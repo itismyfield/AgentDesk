@@ -137,10 +137,23 @@ fn restart_pane_local(
     name: &str,
     row: &InflightTurnState,
 ) -> RestartProbe {
-    if !typed(provider, name) {
+    pane_probe(!typed(provider, name), name, row)
+}
+
+/// [`restart_pane_local`] once the caller has read the provider switch.
+fn pane_probe(legacy: bool, name: &str, row: &InflightTurnState) -> RestartProbe {
+    if legacy {
         return RestartProbe::of_liveness(liveness_with_retry(name, None)).legacy();
     }
     RestartProbe::of_liveness(liveness_with_retry(name, Some(row)))
+}
+
+/// The retries sleep up to 2s between tmux calls, so async callers run them on the
+/// blocking pool instead of a runtime worker (#7348 P2). A panicked probe defers.
+async fn probe_off_worker(probe: impl FnOnce() -> RestartProbe + Send + 'static) -> RestartProbe {
+    tokio::task::spawn_blocking(probe)
+        .await
+        .unwrap_or(RestartProbe::Defer)
 }
 
 /// The row's pane for a restart decision; a death goes on only when the host guard admits it.
@@ -153,7 +166,10 @@ pub(super) async fn restart_pane(
     let Some(name) = name else {
         return RestartProbe::Missing;
     };
-    let probe = restart_pane_local(provider, name, row);
+    // The provider switch is read here: tests force it per thread.
+    let legacy = !typed(provider, name);
+    let (owned_name, owned_row) = (name.to_string(), row.clone());
+    let probe = probe_off_worker(move || pane_probe(legacy, &owned_name, &owned_row)).await;
     admit_death(shared, provider, row, name, probe, "restore_inflight_pane").await
 }
 
@@ -167,10 +183,17 @@ pub(super) async fn restart_session(
     let Some(name) = name else {
         return RestartProbe::Missing;
     };
-    if !typed(provider, name) {
-        return RestartProbe::of_presence(presence_with_retry(name, None)).legacy();
+    // The provider switch is read here: tests force it per thread.
+    let legacy = !typed(provider, name);
+    let (owned_name, owned_row) = (name.to_string(), row.clone());
+    let probe = probe_off_worker(move || {
+        let row = (!legacy).then_some(&owned_row);
+        RestartProbe::of_presence(presence_with_retry(&owned_name, row))
+    })
+    .await;
+    if legacy {
+        return probe.legacy();
     }
-    let probe = RestartProbe::of_presence(presence_with_retry(name, Some(row)));
     admit_death(
         shared,
         provider,
