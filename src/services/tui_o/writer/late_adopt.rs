@@ -124,7 +124,7 @@ pub(crate) async fn activate<I: HostIo>(
             if !checked {
                 let expected = gate.current();
                 let facts = io.activation_facts(channel, provider).await;
-                if gate.current() != expected || !super::host::owned_now(channel, gate) {
+                if gate.current() != expected || !super::host::owned_now(gate) {
                     continue;
                 }
                 if let Ok(facts) = facts {

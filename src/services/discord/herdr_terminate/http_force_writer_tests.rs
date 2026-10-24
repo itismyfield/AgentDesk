@@ -180,13 +180,13 @@ impl Launched {
         let mut config = crate::config::Config::default();
         config.server.auth_token = Some(AUTH.into());
         let (pool, registry) = (Some(self.pool.clone()), Some(self.registry.clone()));
-        crate::server::routes::home_stop_test_app(config, pool, registry, herdr::NODE)
+        crate::server::routes::cancel_route_test_app(config, pool, registry, herdr::NODE)
     }
 
     async fn post(&self, uri: &str, body: Value) -> (StatusCode, Value) {
         let bearer = format!("Bearer {AUTH}");
         let headers = [("authorization", bearer.as_str()), JSON];
-        let post = crate::server::routes::home_stop_test_post;
+        let post = crate::server::routes::cancel_route_test_post;
         post(&self.app(), uri, &headers, &body.to_string()).await
     }
 

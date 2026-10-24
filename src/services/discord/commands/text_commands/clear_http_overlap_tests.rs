@@ -124,7 +124,6 @@ impl Overlap {
             provider,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
-            ingress_shadow: None,
         };
         Self {
             db,
@@ -149,7 +148,7 @@ impl Overlap {
         let mut config = crate::config::Config::default();
         config.server.auth_token = Some(AUTH.into());
         let (pool, registry) = (Some(self.pool.clone()), Some(self.registry.clone()));
-        crate::server::routes::home_stop_test_app(config, pool, registry, herdr::NODE)
+        crate::server::routes::cancel_route_test_app(config, pool, registry, herdr::NODE)
     }
 
     /// The forced cancel the HTTP route takes; the router is built per request.
@@ -163,7 +162,7 @@ impl Overlap {
             ];
             let uri = format!("/turns/{CHANNEL}/cancel");
             let body = json!({"force": true}).to_string();
-            crate::server::routes::home_stop_test_post(&app, &uri, &headers, &body).await
+            crate::server::routes::cancel_route_test_post(&app, &uri, &headers, &body).await
         }
     }
 

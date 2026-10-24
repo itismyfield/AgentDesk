@@ -1,9 +1,6 @@
 {
   "src/cli/migrate/source.rs": 1,
   "src/db/dispatched_sessions/hosted_execution.rs": 1,
-  "src/services/cluster/channel_home.rs": 1,
-  "src/services/cluster/channel_home_drain.rs": 1,
-  "src/services/cluster/channel_home_port.rs": 1,
   "src/services/cluster/intake_router_hook/owner_record.rs": 1,
   "src/services/discord/execution_identity/herdr_agent_hint.rs": 1,
   "src/services/discord/execution_identity/herdr_observation.rs": 1,

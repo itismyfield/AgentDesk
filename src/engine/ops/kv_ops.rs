@@ -1,5 +1,11 @@
+use std::sync::Arc;
+
+use futures::future::BoxFuture;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::PgPool;
+use sqlx::postgres::PgConnection;
+
+use super::read_bridge::{ReadBridge, ReadCommand, ReadError};
 
 // ── KV ops (#126) ─────────────────────────────────────────────────
 //
@@ -8,7 +14,19 @@ use sqlx::PgPool;
 // agentdesk.kv.delete(key) — delete a key
 // agentdesk.kv.deleteMany(keys) — delete exact keys with one array-bound query
 
+/// Registers kv ops with a reader of their own, for callers outside the full op registration.
+#[cfg(test)]
 pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
+    let reads = pg_pool.as_ref().map(|pool| Arc::new(ReadBridge::new(pool)));
+    register_kv_ops_with_reads(ctx, pg_pool, reads)
+}
+
+/// `reads` is the Context's reader and exists exactly when `pg_pool` does.
+pub(super) fn register_kv_ops_with_reads<'js>(
+    ctx: &Ctx<'js>,
+    pg_pool: Option<PgPool>,
+    reads: Option<Arc<ReadBridge>>,
+) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let kv_obj = Object::new(ctx.clone())?;
 
@@ -28,12 +46,11 @@ pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> J
     )?;
 
     // __kvGetRaw(key) → JSON: {"found":true,"value":"..."} or {"found":false}
-    let pg_get = pg_pool.clone();
     kv_obj.set(
         "__getRaw",
         Function::new(ctx.clone(), move |key: String| -> String {
-            if let Some(pool) = pg_get.as_ref() {
-                return kv_get_raw_pg(pool, &key);
+            if let Some(reads) = reads.as_ref() {
+                return kv_get_raw_pg(reads, &key);
             }
             r#"{"found":false}"#.to_string()
         })?,
@@ -177,30 +194,45 @@ fn kv_set_raw_pg(pool: &PgPool, key: &str, value: &str, ttl_seconds: i64) -> Str
     }
 }
 
-fn kv_get_raw_pg(pool: &PgPool, key: &str) -> String {
-    let key = key.to_string();
-    match crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
+fn kv_get_raw_pg(reads: &ReadBridge, key: &str) -> String {
+    match reads.read(ReadCommand::Kv(KvRead {
+        key: key.to_string(),
+    })) {
+        Ok(result) => result,
+        Err(ReadError::Bridge(error)) => {
+            crate::engine::ops::ensure_js_error_json(format!(r#"{{"error":"{error}"}}"#))
+        }
+        Err(ReadError::Query(raw)) => crate::engine::ops::ensure_js_error_json(raw),
+    }
+}
+
+/// The fixed `kv.get` read run on the read bridge; expiry is judged by the database clock.
+pub(super) struct KvRead {
+    pub(super) key: String,
+}
+
+impl KvRead {
+    pub(super) fn select<'c>(
+        &'c self,
+        connection: &'c mut PgConnection,
+    ) -> BoxFuture<'c, Result<String, String>> {
+        let key = self.key.as_str();
+        Box::pin(async move {
             let value = sqlx::query_scalar::<_, String>(
                 "SELECT value
                  FROM kv_meta
                  WHERE key = $1
                    AND (expires_at IS NULL OR expires_at > NOW())",
             )
-            .bind(&key)
-            .fetch_optional(&bridge_pool)
+            .bind(key)
+            .fetch_optional(&mut *connection)
             .await
             .map_err(|error| format!("load postgres kv_meta {key}: {error}"))?;
             Ok(match value {
                 Some(value) => format!(r#"{{"found":true,"value":{}}}"#, serde_json::json!(value)),
                 None => r#"{"found":false}"#.to_string(),
             })
-        },
-        |error| format!(r#"{{"error":"{error}"}}"#),
-    ) {
-        Ok(result) => result,
-        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
+        })
     }
 }
 

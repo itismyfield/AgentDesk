@@ -263,7 +263,6 @@ impl Fixture {
             provider: self.provider.clone(),
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
-            ingress_shadow: None,
         };
         let mut permit = None;
         assert!(

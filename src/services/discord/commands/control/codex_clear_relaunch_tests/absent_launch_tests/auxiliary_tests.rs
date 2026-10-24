@@ -45,12 +45,13 @@ pub(in crate::services::discord) async fn restore_instructions(
         .mailbox(channel)
         .replace_queue(instructions, persistence.clone())
         .await;
-    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
-        &ProviderKind::Codex,
-        &fixture.shared.token_hash,
-        channel,
-    )
-    .unwrap();
+    let (disk, _) =
+        crate::services::turn_orchestrator::test_support::load_channel_pending_queue_checked(
+            &ProviderKind::Codex,
+            &fixture.shared.token_hash,
+            channel,
+        )
+        .unwrap();
     let identities: Vec<_> = disk.iter().map(QueueIdentity::of).collect();
     fixture.shared.mailboxes.remove_fixture_for_test(channel);
     let restored = fixture
@@ -706,12 +707,13 @@ async fn full_fifo_with_owners(recover: Option<bool>, foreign_no_core: Option<bo
         SpawnNonceMarker::Known(n2.execution_nonce.clone())
     );
     assert!(!dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
-    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
-        &ProviderKind::Codex,
-        &fixture.shared.token_hash,
-        serenity::ChannelId::new(CANARY_CHANNEL),
-    )
-    .unwrap();
+    let (disk, _) =
+        crate::services::turn_orchestrator::test_support::load_channel_pending_queue_checked(
+            &ProviderKind::Codex,
+            &fixture.shared.token_hash,
+            serenity::ChannelId::new(CANARY_CHANNEL),
+        )
+        .unwrap();
     assert!(disk.is_empty());
     if let Some(old_state) = old_state {
         old_state.assert_preserved();
@@ -755,7 +757,7 @@ async fn recovery_diagnostic(
         })
     });
     let durable_pending =
-        crate::services::turn_orchestrator::load_channel_pending_dispatch_marker_checked(
+        crate::services::turn_orchestrator::test_support::load_channel_pending_dispatch_marker_checked(
             &ProviderKind::Codex,
             &fixture.shared.token_hash,
             channel,
@@ -763,12 +765,13 @@ async fn recovery_diagnostic(
         .map(|marker| {
             marker.map(|(item, override_channel)| (QueueIdentity::of(&item), override_channel))
         });
-    let disk = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
-        &ProviderKind::Codex,
-        &fixture.shared.token_hash,
-        channel,
-    )
-    .map(|(items, _)| items.iter().map(QueueIdentity::of).collect::<Vec<_>>());
+    let disk =
+        crate::services::turn_orchestrator::test_support::load_channel_pending_queue_checked(
+            &ProviderKind::Codex,
+            &fixture.shared.token_hash,
+            channel,
+        )
+        .map(|(items, _)| items.iter().map(QueueIdentity::of).collect::<Vec<_>>());
     let turn_state = snapshot.cancel_token.as_ref().map(|cancel| {
         (
             cancel.cancelled.load(Ordering::SeqCst),
@@ -898,7 +901,7 @@ pub(in crate::services::discord) async fn wait_recovery_custody_settled(
                 CANARY_CHANNEL,
             );
             let pending =
-                crate::services::turn_orchestrator::load_channel_pending_dispatch_marker_checked(
+                crate::services::turn_orchestrator::test_support::load_channel_pending_dispatch_marker_checked(
                     &ProviderKind::Codex,
                     &fixture.shared.token_hash,
                     channel,

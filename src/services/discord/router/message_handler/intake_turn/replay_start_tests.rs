@@ -365,12 +365,15 @@ mod kickoff_tests {
         head_card: MessageId,
         merged_card: MessageId,
     ) {
-        let (checked, role_override) = turn_orchestrator::load_channel_pending_queue_checked(
-            &ProviderKind::Claude,
-            &host.shared.token_hash,
-            channel,
-        )
-        .expect("checked durable queue loader must succeed, never treat a read failure as empty");
+        let (checked, role_override) =
+            turn_orchestrator::test_support::load_channel_pending_queue_checked(
+                &ProviderKind::Claude,
+                &host.shared.token_hash,
+                channel,
+            )
+            .expect(
+                "checked durable queue loader must succeed, never treat a read failure as empty",
+            );
         assert!(role_override.is_none());
         assert_eq!(checked.len(), 2);
         assert_full_item(&checked[0], original);
@@ -905,12 +908,13 @@ mod kickoff_tests {
                 assert_full_item(&snapshot.intervention_queue[0], &original);
                 assert_full_item(&snapshot.intervention_queue[1], &tail);
                 assert!(snapshot.cancel_token.is_none());
-                let (restored, role) = turn_orchestrator::load_channel_pending_queue_checked(
-                    &ProviderKind::Claude,
-                    &host.shared.token_hash,
-                    channel,
-                )
-                .expect("durable queue custody must ACK, not soft-skip its loader error");
+                let (restored, role) =
+                    turn_orchestrator::test_support::load_channel_pending_queue_checked(
+                        &ProviderKind::Claude,
+                        &host.shared.token_hash,
+                        channel,
+                    )
+                    .expect("durable queue custody must ACK, not soft-skip its loader error");
                 assert!(role.is_none());
                 assert_eq!(restored.len(), 2);
                 assert_full_item(&restored[0], &original);
@@ -1059,12 +1063,13 @@ mod kickoff_tests {
                 assert_full_item(&snapshot.intervention_queue[0], &original);
                 assert_full_item(&snapshot.intervention_queue[1], &tail);
                 assert!(snapshot.cancel_token.is_none());
-                let (restored, role) = turn_orchestrator::load_channel_pending_queue_checked(
-                    &ProviderKind::Claude,
-                    &host.shared.token_hash,
-                    channel,
-                )
-                .expect("raw Deferred requires a real durable queue ACK");
+                let (restored, role) =
+                    turn_orchestrator::test_support::load_channel_pending_queue_checked(
+                        &ProviderKind::Claude,
+                        &host.shared.token_hash,
+                        channel,
+                    )
+                    .expect("raw Deferred requires a real durable queue ACK");
                 assert!(role.is_none());
                 assert_eq!(restored.len(), 2);
                 assert_full_item(&restored[0], &original);
@@ -1235,7 +1240,6 @@ mod worker_entry_tests {
             preserve_on_cancel: true,
             agent_id: format!("input-b-{channel}"),
             provider: "claude".into(),
-            home_epoch: None,
         };
         let id = insert_pending(&host.pool, &payload, 1, None).await.unwrap();
         // Seed SQL directly to cover rows written by older delivery producers.

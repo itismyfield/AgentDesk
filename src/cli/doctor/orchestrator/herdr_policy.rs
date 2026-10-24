@@ -91,6 +91,14 @@ fn user_default_check(cfg: &config::Config, snapshot: &HealthSnapshot) -> Option
             "Inspect each endpoint's node, next_restart_ready, startup_proof, reason/action and checker diagnostics. Run bare herdr manually on its execution node if absent; repair its user config and retry. Doctor does not write config, create a daemon, or restart servers.",
         )
     };
+    let mut evidence = evidence;
+    if let Some(checker) = snapshot
+        .body
+        .as_ref()
+        .and_then(|body| body.get("herdr_checker"))
+    {
+        evidence["checker_evidence"] = checker.clone();
+    }
     Some(
         check
             .with_subsystem("health")

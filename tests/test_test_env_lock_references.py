@@ -30,8 +30,9 @@ impl TestRuntimeRootGuard {
     fn new() { let env = set_agentdesk_root_for_test(root.path()); Self { _env: env } }
 }
 """
+SUPPORT_DECL = '#[cfg(test)]#[path="turn_orchestrator/test_support_tests.rs"]pub(crate) mod test_support;'
+SUPPORT_FILE = "src/services/turn_orchestrator/test_support_tests.rs"
 SUPPORT = """
-mod test_support {
     impl SharedEnvLock {
         fn lock(&self) { crate::config::shared_test_env_lock().lock() }
     }
@@ -39,7 +40,6 @@ mod test_support {
     fn lock_test_env() {
         TEST_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
-}
 """
 WRITE = 'std::env::set_var("AGENTDESK_ROOT_DIR", root);'
 RAW = "crate::config::shared_test_env_lock().lock();"
@@ -55,7 +55,8 @@ class FileReferencePolicy(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.write("src/config.rs", CONFIG)
         self.write("src/config/test_env.rs", ENV)
-        self.write("src/services/turn_orchestrator.rs", SUPPORT)
+        self.write("src/services/turn_orchestrator.rs", SUPPORT_DECL)
+        self.write(SUPPORT_FILE, SUPPORT)
 
     def write(self, path, text):
         target = self.root / path
@@ -112,16 +113,16 @@ class FileReferencePolicy(unittest.TestCase):
         self.check('new_wrapper::lock_test_env();' + WRITE, False)
 
     def test_forwarding_mutant_is_red(self):
-        self.write("src/services/turn_orchestrator.rs", SUPPORT.replace('crate::config::shared_test_env_lock()', 'OTHER'))
+        self.write(SUPPORT_FILE, SUPPORT.replace('crate::config::shared_test_env_lock()', 'OTHER'))
         errors, _, _ = audit(self.root)
         self.assertIn("canonical", errors[0])
 
     def test_decoy_canonical_call_cannot_validate_wrapper(self):
-        self.write("src/services/turn_orchestrator.rs", SUPPORT.replace(RAW[:-1], RAW + ' OTHER.lock()'))
+        self.write(SUPPORT_FILE, SUPPORT.replace(RAW[:-1], RAW + ' OTHER.lock()'))
         self.assertTrue(audit(self.root)[0])
 
     def test_wrapper_cannot_discard_canonical_guard_and_return_other(self):
-        self.write("src/services/turn_orchestrator.rs", SUPPORT.replace(
+        self.write(SUPPORT_FILE, SUPPORT.replace(
             'TEST_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())',
             'TEST_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()); OTHER.lock()'))
         self.assertTrue(audit(self.root)[0])
@@ -182,17 +183,26 @@ class FileReferencePolicy(unittest.TestCase):
     def test_actual_wrapper_forwarding_mutation_is_red(self):
         repo = Path(__file__).resolve().parents[1]
         paths = ('src/config.rs', 'src/config/test_env.rs',
-                 'src/services/turn_orchestrator.rs',
+                 'src/services/turn_orchestrator.rs', SUPPORT_FILE,
                  'src/services/observability/mod.rs',
                  'src/services/observability/test_support.rs')
         sources = {Path(path): rust_text((repo / path).read_text()) for path in paths}
         canonical_owners(sources)
-        path = Path('src/services/turn_orchestrator.rs')
+        path = Path(SUPPORT_FILE)
         before = sources[path]
         sources[path] = before.replace('crate::config::shared_test_env_lock().lock()', 'OTHER.lock()')
         self.assertNotEqual(before, sources[path])
         with self.assertRaisesRegex(ValueError, 'canonical mutex'):
             canonical_owners(sources)
+
+    def test_changed_module_path_is_unknown_red(self):
+        self.write("src/services/turn_orchestrator.rs", SUPPORT_DECL.replace(
+            "test_support_tests.rs", "other.rs"))
+        self.assertIn("reviewed test-only module source", audit(self.root)[0][0])
+
+    def test_missing_module_body_is_unknown_red(self):
+        (self.root / SUPPORT_FILE).unlink()
+        self.assertIn("UNKNOWN canonical source", audit(self.root)[0][0])
 
     def test_ci_wiring_runs_checker(self):
         source = (Path(__file__).resolve().parents[1] / 'scripts/ci-script-checks.sh').read_text()

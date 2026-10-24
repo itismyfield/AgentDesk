@@ -1,5 +1,5 @@
 //! One actor per adopted channel, creating its first store unless Legacy took it.
-//! Ready while resumed and Owned; delegated channels use their registered home gate.
+//! Ready while resumed and owned by the gateway lease.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -18,8 +18,6 @@ use super::deliver::{ChannelWriter, StopCause};
 use super::resume::{self, Backoff};
 use super::{AlarmSink, DeliveryLease, DiscordPort, ReaderConfig, WriterAlarm, WriterConfig};
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::cluster::channel_home::{self, HomeOwnership};
-use crate::services::cluster::home_availability;
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::cutover;
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
@@ -30,7 +28,6 @@ use crate::services::tui_o::store::ledger::Unsent;
 mod activation_io;
 mod first_init;
 mod fresh_input;
-mod hosting;
 mod recover;
 mod transition;
 pub use activation_io::{Custody, FencedFacts};
@@ -157,6 +154,11 @@ fn locked<T>(set: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Readiness {
+    /// The generation whose claim hosts `channel`, read now. A claim is not a live host: one whose
+    /// actor ended abnormally keeps it. No claim does mean no host, as each claims before it spawns.
+    pub fn hosted_by(&self, channel: u64) -> Option<u64> {
+        locked(&self.hosted).get(&channel).copied()
+    }
     pub fn is_ready(&self, channel: u64) -> bool {
         locked(&self.ready).contains(&channel)
     }
@@ -215,7 +217,7 @@ impl Readiness {
         let Some(live) = live.get(&channel).filter(|_| self.is_ready(channel)) else {
             return false;
         };
-        let owned = owned_now(channel, &live.gate);
+        let owned = owned_now(&live.gate);
         owned
             && !*live.stopping.borrow()
             && live.resumed.has_changed().is_ok()
@@ -259,7 +261,7 @@ impl Readiness {
             || live.resumed.has_changed().is_err()
             || !self.is_ready(channel)
             || !*live.resumed.borrow()
-            || !owned_now(channel, &live.gate)
+            || !owned_now(&live.gate)
         {
             return Err("actor_unavailable");
         }
@@ -349,18 +351,13 @@ pub struct HostParts<I> {
     pub readiness: Arc<Readiness>,
 }
 
-/// Whether `channel` is Owned now: by its registered home gate with a lapsed hold ended, else by
-/// the writer's gate.
-pub(super) fn owned_now(channel: u64, gate: &OwnershipGate) -> bool {
-    match channel_home::registered_channel(channel) {
-        Some(home) => matches!(home.ownership(), HomeOwnership::Owned { .. }),
-        None => matches!(gate.current(), GatewayOwnership::Owned { .. }),
-    }
+/// Whether the gateway gate owns this writer now.
+pub(super) fn owned_now(gate: &OwnershipGate) -> bool {
+    matches!(gate.current(), GatewayOwnership::Owned { .. })
 }
 
-/// Spawns one host task per channel this provider's bot may adopt. Without a PG gateway lease the
-/// gate never becomes Owned, so those channels are held with an alarm and get no actor; a
-/// delegated channel is gated by its registered home gate instead of that lease.
+/// Spawns one host per channel this bot may adopt. A missing PG gateway lease holds the
+/// channels with an alarm; only the gateway gate can become Owned.
 pub fn start<I: HostIo>(
     provider: ShadowProvider,
     pg_gateway: bool,
@@ -368,15 +365,6 @@ pub fn start<I: HostIo>(
 ) -> Vec<JoinHandle<()>> {
     let owned = cutover::boot_ownership();
     detached(start_managed(provider, pg_gateway, owned, prepare))
-}
-
-/// [`start`] off the gateway lease for `delegated`, each a channel with a registered home gate.
-pub fn start_delegated<I: HostIo>(
-    provider: ShadowProvider,
-    delegated: Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)>,
-    prepare: impl FnOnce() -> HostParts<I>,
-) -> Vec<JoinHandle<()>> {
-    detached(start_managed(provider, false, delegated, prepare))
 }
 
 fn detached(handles: Vec<ManagedWriterHandle>) -> Vec<JoinHandle<()>> {
@@ -390,14 +378,16 @@ pub type OwnedChannels = Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>
 
 /// One hosted channel's writer: its host task, the stop it obeys and the claim that hosts it.
 pub struct ManagedWriterHandle {
+    #[cfg(test)]
     channel: u64,
+    #[cfg(test)]
     generation: u64,
-    authority: Arc<OwnershipGate>,
+    #[cfg(test)]
     settled: Arc<AtomicBool>,
     stop: StopOnDrop,
     host: JoinHandle<()>,
+    #[cfg(test)]
     keep: Arc<AtomicBool>,
-    ready: hosting::Ready,
 }
 
 struct StopOnDrop {
@@ -421,17 +411,27 @@ pub struct WriterStopped {
 }
 
 impl ManagedWriterHandle {
+    #[cfg(test)]
     pub fn channel(&self) -> u64 {
         self.channel
     }
 
-    pub fn generation(&self) -> u64 {
-        self.generation
+    /// Whether the host task still runs and was not told to stop.
+    #[cfg(test)]
+    pub fn live(&self) -> bool {
+        !self.host.is_finished() && !*self.stop.signal.borrow()
     }
 
-    /// Process-local identity of the captured gate, independent of registry replacement.
-    pub fn authority(&self) -> usize {
-        Arc::as_ptr(&self.authority) as usize
+    /// Leaves the late reservation unsettled when this host ends, for a successor that takes it
+    /// over; set before the stop is signalled.
+    #[cfg(test)]
+    pub fn keep_reservation(&self) {
+        self.keep.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Leaves shutdown to the existing gateway lifecycle; the host still owns its claim.
@@ -441,18 +441,17 @@ impl ManagedWriterHandle {
     }
 
     /// Requests stop before returning the wait future; its cancellation never cancels cleanup.
+    #[cfg(test)]
     pub fn stop_and_join(
         self,
     ) -> impl Future<Output = Result<WriterStopped, String>> + Send + 'static {
         let Self {
             channel,
             generation,
-            authority: _,
             settled,
             stop,
             host,
             keep: _,
-            ready: _,
         } = self;
         stop.signal.send_replace(true);
         let settle = tokio::spawn(async move {
@@ -471,7 +470,7 @@ impl ManagedWriterHandle {
     }
 }
 
-/// [`start`] over `owned`; unavailable delegations are held without a claim.
+/// [`start`] over the supplied owned channels.
 pub fn start_managed<I: HostIo>(
     provider: ShadowProvider,
     pg_gateway: bool,
@@ -503,14 +502,7 @@ pub fn start_managed<I: HostIo>(
         let keep = Arc::new(AtomicBool::new(false));
         let reservation = candidate.late_cleanup_guard(channel, runtime_root.clone());
         let reservation = reservation.map(|guard| guard.kept_by(Arc::clone(&keep)));
-        if let Some(reason) = home_availability::refusal(channel) {
-            hold(&io.alarms(), channel, reason.as_str());
-            drop(reservation);
-            claim.release();
-            continue;
-        }
-        let home = channel_home::registered_channel(channel);
-        let root = match (pg_gateway || home.is_some(), &runtime_root) {
+        let root = match (pg_gateway, &runtime_root) {
             (false, _) => Err("no PG gateway lease"),
             (true, None) => Err("runtime root unresolved"),
             (true, Some(root)) => Ok(root.clone()),
@@ -524,12 +516,12 @@ pub fn start_managed<I: HostIo>(
                 continue;
             }
         };
-        let gate = home.map_or_else(|| Arc::clone(&gate), |home| home.gate());
+        let gate = Arc::clone(&gate);
+        #[cfg(test)]
         let generation = claim.generation;
-        let authority = Arc::clone(&gate);
+        #[cfg(test)]
         let settled = Arc::clone(&claim.settled);
         let (stop, stopping) = watch::channel(false);
-        let ready = hosting::ready_probe(&io, channel, provider, &candidate);
         let io = Arc::clone(&io);
         let host = tokio::spawn(async move {
             host_channel(
@@ -548,17 +540,19 @@ pub fn start_managed<I: HostIo>(
             }
         });
         tasks.push(ManagedWriterHandle {
+            #[cfg(test)]
             channel,
+            #[cfg(test)]
             generation,
-            authority,
+            #[cfg(test)]
             settled,
             stop: StopOnDrop {
                 signal: stop,
                 armed: true,
             },
             host,
+            #[cfg(test)]
             keep,
-            ready,
         });
     }
     tasks

@@ -9,15 +9,15 @@ use crate::app_state::AppState;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
 mod cancel_lookup;
-pub(crate) mod home_stop;
 pub(crate) mod probe;
 mod trusted_target;
-
 #[cfg(test)]
 use cancel_lookup::legacy_session_key_matches_channel;
 #[cfg(unix)]
 pub(crate) use cancel_lookup::load_cancel_turn_hosted;
 pub(crate) use cancel_lookup::load_cancel_turn_session;
+#[cfg(all(test, unix))]
+pub(crate) use trusted_target::loopback_seam;
 use trusted_target::{TrustedForwardTarget, TrustedTargetError, build_trusted_target};
 
 const FORWARDED_BY_HEADER: &str = "x-agentdesk-forwarded-by";

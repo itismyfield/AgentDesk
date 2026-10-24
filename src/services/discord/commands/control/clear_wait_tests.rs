@@ -6,7 +6,7 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
-use super::clear_channel_session_state_fenced;
+use super::clear_channel_session_state_with_session_key;
 use super::clear_persist_failure_tests::{queue_len, seed_session};
 use crate::services::discord::{SharedData, make_shared_data_for_tests};
 use crate::services::provider::ProviderKind;
@@ -92,7 +92,7 @@ fn a_clear_overtakes_a_held_pane_effect_and_discards_the_live_head() {
             .await;
 
         let http = Arc::new(serenity::Http::new(""));
-        let report = clear_channel_session_state_fenced(
+        let report = clear_channel_session_state_with_session_key(
             &http, &shared, &provider, channel_id, "/clear", None,
         )
         .await

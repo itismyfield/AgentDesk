@@ -25,10 +25,10 @@ fn http_cancel(fx: &Fixture, shared: &Arc<crate::services::discord::SharedData>)
         let mut config = crate::config::Config::default();
         config.server.auth_token = Some(AUTH.into());
         let pool = Some(fx.pool.clone());
-        let app = crate::server::routes::home_stop_test_app(config, pool, Some(registry), "h1");
+        let app = crate::server::routes::cancel_route_test_app(config, pool, Some(registry), "h1");
         let (uri, bearer) = (format!("/turns/{channel}/cancel"), format!("Bearer {AUTH}"));
         let headers = [("authorization", bearer.as_str())];
-        let post = crate::server::routes::home_stop_test_post;
+        let post = crate::server::routes::cancel_route_test_post;
         let (status, answer) = post(&app, &uri, &headers, r#"{"force":false}"#).await;
         let read = sqlx::query_scalar("SELECT status FROM sessions WHERE channel_id = $1");
         let row = read.bind(&channel).fetch_one(&fx.pool).await.unwrap();

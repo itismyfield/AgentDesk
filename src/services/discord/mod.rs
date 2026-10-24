@@ -39,7 +39,6 @@ pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot, save_actual_episode_for_tests,
 };
 mod inflight_heartbeat_sweeper;
-mod ingress_shadow;
 pub(crate) mod inject_disposition;
 pub(crate) mod internal_api;
 mod jsonl_watcher;
@@ -1292,7 +1291,6 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         // preserved — the three members hoisted above the spawn calls are
         // side-effect-free constructors; see run_bot_build_shared_data).
         restart: RestartLifecycle {
-            _home_availability: None,
             recovering_channels: dashmap::DashMap::new(),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             intake_worker_lifecycle: Default::default(),
@@ -2570,7 +2568,6 @@ pub(super) struct Data {
     pub(super) provider: ProviderKind,
     pub(super) voice_config: crate::voice::VoiceConfig,
     pub(super) voice_receiver: crate::voice::VoiceReceiver,
-    pub(in crate::services::discord) ingress_shadow: Option<ingress_shadow::IngressShadow>,
 }
 
 pub(super) fn mark_reconcile_complete(shared: &SharedData) {

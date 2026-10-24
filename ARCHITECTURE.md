@@ -40,6 +40,7 @@ src/
 │   │   │   ├── dispatch_outbox_tests.rs
 │   │   │   ├── fd_usage.rs
 │   │   │   ├── health_snapshot.rs
+│   │   │   ├── health_snapshot_tests.rs
 │   │   │   ├── herdr_policy.rs
 │   │   │   ├── herdr_policy_tests.rs
 │   │   │   ├── managed_herdr_config.rs
@@ -50,6 +51,8 @@ src/
 │   │   │   ├── repair_response.rs
 │   │   │   ├── report_display.rs
 │   │   │   └── stale_mailbox_repair.rs
+│   │   ├── startup/
+│   │   │   └── herdr_checker_tests.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
@@ -64,8 +67,6 @@ src/
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
-│   ├── channel_home.rs
-│   ├── channel_home_tests.rs
 │   ├── channel_provider.rs
 │   ├── client.rs
 │   ├── dcserver.rs
@@ -88,6 +89,7 @@ src/
 │   ├── monitoring.rs
 │   ├── o.rs
 │   ├── query.rs
+│   ├── removed_channel_home_tests.rs
 │   ├── restart_terminal_proof.rs
 │   ├── run.rs
 │   ├── turn_lease.rs
@@ -260,7 +262,6 @@ src/
 │   ├── intake_outbox_dispatch_stamp.rs
 │   ├── intake_outbox_dispatched_audit.rs
 │   ├── intake_outbox_force_fail.rs
-│   ├── intake_outbox_home_tests.rs
 │   ├── intake_outbox_open_status.rs
 │   ├── intake_outbox_status.rs
 │   ├── kanban.rs
@@ -268,8 +269,6 @@ src/
 │   ├── mod.rs
 │   ├── o_channel_activation.rs
 │   ├── o_channel_activation_fence_tests.rs
-│   ├── o_channel_homes.rs
-│   ├── o_channel_homes_tests.rs
 │   ├── o_piece_attempts.rs
 │   ├── o_piece_delivery.rs
 │   ├── o_piece_ledger_tests.rs
@@ -307,6 +306,9 @@ src/
 │   │   │   ├── circuit_evidence_tests.rs
 │   │   │   ├── exec_allowlist_tests.rs
 │   │   │   └── session_liveness_tests.rs
+│   │   ├── read_bridge/
+│   │   │   ├── contract_tests.rs
+│   │   │   └── epoch_tests.rs
 │   │   ├── timeouts_ops/
 │   │   │   ├── host_repair.rs
 │   │   │   └── host_repair_tests.rs
@@ -327,6 +329,7 @@ src/
 │   │   ├── pipeline_ops.rs
 │   │   ├── quality_ops.rs
 │   │   ├── queue_ops.rs
+│   │   ├── read_bridge.rs
 │   │   ├── review_automation_ops.rs
 │   │   ├── review_ops.rs
 │   │   ├── runtime_ops.rs
@@ -440,6 +443,19 @@ src/
 │   │   │   └── runtime.rs
 │   │   ├── health_api/
 │   │   │   ├── db_deadline_tests/
+│   │   │   │   ├── amplification_records_tests/
+│   │   │   │   │   └── raw_cases_tests.rs
+│   │   │   │   ├── amplification_verdict_tests/
+│   │   │   │   │   ├── cases_tests.rs
+│   │   │   │   │   ├── claim_verdict_tests.rs
+│   │   │   │   │   ├── policy_verdict_tests.rs
+│   │   │   │   │   ├── s2_cases_tests.rs
+│   │   │   │   │   └── s3_cases_tests.rs
+│   │   │   │   ├── amplification_claim_tests.rs
+│   │   │   │   ├── amplification_policy_tests.rs
+│   │   │   │   ├── amplification_profile_tests.rs
+│   │   │   │   ├── amplification_records_tests.rs
+│   │   │   │   ├── amplification_verdict_tests.rs
 │   │   │   │   └── resource_regression_tests.rs
 │   │   │   ├── runtime_profile/
 │   │   │   │   ├── managed_herdr.rs
@@ -532,7 +548,7 @@ src/
 │   │   ├── provider_auth_profiles.rs
 │   │   ├── provider_cli_api.rs
 │   │   ├── queue_api.rs
-│   │   ├── queue_api_home_stop_tests.rs
+│   │   ├── queue_api_forwarding_tests.rs
 │   │   ├── receipt.rs
 │   │   ├── resume.rs
 │   │   ├── reviews.rs
@@ -553,6 +569,9 @@ src/
 │   │   ├── voice_audio.rs
 │   │   ├── voice_conductor.rs
 │   │   └── voice_config.rs
+│   ├── task_dispatch_claims/
+│   │   ├── config_read.rs
+│   │   └── config_read_tests.rs
 │   ├── web_surface/
 │   │   ├── peer_filter.rs
 │   │   └── tests.rs
@@ -698,8 +717,11 @@ src/
 │   │   └── tui_session_launch_geometry_tests.rs
 │   ├── claude_tui/
 │   │   ├── busy_inject/
+│   │   │   ├── screen/
+│   │   │   │   └── paste_footer.rs
 │   │   │   ├── stash_tests/
-│   │   │   │   └── hold_tests.rs
+│   │   │   │   ├── hold_tests.rs
+│   │   │   │   └── paste_footer_tests.rs
 │   │   │   ├── ownership.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_interleave_tests.rs
@@ -788,15 +810,6 @@ src/
 │   │   │   ├── temporary.rs
 │   │   │   ├── tests.rs
 │   │   │   └── uploads.rs
-│   │   ├── channel_home/
-│   │   │   ├── epoch_tests.rs
-│   │   │   ├── ingress_snapshot.rs
-│   │   │   └── intake.rs
-│   │   ├── channel_home_boot/
-│   │   │   ├── home_writers.rs
-│   │   │   └── home_writers_tests.rs
-│   │   ├── channel_ingress/
-│   │   │   └── tests.rs
 │   │   ├── execution_capacity/
 │   │   │   ├── store.rs
 │   │   │   └── tests.rs
@@ -808,7 +821,6 @@ src/
 │   │   │   ├── capacity_tests.rs
 │   │   │   ├── edge_case_tests.rs
 │   │   │   ├── execution_requirement_tests.rs
-│   │   │   ├── home_route_tests.rs
 │   │   │   ├── model.rs
 │   │   │   ├── o_input.rs
 │   │   │   ├── o_route_tests.rs
@@ -816,21 +828,11 @@ src/
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
-│   │   │   ├── s3_real_tests/
-│   │   │   │   ├── drain_pg_tests.rs
-│   │   │   │   ├── force_pg_tests.rs
-│   │   │   │   ├── fresh_drain_pg_tests.rs
-│   │   │   │   ├── harness_tests.rs
-│   │   │   │   ├── holder_pg_tests.rs
-│   │   │   │   ├── mod.rs
-│   │   │   │   └── route_pg_tests.rs
 │   │   │   ├── tests/
 │   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── consent_scope_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
-│   │   │   ├── home_accept_tests.rs
-│   │   │   ├── home_route_tests.rs
 │   │   │   ├── o_input.rs
 │   │   │   ├── o_route_tests.rs
 │   │   │   ├── owner_fence_pg_tests.rs
@@ -864,21 +866,8 @@ src/
 │   │   ├── agent_execution_node.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
-│   │   ├── channel_home.rs
-│   │   ├── channel_home_boot.rs
-│   │   ├── channel_home_boot_tests.rs
-│   │   ├── channel_home_claim_tests.rs
-│   │   ├── channel_home_drain.rs
-│   │   ├── channel_home_drain_tests.rs
-│   │   ├── channel_home_port.rs
-│   │   ├── channel_home_port_tests.rs
-│   │   ├── channel_home_tests.rs
-│   │   ├── channel_ingress.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
-│   │   ├── home_availability.rs
-│   │   ├── home_supervisor.rs
-│   │   ├── home_supervisor_tests.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
@@ -1058,8 +1047,6 @@ src/
 │   │   │   │   ├── consent_clear_tests.rs
 │   │   │   │   ├── herdr_recovery.rs
 │   │   │   │   ├── herdr_report_tests.rs
-│   │   │   │   ├── home_fence.rs
-│   │   │   │   ├── home_fence_tests.rs
 │   │   │   │   ├── managed_reset.rs
 │   │   │   │   ├── native.rs
 │   │   │   │   └── provider_reset.rs
@@ -1304,6 +1291,7 @@ src/
 │   │   │   │   ├── custody_notice.rs
 │   │   │   │   ├── custody_notice_tests.rs
 │   │   │   │   ├── input_fence_reaper_tests.rs
+│   │   │   │   ├── restore_failure.rs
 │   │   │   │   └── scoped_restore.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── delivery_rewind/
@@ -1372,11 +1360,6 @@ src/
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
-│   │   ├── ingress_shadow/
-│   │   │   ├── compat_tests.rs
-│   │   │   ├── shadow_tests.rs
-│   │   │   ├── telemetry.rs
-│   │   │   └── worker.rs
 │   │   ├── live_bridge/
 │   │   │   ├── guard_tests/
 │   │   │   │   └── source_guard_tests.rs
@@ -1839,7 +1822,6 @@ src/
 │   │   │   │       │   │   ├── boot_gate_alarm_tests.rs
 │   │   │   │       │   │   ├── fresh_process_tests.rs
 │   │   │   │       │   │   └── fresh_scope_restart_tests.rs
-│   │   │   │       │   ├── delegated_tests.rs
 │   │   │   │       │   ├── discord_mock_tests.rs
 │   │   │   │       │   └── ordinary_restart_tests.rs
 │   │   │   │       ├── b1b_fresh_launch_tests.rs
@@ -1854,7 +1836,6 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── relay_dlq_redelivery/
 │   │   │   │   └── tests.rs
-│   │   │   ├── channel_homes_tests.rs
 │   │   │   ├── deferred_restart.rs
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_handback_breaker.rs
@@ -1878,7 +1859,6 @@ src/
 │   │   │   ├── orphan_recovery_fence_tests.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs
-│   │   │   ├── queued_recovery_boot_restore_tests.rs
 │   │   │   ├── queued_recovery_consent_tests.rs
 │   │   │   ├── queued_recovery_draft_tests.rs
 │   │   │   ├── queued_recovery_held.rs
@@ -2406,7 +2386,6 @@ src/
 │   │   │   │   ├── claude_stop_pane_tests.rs
 │   │   │   │   ├── codex_stop_delivery.rs
 │   │   │   │   ├── codex_stop_delivery_cut_tests.rs
-│   │   │   │   ├── codex_stop_delivery_home_stop_tests.rs
 │   │   │   │   ├── codex_stop_delivery_tests.rs
 │   │   │   │   ├── codex_stop_idle_evidence.rs
 │   │   │   │   ├── codex_stop_idle_evidence_tests.rs
@@ -2683,7 +2662,6 @@ src/
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
 │   │   ├── inflight_heartbeat_sweeper.rs
-│   │   ├── ingress_shadow.rs
 │   │   ├── inject_disposition.rs
 │   │   ├── inject_disposition_test_support.rs
 │   │   ├── inject_disposition_tests.rs
@@ -3085,8 +3063,6 @@ src/
 │   │   ├── trusted_target/
 │   │   │   └── loopback_seam_tests.rs
 │   │   ├── cancel_lookup.rs
-│   │   ├── home_stop.rs
-│   │   ├── home_stop_tests.rs
 │   │   ├── probe.rs
 │   │   └── trusted_target.rs
 │   ├── session_host/
@@ -3349,7 +3325,6 @@ src/
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── fresh_input.rs
 │   │   │   │   ├── fresh_input_tests.rs
-│   │   │   │   ├── hosting.rs
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
@@ -3397,7 +3372,6 @@ src/
 │   │   │   ├── deferred_pg_tests.rs
 │   │   │   ├── deferred_tests.rs
 │   │   │   ├── deliver.rs
-│   │   │   ├── deliver_home_tests.rs
 │   │   │   ├── drain_projection_tests.rs
 │   │   │   ├── executed_resume_tests.rs
 │   │   │   ├── fork_lineage.rs
@@ -3415,7 +3389,6 @@ src/
 │   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_codex_turn_mark_tests.rs
 │   │   │   ├── host_first_init_tests.rs
-│   │   │   ├── host_home_tests.rs
 │   │   │   ├── host_io_tests.rs
 │   │   │   ├── host_managed_tests.rs
 │   │   │   ├── host_renumber_tests.rs
@@ -3424,7 +3397,6 @@ src/
 │   │   │   ├── late_adopt.rs
 │   │   │   ├── late_adopt_binding_tests.rs
 │   │   │   ├── late_adopt_cleanup_tests.rs
-│   │   │   ├── late_adopt_delegated_tests.rs
 │   │   │   ├── late_adopt_host_tests.rs
 │   │   │   ├── late_pin_tests.rs
 │   │   │   ├── legacy_hop_retry_tests.rs
@@ -3655,6 +3627,7 @@ src/
 │   │   ├── reply_results.rs
 │   │   ├── source_generation.rs
 │   │   ├── source_generation_origin_tests.rs
+│   │   ├── test_support_tests.rs
 │   │   ├── turn_finished_signal.rs
 │   │   ├── witnessed_release.rs
 │   │   └── witnessed_release_tests.rs

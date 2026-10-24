@@ -33,7 +33,6 @@ async fn legacy_actual_component_text_and_startup_preserve_results_without_conse
         provider: ProviderKind::Claude,
         voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
         voice_config,
-        ingress_shadow: None,
     };
     let reads = STORE_READS.load(Ordering::SeqCst);
     let clicks = [
@@ -217,7 +216,6 @@ async fn actual_component_owner_guard_precedes_store_for_allowed_allowall_and_mi
         provider: ProviderKind::Claude,
         voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
         voice_config,
-        ingress_shadow: None,
     };
     let component = component_fixture("hresume:v1:owner_guard_fixture:yes");
     let reads = STORE_READS.load(Ordering::SeqCst);
@@ -310,7 +308,6 @@ async fn actual_component_rejects_stale_nonce_and_wrong_message_before_peer_or_a
         provider: ProviderKind::Claude,
         voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
         voice_config,
-        ingress_shadow: None,
     };
     let config = root.path().join("config.toml");
     let snapshot = store()
@@ -657,7 +654,6 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
         provider: ProviderKind::Claude,
         voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
         voice_config,
-        ingress_shadow: None,
     };
     let mut permit = None;
     let retry_result = crate::services::discord::commands::handle_text_command_with_uploads(

@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::discord::{inflight, make_shared_data_for_tests, queue_dispatch};
+use crate::services::discord::{inflight, make_shared_data_for_tests};
 use crate::services::turn_orchestrator::{self as queues, InterventionMode};
 use std::fs;
 use std::path::Path;
@@ -91,11 +91,11 @@ async fn s3act_b1_scoped_readers_preserve_foreign_files_and_mailboxes() {
     fs::write(&legacy, serde_json::to_vec(&json).unwrap()).unwrap();
     let before = [&tmp, &placeholder, &legacy].map(|path| fingerprint(path));
     let (queued, role) =
-        queues::load_channel_pending_queue_checked(provider, token, target).unwrap();
+        queues::test_support::load_channel_pending_queue_checked(provider, token, target).unwrap();
     assert_eq!(queued.len(), 1);
     assert_eq!(role, Some(ChannelId::new(99)));
     assert!(
-        queues::load_channel_pending_dispatch_marker_checked(provider, token, target)
+        queues::test_support::load_channel_pending_dispatch_marker_checked(provider, token, target)
             .unwrap()
             .is_some()
     );
@@ -129,15 +129,17 @@ fn s3act_b1_checked_reads_distinguish_absence_from_corruption() {
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     let (provider, target, token) = (ProviderKind::Claude, ChannelId::new(5340111), "scope");
     assert!(
-        queues::load_channel_pending_queue_checked(&provider, token, target)
+        queues::test_support::load_channel_pending_queue_checked(&provider, token, target)
             .unwrap()
             .0
             .is_empty()
     );
     assert!(
-        queues::load_channel_pending_dispatch_marker_checked(&provider, token, target)
-            .unwrap()
-            .is_none()
+        queues::test_support::load_channel_pending_dispatch_marker_checked(
+            &provider, token, target
+        )
+        .unwrap()
+        .is_none()
     );
     let dir = runtime_store::discord_pending_queue_root()
         .unwrap()
@@ -147,9 +149,14 @@ fn s3act_b1_checked_reads_distinguish_absence_from_corruption() {
     for suffix in ["json", "dispatch"] {
         fs::write(dir.join(format!("{}.{}", target.get(), suffix)), "bad").unwrap();
     }
-    assert!(queues::load_channel_pending_queue_checked(&provider, token, target).is_err());
     assert!(
-        queues::load_channel_pending_dispatch_marker_checked(&provider, token, target).is_err()
+        queues::test_support::load_channel_pending_queue_checked(&provider, token, target).is_err()
+    );
+    assert!(
+        queues::test_support::load_channel_pending_dispatch_marker_checked(
+            &provider, token, target
+        )
+        .is_err()
     );
     let path = runtime_store::discord_queued_placeholders_root()
         .unwrap()
@@ -264,62 +271,6 @@ fn s3act_b1_old_format_backfill_requires_save_ack() {
         "failed backfill save must not acknowledge old-format installation"
     );
     assert_eq!(fingerprint(&path), before);
-}
-
-#[tokio::test]
-async fn s3act_b1_install_rolls_back_on_required_persistence_failure() {
-    let root = tempfile::tempdir().unwrap();
-    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-    let shared = make_shared_data_for_tests();
-    let channel = ChannelId::new(5340131);
-    let ctx = queue_dispatch::persistence_context(&shared, &shared.provider, channel);
-    assert!(
-        shared
-            .mailbox(channel)
-            .enqueue(item(11), ctx)
-            .await
-            .enqueued
-    );
-    let path = runtime_store::discord_queued_placeholders_root()
-        .unwrap()
-        .join(shared.provider.as_str())
-        .join(&shared.token_hash)
-        .join(format!("{}.json", channel.get()));
-    fs::create_dir_all(&path).unwrap();
-    let loaded = [((channel, MessageId::new(11)), MessageId::new(91))].into();
-    assert!(
-        install_channel_queued_placeholders_checked(&shared, channel, loaded)
-            .await
-            .is_err(),
-        "failed persistence must not acknowledge installation"
-    );
-    assert!(
-        shared.queued.queued_placeholders.is_empty(),
-        "failed installation rolls map back"
-    );
-    fs::remove_dir(&path).unwrap();
-    let loaded = [
-        ((channel, MessageId::new(11)), MessageId::new(91)),
-        ((channel, MessageId::new(99)), MessageId::new(92)),
-    ]
-    .into();
-    let stale = install_channel_queued_placeholders_checked(&shared, channel, loaded)
-        .await
-        .unwrap();
-    assert_eq!(
-        stale,
-        vec![(channel, MessageId::new(99), MessageId::new(92))]
-    );
-    let disk = queued_placeholders_store::load_channel_queued_placeholders_checked(
-        &shared.provider,
-        &shared.token_hash,
-        channel,
-    )
-    .unwrap();
-    assert_eq!(
-        disk,
-        [((channel, MessageId::new(11)), MessageId::new(91))].into()
-    );
 }
 
 #[tokio::test]

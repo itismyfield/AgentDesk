@@ -145,7 +145,6 @@ fn payload(channel: &str, message: &str) -> InsertPendingPayload {
         preserve_on_cancel: false,
         agent_id: "agent".into(),
         provider: "claude".into(),
-        home_epoch: None,
     }
 }
 
