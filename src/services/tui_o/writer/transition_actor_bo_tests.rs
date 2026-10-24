@@ -171,10 +171,16 @@ impl Observer for Observed {
                 )
             })
             .collect();
-        let mut panes = vec![Pane {
-            name: self.pane.clone(),
-            state: PaneState::Live,
-        }];
+        let panes = vec![
+            Pane {
+                name: self.pane.clone(),
+                state: PaneState::Live,
+            },
+            Pane {
+                name: "historical-other-pane".into(),
+                state: PaneState::Dead,
+            },
+        ];
         if delta.tail {
             events.push(event(
                 events.len() as u64 + 1,
@@ -182,10 +188,6 @@ impl Observer for Observed {
                 None,
                 self.sources[0].clone(),
             ));
-            panes.push(Pane {
-                name: "historical-other-pane".into(),
-                state: PaneState::Dead,
-            });
         }
         Ok(Inputs {
             target: Target {
