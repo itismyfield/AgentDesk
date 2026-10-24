@@ -766,6 +766,7 @@ src/
 │   │   ├── memento_feedback.rs
 │   │   ├── memento_writer_hook.rs
 │   │   ├── mod.rs
+│   │   ├── paste_placeholder.rs
 │   │   ├── prompt_readiness.rs
 │   │   ├── session.rs
 │   │   ├── source_verify.rs
