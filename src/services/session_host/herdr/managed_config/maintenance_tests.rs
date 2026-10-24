@@ -11,7 +11,9 @@ use crate::config::session_hosts::{
     BootSessionHosts, EndpointConfig, EndpointMode, SessionHostsConfig,
 };
 use crate::services::session_host::herdr::observe::CANONICAL_CONFIG;
-use crate::services::session_host::herdr_socket_rig_tests::{NativeHerdrRig, native_server_child};
+use crate::services::session_host::herdr_socket_rig_tests::{
+    NativeHerdrRig, native_registry_on_this_thread, native_server_child,
+};
 
 const UNSAFE: &[u8] = b"[session]\nresume_agents_on_restore = true\n";
 
@@ -360,6 +362,7 @@ fn a_running_server_on_the_old_config_stays_refused_and_is_never_restarted() {
         },
     );
     let boot = BootSessionHosts::from_config(&hosts).unwrap();
+    let _registry = native_registry_on_this_thread(&boot);
 
     pass(&boot, &f.personal, true);
 
@@ -432,10 +435,7 @@ fn the_process_starts_one_upkeep_task() {
         assert!(spawn(), "the first start runs the task");
         assert!(!spawn(), "a second start adds no task");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-        while records()
-            .get("task")
-            .is_none_or(|record| record.last_e7 == "never")
-        {
+        while records().get("task").is_none() {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "the task never ran a pass"

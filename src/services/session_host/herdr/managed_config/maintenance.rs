@@ -10,11 +10,10 @@ use std::time::{Duration, SystemTime};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use super::path::{PersonalPaths, Target};
+use super::super::observe::{RestoreResume, RestoreUnverified};
+use super::path::PersonalPaths;
 use super::{EnsureResult, ManagedHome, publication};
 use crate::config::session_hosts::{BootSessionHosts, with_boot};
-use crate::services::session_host::herdr::model::HerdrEndpoint;
-use crate::services::session_host::herdr::observe::{self, RestoreResume, RestoreUnverified};
 
 pub(crate) const INTERVAL: Duration = Duration::from_secs(30);
 const STALE_AFTER: Duration = Duration::from_secs(90);
@@ -102,24 +101,19 @@ fn e7_label(reading: &RestoreResume) -> String {
     }
 }
 
-/// E7 through the production socket and OS reads, exactly as a launch would read it.
-fn read_e7(boot: &BootSessionHosts, key: &str, target: &Target) -> RestoreResume {
-    use crate::services::session_host::herdr::transport::{
-        HerdrSocketConfig, HerdrSocketTransport,
+/// E7 through the boot registry's launch host, the reading a launch itself checks; `None` when
+/// this process registered no launch host.
+fn read_e7(boot: &BootSessionHosts, key: &str) -> Option<RestoreResume> {
+    use crate::services::herdr_launch::{HerdrLaunchEndpoint, HerdrLaunchHost};
+    let configured = boot.config().herdr.endpoints.get(key)?;
+    let endpoint = HerdrLaunchEndpoint {
+        execution_node: boot.local_node()?.to_owned(),
+        config_key: key.to_owned(),
+        socket_addr: configured.socket_path.to_string_lossy().into_owned(),
+        herdr_session: configured.herdr_session.clone(),
     };
-    use crate::services::session_host::herdr::wire::LineJsonFraming;
-    let configured = boot.config().herdr.endpoints.get(key);
-    let endpoint = configured.zip(boot.local_node()).and_then(|(e, node)| {
-        HerdrEndpoint::new(node, key, &e.socket_path, &e.herdr_session)
-            .and_then(|endpoint| endpoint.with_herdr_home(&target.declared))
-            .ok()
-    });
-    let Some(endpoint) = endpoint else {
-        return RestoreResume::Unverified(RestoreUnverified::NotBootstrapped);
-    };
-    let transport =
-        HerdrSocketTransport::new(&endpoint, HerdrSocketConfig::default(), LineJsonFraming);
-    observe::read_restore_resume(&transport, &endpoint)
+    let registry = super::super::super::herdr_endpoints();
+    Some(registry.launch_host()?.restore_resume(&endpoint))
 }
 
 /// One upkeep pass over the booted dedicated homes. A refused or failing home never blocks
@@ -142,8 +136,9 @@ pub(crate) fn pass(boot: &BootSessionHosts, personal: &PersonalPaths, observe: b
             _ => None,
         };
         for key in &target.keys {
-            let e7 =
-                (observe && matches!(file, File::Ensured(_))).then(|| read_e7(boot, key, &target));
+            let e7 = (observe && matches!(file, File::Ensured(_)))
+                .then(|| read_e7(boot, key))
+                .flatten();
             let mut records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
             let previous = records.get(key).cloned();
             let was = previous.as_ref().and_then(|record| record.reason);

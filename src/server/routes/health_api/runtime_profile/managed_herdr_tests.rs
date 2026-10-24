@@ -8,7 +8,9 @@ use serde_json::json;
 use crate::config::session_hosts::{
     BootSessionHosts, EndpointConfig, EndpointMode, force_for_test, with_boot,
 };
-use crate::services::session_host::herdr_socket_rig_tests::{NativeHerdrRig, native_server_child};
+use crate::services::session_host::herdr_socket_rig_tests::{
+    NativeHerdrRig, native_registry_on_this_thread, native_server_child,
+};
 use crate::services::session_host::managed_config::{maintenance, path::PersonalPaths};
 
 type Snapshot = BTreeMap<PathBuf, (Vec<u8>, u64, i64, i64)>;
@@ -57,7 +59,9 @@ fn health_shows_restart_required_without_touching_the_home_or_the_server() {
         home: user.path().to_path_buf(),
         xdg: None,
     };
+    let registry = native_registry_on_this_thread(&boot);
     maintenance::pass(&boot, &personal, true);
+    drop(registry);
     let _hosts = force_for_test(Some("health-node"), &[(41, "health-node")]);
     let mut live = crate::config::Config::default();
     live.session_hosts = with_boot(|boot| boot.unwrap().config().clone());
