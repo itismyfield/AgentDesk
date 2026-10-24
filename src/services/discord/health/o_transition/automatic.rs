@@ -1,4 +1,4 @@
-//! An independent, non-overlapping hourly sweep of ready Claude writers.
+//! An independent, non-overlapping hourly sweep, scoped to each ready writer's provider.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -116,29 +116,30 @@ impl Stats {
 }
 
 pub(crate) fn spawn(registry: Arc<HealthRegistry>, provider: &ProviderKind) {
-    if *provider != ProviderKind::Claude {
+    if !matches!(provider, ProviderKind::Claude | ProviderKind::Codex) {
         return;
     }
+    let provider = provider.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
-            sweep(&registry).await;
+            sweep(&registry, &provider).await;
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
     });
 }
 
-async fn sweep(registry: &HealthRegistry) {
+async fn sweep(registry: &HealthRegistry, provider: &ProviderKind) {
     let ready = process_readiness();
     let channels = ready.transition_channels();
     let channel_count = channels.len();
     let mut stats = Stats::default();
     for channel in channels {
-        if let Err(reason) = channel_sweep(registry, &ready, channel, &mut stats).await {
+        if let Err(reason) = channel_sweep(registry, &ready, provider, channel, &mut stats).await {
             stats.skip(reason);
         }
     }
-    tracing::info!(channels = channel_count, count = stats.targets.len(), targets = ?stats.targets,
+    tracing::info!(provider = provider.as_str(), channels = channel_count, count = stats.targets.len(), targets = ?stats.targets,
         skip_reasons = ?stats.skipped, "[tui_o] automatic retention sweep");
 }
 
@@ -186,16 +187,46 @@ async fn send(
 async fn channel_sweep(
     registry: &HealthRegistry,
     ready: &Readiness,
+    provider: &ProviderKind,
     channel: u64,
     stats: &mut Stats,
 ) -> Result<(), &'static str> {
+    let port = ready.transition(channel).ok_or("actor_unavailable")?;
+    let expected = match provider {
+        ProviderKind::Claude => ShadowProvider::Claude,
+        ProviderKind::Codex => ShadowProvider::Codex,
+        _ => return Err("provider_unsupported"),
+    };
+    if port.provider() != Some(expected) {
+        return Ok(());
+    }
     let shared = registry
-        .shared_for_provider_on_channel(&ProviderKind::Claude, ChannelId::new(channel))
+        .shared_for_provider_on_channel(provider, ChannelId::new(channel))
         .await
         .ok_or("runtime_unavailable")?;
+    if expected == ShadowProvider::Codex {
+        let context = resolve_codex_context(registry, shared, channel)
+            .await
+            .map_err(|_| "codex_context_unavailable")?;
+        let request = Request {
+            channel,
+            cutoff: u64::MAX,
+            job_id: uuid::Uuid::new_v4().to_string(),
+            operator: "automatic-retention".into(),
+            at: Utc::now(),
+            reason: "read-only Codex execution observation".into(),
+            termination: None,
+        };
+        let reply = send(ready, channel, &port, Operation::Inspect(request), context).await?;
+        if !stats.actor_refused(&reply) {
+            tracing::info!(channel, diagnostics = ?reply.diagnostics, execution = ?reply.execution,
+                "[tui_o] Codex retention observation");
+            stats.skip("codex_inspect_only");
+        }
+        return Ok(());
+    }
     let target = target(&shared, channel).await.ok_or("target_unavailable")?;
     let pool = shared.pg_pool.as_ref().ok_or("pg_unavailable")?;
-    let port = ready.transition(channel).ok_or("actor_unavailable")?;
     let events = tokio::task::spawn_blocking(move || {
         ChannelBindingLog::new(channel, ShadowProvider::Claude).binding_events_since(channel, 0)
     })

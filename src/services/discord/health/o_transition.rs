@@ -50,6 +50,22 @@ pub(crate) async fn resolve_context(
         lock: shared.session_transition_lock(channel),
         tmux: record.owner.logical_key,
         nonce: record.execution_nonce,
+        codex: None,
+    })
+}
+
+/// Codex supplies observation only; the caller never promotes it into automatic Apply.
+pub(crate) async fn resolve_codex_context(
+    registry: &HealthRegistry,
+    shared: std::sync::Arc<crate::services::discord::SharedData>,
+    channel: u64,
+) -> Result<Context, String> {
+    let prepared = codex_context::prepare(registry, shared.clone(), channel).await?;
+    Ok(Context {
+        lock: shared.session_transition_lock(ChannelId::new(channel)),
+        tmux: prepared.tmux,
+        nonce: prepared.nonce,
+        codex: Some(prepared.observer),
     })
 }
 
@@ -100,3 +116,5 @@ fn launched(record: &HostedExecution) -> Result<(), String> {
 
 pub(crate) mod automatic;
 mod automatic_idle;
+mod codex_census;
+mod codex_context;
