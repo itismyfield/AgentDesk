@@ -49,7 +49,12 @@ fn bound_target(rig: &HerdrRig, logical: &str) -> (HostedOwner, HerdrTarget) {
 }
 
 #[test]
-fn cold_herdr_submit_returns_before_source_and_emits_init_before_one_paste_enter() {
+fn cold_herdr_submit_returns_before_source_and_emits_init_before_one_paste_enter() { run_case(false); }
+
+#[test]
+fn cold_herdr_payload_commit_refusal_preserves_raw_and_hold_with_zero_keys() { run_case(true); }
+
+fn run_case(refuse_commit: bool) {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let rig = HerdrRig::start();
@@ -89,6 +94,7 @@ fn cold_herdr_submit_returns_before_source_and_emits_init_before_one_paste_enter
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727398));
     runtime.block_on(mailbox.v2_cold_fixture(root.path().join("herdr-owner.json"),serde_json::json!({"nonce":"claude-herdr-scope","provider":"claude","target":{"host":"herdr","owner":logical,"root":"test","execution_nonce":NONCE},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),727398)).unwrap();
     let socket = rig.socket().display().to_string();
+    let effect_mailbox = mailbox.clone();
     let (_, result) = runtime
         .block_on(
             mailbox.v2_cold_bootstrap(1, std::sync::Arc::new(|| 10000), move |frame| {
@@ -119,6 +125,12 @@ fn cold_herdr_submit_returns_before_source_and_emits_init_before_one_paste_enter
                     cancel: None,
                 };
 
+                if refuse_commit {
+                    tokio::runtime::Handle::current().block_on(effect_mailbox.v2_request(|slot| {
+                        slot.as_mut().unwrap().fault = crate::services::turn_orchestrator::queued_head::v2::Fault::Before;
+                        Ok(())
+                    })).unwrap();
+                }
                 submit(&turn, attached, &tx)
             }),
         )
@@ -126,6 +138,14 @@ fn cold_herdr_submit_returns_before_source_and_emits_init_before_one_paste_enter
     let owner_snapshot = runtime
         .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
         .unwrap();
+    if refuse_commit {
+        assert!(result.is_err(), "payload commit refusal must reach the caller");
+        assert_eq!(rig.sends().len(), 0, "refused owner commit permits no Herdr content or Enter");
+        assert_eq!(owner_snapshot["head_injection"]["payload_window"]["kind"], "bootstrap");
+        assert_eq!(owner_snapshot["head_injection"]["original"]["text"], prompt);
+        assert!(not_held(NONCE).is_err(), "refused first input preserves its provider hold");
+        return;
+    }
     assert_eq!(
         owner_snapshot["head_injection"]["payload_window"]["kind"], "started",
         "actual submit must commit payload in owner scope"
