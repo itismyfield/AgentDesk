@@ -509,9 +509,16 @@ fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fre
     let unverified = RestoreResume::Unverified(RestoreUnverified::NoPeer);
     let off = RestoreResume::Off { witness };
     let sends = || sent.lock().unwrap().clone();
+    // Receipts under this test's own root: the process env root is shared with other tests.
+    let receipts = f.root.path().join("receipts");
     paused().block_on(async {
-        let tick =
-            |e7: &RestoreResume| notify(pass_with(&boot, &f.personal, &|_| Some(e7.clone())));
+        let tick = |e7: &RestoreResume| {
+            let mut faults = pass_with(&boot, &f.personal, &|_| Some(e7.clone()));
+            for notice in faults.iter_mut().filter_map(|fault| fault.notice.as_mut()) {
+                notice.root = Some(receipts.clone());
+            }
+            notify(faults)
+        };
         tick(&restart).await;
         assert_eq!(record("episode").cause, Some(RESTART));
         tokio::time::advance(Duration::from_secs(61)).await;
@@ -519,7 +526,8 @@ fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fre
         assert_eq!(
             sends(),
             vec![7_189_041],
-            "one notice to the lowest mapped channel"
+            "one notice to the lowest mapped channel: {:?}",
+            record("episode")
         );
         assert_eq!(record("episode").notice, "sent");
 
