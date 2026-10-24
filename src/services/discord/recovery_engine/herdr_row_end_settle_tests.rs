@@ -56,9 +56,8 @@ async fn assert_card_deleted(run: &Run) {
 
 const HOLD: u64 = 1_479_671_399_000_121;
 
-/// What the real start of the queued input needs on this fixture: the intake's own session key
-/// (this host's name, where the fixture bound the execution under its fixed node), the channel's
-/// session and workspace, O's seeded store, the source attached to the pane, and local routing.
+/// What the real queued start needs here: the intake's host-named session key, the channel's
+/// session and workspace, O's seeded store, the pane's attached source and local routing.
 async fn real_start(run: &Run) -> crate::config::TestEnvVarGuard {
     let routing = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "ADK_INTAKE_ROUTING_MODE",
@@ -114,10 +113,8 @@ async fn real_start(run: &Run) -> crate::config::TestEnvVarGuard {
     routing
 }
 
-/// A restarted O turn that goes idle right after a pass held it, with input queued: from that
-/// moment (t0, the provider idle and its footer written) the presence edge's kick asks for the
-/// end, the row clears silently within 5 s, the kickoff for the input is requested within 1 s of
-/// the clear, and the real queued start begins the input's own turn within 15 s of the clear.
+/// Idle right after a held pass (t0) with input queued: the edge's kick ends the row silently by
+/// t0 + 5 s, the kickoff follows within 1 s, and the real start begins the input's turn by 15 s.
 #[test]
 fn a_queue_hold_ends_a_relayed_restarted_turn_before_the_next_input_pg() {
     let path = concat!(
