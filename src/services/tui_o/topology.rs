@@ -6,6 +6,12 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 /// Build switch for the O writer. With no channel in the boot list, intake and health stay as before.
 pub(crate) const O_TUI_WRITER: bool = true;
 
+/// What `agentdesk build-info` reports to the deploy guard; keep `true` if the switch retires.
+// CONSUMED-BY: scripts/deploy-release.sh via src/cli/build_info.rs.
+pub(crate) fn o_tui_writer_build_switch() -> bool {
+    O_TUI_WRITER
+}
+
 /// Degraded reason a non-gateway node carries for each provider whose writer channels only the
 /// gateway may serve.
 pub(crate) const TUI_OUTPUT_REQUIRES_GATEWAY: &str = "tui_output_requires_gateway";

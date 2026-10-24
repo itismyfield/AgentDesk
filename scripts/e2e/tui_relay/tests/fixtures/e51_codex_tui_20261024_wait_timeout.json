@@ -1,0 +1,58 @@
+{
+  "source": "post-deploy-smoke-turns-20261024T064319Z-59753/report.codex-tui.json scenarios[0].wait_timeouts[0]",
+  "run_id": "20261024T064319Z-59753-E-51-codex-tui",
+  "channel_id": "1509350778043895902",
+  "cell": "codex-tui",
+  "needle": "[E2E:E51:20261024T064319Z-59753-E-51-codex-tui:T1]",
+  "after_id": "1563443313711906877",
+  "reported_classification": "relay_surface_filter_miss_raw_contains_needle",
+  "recent_raw": [
+    {
+      "id": "1563443349741117454",
+      "type": 0,
+      "timestamp": "2026-10-24T06:45:41.951000+00:00",
+      "edited_timestamp": null,
+      "author_id": "1479017284805722200",
+      "author_bot": true,
+      "is_our_send": true,
+      "is_relay_response": false,
+      "content": "응답에 정확히 한 줄로 [E2E:E51:20261024T064319Z-59753-E-51-codex-tui:T1] 만 출력해줘."
+    },
+    {
+      "id": "1563443355663212655",
+      "type": 0,
+      "timestamp": "2026-10-24T06:45:43.363000+00:00",
+      "edited_timestamp": null,
+      "author_id": "1479425196824989758",
+      "author_bot": true,
+      "is_our_send": false,
+      "is_relay_response": true,
+      "content": "⚠ 15:45 터미널 턴 상태를 확인하지 못해 진행 표시를 멈췄습니다 (사유: watcher_unbound). 그 동안 들어온 외부 입력은 대기열에 보관됩니다."
+    }
+  ],
+  "target_mailboxes": [
+    {
+      "provider": "codex",
+      "channel_id": "1509350778043895902",
+      "busy_reasons": [
+        "queue_depth=1",
+        "relay_health.queue_depth=1",
+        "relay_stall_state=queue_blocked"
+      ],
+      "agent_turn_status": "idle",
+      "inflight_state_present": false,
+      "active_user_message_id": null,
+      "active_dispatch_present": false,
+      "queue_depth": 1,
+      "relay_stall_state": "queue_blocked",
+      "relay_health": {
+        "active_turn": "none",
+        "bridge_inflight_present": false,
+        "mailbox_active_user_msg_id": null,
+        "pending_discord_callback_msg_id": null,
+        "queue_depth": 1,
+        "desynced": false
+      }
+    }
+  ]
+}
