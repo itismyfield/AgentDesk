@@ -92,9 +92,8 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     Ok(BootstrapState { config })
 }
 
-/// Installs the process-lifetime snapshots from the final reconciled config, then ensures the
-/// installed snapshot's dedicated Herdr configs. Static config errors abort boot; migration
-/// refusal is carried by the selected hosts.
+/// Installs the process-lifetime snapshots, then ensures the installed dedicated Herdr configs.
+/// Static config errors abort boot; migration refusal is carried by the selected hosts.
 pub(crate) fn install_boot_snapshots(
     config: &crate::config::Config,
     selection: crate::config::session_hosts::migration::HostsBootSelection,
