@@ -2147,7 +2147,7 @@ pub fn loopback() -> String {
 
 mod runtime_root_guard;
 
-/// Canonical runtime root; tests require an explicit $AGENTDESK_ROOT_DIR.
+/// Canonical runtime root; tests default to a process-local temporary directory.
 /// All code that needs the AgentDesk root directory MUST call this function
 /// instead of reimplementing the resolution logic.
 pub fn runtime_root() -> Option<std::path::PathBuf> {

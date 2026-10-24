@@ -10,7 +10,7 @@ fn production_probe() -> &'static Path {
         let binary = dir.path().join(format!("probe{}", std::env::consts::EXE_SUFFIX));
         let module = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/config/runtime_root_guard.rs");
         std::fs::write(&source, format!(
-            "#[path = {module:?}] mod runtime_root_guard;\nfn main() {{ let root = runtime_root_guard::resolve(|| std::env::var_os(\"HOME\").map(std::path::PathBuf::from)); println!(\"{{}}\", root.unwrap().display()); }}\n"
+            "#[path = {module:?}] mod runtime_root_guard;\nfn home() -> Option<std::path::PathBuf> {{ std::env::var_os(\"HOME\").map(std::path::PathBuf::from) }}\nfn main() {{ let before = std::env::var_os(\"AGENTDESK_ROOT_DIR\"); let root = runtime_root_guard::resolve(home); assert_eq!(root, runtime_root_guard::resolve(home)); for thread in (0..4).map(|_| std::thread::spawn(|| runtime_root_guard::resolve(home))) {{ assert_eq!(root, thread.join().unwrap()); }} assert_eq!(before, std::env::var_os(\"AGENTDESK_ROOT_DIR\")); println!(\"{{}}\", root.unwrap().display()); }}\n"
         )).unwrap();
         let output = Command::new("rustc").args(["--edition=2024", "--crate-name", "runtime_root_probe"])
             .arg(&source).arg("-o").arg(&binary).output().unwrap();
@@ -54,16 +54,17 @@ fn ordinary_build_keeps_release_fallback_and_trimmed_override() {
 }
 
 #[test]
-fn integration_process_and_ordinary_child_require_an_explicit_root() {
+fn integration_process_and_ordinary_child_use_process_temporary_roots() {
     let home = tempfile::tempdir().unwrap();
     assert!(std::env::var_os("AGENTDESK_TEST_RUNTIME").is_some());
+    let mut roots = std::collections::HashSet::new();
     for root in [None, Some(""), Some(" \t ")] {
         let output = run_probe(home.path(), root, true);
-        assert!(!output.status.success(), "{output:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("test runtime requires a non-empty AGENTDESK_ROOT_DIR")
-        );
+        assert!(output.status.success(), "{output:?}");
+        let root = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+        assert!(root.starts_with(std::env::temp_dir()));
+        assert!(!root.starts_with(home.path().join(".adk/release")));
+        assert!(roots.insert(root));
     }
     let explicit = home.path().join("child-runtime");
     let output = run_probe(home.path(), Some(explicit.to_str().unwrap()), true);
@@ -76,7 +77,7 @@ fn integration_process_and_ordinary_child_require_an_explicit_root() {
 }
 
 #[test]
-fn integration_child_using_the_normal_agentdesk_library_fails_before_config_audit() {
+fn integration_child_using_the_normal_agentdesk_library_audits_a_temporary_root() {
     let home = tempfile::tempdir().unwrap();
     let output = if let Some(binary) = option_env!("CARGO_BIN_EXE_agentdesk") {
         println!("normal child: agentdesk config audit --dry-run");
@@ -91,11 +92,16 @@ fn integration_child_using_the_normal_agentdesk_library_fails_before_config_audi
         println!("normal child: standalone production resolver");
         run_probe(home.path(), None, true)
     };
-    assert!(!output.status.success(), "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("test runtime requires a non-empty AGENTDESK_ROOT_DIR"),
-        "{output:?}"
-    );
+    assert!(output.status.success(), "{output:?}");
+    let root = if option_env!("CARGO_BIN_EXE_agentdesk").is_some() {
+        let audit: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let path = PathBuf::from(audit["sources"]["yaml_path"].as_str().unwrap());
+        assert!(path.ends_with("config/agentdesk.yaml"));
+        path.parent().unwrap().parent().unwrap().to_owned()
+    } else {
+        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+    };
+    assert!(root.starts_with(std::env::temp_dir()), "{root:?}");
+    assert!(!root.starts_with(home.path().join(".adk/release")));
     assert!(!home.path().join(".adk").exists());
 }

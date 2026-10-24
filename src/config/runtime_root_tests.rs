@@ -4,11 +4,11 @@ use std::process::Command;
 mod process_tests;
 
 #[test]
-fn guard_keeps_approval_debug_and_children_in_tmp_and_closes_after_drop() {
+fn guard_keeps_approval_debug_and_children_in_tmp_and_restores_fallback_after_drop() {
     use super::session_hosts::approval_store::{ApprovalStore, FileApprovalStore};
 
     const CELL: &str = "ADK_GUARDED_RUNTIME_ROOT_PROBE";
-    const TEST: &str = "config::runtime_root_tests::guard_keeps_approval_debug_and_children_in_tmp_and_closes_after_drop";
+    const TEST: &str = "config::runtime_root_tests::guard_keeps_approval_debug_and_children_in_tmp_and_restores_fallback_after_drop";
     match std::env::var(CELL).as_deref() {
         Ok("inherited") => {
             assert_eq!(
@@ -19,9 +19,11 @@ fn guard_keeps_approval_debug_and_children_in_tmp_and_closes_after_drop() {
         }
         Ok("guarded") => {
             assert!(std::env::var_os("AGENTDESK_ROOT_DIR").is_none());
+            let fallback = super::runtime_root().unwrap();
             {
                 let _root = super::TestRuntimeRootGuard::new();
                 let root = super::runtime_root().unwrap();
+                assert_ne!(root, fallback);
                 let config: super::Config = serde_json::from_value(serde_json::json!({
                     "server": {}, "cluster": {"instance_id": "test-node"},
                     "agents": [{"id": "fixture", "name": "fixture", "channels": {
@@ -65,7 +67,8 @@ fn guard_keeps_approval_debug_and_children_in_tmp_and_closes_after_drop() {
                 assert!(output.status.success(), "{output:?}");
                 assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
             }
-            assert!(std::panic::catch_unwind(super::runtime_root).is_err());
+            assert_eq!(super::runtime_root(), Some(fallback));
+            assert!(std::env::var_os("AGENTDESK_ROOT_DIR").is_none());
             return;
         }
         _ => {}
@@ -85,7 +88,7 @@ fn guard_keeps_approval_debug_and_children_in_tmp_and_closes_after_drop() {
 }
 
 #[test]
-fn missing_or_empty_runtime_root_fails_before_returning_a_path() {
+fn missing_or_empty_runtime_root_uses_a_stable_process_temporary_root() {
     const CELL: &str = "ADK_RUNTIME_ROOT_PROBE";
     if std::env::var_os(CELL).is_some() {
         let _lock = super::shared_test_env_lock()
@@ -95,18 +98,24 @@ fn missing_or_empty_runtime_root_fails_before_returning_a_path() {
             super::TestEnvVarGuard::capture_after_shared_test_env_lock("AGENTDESK_TEST_RUNTIME");
         // SAFETY: this isolated child holds the shared environment lock.
         unsafe { std::env::remove_var("AGENTDESK_TEST_RUNTIME") };
+        let before = std::env::var_os("AGENTDESK_ROOT_DIR");
         let result = std::panic::catch_unwind(super::runtime_root);
-        assert!(
-            result.is_err(),
-            "a test must not resolve the release fallback: {result:?}"
-        );
+        let root = result.expect("missing test ROOT must not panic").unwrap();
+        assert!(root.starts_with(std::env::temp_dir()));
+        assert!(!root.starts_with(
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".adk/release")
+        ));
+        assert_eq!(super::runtime_root(), Some(root.clone()));
+        let threaded = std::thread::spawn(super::runtime_root).join().unwrap();
+        assert_eq!(threaded, Some(root));
+        assert_eq!(std::env::var_os("AGENTDESK_ROOT_DIR"), before);
         return;
     }
     let home = tempfile::tempdir().unwrap();
     for value in [None, Some(""), Some(" \t ")] {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
-            .args(["--exact", "config::runtime_root_tests::missing_or_empty_runtime_root_fails_before_returning_a_path", "--nocapture"])
+            .args(["--exact", "config::runtime_root_tests::missing_or_empty_runtime_root_uses_a_stable_process_temporary_root", "--nocapture"])
             .env(CELL, "1")
             .env("HOME", home.path())
             .env("USERPROFILE", home.path())
