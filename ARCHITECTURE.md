@@ -693,20 +693,28 @@ src/
 │   │   ├── recovery.rs
 │   │   └── worker.rs
 │   ├── claude/
+│   │   ├── first_input/
+│   │   │   └── tests.rs
 │   │   ├── herdr_turn/
+│   │   │   ├── first_input/
+│   │   │   │   └── tests.rs
 │   │   │   ├── boot_host_tests.rs
 │   │   │   ├── coldstop_input_tests.rs
 │   │   │   ├── composer.rs
 │   │   │   ├── composer_tests.rs
+│   │   │   ├── first_input.rs
 │   │   │   ├── live_reader.rs
 │   │   │   ├── never_attached.rs
 │   │   │   ├── provider_terminal_tests.rs
 │   │   │   ├── start_offset.rs
 │   │   │   ├── start_offset_tests.rs
 │   │   │   └── terminal_replay.rs
+│   │   ├── tui_session_launch/
+│   │   │   └── prepared.rs
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
 │   │   ├── c1_teardown_tests.rs
+│   │   ├── first_input.rs
 │   │   ├── herdr_turn.rs
 │   │   ├── host_gate.rs
 │   │   ├── host_gate_tests.rs
@@ -901,10 +909,16 @@ src/
 │   │   ├── actual_submit_tests/
 │   │   │   └── source_io_tests.rs
 │   │   ├── herdr_turn/
-│   │   │   └── composer_tests.rs
+│   │   │   ├── first_input/
+│   │   │   │   └── pg_tests.rs
+│   │   │   ├── composer_tests.rs
+│   │   │   └── first_input.rs
 │   │   ├── tui_session_launch/
+│   │   │   ├── first_input/
+│   │   │   │   └── tests.rs
 │   │   │   ├── launch_policy/
 │   │   │   │   └── fresh_tests.rs
+│   │   │   ├── first_input.rs
 │   │   │   └── launch_policy.rs
 │   │   ├── absence_launch.rs
 │   │   ├── actual_submit_tests.rs
@@ -1208,10 +1222,13 @@ src/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── turn_deliver/
 │   │   │   │   ├── inject/
+│   │   │   │   │   ├── first_input/
+│   │   │   │   │   │   └── pg_tests.rs
 │   │   │   │   │   ├── queued_provider/
 │   │   │   │   │   │   └── history_pg_tests.rs
 │   │   │   │   │   ├── catch_up_race.rs
 │   │   │   │   │   ├── catch_up_race_tests.rs
+│   │   │   │   │   ├── first_input.rs
 │   │   │   │   │   ├── herdr.rs
 │   │   │   │   │   ├── herdr_tests.rs
 │   │   │   │   │   ├── names.rs
@@ -2904,6 +2921,7 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── policy.rs
 │   │   ├── policy_tests.rs
+│   │   ├── prepared.rs
 │   │   └── retired_hold.rs
 │   ├── herdr_launch_tests/
 │   │   └── retired_hold_tests.rs
