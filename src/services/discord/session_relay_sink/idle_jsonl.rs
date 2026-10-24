@@ -638,7 +638,7 @@ mod tests {
         .as_bytes();
         let start = 0u64;
         let end = payload.len() as u64;
-        let mut offset = start;
+        let offset = start;
         let mut duplicate_actor_offset = start;
         let mut session_init_seen = HashSet::new();
         let mut send_attempts = 0;
