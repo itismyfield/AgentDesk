@@ -67,6 +67,8 @@ pub(crate) struct Obligations {
 pub(crate) struct Snapshot {
     pub channel: u64,
     pub provider: ShadowProvider,
+    pub codex: Option<super::codex_snapshot::Observation>,
+    pub reading: usize,
     pub home: Home,
     pub rotation: Rotation,
     /// The actor's cursors, including init sources that never wrote a cursor file.

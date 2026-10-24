@@ -124,8 +124,7 @@ async fn the_actor_publishes_each_undelivered_responsibility_until_it_clears() {
     assert!(owed.has_changed().is_err(), "the ended actor dropped it");
 }
 
-// A channel without Herdr publishes nothing and counts no POSTs, even while a read waits, so it
-// pays no extra reads.
+// A channel without Herdr keeps its POST count without enabling drain publication reads.
 #[tokio::test(start_paused = true)]
 async fn a_channel_without_herdr_publishes_nothing_and_counts_no_posts() {
     let (harness, path, _) = switched_over(&row("m0", "before"));
@@ -140,7 +139,7 @@ async fn a_channel_without_herdr_publishes_nothing_and_counts_no_posts() {
     assert_eq!(*owed.borrow(), None);
     assert!(!owed.has_changed().unwrap(), "never published");
     assert_eq!(undelivered_reads_for_test(), 0);
-    assert_eq!(posts_in_flight(CHANNEL), None);
+    assert_eq!(posts_in_flight(CHANNEL), Some(0));
     halt(stop, task).await;
 }
 
@@ -191,7 +190,6 @@ fn held_post(harness: &Harness) -> tokio::sync::oneshot::Sender<()> {
 #[tokio::test(start_paused = true)]
 async fn a_post_counts_as_running_from_its_start_until_its_request_is_gone() {
     let harness = Harness::new();
-    let _hosts = herdr_configured();
     harness.gate.acquired();
     assert_eq!(posts_in_flight(CHANNEL), None, "no writer counted yet");
 

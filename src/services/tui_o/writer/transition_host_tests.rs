@@ -21,6 +21,7 @@ fn inspect() -> Operation {
 
 fn context() -> Context {
     Context {
+        codex: None,
         tmux: "tmux".into(),
         nonce: "nonce".into(),
         lock: Arc::default(),

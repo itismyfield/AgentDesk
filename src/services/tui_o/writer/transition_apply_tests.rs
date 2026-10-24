@@ -386,6 +386,7 @@ async fn transition_apply_keeps_one_candidate_for_a_receipt_in_turns() {
     let mut probed = Vec::new();
     for _ in 0..2 {
         let context = Context {
+            codex: None,
             lock: Arc::clone(&lock),
             ..chain.context()
         };

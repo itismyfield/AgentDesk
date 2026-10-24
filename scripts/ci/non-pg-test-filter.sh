@@ -105,6 +105,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::restart::host_guard_tests
   --skip services::discord::commands::text_commands::clear_refusal_reply_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
+  --skip services::discord::health::o_transition::codex_context::tests
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::self_watchdog::tests::health_response
   --skip services::discord::health::recovery::stall_alert::tests
@@ -450,6 +451,15 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_report::consent_clear_tests::legacy_actual_clear_ignores_unreadable_consent_storage
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_keeps_unrelated_error_on_first_observation
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_rechecks_one_transient_before_stable_hold
+  services::discord::health::o_transition::codex_context::tests::codex_fixture_pins_identity_when_inherited_host_source_is_missing
+  services::discord::health::o_transition::codex_context::tests::codex_prepare_unknown_preserves_nonce_component_in_stats_and_log
+  services::discord::health::o_transition::codex_context::tests::codex_prepare_without_explicit_identity_refuses_host_identity
+  services::discord::health::o_transition::codex_context::tests::codex_sweep_classifies_existing_and_inflight_suspension
+  services::discord::health::o_transition::codex_context::tests::codex_sweep_timeout_keeps_later_observations_running
+  services::discord::health::o_transition::codex_context::tests::existing_codex_sweep_reaches_the_actual_actor_with_complete_legacy_evidence
+  services::discord::health::o_transition::codex_context::tests::legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed
+  services::discord::health::o_transition::codex_context::tests::same_source_resume_keeps_p5_bytes_and_reaches_actual_codex_sweep
+  services::discord::health::o_transition::codex_context::tests::verified_fresh_durable_claim_and_marker_reach_actual_codex_sweep
   services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions
   services::discord::health::recovery::stall_alert::tests::producer_liveness_suppresses_stall_page
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::idle_tmux_stale_turn_clear_refusal_preserves_mailbox_and_session
@@ -1005,6 +1015,7 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_unreadable_pool_is_unknown
   services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_stop_during_receipt_read_starts_no_actor
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
+  services::tui_o::writer::tests::actor::repost_turn::bo_post::bo_legacy_hosted_post_is_counted_before_the_http_future_exists
   services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
   utils::async_bridge::tests::block_on_pg_result_fails_fast_when_bridge_deadline_already_passed
   utils::redact::tests::dsn_password_extracts_postgres_password_only
