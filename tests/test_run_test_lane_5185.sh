@@ -31,7 +31,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUNNER="$REPO_ROOT/scripts/run_test_lane.py"
 REAL_LEDGER="$REPO_ROOT/scripts/known_test_failures.txt"
 REAL_MANIFEST="$REPO_ROOT/scripts/lib_test_inventory_manifest.txt"
-WORKFLOW="$REPO_ROOT/.github/workflows/ci-pr.yml"
 MAIN_WORKFLOW="$REPO_ROOT/.github/workflows/ci-main.yml"
 PYTHON="${PYTHON:-python3}"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-test-lane-5185.XXXXXX")
@@ -1006,70 +1005,10 @@ LANE_COMMAND='python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summari
 # development machines finished writing first, so the suite was green
 # locally and red on ubuntu-latest. Dropping `-q` makes grep read to EOF,
 # so sed always completes and the status reflects the match alone.
-# Keep the selector's unsharded fallback and both sharded workflow entrypoints exact.
+# Keep the selector's unsharded fallback and main's sharded entrypoint exact; PR runs nextest instead.
 if ! grep -xF "$LANE_COMMAND" "$REPO_ROOT/scripts/ci/test-selection.py" >/dev/null \
-    || ! sed 's/^[[:space:]]*//' "$WORKFLOW" | grep -xF 'run: python3 scripts/ci/test-selection.py run --lane sweep --shard "${{ matrix.shard }}"' >/dev/null \
     || ! sed 's/^[[:space:]]*//' "$MAIN_WORKFLOW" | grep -xF 'run: python3 scripts/ci/test-selection.py run --lane sweep --full --shard "${{ matrix.shard }}"' >/dev/null; then
-    fail_test "PR and Main must run the non-pg-sweep lane through the gate with exactly the pinned shard commands"
-else pass_test
-fi
-
-# --------------------------------------------------------------------------
-# 12. Prose in the workflow must not name flags that do not exist.
-#     `--min-executed` was deleted from the wrapper in this round and a
-#     sentence describing it survived twenty lines above another comment that
-#     states the opposite -- two comments in one file contradicting each
-#     other. The guard that used to stand here missed it because it only
-#     matched lines that ALSO mention `run_test_lane.py`, and the stale
-#     sentence did not. So check every `--flag` token in the whole
-#     library_sweep region against the flags that actually exist.
-# --------------------------------------------------------------------------
-rc=0
-"$PYTHON" - "$REPO_ROOT/scripts" "$WORKFLOW" >"$OUT" 2>&1 <<'PY' || rc=$?
-import re
-import sys
-from pathlib import Path
-
-scripts, workflow = Path(sys.argv[1]), Path(sys.argv[2])
-text = workflow.read_text(encoding="utf-8")
-
-# The region is the `library_sweep` job plus the comment block introducing it.
-job = text.index("\n  library_sweep:\n") + 1
-lines = text[:job].splitlines(keepends=True)
-start = len(text[:job])
-while lines and lines[-1].lstrip().startswith("#"):
-    start -= len(lines.pop())
-end = text.index("\n  library_sweep_required_context:\n")
-region = text[start:end]
-
-declared = set()
-for owner in (scripts / "run_test_lane.py", scripts / "ci/test-selection.py"):
-    options = set(re.findall(r'add_argument\(\s*"(--[a-z][a-z0-9-]*)"', owner.read_text(encoding="utf-8")))
-    if not options:
-        print(f"could not read {owner.name}'s own option list")
-        raise SystemExit(1)
-    declared.update(options)
-# Flags belonging to the tools the region invokes rather than to the wrapper.
-#
-# MEASURED LIMIT OF THIS GUARD: the allowlist is a literal in the same file as
-# the assertion, so anyone who resurrects a deleted wrapper flag in the
-# workflow prose can also add it here and the guard reports nothing. Adding
-# `--min-executed` to this set was measured turning this check green again.
-# That is an edit to the oracle rather than to the code under test, so it is
-# not a mutation this suite can be expected to kill -- but it is the one line
-# a reviewer must read before trusting the check.
-external = {"--lib", "--skip", "--test-threads", "--exact", "--all-targets",
-            "--all-features", "--manifest-path", "--list", "--show-stats", "--version"}
-used = set(re.findall(r"--[a-z][a-z0-9-]*", region))
-unknown = sorted(used - declared - external)
-if unknown:
-    print("the library_sweep region names flag(s) that do not exist: "
-          + ", ".join(unknown))
-    raise SystemExit(1)
-print("library_sweep region flags: " + " ".join(sorted(used)))
-PY
-if [ "$rc" -ne 0 ]; then
-    fail_test "$(cat "$OUT")"
+    fail_test "Main must run the non-pg-sweep lane through the gate with exactly the pinned shard command"
 else pass_test
 fi
 
