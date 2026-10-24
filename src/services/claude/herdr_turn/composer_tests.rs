@@ -12,20 +12,7 @@ fn pane(above: &str, input: &str) -> String {
     )
 }
 
-#[test]
-fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or_enter() {
-    let root = tempfile::tempdir().unwrap();
-    let _root = crate::config::set_agentdesk_root_for_test(root.path());
-    let rig = HerdrRig::start();
-    let _registry = rig.registry_on_this_thread();
-    let context = rig.context(NONCE);
-    rig.run_provider(&context, false);
-    let logical = "e-claude-composer";
-    std::fs::write(
-        crate::services::tmux_common::session_temp_path(logical, "host_kind"),
-        "herdr",
-    )
-    .unwrap();
+fn bound_target(rig: &HerdrRig, logical: &str) -> (HostedOwner, HerdrTarget) {
     let owner = HostedOwner {
         provider: "claude".into(),
         discord_token_hash: "hash".into(),
@@ -58,7 +45,24 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
             baseline_event_seq: None,
         },
     };
-    let target = herdr_endpoints().target(&record).unwrap();
+    (owner, herdr_endpoints().target(&record).unwrap())
+}
+
+#[test]
+fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or_enter() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let rig = HerdrRig::start();
+    let _registry = rig.registry_on_this_thread();
+    let context = rig.context(NONCE);
+    rig.run_provider(&context, false);
+    let logical = "e-claude-composer";
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(logical, "host_kind"),
+        "herdr",
+    )
+    .unwrap();
+    let (owner, target) = bound_target(&rig, logical);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -103,6 +107,11 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let result = screen.map_or_else(|| serde_json::json!({"type":"ok"}), |text| serde_json::json!({"type":"pane_read", "read":{"pane_id":PANE, "source":"recent_unwrapped", "text":text, "revision":1, "truncated":false}}));
         rig.answer("pane.read", result);
+        let reads_before = rig
+            .requests()
+            .iter()
+            .filter(|request| request["method"] == "pane.read")
+            .count();
         let turn = super::super::HerdrTurn {
             pool: &pool,
             owner: owner.clone(),
@@ -132,6 +141,18 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
             rig.sends().is_empty(),
             "composer_guard_zero_mutation_contract: {name}"
         );
+        if matches!(name, "draft" | "modal") {
+            let reads_after = rig
+                .requests()
+                .iter()
+                .filter(|request| request["method"] == "pane.read")
+                .count();
+            assert_eq!(
+                reads_after,
+                reads_before + 1,
+                "human_composer_refuses_immediately_contract: {name}"
+            );
+        }
         assert!(
             super::super::not_held(NONCE).is_ok(),
             "an untouched refusal releases only its own transient hold"
@@ -139,7 +160,7 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
     }
     let ready_screen = pane("✻ Baked for 2s", "").replace("❯", "\x1b[36m❯\x1b[0m");
     assert!(
-        ready(Some(&ready_screen)),
+        matches!(observation(Some(&ready_screen)), ControlFlow::Break(true)),
         "human_finished_composer_ready_contract"
     );
     rig.answer("pane.read", serde_json::json!({"type":"pane_read", "read":{"pane_id":PANE, "source":"recent_unwrapped", "text":ready_screen, "revision":2, "truncated":false}}));
@@ -152,4 +173,80 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
         "human_finished_actual_send_contract"
     );
     assert_eq!(rig.sends().len(), 2);
+}
+
+#[test]
+fn herdr_claude_composer_waits_from_busy_to_ready_before_exactly_one_submit() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let rig = HerdrRig::start();
+    let _registry = rig.registry_on_this_thread();
+    let context = rig.context(NONCE);
+    rig.run_provider(&context, false);
+    let logical = "i7309-claude-composer";
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(logical, "host_kind"),
+        "herdr",
+    )
+    .unwrap();
+    let (_owner, target) = bound_target(&rig, logical);
+    let _admission = crate::services::herdr_admission::force_for_test(
+        crate::services::herdr_admission::Admission::new(None, Some(root.path().join("no-stop"))),
+    );
+    let plan = [
+        TuiInputAction::PasteBuffer("cold start input".into()),
+        TuiInputAction::Enter,
+    ];
+    let cancel = CancelToken::new();
+    cancel
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        run(&target, &plan, Some(&cancel)),
+        InputRun::Cancelled { confirmed: 0 },
+        "cancel_before_composer_capture_contract"
+    );
+    assert!(
+        rig.requests().is_empty(),
+        "cancelled_composer_reads_zero_contract"
+    );
+    assert!(
+        rig.sends().is_empty(),
+        "cancelled_composer_sends_zero_contract"
+    );
+    cancel
+        .cancelled
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let response = |text| {
+        serde_json::json!({"type":"pane_read", "read":{
+            "pane_id":PANE, "source":"recent_unwrapped", "text":text,
+            "revision":1, "truncated":false
+        }})
+    };
+    rig.answer_sequence(
+        "pane.read",
+        [
+            response(pane("✳ Architecting… (12s · esc to interrupt)", "")),
+            response(pane("✻ Baked for 2s", "")),
+        ],
+    );
+    assert_eq!(
+        run(&target, &plan, Some(&cancel)),
+        InputRun::Applied,
+        "busy_then_ready_composer_applies_contract"
+    );
+    assert_eq!(
+        rig.sends().len(),
+        2,
+        "busy_then_ready_composer_sends_two_contract"
+    );
+    let reads = rig
+        .requests()
+        .iter()
+        .filter(|request| request["method"] == "pane.read")
+        .count();
+    assert_eq!(
+        reads, 2,
+        "busy_then_ready_composer_reads_both_screens_contract"
+    );
 }
