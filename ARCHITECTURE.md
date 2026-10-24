@@ -97,6 +97,9 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── config/
+│   ├── runtime_root_guard/
+│   │   ├── process_tests.rs
+│   │   └── test_process.rs
 │   ├── session_hosts/
 │   │   ├── migration/
 │   │   │   ├── consent_holds.rs
@@ -119,6 +122,8 @@ src/
 │   ├── readers_live_reload_tests.rs
 │   ├── retired_relay_tests.rs
 │   ├── runtime_profile.rs
+│   ├── runtime_root_guard.rs
+│   ├── runtime_root_tests.rs
 │   ├── runtime_settings.rs
 │   ├── runtime_validation.rs
 │   ├── session_hosts.rs
