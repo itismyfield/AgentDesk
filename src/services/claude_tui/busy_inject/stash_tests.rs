@@ -323,15 +323,21 @@ fn visible_draft_is_stashed_once_and_submitted_without_post_reads() {
     }
 }
 
+/// Also when streamed output above the box hides the `› stashed` marker.
 #[test]
 fn empty_never_toggles_an_old_stash_back_before_pasting() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let tui = Tui::new("");
-    tui.put("stash", "old stashed draft");
-    assert_eq!(tui.run().outcome, Outcome::Injected);
-    assert_eq!(tui.applied(), ["paste", "Enter"]);
-    assert_eq!(tui.records(), [tui.get("buffer").unwrap()]);
-    assert_eq!(tui.drafts(), ("old stashed draft".into(), None));
+    for status in [None, Some("  12. streamed line\n")] {
+        let tui = Tui::new("");
+        tui.put("stash", "old stashed draft");
+        if let Some(status) = status {
+            tui.put("status", status);
+        }
+        assert_eq!(tui.run().outcome, Outcome::Injected, "{status:?}");
+        assert_eq!(tui.applied(), ["paste", "Enter"], "{status:?}");
+        assert_eq!(tui.records(), [tui.get("buffer").unwrap()]);
+        assert_eq!(tui.drafts(), ("old stashed draft".into(), None));
+    }
 }
 
 #[test]
