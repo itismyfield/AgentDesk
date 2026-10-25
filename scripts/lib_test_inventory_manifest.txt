@@ -7076,10 +7076,12 @@ services::discord::router::intake_gate::queue_effects::schedule_post_enqueue_idl
 services::discord::router::intake_gate::queue_effects::schedule_post_enqueue_idle_drain_tests::skips_when_real_turn_holds_slot
 services::discord::router::intake_gate::queue_effects::source_guard_tests::reuse_seam_guard_rejects_commented_and_reordered_steps
 services::discord::router::intake_gate::reply_context::tests::attachment_reply_context_keeps_canonical_message_id_and_all_files
+services::discord::router::intake_gate::reply_context::tests::earlier_messages_close_truncated_code_before_reply_target_within_budgets
 services::discord::router::intake_gate::reply_context::tests::reply_context_end_precedes_rendered_user_input
 services::discord::router::intake_gate::reply_context::tests::reply_context_keeps_existing_byte_and_message_budgets
 services::discord::router::intake_gate::reply_context::tests::reply_context_omits_messages_emptied_by_subtext_removal
 services::discord::router::intake_gate::reply_context::tests::reply_context_removes_subtext_but_keeps_fenced_code
+services::discord::router::intake_gate::reply_context::tests::reply_target_closes_truncated_code_before_end_marker_within_budget
 services::discord::router::intake_gate::reply_context_tests::attachment_only_empty_check_ignores_leading_bot_mention
 services::discord::router::intake_gate::reply_context_tests::attachment_only_turn_accepts_any_saved_file_without_prompt
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg
@@ -7465,6 +7467,7 @@ services::discord::router::message_handler::tui_followup::busy_retry_fifo_tests:
 services::discord::router::message_handler::turn_context::tests::input_chunks_preserve_plain_reply_and_upload_order
 services::discord::router::message_handler::turn_context::tests::normal_attachment_only_turn_keeps_its_nonempty_author_chunk
 services::discord::router::message_handler::turn_context::tests::normal_turn_context_preserves_existing_author_and_context_bytes
+services::discord::router::message_handler::turn_context::tests::reply_context_is_last_before_user_input_with_recent_and_knowledge
 services::discord::router::message_handler::turn_lifecycle::tests::text_intake_turn_start_waits_behind_queued_inbound
 services::discord::router::message_handler::turn_mark_admission_tests::fresh_codex_intake_marks_before_provider_input
 services::discord::router::message_handler::turn_mark_admission_tests::reused_codex_intake_has_no_admission_mark_at_provider_input

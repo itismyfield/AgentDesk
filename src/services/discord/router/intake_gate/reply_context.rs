@@ -33,26 +33,51 @@ pub(super) async fn build_reply_context(
     )
 }
 
+fn update_code_fence(code_fence: &mut Option<(u8, usize)>, line: &str) {
+    let trimmed = line.trim_start();
+    let marker = trimmed.as_bytes().first().copied().unwrap_or_default();
+    let width = trimmed.bytes().take_while(|&b| b == marker).count();
+    if let Some((open_marker, open_width)) = *code_fence {
+        if marker == open_marker && width >= open_width && trimmed[width..].trim().is_empty() {
+            *code_fence = None;
+        }
+    } else if matches!(marker, b'`' | b'~') && width >= 3 {
+        *code_fence = Some((marker, width));
+    }
+}
+
 fn strip_subtext(content: &str) -> String {
     let mut code_fence = None;
     let mut lines = Vec::new();
     for line in content.lines() {
-        let trimmed = line.trim_start();
-        let marker = trimmed.as_bytes().first().copied().unwrap_or_default();
-        let width = trimmed.bytes().take_while(|&b| b == marker).count();
         // Subtext inside a fenced code block is literal message content.
-        if let Some((open_marker, open_width)) = code_fence {
-            if marker == open_marker && width >= open_width && trimmed[width..].trim().is_empty() {
-                code_fence = None;
-            }
-        } else if matches!(marker, b'`' | b'~') && width >= 3 {
-            code_fence = Some((marker, width));
-        } else if line.starts_with("-# ") {
+        if code_fence.is_none() && line.starts_with("-# ") {
             continue;
         }
+        update_code_fence(&mut code_fence, line);
         lines.push(line);
     }
     lines.join("\n").trim().to_string()
+}
+
+fn truncate_reply_content(content: &str, max_len: usize) -> String {
+    let mut text = truncate_str(content, max_len);
+    loop {
+        let mut code_fence = None;
+        for line in text.lines() {
+            update_code_fence(&mut code_fence, line);
+        }
+        let Some((marker, width)) = code_fence else {
+            return text;
+        };
+        let closing = format!("\n{}", char::from(marker).to_string().repeat(width));
+        if text.len() + closing.len() <= max_len {
+            text.push_str(&closing);
+            return text;
+        }
+        // Reserve the closing line inside the content budget, then rescan the shorter text.
+        text = truncate_str(&text, max_len.saturating_sub(closing.len()));
+    }
 }
 
 fn format_reply_context(
@@ -69,7 +94,7 @@ fn format_reply_context(
         if content.is_empty() {
             continue;
         }
-        let entry = format!("{}: {}", author, truncate_str(&content, 300));
+        let entry = format!("{}: {}", author, truncate_reply_content(&content, 300));
         if entry.len() > budget {
             break;
         }
@@ -85,7 +110,10 @@ fn format_reply_context(
     }
     let content = strip_subtext(content);
     let target = if !content.is_empty() {
-        Some(format!("Content: {}", truncate_str(&content, 500)))
+        Some(format!(
+            "Content: {}",
+            truncate_reply_content(&content, 500)
+        ))
     } else if !attachments.is_empty() {
         Some(format_attachment_reply_content(ref_message_id, attachments))
     } else {
@@ -288,5 +316,52 @@ mod tests {
         assert!(four.starts_with(
             "[Reply context — earlier messages]\nd: four\nc: three\nb: two\na: one\n\n"
         ));
+    }
+
+    #[test]
+    fn reply_target_closes_truncated_code_before_end_marker_within_budget() {
+        for (opening, closing) in [("```rust", "```"), ("~~~~rust", "~~~~")] {
+            let code = format!("{opening}\n{}", "값\n".repeat(200));
+            let context = format_reply_context("bot", 1, &code, &[], &[]).unwrap();
+            let body = context
+                .split_once("Content: ")
+                .unwrap()
+                .1
+                .strip_suffix("\n[End of reply context — the user's reply follows]")
+                .unwrap();
+            assert!(body.starts_with(&format!("{opening}\n")));
+            assert!(body.ends_with(&format!("\n{closing}")), "{context}");
+            assert!(body.len() <= 500);
+        }
+    }
+
+    #[test]
+    fn earlier_messages_close_truncated_code_before_reply_target_within_budgets() {
+        let code = format!("```rust\n{}", "x\n".repeat(400));
+        let authors = ['a', 'b', 'c', 'd'].map(|c| c.to_string().repeat(34));
+        let preceding = authors
+            .iter()
+            .map(|author| (author.as_str(), code.as_str()))
+            .collect::<Vec<_>>();
+        let context = format_reply_context("bot", 1, "answer", &[], &preceding).unwrap();
+        let (earlier, target) = context
+            .split_once("\n\n[Reply context — replied-to message]\n")
+            .unwrap();
+        assert!(target.starts_with("Author: bot\nContent: answer\n"));
+        assert!(earlier.ends_with("\n```"), "{context}");
+        let entries = earlier
+            .strip_prefix("[Reply context — earlier messages]\n")
+            .unwrap()
+            .split_inclusive("\n```")
+            .map(|entry| entry.trim_start_matches('\n'))
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().map(|entry| entry.len()).sum::<usize>() <= 1000);
+        for entry in entries {
+            let body = entry.split_once(": ").unwrap().1;
+            assert!(body.starts_with("```rust\n"));
+            assert!(body.ends_with("\n```"));
+            assert!(body.len() <= 300);
+        }
     }
 }
