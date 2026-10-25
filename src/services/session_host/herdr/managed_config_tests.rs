@@ -533,7 +533,9 @@ fn child(f: &Fixture, mode: &str) -> std::process::Command {
         .args(["--exact", CHILD, "--nocapture"])
         .env("ADK_CONFIG_TEST_HOME", &f.home)
         .env("ADK_CONFIG_TEST_USER", &f.personal.home)
-        .env("ADK_CONFIG_TEST_MODE", mode);
+        .env("ADK_CONFIG_TEST_MODE", mode)
+        // The child's own libtest lines stay out of this run's output.
+        .stdout(std::process::Stdio::piped());
     command
 }
 
@@ -672,22 +674,22 @@ fn two_process_writers_replace_once_and_the_waiting_writer_is_a_noop() {
     let busy = f._root.path().join("busy");
     let result_a = f._root.path().join("a");
     let result_b = f._root.path().join("b");
-    let mut a = child(&f, "hold")
+    let a = child(&f, "hold")
         .env("ADK_CONFIG_TEST_READY", &ready)
         .env("ADK_CONFIG_TEST_RELEASE", &release)
         .env("ADK_CONFIG_TEST_RESULT", &result_a)
         .spawn()
         .unwrap();
     wait_file(&ready);
-    let mut b = child(&f, "write")
+    let b = child(&f, "write")
         .env("ADK_CONFIG_TEST_BUSY", &busy)
         .env("ADK_CONFIG_TEST_RESULT", &result_b)
         .spawn()
         .unwrap();
     wait_file(&busy);
     fs::write(release, b"go").unwrap();
-    assert!(a.wait().unwrap().success());
-    assert!(b.wait().unwrap().success());
+    assert!(a.wait_with_output().unwrap().status.success());
+    assert!(b.wait_with_output().unwrap().status.success());
     assert!(
         fs::read_to_string(result_a)
             .unwrap()
