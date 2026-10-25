@@ -160,8 +160,18 @@ fn explicit_wrong_cwd_returns_422_and_actual_location_missing_transcript_refuses
 #[test]
 fn forks_choose_newest_mtime_explicit_cwd_wins_and_choices_deduplicate() {
     let f = Fixture::new();
-    f.transcript(&f.current, PRIOR, "{}\n", 1000);
-    f.transcript(&f.sibling, PRIOR, "{}\n", 2000);
+    f.transcript(
+        &f.current,
+        PRIOR,
+        "{\"type\":\"ai-title\",\"aiTitle\":\"older fork\"}\n",
+        1000,
+    );
+    f.transcript(
+        &f.sibling,
+        PRIOR,
+        "{\"type\":\"ai-title\",\"aiTitle\":\"newer fork\"}\n",
+        2000,
+    );
     let current = f.current.to_str().unwrap();
     assert_eq!(
         resolve_cwd(Some(current), None, PRIOR, Some(&f.home)).unwrap(),
@@ -172,6 +182,8 @@ fn forks_choose_newest_mtime_explicit_cwd_wins_and_choices_deduplicate() {
         current
     );
     assert_eq!(f.choices(None, &HashSet::new(), "").len(), 1);
+    assert!(f.choices(None, &HashSet::new(), "older fork").is_empty());
+    assert_eq!(f.choices(None, &HashSet::new(), "newer fork").len(), 1);
 }
 
 #[test]

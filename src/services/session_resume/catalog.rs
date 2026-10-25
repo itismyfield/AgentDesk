@@ -211,7 +211,7 @@ pub(crate) fn choices(
         if result.len() == 25 || Instant::now() >= deadline {
             break;
         }
-        if seen.contains(&candidate.session_id) {
+        if !seen.insert(candidate.session_id.clone()) {
             continue;
         }
         let preview = preview(&path, modified, len);
@@ -247,7 +247,6 @@ pub(crate) fn choices(
         if !label.to_lowercase().contains(&partial) && !candidate.session_id.contains(&partial) {
             continue;
         }
-        seen.insert(candidate.session_id.clone());
         result.push(ResumeChoice {
             label,
             session_id: candidate.session_id,
