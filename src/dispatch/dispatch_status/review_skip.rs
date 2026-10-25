@@ -58,20 +58,27 @@ pub(super) async fn restore_auto_queue_mainline_after_review_skip_on_pg(
     .execute(&mut *tx)
     .await
     .map_err(db("clear skipped review sessions"))?;
-    sqlx::query(
+    let cancelled: Vec<String> = sqlx::query_scalar(
         "UPDATE task_dispatches
          SET status = 'cancelled',
              updated_at = NOW(),
              completed_at = COALESCE(completed_at, NOW()),
              result = COALESCE(result, $2)
          WHERE id = ANY($1)
-           AND status IN ('pending', 'dispatched')",
+           AND status IN ('pending', 'dispatched')
+         RETURNING id",
     )
     .bind(&live_reviews)
     .bind(json!({ "completion_source": "review_mode_disabled" }).to_string())
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await
     .map_err(db("cancel skipped review dispatches"))?;
+    // The cancelled row stays, so its semaphore slots are freed here rather than by cascade.
+    for dispatch_id in &cancelled {
+        crate::db::dispatch_semaphores::release_dispatch_semaphores_on_pg_tx(&mut tx, dispatch_id)
+            .await
+            .map_err(db("release skipped review semaphores"))?;
+    }
     sqlx::query("DELETE FROM card_review_state WHERE card_id = $1")
         .bind(card_id)
         .execute(&mut *tx)
@@ -99,4 +106,67 @@ pub(super) async fn restore_auto_queue_mainline_after_review_skip_on_pg(
     .map_err(db("restore mainline card state"))?;
     tx.commit().await.map_err(db("commit review skip"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod semaphore_pg_tests {
+    use super::restore_auto_queue_mainline_after_review_skip_on_pg;
+    use crate::config::ClusterSemaphoreConfig;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::db::dispatch_semaphores::try_acquire_dispatch_semaphores_on_pg_tx;
+    use serde_json::json;
+    use sqlx::PgPool;
+    use std::collections::BTreeMap;
+
+    async fn acquire_gpu(pool: &PgPool, dispatch_id: &str) -> bool {
+        let configs = BTreeMap::from([("gpu".to_string(), ClusterSemaphoreConfig::default())]);
+        let mut tx = pool.begin().await.expect("begin acquire");
+        let outcome = try_acquire_dispatch_semaphores_on_pg_tx(
+            &mut tx,
+            dispatch_id,
+            "node-a",
+            3600,
+            Some(&json!({ "semaphores": ["gpu"] })),
+            &configs,
+        )
+        .await
+        .expect("acquire gpu");
+        tx.commit().await.expect("commit acquire");
+        outcome.acquired
+    }
+
+    /// Contract: skipping a review frees the semaphore slot its cancelled dispatch held.
+    #[tokio::test]
+    async fn a_skipped_review_frees_its_semaphore_slot_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+        sqlx::raw_sql(
+            "INSERT INTO kanban_cards (id, title, status, review_status) VALUES ('card-1', 'c', 'review', 'reviewing');
+             INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status) VALUES
+                 ('impl-1', 'card-1', 'implementation', 'completed'),
+                 ('review-1', 'card-1', 'review', 'dispatched'),
+                 ('next-1', 'card-1', 'implementation', 'pending');",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed review dispatch");
+        assert!(acquire_gpu(&pool, "review-1").await);
+        assert!(!acquire_gpu(&pool, "next-1").await, "capacity 1 is held");
+
+        restore_auto_queue_mainline_after_review_skip_on_pg(&pool, "card-1", "impl-1")
+            .await
+            .expect("restore mainline");
+
+        let held: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dispatch_semaphore_holdings WHERE dispatch_id = 'review-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count review holdings");
+        assert_eq!(held, 0);
+        assert!(acquire_gpu(&pool, "next-1").await);
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }

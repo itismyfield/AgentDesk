@@ -57,6 +57,7 @@ src/dispatch/dispatch_cancel.rs
 src/dispatch/dispatch_context.rs
 src/dispatch/dispatch_status.rs
 src/dispatch/dispatch_status/auto_queue_terminal_sync_policy_tests/migration_value_pg_tests.rs
+src/dispatch/dispatch_status/review_skip.rs
 src/dispatch/dispatch_status/terminal_timestamp_tests.rs
 src/engine/ops/auto_queue_ops.rs
 src/engine/ops/config_ops.rs
@@ -102,6 +103,7 @@ src/server/task_dispatch_claims/config_read_tests.rs
 src/server/task_dispatch_claims_replay_tests.rs
 src/services/agent_quality/regression_alerts.rs
 src/services/agent_recovery/durable/postgres_tests.rs
+src/services/agents/query.rs
 src/services/auto_queue.rs
 src/services/auto_queue/activate_command.rs
 src/services/auto_queue/campaign_handoff_tests.rs
@@ -489,6 +491,7 @@ dispatch::dispatch_cancel::pg_observability_tests
 dispatch::dispatch_context::pg_rereview_tests
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests
 dispatch::dispatch_status::auto_queue_terminal_sync_policy_tests::migration_value_pg_tests
+dispatch::dispatch_status::review_skip::semaphore_pg_tests
 dispatch::dispatch_status::review_skip_pg_tests
 dispatch::dispatch_status::terminal_timestamp_tests
 engine::ops::auto_queue_ops::tests
@@ -537,6 +540,7 @@ server::task_dispatch_claims::replay_tests
 server::task_dispatch_claims::task_dispatch_claims_pg_tests
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests
 services::agent_recovery::durable::postgres_tests
+services::agents::query::blocked_signal_pg_tests
 services::auto_queue::cancel_run::malformed_context_pg_tests
 services::auto_queue::cancel_run::pg_tests
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests
@@ -1343,6 +1347,7 @@ dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgre
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::normal_finalize_infers_legacy_default_only_from_persisted_null_kind
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::patch_completion_reconstructs_legacy_default_and_clears_gate
 dispatch::dispatch_status::auto_queue_terminal_sync_policy_tests::migration_value_pg_tests::migration_status_normalization_and_constraints_match_values_pg
+dispatch::dispatch_status::review_skip::semaphore_pg_tests::a_skipped_review_frees_its_semaphore_slot_pg
 dispatch::dispatch_status::review_skip_pg_tests::a_failed_review_skip_changes_nothing
 dispatch::dispatch_status::review_skip_pg_tests::a_skipped_review_dispatch_is_cancelled_not_deleted
 dispatch::dispatch_status::terminal_timestamp_tests::postgres_terminal_timestamps_preserve_first_finish_and_respect_touch_flag
@@ -1469,6 +1474,7 @@ server::routes::auto_queue_admission_pg_tests::manual_add_waits_for_uncommitted_
 server::routes::auto_queue_admission_pg_tests::order_callback_rolls_back_every_entry_on_insert_failure_pg
 server::routes::auto_queue_admission_pg_tests::order_callback_waits_for_uncommitted_completion_and_refuses_pg
 server::routes::auto_queue_admission_pg_tests::patch_reopen_of_completed_run_entry_answers_conflict_pg
+server::routes::auto_queue_admission_pg_tests::restore_keeps_a_deleted_cards_entry_skipped_pg
 server::routes::auto_queue_admission_pg_tests::restore_waits_on_the_run_token_before_locking_the_run_row_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::dispatch_next_route_completes_drained_run_through_canonical_writer_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
@@ -1576,6 +1582,7 @@ services::agent_recovery::durable::postgres_tests::postgres_same_provider_error_
 services::agent_recovery::durable::postgres_tests::postgres_stale_completion_cannot_claim_a_restarted_takeover
 services::agent_recovery::durable::postgres_tests::postgres_takeover_is_invisible_until_commit
 services::agent_recovery::durable::postgres_tests::postgres_wal_frontier_rejects_same_generation_stale_progress
+services::agents::query::blocked_signal_pg_tests::blocked_signal_skips_a_deleted_in_progress_card_pg
 services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg
 services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_census_failure_rolls_back_pg
 services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg
@@ -1652,6 +1659,7 @@ services::auto_queue::route::fsm::tests::recovery_reattach_path_rechecks_cancell
 services::auto_queue::route::fsm::tests::restore_attach_existing_path_rechecks_cancelled_run_pg
 services::auto_queue::route::phase_gate::tests::attachment_free_gate_uses_newest_entry_single_run_pg
 services::auto_queue::route::phase_gate::tests::cancelled_run_rejects_dispatch_attach_pg
+services::auto_queue::route::phase_gate::tests::deleted_card_rejects_dispatch_attach_pg
 services::auto_queue::route::planning::record_entry_dispatch_failure_tests::production_failure_wrapper_preserves_restoring_slot_binding_pg
 services::auto_queue::route::route_generate::concurrent_generate_tests::two_generates_at_once_create_one_run_pg
 services::auto_queue::route::route_generate::dependency_hold_tests::a_card_waits_for_the_issues_its_dependency_section_lists_pg
