@@ -140,6 +140,41 @@ async fn concurrent_source_authority_serializes_with_claim_and_duplicate_start_p
     finish(fixture, pool).await;
 }
 
+#[tokio::test]
+async fn a_bulk_update_of_plain_rows_takes_no_source_locks_pg() {
+    let (fixture, pool) = setup().await;
+    for n in 0..50 {
+        legacy_on(&pool, "bulk", "claude", &format!("plain-{n}"), "done")
+            .await
+            .unwrap();
+    }
+    receipt_on(&pool, "bulk", "claude", &["held"], "started_unclassified")
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE intake_outbox SET updated_at = NOW() WHERE replay_disposition IS NULL")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let locks: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(locks, 0, "a plain bulk update must not lock every row's sources");
+
+    assert_fenced(
+        sqlx::query("UPDATE intake_outbox SET claim_owner = 'bulk-owner' WHERE channel_id = 'bulk'")
+            .execute(&pool)
+            .await,
+        "a held row inside a bulk update still keeps its claim",
+    );
+    finish(fixture, pool).await;
+}
+
 async fn wait_for_lock(pool: &PgPool, pid: i32) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
