@@ -4329,17 +4329,6 @@ mod watcher_short_replace_controller {
         });
     }
 
-    fn toc_debug_outcome(outcome: &toc::DeliveryOutcome) -> &'static str {
-        match outcome {
-            toc::DeliveryOutcome::Delivered { .. } => "Delivered",
-            toc::DeliveryOutcome::FreshDelivered { .. } => "FreshDelivered",
-            toc::DeliveryOutcome::NotDelivered { .. } => "NotDelivered",
-            toc::DeliveryOutcome::Transient { .. } => "Transient",
-            toc::DeliveryOutcome::Unknown { .. } => "Unknown",
-            toc::DeliveryOutcome::Skipped => "Skipped",
-        }
-    }
-
     // (1) lease pre-held by ANOTHER holder → controller acquire fails →
     // AcquireFailureMode::Transient → B2Skip, NO transport. Mutation:
     // `Transient`→`ProceedMarkerless` in the sibling would POST → replace_calls=1

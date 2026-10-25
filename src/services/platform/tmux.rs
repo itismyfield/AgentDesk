@@ -970,32 +970,30 @@ pub fn set_option(session_name: &str, key: &str, value: &str) {
     let _ = tmux_output(["set-option", "-t", &exact_target(session_name), key, value]);
 }
 
-/// Read one tmux session option without treating a missing session/option as a
-/// fatal condition. Callers that rehydrate best-effort runtime metadata should
-/// use this instead of shelling out themselves: malformed targets, absent tmux,
-/// and non-success responses all resolve to `None`.
-pub fn get_option(session_name: &str, key: &str) -> Option<String> {
-    if is_blank_session_name(session_name) || key.trim().is_empty() {
-        return None;
-    }
-    let output = tmux_output([
-        "show-options",
-        "-qv",
-        "-t",
-        &exact_target(session_name),
-        key,
-    ])
-    .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 #[cfg(test)]
 mod target_safety_tests {
     use super::*;
+
+    /// Reads one tmux session option; malformed targets, absent tmux and
+    /// non-success responses resolve to `None`.
+    fn get_option(session_name: &str, key: &str) -> Option<String> {
+        if is_blank_session_name(session_name) || key.trim().is_empty() {
+            return None;
+        }
+        let output = tmux_output([
+            "show-options",
+            "-qv",
+            "-t",
+            &exact_target(session_name),
+            key,
+        ])
+        .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
 
     #[test]
     fn tmux_command_enables_utf8_mode() {

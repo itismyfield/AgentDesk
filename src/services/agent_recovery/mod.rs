@@ -61,6 +61,7 @@ pub struct RecoveryRuntime {
     claimed_turns: HashMap<String, String>,
     open_keys: HashSet<(String, String)>,
     spawned: Vec<FallbackSpawnPlan>,
+    #[cfg(test)]
     mailbox_handoff_calls: u32,
     pending_restore: HashMap<String, String>,
     max_checkpoint_bytes: usize,
@@ -75,6 +76,7 @@ impl Default for RecoveryRuntime {
             claimed_turns: HashMap::new(),
             open_keys: HashSet::new(),
             spawned: Vec::new(),
+            #[cfg(test)]
             mailbox_handoff_calls: 0,
             pending_restore: HashMap::new(),
             max_checkpoint_bytes: DEFAULT_MAX_CHECKPOINT_BYTES,
@@ -83,10 +85,12 @@ impl Default for RecoveryRuntime {
 }
 
 impl RecoveryRuntime {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[cfg(test)]
     pub fn with_max_checkpoint_bytes(mut self, max_checkpoint_bytes: usize) -> Self {
         self.max_checkpoint_bytes = max_checkpoint_bytes.max(1);
         self
@@ -103,14 +107,17 @@ impl RecoveryRuntime {
         self.catalog = RecoveryCatalog::default();
     }
 
+    #[cfg(test)]
     pub fn catalog(&self) -> &RecoveryCatalog {
         &self.catalog
     }
 
+    #[cfg(test)]
     pub fn mailbox_handoff_calls(&self) -> u32 {
         self.mailbox_handoff_calls
     }
 
+    #[cfg(test)]
     pub fn spawned(&self) -> &[FallbackSpawnPlan] {
         &self.spawned
     }
@@ -130,6 +137,7 @@ impl RecoveryRuntime {
         )
     }
 
+    #[cfg(test)]
     pub fn claim_turn(&mut self, channel_id: &str, turn_id: &str) {
         self.claimed_turns
             .insert(channel_id.to_string(), turn_id.to_string());
@@ -166,6 +174,7 @@ impl RecoveryRuntime {
         }
     }
 
+    #[cfg(test)]
     pub fn allows_cli_turn(&self, channel_id: &str, agent_id: &str) -> bool {
         match self.states.get(channel_id) {
             Some(state) if state.lock_held() => {
@@ -348,20 +357,6 @@ impl RecoveryRuntime {
             .agent_provider(&binding.policy.as_ref()?.fallback_agent_id)
     }
 
-    pub fn is_fallback_writer(&self, channel_id: &str, provider: &ProviderKind) -> bool {
-        let Some(state) = self.states.get(channel_id) else {
-            return false;
-        };
-        if !state.lock_held() {
-            return false;
-        }
-        state.active_writer_agent_id == state.fallback_agent_id
-            && self
-                .writer_provider(state, &state.active_writer_agent_id)
-                .as_ref()
-                == Some(provider)
-    }
-
     pub fn owner_may_retake(&self, channel_id: &str) -> bool {
         let Some(state) = self.states.get(channel_id) else {
             return false;
@@ -467,6 +462,7 @@ impl RecoveryRuntime {
         Some(plan)
     }
 
+    #[cfg(test)]
     pub fn abort(&mut self, channel_id: &str) {
         if let Some(state) = self.states.get_mut(channel_id) {
             state.status = ChannelRecoveryStatus::Aborted;
