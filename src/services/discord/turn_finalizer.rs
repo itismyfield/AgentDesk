@@ -190,10 +190,7 @@ pub(in crate::services::discord) struct LedgerKey {
 /// retained `Finalized` entry → `AlreadyFinalized`); a channel-only id-0
 /// terminal collapses per `resolve_channel_only` (never prematurely finalizing
 /// a queued follow-up).
-pub(super) fn resolve_ledger_key(
-    ledger: &HashMap<LedgerKey, LedgerEntry>,
-    key: TurnKey,
-) -> LedgerKey {
+fn resolve_ledger_key(ledger: &HashMap<LedgerKey, LedgerEntry>, key: TurnKey) -> LedgerKey {
     resolve_channel_only(
         key,
         ledger

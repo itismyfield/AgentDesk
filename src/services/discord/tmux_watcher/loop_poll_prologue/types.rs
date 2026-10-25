@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::services::discord::tmux::tmux_watcher) struct WatcherSourceAuthority {
+pub(in crate::services::discord) struct WatcherSourceAuthority {
     pub(in crate::services::discord::tmux::tmux_watcher) source_file:
         crate::services::cluster::stream_relay::SourceFileIdentity,
     pub(in crate::services::discord::tmux::tmux_watcher) generation_mtime_ns: i64,
