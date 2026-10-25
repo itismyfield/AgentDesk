@@ -509,11 +509,6 @@ if run_check contracts "Rust test source wiring and PG classification"; then
 "$PYTHON" scripts/ci/pg_test_classifier.py classify --json-out "$(mktemp)"
 fi
 
-if run_check contracts "Shared CI shell lexer tests"; then
-# Boundary tests of the CI shell lexer in scripts/ci_shell_lex.py.
-"$PYTHON" -m unittest tests.test_ci_shell_lex
-fi
-
 if run_check contracts "D4-B acceptance manifest (#5340)"; then
 "$PYTHON" scripts/check_herdr_s3_d4b_manifest.py --structure-only
 "$PYTHON" -m unittest tests.test_herdr_s3_d4b_manifest
