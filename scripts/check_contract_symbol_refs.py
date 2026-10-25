@@ -80,13 +80,11 @@ in-repo attacker even in principle. Do not grow this checker to chase such
 constructs; see PR #4388's seven review rounds for why every added parser layer
 became new attack surface.
 """
-# The H2 boundary contract binds its anchors to imported Python functions instead (check_h2_contract).
 
 from __future__ import annotations
 
 import argparse
 import re
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -94,7 +92,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DISCORD_ROOT = REPO_ROOT / "src" / "services" / "discord"
 
 DEFAULT_DOC = REPO_ROOT / "docs" / "relay-state-contract.md"
-H2_DOC = REPO_ROOT / "docs" / "contracts" / "h2-tmux-boundary-ratchet.md"
 
 # A follow-up PR cannot reliably know about an obligation embedded in prose.
 # Detect the three semantic ingredients within one sentence regardless of word
@@ -705,31 +702,6 @@ def format_report(report: ContractRefReport) -> str:
     return "\n".join(lines)
 
 
-def check_h2_contract(doc: Path = H2_DOC) -> list[str]:
-    """Bind the H2 doc to imported Python functions without parsing Rust definitions."""
-    old_path = sys.path[:]
-    sys.path.insert(0, str(REPO_ROOT / "scripts" / "ci"))
-    try:
-        from h2_admission import evaluate, rw_problem
-        from h2_cfg_compare import compare_cfgs
-        from h2_cfg_collect import seal, read_manifest
-        from h2_env import environment, check_host
-        from h2_depinfo import ro_problems, walker_problems
-        from h2_measure import measure, regen
-        from h2_modmap import map_modules
-
-        refs = (evaluate, rw_problem, compare_cfgs, ro_problems, walker_problems, measure, regen, map_modules, seal, read_manifest, environment, check_host)
-        anchors = {f"{ref.__module__}::{ref.__name__}" for ref in refs}
-        documented = extract_doc_anchors(doc.read_text(encoding="utf-8"))
-    except (ImportError, AttributeError, OSError, UnicodeError) as exc:
-        return [f"H2 contract reference unavailable: {exc}"]
-    finally:
-        sys.path[:] = old_path
-    errors = [f"H2 contract: sym:{a} has no imported reference" for a in sorted(documented - anchors)]
-    errors += [f"H2 contract: imported {a} is not documented" for a in sorted(anchors - documented)]
-    return errors
-
-
 def forward_promise_errors(markdown: str) -> list[str]:
     """Reject explicit same-change promises to edit this contract's prose."""
     errors: list[str] = []
@@ -797,7 +769,6 @@ def check_forward_promises(doc: Path = DEFAULT_DOC) -> list[str]:
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Contract symbol-ref sync gate (#4268).")
     parser.add_argument("--doc", type=Path, default=DEFAULT_DOC, help="Contract doc path.")
-    parser.add_argument("--h2-doc", type=Path, default=H2_DOC, help="H2 contract doc path.")
     return parser.parse_args(argv)
 
 
@@ -811,13 +782,7 @@ def main(argv: list[str] | None = None) -> int:
         if promise_errors
         else "forward-promise check passed"
     )
-    h2_errors = check_h2_contract(doc=args.h2_doc)
-    print("warning: " + "\n".join(h2_errors) if h2_errors else "H2 contract symbol-ref check passed (Python imports in sync)")
-    return int(
-        bool(report.errors)
-        or bool(promise_errors)
-        or any("reference unavailable:" in error for error in h2_errors)
-    )
+    return int(bool(report.errors) or bool(promise_errors))
 
 
 if __name__ == "__main__":

@@ -228,13 +228,14 @@ pub(in crate::services::discord) fn confirm_at_boot(
 }
 
 #[cfg(test)]
-static PAUSE: Mutex<
-    Option<(
-        u64,
-        std::sync::mpsc::Sender<()>,
-        std::sync::mpsc::Receiver<()>,
-    )>,
-> = Mutex::new(None);
+type PauseSlot = (
+    u64,
+    std::sync::mpsc::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+
+#[cfg(test)]
+static PAUSE: Mutex<Option<PauseSlot>> = Mutex::new(None);
 
 #[cfg(test)]
 fn pause_before_removal(channel: u64) {

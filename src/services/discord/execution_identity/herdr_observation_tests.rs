@@ -24,7 +24,8 @@ fn herdr_stored_execution_matches_only_when_every_stored_field_is_confirmed() {
     let stored = bound();
     assert_eq!(compare_herdr_execution(&stored, &unchanged(&stored)), Match);
 
-    let cases: Vec<(&str, fn(&mut HerdrCurrentExecution), HerdrExecutionMatch)> = vec![
+    type ExecutionMutation = fn(&mut HerdrCurrentExecution);
+    let cases: Vec<(&str, ExecutionMutation, HerdrExecutionMatch)> = vec![
         (
             "same nonce, provider process replaced",
             |c| c.provider_process.as_mut().unwrap().pid += 7,

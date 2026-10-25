@@ -204,18 +204,15 @@ harness assignment/clearing sites:
 | `.github/workflows/ci-pr.yml:504-505`, `.github/workflows/ci-pr.yml:579-580` | Hosted macOS jobs write empty `RUSTC_WRAPPER` and `SCCACHE_GHA_ENABLED` to `$GITHUB_ENV`. |
 | `.github/workflows/ci-nightly.yml:108-109` | Hosted macOS job writes the same empty pair to `$GITHUB_ENV`. |
 | `.github/workflows/ci-macos-trusted.yml:61-62` | Hosted macOS job writes the same empty pair to `$GITHUB_ENV`. |
-| `.github/workflows/ci-pr.yml:1202` | H2 module-map step env sets `RUSTC_WRAPPER=""`. |
-| `scripts/ci/h2_env.py:12-13`, `scripts/ci/h2_env.py:42`, `scripts/ci/h2_env.py:59-60` | H2 child env and emitted shell commands clear all four `WRAPPERS` keys, including `RUSTC_WRAPPER` and `CARGO_BUILD_RUSTC_WRAPPER`. |
 | `scripts/run_relay_authority_mutations.sh:204` | Mutation build command unsets `RUSTC_WRAPPER` with `env -u`. |
 
 Search hits in `tests/` and the dry observer's fixture environment
 (`scripts/check_release_token_wiring.py:67-68`) isolate test children; they are
 not build defaults. `scripts/check-ci-runner-hardening.sh` validates expected
-workflow env rather than setting it. `scripts/ci/h2_session.py:100` reads Cargo
-configuration, and `scripts/install.sh` calls the shared helper (§2.2) without
-its own wrapper assignment. Comments and documentation are not setters. The
-Mozilla action's installed binary and runtime-provided cache environment
-(§2.3) are outside this census of checked-in assignments.
+workflow env rather than setting it, and `scripts/install.sh` calls the shared
+helper (§2.2) without its own wrapper assignment. Comments and documentation
+are not setters. The Mozilla action's installed binary and runtime-provided
+cache environment (§2.3) are outside this census of checked-in assignments.
 
 ---
 

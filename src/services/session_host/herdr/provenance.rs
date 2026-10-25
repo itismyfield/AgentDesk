@@ -49,6 +49,16 @@ impl ServerProvenance for OsProvenance {
     fn read_config(&self, path: &Path) -> Result<ConfigRead, RestoreUnverified> {
         read_config(path)
     }
+
+    fn config_publication(&self, path: &Path) -> Result<Option<SystemTime>, RestoreUnverified> {
+        #[cfg(unix)]
+        return super::managed_config::publication::read(path);
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Err(RestoreUnverified::PlatformUnsupported)
+        }
+    }
 }
 
 fn read_config(path: &Path) -> Result<ConfigRead, RestoreUnverified> {

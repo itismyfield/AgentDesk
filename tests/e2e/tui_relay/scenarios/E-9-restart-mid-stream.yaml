@@ -15,8 +15,8 @@ steps:
       마지막 줄에는 정확히 "[E2E:E9:END]"를 출력해줘.
   - wait_for_discord_text: "[E2E:E9:STREAM_OK]"
     timeout_s: 180
+  # The run picks dev or release from --base-url or --restart-target-override.
   - restart_dcserver:
-      target: dev
       # Same bulk inventory baseline as E-54; any other degraded reason still fails.
       require_status: &bulk_status [healthy, degraded]
       allowed_degraded_reasons: &bulk_baseline_reasons

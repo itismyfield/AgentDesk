@@ -1,20 +1,20 @@
 use super::super::{Context, Error, check_auth};
 use super::config::{
-    channel_codex_goals_enabled, codex_goals_supported, effective_provider_for_channel,
+    channel_codex_goals_setting, codex_goals_supported, effective_provider_for_channel,
     fallback_channel_name_for_feature_toggle, session_toggle_reset_line,
     update_channel_codex_goals,
 };
 
 fn build_goals_enabled_notice(reset_pending: bool) -> String {
     format!(
-        "`/goals` 적용 완료: Codex goals feature flag를 켰습니다.\n다음 Codex 턴부터 `--enable goals`로 실행합니다.\n{}",
+        "`/goals` 설정 저장: Codex goals를 켜도록 저장했습니다.\n다음 Codex 실행에 goals를 켜도록 요청합니다.\n{}",
         session_toggle_reset_line(reset_pending),
     )
 }
 
 fn build_goals_disabled_notice(reset_pending: bool) -> String {
     format!(
-        "`/goals` 해제 완료: Codex goals feature flag를 껐습니다.\n다음 Codex 턴부터 `--disable goals`로 실행합니다.\n{}",
+        "`/goals` 설정 저장: Codex goals를 끄도록 저장했습니다.\n다음 Codex 실행에 goals를 끄도록 요청합니다.\n{}",
         session_toggle_reset_line(reset_pending),
     )
 }
@@ -46,27 +46,49 @@ pub(in crate::services::discord) async fn cmd_goals(ctx: Context<'_>) -> Result<
         return Ok(());
     }
 
-    let currently_enabled = channel_codex_goals_enabled(&ctx.data().shared, channel_id);
-    let next_enabled = !currently_enabled;
-    update_channel_codex_goals(
-        &ctx.data().shared,
-        &ctx.data().token,
-        channel_id,
-        next_enabled,
-    )
-    .await;
+    let notice: std::io::Result<String> = async {
+        ctx.data()
+            .shared
+            .check_settings_owner(&effective_provider, channel_id)
+            .await?;
+        let runtime_channel_id = channel_id;
+        let channel_id = ctx
+            .data()
+            .shared
+            .feature_command_channel_id(
+                &ctx.serenity_context().http,
+                &effective_provider,
+                channel_id,
+            )
+            .await;
+        let currently_enabled = channel_codex_goals_setting(&ctx.data().shared, channel_id)
+            .await
+            .unwrap_or(false);
+        let next_enabled = !currently_enabled;
+        update_channel_codex_goals(
+            &ctx.data().shared,
+            &ctx.data().token,
+            channel_id,
+            next_enabled,
+        )
+        .await?;
 
-    let reset_pending = ctx
-        .data()
-        .shared
-        .overrides
-        .session_reset_pending
-        .contains(&channel_id);
-    let notice = if next_enabled {
-        build_goals_enabled_notice(reset_pending)
-    } else {
-        build_goals_disabled_notice(reset_pending)
-    };
-    ctx.say(notice).await?;
+        let reset_pending = ctx
+            .data()
+            .shared
+            .overrides
+            .session_reset_pending
+            .contains(&channel_id);
+        let notice = if next_enabled {
+            build_goals_enabled_notice(reset_pending)
+        } else {
+            build_goals_disabled_notice(reset_pending)
+        };
+        let scope = super::fast_mode::feature_scope_notice(runtime_channel_id != channel_id);
+        Ok(format!("{notice}{scope}"))
+    }
+    .await;
+    ctx.say(notice.unwrap_or_else(|error| format!("설정을 저장하지 못했습니다: {error}")))
+        .await?;
     Ok(())
 }

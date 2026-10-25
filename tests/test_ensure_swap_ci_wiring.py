@@ -65,7 +65,7 @@ def needs_swap(step: dict, job: dict) -> bool:
     run = str(step.get("run", ""))
     if CLIPPY_MARKER.search(run) or any(marker.search(run) for marker in LIB_BUILD_MARKERS):
         return True
-    # The cargo Script checks shard keeps Rust for the inventory fallback and the H2 module-map driver.
+    # The cargo Script checks shard keeps Rust for the lib inventory fallback.
     shard = (step.get("env") or {}).get("SCRIPT_CHECK_SHARD")
     return "ci-script-checks.sh" in run and shard == "cargo"
 

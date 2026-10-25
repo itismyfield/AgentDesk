@@ -22,7 +22,7 @@ Its `EXCLUDE` tuple is the precise path policy: `tests/*`, `*/tests/*`,
 `*_tests.rs`, `*_test.rs`, `*/test_*.py`, `test_*.py`, `*/fixtures/*`,
 `*/testdata/*`, `*.snap`, `docs/*`, `*.md`,
 `scripts/lib_test_inventory_manifest.txt`, `scripts/pg_test_lane_manifest.txt`,
-`scripts/sql_execution_surface_inventory.json`, and `*/generated/*`.
+`scripts/sql_execution_surface_inventory.json` (removed), and `*/generated/*`.
 Other generated-looking paths are not implicitly exempt.
 
 The required Script checks runner invokes the cap unconditionally after its

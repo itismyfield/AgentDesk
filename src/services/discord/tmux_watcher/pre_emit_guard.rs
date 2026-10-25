@@ -167,10 +167,10 @@ pub(super) async fn run_pre_emit_guard(
             provider: watcher_provider,
             placeholder_msg_id,
             response_sent_offset,
-            last_edit_text: last_edit_text,
+            last_edit_text,
             inflight_state: None,
             has_active_turn: false,
-            tmux_session_name: tmux_session_name,
+            tmux_session_name,
             task_notification_kind: None,
             reattach_offset_match: matched_reattach.is_some(),
         };

@@ -88,7 +88,11 @@ queues, so the explicit runtime root and dedicated channels matter. Use
 `--no-reset-before-each` when the selected scenario requires session continuity.
 Destructive scenarios require both `--allow-destructive` and
 `AGENTDESK_E2E_ALLOW_DESTRUCTIVE=1`; restart scenarios also need an appropriate
-`--restart-script`. Thread scenarios need `--thread-channel-id`.
+`--restart-script`. Restart steps do not name a server: the run restarts the one
+`--base-url` points at (port 8791 release, 8797 dev), or `--restart-target-override`
+(`AGENTDESK_E2E_RESTART_TARGET`) on other ports, falling back to release. A
+scenario target or override that disagrees with the port is refused before any
+send. Thread scenarios need `--thread-channel-id`.
 
 `E-11` and `E-17` have `cells: []` and are owned by the matrix orchestrator;
 the single-cell driver does not execute them. For that matrix, pass the isolated

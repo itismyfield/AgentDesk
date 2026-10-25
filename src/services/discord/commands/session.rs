@@ -1,3 +1,6 @@
+mod autocomplete;
+use autocomplete::autocomplete_session;
+
 use std::fs;
 use std::path::Path;
 
@@ -215,8 +218,9 @@ pub(in crate::services::discord) async fn cmd_start(
 pub(in crate::services::discord) async fn cmd_resume(
     ctx: Context<'_>,
     #[description = "Provider session id to resume (empty = auto-select previous)"]
+    #[autocomplete = "autocomplete_session"]
     session_id: Option<String>,
-    #[description = "Worktree path for the resumed session (defaults to current)"] cwd: Option<
+    #[description = "Worktree path (empty = locate the selected session transcript)"] cwd: Option<
         String,
     >,
 ) -> Result<(), Error> {

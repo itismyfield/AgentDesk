@@ -327,7 +327,7 @@ from the release worktree after the build is ready:
 python3 scripts/e2e/post_deploy_relay_continuity.py \
   --cell claude-tui \
   --confirm-live \
-  --deploy-command 'AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 scripts/deploy-release.sh --skip-review'
+  --deploy-command 'AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 scripts/deploy-release.sh'
 ```
 
 The same script has CI-safe validation modes:

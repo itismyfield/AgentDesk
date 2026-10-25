@@ -6,6 +6,8 @@ mod herdr {
     pub(crate) mod contract;
     #[cfg(unix)]
     pub(crate) mod launch_host;
+    #[cfg(unix)]
+    pub(crate) mod managed_config;
     pub(crate) mod model;
     pub(crate) mod observe;
     pub(crate) mod pane_probe;
@@ -41,6 +43,9 @@ mod tmux_host;
 mod traits;
 
 pub(crate) use herdr::contract::ServerWitness;
+// Dedicated Herdr config upkeep: the boot pass, the 30-second task, doctor and health.
+#[cfg(unix)]
+pub(crate) use herdr::managed_config;
 #[cfg(all(test, unix))]
 pub(crate) use herdr::model::HerdrEndpoint;
 pub(crate) use herdr::policy;

@@ -27,6 +27,9 @@ import run_tui_relay as driver  # noqa: E402
 from tui_relay import assertions, normal_intake_evidence as e36  # noqa: E402
 from tui_relay.tests.restart_guard_cases import RestartObservationGuard  # noqa: E402, F401
 
+PROVIDER = assertions.provider_bot_id("claude")
+NOTIFY = "1481522187197218816"
+
 
 class E36DriverContract(unittest.TestCase):
     def run_e36(self, *, fault=None, mutate=None):
@@ -117,17 +120,17 @@ class E36DriverContract(unittest.TestCase):
                     trace.append(("body", key))
                 if not (fault == "deleted" and state["qb_done"] and key == "S01"):
                     rows.append({"id": str(mid + 1), "content": f"{hold}\n{marker}" if hold else marker,
-                                 "author": {"id": "999", "bot": True}})
+                                 "author": {"id": NOTIFY if fault == "notify_author" else PROVIDER, "bot": True}})
                 if fault == "page_duplicate" and key == "S01":
                     seen = state.get("page_dup_fetches", 0)
                     state["page_dup_fetches"] = seen + 1
                     rows.append({"id": str(mid + 9), "content": marker if seen == 0 else "edited away",
-                                 "author": {"id": "999", "bot": True}})
+                                 "author": {"id": PROVIDER, "bot": True}})
                 if clock[0] >= first[key] + 6:
-                    rows.append({"id": str(mid + 2), "content": "✅ 응답 완료", "author": {"id": "999", "bot": True}})
+                    rows.append({"id": str(mid + 2), "content": "✅ 응답 완료", "author": {"id": PROVIDER, "bot": True}})
             if fault == "idle_publication_replay" and state.get("idle_returned"):
                 marker = scenario["steps"][0]["body_marker"].replace("{run_id}", "offline")
-                rows.append({"id": "9999", "content": "late header\n" + marker, "author": {"id": "999", "bot": True}})
+                rows.append({"id": "9999", "content": "late header\n" + marker, "author": {"id": PROVIDER, "bot": True}})
             if client.body_observations is not None:
                 for row in rows:
                     if (body := assertions.relay_body(row)) is not None:
@@ -211,6 +214,15 @@ class E36DriverContract(unittest.TestCase):
                 self.assertEqual(result["failure_attribution"]["source"], "assertion")
                 self.assertIn(reason, result["reason"])
                 self.assertNotEqual(result["e36_acceptance"]["queued_followup"], "pass")
+
+    def test_notify_bot_body_never_completes_an_e36_request(self):
+        with patch.object(driver, "_raise_if_tui_prompt_stuck_while_idle"):
+            result, trace, sent, _ = self.run_e36(fault="notify_author")
+        self.assertEqual(result["status"], "fail", result)
+        self.assertEqual(result["failure_attribution"]["source"], "assertion")
+        self.assertIn("E36 response missing", result["reason"])
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn(("join", "S01"), trace)
 
     def test_swapped_join_order_is_real_driver_zero_refetch_red(self):
         result, _, sent, _ = self.run_e36(fault="join_before_completion")
@@ -3594,8 +3606,28 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
         self.assertIsNone(outcome["passed"])
         self.assertEqual(outcome["required_feature"], "two_message_panel")
 
+    def e15_turns(self, terminal):
+        # Each turn's posts are stamped at its own send, so completion_per_turn attributes them per prompt.
+        rows, sent = [], []
+        line = "E15U-LINE-{:03} 🧪🌏🎯🪐🧪🌏🎯🪐 가나다라마바사".format
+        turns = [["[E2E:E15:BEGIN]\nE15-LINE-010\n[E2E:E15:MID]\nE15-LINE-150\n[E2E:E15:END]"],
+                 ["[E2E:E15U:BEGIN]\n" + "\n".join(map(line, range(1, 41))),
+                  "\n".join(map(line, range(41, 61))) + "\n[E2E:E15U:MID]\n" + "\n".join(map(line, range(61, 91))),
+                  "\n".join(map(line, range(91, 121))) + "\n[E2E:E15U:END]"]]
+
+        def send_prompt(*_args, **_kwargs):
+            sent_at = driver.dt.datetime.now(driver.dt.timezone.utc).isoformat()
+            for body in turns[len(sent)] + ([terminal] if terminal != "absent" else []):
+                rows.append({"id": str(120 + len(rows)), "content": body, "timestamp": sent_at,
+                             "author": {"id": "provider", "bot": True}})
+            sent.append(sent_at)
+            return {"id": "111"}
+
+        self.client.send_prompt.side_effect = send_prompt
+        return rows
+
     def test_e9_e15_require_summary_and_reject_retired_panels_without_feature_gates(self):
-        self.stub(driver, "restart_dcserver_for_e2e")
+        self.stub(driver, "restart_dcserver_for_e2e", return_value={"before": "a", "after": "b"})
         self.stub(driver, "assert_health", return_value={"status": "healthy"})
         for scenario_id in ("E-9", "E-15"):
             for terminal in ("-# ⏱️ 1분", "absent", "✅ 응답 완료"):
@@ -3608,6 +3640,8 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
                              "author": {"id": "provider", "bot": True}}]
                     if terminal != "absent":
                         rows.append({**rows[0], "id": "130", "content": terminal, "timestamp": (stamp + driver.dt.timedelta(seconds=2)).isoformat()})
+                    if scenario_id == "E-15":
+                        rows = self.e15_turns(terminal)
                     self.client.fetch_messages.side_effect = lambda *a, **k: [
                         row for row in rows if self.client.send_prompt.called and int(row["id"]) > int(k.get("after_id") or 0)]
                     rc, report, _ = self.main_result(self.load(scenario_id))
@@ -3802,12 +3836,15 @@ class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
         return {**self.HEALTHY, "status": "degraded", "ok": False, "degraded": True,
                 "degraded_reasons": reasons, "fully_recovered": recovered}
 
-    def health_steps_result(self, name, steps, after, *, kickstart_rc=0):
+    def health_steps_result(self, name, steps, after, *, kickstart_rc=0, incarnations=("boot-before", "boot-after")):
         # /api/health stays healthy until launchctl ran, then serves `after` in order; the clock advances on sleep.
         kicked, reads, clock = [], [], [0.0]
         has_restart = any("restart_dcserver" in step for step in steps)
 
         def health(base, path, **k):
+            if path == "/api/health/detail":
+                incarnation = incarnations[1] if kicked else incarnations[0]
+                return 200, {} if incarnation is None else {"boot_incarnation": incarnation}
             if path != "/api/health":
                 return 200, {"sessions": []}
             if has_restart and not kicked:
@@ -3824,8 +3861,31 @@ class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
         with patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
                 patch.object(driver.subprocess, "run", side_effect=kickstart):
             _, report, _ = self.main_result(self.scenario(name, steps + [{"send_prompt": "after health"}]))
-        self.assertEqual(kicked, [["launchctl", "kickstart", "-k"]] if has_restart else [])
+        self.assertEqual(kicked, [["launchctl", "kickstart", "-k"]] if has_restart and incarnations[0] else [])
         return report["scenarios"][0]
+
+    def test_restart_records_changed_boot_incarnation(self):
+        row = self.health_steps_result("E-X", [{"restart_dcserver": {"target": "release"}}], [self.HEALTHY])
+        self.assertEqual(row["status"], "pass", row.get("reason"))
+        self.assertEqual(row["restart_incarnations"], [{"target": "release", "before": "boot-before", "after": "boot-after"}])
+
+    def test_restart_fails_when_boot_incarnation_does_not_change(self):
+        # kickstart rc=0 and healthy health are not proof: the same process may still be answering.
+        row = self.health_steps_result("E-X", [{"restart_dcserver": {"target": "release"}}], [self.HEALTHY],
+                                       incarnations=("boot-same", "boot-same"))
+        self.assertEqual(row["status"], "fail")
+        self.assertEqual(row["failure_attribution"]["source"], "assertion")
+        self.assertIn("boot_incarnation stayed boot-same", row["reason"])
+        self.assertIn("restart not observed", row["reason"])
+        self.client.send_prompt.assert_not_called()
+
+    def test_restart_without_boot_incarnation_is_unevaluable_and_never_kicks(self):
+        for incarnations in ((None, None), ("boot-before", None)):
+            with self.subTest(incarnations=incarnations):
+                row = self.health_steps_result("E-X", [{"restart_dcserver": {"target": "release"}}], [self.HEALTHY],
+                                               incarnations=incarnations)
+                self.assert_unevaluable(row)
+                self.assertIn("has no boot_incarnation", row["reason"])
 
     def test_restart_health_wait_takes_assert_health_allowlist(self):
         # A fully recovered restart can keep only the bulk baseline degraded reasons.
@@ -4008,6 +4068,30 @@ class PhasePartialEvidenceContract(_OutcomeFixture, unittest.TestCase):
                 self.assertEqual(len(row["assertions"]), len({json.dumps(x, sort_keys=True) for x in row["assertions"]}))
                 if failure == "step": self.assertEqual(len(row["assertions"]), 1)
 
+    def test_nested_handler_deadline_keeps_plain_send_id_and_contact(self):
+        # Not E-35: a plain prompt whose deadline lands in the assertion handler's teardown.
+        for step in ("send_prompt", "send_discord_prompt"):
+            with self.subTest(step=step):
+                self.args.phase_deadline_s = 1
+                self.client.send_control.side_effect = lambda channel, text: {"id": "100"} if "SETUP" in text else (_ for _ in ()).throw(driver.PhaseDeadlineExpired("phase"))
+                self.client.fetch_messages.side_effect = [[], assertions.AssertionError("valid assertion")]
+                rc, report, _ = self.main_result(self.scenario(steps=[{step: "probe"}]))
+                row = report["scenarios"][0]
+                self.assertEqual(rc, 1)
+                self.assert_unevaluable(row)
+                self.assertIn("prior: assertion: valid assertion", row["reason"])
+                self.assertEqual(row["prompt_sends"], [{"step": step, "send_state": "acknowledged", "message_id": "111"}])
+                self.assertTrue(row["real_provider_contacted"])
+                self.assertEqual(row["agent_mode_actual"], "real_live")
+
+    def test_deadline_before_plain_ack_reports_attempt_without_contact(self):
+        self.client.send_prompt.side_effect = driver.PhaseDeadlineExpired("pre-ack")
+        rc, report, _ = self.main_result(self.scenario())
+        row = report["scenarios"][0]
+        self.assertEqual(rc, 1)
+        self.assertEqual(row["prompt_sends"], [{"step": "send_prompt", "send_state": "attempted"}])
+        self.assertFalse(row["real_provider_contacted"])
+
     def test_deadline_inside_handler_refresh_preserves_ack(self):
         self.client.fetch_messages.side_effect = [[], assertions.AssertionError("already failed")]
         original = driver._refresh_agent_mode_record
@@ -4070,6 +4154,55 @@ class PhasePartialEvidenceContract(_OutcomeFixture, unittest.TestCase):
                 self.client.fetch_messages.side_effect = error
                 with self.assertRaises(type(error)): self.main_result(self.scenario())
                 self.assertEqual(self.client.send_control.call_count, 1)
+
+
+class RestartTargetParameterized(_OutcomeFixture, unittest.TestCase):
+    """The run, not the YAML, names the restarted server; a mismatch is refused before any send."""
+
+    def restart_step(self, scenario_id):
+        path = next((ROOT / "tests/e2e/tui_relay/scenarios").glob(f"{scenario_id}-*.yaml"))
+        return next(step for step in driver.yaml.safe_load(path.read_text())["steps"] if "restart_dcserver" in step)
+
+    def test_no_active_scenario_hard_codes_a_restart_target(self):
+        for path in sorted((ROOT / "tests/e2e/tui_relay/scenarios").glob("*.yaml")):
+            for step in driver.yaml.safe_load(path.read_text()).get("steps") or []:
+                if "restart_dcserver" in step:
+                    with self.subTest(path=path.name):
+                        self.assertNotIn("target", step["restart_dcserver"] or {})
+
+    def test_restart_scenarios_restart_the_server_under_test(self):
+        restart = self.stub(driver, "restart_dcserver_for_e2e", return_value={"before": "a", "after": "b"})
+        for base_url, override, expected in (("http://127.0.0.1:8791", None, "release"),
+                                             ("http://127.0.0.1:8797", None, "dev"),
+                                             ("http://agentdesk.test", "dev", "dev"),
+                                             ("http://agentdesk.test", None, "release")):
+            for scenario_id in ("E-8", "E-9", "E-10", "E-14", "E-61"):
+                with self.subTest(base_url=base_url, override=override, scenario=scenario_id):
+                    restart.reset_mock()
+                    self.args.base_url, self.args.restart_target_override = base_url, override
+                    scenario = {**self.scenario(scenario_id, [self.restart_step(scenario_id)]), "agent_mode": "controlled"}
+                    rc, report, _ = self.main_result(scenario)
+                    self.assertEqual((rc, report["scenarios"][0]["status"]), (0, "pass"), report["scenarios"][0].get("reason"))
+                    self.assertEqual(restart.call_args.kwargs["target"], expected)
+
+    def test_target_disagreeing_with_base_url_is_refused_before_any_send(self):
+        restart = self.stub(driver, "restart_dcserver_for_e2e", return_value={"before": "a", "after": "b"})
+        for base_url, override, declared in (("http://127.0.0.1:8791", None, "dev"),
+                                             ("http://127.0.0.1:8791", "dev", None),
+                                             ("http://127.0.0.1:8797", None, "release")):
+            with self.subTest(base_url=base_url, override=override, declared=declared):
+                self.client.send_prompt.reset_mock()
+                self.client.send_control.reset_mock()
+                self.args.base_url, self.args.restart_target_override = base_url, override
+                step = {"restart_dcserver": {"target": declared} if declared else {}}
+                rc, report, _ = self.main_result(self.scenario("E-X", [{"send_prompt": "hello"}, step]))
+                row = report["scenarios"][0]
+                self.assertEqual((rc, row["status"]), (1, "fail"))
+                self.assertEqual(row["failure_attribution"]["source"], "config")
+                self.assertIn("does not match base URL", row["reason"])
+                self.client.send_control.assert_not_called()
+                self.client.send_prompt.assert_not_called()
+        restart.assert_not_called()
 
 
 class E37CodexModelLocalControl(unittest.TestCase):

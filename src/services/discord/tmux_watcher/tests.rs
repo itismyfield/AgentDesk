@@ -908,8 +908,8 @@ fn pre_panel_release_decrements_before_same_channel_followup_claims() {
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(987_4106);
         let tmux_session_name = "AgentDesk-claude-adk-cc-9874106";
-        let turn_a = 4106_001;
-        let turn_b = 4106_002;
+        let turn_a = 4_106_001;
+        let turn_b = 4_106_002;
 
         shared
             .tmux_watchers
@@ -3071,7 +3071,7 @@ fn compact_local_only_boundary_without_seed_delivery_fingerprint_preserves_resto
     let _root_guard = AgentdeskRootGuard::set(tmp.path());
 
     let provider = ProviderKind::Claude;
-    let channel_id = ChannelId::new(987_4096_001);
+    let channel_id = ChannelId::new(9_874_096_001);
     let tmux_session_name = "AgentDesk-claude-adk-cc-4096-missing-fingerprint";
     let restored = "queued turn terminal body that failed delivery";
     let mut full_response = restored.to_string();
@@ -3132,7 +3132,7 @@ fn make_post_work_idle_inflight(
 ) -> InflightTurnState {
     let mut state = InflightTurnState::new(
         ProviderKind::Codex,
-        987_4102_001,
+        9_874_102_001,
         None,
         42,
         1001,
@@ -3378,7 +3378,7 @@ fn compact_local_only_boundary_without_output_drops_restored_seed_4081() {
     let _root_guard = AgentdeskRootGuard::set(tmp.path());
 
     let provider = ProviderKind::Claude;
-    let channel_id = ChannelId::new(987_4096_002);
+    let channel_id = ChannelId::new(9_874_096_002);
     let tmux_session_name = "AgentDesk-claude-adk-cc-4096-confirmed-fingerprint";
     let restored = "prior delivered response";
     let mut full_response = restored.to_string();
@@ -4327,17 +4327,6 @@ mod watcher_short_replace_controller {
                 .contains(&turn().user_msg_id)
             );
         });
-    }
-
-    fn toc_debug_outcome(outcome: &toc::DeliveryOutcome) -> &'static str {
-        match outcome {
-            toc::DeliveryOutcome::Delivered { .. } => "Delivered",
-            toc::DeliveryOutcome::FreshDelivered { .. } => "FreshDelivered",
-            toc::DeliveryOutcome::NotDelivered { .. } => "NotDelivered",
-            toc::DeliveryOutcome::Transient { .. } => "Transient",
-            toc::DeliveryOutcome::Unknown { .. } => "Unknown",
-            toc::DeliveryOutcome::Skipped => "Skipped",
-        }
     }
 
     // (1) lease pre-held by ANOTHER holder → controller acquire fails →

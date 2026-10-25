@@ -308,7 +308,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Keep Rust available for inventory fallback and the H2 module-map driver,
+      # Keep Rust available for the lib inventory fallback,
       # on the pinned toolchain and shared cache.
       - name: Install Rust toolchain for lib inventory
         uses: dtolnay/rust-toolchain@master

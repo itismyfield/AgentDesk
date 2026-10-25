@@ -91,13 +91,12 @@ mod settled_ledger_consult;
 mod classification_order_tests;
 
 use api::{CatchUpDiscordApi, CatchUpFetchRequest, SerenityCatchUpDiscordApi};
-#[cfg(test)]
-use classification::is_restart_gap_notice;
 use classification::{
     CatchUpClassification, CatchUpClassificationDecision, CatchUpMessageView, CatchUpScanStats,
-    classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
-    too_old_is_actionable,
+    classify_catch_up_message_with_utility_resolution, too_old_is_actionable,
 };
+#[cfg(test)]
+use classification::{classify_catch_up_message, is_restart_gap_notice};
 #[cfg(test)]
 use clock::SystemClock;
 use deps::CatchUpDeps;

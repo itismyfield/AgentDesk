@@ -92,6 +92,7 @@ fn configured_recent_pairs() -> u64 {
         .min(MAX_RECENT_PAIRS)
 }
 
+#[cfg(test)]
 pub(super) fn should_inject<T>(
     session_id: Option<&str>,
     force_fresh_provider_session: bool,
