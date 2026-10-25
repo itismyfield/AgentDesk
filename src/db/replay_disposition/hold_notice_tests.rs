@@ -271,15 +271,9 @@ async fn legacy_hold_without_notice_is_readable_and_backfilled_once_pg() {
         .await
         .unwrap();
     assert_eq!(read(&pool, attempt.receipt_id()).await.unwrap(), None);
-    let notice = write::withhold_and_notify(
-        &pool,
-        &attempt,
-        "new reason",
-        &serde_json::json!({}),
-        ROUTING,
-    )
-    .await
-    .unwrap();
+    let notice = write::withhold_and_notify(&pool, &attempt, "legacy reason", &preserved, ROUTING)
+        .await
+        .unwrap();
     assert_eq!(
         read(&pool, attempt.receipt_id()).await.unwrap(),
         Some(notice)
@@ -414,4 +408,128 @@ fn withheld_notice_is_non_turn_provenance_only_for_its_exact_source_and_reason()
         "headless_turn",
         Some("stale_replay_withheld")
     ));
+}
+
+#[tokio::test]
+async fn p2_notice_routing_normalizes_missing_empty_and_padded_session_pg() {
+    let (db, pool) = fixture().await;
+    for (n, raw, expected) in [
+        (0, None, "channel:123456789"),
+        (1, Some("   "), "channel:123456789"),
+        (2, Some(" route "), "route"),
+    ] {
+        let attempt = start(&pool, &format!("p2-route-{n}")).await;
+        let notice = write::withhold_and_notify(
+            &pool,
+            &attempt,
+            "activity",
+            &serde_json::json!({}),
+            NoticeRouting {
+                bot: "notify",
+                session_key: raw,
+            },
+        )
+        .await
+        .unwrap();
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT session_key FROM message_outbox WHERE id=$1")
+                .bind(notice.outbox_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.as_deref(), Some(expected));
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn p2_existing_hold_rejects_changed_reason_or_preserved_pg() {
+    let (db, pool) = fixture().await;
+    let attempt = start(&pool, "p2-backfill").await;
+    let preserved = serde_json::json!({"partial_body":"kept"});
+    write::withhold(&pool, &attempt, "original", &preserved)
+        .await
+        .unwrap();
+    let before = snapshot(&pool, attempt.receipt_id()).await;
+    for (reason, body) in [
+        ("changed", preserved.clone()),
+        ("original", serde_json::json!({"partial_body":"new"})),
+    ] {
+        let result = write::withhold_and_notify(&pool, &attempt, reason, &body, ROUTING).await;
+        assert!(
+            matches!(result, Err(write::WriteError::CasMiss)),
+            "must not silently discard caller data: {result:?}"
+        );
+        assert_eq!(snapshot(&pool, attempt.receipt_id()).await, before);
+    }
+    write::withhold_and_notify(&pool, &attempt, "original", &preserved, ROUTING)
+        .await
+        .unwrap();
+    let after = snapshot(&pool, attempt.receipt_id()).await;
+    assert_eq!(after.2, 1);
+    assert!(matches!(
+        write::withhold_and_notify(&pool, &attempt, "changed", &preserved, ROUTING).await,
+        Err(write::WriteError::CasMiss)
+    ));
+    assert_eq!(snapshot(&pool, attempt.receipt_id()).await, after);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn p2_missing_receipt_is_not_an_unnotified_row_pg() {
+    let (db, pool) = fixture().await;
+    assert!(matches!(
+        read(&pool, i64::MAX).await,
+        Err(write::WriteError::CasMiss)
+    ));
+    let attempt = start(&pool, "p2-present").await;
+    assert_eq!(read(&pool, attempt.receipt_id()).await.unwrap(), None);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn p2_notice_payload_pins_the_first_hold_nonce_pg() {
+    let (db, pool) = fixture().await;
+    let attempt = start(&pool, "p2-nonce").await;
+    let first =
+        write::withhold_and_notify(&pool, &attempt, "activity", &serde_json::json!({}), ROUTING)
+            .await
+            .unwrap();
+    let (_, stored, _) = snapshot(&pool, attempt.receipt_id()).await;
+    assert_eq!(stored[super::FIELD]["hold_nonce"], attempt.nonce());
+    assert_eq!(
+        serde_json::to_value(&first).unwrap()["hold_nonce"],
+        attempt.nonce()
+    );
+    assert_eq!(
+        read(&pool, attempt.receipt_id()).await.unwrap(),
+        Some(first)
+    );
+    for (label, pinned) in [("old", None), ("wrong", Some("other-nonce"))] {
+        let older = start(&pool, &format!("p2-payload-{label}")).await;
+        let mut notice =
+            serde_json::json!({"dedupe_key": super::key(older.receipt_id()), "outbox_id": 900});
+        if let Some(nonce) = pinned {
+            notice["hold_nonce"] = nonce.into();
+        }
+        write::withhold(
+            &pool,
+            &older,
+            "activity",
+            &serde_json::json!({"stale_replay_notice":notice}),
+        )
+        .await
+        .unwrap();
+        let readback = read(&pool, older.receipt_id()).await;
+        if pinned.is_some() {
+            assert!(matches!(readback, Err(write::WriteError::CasMiss)));
+        } else {
+            assert_eq!(readback.unwrap().unwrap().hold_nonce, None);
+        }
+    }
+    pool.close().await;
+    db.drop().await;
 }

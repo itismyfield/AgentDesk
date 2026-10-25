@@ -1,7 +1,9 @@
 //! Permanent domain keys stay independent of the notification's routing session.
 
 use crate::db::replay_disposition::write::{WriteError, refused};
-use crate::services::message_outbox::{OutboxMessage, validate_outbox_source};
+use crate::services::message_outbox::{
+    OutboxMessage, normalized_session_key, validate_outbox_source,
+};
 use sqlx::{Postgres, Transaction};
 
 pub(in crate::db::replay_disposition) async fn enqueue_on_tx(
@@ -14,6 +16,7 @@ pub(in crate::db::replay_disposition) async fn enqueue_on_tx(
     }
     validate_outbox_source(message.source)
         .map_err(|_| WriteError::Fenced("notification source is not allowed".into()))?;
+    let session_key = normalized_session_key(message.target, message.session_key);
     // A collision may reuse the same event only when its original route and payload agree.
     sqlx::query_scalar(
         "INSERT INTO message_outbox
@@ -35,7 +38,7 @@ pub(in crate::db::replay_disposition) async fn enqueue_on_tx(
     .bind(message.bot)
     .bind(message.source)
     .bind(message.reason_code)
-    .bind(message.session_key)
+    .bind(session_key)
     .bind(dedupe_key)
     .fetch_optional(&mut **tx)
     .await

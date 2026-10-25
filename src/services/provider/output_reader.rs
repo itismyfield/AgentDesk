@@ -72,6 +72,8 @@ where
     use std::io::{Read, Seek, SeekFrom};
     use std::time::{Duration, Instant};
 
+    let tap =
+        crate::services::discord::replay_policy::live::RawTap::for_file(cancel_token.as_deref());
     let wait_start = Instant::now();
     let mut wait_interval = Duration::from_millis(10);
     let max_wait_interval = Duration::from_millis(500);
@@ -225,6 +227,7 @@ where
                         continue;
                     }
 
+                    tap.file_line(trimmed);
                     if !process_line(trimmed, state) {
                         return Ok(ReadOutputResult::Cancelled {
                             offset: committed_offset,

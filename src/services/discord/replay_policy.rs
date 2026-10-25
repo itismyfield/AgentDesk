@@ -36,13 +36,20 @@ pub(crate) async fn decide_stale(
     let Some(attempt) = attempt else {
         return ReplayDecision::NotApplicable;
     };
-    if let Some(evidence) = observation.no_effect_evidence() {
+    if attempt.retry_of().is_none()
+        && let Some(evidence) = observation.no_effect_evidence()
+    {
         return match write::classify_no_effect(pool, attempt, &evidence).await {
             Ok(ack) => ReplayDecision::AllowStartupRetry(RetryPermit::from_no_effect(ack)),
             Err(_) => ReplayDecision::WithholdReplay { persisted: false },
         };
     }
-    let persisted = withhold(pool, &attempt, observation.hold_reason()).await;
+    let reason = if attempt.retry_of().is_some() {
+        "startup retry budget exhausted"
+    } else {
+        observation.hold_reason()
+    };
+    let persisted = withhold(pool, &attempt, reason).await;
     ReplayDecision::WithholdReplay { persisted }
 }
 
@@ -224,145 +231,7 @@ pub(crate) fn claim_legacy_retry(channel_id: u64, message_id: u64) -> bool {
     }
 }
 
-/// Takes the token's live attempt for its one decision; a protected turn without one decides nothing.
-async fn decide_live<'a>(
-    pool: Option<&'a PgPool>,
-    token: &'a CancelToken,
-) -> Option<(&'a PgPool, &'a LiveAttempt, ExactAttempt, RawObservation)> {
-    let live = token.replay_attempt()?.as_ref();
-    let Some(pool) = pool else {
-        live.settle(Verdict::Held);
-        return None;
-    };
-    let (attempt, observation) = live.take_for_decision(READER_SETTLE).await?;
-    Some((pool, live, attempt, observation))
-}
-
-/// Decides a stale resume: the legacy retry for a legacy or ordinary turn, and for a protected
-/// one an exact retry only on committed no-effect evidence from its own live attempt.
-pub(in crate::services::discord) async fn stale_resume(
-    pool: Option<&PgPool>,
-    token: &CancelToken,
-    inflight: &InflightTurnState,
-) -> StaleResume {
-    if ordinary_allowed(token, inflight) {
-        return StaleResume::Legacy;
-    }
-    let legacy_raced = bar_legacy_retry(inflight);
-    let Some((pool, live, attempt, observation)) = decide_live(pool, token).await else {
-        return StaleResume::Hold;
-    };
-    let receipt = attempt.receipt_id();
-    if legacy_raced {
-        withhold(pool, &attempt, "legacy retry claimed the request").await;
-        live.settle(Verdict::Held);
-        return StaleResume::Hold;
-    }
-    match decide_stale(pool, Some(attempt), &observation).await {
-        ReplayDecision::AllowStartupRetry(retry) => {
-            live.settle(Verdict::Retried);
-            StaleResume::Exact(retry)
-        }
-        decision => {
-            live.settle(Verdict::Held);
-            if matches!(
-                decision,
-                ReplayDecision::WithholdReplay { persisted: false }
-            ) {
-                tracing::warn!(
-                    receipt,
-                    "stale protected attempt held without a committed hold"
-                );
-            }
-            StaleResume::Hold
-        }
-    }
-}
-
-/// Classifies a protected attempt's terminal from a complete observation with exactly one
-/// provider terminal; anything else holds.
-async fn classify_terminal(
-    pool: Option<&PgPool>,
-    token: &CancelToken,
-    inflight: &InflightTurnState,
-) -> bool {
-    if !protected(token, inflight) {
-        return true;
-    }
-    if let Some(verdict) = token.replay_attempt().and_then(|live| live.verdict()) {
-        return verdict == Verdict::Ordinary;
-    }
-    if token.replay_attempt().is_some_and(|live| live.stale()) {
-        return false;
-    }
-    let Some((pool, live, attempt, observation)) = decide_live(pool, token).await else {
-        return false;
-    };
-    let ordinary = match observation.terminal_evidence() {
-        Some(evidence) => write::classify_normal(pool, &attempt, &evidence)
-            .await
-            .inspect_err(|error| {
-                tracing::warn!(receipt = attempt.receipt_id(), kind = ?evidence.kind(), %error,
-                    "ordinary terminal was not classified; the request stays held")
-            })
-            .is_ok(),
-        None => {
-            withhold(pool, &attempt, observation.hold_reason()).await;
-            false
-        }
-    };
-    live.settle(if ordinary {
-        Verdict::Ordinary
-    } else {
-        Verdict::Held
-    });
-    ordinary
-}
-
-/// Whether a provider error may take the ordinary recovery, presentation and reset path; a
-/// protected stale resume is left to the stale-resume decision.
-pub(in crate::services::discord) async fn error_is_ordinary(
-    pool: Option<&PgPool>,
-    token: &CancelToken,
-    inflight: &InflightTurnState,
-    stale_resume: bool,
-) -> bool {
-    if stale_resume && !ordinary_allowed(token, inflight) {
-        token.replay_attempt().inspect(|live| live.mark_stale());
-        bar_legacy_retry(inflight);
-        return false;
-    }
-    ordinary_outcome(pool, token, inflight).await
-}
-
-/// Whether ordinary completion, failure and session effects may run: always for a legacy turn,
-/// and for a protected one once its terminal is classified ordinary.
-pub(in crate::services::discord) async fn ordinary_outcome(
-    pool: Option<&PgPool>,
-    token: &CancelToken,
-    inflight: &InflightTurnState,
-) -> bool {
-    let ordinary = classify_terminal(pool, token, inflight).await;
-    if !ordinary {
-        bar_legacy_retry(inflight);
-    }
-    ordinary
-}
-
-/// Holds a protected request at a recovery sentinel, which is never no-effect evidence; returns
-/// whether the request was held.
-pub(in crate::services::discord) async fn hold_recovery(
-    pool: Option<&PgPool>,
-    token: &CancelToken,
-    inflight: &InflightTurnState,
-) -> bool {
-    if ordinary_allowed(token, inflight) {
-        return false;
-    }
-    bar_legacy_retry(inflight);
-    if let Some((pool, live, attempt, _)) = decide_live(pool, token).await {
-        withhold(pool, &attempt, "recovery sentinel after start").await;
-        live.settle(Verdict::Held);
-    }
-    true
-}
+mod decision;
+pub(in crate::services::discord) use decision::{
+    error_is_ordinary, hold_recovery, ordinary_outcome, stale_resume,
+};

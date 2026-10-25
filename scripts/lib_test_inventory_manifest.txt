@@ -862,6 +862,10 @@ db::replay_disposition::hold_notice::tests::dormant_withhold_still_produces_no_n
 db::replay_disposition::hold_notice::tests::enqueue_or_reference_failure_rolls_back_hold_and_notice_pg
 db::replay_disposition::hold_notice::tests::legacy_hold_without_notice_is_readable_and_backfilled_once_pg
 db::replay_disposition::hold_notice::tests::malformed_notice_never_reads_as_an_unnotified_legacy_row
+db::replay_disposition::hold_notice::tests::p2_existing_hold_rejects_changed_reason_or_preserved_pg
+db::replay_disposition::hold_notice::tests::p2_missing_receipt_is_not_an_unnotified_row_pg
+db::replay_disposition::hold_notice::tests::p2_notice_payload_pins_the_first_hold_nonce_pg
+db::replay_disposition::hold_notice::tests::p2_notice_routing_normalizes_missing_empty_and_padded_session_pg
 db::replay_disposition::hold_notice::tests::same_receipt_repeat_and_reopen_keep_one_permanent_notice_pg
 db::replay_disposition::hold_notice::tests::terminal_outbox_gc_never_remints_the_receipt_notice_pg
 db::replay_disposition::hold_notice::tests::withheld_notice_is_non_turn_provenance_only_for_its_exact_source_and_reason
@@ -6924,6 +6928,14 @@ services::discord::replace_outcome_policy::a0_replace_outcome_policy_tests::watc
 services::discord::replace_outcome_policy::a0_replace_outcome_policy_tests::watcher_send_failure_plan_rewinds_only_transient_4154
 services::discord::replace_outcome_policy::a0_replace_outcome_policy_tests::watcher_send_failure_status_classifies_transient_vs_permanent_4154
 services::discord::replace_outcome_policy::a0_replace_outcome_policy_tests::watcher_send_failure_strip_class_marker_removes_only_valid_prefix_4154
+services::discord::replay_policy::live::observer_tests::p2_actual_output_and_tool_before_stale_never_get_retry_pg
+services::discord::replay_policy::live::observer_tests::p2_codex_quiet_stale_observer_pg
+services::discord::replay_policy::live::observer_tests::p2_file_reader_cannot_mint_no_effect_after_wrapper_exit_pg
+services::discord::replay_policy::live::observer_tests::p2_first_output_on_either_side_of_terminal_wait_is_held_pg
+services::discord::replay_policy::live::observer_tests::p2_only_owned_direct_runtimes_can_activate
+services::discord::replay_policy::live::observer_tests::p2_ordinary_completion_defers_a_stale_error_pg
+services::discord::replay_policy::live::observer_tests::p2_physical_facts_need_one_owned_seal_pg
+services::discord::replay_policy::live::observer_tests::p2_quiet_retry_is_exact_once_and_success_is_one_response_pg
 services::discord::replay_policy::live_tests::decision_wakes_on_a_fact_recorded_after_its_check_pg
 services::discord::replay_policy::live_tests::direct_adapter_completes_the_observation_past_its_done_pg
 services::discord::replay_policy::live_tests::direct_adapter_without_a_live_attempt_is_unchanged_pg

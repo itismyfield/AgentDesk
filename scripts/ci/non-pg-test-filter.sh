@@ -147,6 +147,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::relay_recovery::apply::host_deferred_tests
   --skip services::discord::relay_recovery::circuit_breaker::tests
   --skip services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
+  --skip services::discord::replay_policy::live::observer_tests
   --skip services::discord::replay_policy::live_tests
   --skip services::discord::replay_policy::permit_tests
   --skip services::discord::replay_policy::policy_tests
@@ -593,6 +594,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::relay_recovery::circuit_breaker::tests::stale_stage_cancel_failure_becomes_a_durable_cleanup_obligation
   services::discord::relay_recovery::circuit_breaker::tests::zero_originating_message_reserves_with_a_distinct_mailbox_anchor
   services::discord::relay_recovery::circuit_breaker::tests::zero_originating_message_still_rejects_episode_identity_mismatches
+  services::discord::replay_policy::live::observer_tests::p2_only_owned_direct_runtimes_can_activate
   services::discord::replay_policy::permit_tests::effect_permits_cannot_be_cloned_or_serialised
   services::discord::router::herdr_consent::admission::tests::already_held_requires_every_original_source_and_exact_generation
   services::discord::router::herdr_consent::admission::tests::consent_actual_queued_readmission_restores_same_head_lease_uploads_and_origin

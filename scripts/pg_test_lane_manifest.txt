@@ -215,6 +215,7 @@ src/services/discord/recovery_engine/routing_orphan_tests.rs
 src/services/discord/relay_recovery/tests/host_deferred.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
+src/services/discord/replay_policy/live/observer_tests.rs
 src/services/discord/replay_policy/live_tests.rs
 src/services/discord/replay_policy/permit_tests.rs
 src/services/discord/replay_policy/policy_tests.rs
@@ -654,6 +655,7 @@ services::discord::recovery_engine::routing_orphan::host_guard_tests
 services::discord::relay_recovery::apply::host_deferred_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
+services::discord::replay_policy::live::observer_tests
 services::discord::replay_policy::live_tests
 services::discord::replay_policy::permit_tests
 services::discord::replay_policy::policy_tests
@@ -1258,6 +1260,10 @@ db::replay_disposition::hold_notice::tests::distinct_receipts_in_one_session_hav
 db::replay_disposition::hold_notice::tests::dormant_withhold_still_produces_no_notification_pg
 db::replay_disposition::hold_notice::tests::enqueue_or_reference_failure_rolls_back_hold_and_notice_pg
 db::replay_disposition::hold_notice::tests::legacy_hold_without_notice_is_readable_and_backfilled_once_pg
+db::replay_disposition::hold_notice::tests::p2_existing_hold_rejects_changed_reason_or_preserved_pg
+db::replay_disposition::hold_notice::tests::p2_missing_receipt_is_not_an_unnotified_row_pg
+db::replay_disposition::hold_notice::tests::p2_notice_payload_pins_the_first_hold_nonce_pg
+db::replay_disposition::hold_notice::tests::p2_notice_routing_normalizes_missing_empty_and_padded_session_pg
 db::replay_disposition::hold_notice::tests::same_receipt_repeat_and_reopen_keep_one_permanent_notice_pg
 db::replay_disposition::hold_notice::tests::terminal_outbox_gc_never_remints_the_receipt_notice_pg
 db::replay_disposition::register_tests::register_compares_the_whole_request_identity_pg
@@ -2110,6 +2116,13 @@ services::discord::relay_recovery::circuit_breaker::tests::pg_alert_is_actionabl
 services::discord::relay_recovery::circuit_breaker::tests::progress_during_pg_stage_cancels_stale_alert_and_reopen_is_distinct
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::enqueue_default_off_leaves_all_circuit_columns_null_pg
+services::discord::replay_policy::live::observer_tests::p2_actual_output_and_tool_before_stale_never_get_retry_pg
+services::discord::replay_policy::live::observer_tests::p2_codex_quiet_stale_observer_pg
+services::discord::replay_policy::live::observer_tests::p2_file_reader_cannot_mint_no_effect_after_wrapper_exit_pg
+services::discord::replay_policy::live::observer_tests::p2_first_output_on_either_side_of_terminal_wait_is_held_pg
+services::discord::replay_policy::live::observer_tests::p2_ordinary_completion_defers_a_stale_error_pg
+services::discord::replay_policy::live::observer_tests::p2_physical_facts_need_one_owned_seal_pg
+services::discord::replay_policy::live::observer_tests::p2_quiet_retry_is_exact_once_and_success_is_one_response_pg
 services::discord::replay_policy::live_tests::decision_wakes_on_a_fact_recorded_after_its_check_pg
 services::discord::replay_policy::live_tests::direct_adapter_completes_the_observation_past_its_done_pg
 services::discord::replay_policy::live_tests::direct_adapter_without_a_live_attempt_is_unchanged_pg

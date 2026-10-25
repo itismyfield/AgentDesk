@@ -12,13 +12,14 @@ pub(crate) async fn withhold_and_notify(
     preserved: &serde_json::Value,
     routing: NoticeRouting<'_>,
 ) -> Result<HoldNotice, WriteError> {
-    if !preserved.is_object() || preserved.get(hold_notice::FIELD).is_some() {
+    let preserved_object = preserved.as_object().ok_or(WriteError::CasMiss)?;
+    if preserved.get(hold_notice::FIELD).is_some() {
         return Err(WriteError::CasMiss);
     }
     let mut tx = pool.begin().await.map_err(WriteError::Storage)?;
     let row = sqlx::query(
         "SELECT channel_id, replay_episode_nonce, replay_owner_incarnation,
-                replay_disposition, replay_preserved FROM intake_outbox WHERE id = $1 FOR UPDATE",
+                replay_disposition, replay_hold_reason, replay_preserved FROM intake_outbox WHERE id = $1 FOR UPDATE",
     )
     .bind(attempt.receipt_id)
     .fetch_optional(&mut *tx)
@@ -42,8 +43,25 @@ pub(crate) async fn withhold_and_notify(
     let stored: Option<serde_json::Value> = row
         .try_get("replay_preserved")
         .map_err(WriteError::Storage)?;
+    if disposition.as_deref() == Some("withheld") {
+        let stored_reason: Option<String> = row
+            .try_get("replay_hold_reason")
+            .map_err(WriteError::Storage)?;
+        if stored_reason.as_deref() != Some(reason)
+            || preserved_object
+                .iter()
+                .any(|(key, value)| stored.as_ref().and_then(|saved| saved.get(key)) != Some(value))
+        {
+            return Err(WriteError::CasMiss);
+        }
+    }
     if let Some(notice) = hold_notice::from_preserved(attempt.receipt_id, stored.as_ref())? {
-        if disposition.as_deref() != Some("withheld") {
+        if disposition.as_deref() != Some("withheld")
+            || notice
+                .hold_nonce
+                .as_deref()
+                .is_some_and(|nonce| nonce != attempt.nonce())
+        {
             return Err(WriteError::CasMiss);
         }
         commit(tx).await?;
@@ -71,6 +89,7 @@ pub(crate) async fn withhold_and_notify(
     let notice = HoldNotice {
         dedupe_key,
         outbox_id,
+        hold_nonce: Some(attempt.nonce().to_string()),
     };
     let saved = sqlx::query(
         "UPDATE intake_outbox

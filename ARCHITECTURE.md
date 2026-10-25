@@ -938,6 +938,7 @@ src/
 │   │   ├── actual_submit_tests.rs
 │   │   ├── c1_teardown_tests.rs
 │   │   ├── command_streaming.rs
+│   │   ├── direct_reader.rs
 │   │   ├── followup_reader.rs
 │   │   ├── herdr_guard_tests.rs
 │   │   ├── herdr_turn.rs
@@ -1700,6 +1701,11 @@ src/
 │   │   │   ├── idle_tmux.rs
 │   │   │   └── tests.rs
 │   │   ├── replay_policy/
+│   │   │   ├── live/
+│   │   │   │   ├── observer_tests.rs
+│   │   │   │   ├── seal.rs
+│   │   │   │   └── tap.rs
+│   │   │   ├── decision.rs
 │   │   │   ├── live.rs
 │   │   │   ├── live_tests.rs
 │   │   │   ├── permit.rs

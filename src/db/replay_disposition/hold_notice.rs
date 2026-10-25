@@ -14,6 +14,8 @@ pub(super) const TEXT: &str =
 pub(crate) struct HoldNotice {
     pub(crate) dedupe_key: String,
     pub(crate) outbox_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hold_nonce: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -45,13 +47,23 @@ pub(super) fn from_preserved(
 }
 
 pub(crate) async fn read(pool: &PgPool, receipt_id: i64) -> Result<Option<HoldNotice>, WriteError> {
-    let value: Option<Option<serde_json::Value>> =
-        sqlx::query_scalar("SELECT replay_preserved FROM intake_outbox WHERE id = $1")
-            .bind(receipt_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(WriteError::Storage)?;
-    from_preserved(receipt_id, value.flatten().as_ref())
+    let row: (Option<serde_json::Value>, Option<String>) = sqlx::query_as(
+        "SELECT replay_preserved, replay_episode_nonce FROM intake_outbox WHERE id = $1",
+    )
+    .bind(receipt_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(WriteError::Storage)?
+    .ok_or(WriteError::CasMiss)?;
+    let notice = from_preserved(receipt_id, row.0.as_ref())?;
+    if notice
+        .as_ref()
+        .and_then(|notice| notice.hold_nonce.as_deref())
+        .is_some_and(|nonce| nonce.is_empty() || Some(nonce) != row.1.as_deref())
+    {
+        return Err(WriteError::CasMiss);
+    }
+    Ok(notice)
 }
 
 #[path = "hold_notice_tests.rs"]
