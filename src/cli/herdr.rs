@@ -1,12 +1,13 @@
 //! `agentdesk herdr`: this node's Herdr-hosted executions: a read-only status, a retire that only
-//! reads the pane before its nonce compare-and-set, and a terminate the local server performs.
+//! reads the pane before its nonce compare-and-set, a terminate the local server performs, and a
+//! read-only probe of the execution user's own server.
 
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 
 #[derive(Args)]
 #[command(
-    about = "Herdr-hosted executions on this node: status, retire of an ended one, and terminate"
+    about = "Herdr-hosted executions on this node: status, retire of an ended one, terminate, and a user-default probe"
 )]
 pub(crate) struct HerdrArgs {
     #[command(subcommand)]
@@ -35,6 +36,12 @@ pub(crate) enum HerdrCommand {
         #[arg(long)]
         reason: String,
     },
+    /// Check the execution user's own herdr server once; reads no AgentDesk config or database
+    ProbeUserDefault {
+        /// Absolute socket path; defaults to $HOME/.config/herdr/herdr.sock
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
 }
 
 pub(crate) fn run(args: HerdrArgs) -> Result<(), String> {
@@ -46,6 +53,10 @@ pub(crate) fn run(args: HerdrArgs) -> Result<(), String> {
         } => {
             let body = json!({"session_key": session_key, "execution_nonce": execution_nonce, "reason": reason});
             return terminate(&super::client::api_base(), &body);
+        }
+        #[cfg(unix)]
+        HerdrCommand::ProbeUserDefault { socket } => {
+            return probe::run(socket, std::env::var_os("HOME"), &mut std::io::stdout());
         }
         command => command,
     };
@@ -143,6 +154,9 @@ mod node {
                     Err(refusal) => Err(format!("herdr retire {channel} refused: {refusal:?}")),
                 },
                 HerdrCommand::Terminate { .. } => Err("herdr terminate goes to the server".into()),
+                HerdrCommand::ProbeUserDefault { .. } => {
+                    Err("herdr probe-user-default reads no database".into())
+                }
             };
             pool.close().await;
             println!("{}", result?);
@@ -379,6 +393,10 @@ mod node {
 
 #[cfg(all(test, unix))]
 pub(crate) use node::{RetireRefusal, Retired, retire, retire_on_reading, status};
+
+#[cfg(unix)]
+#[path = "herdr_probe.rs"]
+mod probe;
 
 #[cfg(test)]
 #[path = "herdr_tests.rs"]
