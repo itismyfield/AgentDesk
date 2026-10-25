@@ -5,11 +5,15 @@
 Source issue: #1785
 Epic: #1784
 
-`src/dispatch/mod.rs` is currently 5,109 lines: about 955 lines of
+At planning time `src/dispatch/mod.rs` was 5,109 lines: about 955 lines of
 production facade/helper code followed by about 4,154 lines of inline tests.
-The dispatch directory already has extracted sibling modules, but `mod.rs`
-still owns cancellation, row-summary projection, unified-thread guards, and the
-legacy catch-all test suite.
+The dispatch directory already had extracted sibling modules, but `mod.rs`
+still owned cancellation, row-summary projection, unified-thread guards, and
+the legacy catch-all test suite.
+
+Status: the extraction has landed. `src/dispatch/mod.rs` is now a facade of
+module declarations and re-exports; the subdomain map below names the file and
+entry symbol each proposed module became.
 
 ## Scope Notes
 
@@ -36,19 +40,19 @@ legacy catch-all test suite.
 | `dispatch_create.rs` | 2,877 | Dispatch creation, dedupe, active-dispatch reuse, attached intents, stale review-decision cancellation, and PG/SQLite create APIs. |
 | `dispatch_status.rs` | 1,921 | Dispatch lifecycle/status transitions, completion/finalization, phase-gate verdict injection, status events, status reactions, and notify outbox glue. |
 
-## Remaining `mod.rs` Subdomain Map
+## Former `mod.rs` Subdomain Map
 
-| Proposed module | Current source ranges | Approx. prod LOC | Approx. test LOC | Responsibility | Main consumers |
+| Proposed module | Landed in (path + symbol) | Approx. prod LOC | Approx. test LOC | Responsibility | Main consumers |
 | --- | --- | ---: | ---: | --- | --- |
-| `dispatch::mod` facade | `src/dispatch/mod.rs:1`, `src/dispatch/mod.rs:10`, `src/dispatch/mod.rs:15` | 70 retained | 0 | Module declarations and stable re-exports for the current public API. | All `crate::dispatch::*` callers. |
-| `dispatch::types` | `src/dispatch/mod.rs:64` | 20 | 0 | `DispatchCreateOptions` and any future small shared DTOs. | `dispatch_create.rs`, routes, integration tests. |
-| `dispatch::cancel` | `src/dispatch/mod.rs:71`, `src/dispatch/mod.rs:104`, `src/dispatch/mod.rs:249`, `src/dispatch/mod.rs:436`, `src/dispatch/mod.rs:572` | 560 | 600 | User/system cancel classification, SQLite and PG cancel/reset paths, caller-owned transaction variant, session active-dispatch cleanup, dispatch events, cancel outbox rows, auto-queue reset/user-cancelled handling, cancelled thread-map cleanup, and terminal-card cancel-without-requeue. | `dispatch_create.rs`, `kanban.rs`, queue services, auto-queue command service, review verdict routes, DB schema cleanup. |
-| `dispatch::summary` | `src/dispatch/mod.rs:638`, `src/dispatch/mod.rs:680`, `src/dispatch/mod.rs:724`, `src/dispatch/mod.rs:830`, `src/dispatch/mod.rs:863` | 240 | 80 | Parse result/context JSON, normalize human summaries, map known dispatch codes, and derive noop/rework/orphan/cancel/verdict summaries. | `dispatch_create.rs`, dispatch query paths, `services/dispatches`, kanban card listing. |
-| `dispatch::query` | `src/dispatch/mod.rs:876`; PG mirror currently starts at `src/dispatch/dispatch_create.rs:437` | 130 | 40 | SQLite and PG dispatch row projection, parsed JSON fields, retry count, and `result_summary` injection. | `dispatch_status.rs`, `dispatch_create.rs`, dispatch routes. |
-| `dispatch::channel` unified-thread helpers | `src/dispatch/mod.rs:924`; fold into existing `src/dispatch/dispatch_channel.rs` | 30 moved | existing provider tests | Active unified-thread channel checks, thread-channel ID parsing, channel-name guard, and kill-signal drain. | `services/provider.rs`, Discord delivery/runtime guards. |
-| `dispatch::tests::support` | `src/dispatch/mod.rs:956` | 0 | 260 | Shared unit-test DB, repo, git, env override, outbox counter, event loader, and assistant-response seed helpers. | All dispatch unit test modules. |
-| Owner test modules for create/status/cancel | `src/dispatch/mod.rs:1214`, `src/dispatch/mod.rs:1454`, `src/dispatch/mod.rs:1912`, `src/dispatch/mod.rs:4961` | 0 | 1,450 | Creation, completion evidence, origin-main baseline, cancellation, user-cancelled entries, sidecar phase gates, session strategy defaults, outbox/status event behavior, finalization, dedupe, terminal-card behavior. | `dispatch_create`, `dispatch_status`, `dispatch_cancel`, `dispatch_channel`. |
-| Owner test modules for context/review | `src/dispatch/mod.rs:2964` | 0 | 1,875 | Card repo mapping, explicit worktree context, stale/deleted worktree refresh, review target trust, merge-base context, issue-commit membership, dirty repo fallback rejection, external target repos, noop latest work dispatches, and review checklist injection. | `dispatch_context`. |
+| `dispatch::mod` facade | `src/dispatch/mod.rs` (module declarations and re-exports only) | 70 retained | 0 | Module declarations and stable re-exports for the current public API. | All `crate::dispatch::*` callers. |
+| `dispatch::types` | `src/dispatch/types.rs` (`DispatchCreateOptions`, `Source`) | 20 | 0 | `DispatchCreateOptions` and any future small shared DTOs. | `dispatch_create.rs`, routes, integration tests. |
+| `dispatch::cancel` | `src/dispatch/dispatch_cancel.rs` (`cancel_dispatch_and_reset_auto_queue_on_pg`, `cancel_dispatch_and_reset_auto_queue_on_pg_tx`, `cancel_dispatches_for_runs_on_pg_tx_with_meta`) | 560 | 600 | User/system cancel classification, SQLite and PG cancel/reset paths, caller-owned transaction variant, session active-dispatch cleanup, dispatch events, cancel outbox rows, auto-queue reset/user-cancelled handling, cancelled thread-map cleanup, and terminal-card cancel-without-requeue. | `dispatch_create.rs`, `kanban.rs`, queue services, auto-queue command service, review verdict routes, DB schema cleanup. |
+| `dispatch::summary` | `src/dispatch/dispatch_summary.rs` (`summarize_dispatch_result`, `summarize_dispatch_from_text`) | 240 | 80 | Parse result/context JSON, normalize human summaries, map known dispatch codes, and derive noop/rework/orphan/cancel/verdict summaries. | `dispatch_create.rs`, dispatch query paths, `services/dispatches`, kanban card listing. |
+| `dispatch::query` | `src/dispatch/dispatch_query.rs` (`query_dispatch_row_pg`) | 130 | 40 | SQLite and PG dispatch row projection, parsed JSON fields, retry count, and `result_summary` injection. | `dispatch_status.rs`, `dispatch_create.rs`, dispatch routes. |
+| `dispatch::channel` unified-thread helpers | `src/dispatch/dispatch_channel.rs` (`is_unified_thread_channel_active`, `drain_unified_thread_kill_signals`) | 30 moved | existing provider tests | Active unified-thread channel checks, thread-channel ID parsing, channel-name guard, and kill-signal drain. | `services/provider.rs`, Discord delivery/runtime guards. |
+| `dispatch::tests::support` | `src/dispatch/test_support.rs` (`DispatchPostgresTestDb`, `seed_pg_dispatch`) | 0 | 260 | Shared unit-test DB, repo, git, env override, outbox counter, event loader, and assistant-response seed helpers. | All dispatch unit test modules. |
+| Owner test modules for create/status/cancel | Inline `cfg(test)` modules in `dispatch_create.rs`, `dispatch_status.rs`, `dispatch_cancel.rs`, `dispatch_channel.rs` | 0 | 1,450 | Creation, completion evidence, origin-main baseline, cancellation, user-cancelled entries, sidecar phase gates, session strategy defaults, outbox/status event behavior, finalization, dedupe, terminal-card behavior. | `dispatch_create`, `dispatch_status`, `dispatch_cancel`, `dispatch_channel`. |
+| Owner test modules for context/review | Inline `cfg(test)` module in `dispatch_context.rs` | 0 | 1,875 | Card repo mapping, explicit worktree context, stale/deleted worktree refresh, review target trust, merge-base context, issue-commit membership, dirty repo fallback rejection, external target repos, noop latest work dispatches, and review checklist injection. | `dispatch_context`. |
 
 ## Recommended Extraction Order
 
@@ -88,8 +92,8 @@ legacy catch-all test suite.
 7. #1814 `dispatch/mod: relocate worktree and review context tests`
    - Largest test-only move. Keep last so shared fixtures and owner test files
      are already established.
-   - Prefer `src/dispatch/tests/context.rs`-style files over making
-     `dispatch_context.rs` larger unless the owner issue chooses otherwise.
+   - Prefer separate owner test files over making `dispatch_context.rs`
+     larger unless the owner issue chooses otherwise.
 
 ## Dependency Rules
 
