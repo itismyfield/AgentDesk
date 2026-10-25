@@ -606,6 +606,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::herdr_consent::custody::tests::live_custody_replays_a_lost_response_and_wake_without_recreating_payload
   services::discord::router::herdr_consent::custody::tests::live_mailbox_crash_at_receipt_release_wake_or_ack_replays_one_original_payload
   services::discord::router::herdr_consent::custody::tests::live_mailbox_custody_sink_passes_shared_durable_conformance
+  services::discord::router::herdr_consent::custody::tests::live_mailbox_drained_head_releases_and_wakes_from_its_dispatch_marker
   services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
   services::discord::router::intake_dispatch::tests::codex_turn_hold::a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode
   services::discord::router::intake_dispatch::tests::codex_turn_hold::a_turn_mode_input_the_queue_cannot_hold_fails_before_its_checkpoint
