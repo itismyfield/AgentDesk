@@ -32,6 +32,14 @@ static PREVIEWS: OnceLock<Mutex<HashMap<PathBuf, CachedPreview>>> = OnceLock::ne
 #[cfg(test)]
 tokio::task_local! { pub(super) static TEST_HOME: PathBuf; }
 
+#[cfg(all(test, unix))]
+pub(crate) async fn scope_claude_home_for_tests<F: std::future::Future>(
+    home: PathBuf,
+    future: F,
+) -> F::Output {
+    TEST_HOME.scope(home, future).await
+}
+
 pub(crate) fn claude_home() -> Option<PathBuf> {
     #[cfg(test)]
     if let Ok(home) = TEST_HOME.try_with(Clone::clone) {
