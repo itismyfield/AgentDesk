@@ -79,7 +79,7 @@ fn activity_unmatched_result_and_ring_eviction_fail_closed() {
     end(&mut state, "Read", Some("never-observed"), false);
     let live = render(state.clone());
     assert!(
-        live.contains("? Read") && !live.contains("✓ Read"),
+        live.contains("▶ Read") && !live.contains("✓ Read"),
         "{live}"
     );
     state.apply(StatusEvent::TurnCompleted {
