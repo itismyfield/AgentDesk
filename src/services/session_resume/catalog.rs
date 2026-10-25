@@ -32,7 +32,7 @@ static PREVIEWS: OnceLock<Mutex<HashMap<PathBuf, CachedPreview>>> = OnceLock::ne
 #[cfg(test)]
 tokio::task_local! { pub(super) static TEST_HOME: PathBuf; }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) async fn scope_claude_home_for_tests<F: std::future::Future>(
     home: PathBuf,
     future: F,

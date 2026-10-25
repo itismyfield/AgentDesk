@@ -615,20 +615,19 @@ mod tests {
         if let (Some(cwd), Some(id)) = (&opts.cwd, &opts.session_id) {
             write_transcript(home.path(), std::path::Path::new(cwd), id, 1);
         }
-        catalog::TEST_HOME
-            .scope(
-                home.path().to_path_buf(),
-                super::perform_resume_rebind(
-                    pool,
-                    registry,
-                    session_key,
-                    provider,
-                    channel_id,
-                    tmux_name,
-                    opts,
-                ),
-            )
-            .await
+        catalog::scope_claude_home_for_tests(
+            home.path().to_path_buf(),
+            super::perform_resume_rebind(
+                pool,
+                registry,
+                session_key,
+                provider,
+                channel_id,
+                tmux_name,
+                opts,
+            ),
+        )
+        .await
     }
 
     #[test]
