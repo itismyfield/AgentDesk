@@ -97,7 +97,14 @@ async fn returned_input_stays_held_never_releases_and_closes_only_after_adoption
         assert!(store.settle(&closed, &[(a.clone(), reopen)]).is_err());
     }
     let reloaded = ConsentStore::new(Some(temp.path().join("consents")));
-    assert_eq!(reloaded.load(&closed.key).unwrap(), Some(closed));
+    assert_eq!(reloaded.load(&closed.key).unwrap(), Some(closed.clone()));
+    let name = super::super::durable::key(&closed.key).unwrap();
+    let path = temp.path().join("consents").join(format!("{name}.json"));
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        raw["schema"], 3,
+        "readers without returns refuse it as newer"
+    );
 }
 
 // Clear still discards an open return; release never does.

@@ -10,6 +10,8 @@ use std::path::{Component, PathBuf};
 
 const TTL: u64 = 30 * 60;
 const SCHEMA: u32 = 3;
+/// Records without a return keep the schema that readers before returns decode.
+const PRE_RETURN_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -149,6 +151,14 @@ pub(crate) struct Consent {
     pub settlements: Vec<settlement::Settlement>,
     #[serde(default)]
     intent_previews: Vec<IntentPreview>,
+}
+
+impl Consent {
+    fn stamp(&mut self) {
+        let returned = self.settlements.iter();
+        let returned = returned.any(|settled| settled.resolution.returned_to().is_some());
+        self.schema = if returned { SCHEMA } else { PRE_RETURN_SCHEMA };
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,13 +347,10 @@ impl ConsentStore {
         let mut revision_changed = false;
         let mut already_applied = false;
         let bytes = self.0.change(&durable::key(&key)?, |previous| {
-            let mut decoded = previous
+            let decoded = previous
                 .as_ref()
                 .map(|bytes| self.decode(bytes, &key))
                 .transpose()?;
-            if let Some(current) = &mut decoded {
-                current.schema = SCHEMA;
-            }
             if retry && let Some(current) = &decoded {
                 if current.state == State::Accepted {
                     return Err(
@@ -368,6 +375,7 @@ impl ConsentStore {
                     Self::append_intent(&mut current, &intent, &question_preview)?;
                     if !current.needs_new_generation() {
                         already_applied = true;
+                        current.stamp();
                         return serde_json::to_vec(&current).map_err(|e| e.to_string());
                     }
                     current.history.push(Generation {
@@ -422,7 +430,7 @@ impl ConsentStore {
                 }
             } else {
                 Consent {
-                    schema: SCHEMA,
+                    schema: PRE_RETURN_SCHEMA,
                     key: key.clone(),
                     preview,
                     owner,
@@ -453,6 +461,7 @@ impl ConsentStore {
                 question_preview
             };
             Self::append_intent(&mut value, &intent, &intent_preview)?;
+            value.stamp();
             serde_json::to_vec(&value).map_err(|e| e.to_string())
         })?;
         let value = self.decode(&bytes, &key)?;
@@ -586,7 +595,7 @@ impl ConsentStore {
                 return Err("stale consent decision".into());
             }
             apply(&mut current)?;
-            current.schema = SCHEMA;
+            current.stamp();
             serde_json::to_vec(&current).map_err(|e| e.to_string())
         })?;
         self.decode(&bytes, &key)
