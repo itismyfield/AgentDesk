@@ -604,6 +604,22 @@ def discover_pg_inventory(
         module, name, _ = key
         by_path.setdefault((module, name), set()).add(key)
 
+    glob_closure: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
+
+    def glob_bases(module: tuple[str, ...], local_wildcards=()) -> list[tuple[str, ...]]:
+        """Modules a bare name can come from through `use …::*`, followed through the globs they hold."""
+        if not local_wildcards and module in glob_closure:
+            return glob_closure[module]
+        seen, pending = [], [*wildcard_uses.get(module, []), *local_wildcards]
+        while pending:
+            base = pending.pop(0)
+            if base not in seen:
+                seen.append(base)
+                pending.extend(wildcard_uses.get(base, []))
+        if not local_wildcards:
+            glob_closure[module] = seen
+        return seen
+
     def resolve(module: tuple[str, ...], raw: str, local_aliases=None, local_wildcards=()) -> set[tuple[tuple[str, ...], str, str]]:
         bindings = {**use_aliases.get(module, {}), **(local_aliases or {})}
         if "::" in raw:
@@ -618,7 +634,7 @@ def discover_pg_inventory(
         alias = bindings.get(raw)
         if alias:
             targets.update(by_path.get((alias[:-1], alias[-1]), set()))
-        for base in (*wildcard_uses.get(module, []), *local_wildcards):
+        for base in glob_bases(module, local_wildcards):
             targets.update(by_path.get((base, raw), set()))
         return targets
 

@@ -1206,6 +1206,19 @@ mod tests {
         self.assertEqual(problems, [])
         self.assertEqual(pg.get("outer::inner::tests::pg"), "src/w/inner.rs")
 
+    def test_a_fixture_two_globs_up_makes_the_grandchild_test_pg(self):
+        self.tree({"src/lib.rs": "mod db;\nmod support;\nmod q;\n",
+                   "src/q.rs": "#[cfg(test)]\nmod tests;\n",
+                   "src/q/tests.rs": "struct Fixture;\nimpl Fixture {\n    fn new() -> Self { TestPostgresDb::new(); Fixture }\n}\n"
+                                     "mod auto;\n",
+                   "src/q/tests/auto.rs": "use super::*;\nmod mend;\n",
+                   "src/q/tests/auto/mend.rs": "use super::*;\n#[test]\nfn grandchild() { let _f = Fixture::new(); }\n"
+                                               "#[test]\nfn pure() {}\n"})
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertIn("q::tests::auto::mend::grandchild", pg)
+        self.assertNotIn("q::tests::auto::mend::pure", pg)
+
     def cli(self, *argv):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()), \
