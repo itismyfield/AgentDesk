@@ -4,6 +4,7 @@ use super::provider_dispatch::producer_panic;
 use super::voice_announcement_route::route_voice_transcript_announcement_once;
 use super::*;
 
+mod feature_settings;
 mod intake_dispatch;
 use intake_dispatch::build_intake_inflight_state;
 
@@ -363,7 +364,7 @@ pub(super) async fn handle_text_message(
             .and_then(|binding| binding.provider.clone())
             .unwrap_or_else(|| settings_provider.clone());
         let early_fast_mode_channel_id =
-            effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
+            feature_key(shared, &early_provider, channel_id, early_thread_parent.as_ref()).await;
         let inbound = (channel_id, channel_id, _queued_drain);
         let input = (preloaded_uploads, None);
         let admitted = host_refusal::admitted_uploads(http, shared, &settings_provider, inbound, input);
@@ -1018,7 +1019,7 @@ pub(super) async fn handle_text_message(
         }
 
         let fast_mode_channel_id =
-            effective_fast_mode_channel_id(channel_id, final_thread_parent.clone());
+            feature_key(shared, &provider, channel_id, final_thread_parent.as_ref()).await;
         super::super::super::commands::reset_provider_session_if_pending(
             http,
             shared,
@@ -2225,16 +2226,8 @@ pub(super) async fn handle_text_message(
             }
         }
 
-        let native_fast_mode_override = native_fast_mode_override_for_turn(
-            &provider,
-            super::super::super::commands::channel_fast_mode_setting(shared, fast_mode_channel_id)
-                .await,
-        );
-        let codex_goals_override = codex_goals_override_for_turn(
-            &provider,
-            super::super::super::commands::channel_codex_goals_setting(shared, fast_mode_channel_id)
-                .await,
-        );
+        let (native_fast_mode_override, codex_goals_override) =
+            feature_settings::overrides_for_turn(shared, &provider, fast_mode_channel_id).await;
 
         // Fetch context compact percent from ADK settings (provider-specific)
         let ctx_thresholds =

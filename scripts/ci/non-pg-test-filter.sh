@@ -96,6 +96,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::admin_host_guard::tests
   --skip services::discord::commands::cancel_backstop_tests
+  --skip services::discord::commands::config::provider_settings::revision_tests
+  --skip services::discord::commands::config::provider_settings::truthful_tests
   --skip services::discord::commands::control::clear_end_tests
   --skip services::discord::commands::control::clear_entry_tests
   --skip services::discord::commands::control::clear_persist_failure_tests
@@ -451,6 +453,13 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::intake_router_hook::owner_record::tests::idempotency_key_is_composed_and_normalized
   services::cluster::intake_worker::dispatch_stamp_tests::classifier_branch_guard_rejects_commented_calls
   services::cluster::machine_resources::store::tests::recorder_queue_is_bounded_without_waiting_for_the_database
+  services::discord::commands::config::provider_settings::revision_tests::truthful_shared_feature_reset_is_consumed_by_the_first_parent_or_thread_turn
+  services::discord::commands::config::provider_settings::revision_tests::truthful_shared_feature_scope_warns_which_session_loses_context
+  services::discord::commands::config::provider_settings::truthful_tests::truthful_failed_fast_and_goals_save_never_publish_or_reset
+  services::discord::commands::config::provider_settings::truthful_tests::truthful_headless_claude_fast_persists_and_schedules_real_reset
+  services::discord::commands::config::provider_settings::truthful_tests::truthful_inherited_feature_reset_follows_thread_key_once
+  services::discord::commands::config::provider_settings::truthful_tests::truthful_parent_thread_and_explicit_false_keys_remain_readable
+  services::discord::commands::config::provider_settings::truthful_tests::truthful_pending_reset_migration_preserves_feature_and_provider
   services::discord::commands::control::clear_persist_failure_tests::a_clear_whose_queue_write_fails_twice_still_resets_the_session_and_warns
   services::discord::commands::control::clear_persist_failure_tests::a_clear_whose_write_fails_stops_the_released_turn_once_and_runs_no_old_backlog
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process

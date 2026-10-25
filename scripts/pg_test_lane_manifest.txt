@@ -139,6 +139,8 @@ src/services/cluster/machine_resources/store.rs
 src/services/discord/admin_host_guard_tests.rs
 src/services/discord/catch_up/too_old_drop_pg_tests.rs
 src/services/discord/commands/cancel_backstop_tests.rs
+src/services/discord/commands/config/provider_settings.rs
+src/services/discord/commands/config/provider_settings/revision_tests.rs
 src/services/discord/commands/control/clear_end_tests.rs
 src/services/discord/commands/control/clear_entry_tests.rs
 src/services/discord/commands/control/clear_persist_failure_tests.rs
@@ -572,6 +574,8 @@ services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
 services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests
 services::discord::commands::cancel_backstop_tests
+services::discord::commands::config::provider_settings::revision_tests
+services::discord::commands::config::provider_settings::truthful_tests
 services::discord::commands::control::clear_end_tests
 services::discord::commands::control::clear_entry_tests
 services::discord::commands::control::clear_persist_failure_tests
@@ -1763,6 +1767,9 @@ services::discord::commands::cancel_backstop_tests::actual_stop_action_keeps_hol
 services::discord::commands::cancel_backstop_tests::preserve_stop_completed_native_zombie_slash_recovers_queue_pg
 services::discord::commands::cancel_backstop_tests::preserve_stop_idle_native_slash_recovers_zombie_and_queue_pg
 services::discord::commands::cancel_backstop_tests::preserve_stop_missing_native_slash_recovers_zombie_and_queue_pg
+services::discord::commands::config::provider_settings::revision_tests::truthful_active_intake_owner_without_session_is_refused_pg
+services::discord::commands::config::provider_settings::revision_tests::truthful_offline_idle_owner_is_stale_and_does_not_override_local_owner_pg
+services::discord::commands::config::provider_settings::truthful_tests::truthful_foreign_database_owner_is_named_and_blocks_before_save_pg
 services::discord::commands::control::clear_end_tests::a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
 services::discord::commands::control::clear_end_tests::a_clear_keeps_its_transition_until_the_session_has_ended_pg
 services::discord::commands::control::clear_end_tests::a_clear_whose_tmux_kill_fails_commits_and_warns_pg
