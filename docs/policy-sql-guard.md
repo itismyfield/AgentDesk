@@ -75,7 +75,7 @@ source_events:
   - onCardCompleted
   - onTick
 include_files:
-  - policies/lib/example-helper.js
+  - policies/lib/<helper>.js
 db:
   read:
     tables:
