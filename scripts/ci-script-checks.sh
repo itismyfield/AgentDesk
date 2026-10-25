@@ -522,7 +522,7 @@ if run_check contracts "Rust test source wiring and PG classification"; then
 fi
 
 if run_check contracts "Shared CI shell lexer tests"; then
-# The test-target and PG lane gates read workflow shell through this one lexer.
+# Boundary tests of the CI shell lexer in scripts/ci_shell_lex.py.
 "$PYTHON" -m unittest tests.test_ci_shell_lex
 fi
 

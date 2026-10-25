@@ -1,4 +1,4 @@
-"""Boundary facts of the shared CI shell lexer that the CTI and PGM gates rely on."""
+"""Boundary facts of the CI shell lexer."""
 
 from __future__ import annotations
 

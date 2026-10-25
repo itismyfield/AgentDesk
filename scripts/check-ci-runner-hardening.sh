@@ -1113,8 +1113,8 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
 end
 main_baseline = Array(main_jobs.dig("rust_build", "steps")).select { |step| step.is_a?(Hash) && step["name"] == "Upload nextest baseline" }
 errors << "main rust_build must upload the plan as nextest-baseline for 14 days, exactly once" unless main_baseline == [baseline_upload]
-errors << "only rust_build, rust_tests and test_evidence may run the main lib tests" unless main_jobs.none? { |job_id, job| !%w[rust_build rust_tests test_evidence].include?(job_id) && Array(job.is_a?(Hash) && job["steps"]).any? { |step| step.is_a?(Hash) && step["run"].to_s.match?(/cargo nextest|test-selection\.py|test-postgres|cargo test --lib(?! --no-run)/) } }
-lib_run = /cargo nextest|test-selection\.py|test-postgres|cargo test --lib(?! --no-run)/
+errors << "only rust_build, rust_tests and test_evidence may run the main lib tests" unless main_jobs.none? { |job_id, job| !%w[rust_build rust_tests test_evidence].include?(job_id) && Array(job.is_a?(Hash) && job["steps"]).any? { |step| step.is_a?(Hash) && step["run"].to_s.match?(/cargo nextest|test-postgres|cargo test --lib(?! --no-run)/) } }
+lib_run = /cargo nextest|test-postgres|cargo test --lib(?! --no-run)/
 errors << "nightly lib tests run only in rust_build, rust_tests, test_evidence and the native nextest-native.sh steps" unless nightly_jobs.none? { |job_id, job| !%w[rust_build rust_tests test_evidence].include?(job_id) && Array(job.is_a?(Hash) && job["steps"]).any? { |step| step.is_a?(Hash) && step["run"].to_s.match?(lib_run) } }
 errors.each { |message| warn "#{main_path}: #{message}" }
 exit(errors.empty? ? 0 : 1)

@@ -47,7 +47,6 @@ LIB_BUILD_MARKERS = (
     re.compile(r"cargo test\b[^\n]*--lib\b"),
     re.compile(r"\bcargo nextest archive\b"),
     re.compile(r"\bjust test-postgres"),
-    re.compile(r"\btest-selection\.py run\b"),
     re.compile(r"--observe-selection"),
     re.compile(r"run_relay_authority_mutations\.sh"),
     re.compile(r"check_relay_authority_contract\.py"),

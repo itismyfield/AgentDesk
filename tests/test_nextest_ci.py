@@ -1084,7 +1084,7 @@ class RustSources(unittest.TestCase):
 
 
 class PgClassifier(unittest.TestCase):
-    """Which lib tests need PostgreSQL, judged from source the way the PG lane gate does."""
+    """Which lib tests need PostgreSQL, judged from source by scripts/ci/pg_test_classifier.py."""
 
     DB = """pub fn plain() {}
 #[cfg(test)]

@@ -1,4 +1,4 @@
-"""Shared shell lexer for the CI test-lane gates.
+"""Shell lexer for the commands CI workflows run.
 
 It finds word, quote, comment, operator and substitution boundaries the way Bash
 does for the plain command subset CI writes, and reports every span whose
