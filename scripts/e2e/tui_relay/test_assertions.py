@@ -11,6 +11,7 @@ import copy
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -546,6 +547,184 @@ class E4ProviderBodyWait(unittest.TestCase):
         scenario = {"steps": [{"wait_for_discord_text": "X", "relay_author": "notify"}], "assertions": []}
         with self.assertRaisesRegex(ValueError, "relay_author"):
             driver.validate_scenario_schema(scenario)
+
+
+class ProviderAuthorScenarios(unittest.TestCase):
+    """E-1/E-2/E-36/E-50/E-51 accept a turn body only from the cell's provider bot."""
+
+    NOTIFY_BOT = E4ProviderBodyWait.NOTICE_BOT
+    SCENARIOS = {"E-1": "claude", "E-2": "claude", "E-36": "claude", "E-50": "claude", "E-51": "codex"}
+
+    @staticmethod
+    def load(scenario_id):
+        path = next((ROOT / "tests/e2e/tui_relay/scenarios").glob(f"{scenario_id}-*.yaml"))
+        scenario = driver.yaml.safe_load(path.read_text())
+        driver.validate_scenario_schema(scenario)
+        return scenario
+
+    def test_every_turn_wait_and_e36_request_is_provider_scoped(self):
+        for scenario_id in self.SCENARIOS:
+            scenario = self.load(scenario_id)
+            waits = [step for step in scenario["steps"] if "wait_for_discord_text" in step or "body_marker" in step]
+            with self.subTest(scenario=scenario_id):
+                self.assertTrue(waits)
+                self.assertEqual({step.get("relay_author") for step in waits}, {"provider"})
+                self.assertFalse([spec for spec in scenario["assertions"] if "text_present" in spec])
+
+    def test_marker_presence_rejects_notify_and_announce_bodies(self):
+        for scenario_id, provider in self.SCENARIOS.items():
+            if scenario_id == "E-36":
+                continue  # E-36 judges bodies through its request windows, not presence specs.
+            scenario = self.load(scenario_id)
+            for marker in (step["wait_for_discord_text"] for step in scenario["steps"] if "wait_for_discord_text" in step):
+                specs = [spec for spec in scenario["assertions"]
+                         if marker in (spec.get("text_present"), spec.get("provider_text_present"))]
+                with self.subTest(scenario=scenario_id, marker=marker):
+                    self.assertTrue(specs, f"{scenario_id} has no presence assertion for {marker}")
+                    for author, accepted in ((assertions.provider_bot_id(provider), True),
+                                             (self.NOTIFY_BOT, False), (assertions.OUR_BOT_ID, False)):
+                        window = _window({"id": "101", "content": marker.replace("{run_id}", "run"),
+                                          "author": {"id": author, "bot": True}, "type": 0})
+                        run = [lambda spec=spec: driver.run_assertion(spec, window=window, run_id="run", provider=provider)
+                               for spec in specs]
+                        if accepted:
+                            for check in run:
+                                check()
+                        else:
+                            for check in run:
+                                with self.assertRaises(assertions.AssertionError, msg=f"{author} accepted"):
+                                    check()
+
+    def test_e36_schema_keeps_relay_author_provider_only(self):
+        scenario = self.load("E-36")
+        scenario["steps"][0]["relay_author"] = "notify"
+        with self.assertRaisesRegex(ValueError, "relay_author"):
+            driver.validate_scenario_schema(scenario)
+
+
+def _scenario(scenario_id):
+    path = next((ROOT / "tests/e2e/tui_relay/scenarios").glob(f"{scenario_id}-*.yaml"))
+    scenario = driver.yaml.safe_load(path.read_text())
+    driver.validate_scenario_schema(scenario)
+    return scenario
+
+
+class E6CompactRecapOracle(unittest.TestCase):
+    """E-6 must go red on the real /compact recap, not on a literal the product never emits."""
+
+    SOURCE = ROOT / "src/services/discord/tui_prompt_relay/injected_prompt_policy.rs"
+    # Claude Code's compact summary as it lands in the transcript, old and current wording.
+    RECAPS = (
+        "This session is being continued from a previous conversation that ran out of context. "
+        "The summary below covers the earlier portion of the conversation.\n\nSummary:\n"
+        "1. Primary Request and Intent:\n   Reply with exactly [E2E:E6:BEFORE]\n\n"
+        "Please continue the conversation from where we left it off without asking the user any further "
+        "questions. Continue with the last task that you were asked to work on.",
+        "This session is being continued from a previous conversation that ran out of context. "
+        "The conversation is summarized below:\nAnalysis:\n... summary body ...",
+    )
+
+    def source_openings(self):
+        source = self.SOURCE.read_text(encoding="utf-8")
+        block = source[source.index("const SYSTEM_CONTINUATION_OPENINGS"):]
+        return re.findall(r'"([^"]+)"', block[:block.index("];")])
+
+    def oracle(self):
+        return [spec for spec in _scenario("E-6")["assertions"] if "raw_text_absent" in spec]
+
+    def test_oracle_needles_are_the_source_continuation_openings(self):
+        openings = self.source_openings()
+        self.assertEqual(len(openings), 2)
+        self.assertEqual(sorted(spec["raw_text_absent"] for spec in self.oracle()), sorted(openings))
+
+    def test_real_recap_text_turns_e6_red_on_every_surface(self):
+        provider = {"id": assertions.provider_bot_id("claude"), "bot": True}
+        for recap in self.RECAPS:
+            first, rest = recap.split("\n", 1)
+            # session_notice::subtext: first line, then the remaining line count.
+            surfaces = {"direct-input notice": f"-# ⌨️ {first} (+{len(rest.splitlines())}줄)",
+                        "relayed body": recap, "tail chunk": rest}
+            for label, content in surfaces.items():
+                if label == "tail chunk" and "Please continue" not in rest:
+                    continue
+                window = _window({"id": "101", "content": content, "author": provider, "type": 0})
+                with self.subTest(recap=recap[90:120], surface=label):
+                    failures = 0
+                    for spec in self.oracle():
+                        try:
+                            driver.run_assertion(spec, window=window)
+                        except assertions.AssertionError:
+                            failures += 1
+                    self.assertGreaterEqual(failures, 1, f"E-6 stayed green on the {label}")
+        clean = _window({"id": "101", "content": "[E2E:E6:AFTER]", "author": provider, "type": 0})
+        for spec in self.oracle():
+            driver.run_assertion(spec, window=clean)
+
+
+class Utf16ChunkIntegrity(unittest.TestCase):
+    """E-15's UTF-16 turn: multi-unit characters across Discord chunk boundaries."""
+
+    ASCII_TURN = "[E2E:E15:BEGIN]\nE15-LINE-010\n[E2E:E15:MID]\nE15-LINE-150\n[E2E:E15:END]"
+
+    LINE = "E15U-LINE-{:03} 🧪🌏🎯🪐🧪🌏🎯🪐 가나다라마바사"
+
+    def bodies(self, limit=2000):
+        lines = ["[E2E:E15U:BEGIN]"]
+        for n in range(1, 121):
+            lines.append(self.LINE.format(n))
+            if n == 60:
+                lines.append("[E2E:E15U:MID]")
+        lines.append("[E2E:E15U:END]")
+        chunks, current = [], ""
+        for line in lines:
+            candidate = f"{current}\n{line}" if current else line
+            if len(candidate.encode("utf-16-le")) // 2 > limit:
+                chunks.append(current)
+                candidate = line
+            current = candidate
+        return chunks + [current]
+
+    def check(self, bodies):
+        window = _window(*({"id": str(200 + i), "content": body, "type": 0,
+                            "author": {"id": assertions.provider_bot_id("claude"), "bot": True}}
+                           for i, body in enumerate([self.ASCII_TURN, *bodies])))
+        specs = [spec for spec in _scenario("E-15")["assertions"]
+                 if {"utf16_chunk_integrity", "ordered_text_present"} & spec.keys()]
+        self.assertEqual([next(iter(spec)) for spec in specs],
+                         ["utf16_chunk_integrity", "ordered_text_present", "ordered_text_present"])
+        for spec in specs:
+            driver.run_assertion(spec, window=window, provider="claude")
+
+    def test_scenario_crosses_the_boundary_with_supplementary_characters(self):
+        prompts = [step["send_prompt"] for step in _scenario("E-15")["steps"] if "send_prompt" in step]
+        self.assertEqual(len(prompts), 2)
+        self.assertNotIn("🧪", prompts[0])
+        self.assertIn("🧪🌏🎯🪐🧪🌏🎯🪐 가나다라마바사", prompts[1])
+        bodies = self.bodies()
+        self.assertGreaterEqual(len(bodies), 3)
+        self.check(bodies)
+
+    def test_split_surrogate_lossy_decode_overflow_and_single_chunk_fail(self):
+        good = self.bodies()
+        head, tail = good[0], good[1]
+        split = head[:-1] + "\ud83e"  # a chunk cut inside the last line's surrogate pair
+        broken = {
+            "lone surrogate": [split, "\udd2a" + tail] + good[2:],
+            "lossy decode": [head[:-2] + "\ufffd"] + good[1:],
+            "char-count chunking": ["\n".join(good[:2])] + good[2:],
+            "never crossed a boundary": [good[0].replace("🧪", "x").replace("🌏", "x").replace("🎯", "x").replace("🪐", "x"),
+                                         "\n".join(good[1:])],
+        }
+        self.assertLessEqual(len(broken["char-count chunking"][0]), 4000)
+        for label, bodies in broken.items():
+            with self.subTest(label), self.assertRaises(assertions.AssertionError):
+                if label == "never crossed a boundary":
+                    window = _window(*({"id": str(300 + i), "content": body, "type": 0,
+                                        "author": {"id": assertions.provider_bot_id("claude"), "bot": True}}
+                                       for i, body in enumerate(bodies)))
+                    assertions.utf16_chunk_integrity(window, max_units=10_000, min_chunks=2)
+                else:
+                    self.check(bodies)
 
 
 class NoDuplicateMarker(unittest.TestCase):
@@ -2224,7 +2403,7 @@ class HerdrReviewRepairs(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'restart target'):
                 herdr.validate_restart_binding(scenario, Namespace(base_url=url, restart_target_override=target))
         checks = {r['check'] for r in herdr.omissions(scenario)}
-        self.assertIn('server_incarnation_changed', checks)
+        self.assertNotIn('server_incarnation_changed', checks)
 
     def test_matrix_rejects_cross_provider_actual_channel_alias(self):
         with self.assertRaisesRegex(ValueError, 'same actual channel'):

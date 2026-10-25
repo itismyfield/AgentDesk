@@ -477,9 +477,7 @@ src/
 │   │   │   │   ├── amplification_records_tests.rs
 │   │   │   │   ├── amplification_verdict_tests.rs
 │   │   │   │   └── resource_regression_tests.rs
-│   │   │   ├── runtime_profile/
-│   │   │   │   ├── managed_herdr.rs
-│   │   │   │   └── managed_herdr_tests.rs
+│   │   │   ├── boot_incarnation_tests.rs
 │   │   │   ├── db_collection.rs
 │   │   │   ├── db_deadline_tests.rs
 │   │   │   ├── host_guard_tests.rs

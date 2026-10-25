@@ -1529,6 +1529,7 @@ server::routes::health_api::presence_unknown_tests::deploy_unknown_group_is_nonb
 server::routes::health_api::presence_unknown_tests::health_unknown_reasons_follow_publication_and_recovery
 server::routes::health_api::presence_unknown_tests::public_unknown_diagnostics_keep_groups_and_drop_private_rows
 server::routes::health_api::public_projection::tui_output_readiness_tests::public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate
+server::routes::health_api::response::boot_incarnation_tests::detail_health_carries_one_boot_incarnation_per_process
 server::routes::health_api::response::kv_gate_tests::health_gate_kv_timeout_does_not_report_fallback_as_effective
 server::routes::health_api::runtime_profile::managed_herdr::tests::health_shows_restart_required_without_touching_the_home_or_the_server
 server::routes::health_api::runtime_profile::tests::health_counts_reconnects_and_held_inputs_only_with_a_local_endpoint
