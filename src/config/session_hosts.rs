@@ -399,7 +399,7 @@ thread_local! {
 pub(crate) struct ForcedSessionHosts(Option<BootSessionHosts>, Option<BootMigration>);
 
 /// Installs a real selection's hosts and migration metadata on this thread until dropped.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn force_selected_for_test(
     selection: migration::HostsBootSelection,
 ) -> ForcedSessionHosts {
