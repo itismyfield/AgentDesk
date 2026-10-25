@@ -56,7 +56,7 @@ pub(crate) fn run(args: HerdrArgs) -> Result<(), String> {
         }
         #[cfg(unix)]
         HerdrCommand::ProbeUserDefault { socket } => {
-            return probe::run(socket, std::env::var_os("HOME"), &mut std::io::stdout());
+            return user_probe::run(socket, std::env::var_os("HOME"), &mut std::io::stdout());
         }
         command => command,
     };
@@ -396,7 +396,7 @@ pub(crate) use node::{RetireRefusal, Retired, retire, retire_on_reading, status}
 
 #[cfg(unix)]
 #[path = "herdr_probe.rs"]
-mod probe;
+mod user_probe;
 
 #[cfg(test)]
 #[path = "herdr_tests.rs"]

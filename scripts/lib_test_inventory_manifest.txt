@@ -172,7 +172,6 @@ cli::doctor::startup::herdr_checker_tests::protected_doctor_response_includes_cu
 cli::doctor::startup::herdr_checker_tests::startup_health_strips_raw_checker_evidence_without_changing_the_doctor_artifact
 cli::doctor::startup::tests::only_the_no_provider_skip_is_replaceable
 cli::doctor::startup::tests::skipped_startup_doctor_writes_current_boot_artifact
-cli::herdr::probe::tests::probe_user_default_reports_the_reason_without_config_database_or_writes
 cli::herdr::terminate_tests::act_cli_terminate_never_follows_redirect
 cli::herdr::terminate_tests::act_cli_terminate_never_opens_postgres
 cli::herdr::terminate_tests::act_cli_terminate_refuses_remote_api_url
@@ -187,6 +186,7 @@ cli::herdr::tests::m2t_u9_manual_retire_inside_the_terminate_cas_window_pg
 cli::herdr::tests::retire_root_replaced_both_absent_pg
 cli::herdr::tests::status_shows_rows_panes_and_holds_without_paths_pg
 cli::herdr::tests::t_r3_retire_needs_a_read_that_shows_the_execution_ended_pg
+cli::herdr::user_probe::tests::probe_user_default_reports_the_reason_without_config_database_or_writes
 cli::init::launchd_plist_tests::clamp_launchd_nofile_soft_limit_never_exceeds_host_hard_limit
 cli::init::launchd_plist_tests::generate_launchd_plist_release_sets_clamped_soft_number_of_files_limit
 cli::init::launchd_plist_tests::generate_launchd_plist_uses_requested_fresh_home_and_root_only
