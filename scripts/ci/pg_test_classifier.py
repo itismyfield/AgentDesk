@@ -457,6 +457,9 @@ def discover_pg_inventory(
     records: list[tuple[str, str, tuple[str, ...], str]] = []
     use_aliases: dict[tuple[str, ...], dict[str, tuple[str, ...]]] = {}
     wildcard_uses: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
+    # Every module the walk reaches; a path's first segment naming a child of the current module is relative.
+    known_modules: set[tuple[str, ...]] = {base for bases in inventory.modules.values() for base in bases}
+    module_uses: list[tuple[tuple[str, ...], str]] = []
 
     def absolute_path(module: tuple[str, ...], raw: str) -> tuple[str, ...]:
         parts = tuple(part for part in raw.strip().split("::") if part)
@@ -471,6 +474,8 @@ def discover_pg_inventory(
             while drop < len(parts) and parts[drop] == "super":
                 drop += 1
             return (*module[: max(0, len(module) - drop)], *parts[drop:])
+        if (*module, parts[0]) in known_modules:
+            return (*module, *parts)
         return parts
 
     def import_bindings(module: tuple[str, ...], raw: str):
@@ -503,6 +508,8 @@ def discover_pg_inventory(
         def logical_at(*tail: str, reached_base=reached_base) -> tuple[str, ...]:
             return (*reached_base, *tail)
 
+        known_modules.update(logical_at(*_scope_at(item.start + 1, ranges)) for item in ranges)
+
         fn_ranges: list[tuple[int, int, re.Match[str], int]] = []
         for match in _FN.finditer(clean):
             opening = _function_body_opening(clean, match.end())
@@ -528,12 +535,7 @@ def discover_pg_inventory(
                 use.start(), impl_ranges
             ):
                 continue
-            module = logical_at(*_scope_at(use.start(), ranges))
-            for binding, target in import_bindings(module, use.group("path")):
-                if binding == "*":
-                    wildcard_uses.setdefault(module, []).append(target[:-1])
-                else:
-                    use_aliases.setdefault(module, {})[binding] = target
+            module_uses.append((logical_at(*_scope_at(use.start(), ranges)), use.group("path")))
 
         all_fn_ranges = [(start, end) for start, end, _, _ in fn_ranges]
         for start, end, match, opening in fn_ranges:
@@ -599,6 +601,14 @@ def discover_pg_inventory(
                     "test-not-in-inventory", name,
                     f"{path.relative_to(repo_root).as_posix()}: a test the root inventory does not list"))
 
+    # Bound once every module is known, so a relative `use child::item` resolves under its module.
+    for module, raw in module_uses:
+        for binding, target in import_bindings(module, raw):
+            if binding == "*":
+                wildcard_uses.setdefault(module, []).append(target[:-1])
+            else:
+                use_aliases.setdefault(module, {})[binding] = target
+
     by_path: dict[tuple[tuple[str, ...], str], set[tuple[tuple[str, ...], str, str]]] = {}
     for key in item_bodies:
         module, name, _ = key
@@ -620,20 +630,27 @@ def discover_pg_inventory(
             glob_closure[module] = seen
         return seen
 
+    def lookup(target: tuple[str, ...], hops: int = 8) -> set[tuple[tuple[str, ...], str, str]]:
+        """Items at a path, following `use` re-exports of the module the path names."""
+        found = set(by_path.get((target[:-1], target[-1]), set()))
+        reexport = use_aliases.get(target[:-1], {}).get(target[-1])
+        if not found and hops and reexport and reexport != target:
+            found = lookup(reexport, hops - 1)
+        return found
+
     def resolve(module: tuple[str, ...], raw: str, local_aliases=None, local_wildcards=()) -> set[tuple[tuple[str, ...], str, str]]:
         bindings = {**use_aliases.get(module, {}), **(local_aliases or {})}
         if "::" in raw:
             parts = tuple(part for part in raw.split("::") if part)
             alias = bindings.get(parts[0]) if parts else None
             target = (*alias, *parts[1:]) if alias else absolute_path(module, raw)
-            return by_path.get((target[:-1], target[-1]), set()) if target else set()
+            return lookup(target) if target else set()
         if raw in (local_aliases or {}):
-            alias = local_aliases[raw]
-            return set(by_path.get((alias[:-1], alias[-1]), set()))
+            return lookup(local_aliases[raw])
         targets = set(by_path.get((module, raw), set()))
         alias = bindings.get(raw)
         if alias:
-            targets.update(by_path.get((alias[:-1], alias[-1]), set()))
+            targets.update(lookup(alias))
         for base in glob_bases(module, local_wildcards):
             targets.update(by_path.get((base, raw), set()))
         return targets

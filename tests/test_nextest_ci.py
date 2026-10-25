@@ -1219,6 +1219,25 @@ mod tests {
         self.assertIn("q::tests::auto::mend::grandchild", pg)
         self.assertNotIn("q::tests::auto::mend::pure", pg)
 
+    def test_a_use_of_a_child_module_is_relative_to_its_module(self):
+        self.tree({"src/lib.rs": "mod db;\nmod support;\nmod h;\n",
+                   "src/h.rs": "#[cfg(test)]\nmod tests {\n    mod service {\n        pub(super) struct Service;\n"
+                               "        impl Service {\n            pub(super) fn start() -> Self { TestPostgresDb::new(); Service }\n"
+                               "        }\n    }\n    use service::Service;\n    #[test]\n    fn via_child() { Service::start(); }\n}\n"})
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertIn("h::tests::via_child", pg)
+
+    def test_a_call_through_a_reexport_reaches_the_pg_helper(self):
+        self.tree({"src/lib.rs": "mod db;\nmod support;\nmod r;\n",
+                   "src/r.rs": "mod inner;\n#[cfg(test)]\npub(crate) use inner::exact_tests::shared_pg;\n"
+                               "#[cfg(test)]\nmod tests {\n    #[test]\n    fn via_reexport() { crate::r::shared_pg(); }\n}\n",
+                   "src/r/inner.rs": "#[cfg(test)]\npub(crate) mod exact_tests {\n"
+                                     "    pub(crate) fn shared_pg() { TestPostgresDb::new(); }\n}\n"})
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertIn("r::tests::via_reexport", pg)
+
     def cli(self, *argv):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()), \
