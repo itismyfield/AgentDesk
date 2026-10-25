@@ -3835,6 +3835,7 @@ src/
 │   ├── recovery_defer.rs
 │   ├── release_source.rs
 │   ├── remote_stub.rs
+│   ├── resident_loops.rs
 │   ├── retrospectives.rs
 │   ├── review_decision.rs
 │   ├── scheduled_messages.rs

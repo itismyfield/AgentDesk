@@ -44,7 +44,7 @@ const STUCK_THRESHOLD_OTHER: i64 = 90;
 /// Spawn the watchdog as a background task. Cheap query (single indexed
 /// SELECT every 5 minutes), so always-on is fine.
 pub fn spawn(pool: PgPool) {
-    tokio::spawn(async move {
+    crate::services::resident_loops::spawn_resident("dispatch_watchdog", async move {
         let mut interval = tokio::time::interval(SCAN_INTERVAL);
         // Skip the immediate first tick so boot reconcile finishes first.
         interval.tick().await;
