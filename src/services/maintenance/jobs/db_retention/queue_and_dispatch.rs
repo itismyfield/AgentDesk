@@ -73,51 +73,47 @@ pub(super) async fn retain_task_dispatches(
         return Ok(());
     }
 
-    // Each pass adds the rows it deletes to their month; NOW() is fixed for the
-    // transaction, so the rollup and the DELETE see the same rows.
-    let mut tx = pool.begin().await?;
-    let agg = sqlx::query(
-        "INSERT INTO task_dispatches_monthly_aggregate AS a \
-             (month, total_dispatches, completed_count, review_count, aggregated_at) \
-         SELECT date_trunc('month', completed_at)::DATE AS month, \
-                COUNT(*)::BIGINT, \
-                COUNT(*) FILTER (WHERE status = 'completed')::BIGINT, \
-                COUNT(*) FILTER (WHERE dispatch_type = 'review')::BIGINT, \
-                NOW() \
-         FROM task_dispatches \
-         WHERE status = 'completed' \
-           AND completed_at IS NOT NULL \
-           AND completed_at < NOW() - ($1::INT || ' days')::INTERVAL \
-         GROUP BY date_trunc('month', completed_at) \
-         ON CONFLICT (month) DO UPDATE \
-         SET total_dispatches = a.total_dispatches + EXCLUDED.total_dispatches, \
-             completed_count = a.completed_count + EXCLUDED.completed_count, \
-             review_count = a.review_count + EXCLUDED.review_count, \
-             aggregated_at = EXCLUDED.aggregated_at",
+    // One statement: only the rows this pass actually deleted are added to their month,
+    // so two passes racing on the same rows cannot count them twice.
+    let row = sqlx::query(
+        "WITH removed AS ( \
+             DELETE FROM task_dispatches \
+             WHERE status = 'completed' \
+               AND completed_at IS NOT NULL \
+               AND completed_at < NOW() - ($1::INT || ' days')::INTERVAL \
+             RETURNING completed_at, status, dispatch_type \
+         ), rolled AS ( \
+             INSERT INTO task_dispatches_monthly_aggregate AS a \
+                 (month, total_dispatches, completed_count, review_count, aggregated_at) \
+             SELECT date_trunc('month', completed_at)::DATE, \
+                    COUNT(*)::BIGINT, \
+                    COUNT(*) FILTER (WHERE status = 'completed')::BIGINT, \
+                    COUNT(*) FILTER (WHERE dispatch_type = 'review')::BIGINT, \
+                    NOW() \
+             FROM removed \
+             GROUP BY date_trunc('month', completed_at) \
+             ON CONFLICT (month) DO UPDATE \
+             SET total_dispatches = a.total_dispatches + EXCLUDED.total_dispatches, \
+                 completed_count = a.completed_count + EXCLUDED.completed_count, \
+                 review_count = a.review_count + EXCLUDED.review_count, \
+                 aggregated_at = EXCLUDED.aggregated_at \
+             RETURNING 1 \
+         ) \
+         SELECT (SELECT COUNT(*) FROM rolled)::BIGINT AS months, \
+                (SELECT COUNT(*) FROM removed)::BIGINT AS deleted",
     )
     .bind(DISPATCH_RETENTION_DAYS)
-    .execute(&mut *tx)
+    .fetch_one(pool)
     .await?;
     report.push(TableReport {
         table_name: "task_dispatches_monthly_aggregate",
         action: "insert",
-        rows_affected: agg.rows_affected() as i64,
+        rows_affected: row.try_get("months")?,
     });
-
-    let del = sqlx::query(
-        "DELETE FROM task_dispatches \
-         WHERE status = 'completed' \
-           AND completed_at IS NOT NULL \
-           AND completed_at < NOW() - ($1::INT || ' days')::INTERVAL",
-    )
-    .bind(DISPATCH_RETENTION_DAYS)
-    .execute(&mut *tx)
-    .await?;
     report.push(TableReport {
         table_name: "task_dispatches",
         action: "delete",
-        rows_affected: del.rows_affected() as i64,
+        rows_affected: row.try_get("deleted")?,
     });
-    tx.commit().await?;
     Ok(())
 }

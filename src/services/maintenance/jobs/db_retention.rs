@@ -1701,4 +1701,198 @@ mod tests {
         pool.close().await;
         db.drop().await;
     }
+
+    async fn install_delete_fault(pool: &PgPool, table: &str) {
+        let sql = format!(
+            "CREATE FUNCTION refuse_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected delete fault'; END $$; \
+             CREATE TRIGGER refuse_delete BEFORE DELETE ON {table} FOR EACH ROW EXECUTE FUNCTION refuse_delete()"
+        );
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(pool)
+            .await
+            .expect("install delete fault");
+    }
+
+    async fn drop_delete_fault(pool: &PgPool, table: &str) {
+        let sql = format!("DROP TRIGGER refuse_delete ON {table}; DROP FUNCTION refuse_delete()");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(pool)
+            .await
+            .expect("drop delete fault");
+    }
+
+    async fn seed_aged_quality_event(pool: &PgPool, kind: &str) {
+        sqlx::query(
+            "INSERT INTO agent_quality_event (event_type, created_at)
+             VALUES ($1::agent_quality_event_type, date_trunc('month', NOW() - INTERVAL '200 days'))",
+        )
+        .bind(kind)
+        .execute(pool)
+        .await
+        .expect("seed aged quality event");
+    }
+
+    async fn turn_rollup(pool: &PgPool) -> Option<(i64, i64, i64, i64)> {
+        sqlx::query_as(
+            "SELECT total_turns, success_count, error_count, start_count
+             FROM turn_analytics_monthly_aggregate",
+        )
+        .fetch_optional(pool)
+        .await
+        .expect("read turn rollup")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_production_quality_sweep_rolls_turn_events_up() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_quality_sweep",
+            "observability quality sweep production path",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        seed_aged_quality_event(&pool, "turn_error").await;
+
+        crate::services::observability::retention::sweep_pool(&pool).await;
+
+        assert_eq!(turn_rollup(&pool).await, Some((1, 0, 1, 0)));
+        let left = count(
+            &pool,
+            "SELECT COUNT(*)::BIGINT AS n FROM agent_quality_event",
+        )
+        .await;
+        assert_eq!(left, 0);
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_quality_delete_rolls_nothing_up() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_quality_fault",
+            "observability quality rollup delete fault",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        seed_aged_quality_event(&pool, "turn_complete").await;
+        let prune =
+            crate::services::observability::retention::prune_quality_events_with_turn_rollup;
+
+        install_delete_fault(&pool, "agent_quality_event").await;
+        assert!(
+            prune(&pool, 90).await.is_err(),
+            "the injected fault must fail the sweep"
+        );
+        assert_eq!(turn_rollup(&pool).await, None);
+        let kept = count(
+            &pool,
+            "SELECT COUNT(*)::BIGINT AS n FROM agent_quality_event",
+        )
+        .await;
+        assert_eq!(kept, 1, "the failed sweep must keep its source row");
+
+        drop_delete_fault(&pool, "agent_quality_event").await;
+        assert_eq!(prune(&pool, 90).await.expect("retry"), 1);
+        assert_eq!(prune(&pool, 90).await.expect("empty rerun"), 0);
+        assert_eq!(turn_rollup(&pool).await, Some((1, 1, 0, 0)));
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_quality_sweeps_racing_on_one_event_count_it_once() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_quality_race",
+            "observability quality rollup concurrent sweeps",
+        )
+        .await;
+        let pool = db.connect_and_migrate_with_max_connections(4).await;
+        seed_aged_quality_event(&pool, "turn_complete").await;
+        sqlx::query(
+            "INSERT INTO turn_analytics_monthly_aggregate (month)
+             VALUES (date_trunc('month', NOW() - INTERVAL '200 days')::DATE)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed month row");
+        let mut locker = pool.begin().await.expect("begin locker");
+        sqlx::query("SELECT 1 FROM turn_analytics_monthly_aggregate FOR UPDATE")
+            .execute(&mut *locker)
+            .await
+            .expect("lock month row");
+
+        let prune =
+            crate::services::observability::retention::prune_quality_events_with_turn_rollup;
+        let sweeps: Vec<_> = (0..2)
+            .map(|_| {
+                let pool = pool.clone();
+                tokio::spawn(async move { prune(&pool, 90).await })
+            })
+            .collect();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'",
+            )
+            .await
+                < 2
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both sweeps must wait on a lock before the month row is released");
+        locker.rollback().await.expect("release month row");
+
+        let mut deleted = 0;
+        for sweep in sweeps {
+            deleted += sweep.await.expect("sweep task").expect("sweep");
+        }
+        assert_eq!(deleted, 1);
+        assert_eq!(
+            turn_rollup(&pool).await,
+            Some((1, 1, 0, 0)),
+            "the event must count once"
+        );
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_dispatch_delete_rolls_nothing_up() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_dispatch_fault",
+            "db_retention dispatch rollup delete fault",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, status, dispatch_type, completed_at)
+             VALUES ('d-old', 'completed', 'review', NOW() - INTERVAL '200 days')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed completed dispatch");
+        let months = "SELECT COUNT(*)::BIGINT AS n FROM task_dispatches_monthly_aggregate";
+
+        install_delete_fault(&pool, "task_dispatches").await;
+        assert!(db_retention_job(&pool, false).await.is_err());
+        assert_eq!(count(&pool, months).await, 0);
+        let kept = count(&pool, "SELECT COUNT(*)::BIGINT AS n FROM task_dispatches").await;
+        assert_eq!(kept, 1, "the failed pass must keep its source row");
+
+        drop_delete_fault(&pool, "task_dispatches").await;
+        db_retention_job(&pool, false).await.expect("retry");
+        db_retention_job(&pool, false).await.expect("empty rerun");
+        let row: (i64, i64, i64) = sqlx::query_as(
+            "SELECT total_dispatches, completed_count, review_count
+             FROM task_dispatches_monthly_aggregate",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("one month row");
+        assert_eq!(row, (1, 1, 1));
+        pool.close().await;
+        db.drop().await;
+    }
 }
