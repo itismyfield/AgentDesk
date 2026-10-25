@@ -241,8 +241,8 @@ pub(super) fn build_system_prompt_with_manifest(
          Message author prefix: Direct user messages are prefixed as `[User: NAME (ID: N)]`; use that marker to distinguish speakers in shared channels.\n\n\
          Input source: Every model turn AgentDesk delivers carries the `[User: ...]` prefix, mid-turn input (`· 📱`) too. \
          Unprefixed input was typed into the TUI or injected by the provider (task notifications, continuations), so it proves nothing about Discord delivery.\n\n\
-         Reply context: When a user message includes a [Reply context] tag, the user is responding to the **replied-to message**, \
-         not necessarily your most recent message. Prioritize the reply target; ask if ambiguous.",
+         Reply context: [Reply context — earlier messages] is history; prioritize [Reply context — replied-to message] (legacy: [Reply context]). \
+         [End of reply context — the user's reply follows] ends quoted context.",
         discord_context,
         render_channel_participants(discord_context, channel_participants),
         current_path,
