@@ -201,7 +201,12 @@ fn preview_caps_reads_at_128k_with_an_oversized_record_and_uses_latest_title() {
     }
     impl Seek for Meter {
         fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-            self.cursor.seek(pos)
+            let snapshot = self.cursor.seek(pos)?;
+            if matches!(pos, SeekFrom::End(0)) {
+                let grown_len = self.cursor.get_ref().len() + 2 * WINDOW;
+                self.cursor.get_mut().resize(grown_len, b'x');
+            }
+            Ok(snapshot)
         }
     }
     let mut bytes =
@@ -215,7 +220,7 @@ fn preview_caps_reads_at_128k_with_an_oversized_record_and_uses_latest_title() {
     let preview = read_preview(&mut meter).unwrap();
     assert_eq!(preview.title, "new");
     assert!(preview.tui);
-    assert_eq!(meter.read, 2 * WINDOW);
+    assert_eq!(meter.read, 128 * 1024);
 }
 
 #[test]
