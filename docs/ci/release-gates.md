@@ -187,6 +187,10 @@ job 하나가 판정한다.
   known-flaky 재시도도 publisher를 거울 job으로 보지 않아 `no-op:unlisted-failure`로 끝난다(지금 허용 목록은 비어 있다).
   운영자가 그 실행의 **Re-run failed jobs**로 publisher를 다시 돌린다. 9개 context가 in_progress·failure로 남아 있는
   동안 머지는 막힌다.
+- **새 SHA로 복구**: 같은 SHA에 publisher의 API check와 native check가 함께 남거나(publisher 도입·되돌리기 직후),
+  옛 실행의 success PATCH가 새 실행보다 늦게 도착했을 수 있으면, 같은 SHA의 Re-run 결과로 머지를 판단하지 않는다.
+  그 PR에 새 커밋(빈 커밋 가능: `git commit --allow-empty`)을 push해 SHA를 바꾸고, 새 실행의 9개 결과로 판단한다.
+  되돌리기 검증도 revert를 포함한 새 실행으로 한다. 옛 run의 Re-run은 원래 SHA와 workflow를 다시 쓴다.
 
 ## 2. Path Filter Policy
 

@@ -188,7 +188,8 @@ elif method == "PATCH":
     run.update(body)
 else:
     name = path.split("check_name=")[1].split("&")[0].replace("%20", " ").replace("%28", "(").replace("%29", ")")
-    run = {{"check_runs": [r for r in state["runs"] if r["name"] == name]}}
+    listing = [r for r in state["runs"] if r["name"] == name]
+    run = {{"total_count": len(listing), "check_runs": listing}}
 json.dump(state, open(state_path, "w"))
 print(json.dumps(run))
 """
@@ -312,6 +313,20 @@ class PublishRequiredContexts(unittest.TestCase):
                 self.assertEqual(rc, 1)
                 self.assertEqual({n for n, c in api.conclusions().items() if c == "failure"}, {"Lint"})
                 self.assertIn("is not provably older", out)
+        # A later candidate the listing does not identify must not be skipped as some other check.
+        unidentified = {
+            "null entry": lambda name, mine: [mine] + ([None] if name == "Lint" else []),
+            "app missing": lint(other(30, app=None)),
+            "app id missing": lint(other(30, app={})),
+            "head_sha missing": lint(other(30, head_sha=None)),
+            "name missing": lint(other(30, name=None)),
+        }
+        for label, listing in unidentified.items():
+            with self.subTest(label):
+                rc, api, out = self.publish(api=FakeChecks(listing=listing))
+                self.assertEqual(rc, 1)
+                self.assertEqual({n for n, c in api.conclusions().items() if c == "failure"}, {"Lint"})
+                self.assertIn("cannot be identified", out)
         for label, own in (("own run missing", False), ("own start missing", {"started_at": None}),
                            ("own run of another attempt", {"external_id": "77:2:" + HEAD})):
             with self.subTest(label):
@@ -321,7 +336,9 @@ class PublishRequiredContexts(unittest.TestCase):
                 self.assertEqual({n for n, c in api.conclusions().items() if c == "failure"}, {"Lint"})
                 self.assertIn("own check run is missing", out)
         for label, listing in (("older run", lint(other(-1))), ("other app later", lint(other(30, app={"id": 1}))),
-                               ("other head later", lint(other(30, head_sha="c" * 40)))):
+                               ("other head later", lint(other(30, head_sha="c" * 40))),
+                               ("older native check without external_id", lint(other(-1, external_id=None))),
+                               ("older native check with empty external_id", lint(other(-1, external_id="")))):
             with self.subTest(label):
                 self.assertEqual(self.publish(api=FakeChecks(listing=listing))[0], 0)
 
@@ -343,6 +360,19 @@ class PublishRequiredContexts(unittest.TestCase):
             with self.subTest(label):
                 rc, api, _ = self.publish(api=Listing(body))
                 self.assertEqual((rc, api.conclusions()["Lint"]), (1, "failure"))
+        # A listing that collected fewer runs than it reports, or reports no count, is incomplete.
+        for label, total in (("more than collected", 2), ("missing", None), ("not a number", "1")):
+            with self.subTest(total_count=label):
+                api = FakeChecks()
+
+                def counted(method, path, body=None, total=total):
+                    done = api(method, path, body)
+                    if method == "GET" and "check_name=Lint&" in path:
+                        done = {key: value for key, value in {**done, "total_count": total}.items() if value is not None}
+                    return done
+                rc = nreq.publish_required_contexts({**ENV, "NEEDS_JSON": needs_with()}, api=counted, print_=lambda _: None)
+                self.assertEqual(rc, 1)
+                self.assertEqual({n for n, c in api.conclusions().items() if c == "failure"}, {"Lint"})
         rc, api, out = self.publish(api=Listing(nreq.PublishError("503")))
         self.assertEqual((rc, api.conclusions()), (1, dict.fromkeys(EXPECTED, "failure")))
         self.assertIn("publisher aborted", api.patches[0][3])

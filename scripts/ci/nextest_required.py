@@ -153,28 +153,34 @@ def superseded(api, repo, head, name, own, external_id):
     """Why this run must not publish success for `name`, or None.
 
     Another run's check of the same name, app and head that started at or after ours (a tie has no
-    order) supersedes it; an incomplete listing is not proof that none does. API errors propagate.
+    order) supersedes it; an incomplete listing or an entry it cannot identify is not proof that none
+    does. Other checks need no external_id (native ones have none). API errors propagate.
     """
     runs, page = [], 1
     while True:
         body = api("GET", f"repos/{repo}/commits/{head}/check-runs?check_name={quote(name)}"
                    f"&filter=all&per_page=100&page={page}")
         batch = body.get("check_runs") if isinstance(body, dict) else None
-        if not isinstance(batch, list):
+        if not isinstance(batch, list) or not isinstance(body.get("total_count"), int):
             return "check run listing unreadable"
         runs += batch
         if len(batch) < 100:
             break
         page += 1
+    if len(runs) < body["total_count"]:
+        return f"check run listing incomplete: {len(runs)} of {body['total_count']}"
     mine = [r for r in runs if isinstance(r, dict) and r.get("id") == own["id"]]
     if len(mine) != 1 or mine[0].get("external_id") != external_id or _started(mine[0]) is None:
         return "own check run is missing from the listing"
     start = _started(mine[0])
     for run in runs:
-        if not isinstance(run, dict) or run.get("id") == own["id"]:
+        if isinstance(run, dict) and run.get("id") == own["id"]:
             continue
-        app = run.get("app") if isinstance(run.get("app"), dict) else {}
-        if run.get("name") != name or run.get("head_sha") != head or app.get("id") != ACTIONS_APP_ID:
+        app = run.get("app") if isinstance(run, dict) else None
+        if not isinstance(app, dict) or not isinstance(app.get("id"), int) \
+                or not isinstance(run.get("name"), str) or not isinstance(run.get("head_sha"), str):
+            return "a check run in the listing cannot be identified"
+        if run["name"] != name or run["head_sha"] != head or app["id"] != ACTIONS_APP_ID:
             continue
         other = _started(run)
         if other is None or run.get("external_id") == external_id or other >= start:

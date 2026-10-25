@@ -1154,13 +1154,13 @@ unless job.is_a?(Hash)
   exit 1
 end
 # Dependency or toolchain changes on main, plus a daily run inside the 7-day cache eviction window.
-trigger = warm[true] || warm["on"]
-push = trigger.is_a?(Hash) ? trigger["push"] : nil
+trigger = (warm[true] || warm["on"]).then { |value| value.is_a?(Hash) ? value : {} }
+push = trigger["push"].is_a?(Hash) ? trigger["push"] : {}
 warm_paths = ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml", ".cargo/config", warm_path]
-errors << "#{warm_path}: push must run on main only" unless push.is_a?(Hash) && push["branches"] == ["main"]
-errors << "#{warm_path}: push paths must include #{warm_paths.inspect}" unless push.is_a?(Hash) && (warm_paths - Array(push["paths"])).empty?
-errors << "#{warm_path}: must keep exactly one daily schedule" unless trigger.is_a?(Hash) && Array(trigger["schedule"]).length == 1
-errors << "#{warm_path}: must keep workflow_dispatch" unless trigger.is_a?(Hash) && trigger.key?("workflow_dispatch")
+errors << "#{warm_path}: triggers must be exactly push, schedule and workflow_dispatch" unless trigger.keys.map(&:to_s).sort == %w[push schedule workflow_dispatch]
+errors << "#{warm_path}: push must run on main only, filtered by paths alone" unless push.keys.sort == %w[branches paths] && push["branches"] == ["main"]
+errors << "#{warm_path}: push paths must be exactly #{warm_paths.inspect}" unless push["paths"] == warm_paths
+errors << "#{warm_path}: must keep exactly one daily schedule (cron \"30 16 * * *\")" unless trigger["schedule"] == [{"cron" => "30 16 * * *"}]
 # The PR side is READ_ONLY on purpose, so these are asserted directly rather than compared.
 errors << "#{warm_path}: sccache must write the shared GHA cache" unless warm.dig("env", "SCCACHE_GHA_ENABLED") == "true" && warm.dig("env", "SCCACHE_GHA_RW_MODE") == "READ_WRITE"
 errors << "#{ci_main_path}: windows_cache_warm moved to #{warm_path}; a second warm would double the Windows minutes" if YAML.load_file(ci_main_path).fetch("jobs", {}).key?("windows_cache_warm")
