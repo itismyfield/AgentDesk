@@ -5,10 +5,14 @@
 Source issue: #1789
 Epic: #1788
 
-`src/services/api_friction.rs` is currently 1,709 lines: about 1,090 lines of
-production marker capture, PG persistence, memory sync, pattern aggregation,
-GitHub issue creation, and issue-body rendering followed by a historical block
-of SQLite-only inline tests that has since been retired.
+At planning time `src/services/api_friction.rs` (removed) was 1,709 lines: about
+1,090 lines of production marker capture, PG persistence, memory sync, pattern
+aggregation, GitHub issue creation, and issue-body rendering followed by a
+historical block of SQLite-only inline tests that has since been retired.
+
+Status: the extraction has landed. The code now lives in the
+`src/services/api_friction/` module directory; the subdomain map below names
+the file and entry symbol each proposed module became.
 
 ## Scope Notes
 
@@ -24,37 +28,37 @@ of SQLite-only inline tests that has since been retired.
   add a SQLite fallback.
 - Keep GitHub issue creation, `api_friction_issues` upserts, and memory status
   writes as best-effort side effects with the current failure reporting.
-- `src/services/api_friction.rs` should end as a small facade/re-export module,
-  not as the long-term home for parser, repository, reporting, or processor
+- `src/services/api_friction/mod.rs` stays a small facade/re-export module,
+  not the long-term home for parser, repository, reporting, or processor
   behavior.
 
 ## Current Consumers
 
 | Consumer | API surface |
 | --- | --- |
-| `src/services/discord/turn_bridge/mod.rs` | Extracts markers from provider responses and records captured reports with dispatch/session context. |
-| `src/server/mod.rs` | Runs repeated-pattern processing from the background scheduler. |
-| Inline tests in `src/services/api_friction.rs` | Cover parsing, PG aggregation, Memento sync, PG-only writes, GitHub issue creation, and bigint issue context. |
+| `src/services/discord/turn_bridge/post_loop_finalize.rs` (`extract_api_friction_reports`), `src/services/discord/turn_bridge/completion_postlude.rs` (`record_api_friction_reports`) | Extracts markers from provider responses and records captured reports with dispatch/session context. |
+| `src/server/mod.rs` (`process_api_friction_patterns`) | Runs repeated-pattern processing from the background scheduler. |
+| Inline tests in `src/services/api_friction/issue_body.rs` | Cover issue body rendering. The planned per-owner test modules were not recreated. |
 
 ## Subdomain Map
 
-| Proposed module | Current source ranges | Approx. prod LOC | Approx. test LOC | Responsibility | Main consumers |
+| Proposed module | Landed in (path + symbol) | Approx. prod LOC | Approx. test LOC | Responsibility | Main consumers |
 | --- | --- | ---: | ---: | --- | --- |
-| `api_friction::mod` facade plus `types` | `src/services/api_friction.rs:1` through `src/services/api_friction.rs:157` | 120 retained | 0 | Module declarations, stable re-exports, constants, and public DTOs shared by parser, capture, aggregation, and processing. | `turn_bridge`, `server::mod`, owner modules. |
-| `api_friction::test_support` | `src/services/api_friction.rs:1100` through `src/services/api_friction.rs:1247` | 0 | 150 | PG test lifecycle, mock `gh` issue creation, env restoration, and local Memento HTTP response helpers. | Per-owner API friction tests. |
-| `api_friction::parser` | `src/services/api_friction.rs:31`, `src/services/api_friction.rs:158` through `src/services/api_friction.rs:188`, `src/services/api_friction.rs:415` through `src/services/api_friction.rs:533` | 190 | 35 | Raw marker DTO, marker extraction, report validation, response cleanup, field normalization, keyword collection, and truncation. | `turn_bridge`, parser tests. |
-| `api_friction::source_context` | `src/services/api_friction.rs:124`, `src/services/api_friction.rs:544` through `src/services/api_friction.rs:630` | 95 | 55 | Dispatch/session source lookup, repo/card/issue/task/agent attribution, and bigint GitHub issue-number handling. | Event storage, Memento request builder, evidence tests. |
-| `api_friction::event_store` | `src/services/api_friction.rs:139`, `src/services/api_friction.rs:631` through `src/services/api_friction.rs:733`, `src/services/api_friction.rs:797` through `src/services/api_friction.rs:828` | 145 | 90 | Event row preparation, fingerprint generation, JSON payload/keyword serialization, and transactional PG insertion. | Capture flow, pattern aggregation, PG-only write tests. |
-| `api_friction::memory_sync` | `src/services/api_friction.rs:133`, `src/services/api_friction.rs:189` through `src/services/api_friction.rs:263`, `src/services/api_friction.rs:534` through `src/services/api_friction.rs:543`, `src/services/api_friction.rs:734` through `src/services/api_friction.rs:796`, `src/services/api_friction.rs:829` through `src/services/api_friction.rs:849` | 210 | 210 | Public record orchestration, Memento backend resolution, Memento request construction, token usage accumulation, and per-event memory status updates. | `turn_bridge`, Memento sync tests. |
-| `api_friction::patterns` | `src/services/api_friction.rs:77`, `src/services/api_friction.rs:850` through `src/services/api_friction.rs:965` | 130 | 65 | Repeated-pattern aggregation, minimum-count policy, API limit clamping, latest event row mapping, and existing issue metadata loading. | Processor, scheduler, aggregation tests. |
-| `api_friction::issue_body` | `src/services/api_friction.rs:966` through `src/services/api_friction.rs:1091` | 130 | 50 | Evidence lookup, evidence DTO, issue body rendering, fallback wording, and evidence cap. | GitHub issue processor, reporting tests. |
-| `api_friction::processor` | `src/services/api_friction.rs:96` through `src/services/api_friction.rs:122`, `src/services/api_friction.rs:264` through `src/services/api_friction.rs:414` | 180 | 80 | Public repeated-pattern processor, existing-issue skip policy, GitHub issue creation, `api_friction_issues` success/failure upserts, and process summary DTOs. | `server::mod`, scheduler, GitHub issue tests. |
-| Owner test modules | `src/services/api_friction.rs:1248` through `src/services/api_friction.rs:1709` | 0 | 460 | Parser, pattern aggregation, Memento sync, PG-only write, GitHub issue creation, and source-context bigint tests moved beside owners. | Extracted owner modules. |
+| `api_friction::mod` facade plus `types` | `src/services/api_friction/mod.rs` (re-exports), `src/services/api_friction/core.rs` (`ApiFrictionRecordContext`, `ApiFrictionRecordResult`) | 120 retained | 0 | Module declarations, stable re-exports, constants, and public DTOs shared by parser, capture, aggregation, and processing. | `turn_bridge`, `server::mod`, owner modules. |
+| `api_friction::test_support` | Not created; no shared test-support module exists | 0 | 150 | PG test lifecycle, mock `gh` issue creation, env restoration, and local Memento HTTP response helpers. | Per-owner API friction tests. |
+| `api_friction::parser` | `src/services/api_friction/markers.rs` (`extract_api_friction_reports`, `ApiFrictionReport`) | 190 | 35 | Raw marker DTO, marker extraction, report validation, response cleanup, field normalization, keyword collection, and truncation. | `turn_bridge`, parser tests. |
+| `api_friction::source_context` | `src/services/api_friction/storage.rs` (`SourceContext`, `load_dispatch_source_context_pg`) | 95 | 55 | Dispatch/session source lookup, repo/card/issue/task/agent attribution, and bigint GitHub issue-number handling. | Event storage, Memento request builder, evidence tests. |
+| `api_friction::event_store` | `src/services/api_friction/storage.rs` (`store_api_friction_events_pg`, `build_fingerprint`) | 145 | 90 | Event row preparation, fingerprint generation, JSON payload/keyword serialization, and transactional PG insertion. | Capture flow, pattern aggregation, PG-only write tests. |
+| `api_friction::memory_sync` | `src/services/api_friction/core.rs` (`record_api_friction_reports`), `src/services/api_friction/memory_sync.rs` (`sync_event_memory_pg`, `build_memento_request`) | 210 | 210 | Public record orchestration, Memento backend resolution, Memento request construction, token usage accumulation, and per-event memory status updates. | `turn_bridge`, Memento sync tests. |
+| `api_friction::patterns` | `src/services/api_friction/patterns.rs` (`load_pattern_candidates_pg`, `API_FRICTION_MIN_REPEAT_COUNT`) | 130 | 65 | Repeated-pattern aggregation, minimum-count policy, API limit clamping, latest event row mapping, and existing issue metadata loading. | Processor, scheduler, aggregation tests. |
+| `api_friction::issue_body` | `src/services/api_friction/issue_body.rs` (`build_issue_body_pg`) | 130 | 50 | Evidence lookup, evidence DTO, issue body rendering, fallback wording, and evidence cap. | GitHub issue processor, reporting tests. |
+| `api_friction::processor` | `src/services/api_friction/issues.rs` (`process_api_friction_patterns`) | 180 | 80 | Public repeated-pattern processor, existing-issue skip policy, GitHub issue creation, `api_friction_issues` success/failure upserts, and process summary DTOs. | `server::mod`, scheduler, GitHub issue tests. |
+| Owner test modules | Not done; only `issue_body.rs` carries inline tests | 0 | 460 | Parser, pattern aggregation, Memento sync, PG-only write, GitHub issue creation, and source-context bigint tests moved beside owners. | Extracted owner modules. |
 
 ## Recommended Extraction Order
 
 1. #1830 `api_friction: create facade module shell and shared test support`
-   - Required first because Rust cannot keep `src/services/api_friction.rs`
+   - Required first because Rust cannot keep `src/services/api_friction.rs` (removed)
      and `src/services/api_friction/` as the same module.
    - Acceptance focus: stable public API, no runtime behavior changes, shared
      test helpers available for later owner modules.

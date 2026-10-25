@@ -197,8 +197,8 @@ On `onTick`, scans `backlog` cards without `assigned_agent_id`:
 - Match to kanban cards by `github_issue_number`
 - Auto-transition cards when issues are closed on GitHub
 
-### DoD Mirroring (dod.rs)
-- Sync card's `deferred_dod_json` checklist to GitHub issue comments
+### DoD Mirroring (removed)
+- The GitHub mirror in `dod.rs` (removed) is gone; a card's `deferred_dod_json` checklist is edited through `src/server/routes/kanban.rs` (`apply_deferred_dod_changes`)
 
 ### Auto-Triage (triage.rs)
 - New issues → auto-create kanban cards
@@ -208,18 +208,18 @@ On `onTick`, scans `backlog` cards without `assigned_agent_id`:
 
 ## Session Runtime and Recovery
 
-`src/runtime.rs`, `src/runtime_layout.rs`, `src/supervisor/mod.rs`, and `src/services/discord/runtime_bootstrap.rs` keep provider runtimes recoverable across restarts.
+`src/services/session_host/`, `src/runtime_layout/`, `src/supervisor/mod.rs`, and `src/services/discord/runtime_bootstrap.rs` keep provider runtimes recoverable across restarts.
 
 ### Runtime Abstraction
 
-- `SessionRuntime` hides backend-specific session operations behind a common interface.
-- `TmuxRuntime` is the current production backend and provides session naming, liveness checks, input readiness, termination, and death diagnostics.
+- `InteractiveSessionHost` (`src/services/session_host/traits.rs`) hides backend-specific session operations behind a common interface.
+- `TmuxHost` (`src/services/session_host/tmux_host.rs`) is the tmux backend; `HerdrHost` and `ProcessHost` implement the same trait.
 
 ### Runtime Layout and Managed Assets
 
 - `ensure_runtime_layout()` migrates legacy runtime layout into the managed root, normalizes memory backend paths, and syncs shared prompt/config files.
 - `sync_managed_skills()` deploys provider/workspace skill links from the managed skills manifest.
-- Shared knowledge, shared memory, and long-term memory paths resolve centrally from `src/runtime_layout.rs`.
+- Shared knowledge, shared memory, and long-term memory paths resolve centrally from `src/runtime_layout/paths.rs`.
 
 ### Supervision and Orphan Recovery
 

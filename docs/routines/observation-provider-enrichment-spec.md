@@ -4,7 +4,7 @@ schema_version: "2"
 status: "p0-implemented"
 topic_slug: "agentdesk-observation-provider-enrichment"
 topic_folder: "agentdesk-observation-provider-enrichment"
-linked_prd: "./agentdesk-observation-provider-enrichment-prd.md"
+linked_prd: "./observation-provider-enrichment-prd.md"
 traceability_mode: "req-task-test"
 generated_by: "codex"
 created_at: "2026-05-02"
@@ -18,7 +18,7 @@ p0_pr: "https://github.com/itismyfield/AgentDesk/pull/1497"
 
 ## Linked Documents
 
-- PRD: [agentdesk-observation-provider-enrichment-prd.md](./agentdesk-observation-provider-enrichment-prd.md)
+- PRD: [observation-provider-enrichment-prd.md](./observation-provider-enrichment-prd.md)
 
 ## State
 
@@ -82,7 +82,7 @@ p0_pr: "https://github.com/itismyfield/AgentDesk/pull/1497"
 
 ### P1
 
-> **연관 문서**: recommender saturation detection 및 3-routine pipeline (detector, executor) 구현은 별도 PRD/spec으로 분리됨: [agentdesk-automation-candidate-pipeline](../agentdesk-automation-candidate-pipeline/agentdesk-automation-candidate-pipeline-prd.md)
+> **연관 문서**: recommender saturation detection 및 3-routine pipeline (detector, executor) 구현은 별도 PRD/spec으로 분리됨: [automation-candidate-pipeline-prd.md](./automation-candidate-pipeline-prd.md)
 
 - [TSK-P1-001] [ ] prompt pattern source를 Rust provider 또는 service layer로 설계한다. transcript source는 `GET /api/agents/{id}/transcripts?limit=50` 또는 내부 service 호출만 사용한다.
 - [TSK-P1-002] [ ] memento/local-memory source 전략을 결정한다. real memento bridge가 필요하면 bridge 작업을 별도 선행 PR로 분리한다.
