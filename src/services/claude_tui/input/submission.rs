@@ -21,6 +21,8 @@ fn send_inner(
     transcript: Option<&std::path::Path>,
 ) -> Result<(), SubmissionError> {
     let selected = guarded::capture_request(session)?;
+    // An invalid prompt fails here, before any readiness wait or key.
+    let actions = plan_prompt_submit(prompt)?;
     // A fresh pane may not have drawn its input box yet, so no key goes before it is ready.
     let fresh = matches!(readiness, PromptReadinessKind::FreshTurn);
     if fresh {
@@ -41,7 +43,6 @@ fn send_inner(
             admit_automatic_write(session, readiness)
         })?;
     }
-    let actions = plan_prompt_submit(prompt)?;
     let ready = match transcript {
         _ if fresh => Ok(()),
         Some(path) => wait_for_prompt_ready_or_idle_transcript(session, readiness, cancel, path),
