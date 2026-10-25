@@ -14,7 +14,7 @@ use super::supervisor_relay::SessionBoundRelayAckTarget;
 /// non-failure arms fold 1:1 onto the cross-actor 3-way `DeliveryOutcome`
 /// (`Delivered`, `NotDelivered`); every failure/unconfirmed arm collapses to
 /// `DeliveryOutcome::Unknown` for the resend decision (see
-/// [`session_bound_ack_delivery_outcome`]) but stays distinct here so the
+/// `session_bound_ack_delivery_outcome`) but stays distinct here so the
 /// flight-recorder / metrics keep exact provenance. `NotAttempted` (#3579) is
 /// the benign watcher-owned non-attempt sentinel — distinct from
 /// `MissingTarget` (ack-wait ran but had no target) so metrics can exclude it,
