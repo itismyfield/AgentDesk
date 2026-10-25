@@ -425,6 +425,8 @@ mod fresh_resume;
 pub(crate) use fresh_resume::work_for_tests;
 mod automatic;
 mod automatic_age;
+mod codex_age;
+pub(crate) mod codex_retention;
 mod transition;
 mod transition_snapshot;
 
@@ -738,7 +740,9 @@ pub(crate) fn undelivered_reads_for_test() -> usize {
 #[cfg(test)]
 pub(crate) use test_support::exercise_held_actor_for_tests;
 #[cfg(all(test, unix))]
-pub(crate) use transition::scoped_tests::exercise_scope_waiting_job_for_tests;
+pub(crate) use transition::scoped_tests::{
+    exercise_local_retry_retention_for_tests, exercise_scope_waiting_job_for_tests,
+};
 #[cfg(test)]
 pub(crate) use transition::test_hooks as transition_hooks;
 #[cfg(test)]

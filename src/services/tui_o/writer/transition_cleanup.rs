@@ -12,7 +12,8 @@ use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::cleanup_witness::CleanupWitness;
 use crate::services::tui_o::store::rotation::{Rotation, Successor};
 use crate::services::tui_o::store::spool::{
-    Cursor, ExecutionEnd, TransitionCleanup, VerifiedEnd, source_key,
+    Cursor, ExecutionEnd, RetentionBasisV1, RetentionClaimV1, TransitionCleanup, VerifiedEnd,
+    source_key,
 };
 
 #[path = "transition_observe.rs"]
@@ -88,6 +89,8 @@ pub(crate) struct Snapshot {
 pub(crate) enum Termination {
     /// The operator checked the host and pane and states the basis.
     Confirmed(ExecutionEnd),
+    /// Automatic source-specific retention; never a provider End+Seal proof.
+    Retention(Box<RetentionClaimV1>),
     /// Inferred without checking the execution, such as from a configuration switch.
     Implied(String),
     Unread(String),
@@ -294,7 +297,15 @@ fn check(
             Some(_) => {}
         }
     }
-    if snapshot.provider == ShadowProvider::Codex {
+    if snapshot.provider == ShadowProvider::Codex
+        && !matches!(request.termination, Some(Termination::Retention(_)))
+    {
+        return Err(refuse(CodexDeferred));
+    }
+    #[cfg(test)]
+    if snapshot.provider == ShadowProvider::Codex
+        && super::actor::codex_retention::mutant("consumer_deferred")
+    {
         return Err(refuse(CodexDeferred));
     }
     match &snapshot.home {
@@ -319,7 +330,14 @@ fn check(
     if !successor.is_some_and(captured) {
         return Err(refuse(SuccessorUncaptured));
     }
-    let ended = ended(request, hop_seq, pane.as_deref()).map_err(unclear)?;
+    let ended = if snapshot.provider == ShadowProvider::Codex {
+        retention_claim(snapshot, request, key, next, hop_seq, pane.as_deref())
+            .map_err(unclear)?
+            .end
+            .clone()
+    } else {
+        ended(request, hop_seq, pane.as_deref()).map_err(unclear)?
+    };
     nothing_owed(snapshot, key)?;
     let fingerprint = settled_file(cursor, facts, reader)?;
     Ok(Verdict::Eligible(Box::new(TransitionCleanup {
@@ -335,7 +353,70 @@ fn check(
             fingerprint,
         },
         ended,
+        retention: None,
     })))
+}
+
+/// Checks the claim's binding to a complete snapshot; the final actor also rebuilds its history basis.
+pub(crate) fn retention_claim<'a>(
+    snapshot: &Snapshot,
+    request: &'a Request,
+    key: &str,
+    next: &Successor,
+    hop_seq: u64,
+    pane: Option<&str>,
+) -> Result<&'a RetentionClaimV1, Unclear> {
+    use super::codex_snapshot::Observation;
+    let Some(Termination::Retention(claim)) = &request.termination else {
+        return Err(Unclear::NoTermination);
+    };
+    let Some(complete @ Observation::Complete(current)) = &snapshot.codex else {
+        return Err(Unclear::TerminationUnread(
+            "Codex observation is unknown".into(),
+        ));
+    };
+    let identity = scope::codex::identity(complete).map_err(Unclear::TerminationUnread)?;
+    let basis = match &claim.basis {
+        RetentionBasisV1::SamePane => pane == Some(current.target.tmux.as_str()),
+        RetentionBasisV1::LocalHistorical { context_digest } => {
+            pane != Some(current.target.tmux.as_str()) && !context_digest.is_empty()
+        }
+    };
+    if snapshot.provider != ShadowProvider::Codex
+        || claim.provider != ShadowProvider::Codex
+        || claim.version != 1
+        || claim.channel != snapshot.channel
+        || claim.channel != request.channel
+        || source_key(&claim.old) != key
+        || claim.successor != next.source
+        || claim.hop_seq != hop_seq
+        || claim.end.first_seq != hop_seq
+        || claim.end.last_seq != hop_seq
+        || pane != Some(claim.end.pane.as_str())
+        || claim.end.host != current.target.host
+        || claim.end.basis.trim().is_empty()
+        || claim.observation != identity
+        || claim.binding_seq == 0
+        || claim.binder_seq < claim.binding_seq
+        || claim.binder_seq >= hop_seq
+        || claim.binder_seq > current.tail
+        || claim.old == claim.successor
+        || current.held.iter().any(|held| {
+            held.path == claim.old.path
+                || held.session_id == claim.old.session_id
+                || (held.dev, held.ino) == (claim.old.dev, claim.old.ino)
+        })
+        || claim.binder_nonce.trim().is_empty()
+        || claim.binder_nonce == current.target.nonce
+        || !basis
+        || !snapshot
+            .cursors
+            .iter()
+            .any(|cursor| cursor.source == claim.old)
+    {
+        return Err(Unclear::TerminationIncomplete);
+    }
+    Ok(claim)
 }
 
 fn unclear(reason: Unclear) -> Verdict {
@@ -409,7 +490,9 @@ fn drained(reader: &ReaderView, next: &Successor, cursor: &Cursor) -> Result<(),
 fn ended(request: &Request, hop_seq: u64, pane: Option<&str>) -> Result<ExecutionEnd, Unclear> {
     let end = match &request.termination {
         None => return Err(Unclear::NoTermination),
-        Some(Termination::Implied(_)) => return Err(Unclear::ImpliedTermination),
+        Some(Termination::Implied(_) | Termination::Retention(_)) => {
+            return Err(Unclear::ImpliedTermination);
+        }
         Some(Termination::Unread(detail)) => {
             return Err(Unclear::TerminationUnread(detail.clone()));
         }

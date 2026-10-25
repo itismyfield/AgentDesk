@@ -1,5 +1,7 @@
 # OpenCode Usability Parity Spec
 
+<!-- doc-path-refs: external packages/opencode/ -->
+
 > Status: PR #95 implementation spec and status record
 >
 > Last refreshed: 2026-07-31 (against `main` @ `8a2e18726`).
@@ -47,8 +49,8 @@ execution switch:
 
 - simple calls: `src/services/provider_exec.rs:124-126`
 - structured/streaming calls: `src/services/provider_exec.rs:243-256`
-- Discord router calls: `src/services/discord/router/message_handler.rs:1461`
-  and `:3389`
+- Discord router calls: `src/services/discord/router/message_handler/provider_dispatch.rs`
+  (`execute`, `LegacyDispatchKind::OpenCode` arm)
 
 ### OpenCode runtime path
 
@@ -141,14 +143,14 @@ it is a useful implementation reference.
 
 The common formatting entry point is:
 
-- `src/services/discord/formatting.rs:1915`
+- `src/services/discord/formatting/tool_markdown.rs`
   `format_for_discord_with_provider(...)`
 
 Today it only applies a provider-specific filter for Codex:
 
-- `src/services/discord/formatting.rs:1880` defines
+- `src/services/discord/formatting/tool_markdown.rs` defines
   `filter_codex_tool_logs(...)`.
-- `src/services/discord/formatting.rs:1920-1924` calls that filter only for
+- `format_for_discord_with_provider` calls that filter only for
   `ProviderKind::Codex`.
 - all providers then pass through placeholder stripping and mechanical Discord
   formatting.
@@ -197,8 +199,8 @@ The 2026-04-28 code audit found several gaps beyond prompt/output cleanup:
   OpenCode session (`src/services/opencode.rs:197-199`), then disposes and
   kills the OpenCode server after the turn (`src/services/opencode.rs:138-139`).
   Discord callers pass the session id through
-  `src/services/discord/router/message_handler.rs:1461-1474` and
-  `:3389-3402`, so the public capability currently overpromises.
+  `src/services/discord/router/message_handler/provider_dispatch.rs`
+  (`execute`), so the public capability currently overpromises.
 - OpenCode simple execution did not honor the caller's cancellation token:
   `execute_command_simple_cancellable(...)` accepts `_cancel_token` but creates
   a new local token instead (`src/services/opencode.rs:40-55`). The timeout

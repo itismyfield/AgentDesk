@@ -17,7 +17,7 @@
 ### 조항 2. 사용자 가시 상태는 **중립 marker 1개**
 - thinking 진행 중 사용자에게 보이는 단서는 단일 status line `"💭 Thinking..."` (현재 `thinking_status_line()` 반환값) 하나뿐이다.
 - 다국어 변형 금지, 카운트다운/타이머/토큰 수 노출 금지. Discord 메시지 내에 thinking 표식은 최대 1개.
-- `StreamMessage::Thinking` 수신 시 `current_tool_line`을 이 marker로 교체하고, 직전 tool 상태는 `prev_tool_status`에 `finalize_in_progress_tool_status`로 정리(현재 `mod.rs:3511-3518`).
+- `StreamMessage::Thinking` 수신 시 `current_tool_line`을 이 marker로 교체하고, 직전 tool 상태는 `prev_tool_status`에 `finalize_in_progress_tool_status`로 정리(현재 `turn_bridge/stream_loop/content_arms.rs`의 `StreamMessage::Thinking` arm).
 
 ### 조항 3. Thinking은 turn-completion 산정 제외
 - thinking 엔벨로프는 "응답 진행 중" 신호이지 "응답 완료" 신호가 아니다.
@@ -33,10 +33,10 @@
 
 | 조항 | 파일:라인 | 함수/항목 |
 |---|---|---|
-| 1, 2 | `src/services/discord/turn_bridge/mod.rs:1833-1835` | `thinking_status_line()` — 유일한 중립 marker |
-| 1, 4 | `src/services/discord/turn_bridge/mod.rs:1837-1846` | `redacted_thinking_transcript_event()` — summary 무시, content "" |
-| 1, 2 | `src/services/discord/turn_bridge/mod.rs` 의 `StreamMessage::Thinking` 분기 (검색: `redacted_thinking_transcript_event` call site) | marker 교체, transcript push |
-| 3 | `src/services/tui_turn_state.rs:144-155` | `claude_envelope_turn_state` — thinking이 별도 Idle 분류로 매핑되지 않음 |
+| 1, 2 | `src/services/discord/turn_bridge/thinking.rs` | `thinking_status_line()` — 유일한 중립 marker |
+| 1, 4 | `src/services/discord/turn_bridge/thinking.rs` | `redacted_thinking_transcript_event()` — summary 무시, content "" |
+| 1, 2 | `src/services/discord/turn_bridge/stream_loop/content_arms.rs` 의 `StreamMessage::Thinking` 분기 (검색: `redacted_thinking_transcript_event` call site) | marker 교체, transcript push |
+| 3 | `src/services/tui_turn_state.rs` | `claude_envelope_turn_state` — thinking이 별도 Idle 분류로 매핑되지 않음 |
 
 ## 위반 사례 정의 (트랙 A U-6 assertion 근거)
 
