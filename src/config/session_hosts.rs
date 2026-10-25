@@ -1,5 +1,5 @@
-//! `session_hosts`: the channels a Herdr endpoint runs, and the Claude channels whose tmux
-//! sessions open at the guarded geometry. Read once at boot; an empty section changes nothing.
+//! `session_hosts`: the channels a Herdr endpoint runs, and the Claude channels selected for
+//! the guarded submission canary. Read once at boot; an empty section changes nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -38,7 +38,7 @@ impl EndpointMode {
 pub struct SessionHostsConfig {
     #[serde(default, skip_serializing_if = "HerdrSection::is_empty")]
     pub herdr: HerdrSection,
-    /// Claude TUI channels whose new tmux sessions open at the fixed guarded geometry.
+    /// Claude TUI channels selected for the guarded submission canary.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub claude_guard_channels: BTreeSet<u64>,
 }
@@ -367,7 +367,7 @@ pub(crate) fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
     with_boot(|boot| boot.and_then(|boot| boot.herdr_endpoint(channel)).cloned())
 }
 
-/// Whether a Claude tmux launch for the channel opens at the guarded geometry; `None` never does.
+/// Whether the channel is selected for the Claude guarded submission canary; `None` never is.
 pub(crate) fn claude_guarded(channel: Option<u64>) -> bool {
     channel.is_some_and(|channel| with_boot(|boot| boot.is_some_and(|b| b.claude_guarded(channel))))
 }

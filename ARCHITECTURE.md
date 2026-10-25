@@ -3011,9 +3011,7 @@ src/
 │   │   │   ├── availability.rs
 │   │   │   ├── health_probe.rs
 │   │   │   ├── liveness.rs
-│   │   │   ├── session_inventory.rs
-│   │   │   ├── sized.rs
-│   │   │   └── sized_cleanup_tests.rs
+│   │   │   └── session_inventory.rs
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs
