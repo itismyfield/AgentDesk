@@ -4399,6 +4399,7 @@ services::discord::health::relay_auto_heal::refusal_dispatch_tests::redrive_entr
 services::discord::health::relay_auto_heal::retired_redrive_tests::empty_retired_set_keeps_the_legacy_nudge_outcome
 services::discord::health::relay_auto_heal::retired_redrive_tests::empty_retired_set_keeps_the_legacy_reattach_outcome
 services::discord::health::relay_auto_heal::retired_redrive_tests::legacy_request_nudges_its_watcher_owner_slot
+services::discord::health::relay_auto_heal::retired_redrive_tests::redrive_baseline_writer_waits_for_observer_runtime_root
 services::discord::health::relay_auto_heal::retired_redrive_tests::redrive_tree_ignores_only_foreign_death_markers
 services::discord::health::relay_auto_heal::tests::a_fresh_watcher_still_accepts_the_zero_frontier_5943
 services::discord::health::relay_auto_heal::tests::a_freshly_born_turn_resumes_at_its_birth_offset_not_zero_5943
