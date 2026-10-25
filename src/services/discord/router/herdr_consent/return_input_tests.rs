@@ -743,6 +743,9 @@ async fn applied_retry_replays_its_receipt_without_preview_and_reconsents_only_n
                 ..question(&key, &changed, new, 18)
             };
             store().hold(next, now()).unwrap();
+            // The config changed after the receipt, so only fresh evidence can be approved.
+            let edited = "[session]\nresume_agents_on_restore=true\n# edited\n";
+            std::fs::write(config_dir.path().join("config.toml"), edited).unwrap();
         }
         let reply = f.command(1, "!herdr consent retry").await;
         assert!(reply.is_empty(), "{reply}");
