@@ -15,8 +15,9 @@
 ## Pages
 
 - [`api-friction-extraction-plan.md`](api-friction-extraction-plan.md) —
-  subdomain map and ordered extraction issues for splitting the giant
-  `src/services/api_friction.rs` service module (#1789).
+  subdomain map and ordered extraction issues for splitting the former giant
+  `src/services/api_friction.rs` (removed) service module into
+  `src/services/api_friction/` (#1789).
 - [`auto-queue-db-extraction-plan.md`](auto-queue-db-extraction-plan.md) —
   subdomain map and ordered extraction issues for splitting the giant
   `src/db/auto_queue/` persistence module family (#1783).
@@ -28,9 +29,17 @@
 - [`dispatch-mod-extraction-plan.md`](dispatch-mod-extraction-plan.md) —
   subdomain map and ordered extraction issues for shrinking
   `src/dispatch/mod.rs` into a facade (#1785).
+- [`herdr-runbook.md`](herdr-runbook.md) — Herdr operations runbook (#5340):
+  hosting limits, admission and O-readiness conditions, and operator checks.
+- [`herdr-user-default.md`](herdr-user-default.md) — `mode: user_default`
+  herdr server configuration, which attaches to the node user's existing herdr
+  server instead of a dedicated one.
+- [`idle-kill-owner-recovery.md`](idle-kill-owner-recovery.md) — how idle-kill
+  skips and later recovers remote session owners whose origin or heartbeat is
+  missing.
 - [`kanban-extraction-plan.md`](kanban-extraction-plan.md) — subdomain map and
-  ordered extraction issues for shrinking `src/kanban.rs` into a facade
-  (#1787).
+  ordered extraction issues for shrinking the former `src/kanban.rs` (removed)
+  into the `src/kanban/` facade (#1787).
 - [`discord-outbound-migration.md`](discord-outbound-migration.md) — five
   production callsite families for Discord outbound (#1006). Each row marks
   `migrated | legacy | unknown`. New sends MUST use the v3 outbound; legacy
@@ -47,6 +56,9 @@
   moving AgentDesk from one dcserver node to leader/worker execution, including
   single-node assumptions, side-effect ownership, invariants, and #876-#884
   test gates.
+- [`multinode-two-node-smoke.md`](multinode-two-node-smoke.md) — two-node
+  smoke that separates CI-reproducible multinode invariants from the physical
+  two-machine runtime check.
 - [`opencode-usability-spec.md`](opencode-usability-spec.md) — implementation
   contract for raising OpenCode's Discord-facing usability toward Claude/Codex
   parity, including prompt/output safety, SSE text handling, and MCP sync.
@@ -61,9 +73,11 @@
 
 ## Generated Companions (read-only)
 
-- [`docs/generated/module-inventory.md`](../generated/module-inventory.md) —
-  every Rust module with line count and giant-file flag. Source of truth for
-  the giant-file list in `change-surfaces.md`.
+- `docs/generated/module-inventory.md` — every Rust module with line count
+  and giant-file flag. Source of truth for the giant-file list in
+  `change-surfaces.md`. It is an untracked checkout-local view (see
+  [`docs/generated/README.md`](../generated/README.md)); build it with the
+  command below before reading it.
 - [`docs/generated/route-inventory.md`](../generated/route-inventory.md) — HTTP
   routes and the file/line where each is registered.
 - [`docs/generated/worker-inventory.md`](../generated/worker-inventory.md) —

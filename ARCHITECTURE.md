@@ -7,7 +7,7 @@ High-signal navigation guide for contributors. The generated inventories under `
 - `src/` — runtime code: CLI, HTTP server, Discord bot, orchestration, policy engine, persistence.
 - `policies/` — JavaScript lifecycle hooks loaded by `src/engine`.
 - `dashboard/` — React/Vite UI for the web dashboard.
-- `docs/generated/module-inventory.md` — generated Rust module inventory.
+- `docs/generated/module-inventory.md` — generated Rust module inventory (untracked; build it with the generator above).
 - `docs/generated/route-inventory.md` — generated HTTP/WebSocket route inventory.
 - `docs/generated/worker-inventory.md` — generated supervised worker inventory.
 
@@ -3957,8 +3957,8 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/services/discord/placeholder_controller/queued_card_gate.rs` | #5035: sole enforcement point for destroying a channel's queued `📬` card. Evaluates contract G (G1 ∧ G2) under the channel persist lock over the whole mailbox queue and hands out a `QueuedCardTeardown` token no other module can construct. |
 | `src/services/discord/gateway.rs` / `discord_io.rs` / `queue_io.rs` | Discord gateway bridge and outbound/inbound message plumbing. |
 | `src/services/discord/commands/` | Slash command handlers for session, config, diagnostics, meetings, models, receipts, skills. |
-| `src/services/discord/agentdesk_config.rs` / `config_audit.rs` | YAML/DB/legacy config source-of-truth handling and audits. |
-| `src/services/discord/prompt_builder.rs` / `shared_memory.rs` / `role_map.rs` | Turn prompt assembly and org/shared memory context. |
+| `src/services/discord/agentdesk_config.rs` | YAML/DB/legacy config source-of-truth handling. |
+| `src/services/discord/prompt_builder/` / `shared_memory.rs` / `role_map.rs` | Turn prompt assembly and org/shared memory context. |
 
 ### Provider and Execution Services
 
@@ -3975,7 +3975,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 
 | Path | Purpose |
 | --- | --- |
-| `src/server/boot.rs` / `src/server/mod.rs` | Axum boot, router assembly, background/tick startup. |
+| `src/server/mod.rs` | Axum boot, router assembly, background/tick startup. |
 | `src/server/routes/mod.rs` | API route registration under `/api`. |
 | `src/server/routes/dispatches/` | Dispatch CRUD, Discord delivery, outbox, thread reuse. |
 | `src/server/routes/review_verdict/` | Review verdict and decision routes plus review-state storage helpers. |
@@ -3984,7 +3984,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 
 ## Generated Inventories
 
-- `docs/generated/module-inventory.md` is the fastest way to answer “which module owns this code?”
+- `docs/generated/module-inventory.md` is the fastest way to answer “which module owns this code?” It is untracked; generate it locally first (see `docs/generated/README.md`).
 - `docs/generated/route-inventory.md` is the authoritative endpoint-to-handler map. Prefer it over manually maintained tables.
 - `docs/generated/worker-inventory.md` shows every supervised worker, its start stage, restart policy, and owner.
 - `python3 scripts/generate_inventory_docs.py --check` is the CI drift gate for these inventories, the generated `src/` snapshot above, and the top-level module coverage table.
@@ -4012,7 +4012,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 
 ### Kanban or review state is wrong
 
-1. `src/kanban.rs` — high-level card orchestration.
+1. `src/kanban/` — high-level card orchestration (`transition_core.rs`, `transition_cleanup.rs`, `hooks.rs`).
 2. `src/engine/transition.rs` — canonical state transitions.
 3. `src/engine/ops/kanban_ops.rs` — review-state sync bridge and SQL-side helpers.
 4. `src/server/routes/review_verdict/` — review verdict/decision HTTP surface.
@@ -4028,8 +4028,8 @@ This table is generated from the current `src/` root and fails CI when a new top
 
 1. `src/bootstrap.rs` — config/db/runtime assembly.
 2. `src/config.rs` — config load/defaults.
-3. `src/db/mod.rs` and `src/db/schema.rs` — DB open/migrations.
-4. `src/launch.rs`, `src/server/boot.rs`, `src/server/mod.rs` — runtime and HTTP boot.
+3. `src/db/mod.rs` and `src/db/postgres.rs` (`POSTGRES_MIGRATOR`, which embeds `migrations/postgres/`) — DB open/migrations.
+4. `src/launch.rs`, `src/server/mod.rs` (`run`) — runtime and HTTP boot.
 
 ## Policy and Runtime Flow
 
@@ -4037,7 +4037,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 - Hook contracts live in `src/engine/hooks.rs`.
 - Policy loading and execution live in `src/engine/loader.rs` and `src/engine/mod.rs`.
 - Rust bridge functions live in `src/engine/ops.rs` plus `src/engine/ops/*.rs`.
-- Tick orchestration lives in `src/server/tick.rs` and the server boot path.
+- Tick orchestration lives in `src/server/mod.rs` (`policy_tick_loop`) and the supervised workers in `src/server/worker_registry.rs`.
 
 ## Session Execution Paths
 
@@ -4116,6 +4116,6 @@ restart does not render a still-alive tmux pane "unusable":
 
 ## Data Model Anchors
 
-- `src/db/schema.rs` is the authoritative schema.
+- `migrations/postgres/` is the authoritative schema; `src/db/postgres.rs` (`POSTGRES_MIGRATOR`) applies it.
 - Most operational state hangs off `agents`, `kanban_cards`, `task_dispatches`, `sessions`, `auto_queue_runs`, `auto_queue_entries`, `github_repos`, and `kv_meta`.
-- If a doc or handler disagrees with the schema, trust `src/db/schema.rs` and update the doc.
+- If a doc or handler disagrees with the schema, trust `migrations/postgres/` and update the doc.

@@ -402,7 +402,7 @@ note right of Engine #FFCCCC
   **tracing::error!**
   policy_name="kanban-rules"
   hook="onCardTerminal"
-  error="DB lock\n  at onCardTerminal (kanban-rules.js:659)"
+  error="DB lock\n  at onCardTerminal (kanban-rules.js)"
 
   Error is caught. Execution **continues**
   to the next policy.

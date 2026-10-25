@@ -53,8 +53,8 @@ before/after import.
 ## Draining `message_outbox`
 
 Before cutover, normal operation depended on the message-outbox worker
-(`src/server/background.rs` and
-`src/server/mod.rs`), which polled `status = 'pending'` rows every few seconds
+(`src/server/background.rs` (removed) — now `src/server/outbox_worker.rs`
+`message_outbox_loop` — and `src/server/mod.rs`), which polled `status = 'pending'` rows every few seconds
 and flipped them to `sent` once the local `/api/discord/send` HTTP loop
 accepted them. The historical drain process was:
 
