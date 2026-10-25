@@ -21,6 +21,8 @@ struct Row {
     result: Option<bool>,
     elapsed: Option<u64>,
     background: bool,
+    codex_spawn: bool,
+    launched: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -87,6 +89,10 @@ impl ToolActivityRing {
                     }
                     self.total = self.total.saturating_add(1);
                     self.completed = false;
+                    let codex_spawn = name
+                        .rsplit('.')
+                        .next()
+                        .is_some_and(|key| key.eq_ignore_ascii_case("spawn_agent"));
                     self.rows.push_back(Row {
                         id: tool_use_id.clone(),
                         class: class(name),
@@ -100,10 +106,9 @@ impl ToolActivityRing {
                             .min(observed_unix()),
                         result: None,
                         elapsed: None,
-                        background: name
-                            .rsplit('.')
-                            .next()
-                            .is_some_and(|key| key.eq_ignore_ascii_case("spawn_agent"))
+                        codex_spawn,
+                        launched: false,
+                        background: codex_spawn
                             || matches!(class(name).as_str(), "Task" | "Bash")
                                 && input
                                     .as_deref()
@@ -191,7 +196,13 @@ impl ToolActivityRing {
             return;
         };
         let row = &mut self.rows[index];
-        if row.result.is_some() || row.background && success && !terminal {
+        if row.result.is_some() {
+            return;
+        }
+        if row.background && success && !terminal {
+            if row.codex_spawn {
+                row.launched = true;
+            }
             return;
         }
         row.result = Some(success);
@@ -208,10 +219,15 @@ impl ToolActivityRing {
             .rows
             .iter()
             .rev()
-            .filter(|r| r.result.is_none())
+            .filter(|r| r.result.is_none() && !r.launched)
             .take(limit.min(DISPLAY_LIMIT))
             .collect::<Vec<_>>();
-        for row in self.rows.iter().rev().filter(|r| r.result.is_some()) {
+        for row in self
+            .rows
+            .iter()
+            .rev()
+            .filter(|r| r.result.is_some() || r.launched)
+        {
             if selected.len() == limit.min(DISPLAY_LIMIT) {
                 break;
             }
@@ -222,7 +238,10 @@ impl ToolActivityRing {
         let running = if self.completed {
             0
         } else {
-            self.rows.iter().filter(|r| r.result.is_none()).count()
+            self.rows
+                .iter()
+                .filter(|r| r.result.is_none() && !r.launched)
+                .count()
         };
         let mut lines = vec![format!(
             "🔧 도구 {} · 실행 {running} · 실패 {}",
@@ -232,6 +251,7 @@ impl ToolActivityRing {
             let glyph = match row.result {
                 Some(true) => "✓",
                 Some(false) => "✗",
+                None if row.launched => "↗",
                 None if self.completed => "?",
                 None => "▶",
             };
@@ -242,6 +262,7 @@ impl ToolActivityRing {
                 .unwrap_or_default();
             // Discord refreshes running ages without changing heartbeat render text.
             let time = match row.elapsed {
+                None if row.launched => "  시작됨".to_owned(),
                 Some(elapsed) if row.class == "Bash" || elapsed > 0 => format!("  {elapsed}초"),
                 None => format!("  시작 <t:{}:R>", row.started_unix),
                 _ => String::new(),
@@ -353,7 +374,7 @@ pub(super) fn fit_panel(mut sections: Vec<String>) -> String {
         // Reduce oversized activity lists by removing complete oldest rows.
         let mut lines = sections[0].lines().map(str::to_owned).collect::<Vec<_>>();
         if let Some(index) = lines.iter().rposition(|line| {
-            ["▶ ", "✓ ", "✗ ", "? "]
+            ["▶ ", "↗ ", "✓ ", "✗ ", "? "]
                 .iter()
                 .any(|prefix| line.starts_with(prefix))
         }) {

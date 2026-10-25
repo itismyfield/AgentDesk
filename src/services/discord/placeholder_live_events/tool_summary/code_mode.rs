@@ -30,7 +30,7 @@ pub(super) fn summary(source: &str, cwd: Option<&str>) -> Option<String> {
         if tokens.get(end) != Some(&Token::Mark(')')) || tool_key(name) == "exec" {
             continue;
         }
-        let label = class(name);
+        let label = class(name).replace('_', "\\_");
         let detail = safe_tool_summary(name, &input.to_string(), cwd);
         calls.push((label, detail));
     }

@@ -99,10 +99,14 @@ fn accuracy_usernames_outside_paths_are_anonymous_without_hiding_commands() {
         "user: LaneAlice",
         "ssh LaneAlice@example.test uptime",
         "client --username LaneAlice",
-        "owner LaneAlice /home/LaneAlice/src/lib.rs",
+        "client --owner LaneAlice /home/LaneAlice/src/lib.rs",
+        "alice@example.test",
     ] {
         let out = text(raw, 120).unwrap();
-        assert!(!out.contains("LaneAlice"), "{out}");
+        assert!(
+            !out.contains("LaneAlice") && !out.contains("alice@"),
+            "{out}"
+        );
     }
     for raw in [
         "src/user.rs",
@@ -111,7 +115,30 @@ fn accuracy_usernames_outside_paths_are_anonymous_without_hiding_commands() {
         "inspect users table",
         "user: src/user.rs",
         "curl --user public-user example.test",
+        "npm i react@18",
+        "npx -y create-vite@latest my-app",
+        "cargo install ripgrep@14.1.0",
+        "uvx ruff@latest check",
+        "inspect repo owner permissions",
+        "inspect username handling",
     ] {
-        assert_eq!(text(raw, 120).unwrap(), raw.replace('_', "\\_"));
+        assert_eq!(
+            text(raw, 120).unwrap().replace('\u{200b}', ""),
+            raw.replace('_', "\\_")
+        );
+        assert!(description_text(raw, true).is_some(), "{raw}");
     }
+    assert!(description_text("alice@example.test", true).is_none());
+}
+
+#[test]
+fn accuracy_code_mode_labels_escape_markdown_and_keep_the_first_label() {
+    let out = safe_tool_summary("exec", "tools.exec_command({cmd:'cargo check'}); tools.view_image({path:'a.png'}); tools.write_stdin({session_id:1})", None).unwrap();
+    assert!(out.starts_with("Bash · cargo check"), "{out}");
+    assert!(
+        out.contains("view\\_image") && out.contains("write\\_stdin"),
+        "{out}"
+    );
+    let read = safe_tool_summary("exec", "tools.read_file({path:'src/lib.rs'})", None).unwrap();
+    assert!(read.starts_with("Read · src/lib.rs"), "{read}");
 }

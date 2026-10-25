@@ -32,11 +32,17 @@ pub(super) fn status_frame(
 fn tool_label(frame: &str) -> Option<&str> {
     frame.lines().find_map(|line| {
         let line = line.trim().strip_prefix("-# ").unwrap_or(line.trim());
-        if line.starts_with("마지막 도구 (") {
-            return (line != "마지막 도구 (아직 없음)").then_some(line);
+        let generated = line.strip_prefix("🔧 ").or_else(|| {
+            let (marker, label) = line.split_once(' ')?;
+            crate::services::discord::single_message_panel::SINGLE_MESSAGE_PANEL_SPINNER_FRAMES
+                .contains(&marker)
+                .then_some(label)
+        });
+        let label = generated.unwrap_or(line);
+        if label.starts_with("마지막 도구 (") {
+            return (label != "마지막 도구 (아직 없음)").then_some(label);
         }
-        line.strip_prefix("🔧 ")
-            .filter(|line| line.starts_with("도구 "))
+        generated.filter(|label| label.starts_with("도구 "))
     })
 }
 

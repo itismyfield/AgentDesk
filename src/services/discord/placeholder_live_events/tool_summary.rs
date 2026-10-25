@@ -354,10 +354,13 @@ fn anonymize_home(input: &str) -> String {
 
 fn anonymize_accounts(input: &str) -> String {
     static LABEL: LazyLock<Option<Regex>> = LazyLock::new(|| {
-        Regex::new(&format!(r"(?i)((?:\b(?:username|user|login|owner)[ \t]*[:=][ \t]*|\b(?:username|owner)[ \t]+|--username(?:=|[ \t]+)))({WORD})")).ok()
+        Regex::new(&format!(r"(?i)((?:\b(?:username|user|login|owner)[ \t]*[:=][ \t]*|--(?:owner|username)(?:=|[ \t]+)))({WORD})")).ok()
     });
     static ADDRESS: LazyLock<Option<Regex>> = LazyLock::new(|| {
-        Regex::new(r#"(?i)(?:^|[\s'"])([a-z0-9_.+-]+)@([a-z0-9][a-z0-9.-]*)"#).ok()
+        Regex::new(
+            r#"(?i)(?:^|[\s'"])([a-z0-9_.+-]+)@([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})(?:\b|:)"#,
+        )
+        .ok()
     });
     let (Some(label), Some(address)) = (LABEL.as_ref(), ADDRESS.as_ref()) else {
         return "***".into();

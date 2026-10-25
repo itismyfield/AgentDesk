@@ -53,25 +53,111 @@ fn accuracy_spawn_ack_does_not_finish_the_agent() {
         ring.apply(&event, None);
     }
     let out = ring.render(6);
-    assert!(out.contains("▶ Task") && !out.contains('✓'), "{out}");
-    ring.apply(
-        &StatusEvent::SubagentEnd {
-            success: true,
-            agent_id: Some("agent-1".into()),
-            desc: None,
-            tool_use_id: Some("spawn-call".into()),
-            summary: None,
-            ack_only: false,
-        },
-        None,
+    assert!(
+        out.contains("↗ Task") && out.contains("시작됨") && out.contains("실행 0"),
+        "{out}"
     );
-    assert!(ring.render(6).contains("✓ Task"));
+    assert!(
+        !out.contains('✓') && !out.contains("▶ Task") && !out.contains("시작 <t:"),
+        "{out}"
+    );
     start(&mut ring, "spawn_agent", "failed-launch");
     ring.apply(
         &observation(None, None, Some("failed-launch"), Some(false)),
         None,
     );
     assert!(ring.render(6).contains("✗ Task"));
+}
+
+#[test]
+fn accuracy_codex_spawn_wait_rollout_keeps_launch_ack_out_of_running_count() {
+    let mut ring = ToolActivityRing::default();
+    let mut calls = std::collections::BTreeMap::new();
+    for value in [
+        json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"spawn-1","arguments":"{\"message\":\"PRIVATE_PROMPT\"}"}}),
+        json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"spawn-1","output":"{\"agent_id\":\"agent-1\"}"}}),
+        json!({"type":"response_item","payload":{"type":"function_call","name":"wait_agent","call_id":"wait-1","arguments":"{\"ids\":[\"agent-1\"]}"}}),
+        json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"wait-1","output":"{\"status\":{\"agent-1\":{\"completed\":\"PRIVATE_RESULT\"}},\"timed_out\":false}"}}),
+    ] {
+        let payload = &value["payload"];
+        let id = payload["call_id"].as_str().unwrap();
+        let events = if payload["type"] == "function_call" {
+            let name = payload["name"].as_str().unwrap();
+            calls.insert(id.to_string(), name.to_string());
+            status_events_from_tool_use_with_id(
+                name,
+                payload["arguments"].as_str().unwrap(),
+                Some(id),
+            )
+        } else {
+            status_events_from_tool_result_with_id(
+                calls.get(id).map(String::as_str),
+                false,
+                Some(id),
+            )
+        };
+        for event in events {
+            ring.apply(&event, None);
+        }
+    }
+    let out = ring.render(6);
+    assert!(
+        out.contains("↗ Task") && out.contains("시작됨") && out.contains("실행 0"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("▶ Task") && !out.contains("✓ Task") && !out.contains("PRIVATE_"),
+        "{out}"
+    );
+    ring.apply(
+        &StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: false,
+        },
+        None,
+    );
+    assert!(ring.render(6).contains("↗ Task"));
+    start(&mut ring, "Read", "active-read");
+    for index in 0..7 {
+        let id = format!("spawn-{index}-later");
+        start(&mut ring, "spawn_agent", &id);
+        ring.apply(&observation(None, None, Some(&id), Some(true)), None);
+    }
+    let out = ring.render(6);
+    assert!(out.contains("▶ Read") && out.contains("실행 1"), "{out}");
+}
+
+#[test]
+fn accuracy_claude_background_task_closes_on_task_notification() {
+    let mut ring = ToolActivityRing::default();
+    for event in status_events_from_tool_use_with_id(
+        "Task",
+        r#"{"description":"audit source","run_in_background":true}"#,
+        Some("claude-task"),
+    ) {
+        ring.apply(&event, None);
+    }
+    for event in status_events_from_tool_result_with_id(Some("Task"), false, Some("claude-task")) {
+        ring.apply(&event, None);
+    }
+    let out = ring.render(6);
+    assert!(
+        out.contains("▶ Task") && out.contains("실행 1") && !out.contains("↗"),
+        "{out}"
+    );
+    for event in super::super::status_events::status_events_from_task_notification_with_tool_use_id(
+        "subagent",
+        "completed",
+        "audit finished",
+        Some("claude-task"),
+    ) {
+        ring.apply(&event, None);
+    }
+    let out = ring.render(6);
+    assert!(
+        out.contains("✓ Task") && out.contains("실행 0") && !out.contains("▶ Task"),
+        "{out}"
+    );
 }
 
 #[test]
