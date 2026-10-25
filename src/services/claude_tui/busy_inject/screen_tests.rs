@@ -76,8 +76,8 @@ fn menus_and_permission_cards_are_vetoed_but_literal_draft_words_are_not() {
 
 #[test]
 fn captured_46_column_boxes_ignore_the_cut_footer() {
-    let empty = include_str!("fixtures/truncated-footer-empty.ansi");
-    let draft = include_str!("fixtures/truncated-footer-draft.ansi");
+    let empty = include_str!("../../../../tests/fixtures/claude_tui/truncated-footer-empty.ansi");
+    let draft = include_str!("../../../../tests/fixtures/claude_tui/truncated-footer-draft.ansi");
     assert_eq!(screen::input_box(empty), Composer::Empty);
     assert!(matches!(screen::input_box(draft), Composer::Text(_)));
     for capture in [empty, draft] {

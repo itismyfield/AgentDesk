@@ -596,7 +596,7 @@ fn truncated_46_column_footer_still_sends_enter() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     fake.answers("attach", &["0,,46,37"]);
-    let before = include_str!("busy_inject/fixtures/truncated-footer-empty.ansi")
+    let before = include_str!("../../../tests/fixtures/claude_tui/truncated-footer-empty.ansi")
         .replace("✳ Ruminating…", "✻ Thinking…")
         .replace("(4m 18s)", "(12s · esc to interrupt)");
     let after = before.replace("❯\u{00a0}", &format!("❯\u{00a0}{}", text()));
