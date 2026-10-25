@@ -2082,6 +2082,7 @@ mod review_skip_pg_tests {
     use sqlx::PgPool;
 
     async fn seed_card_in_review(pool: &PgPool) {
+        crate::pipeline::ensure_loaded();
         sqlx::raw_sql(
             "INSERT INTO kanban_cards (id, title, status, review_status) VALUES ('card-1', 'c', 'review', 'reviewing');
              INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status) VALUES
