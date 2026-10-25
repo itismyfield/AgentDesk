@@ -6,15 +6,14 @@
  * here is kept intentionally large because every member of the group either:
  *   - reads or writes the same `auto_queue_phase_gates` DB rows,
  *   - shares the `PHASE_GATE_*` TTL / threshold constants,
- *   - or is part of the verdict-mismatch + auto-close fallback control flow.
+ *   - or is part of the verdict-mismatch control flow.
  *
  * Splitting them across multiple files would force the cross-module call
- * graph (failure → state → fallback → dispatches) to be rewired and would
+ * graph (failure → state → dispatches) to be rewired and would
  * change the policy semantics by accident. So this module owns:
  *   - failure counter + escalation (`handlePhaseGateFailure`)
  *   - human-alert debounce (`_maybeAlertPhaseGateVerdictMismatch`)
- *   - verdict inference + autoclose fallback (`_inferPhaseGatePassVerdict`,
- *     `_phaseGateOnlyIssueClosedFailing`, `_attemptPhaseGateAutoCloseFallback`)
+ *   - verdict inference (`_inferPhaseGatePassVerdict`)
  *   - state load/save/clear and dispatch fanout (`loadPhaseGateState`,
  *     `savePhaseGateState`, `clearPhaseGateState`, `loadPhaseGateDispatches`,
  *     `_buildPhaseGateGroups`, `_phaseGateTitle`, `_createPhaseGateDispatches`)
@@ -35,9 +34,6 @@ var PHASE_GATE_FAILURE_TTL_SEC = 7 * 24 * 60 * 60;
 // #2035: debounce phase-gate verdict-mismatch human-alert WARNs to one per
 // run+phase per hour so the log is not flooded when polling churns.
 var PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC = 60 * 60;
-// #2035: prevent the auto-close fallback from running more than once per
-// (card, phase, commit) so a misbehaving check cannot loop-close the issue.
-var PHASE_GATE_AUTOCLOSE_TTL_SEC = 24 * 60 * 60;
 // #747 round-2: Phase-gate race protection.
 // Tick hooks now run on a separate `PolicyEngine` from `onCardTerminal`, so
 // `onTick1min.finalizeRunWithoutPhaseGate` can see a run with no
@@ -276,214 +272,6 @@ function _maybeAlertPhaseGateVerdictMismatch(runId, phase, cardId, reason) {
   );
 }
 
-// #2035: inspect phase-gate result.checks and decide whether this is a
-// failure caused ONLY by the issue_closed check (i.e. merge_verified and
-// build_passed both passed but the GitHub issue is still open because the
-// commit message did not contain a Closes/Fixes/Resolves keyword).
-// Returns { eligible: bool, reason: string } so the caller can log the
-// rationale even when fallback is declined.
-function _phaseGateOnlyIssueClosedFailing(context, result) {
-  if (!context || !context.phase_gate) {
-    return { eligible: false, reason: "no_phase_gate_context" };
-  }
-  var checks = (result && result.checks) || null;
-  if (!checks || typeof checks !== "object") {
-    return { eligible: false, reason: "no_checks" };
-  }
-  function entryStatus(entry) {
-    if (!entry) return null;
-    if (typeof entry === "string") return entry.toLowerCase();
-    if (typeof entry === "object") {
-      var s = entry.status || entry.result || null;
-      return s ? String(s).toLowerCase() : null;
-    }
-    return null;
-  }
-  var names = _dispatchResultCheckNames(context.phase_gate);
-  if (!names) {
-    return { eligible: false, reason: "incompatible_phase_gate_declaration" };
-  }
-  var sawIssueClosedFail = false;
-  var sawMergeVerifiedPass = false;
-  var sawBuildPassedPass = false;
-  for (var i = 0; i < names.length; i++) {
-    var name = names[i];
-    var status = entryStatus(checks[name]);
-    if (name === "issue_closed") {
-      if (status !== "fail" && status !== "failed") {
-        return { eligible: false, reason: "issue_closed_not_failing" };
-      }
-      sawIssueClosedFail = true;
-    } else if (name === "merge_verified") {
-      if (status !== "pass" && status !== "passed") {
-        return { eligible: false, reason: "merge_verified_not_passing" };
-      }
-      sawMergeVerifiedPass = true;
-    } else if (name === "build_passed") {
-      if (status !== "pass" && status !== "passed") {
-        return { eligible: false, reason: "build_passed_not_passing" };
-      }
-      sawBuildPassedPass = true;
-    } else if (status !== "pass" && status !== "passed") {
-      // Any other unrecognized check failing → bail; we only auto-recover
-      // the well-understood issue_closed-only case.
-      return { eligible: false, reason: "other_check_failing:" + name };
-    }
-  }
-  if (!sawIssueClosedFail || !sawMergeVerifiedPass || !sawBuildPassedPass) {
-    return { eligible: false, reason: "missing_required_signals" };
-  }
-  return { eligible: true, reason: "issue_closed_only_failure" };
-}
-
-// #2035: locate the GitHub repo slug + commit hash for a card so the
-// fallback close can be cross-checked (same commit hash) and the gh CLI
-// can target the right repo.
-function _loadCardForPhaseGateFallback(cardId) {
-  if (!cardId) return null;
-  /* legacy-raw-db: policy=auto-queue capability=phase_gate_autoclose source_event=verdict_mismatch */
-  var rows = agentdesk.db.query(
-    "SELECT id, github_issue_number, github_issue_url, last_commit_sha, pr_merge_commit_sha, " +
-    "       issue_closed_at " +
-    "FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
-  if (!rows || rows.length === 0) return null;
-  return rows[0];
-}
-
-function _extractRepoSlugFromIssueUrl(url) {
-  if (!url || typeof url !== "string") return null;
-  var match = url.match(/github\.com\/([^\/]+\/[^\/]+)\/issues\//);
-  return match ? match[1] : null;
-}
-
-// #2035: best-effort GitHub auto-close fallback. Requires (a) merge pass +
-// build pass + ONLY issue_closed failing, (b) same commit hash present in
-// kanban_cards (so we don't close on stale dispatch state), and
-// (c) one-shot per (card, phase, commit). Returns true if the close
-// command was issued (caller still re-evaluates the gate).
-function _attemptPhaseGateAutoCloseFallback(runId, phase, dispatchId, context, result) {
-  var eligibility = _phaseGateOnlyIssueClosedFailing(context, result);
-  if (!eligibility.eligible) {
-    return { attempted: false, reason: eligibility.reason };
-  }
-  var gate = context && context.phase_gate;
-  var cardIds = (gate && Array.isArray(gate.card_ids)) ? gate.card_ids : [];
-  if (cardIds.length === 0) {
-    return { attempted: false, reason: "no_card_ids_in_phase_gate" };
-  }
-  var anyClosed = false;
-  var attempted = false;
-  for (var i = 0; i < cardIds.length; i++) {
-    var cardId = cardIds[i];
-    var card = _loadCardForPhaseGateFallback(cardId);
-    if (!card || !card.github_issue_number || !card.github_issue_url) continue;
-    if (card.issue_closed_at) {
-      anyClosed = true;
-      continue;
-    }
-    var commitHash = card.pr_merge_commit_sha || card.last_commit_sha || null;
-    if (!commitHash) {
-      autoQueueLog("info", "Phase gate autoclose skipped — no commit hash for card " + cardId, {
-        run_id: runId,
-        dispatch_id: dispatchId,
-        card_id: cardId,
-        batch_phase: phase
-      });
-      continue;
-    }
-    var dedupeKey = "phase_gate_autoclose:" + cardId + ":" + phase + ":" + commitHash;
-    if (agentdesk.kv.get(dedupeKey)) {
-      autoQueueLog("info", "Phase gate autoclose already attempted for card " + cardId + " commit " + commitHash.substring(0, 8), {
-        run_id: runId,
-        dispatch_id: dispatchId,
-        card_id: cardId,
-        batch_phase: phase
-      });
-      continue;
-    }
-    var repo = _extractRepoSlugFromIssueUrl(card.github_issue_url);
-    if (!repo) {
-      autoQueueLog("warn", "Phase gate autoclose skipped — could not parse repo from issue url for card " + cardId, {
-        run_id: runId,
-        dispatch_id: dispatchId,
-        card_id: cardId,
-        batch_phase: phase
-      });
-      continue;
-    }
-    agentdesk.kv.set(dedupeKey, String(Date.now()), PHASE_GATE_AUTOCLOSE_TTL_SEC);
-    attempted = true;
-    try {
-      var issueState = agentdesk.exec(
-        "gh",
-        [
-          "issue", "view", String(card.github_issue_number),
-          "--repo", repo,
-          "--json", "state",
-          "--jq", ".state"
-        ],
-        { timeout_ms: 15000 }
-      );
-      if (String(issueState || "").trim().toUpperCase() === "CLOSED") {
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET issue_closed_at = COALESCE(issue_closed_at, CURRENT_TIMESTAMP) WHERE id = ?",
-          [cardId]
-        );
-        anyClosed = true;
-        autoQueueLog("info", "Phase gate issue_closed refreshed from GitHub for card " + cardId + " issue #" + card.github_issue_number, {
-          run_id: runId,
-          dispatch_id: dispatchId,
-          card_id: cardId,
-          batch_phase: phase
-        });
-        continue;
-      }
-    } catch (e) {
-      autoQueueLog("warn", "Phase gate issue state lookup failed for card " + cardId + ": " + e, {
-        run_id: runId,
-        dispatch_id: dispatchId,
-        card_id: cardId,
-        batch_phase: phase
-      });
-    }
-    try {
-      agentdesk.exec(
-        "gh",
-        [
-          "issue", "close", String(card.github_issue_number),
-          "--repo", repo,
-          "--reason", "completed",
-          "--comment",
-          "Auto-closed by phase-gate fallback (#2035) — merge_verified=pass, build_passed=pass, commit " + commitHash.substring(0, 8) +
-          ". Commit message did not contain a GitHub auto-close keyword."
-        ],
-        { timeout_ms: 15000 }
-      );
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET issue_closed_at = COALESCE(issue_closed_at, CURRENT_TIMESTAMP) WHERE id = ?",
-        [cardId]
-      );
-      anyClosed = true;
-      autoQueueLog("info", "Phase gate autoclose issued for card " + cardId + " issue #" + card.github_issue_number + " commit " + commitHash.substring(0, 8), {
-        run_id: runId,
-        dispatch_id: dispatchId,
-        card_id: cardId,
-        batch_phase: phase
-      });
-    } catch (e) {
-      autoQueueLog("warn", "Phase gate autoclose gh exec failed for card " + cardId + ": " + e, {
-        run_id: runId,
-        dispatch_id: dispatchId,
-        card_id: cardId,
-        batch_phase: phase
-      });
-    }
-  }
-  return { attempted: attempted, anyClosed: anyClosed, reason: eligibility.reason };
-}
-
 function loadPhaseGateState(runId, phase) {
   var rows = agentdesk.db.query(
     "SELECT dispatch_id, status, verdict, pass_verdict, next_phase, final_phase, " +
@@ -668,7 +456,7 @@ function _buildPhaseGateGroups(runId, phase) {
     " WHERE td.kanban_card_id = e.kanban_card_id " +
     "   AND td.status = 'completed' " +
     "   AND td.result IS NOT NULL " +
-    " ORDER BY td.completed_at DESC, td.rowid DESC LIMIT 1) as latest_result " +
+    " ORDER BY td.completed_at DESC, td.created_at DESC, td.id DESC LIMIT 1) as latest_result " +
     "FROM auto_queue_entries e " +
     "JOIN kanban_cards kc ON kc.id = e.kanban_card_id " +
     "WHERE e.run_id = ? AND COALESCE(e.batch_phase, 0) = ? " +
@@ -891,7 +679,6 @@ module.exports = {
   PHASE_GATE_HUMAN_ESCALATION_THRESHOLD: PHASE_GATE_HUMAN_ESCALATION_THRESHOLD,
   PHASE_GATE_FAILURE_TTL_SEC: PHASE_GATE_FAILURE_TTL_SEC,
   PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC: PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC,
-  PHASE_GATE_AUTOCLOSE_TTL_SEC: PHASE_GATE_AUTOCLOSE_TTL_SEC,
   PHASE_GATE_GRACE_WINDOW_MS: PHASE_GATE_GRACE_WINDOW_MS,
   inferPhaseGatePassVerdict: _inferPhaseGatePassVerdict,
   phaseGateVerdictMatches: _phaseGateVerdictMatches,
@@ -905,10 +692,6 @@ module.exports = {
   loadPhaseGateCardLabel: loadPhaseGateCardLabel,
   handlePhaseGateFailure: handlePhaseGateFailure,
   maybeAlertPhaseGateVerdictMismatch: _maybeAlertPhaseGateVerdictMismatch,
-  phaseGateOnlyIssueClosedFailing: _phaseGateOnlyIssueClosedFailing,
-  loadCardForPhaseGateFallback: _loadCardForPhaseGateFallback,
-  extractRepoSlugFromIssueUrl: _extractRepoSlugFromIssueUrl,
-  attemptPhaseGateAutoCloseFallback: _attemptPhaseGateAutoCloseFallback,
   loadPhaseGateState: loadPhaseGateState,
   savePhaseGateState: savePhaseGateState,
   clearPhaseGateState: clearPhaseGateState,

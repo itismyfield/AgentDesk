@@ -80,7 +80,6 @@ test("auto-queue loadPhaseGateCardLabel uses typed facade agentdesk.cards.get", 
       PHASE_GATE_HUMAN_ESCALATION_THRESHOLD: 3,
       PHASE_GATE_FAILURE_TTL_SEC: 0,
       PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC: 0,
-      PHASE_GATE_AUTOCLOSE_TTL_SEC: 0,
       PHASE_GATE_GRACE_WINDOW_MS: 0,
       inferPhaseGatePassVerdict: function() {},
       phaseGateFailureKey: function() {},
@@ -99,10 +98,6 @@ test("auto-queue loadPhaseGateCardLabel uses typed facade agentdesk.cards.get", 
       },
       handlePhaseGateFailure: function() {},
       maybeAlertPhaseGateVerdictMismatch: function() {},
-      phaseGateOnlyIssueClosedFailing: function() {},
-      loadCardForPhaseGateFallback: function() {},
-      extractRepoSlugFromIssueUrl: function() {},
-      attemptPhaseGateAutoCloseFallback: function() {},
       loadPhaseGateState: function() {},
       savePhaseGateState: function() {},
       clearPhaseGateState: function() {},
@@ -123,8 +118,7 @@ test("auto-queue loadPhaseGateCardLabel uses typed facade agentdesk.cards.get", 
       continueRunAfterEntry: function() {},
       resumeRunAndActivate: function() {},
       // auto-queue-error-recovery
-      notifyAutoQueueEntryFailure: function() {},
-      createConsultationDispatch: function() {}
+      notifyAutoQueueEntryFailure: function() {}
     };
   };
 
