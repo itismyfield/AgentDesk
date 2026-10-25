@@ -398,7 +398,7 @@ async fn parked_at_capture(busy: &Busy, message: u64) -> tokio::task::JoinHandle
 async fn a_vetoed_paste_hands_the_message_back_ahead_of_input_sent_meanwhile_pg() {
     let busy = busy().await;
     let rt = &busy.rt;
-    busy.pane.draft();
+    busy.pane.menu();
     let message = fresh_id();
     let request = parked_at_capture(&busy, message).await;
     send_meanwhile(&rt.h.shared, CHANNEL_ID, fresh_id(), "meanwhile").await;
@@ -430,7 +430,7 @@ async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
     let busy = busy().await;
     let rt = &busy.rt;
     rt.hold_mailbox().await;
-    busy.pane.draft();
+    busy.pane.menu();
     let channel = ChannelId::new(CHANNEL_ID);
     // The turn already running started live on an earlier message, which moved the checkpoint.
     let (earlier, answer) = (fresh_id(), fresh_id());
@@ -482,7 +482,7 @@ async fn a_handback_that_never_lands_ends_the_message_with_a_notice_pg() {
     let busy = busy().await;
     let rt = &busy.rt;
     rt.hold_mailbox().await;
-    busy.pane.draft();
+    busy.pane.menu();
     let message = fresh_id();
     let request = parked_at_capture(&busy, message).await;
     send_meanwhile(&rt.h.shared, CHANNEL_ID, fresh_id(), "meanwhile").await;
@@ -521,7 +521,7 @@ async fn a_handback_with_an_unknown_answer_is_neither_resent_nor_queued_again_pg
         let busy = busy().await;
         let rt = &busy.rt;
         rt.hold_mailbox().await;
-        busy.pane.draft();
+        busy.pane.menu();
         inject_hook::fault_handback(CHANNEL_ID, fault);
         let message = fresh_id();
         rt.h.deliver_user_message(message, "status?").await.unwrap();
@@ -790,7 +790,7 @@ async fn a_vetoed_paste_queues_with_the_sender_s_own_marks_pg() {
         let busy = busy_with_announce().await;
         let rt = &busy.rt;
         rt.hold_mailbox().await;
-        busy.pane.draft();
+        busy.pane.menu();
         let message = fresh_id();
         if bot {
             deliver_from_announce(rt, message, "status?").await;

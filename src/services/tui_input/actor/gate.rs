@@ -168,14 +168,6 @@ pub(crate) fn own_draft(
     suffix == format!(" +{newlines} lines]")
 }
 
-/// The composer shows exactly `rows`, as Claude wraps a paste; nothing folded or typed besides.
-pub(crate) fn own_wrapped_draft(capture: &str, rows: &[String]) -> bool {
-    let plain = strip_ansi_escape_sequences(capture);
-    claude_composer_not_known_empty(capture)
-        && claude_composer_rows(&plain)
-            .is_some_and(|shown| shown.into_iter().eq(rows.iter().map(String::as_str)))
-}
-
 // Only the existing measured raw layout can identify a native hint as an empty composer.
 fn claude_measured_composer_empty(capture: &str) -> bool {
     busy_inject::draft_sighting(capture) == DraftSighting::Settled

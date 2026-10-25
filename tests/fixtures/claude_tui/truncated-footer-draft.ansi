@@ -1,0 +1,37 @@
+[38;5;231m⏺[39m Working on the requested change.
+  Inspecting the relevant input path.
+
+[38;5;246m⏺[39m Bash(example command)
+  ⎿  Background shell is running.
+
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+  Example assistant output line.
+
+[38;5;174m✳ Ruminating…[39m (4m 18s)
+  ⎿  Background monitor is running.
+
+
+
+
+[38;5;244m──────────────────────────────────────────────[39m
+[38;5;246m❯ [39mjs
+[38;5;244m──────────────────────────────────────────────[39m
+  Elapsed: 4m18s | Context: 24%
+  Model | 5h: 2% | 7d: 9%
+  Background work is running
+  Folder: example-repo (main)
+  MCP: 2 | Tools: 100 done
+  [38;5;211m⏵⏵ bypass permissions on[39m · 1 shell, 1
