@@ -33,19 +33,13 @@ pub(crate) fn checker(socket: &Path, stdout: &[u8], stderr: &[u8]) {
     }
 }
 
+/// Keeps the last observation for health and doctor and returns it, so every surface shows the
+/// same reason and action.
 pub(crate) fn record(
     socket: &Path,
     cache: &ProofCache,
     result: &Result<NextRestartProof, Unverified>,
-) {
-    let value = describe(cache, result);
-    if let Ok(mut observed) = OBSERVED.get_or_init(Mutex::default).lock() {
-        observed.policy.insert(socket.into(), value);
-    }
-}
-
-/// The reason and action every surface shows for one next-restart result.
-fn describe(cache: &ProofCache, result: &Result<NextRestartProof, Unverified>) -> Value {
+) -> Value {
     let (ready, startup, reason, action, witness) = match result {
         Ok(proof) => {
             let startup = cache.startup_for(proof.witness()).ok().flatten().is_some();
@@ -125,20 +119,24 @@ fn describe(cache: &ProofCache, result: &Result<NextRestartProof, Unverified>) -
             String::new(),
         ),
     };
-    json!({"next_restart_ready": ready,
+    let value = json!({"next_restart_ready": ready,
     "startup_proof": startup, "reason": reason, "action": action, "witness": witness,
-    "observation": "last_check_only; a fresh create rechecks at its fence, while existing input mutations compare only the recorded server witness"})
+    "observation": "last_check_only; a fresh create rechecks at its fence, while existing input mutations compare only the recorded server witness"});
+    if let Ok(mut observed) = OBSERVED.get_or_init(Mutex::default).lock() {
+        observed.policy.insert(socket.into(), value.clone());
+    }
+    value
 }
 
-/// One next-restart check of `socket` with a fresh cache; it writes no config or store and starts no server.
+/// One next-restart check of `socket` with a fresh cache; it writes no config or file and starts no server.
 #[cfg(unix)]
 pub(crate) async fn probe(socket: &Path) -> Result<Value, String> {
     let source = super::super::launch_host::probe_source(socket)?;
     let cache = ProofCache::default();
     let result = cache.next_restart(source, &super::LocalChecker).await;
-    let mut value = describe(&cache, &result);
+    let mut value = record(socket, &cache, &result);
     value["socket"] = socket.display().to_string().into();
-    value["observation"] = "probe_once; nothing is kept".into();
+    value["observation"] = "probe_once; nothing outlives this process".into();
     Ok(value)
 }
 
