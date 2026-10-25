@@ -319,7 +319,7 @@ impl StreamMessage {
 /// `totalDurationMs`) and/or the per-subagent `subagents/agent-<id>.jsonl`
 /// rollout (#3086). Each field is optional so a partial/older transcript that
 /// surfaces only some of the values still renders what it can.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 pub struct SubagentSummary {
     /// Number of tool invocations the subagent issued (`totalToolUseCount`).
     pub tool_count: Option<u64>,
@@ -339,7 +339,7 @@ impl SubagentSummary {
 
 /// Provider-normalized status events consumed by Discord status-panel rendering.
 /// The panel code should not depend on provider-specific JSONL shapes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub enum StatusEvent {
     /// Display-only tool observation; result bodies never enter this event.
     ToolActivity {
@@ -347,6 +347,8 @@ pub enum StatusEvent {
         input: Option<String>,
         tool_use_id: Option<String>,
         success: Option<bool>,
+        #[serde(default)]
+        source_unix: Option<i64>,
     },
     ToolActivityCwd {
         cwd: String,
@@ -467,13 +469,13 @@ pub enum StatusEvent {
     Heartbeat,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct StatusTodoItem {
     pub content: String,
     pub status: StatusTodoStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum StatusTodoStatus {
     Pending,
     InProgress,
