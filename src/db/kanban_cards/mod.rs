@@ -3,11 +3,13 @@ use sqlx::Row as SqlxRow;
 pub mod crud;
 pub mod listing;
 pub mod metadata;
+pub mod soft_delete;
 pub mod transitions;
 
 pub use crud::*;
 pub use listing::*;
 pub use metadata::*;
+pub use soft_delete::*;
 pub use transitions::*;
 
 #[derive(Debug, Clone, Default)]

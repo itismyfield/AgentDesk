@@ -211,6 +211,7 @@ src/
 │   │   ├── listing.rs
 │   │   ├── metadata.rs
 │   │   ├── mod.rs
+│   │   ├── soft_delete.rs
 │   │   └── transitions.rs
 │   ├── postgres/
 │   │   ├── advisory_lock.rs
@@ -302,6 +303,7 @@ src/
 │   ├── dispatch_status/
 │   │   ├── auto_queue_terminal_sync_policy_tests/
 │   │   │   └── migration_value_pg_tests.rs
+│   │   ├── review_skip.rs
 │   │   └── terminal_timestamp_tests.rs
 │   ├── completion_hooks.rs
 │   ├── dispatch_cancel.rs
@@ -492,6 +494,8 @@ src/
 │   │   │   ├── session_repair.rs
 │   │   │   ├── tui_output_readiness_tests.rs
 │   │   │   └── unread_tail_attribution_tests.rs
+│   │   ├── kanban/
+│   │   │   └── card_delete.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs

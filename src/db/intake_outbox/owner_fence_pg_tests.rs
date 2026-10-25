@@ -524,6 +524,14 @@ async fn owner_fence_lock_survives_replay_trigger_and_two_writers_pg() {
     let pg = TestPostgresDb::create().await;
     let pool = pg.connect_and_migrate().await;
     let id = seed(&pool, "lock-held", "spawned", true).await;
+    // Only an update of a row that carries replay sources reaches the replay trigger.
+    sqlx::query(
+        "UPDATE intake_outbox SET replay_source_message_ids = ARRAY[user_msg_id] WHERE id=$1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut replay = pool.begin().await.unwrap();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *replay)

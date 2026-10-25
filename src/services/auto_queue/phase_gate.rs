@@ -104,7 +104,7 @@ async fn create_activate_dispatch_pg_inner(
                 github_issue_number::BIGINT AS github_issue_number,
                 metadata
          FROM kanban_cards
-         WHERE id = $1",
+         WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(card_id)
     .fetch_optional(pool)
@@ -499,6 +499,20 @@ async fn create_activate_dispatch_pg_inner(
         return Ok(existing_id);
     }
 
+    // Card delete locks the same row and refuses while a dispatch is live, so a delete
+    // either waits for this dispatch or commits first and is seen here.
+    let card_live = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM kanban_cards WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(card_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("lock postgres dispatch card {card_id}: {error}"))?;
+    if card_live.is_none() {
+        tx.rollback().await.ok();
+        return Err(format!("card {card_id} not found"));
+    }
+
     sqlx::query(
         "INSERT INTO task_dispatches (
             id,
@@ -749,6 +763,51 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("count attachment-free dispatches");
+        assert_eq!(dispatch_count, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Contract: the dispatch writer refuses a deleted card even when its entry is pending.
+    #[tokio::test]
+    async fn deleted_card_rejects_dispatch_attach_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::raw_sql(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-deleted', 'Deleted Card Agent', 'claude', '789');
+             INSERT INTO kanban_cards (id, title, status, assigned_agent_id, metadata, deleted_at)
+             VALUES ('card-deleted', 'Deleted Card', 'in_progress', 'agent-deleted',
+                     '{\"sandbox_preflight\":true,\"production_mutation_allowed\":false}'::jsonb,
+                     NOW());
+             INSERT INTO auto_queue_runs (id, agent_id, status)
+             VALUES ('run-deleted', 'agent-deleted', 'active');
+             INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, slot_index)
+             VALUES ('entry-deleted', 'run-deleted', 'card-deleted', 'agent-deleted', 'pending', 0);",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed pending entry on a deleted card");
+
+        let error = create_activate_dispatch_for_entry_pg(
+            &pool,
+            "card-deleted",
+            "agent-deleted",
+            "implementation",
+            "Deleted card dispatch",
+            &json!({}),
+            ActivateDispatchEntryAttachment::new("entry-deleted", Some(0), "deleted_card"),
+        )
+        .await
+        .expect_err("a deleted card must not receive a dispatch");
+        assert!(error.contains("card card-deleted not found"), "{error}");
+        let dispatch_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM task_dispatches WHERE kanban_card_id = 'card-deleted'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count deleted card dispatches");
         assert_eq!(dispatch_count, 0);
 
         pool.close().await;

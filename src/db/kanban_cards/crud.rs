@@ -169,11 +169,13 @@ pub async fn insert_card_pg(
 }
 
 pub async fn card_status_pg(pool: &PgPool, card_id: &str) -> Result<Option<String>, String> {
-    sqlx::query_scalar::<_, String>("SELECT status FROM kanban_cards WHERE id = $1 LIMIT 1")
-        .bind(card_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| format!("{error}"))
+    sqlx::query_scalar::<_, String>(
+        "SELECT status FROM kanban_cards WHERE id = $1 AND deleted_at IS NULL LIMIT 1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("{error}"))
 }
 
 pub async fn update_card_fields_pg(
@@ -233,15 +235,6 @@ pub async fn assign_card_agent_pg(
     .execute(pool)
     .await
     .map_err(|error| format!("{error}"))?;
-    Ok(result.rows_affected() > 0)
-}
-
-pub async fn delete_card_pg(pool: &PgPool, card_id: &str) -> Result<bool, String> {
-    let result = sqlx::query("DELETE FROM kanban_cards WHERE id = $1")
-        .bind(card_id)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("{error}"))?;
     Ok(result.rows_affected() > 0)
 }
 
