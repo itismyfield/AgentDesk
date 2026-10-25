@@ -760,7 +760,7 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "79745b96e7fc4d02c7744ac9141e4da962ea56c603b5926401294c1af8a56cee",
+    "job_sha256" => "17e9ab8a51ddb0e4ddf21ab10360dfcbfe13c814f54b259c82450df361221201",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
@@ -774,7 +774,7 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "6a7671032f461e68dfba34df04f7cc3ee3cb2e31a7c692703979fbdca20fd0c8",
+    "job_sha256" => "bc15b089191e1d1234060197410f90e4d3a9cf0bce533d35bddb700cfc21159b",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],

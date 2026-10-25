@@ -509,16 +509,9 @@ if run_check contracts "Unfiltered cargo test in main, nightly and trusted"; the
 "$PYTHON" -m unittest tests.test_cargo_test_filters
 fi
 
-# Main still runs the retired lane tooling until it moves to the nextest jobs; keep its unit tests.
-if run_check contracts "Retired PR lane tooling still used by main"; then
-"$PYTHON" -m unittest tests.test_test_lane_coverage tests.test_lane_source_parity tests.test_lane_activation
-"$PYTHON" -m unittest tests.test_required_id_exception_fragments tests.test_test_selection tests.test_non_pg_test_filter
-"$PYTHON" -m unittest tests.test_check_pg_test_lane_membership
-fi
-
-if run_check cargo "Shared lib test artifact and inventory tooling"; then
-"$PYTHON" -m unittest tests.test_check_test_target_integrity
-"$PYTHON" -m unittest tests.test_target_empty_identity tests.test_lib_test_artifact tests.test_lib_test_inventory_sharing tests.test_lib_inventory_fixture_environment
+# The PostgreSQL 15 owner proof runs its exact ids through lib-test-artifact.py and run_test_lane.py.
+if run_check cargo "Shared lib test artifact and PG15 lane gate"; then
+"$PYTHON" -m unittest tests.test_lib_test_artifact tests.test_run_test_lane
 fi
 
 if run_check contracts "Rust test source wiring and PG classification"; then
@@ -551,10 +544,6 @@ if run_check contracts "Process-global Mutex<()> poison-recovery gate (#5185)"; 
 # panics were PoisonError). A rule that only exists as prose is #5003.
 "$PYTHON" scripts/check_test_mutex_poison_recovery.py
 "$PYTHON" -m unittest tests.test_check_test_mutex_poison_recovery
-fi
-
-if run_check contracts "Flaky-retry verdict fixtures (dormant)"; then
-"$PYTHON" -m unittest tests.test_lane_retry_verdict
 fi
 
 if run_check contracts "Test ROOT file-reference policy"; then

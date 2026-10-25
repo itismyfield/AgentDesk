@@ -42,8 +42,8 @@ class CargoTestFilters(unittest.TestCase):
             ("doctest filter changed", ".github/workflows/ci-main.yml", "cargo test --doc ClaudeBinary\n",
              "cargo test --doc ClaudeBinaryX\n", "ClaudeBinaryX"),
             ("nightly skip array", ".github/workflows/ci-nightly.yml", "\n          " + nightly_cmd,
-             "\n          " + nightly_cmd.replace("--skip _pg --skip pg_ --skip postgres", '"${NON_PG_SKIP_ARGS[@]}"'),
-             "NON_PG_SKIP_ARGS"),
+             "\n          " + nightly_cmd.replace("--skip _pg --skip pg_ --skip postgres", '"${SKIP_ARGS[@]}"'),
+             "SKIP_ARGS"),
             ("trusted loop variable", ".github/workflows/ci-macos-trusted.yml", trusted_cmd,
              trusted_cmd.replace("--test '*' --", "--test '*' \"$filter\" --"), "$filter"),
         )

@@ -190,7 +190,6 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
     def test_workflow_and_check_configuration_changes_select_the_lane(self) -> None:
         for path in (
             ".github/workflows/ci-pr.yml",
-            "scripts/check_test_target_integrity.py",
             "scripts/ci/postgres-service.sh",
         ):
             with self.subTest(path=path):

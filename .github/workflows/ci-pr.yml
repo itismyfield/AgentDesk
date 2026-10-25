@@ -84,7 +84,6 @@ jobs:
               - 'Cargo.toml'
               - 'migrations/**'
               - 'policies/**'
-              - 'scripts/check_test_target_integrity.py'
               - 'scripts/ci/postgres-service.sh'
               - 'src/db/**'
               - 'src/dispatch/**'
@@ -487,7 +486,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Provision Python 3.11 (tomllib owner for check_test_target_integrity, a2a-C PR-1)
+      - name: Provision Python 3.11 (tomllib owner for rust_test_sources)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -562,7 +561,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Provision Python 3.11 (tomllib owner for check_test_target_integrity, a2a-C PR-1)
+      - name: Provision Python 3.11 (tomllib owner for rust_test_sources)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -895,7 +894,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 432795141303ad5cb2fb8ce22166e387169402459baab831f17d60632035a27f
-          pin scripts/check-ci-runner-hardening.sh c61f5bb665e61a11274f207717d0a5d199ba1a627733e2569246fd7af1eeac27
+          pin scripts/check-ci-runner-hardening.sh 86a74e3eee74e1db19efe0636743aaa8ff6ba98b55bfa2fae71420caca178cb1
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required context

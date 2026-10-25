@@ -30,7 +30,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUNNER="$REPO_ROOT/scripts/run_test_lane.py"
 REAL_LEDGER="$REPO_ROOT/scripts/known_test_failures.txt"
-REAL_MANIFEST="$REPO_ROOT/scripts/lib_test_inventory_manifest.txt"
 PYTHON="${PYTHON:-python3}"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-test-lane-5185.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -49,39 +48,18 @@ pass_test() {
 }
 
 LEDGER="$TMP_ROOT/ledger.txt"
-MANIFEST="$TMP_ROOT/manifest.txt"
+IDS="$TMP_ROOT/expected-ids.txt"
 PRELUDE="$TMP_ROOT/prelude.txt"
 OUT="$TMP_ROOT/out.log"
 rc=0
 
-# Builds a synthetic inventory manifest from the ids given on stdin.
-#
-# `run_test_lane.py` derives its expectation through the same reviewed
-# static-only / cargo-only constants `--verify-lib-inventory` uses (#5144), and
-# those constants are deliberately unconditional: there is no test-only escape
-# that would let a real lane skip the adjustment. So the manifest written here
-# also carries the known cargo-only ids, and `$PRELUDE` carries the matching
-# `... ok` lines, which keeps the synthetic expectation equal to the ids under
-# test.
-write_manifest() {
-    "$PYTHON" - "$REPO_ROOT/scripts" "$MANIFEST" "$PRELUDE" "$@" <<'PY'
-import sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-from check_test_target_integrity import (
-    LIB_INVENTORY_KNOWN_CARGO_ONLY, expected_lib_static_only,
-    render_lib_inventory_manifest,
-)
-manifest_path, prelude_path = Path(sys.argv[2]), Path(sys.argv[3])
-ids = set(sys.argv[4:]) | set(LIB_INVENTORY_KNOWN_CARGO_ONLY)
-static_only = expected_lib_static_only(sys.platform) or frozenset()
-manifest_path.write_text(render_lib_inventory_manifest(ids | static_only), encoding="utf-8")
-prelude_path.write_text(
-    "".join(f"test {name} ... ok\n" for name in sorted(LIB_INVENTORY_KNOWN_CARGO_ONLY)),
-    encoding="utf-8",
-)
-print(len(ids))
-PY
+# Writes the planned id set the gate is told to expect, one id per line, as a CI
+# plan's `--expected-ids` file does. `$PRELUDE` stays empty: the expectation is
+# exactly the ids under test.
+write_ids() {
+    printf '%s\n' "$@" >"$IDS"
+    : >"$PRELUDE"
+    printf '%s\n' "$#"
 }
 
 # Drives the gate with a synthetic libtest transcript instead of cargo, so the
@@ -94,14 +72,14 @@ run_gate() {
     # last prelude line and the first transcript line become one line.
     local body
     body="$(cat "$PRELUDE")"$'\n'"$emit"
-    "$PYTHON" "$RUNNER" --ledger "$LEDGER" --inventory-manifest "$MANIFEST" "$@" -- \
+    "$PYTHON" "$RUNNER" --ledger "$LEDGER" --expected-ids "$IDS" "$@" -- \
         bash -c "printf '%s\n' \"\$0\"; exit $exit_code" "$body" \
         >"$OUT" 2>&1 || rc=$?
 }
 
 # Number of cargo-only ids the prelude reports, so summary lines can be built
 # with a correct total.
-EXTRA=$(grep -c '' "$PRELUDE" 2>/dev/null || echo 0)
+EXTRA=0
 
 summary_line() {
     # $1 passed (excluding prelude), $2 failed, $3 ignored
@@ -126,8 +104,7 @@ failures_block() {
 cat >"$LEDGER" <<'EOF'
 # no entries
 EOF
-write_manifest alpha::beta alpha::gamma >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta alpha::gamma >/dev/null
 
 PASSING_RUN="test alpha::beta ... ok
 test alpha::gamma ... ok
@@ -160,8 +137,7 @@ dropped = [f"disabled::mod::tests::t{index:04d}" for index in range(213)]
 (root / "dropped.txt").write_text("".join(f"{name}\n" for name in dropped), encoding="utf-8")
 PY
 # shellcheck disable=SC2046
-write_manifest $(cat "$TMP_ROOT/kept.txt") $(cat "$TMP_ROOT/dropped.txt") >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids $(cat "$TMP_ROOT/kept.txt") $(cat "$TMP_ROOT/dropped.txt") >/dev/null
 DISABLED_MODULE_RUN="$( { while read -r name; do
     printf 'test %s ... ok\n' "$name"
 done <"$TMP_ROOT/kept.txt"; } )
@@ -201,8 +177,7 @@ fi
 # 2. A zero-match run exits 0 from cargo. The gate must still fail: this is
 #    the original false green.
 # --------------------------------------------------------------------------
-write_manifest alpha::beta alpha::gamma >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta alpha::gamma >/dev/null
 ZERO_RUN="
 running 0 tests
 
@@ -311,7 +286,7 @@ if [ "$rc" -eq 0 ]; then
     fail_test "a libtest summary that does not account for the whole expected selection must fail"
 else pass_test
 fi
-if ! grep -q 'but the manifest derives' "$OUT"; then
+if ! grep -q 'but the plan expects' "$OUT"; then
     fail_test "the summary cross-check must state the derived expectation"
 else pass_test
 fi
@@ -336,17 +311,17 @@ else pass_test
 fi
 
 # The same tolerance must not invent results: an id that is not in the
-# inventory manifest fails as extra rather than being silently absorbed.
+# plan fails as extra rather than being silently absorbed.
 INVENTED_RUN="test alpha::beta ... ok
 test alpha::gamma ... ok
-test alpha::not_in_manifest ... ok
+test alpha::not_in_plan ... ok
 $(summary_line 3 0 0)"
 run_gate "$INVENTED_RUN" 0 --lane demo
 if [ "$rc" -eq 0 ]; then
-    fail_test "an id absent from the inventory manifest must fail as extra"
+    fail_test "an id absent from the plan must fail as extra"
 else pass_test
 fi
-if ! grep -q 'lane-extra (reported but not expected): alpha::not_in_manifest' "$OUT"; then
+if ! grep -q 'lane-extra (reported but not expected): alpha::not_in_plan' "$OUT"; then
     fail_test "the unexpected id must be named"
 else pass_test
 fi
@@ -375,8 +350,7 @@ fi
 REAL_SPLIT_ID=cli::discord_thread_create::tests::required_or_unavailable_tags_fail_after_conclusive_lookup_without_post
 REAL_MERGED_ID=cli::discord_thread_create::tests::malformed_archived_has_more_never_posts
 REAL_TMP=/var/folders/7h/1gr2yb5933b36t80rxpj60lr0000gn/T
-write_manifest alpha::beta "$REAL_SPLIT_ID" "$REAL_MERGED_ID" >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta "$REAL_SPLIT_ID" "$REAL_MERGED_ID" >/dev/null
 
 # The observed name write ends in a trailing space; keep it rather than let an
 # editor strip it, or this stops being the shape that was observed.
@@ -485,8 +459,7 @@ fi
 cat >"$LEDGER" <<'EOF'
 always | alpha::gamma | lane=demo | #5185 | isolated while the owning slice lands its fix
 EOF
-write_manifest alpha::beta alpha::gamma >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta alpha::gamma >/dev/null
 CANCELLING_MISREAD_RUN="test alpha::beta ... $REAL_TMP/.tmpQQyyzz/agentdesk.plist: ok
 FAILED
 test alpha::gamma ... $REAL_TMP/.tmpZZxxww/relay.lock: FAILED
@@ -539,8 +512,7 @@ if ! grep -q 'no .failures:. block naming them could be recovered' "$OUT"; then
 else pass_test
 fi
 
-write_manifest alpha::beta alpha::gamma >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta alpha::gamma >/dev/null
 
 # --------------------------------------------------------------------------
 # 4e-2. THE OTHER HALF OF THE CROSS-VALIDATION.
@@ -673,8 +645,7 @@ fi
 # The same block with a THIRD id libtest named but the transcript never
 # reported: the missing side of the set difference must be caught too, which a
 # first-element read cannot see once the first element matches.
-write_manifest alpha::beta alpha::gamma alpha::delta >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta alpha::gamma alpha::delta >/dev/null
 cat >"$LEDGER" <<'EOF'
 always | alpha::beta | lane=demo | #5185 | isolated while the owning slice lands its fix
 always | alpha::gamma | lane=demo | #5185 | isolated while the owning slice lands its fix
@@ -695,8 +666,7 @@ if ! grep -q '^failure-unattributed .*: alpha::delta' "$OUT"; then
     fail_test "the third id in the block must be adjudicated, not dropped after the first: $(grep -E '^(failure-|ERROR)' "$OUT" | head -3)"
 else pass_test
 fi
-write_manifest alpha::beta alpha::gamma >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta alpha::gamma >/dev/null
 cat >"$LEDGER" <<'EOF'
 # no entries
 EOF
@@ -855,7 +825,7 @@ fi
 #     about would otherwise shrink the expectation to fit whatever ran.
 # --------------------------------------------------------------------------
 rc=0
-"$PYTHON" "$RUNNER" --ledger "$LEDGER" --inventory-manifest "$MANIFEST" \
+"$PYTHON" "$RUNNER" --ledger "$LEDGER" --expected-ids "$IDS" \
     --lane demo --skip _pg -- \
     bash -c 'printf "%s\n" "$0"' "$PASSING_RUN" --skip turn_bridge >"$OUT" 2>&1 || rc=$?
 if [ "$rc" -eq 0 ]; then
@@ -868,240 +838,23 @@ else pass_test
 fi
 
 # --------------------------------------------------------------------------
-# 11. The shipped ledger and manifest must parse, and the shipped lane must be
-#     wired to the gate with the exact skip set the adjudicator is told about.
-#     Pinning the skip set here is what makes "declare the narrowing on both
-#     sides" a test-breaking change rather than a quiet one.
+# 11. The shipped ledger must parse for the lane CI runs through this gate.
 # --------------------------------------------------------------------------
 rc=0
-"$PYTHON" - "$REPO_ROOT/scripts" "$REAL_LEDGER" "$REAL_MANIFEST" >"$OUT" 2>&1 <<'PY' || rc=$?
-import datetime, sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-from run_test_lane import parse_ledger, derive_expected_selection
-entries, errors = parse_ledger(Path(sys.argv[2]), "non-pg-sweep", datetime.date.today())
-for error in errors:
-    print(f"ledger error: {error}")
-expected, manifest_errors = derive_expected_selection(
-    Path(sys.argv[3]), sys.platform, ["_pg", "pg_", "postgres"])
-for error in manifest_errors:
-    print(f"manifest error: {error}")
-if errors or manifest_errors:
-    sys.exit(1)
-print(f"shipped ledger entries={len(entries)} derived-selection={len(expected)}")
-PY
-if [ "$rc" -ne 0 ]; then
-    fail_test "the shipped ledger and inventory manifest must parse cleanly (rc=$rc): $(cat "$OUT")"
-else pass_test
-fi
-
-# --------------------------------------------------------------------------
-# 11b. The three Linux-only failures that the `library_sweep` job exposed must
-#      be absorbed by the shipped ledger, and absorbed as `flaky`. Both
-#      directions matter and both are pinned here. If an id stops matching an
-#      entry, the job goes red with `unexpected` and the lane cannot land. If
-#      one were recorded as `always` instead, the stale check would turn a run
-#      where they PASS into a hard lane failure -- and determinism has not been
-#      established for any of the three, so that run is expected to happen.
-# --------------------------------------------------------------------------
-EXPOSED_IDS='services::discord::jsonl_watcher::tests::notify_fires_when_file_modified
-services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_create
-services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit'
-
-rc=0
-"$PYTHON" - "$REPO_ROOT/scripts" "$REAL_LEDGER" "$EXPOSED_IDS" >"$OUT" 2>&1 <<'PY' || rc=$?
+"$PYTHON" - "$REPO_ROOT/scripts" "$REAL_LEDGER" >"$OUT" 2>&1 <<'PY' || rc=$?
 import datetime, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from run_test_lane import parse_ledger
-
-today = datetime.date.today()
-entries, errors = parse_ledger(Path(sys.argv[2]), "non-pg-sweep", today)
+entries, errors = parse_ledger(Path(sys.argv[2]), "pg", datetime.date.today())
 for error in errors:
     print(f"ledger error: {error}")
 if errors:
     sys.exit(1)
-failures = []
-for test_id in sys.argv[3].splitlines():
-    matched = [e for e in entries if e.mode != "ignored" and e.matches(test_id)]
-    if len(matched) != 1:
-        failures.append(f"{test_id}: expected exactly one entry, got {len(matched)}")
-        continue
-    entry = matched[0]
-    if entry.mode != "flaky":
-        failures.append(f"{test_id}: expected mode flaky, got {entry.mode}")
-    if entry.pattern != test_id:
-        failures.append(f"{test_id}: entry must name the exact id, got {entry.pattern}")
-    if entry.expires is None or entry.expires <= today:
-        failures.append(f"{test_id}: flaky entry needs a future expiry, got {entry.expires}")
-for failure in failures:
-    print(failure)
-if failures:
-    sys.exit(1)
-print("library_sweep linux exposures absorbed as flaky=3")
+print(f"shipped ledger entries={len(entries)}")
 PY
 if [ "$rc" -ne 0 ]; then
-    fail_test "the ledger must absorb the three Linux-only library_sweep exposures as flaky (rc=$rc): $(cat "$OUT")"
-else pass_test
-fi
-
-# --------------------------------------------------------------------------
-# 11c. Those three entries must keep saying WHY they are admissible. They are
-#      the first entries this repository admits on the strength of "the lane
-#      had never run them", and that basis is only checkable if the entry
-#      names the evidence. An entry rewritten to claim they were base-red
-#      would be the overclaim this whole change exists to close: there is no
-#      prior Linux verdict for them to pre-exist, and the ledger would then be
-#      resting on a false one.
-# --------------------------------------------------------------------------
-rc=0
-"$PYTHON" - "$REPO_ROOT/scripts" "$REAL_LEDGER" "$EXPOSED_IDS" >"$OUT" 2>&1 <<'PY' || rc=$?
-import datetime, sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-from run_test_lane import parse_ledger
-
-entries, errors = parse_ledger(Path(sys.argv[2]), "non-pg-sweep", datetime.date.today())
-if errors:
-    for error in errors:
-        print(f"ledger error: {error}")
-    sys.exit(1)
-by_pattern = {entry.pattern: entry for entry in entries}
-failures = []
-for test_id in sys.argv[3].splitlines():
-    entry = by_pattern.get(test_id)
-    if entry is None:
-        failures.append(f"{test_id}: no entry naming this exact id")
-        continue
-    if "newly exposed" not in entry.reason:
-        failures.append(f"{test_id}: reason must state that it is newly exposed")
-    if "31465b184" not in entry.reason:
-        failures.append(f"{test_id}: reason must cite the main commit that was checked")
-    if entry.issue != "#5217":
-        failures.append(f"{test_id}: expected tracking issue #5217, got {entry.issue}")
-for failure in failures:
-    print(failure)
-if failures:
-    sys.exit(1)
-print("library_sweep linux exposures carry their provenance=3")
-PY
-if [ "$rc" -ne 0 ]; then
-    fail_test "the three exposure entries must cite why they are admissible (rc=$rc): $(cat "$OUT")"
-else pass_test
-fi
-
-# A substring match is not a pin. `--skip postgres --` is a prefix of
-# `--skip postgres --skip turn_bridge`, so the `grep -q` that used to stand
-# here accepted a lane narrowed by an extra skip -- the exact evasion the
-# assertion claimed to block. Compare the whole command line instead, as a
-# fixed string, with the YAML block indentation normalised away.
-LANE_COMMAND='python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 4 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"'
-# `grep -q` exits the moment it matches, which closes the pipe while `sed`
-# still has the rest of the file to write. GNU sed reports that as
-# "couldn't flush stdout: Broken pipe" and exits non-zero; under the
-# `set -o pipefail` above, that non-zero becomes the pipeline's status and
-# this assertion fails *because the pin was found*. BSD sed on the
-# development machines finished writing first, so the suite was green
-# locally and red on ubuntu-latest. Dropping `-q` makes grep read to EOF,
-# so sed always completes and the status reflects the match alone.
-# Keep the selector's unsharded fallback exact; PR and main run nextest instead.
-if ! grep -xF "$LANE_COMMAND" "$REPO_ROOT/scripts/ci/test-selection.py" >/dev/null; then
-    fail_test "The selector must keep the non-pg-sweep lane's pinned unsharded command"
-else pass_test
-fi
-
-# --------------------------------------------------------------------------
-# 13. `--platform` must reach the expectation derivation.
-#     The static-only set is reviewed, platform-specific data (#5144): four
-#     macOS-only tests are `#[cfg]`-absent on Linux and one Linux-only test is
-#     absent on darwin, so the two platforms derive DIFFERENT id sets from the
-#     same manifest. Nothing else in this file constrains the parameter, and
-#     the lane runs on ubuntu-latest while every machine that develops it is
-#     darwin: a refactor pinning the derivation to the host would stay green
-#     everywhere it is run by hand and make the required context permanently
-#     red (missing 4, extra 1) the first time it runs on a runner.
-# --------------------------------------------------------------------------
-rc=0
-"$PYTHON" - "$REPO_ROOT/scripts" "$REAL_MANIFEST" >"$OUT" 2>&1 <<'PY' || rc=$?
-import sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-from run_test_lane import derive_expected_selection
-
-manifest = Path(sys.argv[2])
-skips = ["_pg", "pg_", "postgres"]
-darwin, darwin_errors = derive_expected_selection(manifest, "darwin", skips)
-linux, linux_errors = derive_expected_selection(manifest, "linux", skips)
-if darwin_errors or linux_errors:
-    print(f"derivation failed: {darwin_errors} {linux_errors}")
-    raise SystemExit(1)
-if not darwin or not linux:
-    print("a platform derived an empty selection")
-    raise SystemExit(1)
-if darwin == linux:
-    print("darwin and linux derived the same id set; --platform is not "
-          "reaching the derivation")
-    raise SystemExit(1)
-print(f"darwin={len(darwin)} linux={len(linux)} "
-      f"darwin-only={len(darwin - linux)} linux-only={len(linux - darwin)}")
-PY
-if [ "$rc" -ne 0 ]; then
-    fail_test "the two supported platforms must derive different selections: $(cat "$OUT")"
-else pass_test
-fi
-
-# End to end through the CLI: a transcript that is exactly right for Linux
-# must pass under `--platform linux` and fail under `--platform darwin`.
-PLATFORM_IDS="$TMP_ROOT/platform-ids.txt"
-"$PYTHON" - "$REPO_ROOT/scripts" "$MANIFEST" "$PRELUDE" "$PLATFORM_IDS" >/dev/null <<'PY'
-import sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-from check_test_target_integrity import (
-    LIB_INVENTORY_KNOWN_CARGO_ONLY, expected_lib_static_only,
-    render_lib_inventory_manifest,
-)
-manifest_path, prelude_path, ids_path = (Path(arg) for arg in sys.argv[2:5])
-darwin_only = expected_lib_static_only("darwin")
-linux_only = expected_lib_static_only("linux")
-cargo_only = set(LIB_INVENTORY_KNOWN_CARGO_ONLY)
-manifest_ids = {"alpha::beta"} | cargo_only | darwin_only | linux_only
-manifest_path.write_text(render_lib_inventory_manifest(manifest_ids),
-                         encoding="utf-8")
-prelude_path.write_text(
-    "".join(f"test {name} ... ok\n" for name in sorted(cargo_only)),
-    encoding="utf-8")
-# What a Linux runner must report: the manifest minus what does not compile
-# on Linux. The prelude already carries the cargo-only ids.
-ids_path.write_text(
-    "".join(f"{name}\n"
-            for name in sorted((manifest_ids - linux_only) - cargo_only)),
-    encoding="utf-8")
-PY
-EXTRA=$(grep -c '' "$PRELUDE")
-LINUX_COUNT=$(grep -c '' "$PLATFORM_IDS")
-LINUX_RUN="$( { while read -r name; do
-    printf 'test %s ... ok\n' "$name"
-done <"$PLATFORM_IDS"; } )
-$(summary_line "$LINUX_COUNT" 0 0)"
-
-run_gate "$LINUX_RUN" 0 --lane demo --platform linux
-if [ "$rc" -ne 0 ]; then
-    fail_test "the Linux selection must pass under --platform linux (rc=$rc): $(grep -E '^(lane-missing|lane-extra|ERROR)' "$OUT" | head -3)"
-else pass_test
-fi
-run_gate "$LINUX_RUN" 0 --lane demo --platform darwin
-if [ "$rc" -eq 0 ]; then
-    fail_test "the Linux selection must NOT satisfy --platform darwin; the two platforms compile different test sets"
-else pass_test
-fi
-if ! grep -q '^lane-missing' "$OUT" || ! grep -q '^lane-extra' "$OUT"; then
-    fail_test "the platform mismatch must name both sides of the difference"
-else pass_test
-fi
-run_gate "$LINUX_RUN" 0 --lane demo --platform freebsd
-if [ "$rc" -eq 0 ]; then
-    fail_test "an unsupported --platform must fail; the static-only set is reviewed data and cannot be guessed"
+    fail_test "the shipped ledger must parse cleanly (rc=$rc): $(cat "$OUT")"
 else pass_test
 fi
 
@@ -1119,8 +872,7 @@ fi
 # Test 4g-1: The lookahead must reject ok followed by word characters.
 #     `okhttp:` starts with ok but continues with word characters, so the
 #     ok at the start is not a verdict.
-write_manifest alpha::beta alpha::gamma >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta alpha::gamma >/dev/null
 cat >"$LEDGER" <<'EOF'
 # no entries
 EOF
@@ -1135,8 +887,7 @@ else pass_test
 fi
 
 # Test 4g-2: The lookahead must also reject FAILED and ignored with word chars.
-write_manifest alpha::beta alpha::gamma >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta alpha::gamma >/dev/null
 FAILEDBAR_RUN="test alpha::beta ... ok
 test alpha::gamma ... FAILED_upload_error
 $(summary_line 1 0 0)"
@@ -1148,8 +899,7 @@ fi
 
 # Test 4g-3: The lookahead ALLOWS ok/FAILED/ignored when followed by
 #     non-word characters or another verdict word (the whole point).
-write_manifest alpha::beta alpha::gamma >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta alpha::gamma >/dev/null
 LOOKAHEAD_ALLOW_RUN="test alpha::beta ... test alpha::gamma ... okok
 $(summary_line 2 0 0)"
 run_gate "$LOOKAHEAD_ALLOW_RUN" 0 --lane demo
@@ -1170,8 +920,7 @@ fi
 
 # Test 4h-1: Foreign text with `ok` followed by FAILED must let FAILED win.
 #     Regression: r1 leftmost `ok` in `/Users/ok-dev/cache:` stole FAILED.
-write_manifest alpha::beta >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta >/dev/null
 cat >"$LEDGER" <<'EOF'
 always | alpha::beta | lane=demo | #5227 | regression test: mid-segment ok must not shadow end FAILED
 EOF
@@ -1189,8 +938,7 @@ fi
 
 # Test 4h-2: Foreign text with `ok` in middle, no real verdict, must stay missing.
 #     Regression: r1 END leftmost invented `ok` from `/tmp/ok-cache/x`.
-write_manifest alpha::beta >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta >/dev/null
 cat >"$LEDGER" <<'EOF'
 # no entries
 EOF
@@ -1210,8 +958,7 @@ fi
 #     anchor), `ok.` at end-of-line would match. With the fixed END anchor,
 #     it must not. Since alpha::beta has no verdict and summary is not one,
 #     beta must be reported as lane-missing.
-write_manifest alpha::beta >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta >/dev/null
 cat >"$LEDGER" <<'EOF'
 # no entries
 EOF
@@ -1231,8 +978,7 @@ fi
 # Test 4h-4: Foreign text ending differently (message/warning), real verdict follows.
 #     Verify that `error: FAILED-to-open` is NOT parsed as FAILED verdict on
 #     the first line, but the second line `ok` is properly parsed.
-write_manifest alpha::beta >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta >/dev/null
 cat >"$LEDGER" <<'EOF'
 # no entries
 EOF
@@ -1247,8 +993,7 @@ else pass_test
 fi
 
 # Test 4h-5: Foreign text ending with `ignored`, real verdict follows.
-write_manifest alpha::beta >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta >/dev/null
 FOREIGN_IGNORED_THEN_OK_RUN="test alpha::beta ... [warn] flag ignored, using default
 ok
 $(summary_line 1 0 0)"
@@ -1260,8 +1005,7 @@ fi
 
 # Test 4h-6: OKok (END anchor must still match at segment end even with AT_START lookahead).
 #     This pins that the END anchor remains fixed and still matches final ok.
-write_manifest alpha::beta >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids alpha::beta >/dev/null
 OKOBJECT_END_OKOK_RUN="test alpha::beta ... /var/folders/tmp/agentdesk.plist: OKok
 $(summary_line 1 0 0)"
 run_gate "$OKOBJECT_END_OKOK_RUN" 0 --lane demo
@@ -1276,8 +1020,7 @@ fi
 # --------------------------------------------------------------------------
 TMUX_ID=services::discord::health::runtime_resolve::direct_meeting_candidate_tests::explicit_owner_does_not_wait_for_unrelated_live_probes
 TMUX_STDERR='no server running on /tmp/tmux-1001/default'
-write_manifest a::b "$TMUX_ID" >/dev/null
-EXTRA=$(grep -c '' "$PRELUDE")
+write_ids a::b "$TMUX_ID" >/dev/null
 cat >"$LEDGER" <<'EOF'
 # no entries
 EOF
@@ -1295,7 +1038,7 @@ printf '\n%s\n' "$3"
 SH
 STDOUT_LOG="$TMP_ROOT/child-stderr-transcript.log"
 rc=0
-"$PYTHON" "$RUNNER" --ledger "$LEDGER" --inventory-manifest "$MANIFEST" \
+"$PYTHON" "$RUNNER" --ledger "$LEDGER" --expected-ids "$IDS" \
     --log "$STDOUT_LOG" --lane demo -- \
     bash "$FAKE_LIBTEST" "$PRELUDE" "$TMUX_STDERR" "$(summary_line 2 0 0)" "$TMUX_ID" \
     >"$OUT" 2>&1 || rc=$?

@@ -36,79 +36,24 @@ Selection observer required gate가 red로 만드는 observer 사망은 **프로
 **참인지**만 검사하며 관측이 충분한지는 검사하지 않는다. invocation 하한을
 제거했으므로 truthful all-zero summary도 통과한다.
 
-### Main 측 library sweep (#5185)
+### PG15 exact owner proof의 판정 wrapper (#5185)
 
-PR과 main은 이 sweep 대신 nextest 한 번으로 모든 lib 시험을 돌린다. 아래는 어느 workflow도 더는 실행하지 않는 `test-selection.py` 도구의 설명이다.
-
-`library_sweep`은 `scripts/ci/test-selection.py plan`이 고른 PR sweep 집합을
-최대 네 샤드로 나눈다. full 모드의 집합은 기존 `--lib` 하네스에서
-`--skip _pg --skip pg_ --skip postgres`를 적용한 결과와 source-verified replay ID의
-합집합이다. Main은 같은 full 집합을 항상 계획한다. 일반 PR의 디렉터리 선택과
-full 전환 규칙은 그대로 유지한다.
-
-planner와 각 실행 leg는 원장의 declared-ignored ID를 같은 방식으로 읽고,
-실행 가능한 ID를 각 샤드에 먼저 배정한 뒤 ignored ID를 나눈다. 실행 가능한 ID가
-있으면 ignored-only 샤드를 만들지 않는다. 원장 판정 대상의 runnable ID가 있으면
-그 ID와 같은 샤드에 ignored 판정 대상 ID를 붙여, replay가 실행되기 전에 ignored-only
-하위 실행이 실패하는 새 경우를 만들지 않는다. 각 leg는 Counter 합집합·중복·빈 집합을
-검사하고 실제 matrix 크기인 `SWEEP_SHARD_TOTAL=${{ strategy.job-total }}`이 계획된
-샤드 수와 같은지도 실행 전에 검사한다. stdout을 상속하는 ignored subprocess 진입점은
-`scripts/ci/nested_libtest_declarations.json`의 관계에 따라 부모와 같은 primary
-하네스에 배치한다. 여러 부모가 같은 자식을 쓰면 그 부모들도 한 shard로 묶는다.
-선택 집합에 자식이 빠졌거나 분할 결과가 관계를 깨면 계획·실행 검사가 실패한다.
-추가 summary 예산은 그 shard에 있는 선언된 부모의 자식 수로 정하고,
-자식의 실행 출력은 선언된 부모도 실제로 선택·실행됐을 때만 받는다.
-hardening이 부르는 `nested_libtest.py check`는 이제 ignored 재실행 callsite·출력 경로·함수 hash와
-소스 인벤토리(자식의 `#[ignore]`·linux 컴파일·선언된 부모)만 검사한다. nextest는 시험마다
-프로세스를 따로 쓰므로 원장·PG hash/harness 정합성은 더 보지 않는다. 실제 시험은 `run_test_lane.py`의 exact-ID
-판정을 거치며, replay ID도 판정 누락과 미등록 ignore를 거부한다. 모든 ID가 ignored면
-실행 0건이므로 실패한다. 샤드별 PostgreSQL 서비스는 계속 필요하다.
-
-> ⚠️ **이 잡은 PostgreSQL을 필요로 한다.** 이름의 skip 패턴은 **test id에 대한
-> 부분문자열 필터**이고 PG 의존성은 **테스트 본문의 성질**이라 둘이 일치하지
-> 않는다. `scripts/pg_test_lane_manifest.txt`가 PG 의존으로 분류한 460건 중
-> **정확히 61건**이 그 세 부분문자열을 id에 갖지 않아 이 레인에 선택된다.
-> 실측: fixture base를 닫힌 포트로 향하게 하면 **61건 중 57건 FAILED**이고
-> 소요 **915.7초**(연결 재시도로 각 테스트가 60초 이상 매달린다), 살아 있는
-> 서버에 대해서는 `AGENTDESK_REQUIRE_PG=1`·병렬로 **61 passed / 0 failed,
-> 24.8초**다. 따라서 서비스가 없으면 이 required context는 **구조적으로 초록이
-> 될 수 없다**. 서비스를 붙임으로써 어떤 PR 레인도 실행하지 않던 56건
-> (`scripts/pg_test_lane_baseline.txt`의 `[rule1]`, 이제 비어 있다)이 모든 Rust
-> PR에서 실제 DB를 상대로 돌기 시작한다.
->
-> #6014: `ci-pr.yml` `pg_db` filter의 **소스 경로 부분은 생성물**이다. `scripts/pg_test_lane_manifest.txt`의
-> `[files]`가 `# BEGIN/END generated pg_db source paths` 구간으로 렌더링되고, 재생성은
-> `python3 scripts/check_pg_test_lane_membership.py --write-pg-db-paths`다. 구간 밖의 수작업 글롭·비소스
-> 트리거(`migrations/**`, `justfile`, `Cargo.*` 등)와 주석은 보존된다. 기본 게이트가 구간 동기화를 함께
-> 검사하고, 무조건 실행되는 `scripts_contracts` 잡의 `ci-script-checks.sh`(`contracts` 샤드)가 재생성 후 `git diff --exit-code`로
-> **커밋된 트리**가 생성 결과와 같은지 확인한다. dorny/paths-filter는 패턴을 각각 picomatch로 컴파일해
-> 전부 OR(`matchers.some`; 이 워크플로는 `predicate-quantifier` 미설정)하므로 `!`는 제외가 아니라 "그 외
-> 전부"를 고르는 양성 매처다(#5232) — `pg_db` 안의 `!`는 구간 앞뒤 무관하게 rc=2이고, 구간 누락·중복·역순도
-> 파일을 고치지 않고 rc=2다. 이로써 `[rule3]` debt는 21 → 0이고 baseline의 해당 섹션은 비었다. 이 변경은
-> PG 레인이 **선택되는 빈도**만 바꿀 뿐 잡 실행 시간에 대한 주장이 아니다.
->
-> 이 성질은 `scripts/check_pg_test_lane_membership.py`의 **`[rule5]`**가
-> 기계적으로 지킨다: `ci-pr.yml`의 어떤 잡이 서비스를 시작하지 않은 채
-> `cargo test`로 PG 의존 테스트를 선택하면 **id를 전수로 지목하며 rc=1**이다.
-> baseline 관용이 없는 규칙이라 재생성으로 흡수되지 않는다. `rule2`는 이것을
-> 잡지 못한다 — `--all-targets` 커맨드만 읽어서 `--lib` 레인을 보지 못하고,
-> 같은 61건이 이미 nightly macOS/Windows 레인 몫의 debt로 등재돼 있어 **PR 레인을
-> 추가해도 숫자가 움직이지 않는다.**
+PR·main·nightly는 nextest 한 번으로 모든 lib 시험을 돌린다. `scripts/run_test_lane.py`는 PR의
+`PostgreSQL 15 exact owner proof`만 감싸며, 기대 집합은 `--expected-ids` 파일
+(`scripts/ci/pg15_required_ids.txt`)이다.
 
 이 wrapper는 **실행 건수 임계를 쓰지
 않는다.** 임계는 집합의 스칼라 요약이고, 실측된 두 회피가 모두 임계를 통과했다:
 한 모듈을 402건 축소하면 `executed=6539`, 213건 모듈을 비활성화하면
 `executed=6708`로 둘 다 floor 6500 위에 남아 **GATE_RC=0**을 반환했다.
 
-대신 wrapper는 `scripts/lib_test_inventory_manifest.txt`에서 이 레인이 실행해야
-할 **test id 집합**을 유도하고(플랫폼별 static-only / cargo-only 보정은 #5144의
-`--verify-lib-inventory`와 같은 상수를 재사용한다), 선언된 `--skip` 패턴을 뺀 뒤
+대신 wrapper는 계획된 **test id 집합**을
 실제 보고된 집합과 비교해 **양쪽 차분을 id 이름으로 출력하며** 실패한다.
 `--skip`은 wrapper와 cargo 양쪽에 선언되어야 하고 둘이 다르면 레인 실행 전에
 실패한다. `#[ignore]`는 선택 집합을 유지한 채 실행만 줄이는 우회로이므로
 원장(`ignored` 모드)에 집합으로 핀된다. libtest 요약줄이 `--max-summaries`를
 넘으면 실패하며(테스트 바이너리를 재실행하는 테스트가 자식 요약을 상속 stdout에
-쓴다), 주 요약줄은 유도된 기대 집합과 교차검증된다.
+쓴다), 주 요약줄은 계획된 기대 집합과 교차검증된다.
 
 libtest는 병렬 모드에서 `test <id> ... `과 판정을 **동기화되지 않은 두 번의
 write**로 내보내고, 그 stdout은 모든 테스트 스레드와 상속받은 자식 프로세스가
@@ -195,40 +140,6 @@ write 사이에 끼어드는 것이라 바이트를 **추가**할 수 있을 뿐
 이 레인의 아카이브 전사 76개(73건 실패의 poison cascade 1개 포함)를 재생했을 때
 블록 집합과 파싱 집합은 전부 일치했으므로, 이 검사의 실측 false-red 비용은 0이다.
 
-#### required context 등록 절차 (#5185)
-
-`library_sweep`을 branch protection의 required check으로 등록할 때:
-
-1. 먼저 이 PR을 머지한다. 등록은 머지 **후**다.
-2. **잡이 필요로 하는 서비스를 실제로 갖고 있는지 확인한다.** 등록 여부와
-   무관하게 잡은 실행되므로, 등록은 red를 만드는 것이 아니라 **red가 머지를
-   막게 만들 뿐**이다. 즉 이 단계를 건너뛰면 등록 전에 이미 모든 PR이 red다.
-   확인 방법은 두 가지이며 **둘 다** 한다:
-   - `python3 scripts/check_pg_test_lane_membership.py`가 `rule5=0`인지 본다.
-     0이 아니면 `ci-pr.yml`의 어떤 잡이 PG를 시작하지 않은 채 PG 의존 테스트를
-     선택하고 있다는 뜻이고, 출력이 그 id를 전수로 지목한다.
-   - main의 실제 런에서 그 잡의 `Start PostgreSQL service` step이 존재하고
-     성공했는지 본다. rule5는 **선택 집합**을 검사할 뿐 서비스가 실제로 떴는지는
-     모른다.
-   ⚠️ 이 단계는 #5185가 **거의 놓친 것**이다. 잡 이름과 `--skip` 패턴이 모두
-   "non-PostgreSQL"이라 아무도 PG를 의심하지 않았지만, 그 패턴은 id 부분문자열
-   필터였고 61건이 통과했다.
-3. main에서 `Library test sweep`이 **N회 연속 green**인지 확인하고 **false-red
-   비율을 실측**한다. 1회 green은 근거가 아니다: 이 레인이 관측하는 stdout
-   오염은 확률적이고, 실제로 5회 스윕 중 1회 오탐이 관측된 적이 있다.
-4. 등록할 컨텍스트 이름은 **`Library test sweep (ubuntu-latest)`**
-   (= `library_sweep_required_context` job)이다. sweep 잡 본체인
-   `Library test sweep`을 등록하면 `rust_tests` 출력이 false인 PR에서 잡이
-   `if:`로 skip되는데, GitHub은 job 조건으로 skip된 required check를 **통과로
-   친다**. `changes`가 실패해 sweep이 skip돼도 통과하므로 fail-open이다.
-   (**pending으로 남아 머지를 막는 것**은 workflow 자체가 트리거되지 않거나
-   그 이름의 check가 아예 발행되지 않은 경우다. job skip과 구분한다.)
-   mirror job은 `if: ${{ !cancelled() }}`로 돌면서 의도된 skip만 명시적 green으로
-   바꾸고, upstream 실패와 timeout(`cancelled`로 보고됨)에는 fail-closed다.
-   run이 취소되면 아직 시작하지 않은 mirror는 시작하지 않고, 이미 실행 중인
-   mirror는 run과 함께 취소 대상이 된다. 그때의 check conclusion은 PR run
-   취소로 실측해 확인한다.
-
 `scripts/check-ci-runner-hardening.sh`의 `targets`에 등재된 `rust_build`·`rust_tests`·
 `test_evidence`·`pg15_owner_proof`·`relay_authority_mutations`·`check_fast_cross_os`·
 `check_fast_cross_os_targets`에는 **강도가 다른 두 층**이 있다.
@@ -250,65 +161,9 @@ write 사이에 끼어드는 것이라 바이트를 **추가**할 수 있을 뿐
 `targets`에 없는 신규 job 경계, job ID 인용이나 표현 변형으로 인한 추출량 붕괴,
 invocation 하한은 이 게이트가 보장하지 않는다.
 
-`scripts/ci-script-checks.sh`가 독립 실행하는
-`check_test_target_integrity.py --verify-lib-inventory` 검사는 Rust 소스에서
-정적으로 수집한 lib 테스트의 전체 이름 집합을 정렬된
-`scripts/lib_test_inventory_manifest.txt`와 양방향 비교하고, 같은 트리에서
-`cargo test --lib -- --list`가 연 집합과의 차이가 명시된 platform/include 차이인지
-비교한다. 새 테스트를 추가하거나 기존 테스트를 삭제·이름 변경하면 manifest와
-static 집합의 차집합에 실제 test ID가 이름 그대로 출력되어 red가 된다. 실패
-출력에는 검사 시점에 파생한 count/digest와 함께 다음 재생성 명령이 그대로 나온다:
-
-```sh
-python3 scripts/check_test_target_integrity.py --write-lib-inventory-manifest
-```
-
-명령은 사람이 의도적으로 실행해 매니페스트를 다시 쓰는 절차다. 생성된
-`[tests]` 행을 소스 diff와 함께 검토한 뒤 `--verify-lib-inventory`를 다시 실행한다.
-검사는 자동으로 매니페스트를 고치지 않는다. 행은 중복 없이 locale-independent
-bytewise UTF-8 오름차순이어야 하고, 파일은 UTF-8/LF/최종 LF 형식이어야 한다.
-따라서 64-hex/count 한 줄보다 추가·삭제된 test ID 자체가 리뷰 diff에 노출된다.
-소스에서 cfg-분기 때문에 같은 full ID가 반복되면 스캐너가 위치를 진단하고
-집합에는 한 번만 canonicalize한다. 매니페스트의 중복 행은 거부한다.
-
-이 inventory 검사는 테스트 identity만 확인하며 다음을 보장하지 않는다.
-
-- 대상 테스트에 `#[ignore]`를 붙여 실행에서 제외하는 조작은 identity를 유지하므로
-  이 inventory 검사가 거부하지 않는다.
-- 컴파일되고 통과하지만 아무것도 검증하지 않는 빈 테스트 본문은 정적 identity
-  검사로 원리적으로 판별할 수 없다.
-- workflow의 실제 test step에 `if: false`를 넣고 해당 job의 semantic hash를
-  재핀해도 Rust test identity는 바뀌지 않는다. 이 inventory 검사는 그 step의
-  실행 여부를 검증하지 않는다.
-- path filter에 `!src/...` 부정 패턴을 넣어 변경을 lane 선택에서 제외해도 Rust test
-  identity는 바뀌지 않는다. 이 inventory 검사는 path-filter의 lane 선택 의미론을
-  검증하지 않는다.
-- 매니페스트 자체는 같은 PR에서 갱신할 수 있으므로, 그 갱신을 동반한 삭제·이름
-  변경을 이 검사만으로 막는 것은 보장하지 않는다. 반드시 소스 diff와 이름 diff를
-  함께 리뷰해야 한다.
-- 정적 스캐너만 실행한 뒤 매니페스트를 재생성하는 절차는 수집 완전성을 보장하지
-  않는다. 스캐너가 회귀해 ID를 덜 수집하면 재생성이 그 축소를 그대로 기록할 수
-  있다. CI의 Cargo `--list` 독립 대조가 `cargo-only` 차이를 잡는 backstop이므로,
-  이 대조를 생략한 재생성 성공만으로 inventory가 완전하다고 판정하면 안 된다.
-
-`--verify-lib-inventory`는 `cargo test --manifest-path Cargo.toml --lib -- --list`를
-실행하므로 전체 lib 크레이트 컴파일이 필요하다. 이를 호출하는 PR `Script checks runner`(`cargo` 샤드)와
-main `Main script checks` job(`cargo` 샤드)은 모두 Rust 1.94.1 toolchain, sccache, Cargo dependency
-cache를 먼저 설치한다. 이 wiring을 바꾸면 해당 workflow setup과 이 문서의 재현 명령을
-함께 검토한다.
-
-`scripts/ci-script-checks.sh`는 cargo-free unittest를 먼저 실행하고, Cargo 대조는
-다음 명령으로 정확히 한 번 실행한다.
-
-```sh
-AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
-```
-
-1800초는 이 컴파일 포함 검사의 명시적 wall-clock 예산이며, report 플래그는 성공과
-실패 모두에서 실제 소요시간을 CI notice로 남긴다. #5145 close-out 때 특정 runner/cache
-상태에서 관측한 약 446–454초는 예산 산정 맥락일 뿐 현재 속도나 상한을 약속하지 않는다.
-2026-10-11 hosted runner 실측은 636–914초였고(#6827), 900초 예산에서 정상 실행이 시간 초과로 실패해 1800초로 올렸다.
-하드웨어, cache hit 여부, dependency 변경에 따라 실제 시간은 달라질 수 있다.
+lib 시험 identity는 `rust_build`의 nextest list와 소스 인벤토리 대조
+(`scripts/ci/rust_test_sources.py compare`), 그리고 `test_evidence` 감사가 맡는다. 시험 삭제나
+`#[ignore]` 전환은 `scripts/ci/test-removal-justifications.txt`의 정확한 ID·종류 행이 있어야 통과한다.
 
 ### Gate ↔ 실제 커맨드
 
@@ -404,7 +259,6 @@ nextest worker 와 PR `pg15_owner_proof` 는 **각자의 job 에서 `Start Postg
 - PR `pg15_owner_proof`(`PostgreSQL 15 owner proof`)는 `rust_build`와 같은 `needs`·`if`로 `postgres:15`를 띄우고, `server_version_num`이 15가 아니면 실패한다. `scripts/ci/pg15_required_ids.txt`의 시험만 `--exact`·`--test-threads=1`로 실행하며 `run_test_lane.py --expected-ids`가 누락·추가·미실행·빈 목록을 실패로 판정한다. `required_contexts`의 `Fast targeted tests (ubuntu-latest)` 판정이 `rust_tests` 필터로 이 결과도 확인한다(`docs/ci/postgres-service-image.md`).
 - PR infra retry는 `Rust tests (worker N)` 워커만 후보로 본다. 로그가 infra로 분류된 워커만 `classify-worker --infra-evidence`로 넘기고, 워커 아티팩트에 시험 실패·읽을 수 없는 결과가 있거나 분류되지 않은 워커·내려받기 실패·만료된 아티팩트·plan 부재가 있거나, 워커의 시험 단계 로그에 nextest 실패(`LEAK-FAIL`, `error: test run failed`, runner의 `##[error]Process completed with exit code 100.` 줄)가 있으면 아티팩트가 없어도 모든 워커의 재시도를 막는다. 최초 attempt에서만 한 번 요청하며 default branch checkout과 요청 전 stale-attempt·PR head 검사는 유지한다.
 - PR `check_fast_cross_os_targets`(`Windows exact targets`)의 `Writer namespace exact Windows targets` step 예산은 `timeout-minutes: 60` 이고 job 수준 timeout 은 두지 않는다. 값은 `check-ci-runner-hardening.sh` 가 고정한다. 2026-10-15~16 PR CI 실측 약 40회가 24~46분(p90 약 42분)이었고 45분 예산에서 #7021(2회) 등 세 건이 시간 초과로 끊겼다. p90 이 40분을 넘었으므로 step 분할을 후속으로 검토한다. 그 뒤 같은 job 이 Windows nextest list 로 `rust_test_sources.py compare --platform windows` 를 30분 예산으로 실행한다.
-- 모든 샤드의 합집합이 미분할 선택과 같고 교집합이 없다는 것은 `check_pg_test_lane_membership.py` 의 filter contract 가 lib inventory 로 검사한다.
 - nextest worker 는 `.config/nextest.toml` 의 `ci` profile(`test-threads = 1`)로 계획된 시험을 하나씩 실행한다 — `high_risk_recovery::` 도 같다.
 - 이유(#974, `683db919f`): `PgRecoveryTestDatabase::create()` 가 시나리오마다 admin PG connection 을 열어 새 DB 를 만드는데, 기본 병렬 executor 에서는 **admin pool 이 고갈**되어 `pool timed out while waiting for an open connection` 으로 실패했다. `--test-threads=1` 이 순차 실행을 강제해 admin connection 을 재사용하게 한다. 즉 원인은 "테스트 간 lifecycle race" 가 아니라 **connection pool 고갈**이다.
 - #973(`24a0e1cb0`)은 이 항목의 근거가 아니다 — non-PG lane 의 skip 필터가 너무 좁아(`_pg_`, `postgres_`) `*_pg`/`pg_*`/`*postgres` 가 새어 들어간 것과 brittle assertion 을 고친 건이다.

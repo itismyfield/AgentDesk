@@ -66,7 +66,7 @@ def needs_swap(step: dict, job: dict) -> bool:
     run = str(step.get("run", ""))
     if CLIPPY_MARKER.search(run) or any(marker.search(run) for marker in LIB_BUILD_MARKERS):
         return True
-    # The cargo Script checks shard runs --verify-lib-inventory.
+    # The cargo Script checks shard keeps Rust for the inventory fallback and the H2 module-map driver.
     shard = (step.get("env") or {}).get("SCRIPT_CHECK_SHARD")
     return "ci-script-checks.sh" in run and shard == "cargo"
 
@@ -160,7 +160,7 @@ class SwapStepWiring(unittest.TestCase):
         restored = {
             "name": REMOVED_OBSERVER_STEPS[0], "shell": "bash",
             "run": "set -o pipefail\nbash scripts/ci/mem-measure.sh observe-high-risk -- python3 "
-                   "scripts/check_test_target_integrity.py --observe-selection "
+                   "scripts/check.py --observe-selection "
                    "--workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee x.log\n",
         }
         script_mutants = {

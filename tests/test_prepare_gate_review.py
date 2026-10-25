@@ -78,40 +78,6 @@ class PrepareGateReviewTest(unittest.TestCase):
             self.assertEqual(untouched.read_text(), "manual\n")
             self.assertEqual(PREPARE.prepare(root), 0)
 
-    def test_official_static_manifest_writer_corrects_drift(self):
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "src").mkdir()
-            (root / "scripts").mkdir()
-            (root / "Cargo.toml").write_text('[package]\nname="fixture"\nversion="0.1.0"\n')
-            (root / "src/lib.rs").write_text('#[cfg(test)]\nmod tests { #[test] fn selected() {} }\n')
-            manifest = root / "scripts/lib_test_inventory_manifest.txt"
-            manifest.write_text("drift\n")
-            argv = [sys.executable, str(ROOT / "scripts/check_test_target_integrity.py"),
-                    "--repo-root", str(root), "--write-lib-inventory-manifest"]
-            result = subprocess.run(argv, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("tests::selected", manifest.read_text())
-            expected = manifest.read_bytes()
-            self.assertEqual(subprocess.run(argv, capture_output=True).returncode, 0)
-            self.assertEqual(manifest.read_bytes(), expected)
-
-    def test_unclear_static_inventory_refuses_write(self):
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "src").mkdir()
-            (root / "scripts").mkdir()
-            (root / "Cargo.toml").write_text('[package]\nname="fixture"\nversion="0.1.0"\n')
-            (root / "src/lib.rs").write_text("mod missing;\n")
-            manifest = root / "scripts/lib_test_inventory_manifest.txt"
-            manifest.write_text("preserve\n")
-            result = subprocess.run([sys.executable, str(ROOT / "scripts/check_test_target_integrity.py"),
-                                     "--repo-root", str(root), "--write-lib-inventory-manifest"],
-                                    capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("not unambiguous", result.stderr)
-            self.assertEqual(manifest.read_text(), "preserve\n")
-
 
 class SafeAdditiveSkipTest(unittest.TestCase):
     def _fixture(self, root, *, pinned=True, child=True, production=False):

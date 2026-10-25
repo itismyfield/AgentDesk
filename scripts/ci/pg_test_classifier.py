@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Classify which library tests need PostgreSQL, from source alone; nothing here runs cargo.
 
-A copy of the classifier in scripts/check_pg_test_lane_membership.py and the Rust helpers it borrows
-from scripts/check_test_lane_coverage.py; it becomes the single source when slice D deletes those files.
+The single source of PG classification: native-OS runs plan only its non-PG tests, and Script checks
+fail when part of the tree cannot be analysed.
 
   classify  PG test IDs with their files, minus the exemptions below; with --list also the non-PG IDs
             of an unfiltered nextest list, which native-OS runs execute without a PG service

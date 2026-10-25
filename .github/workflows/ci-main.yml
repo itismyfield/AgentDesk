@@ -308,8 +308,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      # --verify-lib-inventory invokes `cargo test --lib -- --list`; keep the
-      # main-push aggregate job on the pinned Rust toolchain and shared cache.
+      # Keep Rust available for inventory fallback and the H2 module-map driver,
+      # on the pinned toolchain and shared cache.
       - name: Install Rust toolchain for lib inventory
         uses: dtolnay/rust-toolchain@master
         with:
@@ -334,9 +334,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      # See the matching step in ci-pr.yml: the PyYAML oracle in
-      # `tests/test_check_pg_test_lane_membership.py` is not available on the
-      # clean setup-python interpreter and must be installed explicitly.
+      # See the matching step in ci-pr.yml: install PyYAML for the independent
+      # workflow-shape test oracles; the clean setup-python interpreter lacks it.
       - name: Install script-test Python deps
         run: python3 -m pip install --disable-pip-version-check pyyaml
 

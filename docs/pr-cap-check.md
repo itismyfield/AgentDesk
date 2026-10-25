@@ -1,5 +1,7 @@
 # Production PR size check
 
+<!-- doc-path-refs: removed scripts/lib_test_inventory_manifest.txt scripts/pg_test_lane_manifest.txt -->
+
 Run `bash scripts/pr_cap_check.sh [commit-ish]` in the repository being measured.
 The target defaults to committed `HEAD`; an absolute helper path still measures
 its caller's worktree. Uncommitted files never count. The local helper fetches

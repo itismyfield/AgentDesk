@@ -108,7 +108,7 @@ class UnprovenBoundaries(unittest.TestCase):
 
     def test_supported_ci_forms_raise_no_issue(self) -> None:
         for text in ('echo "${PKG_CONFIG_PATH:-}" ${#A[@]} ${{ matrix.shard }}',
-                     'cargo test -- "${NON_PG_SKIP_ARGS[@]}" 2>&1',
+                     'cargo test -- "${SKIP_ARGS[@]}" 2>&1',
                      "for ((i = 1; i < 3; i += 2)); do :; done",
                      "limit=$((10 * 1024 * 1024))", "a <<< here"):
             with self.subTest(text=text):

@@ -1,5 +1,7 @@
 # design-4712 — `tmux_watcher.rs` 분해 슬라이스 (릴레이 안정화 병목 해소)
 
+<!-- doc-path-refs: removed scripts/check_test_lane_coverage.py scripts/test_lane_coverage_baseline.txt -->
+
 작성 2026-07-29. 설계 에이전트(Claude, read-only)의 산출물을 오케스트레이터가 파일로 옮긴 것.
 설계 에이전트는 Write 도구가 없어 직접 쓰지 못했고, **아래 사실관계는 오케스트레이터가 리포에서 직접 재확인함**(§0.1).
 

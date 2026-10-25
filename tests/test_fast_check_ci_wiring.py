@@ -499,8 +499,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         jobs = yaml.safe_load(workflow)["jobs"]
         check, targets = jobs["check_fast_cross_os"], jobs["check_fast_cross_os_targets"]
         python_step_name = (
-            "Provision Python 3.11 (tomllib owner for "
-            "check_test_target_integrity, a2a-C PR-1)"
+            "Provision Python 3.11 (tomllib owner for rust_test_sources)"
         )
         self.assertEqual(check["name"], "Fast check + non-PG tests (${{ matrix.os }})")
         self.assertEqual(targets["name"], "Windows exact targets (${{ matrix.os }})")
