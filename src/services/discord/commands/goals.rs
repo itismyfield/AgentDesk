@@ -46,58 +46,53 @@ pub(in crate::services::discord) async fn cmd_goals(ctx: Context<'_>) -> Result<
         return Ok(());
     }
 
-    if let Err(error) = ctx
-        .data()
-        .shared
-        .check_settings_owner(&effective_provider, channel_id)
-        .await
-    {
-        ctx.say(error.to_string()).await?;
-        return Ok(());
-    }
-    let runtime_channel_id = channel_id;
-    let channel_id = ctx
-        .data()
-        .shared
-        .feature_command_channel_id(
-            &ctx.serenity_context().http,
-            &effective_provider,
-            channel_id,
-        )
-        .await;
-    let currently_enabled = channel_codex_goals_setting(&ctx.data().shared, channel_id)
-        .await
-        .unwrap_or(false);
-    let next_enabled = !currently_enabled;
-    if let Err(error) = update_channel_codex_goals(
-        &ctx.data().shared,
-        &ctx.data().token,
-        channel_id,
-        next_enabled,
-    )
-    .await
-    {
-        ctx.say(format!("설정을 저장하지 못했습니다: {error}"))
+    let notice: std::io::Result<String> = async {
+        ctx.data()
+            .shared
+            .check_settings_owner(&effective_provider, channel_id)
             .await?;
-        return Ok(());
-    }
+        let runtime_channel_id = channel_id;
+        let channel_id = ctx
+            .data()
+            .shared
+            .feature_command_channel_id(
+                &ctx.serenity_context().http,
+                &effective_provider,
+                channel_id,
+            )
+            .await;
+        let currently_enabled = channel_codex_goals_setting(&ctx.data().shared, channel_id)
+            .await
+            .unwrap_or(false);
+        let next_enabled = !currently_enabled;
+        update_channel_codex_goals(
+            &ctx.data().shared,
+            &ctx.data().token,
+            channel_id,
+            next_enabled,
+        )
+        .await?;
 
-    let reset_pending = ctx
-        .data()
-        .shared
-        .overrides
-        .session_reset_pending
-        .contains(&channel_id);
-    let notice = if next_enabled {
-        build_goals_enabled_notice(reset_pending)
-    } else {
-        build_goals_disabled_notice(reset_pending)
-    };
-    let scope = if runtime_channel_id != channel_id {
-        "\n이 스레드는 부모 채널과 설정을 공유합니다."
-    } else {
-        ""
-    };
-    ctx.say(format!("{notice}{scope}")).await?;
+        let reset_pending = ctx
+            .data()
+            .shared
+            .overrides
+            .session_reset_pending
+            .contains(&channel_id);
+        let notice = if next_enabled {
+            build_goals_enabled_notice(reset_pending)
+        } else {
+            build_goals_disabled_notice(reset_pending)
+        };
+        let scope = if runtime_channel_id != channel_id {
+            "\n이 스레드는 부모 채널과 설정을 공유합니다."
+        } else {
+            ""
+        };
+        Ok(format!("{notice}{scope}"))
+    }
+    .await;
+    ctx.say(notice.unwrap_or_else(|error| format!("설정을 저장하지 못했습니다: {error}")))
+        .await?;
     Ok(())
 }

@@ -351,6 +351,7 @@ jobs:
               - 'src/services/discord/admin_host_guard_tests.rs'
               - 'src/services/discord/catch_up/too_old_drop_pg_tests.rs'
               - 'src/services/discord/commands/cancel_backstop_tests.rs'
+              - 'src/services/discord/commands/config/provider_settings.rs'
               - 'src/services/discord/commands/control/clear_end_tests.rs'
               - 'src/services/discord/commands/control/clear_entry_tests.rs'
               - 'src/services/discord/commands/control/clear_persist_failure_tests.rs'
