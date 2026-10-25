@@ -1448,3 +1448,54 @@ fn implementation_and_rework_render_one_pr_merge_contract_for_every_merge_strate
         "merge_strategy_mode still varies the rendered dispatch contract"
     );
 }
+
+#[test]
+fn system_prompt_inspection_preserves_pending_restore_for_the_next_turn() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let channel = ChannelId::new(7_378_901);
+    let id = channel.get().to_string();
+    let packet = "pending owner restore packet for inspection";
+    crate::services::agent_recovery::stage_restore_packet_for_test(&id, packet);
+    let build = |profiles| {
+        build_system_prompt_with_manifest(
+            "ctx",
+            &[],
+            root.path().to_str().unwrap(),
+            channel,
+            channel,
+            "test-token",
+            None,
+            false,
+            profiles,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            None,
+            None,
+        )
+    };
+    let built = build(PromptProfiles::inspection(DispatchProfile::Full));
+    let remaining = crate::services::agent_recovery::take_restore_packet(&id);
+    assert!(built.system_prompt.contains(packet));
+    assert_eq!(
+        remaining.as_deref(),
+        Some(packet),
+        "inspection must not consume the next owner's restore packet"
+    );
+    crate::services::agent_recovery::stage_restore_packet_for_test(&id, packet);
+    assert!(
+        build(PromptProfiles::foreground(DispatchProfile::Full))
+            .system_prompt
+            .contains(packet)
+    );
+    assert!(
+        crate::services::agent_recovery::take_restore_packet(&id).is_none(),
+        "normal turns still consume restore packets"
+    );
+}

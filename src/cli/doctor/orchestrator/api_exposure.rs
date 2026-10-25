@@ -1,4 +1,6 @@
-use super::{Check, CheckGroup, CheckStatus, SecurityExposure, Severity};
+use super::{Check, CheckGroup, SecurityExposure};
+#[cfg(test)]
+use super::{CheckStatus, Severity};
 use crate::config;
 
 pub(super) fn check_server_api_exposure(cfg: &config::Config) -> Check {

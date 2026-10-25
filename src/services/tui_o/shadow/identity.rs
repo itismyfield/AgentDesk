@@ -217,8 +217,8 @@ fn codex_item(item: &Value, item_type: &str) -> Option<RecordFact> {
             let texts: Vec<&str> = parts.filter_map(|part| str_at(part, "text")).collect();
             return Some(RecordFact::Prompt(false, texts.join("\n")));
         }
-        // Reasoning, other roles and inter-agent traffic are not channel output.
-        ("message" | "reasoning" | "agent_message", _) => return None,
+        // Reasoning, other roles, inter-agent traffic and the session's tool list are not output.
+        ("message" | "reasoning" | "agent_message" | "additional_tools", _) => return None,
         ("function_call" | "custom_tool_call" | "tool_search_call", _) => (
             UnitKind::Tool,
             tool_call(item, &["arguments", "input", "action"]),
@@ -404,6 +404,24 @@ mod tests {
         let mut synthetic = row(Value::Null, vec![text("a"), text("b")]);
         synthetic["isApiErrorMessage"] = true.into();
         blocked(synthetic, "assistant row without a supported identity");
+    }
+
+    /// The session tool list Codex writes in a new session yields nothing, while any other unknown
+    /// response item of the same shape still blocks.
+    #[test]
+    fn codex_tool_list_yields_nothing_and_unknown_items_still_block() {
+        use super::{RecordFact, classify};
+        let item = |kind: &str| {
+            json!({"type": "response_item", "payload": {"type": kind, "id": "at_1",
+                "role": "developer", "tools": [{"type": "function", "name": "t"}]}})
+        };
+        assert_eq!(
+            classify(ShadowProvider::Codex, &item("additional_tools")),
+            []
+        );
+        let blocked = RecordFact::Blocked("unsupported response_item definitely_unknown".into());
+        let unknown = classify(ShadowProvider::Codex, &item("definitely_unknown"));
+        assert_eq!(unknown, [blocked]);
     }
 
     #[test]

@@ -338,7 +338,7 @@ test("review-automation walks stages itself on a binary without advanceStage", (
     },
     dbQuery: createSqlRouter([
       {
-        match: "SELECT stage_order FROM pipeline_stages WHERE id = ?",
+        match: "SELECT stage_order FROM pipeline_stages WHERE id::text = ?",
         result: (_sql, params) => stageOrders[params[0]]
       },
       { match: "AND stage_order > ?", result: [] },
@@ -862,4 +862,72 @@ test("00-escalation notifyDeadlockManager reports enqueue failures as undelivere
 
   assert.equal(withQueueResult({ error: "outbox unavailable" }).notifyDeadlockManager("m", "s"), false);
   assert.equal(withQueueResult({ ok: true, id: 7 }).notifyDeadlockManager("m", "s"), true);
+});
+
+// The empty-notes guard reads the previous review verdict from task_dispatches.result
+// (kanban_reviews never existed on Postgres).
+function runEmptyNotesImprove(priorResult) {
+  const { policy, state } = loadPolicy("policies/review-automation.js", {
+    cards: {
+      "card-118": {
+        id: "card-118",
+        status: "review",
+        review_status: "reviewing",
+        assigned_agent_id: "agent-1",
+        github_issue_number: 118,
+        title: "Empty notes"
+      }
+    },
+    dbQuery(sql) {
+      if (sql.includes("SELECT c.review_notes, c.review_round")) {
+        return [{
+          review_notes: "older findings",
+          review_round: 2,
+          assigned_agent_id: "agent-1",
+          title: "Empty notes",
+          github_issue_number: 118
+        }];
+      }
+      if (sql.includes("AND dispatch_type = 'review' AND status = 'completed' AND id <> ?")) {
+        return priorResult === undefined ? [] : [{ result: JSON.stringify(priorResult) }];
+      }
+      return [];
+    }
+  });
+  policy.onReviewVerdict({ card_id: "card-118", dispatch_id: "review-r2", verdict: "improve" });
+  const priorQuery = state.queries.find((q) => q.sql.includes("AND id <> ?"));
+  return { state, priorQuery };
+}
+
+test("review-automation escalates when the previous review verdict also had no notes", () => {
+  const { state, priorQuery } = runEmptyNotesImprove({ verdict: "improve" });
+  assert.deepEqual([...priorQuery.params], ["card-118", "review-r2"]);
+  assert.equal(priorQuery.sql.includes("kanban_reviews"), false);
+  assert.equal(state.manualInterventions.length, 1);
+  assert.match(state.manualInterventions[0].reason, /리뷰 피드백 없이 2회 이상 연속 improve/);
+  assert.equal(state.escalations.length, 1);
+});
+
+test("review-automation keeps reworking when the previous review verdict carried notes", () => {
+  const { state } = runEmptyNotesImprove({ verdict: "improve", notes: "fix the retry loop" });
+  assert.equal(
+    state.manualInterventions.some((m) => /리뷰 피드백 없이/.test(m.reason)),
+    false
+  );
+});
+
+test("review-automation treats previous feedback as notes for the empty-notes guard", () => {
+  const { state } = runEmptyNotesImprove({ verdict: "reject", feedback: "missing tests" });
+  assert.equal(
+    state.manualInterventions.some((m) => /리뷰 피드백 없이/.test(m.reason)),
+    false
+  );
+});
+
+test("review-automation does not count a previous pass verdict as an empty improve round", () => {
+  const { state } = runEmptyNotesImprove({ verdict: "pass" });
+  assert.equal(
+    state.manualInterventions.some((m) => /리뷰 피드백 없이/.test(m.reason)),
+    false
+  );
 });

@@ -108,6 +108,7 @@ pub mod qwen_tmux_wrapper;
 pub(crate) mod recovery_defer;
 pub(crate) mod release_source;
 pub mod remote_stub;
+pub(crate) mod resident_loops;
 pub mod retrospectives;
 pub mod review_decision;
 pub mod routines;

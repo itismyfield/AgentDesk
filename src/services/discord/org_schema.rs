@@ -180,7 +180,7 @@ pub(crate) fn provider_auth_primary_profiles() -> std::collections::HashMap<Stri
         .unwrap_or_default()
 }
 
-pub(crate) fn parse_org_schema(content: &str) -> Result<OrgSchema, String> {
+pub(super) fn parse_org_schema(content: &str) -> Result<OrgSchema, String> {
     let schema: OrgSchema =
         serde_yaml::from_str(content).map_err(|error| format!("org schema yaml: {error}"))?;
     if let Some(catalog) = schema.provider_auth_profiles.as_ref() {

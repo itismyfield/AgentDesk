@@ -237,7 +237,7 @@ pub(in crate::services::discord) fn legacy_watcher_delivery_committed(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
+pub(in crate::services::discord::tmux::tmux_watcher) async fn deliver_long_chunks_via_controller<
     G: TurnGateway + ?Sized,
 >(
     gateway: &G,
@@ -397,7 +397,7 @@ pub(in crate::services::discord) struct WatcherLongChunksLocals<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::services::discord) async fn apply_watcher_long_chunks_controller(
+pub(in crate::services::discord::tmux::tmux_watcher) async fn apply_watcher_long_chunks_controller(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

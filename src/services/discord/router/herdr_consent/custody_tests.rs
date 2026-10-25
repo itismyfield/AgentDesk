@@ -351,6 +351,90 @@ fn live_custody_replays_a_lost_response_and_wake_without_recreating_payload() {
         });
 }
 
+// A drained head waits in its dispatch marker until admission requeues or runs it.
+#[test]
+fn live_mailbox_drained_head_releases_and_wakes_from_its_dispatch_marker() {
+    let _env = crate::config::TestRuntimeRootGuard::new();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let shared = make_shared_data_for_tests();
+            seed(&shared, 891_301).await;
+            let intent = mapped(&IntentRef {
+                store: String::new(),
+                id: "intent-1".into(),
+                provider: String::new(),
+                channel: 0,
+                source_message: 0,
+                fifo: 0,
+            });
+            let key = SettlementKey {
+                nonce: "generation-1".into(),
+                store: intent.store.clone(),
+                id: intent.id.clone(),
+            };
+            let reasons = Arc::new(Mutex::new(Vec::new()));
+            let seen = reasons.clone();
+            let _kick =
+                queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(move |_, _, _, reason| {
+                    seen.lock().unwrap().push(reason);
+                    Box::pin(async { Some(IdleQueueKickoffChannelOutcome { started: false }) })
+                }));
+            let channel = ChannelId::new(intent.channel);
+            let context =
+                || QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None);
+            let taken = shared.mailbox(channel).take_next_soft(context()).await;
+            let lease = taken.dispatch_lease.expect("drained head owns its lease");
+            assert_eq!(
+                taken.intervention.map(|item| item.message_id.get()),
+                Some(891_301)
+            );
+            let mut sink =
+                LiveSink::new(shared.clone(), ProviderKind::Claude, &consent_key()).unwrap();
+            let released = sink.release(&key, &intent).await;
+            assert!(
+                released.is_ok(),
+                "live_custody_drained_head_releases_contract: {released:?}"
+            );
+            let woken = sink.wake(&key, &intent).await;
+            assert!(
+                woken.is_ok(),
+                "live_custody_drained_head_wakes_contract: {woken:?}"
+            );
+            assert_eq!(
+                *reasons.lock().unwrap(),
+                ["herdr_consent_release"],
+                "live_custody_drained_head_wake_kicks_its_queue_contract"
+            );
+            let restarted = LiveSink::new(
+                make_shared_data_for_tests(),
+                ProviderKind::Claude,
+                &consent_key(),
+            )
+            .unwrap();
+            let unrestored = restarted.mailbox_pending(&intent).await;
+            assert!(
+                unrestored
+                    .as_ref()
+                    .is_err_and(|error| error.contains("not durably restored")),
+                "live_custody_marker_before_restore_still_refuses_contract: {unrestored:?}"
+            );
+            let source = poise::serenity_prelude::MessageId::new(intent.source_message);
+            let mailbox = shared.mailbox(channel);
+            assert!(
+                mailbox
+                    .abandon_pending_dispatch_if_lease_matches(source, lease, context())
+                    .await
+            );
+            assert!(
+                matches!(sink.mailbox_pending(&intent).await, Ok(false)),
+                "live_custody_finished_head_is_absent_contract"
+            );
+        });
+}
+
 #[test]
 fn live_custody_missing_corrupt_or_changed_references_fail_closed() {
     let _env = crate::config::TestRuntimeRootGuard::new();

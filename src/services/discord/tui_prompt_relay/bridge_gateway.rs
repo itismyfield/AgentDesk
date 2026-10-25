@@ -1,8 +1,6 @@
 use super::super::gateway::{GatewayFuture, TurnGateway};
 use super::*;
-use crate::services::discord::{
-    mailbox_requeue_intervention_front, schedule_deferred_idle_queue_kickoff,
-};
+use crate::services::discord::schedule_deferred_idle_queue_kickoff;
 use crate::services::turn_orchestrator::Intervention;
 
 pub(super) struct TuiDirectBridgeGateway {

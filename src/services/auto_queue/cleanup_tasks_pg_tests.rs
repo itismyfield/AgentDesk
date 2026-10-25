@@ -379,10 +379,13 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "crash").await;
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(cancelled.dispatch_ids, vec![dispatch_id.clone()]);
 
         // --- the crash window itself ---------------------------------------
@@ -443,10 +446,13 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "retry").await;
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         sqlx::query("ALTER TABLE sessions RENAME TO sessions_hidden")
             .execute(&pool)
@@ -553,10 +559,13 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "registry").await;
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         let registry = std::sync::Arc::new(crate::services::discord::health::HealthRegistry::new());
         let outcome =
@@ -583,9 +592,13 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "aba").await;
 
-        cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-            .await
-            .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         // Another run takes the slot while the cleanup is still owed, and brings
         // its own live session on the same thread.
@@ -687,8 +700,12 @@ mod pg_tests {
         .await
         .expect("hide cleanup task table"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
-        let failed =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel").await;
+        let failed = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await;
         assert!(
             failed.is_err(),
             "a cancel that cannot record its cleanup debt must fail loudly, got {failed:?}"
@@ -725,10 +742,13 @@ mod pg_tests {
             0,
             "a rolled-back cancel must not leave a cleanup row behind"
         );
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel after the cleanup table came back"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel after the cleanup table came back"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(cancelled.dispatch_ids, vec![dispatch_id.clone()]);
         assert_eq!(dispatch_status(&pool, &dispatch_id).await, "cancelled");
         assert!(
@@ -761,10 +781,13 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "atomicslots").await;
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         arm_released_slots_persist_failure(&pool).await;
         let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id).await;
@@ -840,10 +863,13 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "noop").await;
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(cancelled.dispatch_ids, vec![dispatch_id.clone()]);
 
         // The committed cancel already unbound the session from the dispatch...
@@ -912,10 +938,13 @@ mod pg_tests {
         let (run_id, _dispatch_id) =
             seed_run_holding_slot_on_thread(&pool, "runtime", RUNTIME_THREAD_ID).await;
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         let registry = std::sync::Arc::new(crate::services::discord::health::HealthRegistry::new());
         registry
@@ -969,9 +998,13 @@ mod pg_tests {
         .expect("seed undecodable cleanup task"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "poison").await;
-        cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-            .await
-            .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
             .await
@@ -1014,10 +1047,13 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "cap").await;
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         // Fast-forward to the last attempt this task is entitled to.
         sqlx::query("UPDATE auto_queue_run_cleanup_tasks SET attempts = $1 WHERE id = $2")
@@ -1080,10 +1116,13 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "claim").await;
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         // Model the competing drainer: it holds a fresh claim on the row.
         sqlx::query(
@@ -1189,10 +1228,13 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "deadletter").await;
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         // Nothing is parked yet, so the gauge must read zero — otherwise a
         // non-zero reading below would prove nothing.
@@ -1318,10 +1360,13 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "reemit").await;
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         // Without a pending emit the guard is vacuous and this test would pass
         // for the wrong reason.
@@ -1419,10 +1464,13 @@ mod pg_tests {
         let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "markfail").await;
         let emits_before = emit_probe::emit_count(&dispatch_id);
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         // Reject the mark itself: any UPDATE that flips `emitted` to TRUE.
         sqlx::query(
@@ -1540,10 +1588,13 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "delfail").await;
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         arm_cleanup_task_delete_failure(&pool).await;
         let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id).await;
@@ -1667,10 +1718,13 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "noattempt").await;
 
-        let cancelled =
-            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
-                .await
-                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let cancelled = cancel_live_dispatches_for_runs_pg(
+            &pool,
+            std::slice::from_ref(&run_id),
+            "auto_queue_cancel",
+        )
+        .await
+        .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         // Break a drain step, then break the bookkeeping that would record it.
         sqlx::query("ALTER TABLE sessions RENAME TO sessions_hidden")

@@ -148,14 +148,6 @@ pub(crate) fn codex_tui_existing_inflight_raw_cursor(
             .max(existing.turn_start_offset.unwrap_or(0)),
     )
 }
-pub(crate) fn codex_tui_rebind_prompt_replay_start_offset(
-    rollout_path: &str,
-    prompt_text: &str,
-) -> Option<u64> {
-    codex_tui_rebind_prompt_replay_evidence(rollout_path, prompt_text, None, None)
-        .replay_start_offset
-}
-
 pub(crate) fn codex_tui_rebind_prompt_replay_evidence(
     rollout_path: &str,
     prompt_text: &str,
@@ -369,6 +361,14 @@ mod tests {
     use crate::services::provider::ProviderKind;
     use std::ffi::OsString;
     use std::path::Path;
+
+    fn codex_tui_rebind_prompt_replay_start_offset(
+        rollout_path: &str,
+        prompt_text: &str,
+    ) -> Option<u64> {
+        codex_tui_rebind_prompt_replay_evidence(rollout_path, prompt_text, None, None)
+            .replay_start_offset
+    }
 
     struct EnvGuard {
         key: &'static str,

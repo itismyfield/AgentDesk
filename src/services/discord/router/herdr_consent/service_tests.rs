@@ -68,11 +68,11 @@ async fn legacy_actual_component_text_and_startup_preserve_results_without_conse
         );
     }
     assert!(
-        recover_excluding(
+        recover(
             &ctx.http,
             &shared,
             &ProviderKind::Claude,
-            &std::collections::BTreeSet::new()
+            Replay::Excluding(&std::collections::BTreeSet::new())
         )
         .await
         .is_ok(),
@@ -1055,11 +1055,11 @@ async fn actual_applied_startup_keeps_failed_consent_retryable_and_releases_late
             .await;
         assert!(enqueued.enqueued && enqueued.persistence_error.is_none());
         for _ in 0..2 {
-            let result = recover_excluding(
+            let result = recover(
                 &http,
                 &shared,
                 &provider,
-                &std::collections::BTreeSet::new(),
+                Replay::Excluding(&std::collections::BTreeSet::new()),
             )
             .await;
             let later_now = store().load(&later.key).unwrap().unwrap();
@@ -1114,6 +1114,223 @@ async fn actual_applied_startup_keeps_failed_consent_retryable_and_releases_late
             .await
             .intervention_queue
             .is_empty()
+    );
+    http_server.abort();
+}
+
+// Real boot recovery: one channel's queue merge is held at boot and settles on its retry.
+#[tokio::test(flavor = "current_thread")]
+async fn actual_held_boot_channel_replays_only_its_applied_consent_once_after_merge() {
+    use crate::services::discord::{IdleQueueKickoffChannelOutcome, queue_io};
+    use crate::services::turn_orchestrator::{
+        Intervention, InterventionMode, QueuePersistenceContext,
+    };
+    let runtime = tempfile::tempdir().unwrap();
+    let _runtime = crate::config::set_agentdesk_root_for_test(runtime.path());
+    let (held, open) = (940_487_400_000_201_u64, 940_487_400_000_202_u64);
+    let agents: String = [held, open]
+        .iter()
+        .map(|id| format!("  - id: consent-{id}\n    name: consent-{id}\n    provider: claude\n    channels:\n      claude:\n        id: \"{id}\"\n        name: consent-{id}\n"))
+        .collect();
+    let config = crate::runtime_layout::config_file_path(runtime.path());
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, format!("server:\n  port: 8791\nagents:\n{agents}")).unwrap();
+    let _boot = session_hosts::force_for_test(Some("node"), &[(held, "node"), (open, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    let (config_dir, peer) = preview::tests::fixture("printf 'config: ok\\n'");
+    peer.0.lock().unwrap().witness.socket = "/adk/herdr/agentdesk.sock".into();
+    let previous = TEST_SOURCE.with(|source| source.replace(Some(peer.clone())));
+    let _peer = ScopedPeer(previous);
+    let token = consent::Preview {
+        revision: 1,
+        witness: peer.snapshot().unwrap().witness,
+        target_hash: [1; 32],
+        chain_hash: [2; 32],
+        checker_hash: [3; 32],
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = axum::Router::new()
+        .fallback(interaction_http)
+        .with_state(InteractionHttp {
+            calls: calls.clone(),
+        });
+    let http_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = Arc::new(
+        serenity::HttpBuilder::new("test-token")
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let mut cards = std::collections::BTreeMap::new();
+    for channel in [held, open] {
+        let source = channel + 1_000;
+        let path = config_dir.path().join(format!("{source}.toml"));
+        let pending = store()
+            .hold(
+                consent::Question {
+                    key: consent::ConsentKey {
+                        node: "node".into(),
+                        user: unsafe { libc::geteuid() },
+                        socket: "/adk/herdr/agentdesk.sock".into(),
+                        named_session: "agentdesk".into(),
+                        config: path.clone(),
+                        target: path,
+                    },
+                    preview: token.clone(),
+                    owner: 1,
+                    bot: 940_487_400_000_003,
+                    provider: "claude".into(),
+                    channel,
+                    message: source + 100,
+                    intent: consent::IntentRef {
+                        store: "mailbox".into(),
+                        id: format!("{source}:17"),
+                        provider: "claude".into(),
+                        channel,
+                        source_message: source,
+                        fifo: 17,
+                    },
+                },
+                now(),
+            )
+            .unwrap()
+            .into_consent();
+        let accepted = store().decide(&pending, 1, true, now()).unwrap();
+        let applied = store()
+            .record_apply(
+                &accepted,
+                consent::ApplyResult {
+                    before: Some([1; 32]),
+                    after: Some([4; 32]),
+                    backup: None,
+                    detail: None,
+                },
+            )
+            .unwrap();
+        cards.insert(channel, (applied.key, source + 100));
+        let source = serenity::MessageId::new(source);
+        crate::services::turn_orchestrator::save_channel_queue(
+            &provider,
+            &shared.token_hash,
+            serenity::ChannelId::new(channel),
+            &[Intervention {
+                author_id: serenity::UserId::new(1),
+                author_is_bot: false,
+                message_id: source,
+                queued_generation: 17,
+                source_message_ids: vec![source],
+                source_message_queued_generations: Vec::new(),
+                source_text_segments: Vec::new(),
+                text: format!("original {source}"),
+                mode: InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: Vec::new(),
+                voice_announcement: None,
+            }],
+            None,
+        )
+        .unwrap();
+    }
+    let effects = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+    let observed = effects.clone();
+    // Only the consent wake runs a payload; other kicks stand in for admission holding it.
+    let _executor = queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
+        move |shared, provider, channel, reason| {
+            let observed = observed.clone();
+            Box::pin(async move {
+                if reason != "herdr_consent_release" {
+                    return Some(IdleQueueKickoffChannelOutcome { started: false });
+                }
+                let context = QueuePersistenceContext::new(&provider, &shared.token_hash, None);
+                let taken = shared.mailbox(channel).take_next_soft(context).await;
+                if let Some(item) = taken.intervention {
+                    let lease = taken.dispatch_lease.expect("original lease");
+                    crate::services::discord::mailbox_abandon_unclaimed_dispatch_after_success(
+                        &shared,
+                        &provider,
+                        channel,
+                        item.message_id,
+                        lease,
+                    )
+                    .await;
+                    *observed
+                        .lock()
+                        .unwrap()
+                        .entry(item.message_id.get())
+                        .or_insert(0_u32) += 1;
+                }
+                Some(IdleQueueKickoffChannelOutcome { started: true })
+            })
+        },
+    ));
+    let queue_file = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("claude")
+        .join(&shared.token_hash)
+        .join(format!("{held}.json"));
+    let valid = std::fs::read(&queue_file).unwrap();
+    // The held channel's file tears after boot read it, so only its merge fails.
+    let settings = shared.settings.write().await;
+    let boot = tokio::spawn({
+        let (http, shared, provider) = (http.clone(), shared.clone(), provider.clone());
+        async move {
+            crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests(
+                &http, &shared, &provider,
+            )
+            .await
+        }
+    });
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    std::fs::write(&queue_file, br#"[{"message_id": 1, "te"#).unwrap();
+    drop(settings);
+    boot.await.unwrap();
+    let replays = |channel: u64| {
+        let card = format!("/messages/{}", cards[&channel].1);
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| path.ends_with(&card))
+            .count()
+    };
+    let ran = |channel: u64| {
+        let source = channel + 1_000;
+        effects.lock().unwrap().get(&source).copied().unwrap_or(0)
+    };
+    assert_eq!(
+        (replays(open), ran(open), replays(held), ran(held)),
+        (1, 1, 0, 0),
+        "boot_replays_open_channel_and_skips_held_channel_contract"
+    );
+    std::fs::write(&queue_file, &valid).unwrap();
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    tokio::time::resume();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while replays(held) == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let settled = store().load(&cards[&held].0).unwrap().unwrap();
+    assert_eq!(
+        (replays(held), ran(held), settled.settlements.len()),
+        (1, 1, 1),
+        "held_channel_merge_replays_its_applied_consent_once_contract"
+    );
+    let again = super::startup::restore_only(&http, &shared, &provider, held).await;
+    assert!(again.is_ok(), "{again:?}");
+    assert_eq!(
+        (replays(open), ran(open), replays(held), ran(held)),
+        (1, 1, 1, 1),
+        "held_replay_never_repeats_open_or_already_replayed_consents_contract"
     );
     http_server.abort();
 }

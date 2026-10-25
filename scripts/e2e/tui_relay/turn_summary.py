@@ -16,7 +16,7 @@ TURN_SUMMARY_PATTERN = re.compile(
 
 def is_turn_summary(content: str) -> bool:
     return (isinstance(content, str)
-            and len(content.encode("utf-16-le")) <= (256 if content.startswith("-# ⏱️ ") else 160)
+            and len(content.encode("utf-16-le", "surrogatepass")) <= (256 if content.startswith("-# ⏱️ ") else 160)
             and bool(TURN_SUMMARY_PATTERN.fullmatch(content)))
 
 

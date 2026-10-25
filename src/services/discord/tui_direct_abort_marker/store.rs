@@ -187,29 +187,6 @@ pub(in crate::services::discord) struct CommitTombstone {
     pub committed_at_ms: u64,
 }
 
-/// Persist a terminal-commit tombstone. Best-effort by design (a failed write
-/// degrades to the conservative `⚠`-after-cap path, never a false `✅`); the
-/// stem is keyed on the write instant PLUS a process-monotonic sequence so
-/// same-ms commits on one channel never overwrite earlier still-retained
-/// evidence (codex r3 — the ms-only stem ERASED the first commit's tombstone;
-/// the seq resets per process, but a restart spans more than one ms).
-pub(in crate::services::discord) fn record_commit_tombstone(
-    provider: &str,
-    tmux_session_name: &str,
-    channel_id: u64,
-    committed_user_msg_id: u64,
-    committed_started_at: &str,
-) {
-    record_commit_tombstone_with_offset(
-        provider,
-        tmux_session_name,
-        channel_id,
-        committed_user_msg_id,
-        committed_started_at,
-        None,
-    );
-}
-
 pub(in crate::services::discord) fn record_commit_tombstone_with_offset(
     provider: &str,
     tmux_session_name: &str,
@@ -253,6 +230,7 @@ pub(in crate::services::discord) fn record_commit_tombstone_with_offsets(
     );
 }
 
+#[cfg(test)]
 pub(in crate::services::discord) fn record_commit_tombstone_at(
     now_ms: u64,
     provider: &str,
@@ -272,6 +250,7 @@ pub(in crate::services::discord) fn record_commit_tombstone_at(
     );
 }
 
+#[cfg(test)]
 pub(in crate::services::discord) fn record_commit_tombstone_at_with_offset(
     now_ms: u64,
     provider: &str,

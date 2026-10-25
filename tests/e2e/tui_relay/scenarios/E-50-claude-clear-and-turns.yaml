@@ -22,21 +22,24 @@ report_marker_counts:
 steps:
   - send_discord_prompt: "응답에 정확히 한 줄로 [E2E:E50:{run_id}:T1] 만 출력해줘."
   - wait_for_discord_text: "[E2E:E50:{run_id}:T1]"
+    relay_author: provider
     timeout_s: 60
   - wait_idle_s: 2
   - send_discord_prompt: "응답에 정확히 한 줄로 [E2E:E50:{run_id}:T2] 만 출력해줘."
   - wait_for_discord_text: "[E2E:E50:{run_id}:T2]"
+    relay_author: provider
     timeout_s: 60
   - send_discord_prompt: "!clear [E2E:E50:{run_id}:CLEAR]"
   - wait_for_raw_discord_text: "세션을 초기화했어요."
     timeout_s: 20
   - send_discord_prompt: "응답에 정확히 한 줄로 [E2E:E50:{run_id}:AFTER_CLEAR] 만 출력해줘."
   - wait_for_discord_text: "[E2E:E50:{run_id}:AFTER_CLEAR]"
+    relay_author: provider
     timeout_s: 50
 assertions:
-  - text_present: "[E2E:E50:{run_id}:T1]"
-  - text_present: "[E2E:E50:{run_id}:T2]"
-  - text_present: "[E2E:E50:{run_id}:AFTER_CLEAR]"
+  - provider_text_present: "[E2E:E50:{run_id}:T1]"
+  - provider_text_present: "[E2E:E50:{run_id}:T2]"
+  - provider_text_present: "[E2E:E50:{run_id}:AFTER_CLEAR]"
   - no_duplicate_marker: "[E2E:E50:{run_id}:T1]"
   - no_duplicate_marker: "[E2E:E50:{run_id}:T2]"
   - no_duplicate_marker: "[E2E:E50:{run_id}:AFTER_CLEAR]"

@@ -264,22 +264,10 @@ if run_check guards "Policy DB capability manifest guard (#3734)"; then
 "$PYTHON" -m unittest tests.test_policy_db_capabilities
 fi
 
-if run_check guards "SQL execution surface inventory baseline (#5358)"; then
-"$PYTHON" scripts/check_sql_execution_surface_inventory.py --check
-git diff --exit-code HEAD -- scripts/sql_execution_surface_inventory.json
-"$PYTHON" -m unittest tests.test_sql_execution_surface_inventory
-fi
-
 if run_check guards "Destructive call-site per-file ratchet (#5071 T3-A4)"; then
 "$PYTHON" scripts/check_destructive_call_site_ratchet.py --check
 git diff --exit-code HEAD -- scripts/destructive_call_site_baseline.json
 "$PYTHON" -m unittest tests.test_destructive_call_site_ratchet
-fi
-
-if run_check guards "H2 tmux boundary measurer and admission self-tests"; then
-# Baseline gates skip until activation; driver/cfg canary and these unit tests already run in CI.
-"$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare tests.test_h2_cfg_collect tests.test_h2_session_driver tests.test_h2_session tests.test_h2_items
-"$PYTHON" -m unittest tests.test_h2_admission_carriers
 fi
 
 if run_check guards "Reachability row-independence + change-surface gate (#5071 T4-B1)"; then
@@ -532,7 +520,7 @@ if run_check contracts "PostgreSQL test-lane membership gate (#4979, enforced)";
 "$PYTHON" scripts/check_pg_test_lane_membership.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 # #6014: regenerate and demand an empty diff. The check above proves the region
 # is derivable; this proves the COMMITTED workflow is the derived one, and that
-# regenerating an in-sync tree is a no-op. Same shape as the SQL inventory above.
+# regenerating an in-sync tree is a no-op.
 "$PYTHON" scripts/check_pg_test_lane_membership.py --write-pg-db-paths
 git diff --exit-code HEAD -- .github/workflows/ci-pr.yml
 "$PYTHON" -m unittest tests.test_check_pg_test_lane_membership

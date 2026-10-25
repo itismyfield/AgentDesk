@@ -30,10 +30,9 @@ use super::formatting::{
 };
 use super::gateway::edit_outbound_message;
 use super::inflight::{
-    InflightTurnState, delete_inflight_state_file, emit_reap_abandoned_rebind_origin,
-    load_inflight_states_for_sweep, opt_channel_id, parse_started_at_unix,
-    reap_abandoned_rebind_origin_locked, should_reap_abandoned_rebind_origin,
-    sweep_reap_dead_watcher_rebind_origin,
+    InflightTurnState, emit_reap_abandoned_rebind_origin, load_inflight_states_for_sweep,
+    opt_channel_id, parse_started_at_unix, reap_abandoned_rebind_origin_locked,
+    should_reap_abandoned_rebind_origin, sweep_reap_dead_watcher_rebind_origin,
 };
 use crate::services::provider::ProviderKind;
 

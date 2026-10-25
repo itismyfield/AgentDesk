@@ -112,6 +112,8 @@ pub(in crate::services::discord) fn spawn(shared: Arc<SharedData>, provider: Pro
     LazyLock::force(&PROCESS_STARTED);
     let started = Started::new(&provider);
     let effects = Arc::new(LiveEffects { shared, provider });
+    #[cfg(unix)]
+    notices::operator::adopt(&effects);
     tokio::spawn(async move {
         let _started = started;
         Supervisor::new(effects).run().await;

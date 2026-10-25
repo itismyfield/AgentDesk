@@ -11,6 +11,17 @@ struct RolePromptCacheEntry {
 
 static ROLE_PROMPT_CACHE: OnceLock<Mutex<HashMap<PathBuf, RolePromptCacheEntry>>> = OnceLock::new();
 
+impl RoleBinding {
+    pub(in crate::services::discord) fn inspection_prompt(&self) -> Option<String> {
+        let (path, _) = resolve_role_prompt_path(Path::new(&self.prompt_file))?;
+        read_role_prompt(&path)
+    }
+
+    pub(in crate::services::discord) fn inspection_peer_guidance(&self) -> Option<String> {
+        render_peer_agent_guidance_with_cache(&self.role_id, false)
+    }
+}
+
 pub(in crate::services::discord) fn load_role_prompt(binding: &RoleBinding) -> Option<String> {
     let prompt_path = Path::new(&binding.prompt_file);
     let (resolved_path, metadata) = resolve_role_prompt_path(prompt_path)?;
@@ -26,13 +37,7 @@ pub(in crate::services::discord) fn load_role_prompt(binding: &RoleBinding) -> O
         return Some(entry.content.clone());
     }
 
-    let raw = fs::read_to_string(&resolved_path).ok()?;
-    const MAX_CHARS: usize = 12_000;
-    let content = if raw.chars().count() <= MAX_CHARS {
-        raw
-    } else {
-        raw.chars().take(MAX_CHARS).collect()
-    };
+    let content = read_role_prompt(&resolved_path)?;
     if let Ok(mut guard) = cache.lock() {
         guard.insert(
             resolved_path,
@@ -44,6 +49,16 @@ pub(in crate::services::discord) fn load_role_prompt(binding: &RoleBinding) -> O
         );
     }
     Some(content)
+}
+
+fn read_role_prompt(path: &Path) -> Option<String> {
+    Some(
+        fs::read_to_string(path)
+            .ok()?
+            .chars()
+            .take(12_000)
+            .collect(),
+    )
 }
 
 fn resolve_role_prompt_path(prompt_path: &Path) -> Option<(PathBuf, fs::Metadata)> {
@@ -90,6 +105,45 @@ mod role_prompt_cache_tests {
             auth_profile: "default".to_string(),
             memory: ResolvedMemorySettings::default(),
         }
+    }
+
+    #[test]
+    fn system_prompt_inspection_does_not_populate_role_or_peer_caches() {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let path = root.path().join("inspection-role.md");
+        fs::write(&path, "uncached role content").unwrap();
+        let mut binding = binding(&path);
+        binding.role_id = format!("inspection-{}", root.path().display());
+        assert_eq!(
+            binding.inspection_prompt().as_deref(),
+            Some("uncached role content")
+        );
+        assert!(
+            ROLE_PROMPT_CACHE
+                .get()
+                .is_none_or(|cache| !cache.lock().unwrap().contains_key(&path))
+        );
+        assert_eq!(binding.inspection_peer_guidance(), None);
+        assert!(
+            !peer_guidance_cache()
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key(&binding.role_id)
+        );
+        assert_eq!(
+            load_role_prompt(&binding).as_deref(),
+            Some("uncached role content")
+        );
+        assert!(
+            ROLE_PROMPT_CACHE
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .contains_key(&path)
+        );
     }
 
     #[test]
@@ -613,11 +667,15 @@ pub(in crate::services::discord) fn invalidate_peer_guidance_cache_for_tests() {
 pub(in crate::services::discord) fn render_peer_agent_guidance(
     current_role_id: &str,
 ) -> Option<String> {
+    render_peer_agent_guidance_with_cache(current_role_id, true)
+}
+
+fn render_peer_agent_guidance_with_cache(current_role_id: &str, memoize: bool) -> Option<String> {
     // #2663: fast path — same role, unchanged source files → reuse cached
     // rendering (a String clone is much cheaper than the load+filter+format
     // pipeline below).
     let fingerprint = current_peer_source_fingerprint();
-    {
+    if memoize {
         let guard = peer_guidance_cache()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -633,14 +691,16 @@ pub(in crate::services::discord) fn render_peer_agent_guidance(
         .filter(|agent| agent.role_id != current_role_id)
         .collect();
     if peers.is_empty() {
-        let mut guard = peer_guidance_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if guard.fingerprint.as_ref() != Some(&fingerprint) {
-            guard.fingerprint = Some(fingerprint);
-            guard.entries.clear();
+        if memoize {
+            let mut guard = peer_guidance_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.fingerprint.as_ref() != Some(&fingerprint) {
+                guard.fingerprint = Some(fingerprint);
+                guard.entries.clear();
+            }
+            guard.entries.insert(current_role_id.to_string(), None);
         }
-        guard.entries.insert(current_role_id.to_string(), None);
         return None;
     }
 
@@ -675,16 +735,18 @@ pub(in crate::services::discord) fn render_peer_agent_guidance(
     // If the fingerprint changed since the fast-path check, we reset the
     // role-keyed map so we never serve a rendering produced against an
     // out-of-date source file.
-    let mut guard = peer_guidance_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if guard.fingerprint.as_ref() != Some(&fingerprint) {
-        guard.fingerprint = Some(fingerprint);
-        guard.entries.clear();
+    if memoize {
+        let mut guard = peer_guidance_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.fingerprint.as_ref() != Some(&fingerprint) {
+            guard.fingerprint = Some(fingerprint);
+            guard.entries.clear();
+        }
+        guard
+            .entries
+            .insert(current_role_id.to_string(), Some(rendered.clone()));
     }
-    guard
-        .entries
-        .insert(current_role_id.to_string(), Some(rendered.clone()));
     Some(rendered)
 }
 

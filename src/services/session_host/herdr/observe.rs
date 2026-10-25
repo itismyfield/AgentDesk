@@ -75,6 +75,9 @@ pub(crate) trait ServerProvenance {
     /// Every value `pid`'s environment holds for `key`.
     fn process_env(&self, pid: u32, key: &str) -> Result<Vec<String>, RestoreUnverified>;
     fn read_config(&self, path: &Path) -> Result<ConfigRead, RestoreUnverified>;
+    fn config_publication(&self, _path: &Path) -> Result<Option<SystemTime>, RestoreUnverified> {
+        Ok(None)
+    }
 }
 
 /// E7 over the production OS reads.
@@ -131,7 +134,13 @@ fn prove_restore_off<T: HerdrTransport + ?Sized>(
     if read.bytes != CANONICAL_CONFIG {
         return Err(Why::ConfigNotCanonical);
     }
-    if read.modified + START_MARGIN >= hello.started {
+    let modified = provenance
+        .config_publication(&config)?
+        .map_or(read.modified, |published| published.max(read.modified));
+    if modified
+        .checked_add(START_MARGIN)
+        .is_none_or(|limit| limit >= hello.started)
+    {
         return Err(Why::ConfigChangedSinceStart);
     }
     if provenance.process_start(witness.pid)?.identity != witness.start {
