@@ -727,7 +727,6 @@ src/
 │   │   ├── busy_inject/
 │   │   │   ├── screen/
 │   │   │   │   └── paste_footer.rs
-│   │   │   ├── stash_tests/
 │   │   │   ├── ownership.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_interleave_tests.rs
