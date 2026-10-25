@@ -112,22 +112,47 @@ impl SharedData {
         provider: &ProviderKind,
         channel_id: serenity::ChannelId,
     ) -> io::Result<()> {
-        let local = crate::config::session_hosts::local_node().unwrap_or_else(
-            crate::services::cluster::node_registry::resolve_self_instance_id_without_config,
-        );
+        let local =
+            crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
         if let Some(endpoint) = crate::config::session_hosts::herdr_endpoint(channel_id.get()) {
             reject_foreign_owner(&local, &[endpoint.execution_node])?;
         }
         if let Some(pool) = self.pg_pool.as_ref() {
+            use crate::services::cluster::intake_router_hook::{
+                SessionOwnerResolution, resolve_session_owner,
+            };
+            let owner = resolve_session_owner(
+                pool,
+                provider.as_str(),
+                &channel_id.get().to_string(),
+                &local,
+                crate::config::load_graceful().cluster.lease_ttl_secs.max(1),
+                false,
+            )
+            .await
+            .map_err(io::Error::other)?;
+            match owner {
+                SessionOwnerResolution::NoOwner | SessionOwnerResolution::LiveLocal { .. } => {}
+                SessionOwnerResolution::LiveForeign { instance_id, .. }
+                | SessionOwnerResolution::LiveForeignIncompatible { instance_id, .. } => {
+                    reject_foreign_owner(&local, &[instance_id])?;
+                }
+                SessionOwnerResolution::ConflictingLiveOwners { instance_ids } => {
+                    return Err(io::Error::other(format!(
+                        "여러 노드(`{}`)의 활성 소유 기록이 충돌하여 설정 변경을 거절합니다.",
+                        instance_ids.join("`, `")
+                    )));
+                }
+                SessionOwnerResolution::StaleOwners { instance_ids } => {
+                    return Err(io::Error::other(format!(
+                        "정리되지 않은 소유 기록(노드 `{}`)이 남아 있어 설정 변경을 거절합니다.",
+                        instance_ids.join("`, `")
+                    )));
+                }
+            }
             let owners: Vec<String> = sqlx::query_scalar(
-                "SELECT DISTINCT COALESCE(NULLIF(hosted_execution->'owner'->>'owner_node', ''),
-                    NULLIF(hosted_execution->'location'->>'execution_node', ''), NULLIF(BTRIM(instance_id), ''))
-                 FROM sessions WHERE channel_id = $1 AND LOWER(BTRIM(provider)) = $2
-                   AND COALESCE(LOWER(BTRIM(status)), '') NOT IN ('disconnected', 'aborted')
-                   AND COALESCE(NULLIF(hosted_execution->'owner'->>'owner_node', ''),
-                    NULLIF(hosted_execution->'location'->>'execution_node', ''), NULLIF(BTRIM(instance_id), '')) IS NOT NULL
-                 UNION SELECT owner_instance_id FROM intake_session_owners
-                   WHERE raw_channel_id = $1 AND provider = $2 AND status = 'active'",
+                "SELECT owner_instance_id FROM intake_session_owners
+                 WHERE raw_channel_id = $1 AND provider = $2 AND status = 'active'",
             )
             .bind(channel_id.get().to_string())
             .bind(provider.as_str())
@@ -479,6 +504,7 @@ mod truthful_tests {
             &config_root.path().join("missing.yaml"),
         );
         let (db, pool) = crate::services::discord::host_defer_gate::tests::postgres().await;
+        super::revision_tests::seed_worker(&pool, "remote-owner", "online").await;
         sqlx::query("INSERT INTO sessions (session_key, provider, channel_id, instance_id, status, last_heartbeat) VALUES ('settings-owner', 'codex', '648640', 'remote-owner', 'idle', NOW())")
             .execute(&pool).await.unwrap();
         let shared =
@@ -660,4 +686,13 @@ mod truthful_tests {
             );
         });
     }
+}
+
+#[cfg(test)]
+mod revision_tests;
+
+#[cfg(test)]
+pub(super) fn local_tui_for_test(channel: u64) -> crate::config::session_hosts::ForcedSessionHosts {
+    let local = crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+    crate::config::session_hosts::force_for_test(Some(&local), &[(channel, &local)])
 }

@@ -84,11 +84,7 @@ pub(in crate::services::discord) async fn cmd_goals(ctx: Context<'_>) -> Result<
         } else {
             build_goals_disabled_notice(reset_pending)
         };
-        let scope = if runtime_channel_id != channel_id {
-            "\n이 스레드는 부모 채널과 설정을 공유합니다."
-        } else {
-            ""
-        };
+        let scope = super::fast_mode::feature_scope_notice(runtime_channel_id != channel_id);
         Ok(format!("{notice}{scope}"))
     }
     .await;

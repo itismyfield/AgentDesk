@@ -27,6 +27,14 @@ fn build_fast_disabled_notice(provider: &ProviderKind, reset_pending: bool) -> S
     )
 }
 
+pub(super) fn feature_scope_notice(shared_with_parent: bool) -> &'static str {
+    if shared_with_parent {
+        "\n이 스레드는 부모 채널과 설정을 공유합니다. 부모 채널 또는 이 설정을 공유하는 스레드 중 먼저 턴을 시작하는 세션이 리셋됩니다(맥락 소실)."
+    } else {
+        ""
+    }
+}
+
 /// /fast — Toggle native fast mode for the current provider session
 #[poise::command(slash_command, rename = "fast")]
 pub(in crate::services::discord) async fn cmd_fast(ctx: Context<'_>) -> Result<(), Error> {
@@ -94,11 +102,7 @@ pub(in crate::services::discord) async fn cmd_fast(ctx: Context<'_>) -> Result<(
         } else {
             build_fast_disabled_notice(&effective_provider, reset_pending)
         };
-        let scope = if runtime_channel_id != channel_id {
-            "\n이 스레드는 부모 채널과 설정을 공유합니다."
-        } else {
-            ""
-        };
+        let scope = feature_scope_notice(runtime_channel_id != channel_id);
         Ok(format!("{notice}{scope}"))
     }
     .await;

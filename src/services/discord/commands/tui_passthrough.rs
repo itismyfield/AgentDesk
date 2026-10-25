@@ -445,7 +445,14 @@ mod host_guard_tests {
     #[tokio::test]
     async fn passthrough_is_refused_before_probing_a_kept_session_pg() {
         let _root = crate::config::TestRuntimeRootGuard::new();
-        let _hosts = crate::config::session_hosts::force_for_test(Some("test-node"), &[]);
+        let local =
+            crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+        let _hosts = crate::config::session_hosts::force_for_test(Some(&local), &[]);
+        let scratch = tempfile::tempdir().unwrap();
+        let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+            &scratch.path().join("missing.yaml"),
+        );
         let tmux = ScriptedTmux::install();
         let (db, pool) = postgres().await;
         let shared = shared_on(&pool).await;
@@ -455,6 +462,12 @@ mod host_guard_tests {
             let name = provider.build_tmux_session_name(&format!("p4c2-passthrough-{n}"));
             case.seed(&pool, &channel_key(&shared, &name), &name, channel)
                 .await;
+            sqlx::query("UPDATE sessions SET instance_id = $1 WHERE channel_id = $2")
+                .bind(&local)
+                .bind(channel.to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
             tmux.take_calls();
             let command = ClaudeSlashPassthrough::Cost;
             let block = passthrough_block(&shared, &provider, channel, &name, command).await;
@@ -474,7 +487,7 @@ mod host_guard_tests {
         }
         let remote_channel = 1_479_671_302_387_063_999;
         let _remote = crate::config::session_hosts::force_for_test(
-            Some("test-node"),
+            Some(&local),
             &[(remote_channel, "remote-node")],
         );
         tmux.take_calls();

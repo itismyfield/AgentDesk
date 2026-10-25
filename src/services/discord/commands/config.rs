@@ -1193,8 +1193,7 @@ mod session_override_cluster_characterization_tests {
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env = isolate_persistence(tmp.path());
-        let _hosts =
-            crate::config::session_hosts::force_for_test(Some("local"), &[(6488, "local")]);
+        let _hosts = provider_settings::local_tui_for_test(6488);
         let shared = make_shared_data_for_tests();
         let channel = serenity::ChannelId::new(6488);
         let result = test_rt().block_on(update_channel_fast_mode(
