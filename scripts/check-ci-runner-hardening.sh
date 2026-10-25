@@ -685,7 +685,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 60, "job_sha256" => "d22bbf9904832db7e73e446533625ebd8d17a0124a48d77f388050c2322ec65e",
+    "job_timeout_minutes" => 100, "job_sha256" => "18f738247b0c02b9cac5cd225bcb4ce366c733f7378d1b6aaa1c4cc38706ba9a",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -705,6 +705,11 @@ targets = {
           'python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"',
         ],
         "timeout_minutes" => 45, "env" => {"BASH_ENV" => "/dev/null"},
+      },
+      # Dropping this step or changing its argv (a report-only diff) is rejected here.
+      "Compare tests with the comparison base" => {
+        "commands" => ['bash scripts/ci/nextest-base-diff.sh "$RUNNER_TEMP/nextest"'], "timeout_minutes" => 40,
+        "env" => {"BASH_ENV" => "/dev/null", "GH_TOKEN" => "${{ github.token }}", "PR_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}"},
       },
     },
   },
@@ -1024,8 +1029,8 @@ unless evidence == [["scripts", {"name" => "Upload giant-file progress evidence"
   errors << "giant-file progress evidence upload must remain exact, unconditional and only in the cargo shard job"
 end
 clippy_upload = {"name" => "Upload Clippy observation", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "clippy-observation-${{ github.sha }}", "path" => "target/clippy-observation/", "if-no-files-found" => "error"}}
-lib_upload = {"name" => "Upload shared lib tests", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "lib-test-artifact", "path" => "${{ runner.temp }}/lib-test-artifact.tar.gz", "if-no-files-found" => "error", "retention-days" => 1}}
-errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) || (job_id == "lib_test_prepare" && step == lib_upload) }
+nextest_upload = ->(job_id, step) { %w[rust_build rust_tests].include?(job_id) && step["uses"] == "actions/upload-artifact@v4" && step["with"].to_h["name"].to_s.start_with?("nextest-") }
+errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) || nextest_upload.(job_id, step) }
 errors.each { |message| warn "#{path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY
@@ -1035,7 +1040,7 @@ RUBY
 }
 validate_main_script_check_shards
 
-validate_main_full_sweep() {
+validate_main_lint_and_nextest() {
   if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
 require "yaml"
 require "json"
@@ -1044,10 +1049,9 @@ main_path, pr_path = ARGV
 main_jobs = YAML.load_file(main_path).fetch("jobs", {})
 pr_jobs = YAML.load_file(pr_path).fetch("jobs", {})
 errors = []
-sweep_name = "Library sweep (selection-set gated)"
 lint_tests_name = "Non-lib tests and doctests"
 cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
-{"full_non_pg" => "Library test sweep (main shard ${{ matrix.shard }})", "lint" => "Main lint and non-lib tests (ubuntu-latest)"}.each do |job_id, name|
+{"lint" => "Main lint and non-lib tests (ubuntu-latest)"}.each do |job_id, name|
   job = main_jobs[job_id]
   unless job.is_a?(Hash)
     errors << "job #{job_id} is missing"
@@ -1055,13 +1059,11 @@ cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./script
   end
   errors << "job #{job_id} must be named #{name.inspect}" unless job["name"] == name
   errors << "job #{job_id} must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
-  forbidden = job_id == "lint" ? %w[if needs continue-on-error strategy] : %w[continue-on-error]
-  forbidden.each { |key| errors << "job #{job_id} must not set #{key}" if job.key?(key) }
+  %w[if needs continue-on-error strategy].each { |key| errors << "job #{job_id} must not set #{key}" if job.key?(key) }
   Array(job["steps"]).each do |step|
     next unless step.is_a?(Hash)
     label = "job #{job_id} step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
-    optional_restore = job_id == "full_non_pg" && ["Download shared lib tests", "Restore shared lib tests"].include?(step["name"]) && step["continue-on-error"] == true
-    errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error") && !optional_restore
+    errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error")
     errors << "#{label} may only set if: always() as a cleanup step" if step.key?("if") && !(step["if"] == "always()" && cleanup.(step))
   end
 end
@@ -1093,133 +1095,30 @@ if lint.is_a?(Hash)
     errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"
   end
 end
-job = main_jobs["full_non_pg"]
-if job.is_a?(Hash)
-  errors << "job full_non_pg must retain the sweep planner and optional artifact producer dependencies" unless job["needs"] == %w[sweep_shards lib_test_prepare]
-  errors << "job full_non_pg must preserve producer-failure fallback" unless job["if"] == "${{ !cancelled() }}"
-  strategy = {"fail-fast" => false, "matrix" => "${{ fromJSON(needs.sweep_shards.outputs.matrix) }}"}
-  errors << "job full_non_pg must use the validated sweep matrix without fail-fast" unless job["strategy"] == strategy
-  env = job["env"] || {}
-  { "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0", "AGENTDESK_REQUIRE_PG" => "1" }.each do |key, value|
-    errors << "job full_non_pg env must set #{key}=#{value}" unless env[key] == value
+# PR N == main N: the nextest jobs differ only in needs, the PR base comparison and the main baseline upload.
+built_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
+baseline_upload = {"name" => "Upload nextest baseline", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-baseline", "path" => "${{ runner.temp }}/nextest/plan/plan.json", "if-no-files-found" => "error", "retention-days" => 14}}
+role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key) }.merge("steps" => Array(job["steps"]).reject { |step| step.is_a?(Hash) && step["name"] == role_step }) }
+{"rust_build" => [nil, nil], "rust_tests" => ["rust_build", built_gate], "test_evidence" => [%w[rust_build rust_tests], built_gate]}.each do |job_id, (needs, gate)|
+  main_job, pr_job = main_jobs[job_id], pr_jobs[job_id]
+  unless main_job.is_a?(Hash) && pr_job.is_a?(Hash)
+    errors << "job #{job_id} must exist in both workflows"
+    next
   end
-  steps = Array(job["steps"])
-  index = ->(pred) { steps.index { |step| step.is_a?(Hash) && pred.(step) } }
-  start = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh start" && !step.key?("if") })
-  sweep = index.(->(step) { step["name"] == sweep_name })
-  stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" && step["if"] == "always()" })
-  errors << "job full_non_pg must start PostgreSQL, sweep, then stop PostgreSQL under always()" unless start && sweep && stop && start < sweep && sweep < stop
-  if sweep
-    step = steps[sweep]
-    %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].each do |key|
-      errors << "full_non_pg #{sweep_name} must keep #{key}=0" unless (step["env"] || {})[key] == "0"
-    end
-    errors << "full_non_pg #{sweep_name} must keep timeout-minutes: 60" unless step["timeout-minutes"] == 60
-  end
-  sweep_runs = steps.select { |step| step["name"] == sweep_name }.map { |step| step["run"].to_s.strip }
-  errors << "full_non_pg must execute exactly one unconditional full sweep shard" unless sweep_runs == ['python3 scripts/ci/test-selection.py run --lane sweep --full --shard "${{ matrix.shard }}"']
-  # The PR no longer runs this lane, so the main job surface is pinned on its own.
-  errors << "full_non_pg semantic structure changed" unless Digest::SHA256.hexdigest(JSON.generate(job)) == "5a32db067e3a3d3920772d16d40252ed8b6ff2262be2e8f800856314433a30a2"
-else
-  errors << "job full_non_pg is missing"
+  errors << "main #{job_id} must keep needs #{needs.inspect} and if #{gate.inspect}" unless main_job["needs"] == needs && main_job["if"] == gate
+  errors << "main #{job_id} must equal the PR job apart from needs, if and the role step" unless role_free.(main_job, "Upload nextest baseline") == role_free.(pr_job, "Compare tests with the comparison base")
 end
-planner = {
-  "runs-on" => "ubuntu-latest",
-  "outputs" => {"matrix" => "${{ steps.plan.outputs.matrix }}"},
-  "steps" => [
-    {"uses" => "actions/checkout@v4"},
-    {"id" => "plan", "shell" => "bash", "run" => "matrix=$(python3 scripts/ci/test-selection.py sweep-matrix)\necho \"matrix=$matrix\" >> \"$GITHUB_OUTPUT\"\n"},
-  ],
-}
-errors << "sweep_shards must validate and emit the canonical full sweep matrix" unless main_jobs["sweep_shards"] == planner
-producer = main_jobs["lib_test_prepare"]
-errors << "main lib_test_prepare must retain the independent shared lib producer contract" unless producer.is_a?(Hash) && !producer.key?("needs") && !producer.key?("if") && Digest::SHA256.hexdigest(JSON.generate(producer)) == "cebfd2e1c31084a1a78406126bc58be8f72252ac3cc8a2e2181d562183738420"
-aggregate = main_jobs["full_non_pg_required_context"]
-expected_aggregate_step = {"shell" => "bash", "env" => {"SWEEP_RESULT" => "${{ needs.full_non_pg.result }}"}, "run" => "echo \"aggregate-only: upstream=full_non_pg result=$SWEEP_RESULT\"\ntest \"$SWEEP_RESULT\" = success\n"}
-aggregate_steps = Array(aggregate && aggregate["steps"]).map { |step| step.reject { |key, _| key == "name" } }
-expected_aggregate = {"name" => "Full tests (ubuntu-latest)", "needs" => "full_non_pg", "if" => "always()", "runs-on" => "ubuntu-latest"}
-errors << "full_non_pg_required_context must preserve the original required status and fail closed over every sweep shard" unless aggregate.is_a?(Hash) && aggregate.reject { |key, _| key == "steps" } == expected_aggregate && aggregate_steps == [expected_aggregate_step]
-errors << "only full_non_pg_required_context may publish the original Full tests required status" unless main_jobs.select { |_, candidate| candidate["name"] == "Full tests (ubuntu-latest)" }.keys == ["full_non_pg_required_context"]
+main_baseline = Array(main_jobs.dig("rust_build", "steps")).select { |step| step.is_a?(Hash) && step["name"] == "Upload nextest baseline" }
+errors << "main rust_build must upload the plan as nextest-baseline for 14 days, exactly once" unless main_baseline == [baseline_upload]
+errors << "only rust_build, rust_tests and test_evidence may run the main lib tests" unless main_jobs.none? { |job_id, job| !%w[rust_build rust_tests test_evidence].include?(job_id) && Array(job.is_a?(Hash) && job["steps"]).any? { |step| step.is_a?(Hash) && step["run"].to_s.match?(/cargo nextest|test-selection\.py|test-postgres|cargo test --lib(?! --no-run)/) } }
 errors.each { |message| warn "#{main_path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY
   then
-    error "$main_workflow must run the full non-PG sweep unconditionally with PostgreSQL and debuginfo stripped"
+    error "$main_workflow must keep its lint contract and run the same nextest jobs as $pr_workflow"
   fi
 }
-validate_main_full_sweep
-
-validate_main_pg_shards() {
-  if ! ruby - "$main_workflow" <<'RUBY'
-require "yaml"
-errors = []
-main_path = ARGV.fetch(0)
-job_id = "postgres"
-document = YAML.load_file(main_path)
-plan = {
-  "runs-on" => "ubuntu-latest",
-  "outputs" => { "matrix" => "${{ steps.plan.outputs.matrix }}" },
-  "steps" => [
-    { "uses" => "actions/checkout@v4" },
-    { "id" => "plan", "shell" => "bash", "run" => "matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)\necho \"matrix=$matrix\" >> \"$GITHUB_OUTPUT\"\n" },
-  ],
-}
-recipe = recipe_step = "just test-postgres-shard"
-job = document.dig("jobs", job_id)
-unless job.is_a?(Hash)
-  warn "#{main_path}: job postgres is missing"
-  exit 1
-end
-errors << "#{main_path}: pg_shards must emit the canonical matrix" unless document.dig("jobs", "pg_shards") == plan
-errors << "job postgres must be named per shard" unless job["name"] == "PostgreSQL tests (shard ${{ matrix.shard }})"
-errors << "job postgres must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
-errors << "PG job must retain its exact needs" unless job["needs"] == "pg_shards"
-errors << "PG job must retain its path condition" if job.key?("if")
-errors << "PG job must not set continue-on-error" if job.key?("continue-on-error")
-errors << "PG job must use the canonical matrix without fail-fast" unless job["strategy"] == { "fail-fast" => false, "matrix" => "${{ fromJSON(needs.pg_shards.outputs.matrix) }}" }
-env = job["env"] || {}
-errors << "PG_INCLUDE_SHARD must not be inherited by the PostgreSQL prelude" if env.key?("PG_INCLUDE_SHARD") || (document["env"] || {}).key?("PG_INCLUDE_SHARD")
-errors << "job postgres env must set AGENTDESK_REQUIRE_PG=1" unless env["AGENTDESK_REQUIRE_PG"] == "1"
-diagnostics = {
-  "PostgreSQL lane resource diagnostics" => "${{ inputs.resource_diagnostics == true }}",
-  "Show PostgreSQL lane resource diagnostics" => "always() && inputs.resource_diagnostics == true",
-}
-
-cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
-runs_tests = ->(step) { step["run"].to_s.match?(/\b(?:cargo\s+test|just\s+test|test-selection\.py\s+run)/) }
-start_run = "./scripts/ci/postgres-service.sh start"
-steps = Array(job["steps"]).select { |step| step.is_a?(Hash) }
-steps.each do |step|
-  label = "job postgres step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
-  errors << "PG_INCLUDE_SHARD must be confined to the actual PostgreSQL shard step" if step["name"] != recipe_step && (step["env"] || {}).key?("PG_INCLUDE_SHARD")
-  errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error")
-  next unless step.key?("if")
-  allowed = if runs_tests.(step) || step["run"] == start_run then nil
-            elsif diagnostics.key?(step["name"]) then diagnostics[step["name"]]
-            elsif cleanup.(step) then "always()"
-            end
-  errors << "#{label} may not set if: #{step["if"].inspect}" unless step["if"] == allowed
-end
-index = ->(pred) { steps.index(&pred) }
-start = index.(->(step) { step["run"] == start_run })
-tests = steps.each_index.select { |i| runs_tests.(steps[i]) }
-stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" })
-errors << "PG job must run the shard recipe exactly once" unless steps.count { |step| step["run"].to_s.strip == recipe } == 1
-test_step = steps.find { |step| step["run"].to_s.strip == recipe } || {}
-errors << "actual PostgreSQL shard step must set PG_INCLUDE_SHARD from matrix.shard" unless test_step.dig("env", "PG_INCLUDE_SHARD") == "${{ matrix.shard }}"
-errors << "PG shard step must keep its exact name" unless test_step["name"] == recipe_step
-errors << "job postgres test step must keep timeout-minutes: 75" unless test_step["timeout-minutes"] == 75
-errors << "job postgres must not set a job timeout-minutes" if job.key?("timeout-minutes")
-errors << "PG job must start PostgreSQL, run tests, then stop it" unless start && stop && !tests.empty? && tests.all? { |i| start < i && i < stop }
-errors << "main PG job must have exactly one test step" unless tests.length == 1
-errors.each { |message| warn message }
-exit(errors.empty? ? 0 : 1)
-RUBY
-  then
-    error "$main_workflow must run both PostgreSQL shards unconditionally"
-  fi
-}
-validate_main_pg_shards
+validate_main_lint_and_nextest
 
 validate_main_windows_cache_warm() {
   if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'

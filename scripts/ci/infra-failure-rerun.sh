@@ -436,10 +436,10 @@ is_worker_job() {
   [[ "$1" =~ $WORKER_JOB_REGEX ]]
 }
 
-# A nextest failure the test step logged vetoes the retry even when its result artifact never uploaded.
-NEXTEST_FAILURE_REGEX='(^|[^[:alnum:]-])LEAK-FAIL([^[:alnum:]-]|$)|error: test run failed|Process completed with exit code 100\.'
+# A failure the test step logged (nextest verdict or the runner's exit-100 line) vetoes even without an artifact.
 worker_log_has_test_failure() {
-  awk '/##\[group\]Run /{step=0} /cargo nextest run --archive-file/{step=1} step' "$1" | grep -a -E -q -- "$NEXTEST_FAILURE_REGEX"
+  LC_ALL=C awk '/##\[group\]Run /{step=0} /cargo nextest run --archive-file/{step=1} step && (/(^|[^[:alnum:]-])LEAK-FAIL([^[:alnum:]-]|$)/ || /error: test run failed/ ||
+    /^([0-9][0-9T:.-]*Z )?##\[error\]Process completed with exit code 100\.[[:space:]]*$/) {hit=1; exit} END {exit !hit}' "$1"
 }
 
 # Log evidence alone never retries: classify-worker reads the worker artifacts, and any

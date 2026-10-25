@@ -143,12 +143,39 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: cargo test (non-PG)
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.149
+
+      # Native lib run: the macos list must match the sources, and the source PG classifier picks what runs without PG.
+      - name: Compare and run non-PG lib tests
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          RUST_BACKTRACE: 1
+        run: |
+          set -euo pipefail
+          NEXTEST_DIR="$RUNNER_TEMP/nextest"
+          mkdir -p "$NEXTEST_DIR"
+          cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
+          cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
+            --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
+          python3 scripts/ci/rust_test_sources.py compare --platform macos --list "$NEXTEST_DIR/universe.json" \
+            --json-out "$NEXTEST_DIR/compare.json"
+          python3 scripts/ci/pg_test_classifier.py classify --list "$NEXTEST_DIR/universe.json" --json-out "$NEXTEST_DIR/pg.json"
+          python3 scripts/ci/nextest_ci.py plan --universe "$NEXTEST_DIR/universe.json" --only "$NEXTEST_DIR/pg.json" \
+            --archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 1 --sha "$GITHUB_SHA" --scope macos-lib \
+            --rust-version 1.94.1 --nextest-version "$(cargo nextest --version | awk 'NR==1 {print $2}')" \
+            --target "$(rustc -vV | sed -n 's/^host: //p')" --output "$NEXTEST_DIR/plan"
+          cargo nextest run --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
+            --config-file "$NEXTEST_DIR/plan/worker-0.toml" --profile ci --no-tests fail
+
+      - name: cargo test (non-PG, non-lib targets)
         shell: bash
         run: |
           source scripts/ci/non-pg-test-filter.sh
-          cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"
-          run_non_pg_filter_replay
+          cargo test --bins --examples --benches --test '*' -- "${NON_PG_SKIP_ARGS[@]}"
         env:
           RUST_BACKTRACE: 1
 
@@ -205,12 +232,39 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo test --lib discord_thread_create -- --test-threads=1
 
-      - name: cargo test (non-PG)
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.149
+
+      # Native lib run: the windows list must match the sources, and the source PG classifier picks what runs without PG.
+      - name: Compare and run non-PG lib tests
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          RUST_BACKTRACE: 1
+        run: |
+          set -euo pipefail
+          NEXTEST_DIR="$RUNNER_TEMP/nextest"
+          mkdir -p "$NEXTEST_DIR"
+          cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
+          cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
+            --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
+          python3 scripts/ci/rust_test_sources.py compare --platform windows --list "$NEXTEST_DIR/universe.json" \
+            --json-out "$NEXTEST_DIR/compare.json"
+          python3 scripts/ci/pg_test_classifier.py classify --list "$NEXTEST_DIR/universe.json" --json-out "$NEXTEST_DIR/pg.json"
+          python3 scripts/ci/nextest_ci.py plan --universe "$NEXTEST_DIR/universe.json" --only "$NEXTEST_DIR/pg.json" \
+            --archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 1 --sha "$GITHUB_SHA" --scope windows-lib \
+            --rust-version 1.94.1 --nextest-version "$(cargo nextest --version | awk 'NR==1 {print $2}')" \
+            --target "$(rustc -vV | sed -n 's/^host: //p')" --output "$NEXTEST_DIR/plan"
+          cargo nextest run --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
+            --config-file "$NEXTEST_DIR/plan/worker-0.toml" --profile ci --no-tests fail
+
+      - name: cargo test (non-PG, non-lib targets)
         shell: bash
         run: |
           source scripts/ci/non-pg-test-filter.sh
-          cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"
-          run_non_pg_filter_replay
+          cargo test --bins --examples --benches --test '*' -- "${NON_PG_SKIP_ARGS[@]}"
         env:
           RUST_BACKTRACE: 1
 

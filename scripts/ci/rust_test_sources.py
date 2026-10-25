@@ -4,6 +4,7 @@
   inventory  walk src/lib.rs through `mod`, `#[path]` and `include!`, keeping each test's cfg chain
   check      fail on test files no crate root reaches, missing module/include files and unreadable cfg
   compare    compare the source inventory for one platform with an unfiltered nextest list
+  removed    per platform, tests a base checkout compiles that this tree no longer compiles
 
 A compiled list cannot see a test file that no `mod` connects, so the orphan check stays source based.
 Nothing here runs cargo.
@@ -391,6 +392,17 @@ def compare(inventory, listed, target_os, features):
             "unknown_cfg": sorted(set(unknown) - listed)}
 
 
+def platform_tests(repo_root):
+    """{platform: compiled test IDs} for one tree; unknown cfg fails because it cannot prove a removal."""
+    inv, features, found = lib_inventory(repo_root), default_features(repo_root), {}
+    for platform, target_os in PLATFORMS.items():
+        compiled, _, unknown = platform_split(inv, target_os, features)
+        if unknown or inv.errors:
+            raise ValueError(f"{repo_root}: cfg unknown or sources missing on {platform}; run `check` there")
+        found[platform] = compiled
+    return found
+
+
 def check_findings(repo_root):
     inv = lib_inventory(repo_root)
     found = [f"orphan test file: {path}" for path in orphans(repo_root, inv)]
@@ -415,8 +427,21 @@ def main(argv=None):
     c.add_argument("--platform", choices=sorted(PLATFORMS), required=True)
     c.add_argument("--list", required=True, help="unfiltered `cargo nextest list --message-format json`")
     c.add_argument("--json-out", required=True)
+    r = sub.add_parser("removed")
+    r.add_argument("--base-root", type=Path, required=True, help="checkout of the comparison base")
+    r.add_argument("--json-out", required=True)
     args = parser.parse_args(argv)
     root = args.repo_root.resolve()
+    if args.command == "removed":
+        try:
+            base, head = platform_tests(args.base_root.resolve()), platform_tests(root)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR {exc}", file=sys.stderr)
+            return 1
+        lost = {platform: sorted(base[platform] - head[platform]) for platform in PLATFORMS}
+        Path(args.json_out).write_text(json.dumps(lost, indent=1, sort_keys=True) + "\n")
+        print(" · ".join(f"{platform} -{len(names)}" for platform, names in lost.items()))
+        return 0
     if args.command == "check":
         inv, found = check_findings(root)
         for line in found:

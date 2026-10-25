@@ -4,7 +4,8 @@
   plan            nextest list JSON + archive -> plan.json and one config per worker (LPT by duration)
   verify-archive  worker preflight: archive digest, checkout SHA, run and config must match the plan
   audit           per-worker artifacts -> verdict JSON and Markdown summary; any gap is red
-  base-diff       compare a plan with the plan of a fixed comparison base SHA
+  base-diff       compare a plan with the plan of a fixed comparison base SHA; every lost test needs a
+                  matching scripts/ci/test-removal-justifications.txt row and every row a matching loss
   required-context, comparison-base, classify-worker   see nextest_required.py
 
 Every input format carries a version and is rejected when it does not match; a missing or
@@ -296,9 +297,36 @@ def _plan_digest(plan):
     return _digest({k: v for k, v in plan.items() if k != "plan_digest"})
 
 
+def adopt_identity(args):
+    """Fill the scope and build flags from an existing plan, so a rebuilt base plan is comparable."""
+    ident = load_plan(args.identity_from)["identity"]
+    build = ident["build"]
+    args.scope, args.rust_version, args.nextest_version = ident["scope"], ident["rust"], ident["nextest"]
+    args.target, args.features, args.build_option = build["target"], ",".join(build["features"]), build["options"]
+    args.cargo_profile, args.nextest_profile = build["cargo_profile"], build["nextest_profile"]
+
+
+def only_listed(universe, ignored, path):
+    """Keep the lib tests a pg_test_classifier.py report names under non_pg (native runs without PG)."""
+    try:
+        names = set(json.loads(Path(path).read_text())["non_pg"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise PlanError(f"cannot read non_pg names from {path}: {exc}") from exc
+    keep = {t for t in universe if t[1] in names}
+    if not keep or names - {t[1] for t in universe | ignored}:
+        raise PlanError(f"{path} names tests outside the listed universe or selects none")
+    return keep, {t for t in ignored if t[1] in names}
+
+
 def cmd_plan(args):
+    if args.identity_from:
+        adopt_identity(args)
+    if not (args.scope or "").strip():
+        raise PlanError("plan identity needs scope")
     build = build_identity(args)
     universe, ignored = load_universe(args.universe)
+    if args.only:
+        universe, ignored = only_listed(universe, ignored, args.only)
     timings, invalid = load_timings(args.timings or [])
     weights, timing = weights_for(universe, timings)
     timing["invalid_records"] = invalid
@@ -538,8 +566,42 @@ def cmd_audit(args):
     return 0 if verdict["verdict"] == "pass" else 1
 
 
+REMOVAL_KINDS = ("removed", "runnable->ignored")
+
+
+def load_justifications(path):
+    """{(test ID text, kind): reason} from `<binary-id> <test> | <kind> | <reason>` rows."""
+    rows = {}
+    for n, line in enumerate(Path(path).read_text().splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) != 3 or parts[1] not in REMOVAL_KINDS or not parts[2] or len(parts[0].split(" ")) != 2:
+            raise PlanError(f"{path}:{n}: need `<binary-id> <test> | removed|runnable->ignored | <reason>`")
+        _check_id(*parts[0].split(" "))
+        if (parts[0], parts[1]) in rows:
+            raise PlanError(f"{path}:{n}: {parts[0]} {parts[1]} is listed twice")
+        rows[(parts[0], parts[1])] = parts[2]
+    return rows
+
+
+def platform_removals(path, binary_id):
+    """{ID text: platforms} for tests the macOS/Windows source inventory lost; Linux is the plan's job."""
+    try:
+        doc = json.loads(Path(path).read_text())
+        lost = {p: doc[p] for p in ("macos", "windows")}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise PlanError(f"cannot read source removals {path}: {exc}") from exc
+    found = {}
+    for platform, names in lost.items():
+        for name in names:
+            found.setdefault(_id_text(_check_id(binary_id, name)), []).append(platform)
+    return found
+
+
 def cmd_base_diff(args):
     plan = load_plan(args.plan)
+    justified = load_justifications(args.justifications)
     path = Path(args.baseline)
     if not path.is_file():
         print(f"ERROR no baseline plan; regenerate it at {args.comparison_base_sha}", file=sys.stderr)
@@ -560,16 +622,29 @@ def cmd_base_diff(args):
 
     run, ign = sets(plan)
     base_run, base_ign = sets(base)
+    binaries = {t[0] for t in run | ign}
+    if len(binaries) != 1:
+        raise PlanError(f"source removals need one lib binary in the plan, found {sorted(binaries)}")
+    platform_lost = platform_removals(args.source_removed, binaries.pop())
     diff = {"comparison_base_sha": args.comparison_base_sha, "scope": plan["identity"]["scope"],
             "removed": sorted(_id_text(t) for t in (base_run | base_ign) - (run | ign)),
             "runnable_to_ignored": sorted(_id_text(t) for t in base_run & ign),
             "ignored_to_runnable": sorted(_id_text(t) for t in base_ign & run),
-            "added": sorted(_id_text(t) for t in (run | ign) - (base_run | base_ign))}
+            "added": sorted(_id_text(t) for t in (run | ign) - (base_run | base_ign)),
+            "platform_removed": dict(sorted(platform_lost.items()))}
+    lost = {(t, "removed") for t in diff["removed"] + list(platform_lost)}
+    lost |= {(t, "runnable->ignored") for t in diff["runnable_to_ignored"]}
+    diff["unjustified"] = sorted(f"{t} | {kind}" for t, kind in lost - set(justified))
+    diff["stale_justifications"] = sorted(f"{t} | {kind}" for t, kind in set(justified) - lost)
     Path(args.json_out).write_text(json.dumps(diff, indent=1, sort_keys=True) + "\n")
-    lost = len(diff["removed"]) + len(diff["runnable_to_ignored"])
     print(f"removed {len(diff['removed'])} · runnable->ignored {len(diff['runnable_to_ignored'])} · "
-          f"ignored->runnable {len(diff['ignored_to_runnable'])} · added {len(diff['added'])}")
-    return 1 if lost and not args.report_only else 0
+          f"platform-removed {len(platform_lost)} · ignored->runnable {len(diff['ignored_to_runnable'])} · "
+          f"added {len(diff['added'])} · justified {len(lost) - len(diff['unjustified'])}")
+    for row in diff["unjustified"]:
+        print(f"ERROR lost without a justification row: {row}", file=sys.stderr)
+    for row in diff["stale_justifications"]:
+        print(f"ERROR justification row matches no loss against {args.comparison_base_sha}: {row}", file=sys.stderr)
+    return 1 if diff["unjustified"] or diff["stale_justifications"] else 0
 
 
 # The plan and JUnit readers that nextest_required reuses.
@@ -585,11 +660,11 @@ def main(argv=None):
     p.add_argument("--archive", required=True)
     p.add_argument("--workers", type=int, required=True)
     p.add_argument("--sha", required=True)
-    p.add_argument("--scope", required=True)
+    p.add_argument("--scope")
     p.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", "local"))
-    p.add_argument("--rust-version", required=True)
-    p.add_argument("--nextest-version", required=True)
-    p.add_argument("--target", required=True, help="target triple the archive was built for")
+    p.add_argument("--rust-version")
+    p.add_argument("--nextest-version")
+    p.add_argument("--target", help="target triple the archive was built for")
     p.add_argument("--features", default="default", help="comma-separated cargo features of the build")
     p.add_argument("--cargo-profile", default="test")
     p.add_argument("--nextest-profile", default="ci")
@@ -598,6 +673,8 @@ def main(argv=None):
     p.add_argument("--base-config", default=".config/nextest.toml")
     p.add_argument("--retry-policy", default="scripts/ci/nextest-retry-policy.toml")
     p.add_argument("--today", help="YYYY-MM-DD for policy expiry (default: UTC today)")
+    p.add_argument("--identity-from", help="plan.json whose scope and build flags this plan takes")
+    p.add_argument("--only", help="pg_test_classifier.py JSON; plan only its non_pg tests")
     p.add_argument("--output", required=True)
     v = sub.add_parser("verify-archive")
     v.add_argument("--plan", required=True)
@@ -617,8 +694,9 @@ def main(argv=None):
     b.add_argument("--plan", required=True)
     b.add_argument("--baseline", required=True)
     b.add_argument("--comparison-base-sha", required=True)
+    b.add_argument("--justifications", required=True, help="scripts/ci/test-removal-justifications.txt")
+    b.add_argument("--source-removed", required=True, help="rust_test_sources.py removed JSON")
     b.add_argument("--json-out", required=True)
-    b.add_argument("--report-only", action="store_true")
     delegated = nextest_required.register(sub)
     args = parser.parse_args(argv)
     handler = {"plan": cmd_plan, "verify-archive": cmd_verify_archive,

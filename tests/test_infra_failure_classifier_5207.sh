@@ -585,14 +585,29 @@ new_shard_case
 printf '%s\n' '{"total_count":0,"artifacts":[]}' >"$E2E_CASE/artifacts.json"
 assert_e2e "a run without its plan artifact vetoes" "no-op:worker-artifact-veto" "infra-shutdown"
 
-# A nextest failure logged by the test step vetoes even when the worker's result upload then died.
+# A failure logged by the test step vetoes even when the worker's result upload then died; each signal alone suffices.
+nextest_step_log() {
+  printf '%s\n' '##[group]Run set +e' 'cargo nextest run --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" \\' "$@" \
+    '##[group]Run actions/upload-artifact@v4' 'The operation was canceled.' >"$E2E_CASE/job-902.log"
+}
+for signal in '    LEAK-FAIL [   2.003s] agentdesk m::a' 'error: test run failed' \
+  '2026-10-25T01:02:03.4567890Z ##[error]Process completed with exit code 100.'; do
+  new_shard_case
+  nextest_step_log 'test result: ok. 1 passed; 0 failed' "$signal"
+  GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "a logged '${signal##* ##}' alone vetoes despite a missing artifact" "no-op:regression" "nextest-test-failure"
+  [[ ! -e "$E2E_CASE/rerun.log" ]] || fail "logged nextest failure made a retry request"
+done
+
+# A long test log after an early failure must still read as that failure.
 new_shard_case
-printf '%s\n' '##[group]Run set +e' 'cargo nextest run --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" \\' \
-  '    LEAK-FAIL [   2.003s] agentdesk m::a' 'test result: ok. 1 passed; 0 failed' 'error: test run failed' \
-  '##[error]Process completed with exit code 100.' '##[group]Run actions/upload-artifact@v4' \
-  'The operation was canceled.' >"$E2E_CASE/job-902.log"
-GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "a logged nextest failure vetoes despite a missing artifact" "no-op:regression" "nextest-test-failure"
-[[ ! -e "$E2E_CASE/rerun.log" ]] || fail "logged nextest failure made a retry request"
+nextest_step_log '    LEAK-FAIL [   2.003s] agentdesk m::a' $(seq -f '        PASS [   0.001s] agentdesk m::t%g' 1 12000)
+GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "an early LEAK-FAIL before 12000 more lines vetoes" "no-op:regression" "nextest-test-failure"
+
+# Test output that quotes the runner's phrase is not the runner's exit line.
+new_shard_case
+nextest_step_log 'note: Process completed with exit code 100.' 'The runner has received a shutdown signal.'
+GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "a quoted exit-100 phrase in test output stays infra" "rerun-requested:infra" "infra-shutdown"
+assert_rerun_ids '901,902'
 
 # Only the test step's own output counts: an exit 100 from another step stays an infra retry.
 new_shard_case
