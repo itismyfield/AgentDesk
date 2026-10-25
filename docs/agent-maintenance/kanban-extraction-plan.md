@@ -5,10 +5,14 @@
 Source issue: #1787
 Epic: #1786
 
-`src/kanban.rs` is currently 4,041 lines: about 2,400 lines of production
-transition orchestration and compatibility helpers followed by about 1,640
-lines of inline tests. It is a runtime coordination surface, not the primary
-home for card CRUD persistence.
+At planning time `src/kanban.rs` (removed) was 4,041 lines: about 2,400 lines
+of production transition orchestration and compatibility helpers followed by
+about 1,640 lines of inline tests. It is a runtime coordination surface, not
+the primary home for card CRUD persistence.
+
+Status: the extraction has landed. The code now lives in the `src/kanban/`
+module directory; the subdomain map below names the file and entry symbol each
+proposed module became.
 
 ## Scope Notes
 
@@ -24,7 +28,7 @@ home for card CRUD persistence.
   `src/services/kanban_cards.rs`, `src/server/dto/kanban.rs`, and
   `src/server/routes/kanban.rs`. Do not move that logic into the new
   `kanban` module tree.
-- `src/kanban.rs` should end as a small facade/re-export module plus module
+- `src/kanban/mod.rs` stays a small facade/re-export module plus module
   wiring. New state-machine behavior should land in the extracted owner
   modules, not in the facade.
 
@@ -37,24 +41,24 @@ home for card CRUD persistence.
 | Engine operation bridge | `src/engine/ops/kanban_ops.rs` | Engine-dispatched kanban operations that call the stable `crate::kanban::*` facade. |
 | Service helpers | `src/services/kanban_cards.rs`, `src/services/auto_queue.rs` | Service-level card helpers and auto-queue coordination triggered by card state. |
 
-## Remaining `src/kanban.rs` Subdomain Map
+## Former `src/kanban.rs` (removed) Subdomain Map
 
-| Proposed module | Current source ranges | Approx. prod LOC | Approx. test LOC | Responsibility | Main consumers |
+| Proposed module | Landed in (path + symbol) | Approx. prod LOC | Approx. test LOC | Responsibility | Main consumers |
 | --- | --- | ---: | ---: | --- | --- |
-| `kanban::mod` facade | `src/kanban.rs:1` | 70 retained | 0 | Module declarations, stable re-exports, and shared constants only. | All `crate::kanban::*` callers. |
-| `kanban::test_support` | `src/kanban.rs:2408` through `src/kanban.rs:2739` | 0 | 330 | Isolated PG database lifecycle, env guards, script fixtures, and card/dispatch seed helpers. | Per-owner kanban unit tests. |
-| `kanban::transition` | `src/kanban.rs:635` through `src/kanban.rs:1121`, `src/kanban.rs:1122` | 500 | 180 | PG transition entrypoints, caller-owned transaction variants, active-dispatch and latest-verdict gates, pipeline decision invocation, policy intent execution, and transition result DTO. | Routes, dispatch status/finalization, auto-queue services, engine kanban ops, integration tests. |
-| `kanban::cleanup` | `src/kanban.rs:143` through `src/kanban.rs:162`, `src/kanban.rs:275` through `src/kanban.rs:462`, `src/kanban.rs:547` through `src/kanban.rs:713` | 580 | 260 | Escalation alert clearing, stale worktree metadata scrubbing, auto-queue live entry checks, force-transition link/revert cleanup, live dispatch cancellation, and allowlisted cleanup execution. | `kanban::transition`, auto-queue terminal sync tests, dispatch cleanup callers. |
-| `kanban::terminal_cleanup` | `src/kanban.rs:163` through `src/kanban.rs:274`, `src/kanban.rs:1303` through `src/kanban.rs:1369` | 190 | 250 | Terminal managed-worktree cleanup counts, managed worktree metadata removal, terminal cleanup reason, and terminal follow-up helpers. | `kanban::transition`, dispatch cancellation, auto-queue terminal-card paths. |
-| `kanban::hooks` | `src/kanban.rs:1132` through `src/kanban.rs:1213`, `src/kanban.rs:1370` through `src/kanban.rs:1839` | 550 | 420 | Dynamic hook execution, pending side-effect drain, event/state/enter/transition hook wrappers, hook pipeline resolution, and PG hook implementation. | `kanban::transition`, engine hook policy, outbox/event tests. |
-| `kanban::github_sync` | `src/kanban.rs:1214` through `src/kanban.rs:1302`, `src/kanban.rs:1840` through `src/kanban.rs:1976` | 95 | 140 | GitHub sync trigger and target lookup plus legacy test-cfg audit logging helpers. | `kanban::transition`, GitHub sync worker, audit tests. |
-| `kanban::review_tuning` | `src/kanban.rs:1977` through `src/kanban.rs:2400` | 420 | 160 | Review true-negative recording on pass-to-done and false-negative correction/category backfill on reopen. | `kanban::transition`, review verdict routes, tuning persistence. |
-| Owner test modules | `src/kanban.rs:2741` through `src/kanban.rs:4041` | 0 | 1,300 | Transition gate tests, force override tests, terminal sync tests, hook/outbox tests, cleanup tests, GitHub sync tests, and review tuning tests moved beside owner modules. | Extracted kanban owner modules. |
+| `kanban::mod` facade | `src/kanban/mod.rs` (re-exports only) | 70 retained | 0 | Module declarations, stable re-exports, and shared constants only. | All `crate::kanban::*` callers. |
+| `kanban::test_support` | Not created; no shared test-support module exists | 0 | 330 | Isolated PG database lifecycle, env guards, script fixtures, and card/dispatch seed helpers. | Per-owner kanban unit tests. |
+| `kanban::transition` | `src/kanban/transition_core.rs` (`transition_status_with_opts_pg`, `transition_status_with_opts_and_allowed_cleanup_pg`), `src/kanban/state_machine.rs` (`resolve_pipeline_with_pg`) | 500 | 180 | PG transition entrypoints, caller-owned transaction variants, active-dispatch and latest-verdict gates, pipeline decision invocation, policy intent execution, and transition result DTO. | Routes, dispatch status/finalization, auto-queue services, engine kanban ops, integration tests. |
+| `kanban::cleanup` | `src/kanban/transition_cleanup.rs` (`execute_allowed_cleanup_on_pg_tx`, `clear_escalation_alert_state_on_pg_tx`) | 580 | 260 | Escalation alert clearing, stale worktree metadata scrubbing, auto-queue live entry checks, force-transition link/revert cleanup, live dispatch cancellation, and allowlisted cleanup execution. | `kanban::transition`, auto-queue terminal sync tests, dispatch cleanup callers. |
+| `kanban::terminal_cleanup` | `src/kanban/terminal_cleanup.rs` (`cleanup_terminal_managed_worktrees_pg`, `sync_terminal_transition_followups_pg`) | 190 | 250 | Terminal managed-worktree cleanup counts, managed worktree metadata removal, terminal cleanup reason, and terminal follow-up helpers. | `kanban::transition`, dispatch cancellation, auto-queue terminal-card paths. |
+| `kanban::hooks` | `src/kanban/hooks.rs` (`fire_dynamic_hooks`, `drain_hook_side_effects_with_backends`) | 550 | 420 | Dynamic hook execution, pending side-effect drain, event/state/enter/transition hook wrappers, hook pipeline resolution, and PG hook implementation. | `kanban::transition`, engine hook policy, outbox/event tests. |
+| `kanban::github_sync` | `src/kanban/github_sync.rs` (`github_sync_on_transition_pg`), `src/kanban/github_sync_target.rs` (`github_sync_target_for_card_pg`), `src/kanban/audit.rs` (`log_transition_audit_pg`) | 95 | 140 | GitHub sync trigger and target lookup plus legacy test-cfg audit logging helpers. | `kanban::transition`, GitHub sync worker, audit tests. |
+| `kanban::review_tuning` | `src/kanban/review_tuning.rs` (`record_true_negative_if_pass_with_backends`, `correct_tn_to_fn_on_reopen`) | 420 | 160 | Review true-negative recording on pass-to-done and false-negative correction/category backfill on reopen. | `kanban::transition`, review verdict routes, tuning persistence. |
+| Owner test modules | Not done; only `transition_core.rs` and `terminal_cleanup.rs` carry `cfg(test)` code | 0 | 1,300 | Transition gate tests, force override tests, terminal sync tests, hook/outbox tests, cleanup tests, GitHub sync tests, and review tuning tests moved beside owner modules. | Extracted kanban owner modules. |
 
 ## Recommended Extraction Order
 
 1. #1818 `kanban: create facade module shell and shared test support`
-   - Required first because Rust cannot keep `src/kanban.rs` and
+   - Required first because Rust cannot keep `src/kanban.rs` (removed) and
      `src/kanban/` as the same module.
    - Acceptance focus: stable public API, no behavior changes, shared PG
      fixture available for later owner tests.

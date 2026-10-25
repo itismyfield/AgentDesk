@@ -1,5 +1,7 @@
 # 채널 소유 ingress 판정 계약 (과거 관측 shadow 기록)
 
+<!-- doc-path-refs: removed src/services/cluster/channel_ingress.rs src/services/cluster/channel_ingress/tests.rs src/services/cluster/channel_home.rs src/services/cluster/channel_home_drain.rs src/db/o_channel_homes.rs ingress_shadow/compat_tests.rs -->
+
 기준: `itismyfield/AgentDesk@070157faf`. §1–§8의 좌표는 이 SHA 기준이다. §9의 관측 연결은 `b0062777a` 위에 얹었고 좌표 대신 심볼로 적는다.
 
 이 문서는 R1–R6에서 제거한 채널 home·ingress shadow의 과거 설계와 검증 기록이다. 현재 production에는 이 판정 모듈·shadow worker·설정·admission 배선이 없다(§4.4). 아래의 파일 좌표·수용 기준·활성화 절차는 당시 구현을 설명하며 현재 운영 계약이나 F1의 구현 지시가 아니다. 0133·0134 migration과 잔류 테이블은 데이터 보존을 위해 남긴다.

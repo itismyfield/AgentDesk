@@ -25,7 +25,7 @@
 |---|---|---|
 | Claude input | `src/services/claude_tui/input.rs:88-100` | `plan_prompt_submit`, paste 1800자, control char **reject** |
 | Codex input | `src/services/codex_tui/input.rs:1-100` | rounded-box composer, fresh=120s/followup=45s |
-| Notification strip | `format_ssh_direct_prompt_notification` @ `tui_prompt_relay.rs:1538`, `strip_terminal_controls` @ `:1563` | 표시용 control char strip — #2699 |
+| Notification strip | `format_ssh_direct_prompt_notification` @ `tui_prompt_relay/injected_prompt_policy.rs`, `strip_terminal_controls` @ `tui_task_card.rs` | 표시용 control char strip — #2699 |
 | Claude tail | `src/services/claude_tui/transcript_tail.rs` + `tui_prompt_relay.rs:247,373,584,631` | offset JSON, rehydrate grace |
 | Codex tail | `src/services/codex_tui/rollout_tail.rs` | composer_ready, tool deadline 5m |
 | Turn state | `src/services/tui_turn_state.rs:64-120` | envelope classifier + partial parser(Claude only) |
@@ -39,7 +39,7 @@
 ## 2. 두 개 트랙
 
 ### 트랙 A — Rust 단위/통합 (helper-level subset, 우선)
-**위치**: 기존 컨벤션(`#[cfg(test)] mod tests` inline)을 따라 **대상 함수와 같은 모듈에 inline**으로 추가. 신규 디렉터리 `tests/unit_tui/`는 만들지 않음.
+**위치**: 기존 컨벤션(`#[cfg(test)] mod tests` inline)을 따라 **대상 함수와 같은 모듈에 inline**으로 추가. 신규 `tests` 하위 디렉터리(unit_tui)는 만들지 않음.
 **Private 함수 접근**: `claude_tui_rehydrate_start_offset` 등 helper가 같은 부모 모듈의 inline test에서 호출 가능. 외부 `tests/` 통합테스트가 필요한 경우만 `pub(crate)` 승격 검토.
 **원칙**: 외부 의존(Discord, tmux, launchctl) 없이 fixture jsonl + 함수 단위 호출.
 

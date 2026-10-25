@@ -7,7 +7,6 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -16,7 +15,7 @@ use super::{
     CURSOR_DIR, ChannelStore, HaltReason, Initialized, SPOOL_DIR, StoreError, damage, durable,
 };
 use crate::services::discord::runtime_store::fsync_parent_dir;
-use crate::services::tui_o::shadow::capture::{FileMatch, Fingerprint, file_identity, file_match};
+use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
 use crate::services::tui_o::shadow::{CaptureBatch, CapturedRecord, IDENTITY_VERSION, SourceId};
 
 /// A segment takes no more appends past this size; GC removes whole segments.
@@ -39,39 +38,11 @@ pub struct Cursor {
     pub transition_cleanup: Option<TransitionCleanup>,
 }
 
-/// The record of an operator's transition cleanup of one unproven hop. It explains a past
-/// retirement and never authorizes another one.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TransitionCleanup {
-    pub job_id: String,
-    pub operator: String,
-    pub at: DateTime<Utc>,
-    pub reason: String,
-    /// The last hop seq the transition covers.
-    pub cutoff: u64,
-    pub hop_seq: u64,
-    pub verified: VerifiedEnd,
-    pub ended: ExecutionEnd,
-}
-
-/// The cursor and file state checked before the retirement.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerifiedEnd {
-    pub offset: u64,
-    pub prefix_hash: String,
-    pub fingerprint: Fingerprint,
-}
-
-/// The operator's statement that the execution writing the source has ended.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutionEnd {
-    pub host: String,
-    pub pane: String,
-    /// Hop seqs the statement covers, both ends included.
-    pub first_seq: u64,
-    pub last_seq: u64,
-    pub basis: String,
-}
+mod retention;
+pub use retention::{
+    ExecutionEnd, RetentionBasisV1, RetentionClaimV1, RetentionEvidenceV1, TransitionCleanup,
+    VerifiedEnd,
+};
 
 /// A spooled span: a complete record, or bytes capture consumed without one (a torn first line).
 #[derive(Clone, Debug, PartialEq, Eq)]
