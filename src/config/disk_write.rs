@@ -162,9 +162,14 @@ fn read_config_on_disk(path: &Path) -> Result<Option<Config>> {
         .with_context(|| format!("Failed to parse existing config {}", path.display()))
 }
 
-/// Drops the MCP server `load` injects when it is unchanged; loading injects it again.
-fn drop_injected_mcp_server(config: &mut Config, injected: Option<(String, McpServerConfig)>) {
+/// Drops the MCP server `load` injected: the file never named it and it is unchanged.
+fn drop_injected_mcp_server(
+    config: &mut Config,
+    file: &Config,
+    injected: Option<(String, McpServerConfig)>,
+) {
     if let Some((name, server)) = injected
+        && !file.mcp_servers.contains_key(&name)
         && config.mcp_servers.get(&name) == Some(&server)
     {
         config.mcp_servers.remove(&name);
@@ -175,11 +180,11 @@ fn drop_injected_mcp_server(config: &mut Config, injected: Option<(String, McpSe
 /// back and later default changes still apply.
 fn without_runtime_derivations(path: &Path, config: &Config, on_disk: Option<&Config>) -> Config {
     let mut config = config.clone();
-    drop_injected_mcp_server(&mut config, super::default_memento_mcp_server());
+    let file = on_disk.cloned().unwrap_or_default();
+    drop_injected_mcp_server(&mut config, &file, super::default_memento_mcp_server());
     let Some(root) = super::runtime_root_for_config_path(path) else {
         return config;
     };
-    let file = on_disk.cloned().unwrap_or_default();
     let resolves_to =
         |raw: &PathBuf, value: &PathBuf| super::resolve_runtime_path(&root, raw) == *value;
     for (value, raw) in [
@@ -265,7 +270,7 @@ pub fn save_to_path(path: &Path, config: &Config) -> Result<()> {
 /// Renames a fully written sibling over `path` (through a symlink), keeping its mode,
 /// so a crash leaves the old file or the new one, never a truncated one.
 fn replace_file(path: &Path, contents: &str) -> std::io::Result<()> {
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = crate::utils::secret_file::replacement_target(path)?;
     let dir = target
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
@@ -440,18 +445,76 @@ mod tests {
         let mut edited = server.clone();
         edited.url = "https://elsewhere.example/mcp".to_string();
         let injected = || Some(("memento".to_string(), server.clone()));
+        let (unnamed, mut named) = (Config::default(), Config::default());
+        named
+            .mcp_servers
+            .insert("memento".to_string(), server.clone());
         let mut config = Config::default();
 
         config
             .mcp_servers
             .insert("memento".to_string(), server.clone());
-        drop_injected_mcp_server(&mut config, injected());
+        drop_injected_mcp_server(&mut config, &named, injected());
+        assert_eq!(config.mcp_servers.get("memento"), Some(&server));
+        drop_injected_mcp_server(&mut config, &unnamed, injected());
         assert!(config.mcp_servers.is_empty());
 
         config
             .mcp_servers
             .insert("memento".to_string(), edited.clone());
-        drop_injected_mcp_server(&mut config, injected());
+        drop_injected_mcp_server(&mut config, &unnamed, injected());
         assert_eq!(config.mcp_servers.get("memento"), Some(&edited));
+    }
+
+    #[test]
+    fn a_save_writes_back_only_the_memento_server_the_file_names() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _key = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "MEMENTO_ACCESS_KEY",
+            std::ffi::OsStr::new("memento-test-key"),
+        );
+        let (_, default) = crate::config::default_memento_mcp_server().expect("key is set");
+        let dir = tempfile::tempdir().unwrap();
+        let saved_url = |case: &str, extra: &str| {
+            let path = dir.path().join(case).join("agentdesk.yaml");
+            write_secret_config(&path, extra);
+            let mut config = crate::config::load_from_path(&path).unwrap();
+            config.shared_prompt = Some("/prompts/shared.md".to_string());
+            save_to_path(&path, &config).unwrap();
+            let raw: serde_yaml::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            raw["mcp_servers"]["memento"]["url"]
+                .as_str()
+                .map(str::to_string)
+        };
+
+        assert_eq!(saved_url("injected", ""), None);
+        let written = format!(
+            "mcp_servers:\n  memento:\n    url: {}\n    auth:\n      type: bearer\n      token_env_var: MEMENTO_ACCESS_KEY\n",
+            default.url
+        );
+        assert_eq!(saved_url("written", &written), Some(default.url.clone()));
+        let edited = "mcp_servers:\n  memento:\n    url: https://elsewhere.example/mcp\n";
+        assert_eq!(
+            saved_url("edited", edited).as_deref(),
+            Some("https://elsewhere.example/mcp")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_save_through_a_dangling_symlink_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, missing) = (
+            dir.path().join("agentdesk.yaml"),
+            dir.path().join("gone.yaml"),
+        );
+        std::os::unix::fs::symlink(&missing, &path).unwrap();
+
+        save_to_path(&path, &Config::default()).expect_err("a dangling symlink is not replaced");
+
+        let link = std::fs::symlink_metadata(&path).unwrap();
+        assert!(link.file_type().is_symlink());
+        assert!(!missing.exists());
     }
 }

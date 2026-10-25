@@ -43,11 +43,28 @@ pub(crate) fn write_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> io::
     write_secret_file_after_parent(path, contents)
 }
 
+/// The file a rename-replace of `path` writes: the symlink target, or `path` itself when
+/// absent. A symlink whose target is missing is refused rather than turned into a file.
+pub(crate) fn replacement_target(path: &Path) -> io::Result<std::path::PathBuf> {
+    match fs::canonicalize(path) {
+        Ok(target) => Ok(target),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound && fs::symlink_metadata(path).is_err() =>
+        {
+            Ok(path.to_path_buf())
+        }
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("cannot resolve {}: {error}", path.display()),
+        )),
+    }
+}
+
 /// [`write_secret_file`] by renaming a fully written 0600 sibling over `path` (through a
 /// symlink), so readers never see a truncated file.
 pub(crate) fn replace_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    ensure_secret_parent(&target)?;
+    ensure_secret_parent(path)?;
+    let target = replacement_target(path)?;
     let dir = target
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
@@ -174,6 +191,32 @@ mod tests {
             & 0o777;
         assert_eq!(file_mode, 0o600);
         assert_eq!(dir_mode, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_secret_file_through_a_symlink_keeps_the_target_directory_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let shared = temp.path().join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+        let target = shared.join("agentdesk.yaml");
+        fs::write(&target, "old\n").unwrap();
+        let link = temp.path().join("config").join("agentdesk.yaml");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        replace_secret_file(&link, "secret\n").unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "secret\n");
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!((mode(&target), mode(&shared)), (0o600, 0o755));
     }
 
     #[cfg(unix)]

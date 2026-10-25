@@ -8,7 +8,6 @@ use sqlx::{PgPool, Row};
 use crate::config::{ClusterConfig, ClusterRole, Config};
 use crate::db::postgres::AdvisoryLockLease;
 use crate::services::cluster::session_routing::worker_api_base_url_from_capabilities;
-use crate::services::resident_loops::spawn_resident;
 
 pub(crate) const CLUSTER_LEADER_ADVISORY_LOCK_ID: i64 = 7_801_100;
 
@@ -319,7 +318,7 @@ fn spawn_heartbeat_loop(
         instance_id.clone(),
         leader_active.clone(),
     );
-    spawn_resident("cluster_node_heartbeat", async move {
+    crate::services::resident_loops::spawn_resident("cluster_node_heartbeat", async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.tick().await;
         // #3651: throttle for the leader-only stale-GC backpressure yield log.
@@ -438,7 +437,7 @@ fn spawn_stale_claim_owner_reassignment_loop(
     leader_active: Arc<AtomicBool>,
 ) {
     let interval_secs = cluster_config.heartbeat_interval_secs.max(1);
-    spawn_resident("cluster_stale_claim_owner_reassignment", async move {
+    crate::services::resident_loops::spawn_resident("cluster_claim_reassignment", async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // #3651: throttle for the backpressure yield log.

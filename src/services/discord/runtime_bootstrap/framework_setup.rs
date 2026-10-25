@@ -122,7 +122,7 @@ pub(super) async fn run_bot_framework_setup(
     );
 
     // Background: periodic cleanup for stale Discord upload files
-    super::spawns::run_bot_spawn_upload_cleanup();
+    super::spawns::run_bot_spawn_upload_cleanup(&provider_for_setup);
 
     // #1115 placeholder stall sweeper: safety net for placeholders
     // whose owning turn task is stuck or dead. Edits Discord
@@ -188,13 +188,13 @@ pub(super) async fn run_bot_framework_setup(
     // Background: periodic reaper for dead tmux sessions that
     // still show as working in the DB (catches watcher gaps)
     #[cfg(unix)]
-    super::spawns::run_bot_spawn_dead_tmux_reaper(&shared_clone);
+    super::spawns::run_bot_spawn_dead_tmux_reaper(&shared_clone, &provider_for_setup);
 
     // Background: periodic GC for stale thread sessions in DB.
     // Normal idle/disconnected thread rows expire after 1 hour,
     // but rows still carrying an active_dispatch_id stay until the
     // 3-hour safety TTL so warm-resume sessions keep DB ownership.
-    super::spawns::run_bot_spawn_stale_session_gc(&shared_clone);
+    super::spawns::run_bot_spawn_stale_session_gc(&shared_clone, &provider_for_setup);
     super::intake_delivery_sweep::spawn_intake_delivery_sweep(shared_clone.clone());
 
     super::voice::run_bot_spawn_voice_auto_join(
