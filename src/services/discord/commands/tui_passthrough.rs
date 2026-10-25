@@ -128,7 +128,6 @@ impl ClaudeSlashPassthrough {
 /// (e.g. anything `/loop`-shaped) MUST stay off this list or its turn loses its
 /// `⏳`→`✅` lifecycle. The `local_only_whitelist_matches_passthrough_command_set`
 /// anti-drift test pins this against the [`ClaudeSlashPassthrough`] variant set.
-#[cfg(test)]
 pub(in crate::services::discord) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
     crate::services::tui_prompt_control::LOCAL_ONLY_SLASH_COMMANDS;
 
@@ -143,7 +142,6 @@ pub(in crate::services::discord) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
 /// pass-through handler), so they live here rather than in `LOCAL_ONLY_SLASH_COMMANDS`
 /// (which the `local_only_whitelist_matches_passthrough_command_set` anti-drift test
 /// pins to that variant set).
-#[cfg(test)]
 pub(in crate::services::discord) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 1] =
     crate::services::tui_prompt_control::OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS;
 
