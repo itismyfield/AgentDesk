@@ -123,8 +123,6 @@ pub(crate) struct PaneIdentity {
 pub(crate) struct GuardedPane {
     session: String,
     geometry: Geometry,
-    #[cfg(unix)]
-    stash_attempted: bool,
 }
 
 pub(crate) struct GuardedObserver {
@@ -191,8 +189,6 @@ impl SubmissionTmux {
         Ok(GuardedPane {
             session: session.to_owned(),
             geometry,
-            #[cfg(unix)]
-            stash_attempted: false,
         })
     }
 }
@@ -221,29 +217,6 @@ impl GuardedPane {
     }
 
     #[cfg(unix)]
-    pub(crate) fn capture_viewport(&self) -> Option<String> {
-        let output = SubmissionTmux
-            .run(&[
-                "display-message",
-                "-p",
-                "-t",
-                &self.geometry.pane,
-                SNAPSHOT,
-                ";",
-                "capture-pane",
-                "-p",
-                "-e",
-                "-t",
-                &self.geometry.pane,
-                "-S",
-                "0",
-            ])
-            .ok()?;
-        let capture = read_capture(output, &self.geometry)?;
-        self.geometry_matches().then_some(capture)
-    }
-
-    #[cfg(unix)]
     pub(crate) fn identity(&self) -> PaneIdentity {
         PaneIdentity {
             session: self.geometry.session.clone(),
@@ -252,19 +225,6 @@ impl GuardedPane {
             server_pid: self.geometry.server_pid.clone(),
             pane_pid: self.geometry.pane_pid.clone(),
         }
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn dimensions(&self) -> (usize, usize) {
-        (self.geometry.width, self.geometry.height)
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn stash(&mut self) -> EffectOutcome {
-        if std::mem::replace(&mut self.stash_attempted, true) {
-            return EffectOutcome::Held;
-        }
-        self.effect(&format!("send-keys -t {} C-s", self.geometry.pane), true)
     }
 
     pub(crate) fn payload(&self, action: &TuiInputAction) -> EffectOutcome {

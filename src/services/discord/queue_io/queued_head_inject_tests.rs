@@ -1446,16 +1446,16 @@ async fn a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a2_queued_hold_blocks_idle_fallthrough_without_retry_charge_pg() {
-    use crate::services::claude_tui::composer_lock::{DraftGuard, guard_draft};
+async fn menu_keeps_the_queued_head_and_unread_idle_input_consumes_it_without_notice_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let fixture = Fixture::new(7_314_201, "all").await;
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
     let original = std::fs::read_to_string(fixture.pane.path("cap.before")).unwrap();
-    fixture.pane.set("cap.before", "unrecognized overlay");
-    guard_draft(&fixture.pane.session(), DraftGuard::RecoveryRequired);
+    fixture.pane.set(
+        "cap.before",
+        &format!("Run this tool? allow / deny\n{original}"),
+    );
     let before = fixture.queue().await;
-    let head = before[0].message_id;
     let deps = router::IntakeDeps {
         http: &fixture.http,
         cache: None,
@@ -1463,50 +1463,45 @@ async fn a2_queued_hold_blocks_idle_fallthrough_without_retry_charge_pg() {
         shared: &fixture.shared,
         token: "s2b-test-token",
     };
-    for _ in 0..3 {
-        let blocked = super::try_busy(
-            &deps,
-            &ProviderKind::Claude,
-            fixture.channel,
-            Some(|_, _| true),
-            "a2-held",
-        )
-        .await;
+    for _ in 0..2 {
         assert!(
-            blocked,
-            "a preparation veto must stop the caller before AI kickoff"
-        );
-        assert_eq!(fixture.pane.records().len(), 0);
-        assert_eq!(fixture.queue().await[0].message_id, head);
-        assert!(
-            crate::services::discord::busy_followup_retry_store::load(
+            super::try_busy(
+                &deps,
                 &ProviderKind::Claude,
-                fixture.channel.get(),
-                head.get()
+                fixture.channel,
+                Some(|_, _| true),
+                "menu-held"
             )
-            .is_none(),
-            "an initial queued hold creates no busy attempt or placeholder binding"
+            .await
         );
+        assert!(fixture.pane.keys().is_empty());
+        assert_eq!(fixture.queue().await[0].message_id, before[0].message_id);
+        assert_eq!(fixture.queue().await.len(), before.len());
     }
-    let target = format!("channel:{}", fixture.channel.get());
-    let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE target=$1 AND reason_code='claude.input.preparation_hold'")
-        .bind(target).fetch_one(&fixture.pool).await.unwrap();
-    assert_eq!(notices, 1, "one non-turn notice for this held source");
-    fixture.pane.set("cap.before", &original);
+    fixture.pane.set("cap.before", "unrecognized composer");
+    fixture.pane.set(
+        InjectPane::TRANSCRIPT,
+        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+    );
     assert!(
         super::try_busy(
             &deps,
             &ProviderKind::Claude,
             fixture.channel,
             Some(|_, _| true),
-            "a2-released"
+            "idle-unread"
         )
         .await
     );
-    assert_eq!(
-        fixture.pane.records().len(),
-        1,
-        "one submission after release"
-    );
+    assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
     assert_eq!(fixture.queue().await.len(), before.len() - 1);
+    let notices_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE target=$1 AND reason_code='claude.input.preparation_hold'")
+        .bind(format!("channel:{}", fixture.channel)).fetch_one(&fixture.pool).await.unwrap();
+    assert_eq!(
+        notices_before, 1,
+        "only the pre-paste menu may emit a waiting notice"
+    );
+    assert!(!crate::services::claude_tui::composer_lock::draft_guarded(
+        &fixture.pane.session()
+    ));
 }

@@ -5,21 +5,17 @@ use crate::services::claude_tui::submission_fence::{
 };
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 use std::cell::Cell;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) const PROMPT: &str = "[User: test]\nprepared question";
 pub(crate) const FAST: Timing = Timing {
     lock_retries: &[],
     settle: Duration::from_millis(30),
-    rechecks: 8,
-    recheck_interval: Duration::from_millis(20),
     confirm_window: Duration::from_secs(1),
     confirm_poll: Duration::from_millis(10),
-    restore_window: Duration::from_millis(200),
 };
 
 pub(crate) fn view(text: &str, stashed: bool) -> String {
@@ -34,7 +30,7 @@ pub(crate) fn view(text: &str, stashed: bool) -> String {
 fn quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
-fn wait(phase: &str, mut ready: impl FnMut() -> bool) {
+pub(crate) fn wait(phase: &str, mut ready: impl FnMut() -> bool) {
     eprintln!("fixture phase={phase} waiting");
     let deadline = Instant::now() + Duration::from_secs(4);
     while !ready() {
@@ -48,12 +44,11 @@ fn wait(phase: &str, mut ready: impl FnMut() -> bool) {
 }
 
 struct Authority {
-    identity: crate::services::tui_input::submission_tmux::guarded::PaneIdentity,
     admitted: Cell<bool>,
 }
 impl StashAuthority for Authority {
-    fn admits(&self, pane: &GuardedPane) -> bool {
-        self.admitted.get() && pane.identity() == self.identity
+    fn admits(&self, _: &str) -> bool {
+        self.admitted.get()
     }
 }
 
@@ -165,7 +160,9 @@ while True:
     wait("renderer-started", || root.join("ready").exists());
     if mode != "fresh" {
         wait("renderer-capture", || {
-            f.tmux(&["capture-pane", "-p", "-t", &pane]).contains("❯")
+            !f.tmux(&["capture-pane", "-p", "-t", &pane])
+                .trim()
+                .is_empty()
         });
     }
     root
@@ -179,1126 +176,207 @@ pub(crate) fn events(root: &Path) -> Vec<String> {
 }
 
 #[test]
-fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
-    use crate::services::agent_protocol::RuntimeHandoffKind;
-    use crate::services::claude_tui::busy_inject::StashChannelGuard;
-    use crate::services::claude_tui::submission_fence::IdleStashContext;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    struct Attempt {
-        session: String,
-        channel: u64,
-        root: PathBuf,
-        person: bool,
-        fenced: AtomicUsize,
-        outcomes: Mutex<Vec<InputRun>>,
-    }
-    impl SubmissionFence for Attempt {
-        fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
-            assert!(
-                self.person || self.root.join("composer-ready").exists(),
-                "payload preceded readiness"
-            );
-            self.fenced.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-        fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
-            None
-        }
-        fn idle_stash_context(&self) -> Option<IdleStashContext> {
-            Some(IdleStashContext {
-                channel: self.channel,
-                target: self.session.clone(),
-                available: true,
-            })
-        }
-        fn idle_stash_admits(&self, target: &str) -> bool {
-            target == self.session
-        }
-        fn claim_idle_stash(&self, _: &str) -> Result<(), PreSubmitPersistenceRefused> {
-            if self.person {
-                return self.before_first_payload();
-            }
-            panic!("no person draft was observed, so no stash may claim this attempt")
-        }
-    }
-    impl guarded_outcome::Owner for Attempt {
-        fn started(&self) {}
-        fn finished(&self, run: &InputRun) {
-            self.outcomes.lock().unwrap().push(run.clone());
-        }
-    }
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let f = Fixture::after_shared_test_env_lock();
-    let shim = f.root.path().join("tmux");
-    let original = fs::read_to_string(&shim).unwrap();
-    for listed in [true, false] {
-        for (i, fault) in [
-            "scrollback",
-            "capture",
-            "pin",
-            "unpainted",
-            "partial",
-            "banner",
-            "person_no_viewport",
-            "continuation",
-            "viewport_read",
-            "viewport_resize",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if !listed
-                && matches!(
-                    fault,
-                    "continuation"
-                        | "scrollback"
-                        | "viewport_read"
-                        | "viewport_resize"
-                        | "person_no_viewport"
-                )
-            {
-                continue;
-            }
-            let channel = 6_899_950 + i as u64 + if listed { 0 } else { 10 };
-            let _listed = StashChannelGuard::new(if listed { channel } else { channel + 100 });
-            let name = format!("fresh-{listed}-{fault}");
-            let root = renderer_with(
-                &f,
-                &name,
-                if fault == "person_no_viewport" {
-                    "normal"
-                } else if fault == "continuation" {
-                    "person"
-                } else {
-                    "fresh"
-                },
-                match fault {
-                    "scrollback" | "viewport_read" | "viewport_resize" => format!(
-                        "{}{}\x1b[2J\x1b[HClaude is starting…\n",
-                        view("[User: previous] old prompt", false),
-                        (0..55)
-                            .map(|i| format!("startup output {i}\n"))
-                            .collect::<String>()
-                    ),
-                    "partial" => "❯ \n".into(),
-                    "banner" => "Ready for input (type message + Enter)\n".into(),
-                    "continuation" => "❯ human text\n  ❯\n".into(),
-                    "person_no_viewport" => view("js", false),
-                    _ => "Claude is starting…\n".into(),
-                },
-                "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
-                PROMPT,
-            );
-            if matches!(fault, "scrollback" | "viewport_read" | "viewport_resize") {
-                let target = format!("={name}:");
-                let history = f.tmux(&["capture-pane", "-p", "-J", "-t", &target, "-S", "-80"]);
-                let viewport = f.tmux(&["capture-pane", "-p", "-t", &target]);
-                assert!(history.contains("❯\u{a0}[User: previous] old prompt"));
-                assert_eq!(
-                    busy_inject::composer_owner(&history),
-                    busy_inject::ComposerOwner::Unread
-                );
-                assert!(viewport.contains("Claude is starting…"));
-                assert!(
-                    !viewport.contains('❯'),
-                    "old composer is outside the viewport"
-                );
-            }
-            if matches!(fault, "unpainted" | "person_no_viewport") {
-                let target = format!("={name}:");
-                let history = f.tmux(&["capture-pane", "-p", "-J", "-t", &target, "-S", "-80"]);
-                if fault == "unpainted" {
-                    assert!(!history.contains('❯'));
-                    assert!(!f.tmux(&["capture-pane", "-p", "-t", &target]).contains('❯'));
-                } else {
-                    assert_eq!(
-                        busy_inject::composer_owner(
-                            &SubmissionTmux
-                                .pin_guarded(&name)
-                                .unwrap()
-                                .capture_draft()
-                                .unwrap()
-                        ),
-                        busy_inject::ComposerOwner::Person
-                    );
-                }
-            }
-            let hook = format!(
-                "pin=0; capture=0; viewport=0\nfor arg in \"$@\"; do\n case \"$arg\" in *'#{{window_panes}}'*) pin=1;; capture-pane) capture=1;; 0) viewport=1;; esac\ndone\n\
-                 if [ \"$pin\" = 1 ] && [ ! -f {failed} ]; then\n\
-                  if [ '{fault}' = pin ] || {{ [ '{fault}' = capture ] && [ \"$capture\" = 1 ]; }}; then touch {failed}; exit 1; fi\nfi\n\
-                 if [ \"$pin\" = 1 ] && [ \"$capture\" = 1 ] && [ \"$viewport\" = 1 ]; then\n touch {viewport_seen}\n\
-                  case '{fault}' in\n\
-                   unpainted|person_no_viewport) exit 1;;\n\
-                   viewport_read) touch {failed}; exit 1;;\n\
-                   viewport_resize) {real} -L {socket} -f /dev/null \"$@\"\n\
-                    {real} -L {socket} resize-window -t ={name}: -x 161 -y 40\n touch {failed}\n exit 0;;\n\
-                  esac\nfi\n\
-                 if [ \"$capture\" = 1 ] && [ \"$pin\" = 0 ] && [ ! -f {release} ]; then\n\
-                  {real} -L {socket} -f /dev/null \"$@\"\n touch {release}\n\
-                  readiness_polls=0\n while [ ! -f {ready} ]; do\n\
-                   readiness_polls=$((readiness_polls + 1))\n [ \"$readiness_polls\" -lt 400 ] || exit 1\n sleep 0.01\n done\n exit 0\nfi\n",
-                failed = quote(&root.join("read-failed")),
-                viewport_seen = quote(&root.join("viewport-seen")),
-                release = quote(&root.join("release")),
-                ready = quote(&root.join("composer-ready")),
-                real = quote(&f.real),
-                socket = f.socket,
-            );
-            fs::write(
-                &shim,
-                original.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{hook}"), 1),
-            )
-            .unwrap();
-            let transcript = root.join("transcript");
-            let attempt = Arc::new(Attempt {
-                session: name.clone(),
-                channel,
-                root: root.clone(),
-                person: fault == "person_no_viewport",
-                fenced: AtomicUsize::new(0),
-                outcomes: Mutex::new(Vec::new()),
-            });
-            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
-                &name,
-                crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
-                    output_path: transcript.display().to_string(),
-                    relay_output_path: None,
-                    input_fifo_path: None,
-                    session_id: None,
-                    last_offset: 0,
-                    relay_last_offset: None,
-                },
-            );
-            let token = Arc::new(CancelToken::new());
-            let (stop, stopped) = std::sync::mpsc::channel();
-            let timer_token = token.clone();
-            let timer = std::thread::spawn(move || {
-                if stopped.recv_timeout(Duration::from_secs(4)).is_err() {
-                    timer_token
-                        .cancelled
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-            });
-            let result = guarded_outcome::with_owner(Some(attempt.clone()), || {
-                with_scope(Some(attempt.clone()), || {
-                    input::send_prompt_with_readiness(
-                        &name,
-                        PROMPT,
-                        input::PromptReadinessKind::FreshTurn,
-                        Some(&token),
-                    )
-                })
-            });
-            let _ = stop.send(());
-            timer.join().unwrap();
-            eprintln!(
-                "fresh entry listed={listed} fault={fault} effects={:?} result={result:?}",
-                events(&root)
-            );
-            assert_eq!(
-                root.join("viewport-seen").exists(),
-                listed
-                    && matches!(
-                        fault,
-                        "scrollback" | "continuation" | "viewport_read" | "viewport_resize"
-                    ),
-                "listed={listed}, fault={fault}: unexpected viewport observation"
-            );
-            if matches!(fault, "continuation" | "viewport_read" | "viewport_resize") {
-                assert!(
-                    matches!(result, Err(guarded_outcome::SubmissionError::Held(ref hold))
-                        if hold.reason == "composer_not_ready" && hold.may_requeue()),
-                    "not-ready stays a typed pre-payload hold: {result:?}"
-                );
-                assert!(events(&root).is_empty());
-                assert_eq!(attempt.fenced.load(Ordering::SeqCst), 0);
-                if fault == "continuation" {
-                    let visible = f.tmux(&["capture-pane", "-p", "-t", &format!("={name}:")]);
-                    assert!(visible.contains("❯ human text"));
-                    assert!(visible.lines().any(|row| row.starts_with("  ❯")));
-                } else {
-                    assert!(root.join("read-failed").exists());
-                    assert!(!root.join("release").exists());
-                }
-                continue;
-            }
-            assert!(result.is_ok(), "listed={listed}, fault={fault}: {result:?}");
-            assert!(
-                attempt
-                    .outcomes
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .all(|run| *run == InputRun::Applied),
-                "fresh pane must not report a held owner"
-            );
-            assert_eq!(attempt.fenced.load(Ordering::SeqCst), 1);
-            wait("fresh-submit", || {
-                events(&root).contains(&"Enter".to_string())
-            });
-            let expected = if attempt.person {
-                vec!["C-s", "paste", "Enter"]
-            } else {
-                vec!["paste", "Enter"]
-            };
-            assert_eq!(events(&root), expected, "{name}");
-            assert_eq!(fs::read_to_string(root.join("body")).unwrap(), PROMPT);
-            let users: Vec<serde_json::Value> = fs::read_to_string(&transcript)
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-                .filter(|record| record["type"] == "user")
-                .map(|record| record["message"]["content"].clone())
-                .collect();
-            assert_eq!(users, [serde_json::Value::String(PROMPT.into())]);
-            if attempt.person {
-                let restored = f.tmux(&["capture-pane", "-p", "-t", &format!("={name}:")]);
-                assert!(restored.contains("❯\u{a0}js"));
-                assert_eq!(
-                    busy_inject::composer_owner(
-                        &SubmissionTmux
-                            .pin_guarded(&name)
-                            .unwrap()
-                            .capture_draft()
-                            .unwrap()
-                    ),
-                    busy_inject::ComposerOwner::Person
-                );
-            } else {
-                assert!(
-                    root.join("composer-ready").exists(),
-                    "payload preceded readiness"
-                );
-            }
-            fs::write(&shim, &original).unwrap();
-        }
-    }
-}
-
-#[test]
-fn missing_capability_and_off_do_no_preparation_or_io() {
-    struct Never;
-    impl StashAuthority for Never {
-        fn admits(&self, _: &GuardedPane) -> bool {
-            panic!("authority was queried");
-        }
-    }
-    impl MutationGate for Never {
-        fn admit(&self, _: &str) -> Result<(), InputRefusal> {
-            panic!("gate was queried");
-        }
-    }
-    let target = InputTarget::legacy_tmux("nonexistent-idle-stash-target");
-    let invalid_request = Request {
-        target: &target,
-        gate: &Never,
-        prompt: "\0invalid",
-        transcript: Path::new("missing-transcript"),
-        cancel: None,
-        timing: &FAST,
-    };
-    assert_eq!(run(None, true, &invalid_request), None);
-    assert!(!composer_lock::draft_guarded(
-        "nonexistent-idle-stash-target"
-    ));
-
-    let f = Fixture::new();
-    let root = renderer(&f, "idle-off", "normal");
-    let authority = Authority {
-        identity: SubmissionTmux.pin_guarded("idle-off").unwrap().identity(),
-        admitted: Cell::new(true),
-    };
-    let target = InputTarget::legacy_tmux("idle-off");
-    let transcript = root.join("transcript");
-    let request = Request {
-        target: &target,
-        gate: &LegacyTmuxGate,
-        prompt: PROMPT,
-        transcript: &transcript,
-        cancel: None,
-        timing: &FAST,
-    };
-    let shim = f.root.path().join("tmux");
-    let tape = root.join("io");
-    let original = fs::read_to_string(&shim).unwrap();
-    fs::write(
-        &shim,
-        original.replacen(
-            "#!/bin/sh\n",
-            &format!("#!/bin/sh\nprintf x >> {}\n", quote(&tape)),
-            1,
-        ),
-    )
-    .unwrap();
-    assert_eq!(run(None, true, &request), None);
-    assert_eq!(run(Some(&authority), false, &request), None);
-    assert!(!tape.exists(), "OFF/None queried the pane");
-    assert!(events(&root).is_empty());
-    assert!(!composer_lock::draft_guarded("idle-off"));
-    assert_eq!(run(Some(&Never), false, &invalid_request), None);
-}
-
-#[test]
-fn pinned_idle_stash_preserves_delivery_and_protects_unrestored_draft() {
+fn idle_sends_the_same_sequence_without_receipt_or_restore_verdicts() {
     let f = Fixture::new();
     for mode in ["normal", "never", "foreign", "mixed", "own_race"] {
         let name = format!("idle-{mode}");
         let root = renderer(&f, &name, mode);
         let authority = Authority {
-            identity: SubmissionTmux.pin_guarded(&name).unwrap().identity(),
             admitted: Cell::new(true),
         };
         let target = InputTarget::legacy_tmux(&name);
-        let transcript = root.join("transcript");
         let request = Request {
             target: &target,
             gate: &LegacyTmuxGate,
             prompt: PROMPT,
-            transcript: &transcript,
             cancel: None,
             timing: &FAST,
         };
-        let got = run(Some(&authority), true, &request).unwrap();
-        let delivery = if ["normal", "never"].contains(&mode) {
-            Delivery::Observed
-        } else {
-            Delivery::AttemptedUnconfirmed
-        };
-        assert_eq!(got.delivery, delivery, "mode={mode}");
         assert_eq!(
-            got.draft,
-            if ["never", "own_race"].contains(&mode) {
-                DraftState::Unknown
-            } else {
-                DraftState::RestoredObserved
-            },
-            "mode={mode}"
+            run(Some(&authority), true, &request),
+            Some(InputRun::Applied)
         );
-        let expected = if mode == "own_race" {
-            vec!["C-s", "paste"]
-        } else {
-            vec!["C-s", "paste", "Enter"]
-        };
-        assert_eq!(events(&root), expected);
+        wait("one Enter", || events(&root).len() == 3);
+        assert_eq!(events(&root), ["C-s", "paste", "Enter"]);
         assert_eq!(fs::read_to_string(root.join("body")).unwrap(), PROMPT);
-        let pane = SubmissionTmux.pin_guarded(&name).unwrap();
-        let admit = composer_lock::try_with_composer_permit(&name, |_| {
-            composer_lock::admit_composer_write(&name, || pane.capture_draft())
-        });
-        assert_eq!(admit, Some(Err(composer_lock::DraftRecoveryHold)));
-        let before = events(&root);
-        assert_eq!(
-            super::super::run(&target, &LegacyTmuxGate, "next question", None),
-            if got.delivery == Delivery::Observed {
-                refused(Refusal::NotReady)
-            } else {
-                got.input_run(None)
-            }
-        );
-        assert_eq!(events(&root), before);
-        guarded_outcome::forget_test_hold(&name);
-    }
-}
-
-struct Fence {
-    path: PathBuf,
-    fail: bool,
-}
-impl SubmissionFence for Fence {
-    fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
-        assert!(
-            events(&self.path).is_empty(),
-            "mutation preceded durable fence"
-        );
-        fs::write(self.path.join("fenced"), "fenced").unwrap();
-        if self.fail {
-            Err(PreSubmitPersistenceRefused {
-                reason: "fixture persistence failure".into(),
-            })
-        } else {
-            Ok(())
-        }
-    }
-    fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
-        None
+        assert!(!composer_lock::draft_guarded(&name));
+        assert_eq!(guarded_outcome::held(&name), None);
     }
 }
 
 #[test]
-fn fence_and_revoked_authority_precede_any_stash_effect() {
+fn idle_menu_blocks_every_key_and_empty_or_unread_never_stashes() {
     let f = Fixture::new();
-    for (name, revoked, fail) in [
-        ("fence-fail", false, true),
-        ("authority-revoked", true, false),
-        ("fence-pass", false, false),
+    for (name, before, allowed, expected) in [
+        ("idle-empty", view("", false), true, vec!["paste", "Enter"]),
+        (
+            "idle-unread",
+            "unread composer".into(),
+            true,
+            vec!["paste", "Enter"],
+        ),
+        ("idle-off", view("js", false), false, vec!["paste", "Enter"]),
+        (
+            "idle-modal",
+            format!("Run this tool? allow / deny\n{}", view("js", false)),
+            true,
+            vec![],
+        ),
     ] {
-        let root = renderer(&f, name, "normal");
+        let root = renderer_with(
+            &f,
+            name,
+            "normal",
+            before,
+            "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+            PROMPT,
+        );
         let authority = Authority {
-            identity: SubmissionTmux.pin_guarded(name).unwrap().identity(),
-            admitted: Cell::new(!revoked),
+            admitted: Cell::new(true),
         };
         let target = InputTarget::legacy_tmux(name);
-        let transcript = root.join("transcript");
         let request = Request {
             target: &target,
             gate: &LegacyTmuxGate,
             prompt: PROMPT,
-            transcript: &transcript,
             cancel: None,
             timing: &FAST,
         };
-        let got = with_scope(
-            Some(Arc::new(Fence {
-                path: root.clone(),
-                fail,
-            })),
-            || run(Some(&authority), true, &request),
-        )
-        .unwrap();
-        if revoked || fail {
-            assert_eq!(got.delivery, Delivery::NotAttempted);
-            assert_eq!(got.draft, DraftState::Unchanged);
-            assert!(!got.entered);
-            assert_eq!(
-                got.refusal,
-                revoked.then_some(InputRefusal::IdentityMismatch)
-            );
-            assert!(events(&root).is_empty());
+        let got = run(Some(&authority), allowed, &request);
+        if expected.is_empty() {
+            assert!(matches!(got, Some(InputRun::Refused(_))));
         } else {
-            assert_eq!(got.delivery, Delivery::Observed);
-            assert_eq!(events(&root), ["C-s", "paste", "Enter"]);
+            assert_eq!(got, Some(InputRun::Applied));
+            wait("idle Enter", || events(&root).len() == expected.len());
         }
-    }
-}
-
-fn append(path: &Path, record: serde_json::Value) {
-    writeln!(
-        OpenOptions::new().append(true).open(path).unwrap(),
-        "{record}"
-    )
-    .unwrap();
-}
-#[test]
-fn exact_receipt_rejects_first_foreign_mixed_partial_and_replaced_records() {
-    use receipt::Receipt;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("transcript");
-    let user = |body: &str| serde_json::json!({"type":"user","message":{"content":body}});
-    for case in [
-        "exact", "foreign", "mixed", "meta", "partial", "rotate", "rewrite",
-    ] {
-        fs::write(&path, "{\"type\":\"result\"}\n").unwrap();
-        let receipt = Receipt::before(&path).unwrap();
-        match case {
-            "foreign" => append(&path, user("foreign")),
-            "mixed" => append(
-                &path,
-                serde_json::json!({"type":"user","message":{"content":[{"type":"text","text":PROMPT},{"type":"tool_result","content":"x"}]}}),
-            ),
-            "meta" => append(
-                &path,
-                serde_json::json!({"type":"user","isMeta":true,"message":{"content":"metadata"}}),
-            ),
-            "partial" => {
-                write!(
-                    OpenOptions::new().append(true).open(&path).unwrap(),
-                    "{}",
-                    user(PROMPT)
-                )
-                .unwrap();
-                assert_eq!(receipt.scan(PROMPT), None);
-                writeln!(OpenOptions::new().append(true).open(&path).unwrap()).unwrap();
-            }
-            "rotate" => {
-                fs::rename(&path, dir.path().join("retired")).unwrap();
-                fs::write(&path, "").unwrap();
-            }
-            "rewrite" => {
-                fs::write(&path, "{\"type\":\"system\"}\n").unwrap();
-            }
-            _ => {}
-        }
-        append(&path, user(PROMPT));
-        assert_eq!(
-            receipt.scan(PROMPT),
-            Some(["exact", "meta", "partial"].contains(&case)),
-            "case={case}"
-        );
-    }
-    fs::write(&path, "{\"type\":\"result\"}").unwrap();
-    assert!(Receipt::before(&path).is_none());
-}
-
-#[test]
-fn pinned_stash_is_single_attempt_even_when_acknowledgement_is_lost() {
-    let f = Fixture::new();
-    for mode in ["normal", "drop"] {
-        let name = format!("stash-once-{mode}");
-        f.session(&name);
-        if mode == "drop" {
-            fs::write(f.root.path().join("mode"), mode).unwrap();
-        }
-        let mut pane = SubmissionTmux.pin_guarded(&name).unwrap();
-        let first = pane.stash();
-        if mode == "normal" {
-            assert_eq!(first, EffectOutcome::Applied);
-        } else {
-            assert!(matches!(first, EffectOutcome::Unknown(_)));
-        }
-        assert_eq!(pane.stash(), EffectOutcome::Held);
-        wait("stash-key-received", || f.received(&name).contains(&0x13));
-        assert_eq!(f.received(&name).iter().filter(|b| **b == 0x13).count(), 1);
-        fs::remove_file(f.root.path().join("mode")).ok();
-    }
-}
-
-#[test]
-fn each_lost_acknowledgement_stops_without_retry_or_cleanup() {
-    for (stage, expected) in [
-        ("C-s", vec!["C-s"]),
-        ("paste-buffer", vec!["C-s", "paste"]),
-        ("Enter", vec!["C-s", "paste", "Enter"]),
-    ] {
-        let f = Fixture::new();
-        let root = renderer(&f, "lost-ack", "normal");
-        let shim = f.root.path().join("tmux");
-        let original = fs::read_to_string(&shim).unwrap();
-        let hook = format!(
-            "for effect in \"$@\"; do\n case \"$effect\" in *'{stage}'*) {} -L {} -f /dev/null \"$@\" >/dev/null; exit 0;; esac\ndone\n",
-            quote(&f.real),
-            f.socket
-        );
-        fs::write(
-            &shim,
-            original.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{hook}"), 1),
-        )
-        .unwrap();
-        let authority = Authority {
-            identity: SubmissionTmux.pin_guarded("lost-ack").unwrap().identity(),
-            admitted: Cell::new(true),
-        };
-        let target = InputTarget::legacy_tmux("lost-ack");
-        let transcript = root.join("transcript");
-        let request = Request {
-            target: &target,
-            gate: &LegacyTmuxGate,
-            prompt: PROMPT,
-            transcript: &transcript,
-            cancel: None,
-            timing: &FAST,
-        };
-        let got = run(Some(&authority), true, &request).unwrap();
-        assert_eq!(got.delivery, Delivery::AttemptedUnconfirmed, "{stage}");
-        assert_eq!(
-            got.draft,
-            if stage == "Enter" {
-                DraftState::RestoredObserved
-            } else {
-                DraftState::Unknown
-            },
-            "{stage}"
-        );
-        wait("lost-ack-effects", || events(&root).len() >= expected.len());
         assert_eq!(events(&root), expected);
-        assert!(composer_lock::draft_guarded("lost-ack"));
     }
 }
 
 #[test]
-fn cancel_and_gate_revocation_at_effect_boundaries_never_enter_or_fallback() {
-    struct Gate {
-        root: PathBuf,
-        boundary: &'static str,
-        token: Arc<CancelToken>,
-        cancel: bool,
-    }
-    impl MutationGate for Gate {
-        fn admit(&self, _: &str) -> Result<(), InputRefusal> {
-            if self.boundary == "before" || events(&self.root).iter().any(|e| e == self.boundary) {
-                if self.cancel {
-                    self.token
-                        .cancelled
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    return Ok(());
-                }
-                return Err(InputRefusal::IdentityMismatch);
-            }
-            Ok(())
-        }
-    }
-    let f = Fixture::new();
-    for (i, boundary) in ["before", "C-s", "paste"].into_iter().enumerate() {
-        for cancel in [false, true] {
-            let name = format!("boundary-{i}-{cancel}");
-            let root = renderer(&f, &name, "normal");
-            let token = Arc::new(CancelToken::new());
-            let gate = Gate {
-                root: root.clone(),
-                boundary,
-                token: token.clone(),
-                cancel,
-            };
-            let authority = Authority {
-                identity: SubmissionTmux.pin_guarded(&name).unwrap().identity(),
-                admitted: Cell::new(true),
-            };
-            let target = InputTarget::legacy_tmux(&name);
-            let transcript = root.join("transcript");
-            let request = Request {
-                target: &target,
-                gate: &gate,
-                prompt: PROMPT,
-                transcript: &transcript,
-                cancel: Some(&token),
-                timing: &FAST,
-            };
-            let got = run(Some(&authority), true, &request).unwrap();
-            assert_eq!(
-                got.delivery,
-                if i == 0 {
-                    Delivery::NotAttempted
-                } else {
-                    Delivery::AttemptedUnconfirmed
-                },
-                "{boundary}/{cancel}"
-            );
-            assert_eq!(events(&root), ["C-s", "paste"][..i], "{boundary}/{cancel}");
-        }
-    }
-}
-
-#[test]
-fn restore_observation_holds_same_pane_writer_while_other_pane_proceeds() {
-    let f = Fixture::new();
-    let root = renderer(&f, "restore-barrier", "normal");
-    let shim = f.root.path().join("tmux");
-    let original = fs::read_to_string(&shim).unwrap();
-    let hook = format!(
-        "for effect in \"$@\"; do\n if [ \"$effect\" = capture-pane ] && [ -f {} ] && grep -q Enter {}; then\n  touch {}\n  while [ ! -f {} ]; do sleep 0.01; done\n fi\ndone\n",
-        quote(&root.join("events")),
-        quote(&root.join("events")),
-        quote(&root.join("observing")),
-        quote(&root.join("release"))
-    );
-    fs::write(
-        &shim,
-        original.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{hook}"), 1),
-    )
-    .unwrap();
-    let worker_root = root.clone();
-    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        let target = InputTarget::legacy_tmux("restore-barrier");
-        let authority = Authority {
-            identity: SubmissionTmux
-                .pin_guarded("restore-barrier")
-                .unwrap()
-                .identity(),
-            admitted: Cell::new(true),
-        };
-        let transcript = worker_root.join("transcript");
-        let request = Request {
-            target: &target,
-            gate: &LegacyTmuxGate,
-            prompt: PROMPT,
-            transcript: &transcript,
-            cancel: None,
-            timing: &FAST,
-        };
-        let got = run(Some(&authority), true, &request).unwrap();
-        let _ = finished_tx.send(format!("{got:?}"));
-        got
-    });
-    let while_observing = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        wait("restore-observation", || {
-            if let Ok(ended) = finished_rx.try_recv() {
-                let probe = std::process::Command::new(&shim)
-                    .args(["capture-pane", "-p", "-t", "=restore-barrier:"])
-                    .output()
-                    .unwrap();
-                eprintln!(
-                    "fixture capture status={} stderr={:?}",
-                    probe.status,
-                    String::from_utf8_lossy(&probe.stderr)
-                );
-                panic!(
-                    "worker ended before restore barrier: {ended}; effects={:?}",
-                    events(&root)
-                );
-            }
-            root.join("observing").exists()
-        });
-        let got = super::super::run(
-            &InputTarget::legacy_tmux("restore-barrier"),
-            &LegacyTmuxGate,
-            "competing input",
-            None,
-        );
-        let calls = Cell::new(0);
-        let same = composer_lock::try_with_composer_permit("restore-barrier", |_| {
-            calls.set(calls.get() + 1);
-            7
-        });
-        let other = composer_lock::try_with_composer_permit("other-idle-barrier-pane", |_| 7);
-        (got, same, calls.get(), other)
-    }));
-    fs::write(root.join("release"), "release").unwrap();
-    let ended = worker.join().unwrap();
-    let (got, same, calls, other) = match while_observing {
-        Ok(result) => result,
-        Err(panic) => std::panic::resume_unwind(panic),
-    };
-    assert_eq!(got, refused(Refusal::WriterContended));
-    assert_eq!(same, None);
-    assert_eq!(calls, 0);
-    assert_eq!(other, Some(7));
-    assert_eq!(ended.delivery, Delivery::Observed);
-    assert_eq!(ended.draft, DraftState::RestoredObserved);
-    assert_eq!(events(&root), ["C-s", "paste", "Enter"]);
-}
-
-#[test]
-fn managed_admission_rejects_busy_stash_modal_and_agentdesk_without_fence() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    struct Count(AtomicUsize);
-    impl SubmissionFence for Count {
+fn idle_fence_and_revoked_authority_precede_every_key() {
+    struct Fence;
+    impl SubmissionFence for Fence {
         fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            Err(PreSubmitPersistenceRefused {
+                reason: "fixture refusal".into(),
+            })
         }
         fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
             None
         }
     }
     let f = Fixture::new();
-    for kind in ["busy", "stash", "modal", "agentdesk"] {
-        let name = format!("negative-{kind}");
-        let mut before = view("js", kind == "stash");
-        if kind == "modal" {
-            before = format!(
-                "  ❯ 1. Resume from summary (recommended)\n    2. Resume full session as-is\n  Enter to confirm · Esc to cancel\n{before}"
-            );
-        }
-        if kind == "agentdesk" {
-            before = view("[User: test]\nprevious", false);
-            assert_eq!(
-                busy_inject::composer_owner(&before),
-                busy_inject::ComposerOwner::AgentDesk
-            );
-        }
-        let transcript = if kind == "busy" {
-            "{\"type\":\"user\",\"message\":{\"content\":\"previous\"}}\n"
-        } else {
-            "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n"
-        };
-        let prompt = PROMPT;
-        let root = renderer_with(&f, &name, "normal", before, transcript, prompt);
-        let authority = Authority {
-            identity: SubmissionTmux.pin_guarded(&name).unwrap().identity(),
-            admitted: Cell::new(true),
-        };
-        let target = InputTarget::legacy_tmux(&name);
-        let path = root.join("transcript");
-        let request = Request {
-            target: &target,
-            gate: &LegacyTmuxGate,
-            prompt,
-            transcript: &path,
-            cancel: None,
-            timing: &FAST,
-        };
-        let fence = Arc::new(Count(AtomicUsize::new(0)));
-        let _result = with_scope(Some(fence.clone()), || {
-            run(Some(&authority), true, &request)
-        });
-        assert!(events(&root).is_empty(), "{kind}: no C-s, paste or Enter");
-        assert_eq!(fence.0.load(Ordering::SeqCst), 0, "{kind}: no fence entry");
-    }
-}
-
-fn effort_view(text: &str, stashed: bool) -> String {
-    let status = if stashed {
-        "◉ xhigh · /effort · › stashed"
-    } else {
-        "◉ xhigh · /effort"
+    let root = renderer(&f, "idle-fence", "normal");
+    let target = InputTarget::legacy_tmux("idle-fence");
+    let request = Request {
+        target: &target,
+        gate: &LegacyTmuxGate,
+        prompt: PROMPT,
+        cancel: None,
+        timing: &FAST,
     };
-    let shown = view(text, stashed);
-    let (_, composer) = shown.split_once('\n').unwrap();
-    format!("{status:>158}\n{composer}")
+    let authority = Authority {
+        admitted: Cell::new(false),
+    };
+    assert!(matches!(
+        run(Some(&authority), true, &request),
+        Some(InputRun::Refused(_))
+    ));
+    authority.admitted.set(true);
+    let got = with_scope(Some(Arc::new(Fence)), || {
+        run(Some(&authority), true, &request)
+    });
+    assert_eq!(got, Some(refused(Refusal::SubmissionFence)));
+    assert!(events(&root).is_empty());
+    assert_eq!(run(None, true, &request), None);
 }
 
 #[test]
-fn managed_multiline_stash_restores_plain_and_chip_bytes_with_measured_effort_status() {
-    let f = Fixture::new();
-    let prompt = format!(
-        "[User: test]\n{}",
-        (0..14)
-            .map(|n| format!("outgoing {n}: {}", "긴 메시지 ".repeat(12)))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-    let chip = format!("[Pasted text #2 +{} lines]", prompt.matches('\n').count());
-    for human_chip in [false, true] {
-        let name = format!("multiline-effort-{human_chip}");
-        let original = if human_chip {
-            "원래 붙여넣기\n보존할 둘째 줄  \n마지막 줄"
-        } else {
-            "사람 초안\n둘째 줄  \n마지막 줄"
-        };
-        let human_shown = if human_chip {
-            "[Pasted text #1 +2 lines]"
-        } else {
-            original
-        };
-        let root = renderer_with(
-            &f,
-            &name,
-            "wrapped",
-            effort_view(human_shown, false),
-            "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
-            &prompt,
-        );
-        fs::write(root.join("draft-bytes"), original.as_bytes()).unwrap();
-        if human_chip {
-            fs::write(root.join("draft-chip"), human_shown).unwrap();
-        }
-        fs::write(root.join("stashed"), effort_view("", true)).unwrap();
-        fs::write(
-            root.join("own"),
-            effort_view(&chip, true).replace(
-                "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
-                "  paste again to expand",
-            ),
-        )
-        .unwrap();
-        fs::write(root.join("after"), effort_view(human_shown, false)).unwrap();
-        let authority = Authority {
-            identity: SubmissionTmux.pin_guarded(&name).unwrap().identity(),
-            admitted: Cell::new(true),
-        };
-        let target = InputTarget::legacy_tmux(&name);
-        let transcript = root.join("transcript");
-        let request = Request {
-            target: &target,
-            gate: &LegacyTmuxGate,
-            prompt: &prompt,
-            transcript: &transcript,
-            cancel: None,
-            timing: &FAST,
-        };
-        let got = run(Some(&authority), true, &request).unwrap();
-        assert_eq!(got.delivery, Delivery::Observed, "human_chip={human_chip}");
-        assert_eq!(got.draft, DraftState::RestoredObserved);
-        assert_eq!(events(&root), ["C-s", "paste", "Enter"]);
-        assert_eq!(fs::read(root.join("body")).unwrap(), prompt.as_bytes());
-        assert_eq!(
-            fs::read(root.join("draft-bytes")).unwrap(),
-            original.as_bytes()
-        );
-        assert!(!root.join("draft-stash").exists());
-        assert!(!root.join("draft-stash-chip").exists());
-        assert_eq!(
-            fs::read_to_string(root.join("draft-chip")).ok(),
-            human_chip.then(|| human_shown.to_string())
-        );
-        assert!(composer_lock::draft_guarded(&name));
-        let after = SubmissionTmux
-            .pin_guarded(&name)
-            .unwrap()
-            .capture_draft()
-            .unwrap();
-        assert_eq!(
-            screen::stashable(&after, PROMPT, Some((160, 40))),
-            Some(
-                human_shown
-                    .split('\n')
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            )
-        );
-    }
-}
-
-#[test]
-fn managed_idle_literal_modal_text_submits_but_identical_chrome_blocks_all_keys() {
-    let f = Fixture::new();
-    let literal = "Enter to confirm · esc to cancel";
-    let prompt = format!("[User: test]\n{literal}");
-    for in_chrome in [false, true] {
-        let name = format!("idle-literal-modal-{in_chrome}");
-        let before = if in_chrome {
-            view("js", false).replace(
-                "  ⏵⏵ bypass permissions on",
-                &format!("  {literal}\n  ⏵⏵ bypass permissions on"),
-            )
-        } else {
-            view("js", false)
-        };
-        assert_eq!(
-            judge_pane(ShadowProvider::Claude, &before) == PaneVerdict::Modal,
-            in_chrome
-        );
-        assert_ne!(
-            judge_pane(ShadowProvider::Claude, &view(&prompt, true)),
-            PaneVerdict::Modal,
-            "literal composer content is not an idle modal"
-        );
-        let root = renderer_with(
-            &f,
-            &name,
-            "normal",
-            before,
-            "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
-            &prompt,
-        );
-        let authority = Authority {
-            identity: SubmissionTmux.pin_guarded(&name).unwrap().identity(),
-            admitted: Cell::new(true),
-        };
-        let target = InputTarget::legacy_tmux(&name);
-        let transcript = root.join("transcript");
-        let request = Request {
-            target: &target,
-            gate: &LegacyTmuxGate,
-            prompt: &prompt,
-            transcript: &transcript,
-            cancel: None,
-            timing: &FAST,
-        };
-        let got = run(Some(&authority), true, &request).unwrap();
-        if in_chrome {
-            assert_eq!(got.delivery, Delivery::NotAttempted);
-            assert_eq!(got.draft, DraftState::Unchanged);
-            assert!(events(&root).is_empty());
-        } else {
-            assert_eq!(got.delivery, Delivery::Observed);
-            assert_eq!(got.draft, DraftState::RestoredObserved);
-            assert_eq!(events(&root), ["C-s", "paste", "Enter"]);
-            assert_eq!(fs::read_to_string(root.join("body")).unwrap(), prompt);
-        }
-    }
-}
-
-#[test]
-fn managed_idle_stash_modal_after_stash_or_paste_never_enters() {
-    let f = Fixture::new();
-    let modal =
-        "  Do you want to proceed?\n  1. Allow\n  2. Deny\n  Enter to confirm · esc to cancel\n";
-    for phase in ["stashed", "own"] {
-        let name = format!("idle-modal-{phase}");
-        let root = renderer(&f, &name, "normal");
-        let state = root.join(phase);
-        let shown = fs::read_to_string(&state).unwrap();
-        let overlay = shown.replace(
-            "  ⏵⏵ bypass permissions on",
-            &format!("{modal}  ⏵⏵ bypass permissions on"),
-        );
-        fs::write(&state, &overlay).unwrap();
-        assert_eq!(
-            judge_pane(ShadowProvider::Claude, &overlay),
-            PaneVerdict::Modal,
-            "the modal fixture must reach the idle modal check"
-        );
-        assert!(
-            if phase == "stashed" {
-                screen::stashed(&overlay)
-            } else {
-                screen::owns(&overlay, PROMPT)
-            },
-            "the modal must veto a readable, otherwise owned composer"
-        );
-        let authority = Authority {
-            identity: SubmissionTmux.pin_guarded(&name).unwrap().identity(),
-            admitted: Cell::new(true),
-        };
-        let target = InputTarget::legacy_tmux(&name);
-        let transcript = root.join("transcript");
-        let request = Request {
-            target: &target,
-            gate: &LegacyTmuxGate,
-            prompt: PROMPT,
-            transcript: &transcript,
-            cancel: None,
-            timing: &FAST,
-        };
-        let got = run(Some(&authority), true, &request).unwrap();
-        assert_eq!(
-            got.delivery,
-            Delivery::AttemptedUnconfirmed,
-            "phase={phase}"
-        );
-        assert_eq!(got.draft, DraftState::Unknown);
-        assert_eq!(
-            events(&root),
-            if phase == "stashed" {
-                vec!["C-s"]
-            } else {
-                vec!["C-s", "paste"]
-            },
-            "phase={phase}"
-        );
-        assert!(composer_lock::draft_guarded(&name));
-    }
-}
-
-#[test]
-fn managed_idle_receipt_accepts_only_exact_measured_paste_wrappers() {
-    use receipt::Receipt;
+fn scripted_idle_pre_capture_selects_stash_once_without_later_io_checks() {
+    use std::os::unix::fs::PermissionsExt;
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("transcript");
-    let wrapped =
-        |body: &str| format!("<pasted_content id=\"a17f\">\n{body}\n</pasted_content id=\"a17f\">");
-    for (case, body, accepted) in [
-        ("plain", PROMPT.to_string(), true),
-        ("wrapped", wrapped(PROMPT), true),
+    let _path = crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(dir.path());
+    let script = r#"#!/bin/sh
+d='@D@'
+echo "$2" >> "$d/calls"
+case "$2" in
+capture-pane) cat "$d/before" ;;
+load-buffer) for last do :; done; cp "$last" "$d/body" ;;
+paste-buffer) echo paste >> "$d/events" ;;
+send-keys) for last do :; done; echo "$last" >> "$d/events" ;;
+esac
+"#
+    .replace("@D@", &dir.path().display().to_string());
+    let program = dir.path().join("tmux");
+    fs::write(&program, script).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let transcript = dir.path().join("transcript");
+    fs::write(
+        &transcript,
+        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+    )
+    .unwrap();
+    let target = InputTarget::legacy_tmux("scripted-idle");
+    let request = Request {
+        target: &target,
+        gate: &LegacyTmuxGate,
+        prompt: PROMPT,
+        cancel: None,
+        timing: &FAST,
+    };
+    let authority = Authority {
+        admitted: Cell::new(true),
+    };
+    for (before, allowed, expected) in [
+        (view("draft", false), true, vec!["C-s", "paste", "Enter"]),
+        (view("", false), true, vec!["paste", "Enter"]),
+        ("unread".into(), true, vec!["paste", "Enter"]),
+        (view("draft", false), false, vec!["paste", "Enter"]),
         (
-            "outer-separators",
-            format!("\n\n{}\n", wrapped(PROMPT)),
+            format!("Run this tool? allow / deny\n{}", view("draft", false)),
             true,
+            vec![],
         ),
-        ("prefix", format!("foreign {}", wrapped(PROMPT)), false),
-        ("suffix", format!("{} foreign", wrapped(PROMPT)), false),
-        (
-            "inner-foreign",
-            wrapped(&format!("{PROMPT} foreign")),
-            false,
-        ),
-        (
-            "wrong-close",
-            wrapped(PROMPT).replace(
-                "</pasted_content id=\"a17f\">",
-                "</pasted_content id=\"b17f\">",
-            ),
-            false,
-        ),
-        ("short-token", wrapped(PROMPT).replace("a17f", "a17"), false),
-        (
-            "upper-token",
-            wrapped(PROMPT).replace("a17f", "A17F"),
-            false,
-        ),
-        ("partial-outer", format!("\n{}\n", wrapped(PROMPT)), false),
     ] {
-        for blocks in [false, true] {
-            fs::write(&path, "{\"type\":\"system\"}\n").unwrap();
-            let receipt = Receipt::before(&path).unwrap();
-            let content = if blocks {
-                serde_json::json!([{"type":"text", "text":body}])
-            } else {
-                serde_json::json!(body)
-            };
-            append(
-                &path,
-                serde_json::json!({"type":"user","message":{"content":content}}),
-            );
-            assert_eq!(
-                receipt.scan(PROMPT),
-                Some(accepted),
-                "case={case}, blocks={blocks}"
-            );
+        fs::write(dir.path().join("before"), before).unwrap();
+        fs::write(dir.path().join("calls"), "").unwrap();
+        fs::write(dir.path().join("events"), "").unwrap();
+        let result = run(Some(&authority), allowed, &request);
+        if expected.is_empty() {
+            assert!(matches!(result, Some(InputRun::Refused(_))));
+        } else {
+            assert_eq!(result, Some(InputRun::Applied));
         }
+        assert_eq!(events(dir.path()), expected);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("calls"))
+                .unwrap()
+                .lines()
+                .filter(|call| *call == "capture-pane")
+                .count(),
+            1
+        );
+        assert!(!composer_lock::draft_guarded("scripted-idle"));
     }
+    fs::write(dir.path().join("before"), view("", false)).unwrap();
+    fs::write(dir.path().join("events"), "").unwrap();
+    fs::write(&transcript, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n").unwrap();
+    assert!(observe_claude_jsonl_turn_state(&transcript).is_busy());
+    assert_eq!(
+        run(Some(&authority), true, &request),
+        Some(InputRun::Applied)
+    );
+    assert_eq!(events(dir.path()), ["paste", "Enter"]);
+
+    fs::write(dir.path().join("calls"), "").unwrap();
+    fs::write(dir.path().join("events"), "").unwrap();
+    let contended = composer_lock::with_composer_mutation_lock("scripted-idle", || {
+        run(Some(&authority), true, &request)
+    });
+    assert_eq!(contended, Some(refused(Refusal::WriterContended)));
+    assert_eq!(fs::read_to_string(dir.path().join("calls")).unwrap(), "");
+    assert!(events(dir.path()).is_empty());
+    assert!(!composer_lock::draft_guarded("scripted-idle"));
 }

@@ -25,7 +25,7 @@ fn send_inner(
     {
         guarded_outcome::receipt(session, prompt);
         if let Some(result) =
-            guarded::idle_stash::submit(session, prompt, cancel, transcript, selected.as_deref())
+            guarded::idle_stash::submit(session, prompt, cancel, selected.as_deref())
         {
             return result.map_err(|e| preparation_hold::idle_stash_stopped(session, e));
         }

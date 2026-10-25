@@ -3,12 +3,6 @@
 
 mod paste_footer;
 
-use unicode_width::UnicodeWidthChar;
-
-use crate::services::tui_input::actor::gate::{
-    claude_border_row, claude_prompt_row, own_wrapped_draft,
-};
-
 /// Draft chips whose payload is not measured to survive a stash round trip.
 const UNMEASURED_CHIPS: [&str; 3] = [
     "[Image #",
@@ -21,7 +15,7 @@ const MIN_BORDER: usize = 10;
 const FOOTER: &str = "  \u{23f5}\u{23f5} bypass permissions on";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Composer {
+pub(in crate::services::claude_tui) enum Composer {
     Empty,
     /// Rows as typed: the prompt and the two-column continuation indent removed.
     Text(Vec<String>),
@@ -123,6 +117,27 @@ fn sgr_faint(params: &str, mut faint: bool) -> bool {
     faint
 }
 
+/// Equal box edges and a single prompt delimit the input independently of footer chrome.
+fn box_bounds(rows: &[Row]) -> Option<(usize, usize)> {
+    let prompt = rows.iter().rposition(|row| row.plain.starts_with('❯'))?;
+    let border = |index: usize| -> Option<usize> {
+        let text = rows.get(index)?.plain.trim_end();
+        let width = text.chars().count();
+        (width >= MIN_BORDER && text.chars().all(|c| c == '─')).then_some(width)
+    };
+    let width = border(prompt.checked_sub(1)?)?;
+    let bottom = (prompt + 1..rows.len()).find(|&index| border(index).is_some())?;
+    (border(bottom) == Some(width)).then_some((prompt, bottom))
+}
+
+/// Unknown never triggers C-s: a faint or incomplete field may hide an old stash toggle.
+pub(in crate::services::claude_tui) fn input_box(capture: &str) -> Composer {
+    let rows: Vec<Row> = capture.lines().map(row).collect();
+    box_bounds(&rows).map_or(Composer::Unknown, |(prompt, bottom)| {
+        composer(&rows[prompt..bottom])
+    })
+}
+
 /// The bottom-most `❯` row between two equal full borders; below, only status-line rows and then
 /// a measured footer as the last row drawn.
 pub(super) fn read(capture: &str) -> Screen {
@@ -182,7 +197,7 @@ pub(super) fn modal(capture: &str) -> bool {
     }
     let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(capture);
     let rows: Vec<&str> = plain.lines().collect();
-    let chrome = if read(capture).composer != Composer::Unknown {
+    let chrome = if input_box(capture) != Composer::Unknown {
         rows.iter()
             .rposition(|row| row.starts_with('❯'))
             .and_then(|prompt| {
@@ -327,230 +342,6 @@ fn stash(status: &str, width: usize) -> Stash {
     }
 }
 
-/// The person's visible draft rows when Claude shows no stash and can render the outgoing frame.
-pub(in crate::services::claude_tui) fn stashable(
-    capture: &str,
-    frame: &str,
-    size: Option<(usize, usize)>,
-) -> Option<Vec<String>> {
-    direct(frame, size)?;
-    let screen = read(capture);
-    let Composer::Text(rows) = screen.composer else {
-        return None;
-    };
-    (screen.footer == Footer::Normal && screen.stash == Stash::AbsentInRecognizedLayout)
-        .then_some(rows)
-}
-
-/// How Claude shows a paste in an empty composer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Drawn {
-    /// Wrapping is unknown; only the full captured body can prove this paste.
-    Body,
-    /// A `[Pasted text #N …]` placeholder.
-    Folded,
-    /// Every row, the prompt and continuation indent removed.
-    Rows(Vec<String>),
-}
-
-/// Wrap predictions are optional for ownership; an unfolded body must remain fully visible.
-pub(super) fn direct(frame: &str, size: Option<(usize, usize)>) -> Option<Drawn> {
-    let (width, height) = size?;
-    if width < 6
-        || height <= 10
-        || frame
-            .split('\n')
-            .any(|line| line.chars().any(char::is_control))
-    {
-        return None;
-    }
-    if let Some(drawn) = drawn(frame, size) {
-        return Some(drawn);
-    }
-    let columns = width - 4;
-    let mut rows = 0;
-    let mut shown = Vec::new();
-    for line in frame.split('\n') {
-        match wrap(line, columns) {
-            Some(wrapped) => {
-                rows += wrapped.len();
-                shown.extend(wrapped);
-            }
-            None => {
-                // Word wrapping may use half a row; only unknown lines need this upper bound.
-                let bound: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
-                rows += if bound <= columns {
-                    1
-                } else {
-                    2 * bound.div_ceil(columns) + 1
-                };
-                shown.push(line.to_owned());
-            }
-        }
-    }
-    if shown[1..].iter().any(|row| chrome_row(row)) {
-        return None;
-    }
-    (rows <= height.saturating_sub(10) / 2).then_some(Drawn::Body)
-}
-
-/// Proves the complete body or an exact placeholder; multiline pastes may fold before predicted.
-pub(super) fn owns_direct(capture: &str, frame: &str, drawn: &Drawn) -> bool {
-    let screen = read(capture);
-    let Composer::Text(rows) = screen.composer else {
-        return false;
-    };
-    if screen.footer == Footer::Normal
-        && (matches!(drawn, Drawn::Rows(expected) if own_wrapped_draft(capture, expected))
-            || rows
-                .iter()
-                .flat_map(|row| row.chars())
-                .filter(|c| !c.is_whitespace())
-                .eq(frame.chars().filter(|c| !c.is_whitespace())))
-    {
-        return true;
-    }
-    let [row] = rows.as_slice() else {
-        return false;
-    };
-    let lines = frame.matches('\n').count();
-    if !matches!(drawn, Drawn::Folded) && lines == 0 {
-        return false;
-    }
-    let Some(rest) = row.strip_prefix("[Pasted text #") else {
-        return false;
-    };
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    let owned = digits > 0
-        && if lines == 0 {
-            &rest[digits..] == "]"
-        } else {
-            rest[digits..] == format!(" +{lines} lines]")
-        };
-    if owned {
-        super::ownership::observe_owned_chip(frame, row);
-    }
-    owned
-}
-
-/// Measured on Claude Code 2.1.293: pastes over 800 UTF-16 units or over min(rows-10,2) LFs fold.
-/// Other lines wrap at width-4, with at most (rows-10)/2 visible rows; unknown layouts return `None`.
-pub(super) fn drawn(frame: &str, size: Option<(usize, usize)>) -> Option<Drawn> {
-    let (width, height) = size?;
-    // Claude may rewrite a tab or CR, changing even a folded paste's line count.
-    if frame
-        .split('\n')
-        .any(|line| line.chars().any(char::is_control))
-    {
-        return None;
-    }
-    let newlines = frame.matches('\n').count();
-    if frame.encode_utf16().count() > 800 || newlines > height.saturating_sub(10).min(2) {
-        return Some(Drawn::Folded);
-    }
-    let mut rows = Vec::new();
-    for line in frame.split('\n') {
-        if line.trim_end() != line {
-            return None;
-        }
-        rows.extend(wrap(line, width.checked_sub(4).filter(|&c| c >= 2)?)?);
-    }
-    if rows[1..].iter().any(|row| chrome_row(row)) {
-        return None;
-    }
-    (rows.len() <= height.saturating_sub(10) / 2).then_some(Drawn::Rows(rows))
-}
-
-// A row the composer reader takes for a prompt or border cannot prove the paste.
-fn chrome_row(row: &str) -> bool {
-    let shown = format!("  {row}");
-    claude_prompt_row(&shown) || claude_border_row(&shown)
-}
-
-/// One line as wrap-ansi `hard` without trim lays it out; Claude drops the leading spaces of each
-/// wrapped row and the capture drops trailing ones. `None` for a wrap past measured characters.
-fn wrap(line: &str, columns: usize) -> Option<Vec<String>> {
-    // Zero-width joiners, selectors, combining marks and modifiers may merge into one glyph.
-    if line.chars().any(may_join) {
-        return None;
-    }
-    // No character is wider than two columns, so this bound proves a line stays on one row.
-    let bound: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
-    if bound <= columns {
-        return Some(vec![line.to_string()]);
-    }
-    let mut rows = vec![String::new()];
-    let mut used = 0;
-    for (index, word) in line.split(' ').enumerate() {
-        if index > 0 {
-            if used >= columns {
-                rows.push(String::new());
-                used = 0;
-            }
-            rows.last_mut()?.push(' ');
-            used += 1;
-        }
-        let length = word.chars().map(measured_width).sum::<Option<usize>>()?;
-        if length > columns {
-            // A word wider than the row breaks where it starts unless that costs a row.
-            if (length - 1) / columns < 1 + (length - (columns - used) - 1) / columns {
-                rows.push(String::new());
-                used = 0;
-            }
-            let chars: Vec<char> = word.chars().collect();
-            for (at, &c) in chars.iter().enumerate() {
-                let cells = measured_width(c)?;
-                if used + cells <= columns {
-                    rows.last_mut()?.push(c);
-                    used += cells;
-                } else {
-                    rows.push(c.to_string());
-                    used = cells;
-                }
-                if used == columns && at + 1 < chars.len() {
-                    rows.push(String::new());
-                    used = 0;
-                }
-            }
-            continue;
-        }
-        if used + length > columns && used > 0 && length > 0 {
-            rows.push(String::new());
-            used = 0;
-        }
-        rows.last_mut()?.push_str(word);
-        used += length;
-    }
-    let shown = |(index, row): (usize, String)| {
-        let row = row.trim_end_matches(' ');
-        if index == 0 {
-            row
-        } else {
-            row.trim_start_matches(' ')
-        }
-        .to_string()
-    };
-    Some(rows.into_iter().enumerate().map(shown).collect())
-}
-
-/// A character with no cell of its own, or a flag or skin-tone half that joins its neighbour.
-fn may_join(c: char) -> bool {
-    !matches!(c.width(), Some(1 | 2))
-        || ('\u{1f1e6}'..='\u{1f1ff}').contains(&c)
-        || ('\u{1f3fb}'..='\u{1f3ff}').contains(&c)
-}
-
-/// Columns measured in Claude's composer: printable ASCII one, Hangul syllables and jamo two.
-/// The input header's `·` and `📱` take one and two, as string-width and tmux both count them; a
-/// paste whose rows differ is still proven by its whitespace-free body.
-fn measured_width(c: char) -> Option<usize> {
-    match c {
-        ' '..='~' | '\u{b7}' | '\u{2192}' => Some(1),
-        '\u{ac00}'..='\u{d7a3}' | '\u{3131}'..='\u{318e}' | '\u{1f4f1}' => Some(2),
-        _ => None,
-    }
-}
-
 /// Whether the bottom-most `❯` row, and the rows under it down to a full border, hold text not
 /// drawn faint; `None` without a `❯` row or its closing border. It needs no measured layout.
 pub(super) fn typed(capture: &str) -> Option<bool> {
@@ -565,30 +356,4 @@ pub(super) fn typed(capture: &str) -> Option<bool> {
     let solid = rows[prompt..end].iter().map(|row| row.solid.as_str());
     let text = solid.collect::<String>().replacen('❯', "", 1);
     Some(text.chars().any(|c| !c.is_whitespace()))
-}
-
-/// A current stash transaction owns the full body or its folded chip, with the draft still stashed.
-pub(in crate::services::claude_tui) fn owns(capture: &str, frame: &str) -> bool {
-    let drawn = if frame.encode_utf16().count() > 800 {
-        Drawn::Folded
-    } else {
-        Drawn::Body
-    };
-    read(capture).stash == Stash::Present && owns_direct(capture, frame, &drawn)
-}
-
-/// The C-s took: an empty composer under the stash marker.
-pub(in crate::services::claude_tui) fn stashed(capture: &str) -> bool {
-    let screen = read(capture);
-    screen.footer == Footer::Normal
-        && screen.stash == Stash::Present
-        && screen.composer == Composer::Empty
-}
-
-/// Claude handed the draft back: the same rows and no stash.
-pub(super) fn restored(capture: &str, draft: &[String]) -> bool {
-    let screen = read(capture);
-    screen.footer == Footer::Normal
-        && screen.stash == Stash::AbsentInRecognizedLayout
-        && matches!(&screen.composer, Composer::Text(rows) if rows == draft)
 }
