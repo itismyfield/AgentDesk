@@ -8,10 +8,8 @@
 //! per-receipt ranges) and `DeliveryRecord::delivered_frontier` (the
 //! release-surviving watermark). Both are read; neither is written.
 //!
-//! This module has no verdict authority. It does not mutate the store, does not
-//! produce a health or recovery decision, and nothing constructs it yet — the
-//! `dead_code` warnings on its surface are the expected state until a later
-//! slice composes the fact it returns.
+//! It has no verdict authority: it never mutates the store or makes a health/recovery decision.
+//! Its production reader is `observe_relay_verdict` in `health/reachability/composite.rs`.
 //!
 //! Each guarantee below belongs to a different subject and a different axis;
 //! they are deliberately not collapsed into one sentence.

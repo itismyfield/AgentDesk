@@ -2,11 +2,12 @@
 
 > Source: [`docs/agent-maintenance/index.md`](index.md). For every "where do I
 > add this?" question, consult this page first. The giant-file list is the
-> auto-generated inventory in
-> [`docs/generated/module-inventory.md`](../generated/module-inventory.md) and
-> the owner/deadline registry in
-> [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
-> the rows below project the operational meaning of each entry.
+> auto-generated inventory in `docs/generated/module-inventory.md` and the
+> owner/deadline registry in `docs/generated/giant-file-registry.md`. Both are
+> untracked checkout-local views: build them with
+> `python3 scripts/generate_inventory_docs.py` (see
+> [`docs/generated/README.md`](../generated/README.md)). The rows below project
+> the operational meaning of each entry.
 >
 > Last refreshed: 2026-09-02 (manual: #5679 transport extraction and ghost freeze removal).
 >
@@ -325,7 +326,7 @@ time for diagnostics; neither is a stored approval value.
   (#1006 v3 domain types, pure planner, delivery implementation, shared
   transport/dedup primitives, and the #3038 send-to-agent/manual outbound
   dispatch surface).
-- legacy_modules: none; `src/services/discord/outbound/legacy.rs` was removed
+- legacy_modules: none; `src/services/discord/outbound/legacy.rs` (removed) was removed
   in #2535.
 - do_not_edit_without_migration_plan:
   - `src/services/discord/formatting/delivery.rs::send_long_message_raw`
@@ -462,7 +463,7 @@ time for diagnostics; neither is a stored approval value.
 - invariants: dispatch creation is the only writer for `dispatched_sessions`;
   status transitions go through `dispatch_status`.
 - allowed_changes: `bugfix` only.
-- tests: `src/integration_tests/dispatch_flow/*` and per-module unit tests.
+- tests: per-module unit tests (the former `src/integration_tests/dispatch_flow/` (removed) suite is gone).
 - related_issues: #1784, #1785, #1808-#1814.
 
 ### `tmux_watcher`
@@ -1318,7 +1319,7 @@ time for diagnostics; neither is a stored approval value.
     registry entry is retired.
   - `src/services/discord/tmux_placeholder_suppression/{mod,evidence,ops}.rs`
     (348 / 259 / 584 production lines after #4176; formerly
-    `tmux_placeholder_suppression.rs` at 1092 production lines. The facade keeps
+    `tmux_placeholder_suppression.rs` (removed) at 1092 production lines. The facade keeps
     the pure placeholder-suppression decision core, `evidence.rs` owns frontier /
     proof / EOF helpers, and `ops.rs` owns Discord edit/delete cleanup operations.
     All three files are below the giant-file threshold).
@@ -1506,7 +1507,7 @@ time for diagnostics; neither is a stored approval value.
     (363 prod lines) owns the Codex-TUI replay/resume helper cluster, and
     `src/services/discord/recovery_engine/manual_rebind/adoption.rs` (95 prod
     lines) owns transcript-adoption offset and binding decisions. The retired
-    `manual_rebind.rs` giant registration and the later `manual_rebind/mod.rs`
+    `manual_rebind.rs` (removed) giant registration and the later `manual_rebind/mod.rs`
     shrink entry (de-gianted by #4712) were removed from
     scripts/giant_file_registry.toml.)
   - `src/services/discord/recovery_engine/rebind_runtime.rs` (below the giant threshold
@@ -1801,7 +1802,7 @@ time for diagnostics; neither is a stored approval value.
 - 2026-05-18 refresh: #2558 removed dead watcher/placeholder cleanup parameters
   and retained a warning log for pause/epoch placeholder delete failures; no
   new watcher ownership path was introduced.
-- 2026-06-16 refresh: #3479 decomposed `commands/diagnostics.rs` (1022 prod
+- 2026-06-16 refresh: #3479 decomposed `commands/diagnostics.rs` (removed) (1022 prod
   LoC) verbatim into the `commands/diagnostics/` directory module — the root
   `src/services/discord/commands/diagnostics/mod.rs` (389 production lines;
   metrics/health/sessions/status/inflight/queue/adk-phase/debug slash commands +
@@ -1914,7 +1915,8 @@ time for diagnostics; neither is a stored approval value.
 - canonical_modules: `src/services/discord/health/reachability.rs` (module root)
   and everything under `src/services/discord/health/reachability/**`. The
   receipt-index read path `src/services/discord/outbound/receipt_index.rs`
-  belongs to this surface too and is **not yet on disk** — #5071 T4-B3 lands it.
+  (landed by #5071 T4-B3; read by `health/reachability/composite.rs`
+  `observe_relay_verdict`) belongs to this surface too.
   The tree is unix-gated: its transcript coordinate is the `(dev, ino)` file
   identity of 4987 §-1.3, and `std::fs::Metadata` exposes no stable Windows
   equivalent.
@@ -2065,7 +2067,7 @@ time for diagnostics; neither is a stored approval value.
   changes must go under `src/services/auto_queue/*`; the route facade should
   remain extraction/delegation only. New routes must register in the route
   inventory generator.
-- tests: `src/server/routes/routes_tests.rs`, plus per-route module tests.
+- tests: `src/server/routes/tests/`, plus per-route module tests.
 - related_issues: split issues TBD (file under follow-up).
 
 ### `cli_runtime`
@@ -2115,7 +2117,7 @@ time for diagnostics; neither is a stored approval value.
   - `src/reconcile.rs` (frozen giant surface; dispatch-delivery, auto-queue,
     dispatched-session, and queue-review reconciliation — split before adding
     non-bugfix behavior).
-  - `src/server/maintenance.rs` decomposed in #4710 into
+  - `src/server/maintenance.rs` (removed) decomposed in #4710 into
     `src/server/maintenance/mod.rs` (registry + scheduler loop, now below the
     1000-line giant threshold) and `src/server/maintenance/storage_jobs.rs`
     (the storage/voice `MaintenanceJob` impl cluster). No longer a giant.
@@ -2147,8 +2149,8 @@ time for diagnostics; neither is a stored approval value.
   - `src/db/auto_queue/phase_gates.rs` (frozen giant surface after #1980 durable
     reconciliation, production LoC; PG-backed tests for `current_batch_phase_pg`
     + `reconcile_phase_gate_for_terminal_dispatch_on_pg_tx` live in a
-    `#[cfg(test)] mod`. Split the test module out into a sibling
-    `phase_gates_tests.rs` before adding new feature logic). Verdict extraction,
+    `#[cfg(test)] mod`. Split the test module out into a sibling `phase_gates`
+    test file before adding new feature logic). Verdict extraction,
     checks inference, expected-verdict selection, and diagnostic preservation are
     owned by the split-friendly sibling `src/db/auto_queue/phase_gate_verdict.rs`;
     changes to either surface require reducer unit coverage plus PG reconciler
@@ -2202,7 +2204,7 @@ time for diagnostics; neither is a stored approval value.
   reseed. Retired DB compatibility handles must not be reintroduced as live
   route fallbacks.
 - allowed_changes: `bugfix` on existing path; `new_feature` MUST use PG.
-- tests: `src/integration_tests/postgres_only/*`.
+- tests: PG-backed module tests (the former `src/integration_tests/postgres_only/` (removed) suite is gone).
 - related_issues: #843 epic, #1237, #1238, #1239.
 
 ### `services_misc_giants`
@@ -2226,8 +2228,8 @@ these contextual numbers to match ordinary LoC churn.
   follow-up adds only conflict-category observation and resolved-primary selector
   propagation, while PostgreSQL identity authority stays under `src/db/`), and
   `src/services/settings.rs` (frozen giant surface) — service-layer route support surfaces
-  split out of the large dashboard route modules. (`src/services/onboarding.rs`
-  and `src/services/api_friction.rs` have been removed/decomposed.)
+  split out of the large dashboard route modules. (`src/services/onboarding.rs` (removed)
+  and `src/services/api_friction.rs` (removed) have been removed/decomposed.)
 - `src/services/dispatches/outbox_route.rs` (frozen giant surface) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.

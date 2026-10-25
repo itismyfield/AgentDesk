@@ -248,13 +248,14 @@
 ### `multinode / supervised_workers_singleton`
 
 - feature: `multinode / supervised_workers_singleton`
-- canonical_modules: `src/server/worker_registry.rs:193` defines the supervised
+- canonical_modules: `src/server/worker_registry.rs` (`WORKER_SPECS`) defines the supervised
   worker inventory; `src/server/worker_registry/registry.rs` owns construction,
   startup staging, and supervision, including the `dispatch_outbox_loop` worker
   arm. `src/server/worker_registry/status.rs` owns read-only active-worker status.
-  `src/server/mod.rs:201` creates the
-  registry, `src/server/mod.rs:207` runs boot-only steps, and
-  `src/server/mod.rs:208` starts workers after boot reconcile. The
+  `src/server/mod.rs` (`run`) creates the registry
+  (`SupervisedWorkerRegistry::new`), runs boot-only steps
+  (`run_boot_only_steps`), and starts workers after boot reconcile
+  (`start_after_boot_reconcile`). The
   `ScheduledMessages` spec registers `scheduled_message_loop` as
   `WorkerExecutionScope::LeaderOnly`; its durable claim/recovery implementation
   lives in `src/services/scheduled_messages.rs` and
@@ -274,9 +275,9 @@
   through `src/server/cluster.rs`; `src/server/worker_registry.rs` classifies
   supervised workers as `leader_only` or `worker_local`, and
   `src/server/worker_registry/registry.rs` applies that scope before startup.
-  `policy_tick_loop` already uses a PG advisory lock at
-  `src/server/mod.rs:297`, and `github_sync_loop` uses one at
-  `src/server/mod.rs:2798`; leader lease loss still needs per-loop self-fencing
+  `policy_tick_loop` already uses a PG advisory lock in
+  `src/server/mod.rs` (`policy_tick_loop`), and `github_sync_loop` uses one in
+  `src/server/mod.rs` (`github_sync_loop`); leader lease loss still needs per-loop self-fencing
   before every side effect is considered failover-safe. Scheduled messages are
   leader-started and additionally fence each delivery attempt with a Postgres
   lease, a per-attempt `claim_token`, and a durable fire-slot uniqueness key.
@@ -305,10 +306,12 @@
 ### `multinode / merge_review_side_effects`
 
 - feature: `multinode / merge_review_side_effects`
-- canonical_modules: none in JS — `policies/merge-automation.js` (terminal
+- canonical_modules: none in JS — `policies/merge-automation.js` (removed) (terminal
   cards, direct pushes, auto-merge) was removed in #5716 slice B. GitHub issue
-  mutation lives in `src/github/mod.rs:166`, `src/github/mod.rs:218`,
-  `src/github/dod.rs:122`, and `src/server/routes/github.rs:212`.
+  mutation lives in `src/github/mod.rs` (`comment_issue_with`,
+  `create_issue_with_options`, `close_issue_with`), `src/github/triage.rs`
+  (`write_back_inferred_agent_label`), and `src/server/routes/github.rs`
+  (`create_issue`).
 - legacy_modules: none. The removed policy was the last JS merge surface.
 - do_not_edit_without_migration_plan: `policies/review-automation.js` create-pr
   handoff and `policies/00-pr-tracking.js` tracking paths (#5716 slice B).
@@ -326,15 +329,16 @@
 ### `multinode / tmux_provider_sessions`
 
 - feature: `multinode / tmux_provider_sessions`
-- canonical_modules: `src/services/discord/mod.rs:538` owns the in-process tmux
-  watcher registry, `src/services/discord/router/message_handler.rs:874` builds
-  the ADK session key, `src/services/discord/router/message_handler.rs:1266`
-  posts working status, `src/services/discord/router/message_handler.rs:1349`
-  stores the session key in inflight state, and
-  `src/services/discord/router/message_handler.rs:1420` passes provider
-  execution context into provider CLI execution. Claude local tmux execution is
-  at `src/services/claude.rs:1166` and new local tmux session creation is at
-  `src/services/claude.rs:1300`.
+- canonical_modules: `src/services/discord/tmux_watcher_registry.rs`
+  (`TmuxWatcherRegistry`) owns the in-process tmux watcher registry,
+  `src/services/discord/adk_session.rs` (`build_adk_session_key`) builds the
+  ADK session key, and
+  `src/services/discord/router/message_handler/intake_turn.rs`
+  (`handle_text_message`) posts working status, stores the session key in
+  inflight state, and passes `ProviderExecutionContext` into provider CLI
+  execution. Claude local tmux execution, including new local tmux session
+  creation, is in `src/services/claude.rs` (`execute_streaming_local_tmux`,
+  `execute_streaming_local_tui_tmux`).
 - legacy_modules: none. Provider execution is local to the node that owns the
   tmux session.
 - do_not_edit_without_migration_plan: watcher ownership and relay coordination in
@@ -368,13 +372,15 @@
 
 - feature: `multinode / mcp_routing`
 - canonical_modules: provider MCP availability and sync are in
-  `src/services/mcp_config.rs:34`, `src/services/mcp_config.rs:71`, and
-  `src/services/mcp_config.rs:128`. Discord checks MCP capability at
-  `src/services/discord/router/message_handler.rs:1048`. Memento MCP sessions
-  are cached and retried in `src/services/memory/memento.rs:262` and
-  `src/services/memory/memento.rs:275`. The local credential watcher starts at
-  `src/services/discord/runtime_bootstrap.rs:1088` and runs its notify thread at
-  `src/services/discord/mcp_credential_watcher.rs:349`.
+  `src/services/mcp_config.rs` (`provider_has_mcp_server`,
+  `provider_has_memento_mcp`, `sync_codex_mcp_servers`). Discord checks MCP
+  capability in `src/services/discord/router/message_handler/intake_turn.rs`
+  (`handle_text_message`) and
+  `src/services/discord/router/message_handler/headless_turn.rs`. Memento MCP
+  sessions are cached and retried in `src/services/memory/memento.rs`
+  (`initialize_session`, `capture_session_id`). The local credential watcher
+  runs its notify thread in `src/services/discord/mcp_credential_watcher.rs`
+  (`spawn_watcher`).
 - legacy_modules: none.
 - do_not_edit_without_migration_plan: provider-specific MCP config mutation in
   `src/services/mcp_config.rs` and Memento MCP HTTP session reuse in
@@ -391,17 +397,22 @@
 ### `multinode / dispatch_outbox`
 
 - feature: `multinode / dispatch_outbox`
-- canonical_modules: `src/server/worker_registry.rs:206` registers the worker,
-  `src/server/routes/dispatches/outbox.rs:248` claims PostgreSQL rows with
-  `FOR UPDATE SKIP LOCKED`, `src/server/routes/dispatches/outbox.rs:596`
-  processes a batch, `src/server/routes/dispatches/outbox.rs:654` relies on the
-  Discord delivery reservation guard, and `src/server/routes/dispatches/outbox.rs:719`
-  applies retry/permanent-failure state.
+- canonical_modules: `src/server/worker_registry.rs` (`WORKER_SPECS`) registers
+  the worker, `src/db/dispatches/outbox/claim.rs`
+  (`select_pending_dispatch_outbox_claim_candidates_pg`) claims PostgreSQL rows
+  with `FOR UPDATE SKIP LOCKED`, `src/services/dispatches/outbox_queue.rs`
+  (`process_outbox_batch_with_pg`) processes a batch,
+  `src/services/dispatches/discord_delivery/guard.rs`
+  (`send_dispatch_with_delivery_guard`) is the Discord delivery reservation
+  guard, and `src/db/dispatches/outbox/retry.rs` (`schedule_outbox_retry_pg`)
+  plus `src/db/dispatches/outbox/delivery.rs` (`mark_outbox_failed_pg`) apply
+  retry/permanent-failure state.
 - legacy_modules: removed SQLite-only fallback paths are historical context;
-  current `src/server/routes/dispatches/outbox.rs` behavior is PostgreSQL-first.
+  current dispatch outbox behavior is PostgreSQL-first.
+  `src/server/routes/dispatches/outbox.rs` is now a thin re-export shim.
 - do_not_edit_without_migration_plan:
-  `src/server/routes/dispatches/outbox.rs` claim, notify, followup, status
-  reaction, retry, and failure paths.
+  `src/db/dispatches/outbox/` and `src/services/dispatches/outbox_queue.rs`
+  claim, notify, followup, status reaction, retry, and failure paths.
 - active_callsite_coverage: partial. The PostgreSQL claim path prevents two
   consumers from processing the same pending row concurrently, but #878 still
   owns explicit PG lease/idempotency semantics for multinode delivery.
@@ -415,14 +426,15 @@
 ### `multinode / memory_cache`
 
 - feature: `multinode / memory_cache`
-- canonical_modules: backend selection is in `src/services/memory/mod.rs:159`;
-  local memory reads are in `src/services/memory/local.rs:10`; Memento
-  dedupe/cache state is a process-wide `OnceLock` at
-  `src/services/memory/memento_throttle.rs:128`; recall and remember cache
-  helpers are at `src/services/memory/memento_throttle.rs:175` and
-  `src/services/memory/memento_throttle.rs:196`. Other process-local telemetry
-  includes observability globals in `src/services/observability/mod.rs:460` and
-  `src/services/observability/metrics.rs:238`.
+- canonical_modules: backend selection is in `src/services/memory/mod.rs`
+  (`build_resolved_memory_backend`); local memory reads are in
+  `src/services/memory/local.rs` (`LocalMemoryBackend`); Memento dedupe/cache
+  state is a process-wide `OnceLock` in `src/services/memory/memento_throttle.rs`
+  (`throttle_state`); recall cache helpers are `cached_recall_response` and
+  `store_recall_response` in the same file. Other process-local telemetry
+  includes observability globals in `src/services/observability/mod.rs`
+  (`OBSERVABILITY_RUNTIME`) and `src/services/observability/metrics.rs`
+  (`GLOBAL_COUNTERS`).
 - legacy_modules: none.
 - do_not_edit_without_migration_plan: process-global memory and observability
   cache state, especially `memento_throttle.rs` and observability global
@@ -441,39 +453,41 @@
 | assumption | owning module | current risk |
 | --- | --- | --- |
 | Discord gateway singleton | `src/services/discord/runtime_bootstrap.rs`, `src/services/discord/runtime_bootstrap/gateway_lease.rs`, `src/services/discord/runtime_bootstrap/shutdown.rs` | Two nodes starting a gateway for the same provider can duplicate command intake, watcher startup, and shutdown cleanup unless #877 fences gateway ownership to the leader. |
-| Supervised workers singleton | `src/server/worker_registry.rs:151`, `src/server/mod.rs:202`, `src/server/mod.rs:209` | Cluster-enabled worker nodes skip `leader_only` supervised workers unless they hold the startup leader lease; lease-loss self-fencing for already-running loops remains follow-up work. |
-| Merge/review side effects local | removed (`policies/merge-automation.js`, #5716 slice B) | Historical: duplicate policy runners could race direct pushes, PR auto-merge, review notifications, and worktree cleanup. No automated merge surface remains. |
-| GitHub issue/body mutation local | `src/github/mod.rs:166`, `src/github/mod.rs:218`, `src/github/dod.rs:122`, `src/server/routes/github.rs:275` | Multiple nodes can create, close, comment, or edit issue bodies unless calls are leader-only or idempotent. |
-| Tmux/provider sessions local | `src/services/discord/mod.rs:538`, `src/services/discord/router/message_handler.rs:1420`, `src/services/claude.rs:1166`, `src/services/claude.rs:1300` | Live provider state depends on local tmux panes, FIFOs, output files, watcher handles, and wrapper processes. |
-| MCP routing local | `src/services/mcp_config.rs:34`, `src/services/mcp_config.rs:71`, `src/services/memory/memento.rs:262`, `src/services/discord/mcp_credential_watcher.rs:349` | MCP availability, config mutation, cached MCP session IDs, and credential watcher notifications are node/provider local. |
-| `dispatch_outbox` local retry loop | `src/server/worker_registry.rs:206`, `src/server/routes/dispatches/outbox.rs:248`, `src/server/routes/dispatches/outbox.rs:596`, `src/server/routes/dispatches/outbox.rs:719` | Current PG claim narrows duplicate row processing, but multinode delivery still needs explicit lease/idempotency tests before multiple nodes drain it. |
-| Memory/cache local | `src/services/memory/local.rs:10`, `src/services/memory/memento_throttle.rs:128`, `src/services/memory/memento_throttle.rs:175`, `src/services/observability/metrics.rs:238` | Process-local recall, dedupe, and telemetry caches must not be treated as cluster truth. |
+| Supervised workers singleton | `src/server/worker_registry.rs` (`WORKER_SPECS`), `src/server/mod.rs` (`run`) | Cluster-enabled worker nodes skip `leader_only` supervised workers unless they hold the startup leader lease; lease-loss self-fencing for already-running loops remains follow-up work. |
+| Merge/review side effects local | removed (`policies/merge-automation.js` (removed), #5716 slice B) | Historical: duplicate policy runners could race direct pushes, PR auto-merge, review notifications, and worktree cleanup. No automated merge surface remains. |
+| GitHub issue/body mutation local | `src/github/mod.rs` (`comment_issue_with`, `create_issue_with_options`), `src/github/triage.rs` (`write_back_inferred_agent_label`), `src/server/routes/github.rs` (`create_issue`) | Multiple nodes can create, close, comment, or edit issue bodies unless calls are leader-only or idempotent. |
+| Tmux/provider sessions local | `src/services/discord/tmux_watcher_registry.rs` (`TmuxWatcherRegistry`), `src/services/discord/router/message_handler/intake_turn.rs` (`handle_text_message`), `src/services/claude.rs` (`execute_streaming_local_tmux`) | Live provider state depends on local tmux panes, FIFOs, output files, watcher handles, and wrapper processes. |
+| MCP routing local | `src/services/mcp_config.rs` (`provider_has_mcp_server`, `sync_codex_mcp_servers`), `src/services/memory/memento.rs` (`initialize_session`), `src/services/discord/mcp_credential_watcher.rs` (`spawn_watcher`) | MCP availability, config mutation, cached MCP session IDs, and credential watcher notifications are node/provider local. |
+| `dispatch_outbox` local retry loop | `src/server/worker_registry.rs` (`WORKER_SPECS`), `src/db/dispatches/outbox/claim.rs` (`select_pending_dispatch_outbox_claim_candidates_pg`), `src/services/dispatches/outbox_queue.rs` (`process_outbox_batch_with_pg`), `src/db/dispatches/outbox/retry.rs` (`schedule_outbox_retry_pg`) | Current PG claim narrows duplicate row processing, but multinode delivery still needs explicit lease/idempotency tests before multiple nodes drain it. |
+| Memory/cache local | `src/services/memory/local.rs` (`LocalMemoryBackend`), `src/services/memory/memento_throttle.rs` (`throttle_state`, `cached_recall_response`), `src/services/observability/metrics.rs` (`GLOBAL_COUNTERS`) | Process-local recall, dedupe, and telemetry caches must not be treated as cluster truth. |
 
 ## Leader-Only Side Effects
 
-- GitHub merge and auto-merge: removed with `policies/merge-automation.js`
+- GitHub merge and auto-merge: removed with `policies/merge-automation.js` (removed)
   in #5716 slice B; no automated merge surface remains.
-- GitHub issue/body mutation: `src/github/mod.rs:166`,
-  `src/github/mod.rs:218`, `src/github/dod.rs:122`,
-  `src/server/routes/github.rs:275`.
-- Singleton policy ticks and global hook side effects: `src/server/mod.rs:284`,
-  `src/server/mod.rs:297`, `src/server/mod.rs:367`,
-  `src/server/mod.rs:379`.
+- GitHub issue/body mutation: `src/github/mod.rs` (`comment_issue_with`,
+  `create_issue_with_options`), `src/github/triage.rs`
+  (`write_back_inferred_agent_label`), `src/server/routes/github.rs`
+  (`create_issue`).
+- Singleton policy ticks and global hook side effects: `src/server/mod.rs`
+  (`policy_tick_loop`, `fire_tick_hook_by_name_with_timeout`).
 - Global cleanup and maintenance jobs registered as supervised workers:
-  `src/server/worker_registry.rs:177`, `src/server/worker_registry.rs:206`,
-  `src/server/worker_registry.rs:219`.
+  the leader-only entries of `src/server/worker_registry.rs` (`WORKER_SPECS`).
 - `dispatch_outbox` delivery if the action is not proven lease-backed and
-  idempotent: `src/server/routes/dispatches/outbox.rs:248`,
-  `src/server/routes/dispatches/outbox.rs:654`.
+  idempotent: `src/db/dispatches/outbox/claim.rs`
+  (`select_pending_dispatch_outbox_claim_candidates_pg`),
+  `src/services/dispatches/discord_delivery/guard.rs`
+  (`send_dispatch_with_delivery_guard`).
 
 ## Worker-Local Side Effects
 
-- Provider CLI and tmux execution: `src/services/claude.rs:1166`,
-  `src/services/claude.rs:1300`, `src/services/codex_tmux_wrapper.rs:139`,
-  `src/services/qwen_tmux_wrapper.rs:183`.
-- Node-local MCP calls and credentials: `src/services/mcp_config.rs:71`,
-  `src/services/mcp_config.rs:128`, `src/services/memory/memento.rs:275`,
-  `src/services/discord/mcp_credential_watcher.rs:349`.
+- Provider CLI and tmux execution: `src/services/claude.rs`
+  (`execute_streaming_local_tmux`), `src/services/codex_tmux_wrapper.rs` (`run`),
+  `src/services/qwen_tmux_wrapper.rs` (`run`).
+- Node-local MCP calls and credentials: `src/services/mcp_config.rs`
+  (`provider_has_mcp_server`, `sync_codex_mcp_servers`),
+  `src/services/memory/memento.rs` (`initialize_session`),
+  `src/services/discord/mcp_credential_watcher.rs` (`spawn_watcher`).
 - Local resource locks for exclusive editor/test execution: #880 owns the durable
   lock implementation; the lock acquisition is worker-local but must be recorded
   in PG before the local tool starts.
@@ -483,8 +497,9 @@
   lock and records a running row; `complete` records terminal evidence and can
   release the lock. Each phase/head SHA pair has an idempotent evidence row so
   later merge gates can require the exact tested commit before accepting a phase.
-- Local telemetry capture and cache state: `src/services/memory/memento_throttle.rs:128`,
-  `src/services/observability/mod.rs:460`, `src/services/observability/metrics.rs:238`.
+- Local telemetry capture and cache state: `src/services/memory/memento_throttle.rs`
+  (`throttle_state`), `src/services/observability/mod.rs` (`OBSERVABILITY_RUNTIME`),
+  `src/services/observability/metrics.rs` (`GLOBAL_COUNTERS`).
 - #3262 Claude auto-compact `/compact` injection trigger state:
   `src/services/claude_compact_trigger.rs`. The once-per-fill-cycle "armed" latch
   is a **worker-local** process-global `LazyLock<Mutex<HashMap<channel_id, bool>>>`
@@ -514,12 +529,13 @@
   gateway, GitHub merge/issue mutation, singleton policy ticks, global cleanup,
   and any unleased outbox delivery.
 - Current anchors: gateway lease keepalive at
-  `src/services/discord/runtime_bootstrap/gateway_lease.rs`, policy tick advisory lock at
-  `src/server/mod.rs:301`, GitHub sync advisory lock at `src/server/mod.rs:2818`,
-  server cluster leader lease bootstrap at `src/server/cluster.rs`, and
-  leader-only worker self-fence at `src/server/worker_registry.rs:522`.
+  `src/services/discord/runtime_bootstrap/gateway_lease.rs`, policy tick advisory lock in
+  `src/server/mod.rs` (`policy_tick_loop`), GitHub sync advisory lock in
+  `src/server/mod.rs` (`github_sync_loop`), server cluster leader lease bootstrap at
+  `src/server/cluster.rs`, and leader-only worker self-fence in
+  `src/server/worker_registry/registry.rs` (`supervise_leader_tokio_worker`).
 - Enablement condition: every supervised worker in
-  `src/server/worker_registry.rs:151` is classified as leader-only,
+  `src/server/worker_registry.rs` (`WORKER_SPECS`) is classified (`WorkerExecutionScope`) as leader-only,
   lease-backed multi-consumer, or worker-local.
 
 ### `pg_lease_backed_claim`
@@ -528,8 +544,11 @@
   PostgreSQL, record ownership/attempt state, and make delivery idempotent.
 - Current anchors: `dispatch_outbox` records `claimed_at`/`claim_owner` through
   `migrations/postgres/0030_dispatch_outbox_claims.sql`, uses `FOR UPDATE SKIP
-  LOCKED` plus stale processing reclaim at `src/server/routes/dispatches/outbox.rs:250`,
-  calls delivery with a reservation guard at `src/server/routes/dispatches/outbox.rs:681`,
+  LOCKED` plus stale processing reclaim in `src/db/dispatches/outbox/claim.rs`
+  (`select_pending_dispatch_outbox_claim_candidates_pg`,
+  `select_stale_dispatch_outbox_claim_owner_candidates_pg`), calls delivery with
+  a reservation guard in `src/services/dispatches/discord_delivery/guard.rs`
+  (`send_dispatch_with_delivery_guard`),
   and clears claim fields on done/retry/failure.
 - Enablement condition: #878 still needs the same claim model on
   `task_dispatches`; `dispatch_outbox` now has a stale-claim regression test.
@@ -540,9 +559,10 @@
   `resource_locks` record before launching local work, and must release or expire
   that record on worker death.
 - Current anchors: auto-queue slots already use PG compare-and-set style claims
-  through `src/db/auto_queue/claim.rs:316` and release ownership through
-  `src/db/auto_queue/slots.rs:98`; slot cleanup clears local runtime state
-  through `src/services/auto_queue/runtime.rs:146`; #880 owns the missing
+  through `src/db/auto_queue/claim.rs` (`allocate_slot_for_group_agent_pg`) and
+  release ownership through `src/db/auto_queue/slots.rs` (`release_run_slots_pg`);
+  slot cleanup clears local runtime state through
+  `src/services/auto_queue/runtime.rs` (`clear_slot_sessions_pg`); #880 owns the missing
   resource-lock table and API.
 - Enablement condition: two workers contending for the same Unreal editor/test
   resource cannot run the exclusive phase concurrently.
@@ -553,10 +573,12 @@
   that advertised the required capability. Expired heartbeats must remove the
   worker from routing before new work is assigned.
 - Current anchors: `worker_nodes` stores `labels` and `capabilities` through
-  `src/server/cluster.rs`; provider execution context carries node-local details at
-  `src/services/discord/router/message_handler.rs:1420`; MCP capability checks
-  are local in `src/services/mcp_config.rs:34`; tmux watcher state is in-process
-  at `src/services/discord/mod.rs:538`.
+  `src/server/cluster.rs`; provider execution context carries node-local details in
+  `src/services/discord/router/message_handler/intake_turn.rs`
+  (`handle_text_message`); MCP capability checks are local in
+  `src/services/mcp_config.rs` (`provider_has_mcp_server`); tmux watcher state
+  is in-process in `src/services/discord/tmux_watcher_registry.rs`
+  (`TmuxWatcherRegistry`).
 - `intake_worker.features` advertises versioned request protocols. A preserving
   request (`preserve_on_cancel=true`) requires `preserve_on_cancel_v1`; a
   non-preserving request may still use a legacy provider-capable worker. The same
@@ -574,7 +596,7 @@
   head SHA that will be merged.
 - Current anchors: PR tracking treats `head_sha` as authoritative at
   `policies/00-pr-tracking.js:37`; the head-SHA load and merge-readiness
-  mismatch check went with `policies/merge-automation.js` in #5716 slice B.
+  mismatch check went with `policies/merge-automation.js` (removed) in #5716 slice B.
 - Enablement condition: #881/#882/#883 defined phase-run evidence for
   merge-automation; with that policy removed the condition has no consumer.
 
@@ -1092,7 +1114,7 @@ redeploy leaves the old values live in the plist.
 - #3871 rollover duplicate-relay fix: `tmux_watcher.rs` records the streamed
   rollover-prefix message ids it FROZE during streaming and, on the terminal
   full-body fallback, deletes them (via `delete_watcher_rollover_frozen_prefixes`
-  in `tmux_placeholder_suppression.rs`) so the full-body re-post does not
+  in `tmux_placeholder_suppression/ops.rs`) so the full-body re-post does not
   duplicate the frozen prose — watcher parity with the sink's existing
   `terminal_full_replay_cleanup_msg_ids`. For durability across `'watcher_loop`
   iterations and watcher restarts the id set is PERSISTED on the inflight row
@@ -1419,7 +1441,7 @@ redeploy leaves the old values live in the plist.
   `services::discord::outbound::send_to_agent` module. The new module is a
   **stateless** request parser/router: it owns no global state, no durable queue,
   and no lease, and it still delivers through the unchanged
-  `health::send_message_with_backends`. Call sites (`route_request_generate.rs`,
+  `health::send_message_with_backends`. Call sites (`route_request_generate.rs` (removed),
   `health_api.rs`) were re-pointed to the new path with identical arguments. No
   new multinode ownership, singleton, or lease assumption is introduced.
 - #3142 (committed-output turn-aliasing safety): `tmux_watcher.rs` changed by
@@ -1502,8 +1524,8 @@ redeploy leaves the old values live in the plist.
 - #3078 (status-panel controller shadow-parity): **SUPERSEDED — removed in #3479.**
   The `StatusPanelController` cutover was frozen 2026-06-12 and superseded by
   #3089 M1 (single-message footer; the "one owner" goal was met there); the
-  dormant shadow-parity substrate (`status_panel_controller.rs`,
-  `watcher_panel_parity.rs`, `shadow_parity_warn.rs`) was deleted. It had only
+  dormant shadow-parity substrate (`status_panel_controller.rs` (removed),
+  `watcher_panel_parity.rs` (removed), `shadow_parity_warn.rs` (removed)) was deleted. It had only
   ever been a per-process in-memory shadow performing no Discord IO, so no
   multinode ownership/singleton/lease assumption was introduced or removed.
 - #3231 (worktree GC 강화 — `storage.worktree_orphan_sweep`): extends the hourly
@@ -1612,7 +1634,7 @@ redeploy leaves the old values live in the plist.
   `runtime/discord_tui_direct_abort_marker/` root instead of swapping `⏳ → ⚠`;
   the watcher terminal-commit chokepoint (`tmux_watcher.rs`) drains it `⏳ → ✅`
   on a covering commit and the placeholder sweeper applies the TTL'd `⏳ → ⚠`
-  fallback (`tui_direct_abort_marker.rs`). Codex r2 adds a sibling node-local
+  fallback (`tui_direct_abort_marker/sweep.rs`). Codex r2 adds a sibling node-local
   `runtime/discord_tui_direct_commit_tombstone/` root (`CommitTombstone`):
   written only by the same node's watcher chokepoint BEFORE its inflight-row
   clear, read only by that node's ABORT path / sweeper 대조, GC'd by the same
