@@ -29,7 +29,7 @@ class RelayRecoveryCiWiringTest(unittest.TestCase):
         expected_counts = {
             "justfile": 1,
             ".github/workflows/ci-pr.yml": 0,
-            ".github/workflows/ci-macos-trusted.yml": 1,
+            ".github/workflows/ci-macos-trusted.yml": 0,
         }
         for relative_path, expected_count in expected_counts.items():
             with self.subTest(path=relative_path):
@@ -40,6 +40,11 @@ class RelayRecoveryCiWiringTest(unittest.TestCase):
                     f"{relative_path} must retain exactly {expected_count} "
                     "relay_recovery non-PG lane(s)",
                 )
+        # Trusted macOS runs relay_recovery through its selector file on the nextest worker path.
+        trusted = (REPO_ROOT / ".github/workflows/ci-macos-trusted.yml").read_text(encoding="utf-8")
+        self.assertEqual(trusted.count("nextest-native.sh macos macos-trusted selectors:scripts/ci/macos-trusted-selectors.txt"), 1)
+        selectors = (REPO_ROOT / "scripts/ci/macos-trusted-selectors.txt").read_text(encoding="utf-8")
+        self.assertIn("relay_recovery | _pg pg_ postgres", selectors.splitlines())
 
     def test_commented_or_echoed_commands_do_not_count_as_executable_wiring(self) -> None:
         fixture = "\n".join(

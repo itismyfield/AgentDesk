@@ -68,8 +68,9 @@ UNREACHABLE_RUST_FILES = (
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
 MACOS_TRUSTED_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
-BUSY_RETRY_4888_TEST_COMMAND = (
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib _4888 -- --test-threads=1"
+TRUSTED_LIB_RUN = (
+    "bash scripts/ci/nextest-native.sh macos macos-trusted "
+    "selectors:scripts/ci/macos-trusted-selectors.txt"
 )
 
 EXPECTED_TEST_NON_PG_COMMANDS = (
@@ -827,21 +828,18 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 )["cross_os_rust"]
                 self.assertFalse(selects(survivors, sample))
 
-    def test_trusted_macos_hosted_lane_runs_single_message_panel_tests(self) -> None:
+    def assert_trusted_hosted_selector(self, line: str) -> None:
+        """The hosted job runs the selector file once, and the file keeps `line`."""
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        command = (
-            "env -u AGENTDESK_ROOT_DIR cargo test --lib "
-            "single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres"
-        )
-        self.assertEqual(job_block(workflow, "macos_hosted").count(command), 1)
+        self.assertEqual(job_block(workflow, "macos_hosted").count(TRUSTED_LIB_RUN), 1)
+        selectors = (REPO_ROOT / "scripts/ci/macos-trusted-selectors.txt").read_text(encoding="utf-8")
+        self.assertIn(line, selectors.splitlines())
+
+    def test_trusted_macos_hosted_lane_runs_single_message_panel_tests(self) -> None:
+        self.assert_trusted_hosted_selector("single_message_panel::tests | _pg pg_ postgres")
 
     def test_trusted_macos_hosted_lane_runs_placeholder_live_events_tests(self) -> None:
-        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        command = (
-            "env -u AGENTDESK_ROOT_DIR cargo test --lib "
-            "placeholder_live_events -- --skip _pg --skip pg_ --skip postgres"
-        )
-        self.assertEqual(job_block(workflow, "macos_hosted").count(command), 1)
+        self.assert_trusted_hosted_selector("placeholder_live_events | _pg pg_ postgres")
 
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
@@ -1755,10 +1753,14 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     f"      - name: {step_name}\n{insertion}",
                     1,
                 )
-                # Main must carry the same step policy, since its nextest jobs equal the PR's.
-                main = MAIN_WORKFLOW.read_text(encoding="utf-8")
-                main = main.replace(f"      - name: {step_name}\n", f"      - name: {step_name}\n{insertion}", 1)
-                result = self.run_hardening_fixture(mutated, {"ci-main.yml": main})
+                # Main and nightly must carry the same step policy, since their nextest jobs equal the PR's.
+                same = {
+                    name: path.read_text(encoding="utf-8").replace(
+                        f"      - name: {step_name}\n", f"      - name: {step_name}\n{insertion}", 1
+                    )
+                    for name, path in (("ci-main.yml", MAIN_WORKFLOW), ("ci-nightly.yml", NIGHTLY_WORKFLOW))
+                }
+                result = self.run_hardening_fixture(mutated, same)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_script_checks_run_accepts_equivalent_scalar_and_block_forms(self) -> None:
@@ -1801,9 +1803,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 self.assertIn("must retain exact needs: changes", result.stderr)
 
     def test_trusted_macos_runs_busy_retry_regressions_on_hosted_runner(self) -> None:
-        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        hosted = job_block(workflow, "macos_hosted")
-        self.assertEqual(hosted.count(BUSY_RETRY_4888_TEST_COMMAND), 1)
+        self.assert_trusted_hosted_selector("_4888 |")
 
     def test_trusted_macos_has_only_an_unconditional_hosted_job(self) -> None:
         workflow = yaml.safe_load(MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8"))
@@ -1863,7 +1863,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "cargo check",
                 "H2 tmux boundary measurement (macos, inert)",
                 "H2 module map (macos, inert)",
-                "cargo test (non-PG, targeted subset)",
+                "Install cargo-nextest",
+                "cargo nextest (non-PG, targeted lib selectors)",
+                "cargo test (non-PG, targeted non-lib selectors)",
                 "Fresh user portable smoke",
             },
         )
