@@ -39,6 +39,7 @@ class WarningGateTest(unittest.TestCase):
         (self.root / "scripts").mkdir()
         self.baseline = self.root / "scripts/clippy_warning_baseline.json"
         self.data = json.loads((ROOT / "scripts/clippy_warning_baseline.json").read_text())
+        self.limit = self.data["warnings"]
         self.baseline.write_text(json.dumps(self.data))
         self.git("add", ".")
         self.git("commit", "-qm", "baseline")
@@ -54,7 +55,8 @@ class WarningGateTest(unittest.TestCase):
     def git(self, *args):
         return subprocess.check_output(["git", "-C", str(self.root), *args], text=True).strip()
 
-    def run_gate(self, count=952, payload=None):
+    def run_gate(self, count=None, payload=None):
+        count = self.limit if count is None else count
         warning = {"reason": "compiler-message", "message": {"level": "warning"}}
         diagnostics = self.root / "diagnostics.jsonl"
         diagnostics.write_text(payload if payload is not None else stream(*([warning] * count), {"reason": "build-finished", "success": True}))
@@ -66,7 +68,7 @@ class WarningGateTest(unittest.TestCase):
         return result, json.loads(report_path.read_text()) if report_path.exists() else {}
 
     def test_gate_counts_actual_diagnostics_and_blocks_growth(self):
-        for count, rc in ((952, 0), (951, 0), (953, 1)):
+        for count, rc in ((self.limit, 0), (self.limit - 1, 0), (self.limit + 1, 1)):
             with self.subTest(count=count):
                 result, report = self.run_gate(count)
                 self.assertEqual(result.returncode, rc, result.stderr)
@@ -84,28 +86,28 @@ class WarningGateTest(unittest.TestCase):
                 self.assertNotEqual(report.get("gate"), "PASS")
 
     def test_baseline_increase_is_rejected_even_if_count_fits(self):
-        self.data["warnings"] = 953
+        self.data["warnings"] = self.limit + 1
         self.baseline.write_text(json.dumps(self.data))
-        result, report = self.run_gate(953)
+        result, report = self.run_gate(self.limit + 1)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("baseline increase", report["error"])
 
     def test_reviewed_decrease_and_initial_baseline_are_allowed(self):
-        self.data["warnings"] = 951
+        self.data["warnings"] = self.limit - 1
         self.baseline.write_text(json.dumps(self.data))
-        self.assertEqual(self.run_gate(951)[0].returncode, 0)
+        self.assertEqual(self.run_gate(self.limit - 1)[0].returncode, 0)
         self.git("rm", "--cached", "scripts/clippy_warning_baseline.json")
         (self.root / "placeholder").write_text("bootstrap")
         self.git("add", "placeholder")
         self.git("commit", "-qm", "without baseline")
         self.base = self.git("rev-parse", "HEAD")
-        self.assertEqual(self.run_gate(951)[0].returncode, 0)
+        self.assertEqual(self.run_gate(self.limit - 1)[0].returncode, 0)
 
     def test_bad_base_and_invalid_baseline_fail_closed(self):
         self.base = "missing"
         self.assertEqual(self.run_gate()[0].returncode, 1)
         self.base = self.git("rev-parse", "HEAD")
-        for count in (True, -1, "952"):
+        for count in (True, -1, str(self.limit)):
             self.data["warnings"] = count
             self.baseline.write_text(json.dumps(self.data))
             self.assertEqual(self.run_gate()[0].returncode, 1)
