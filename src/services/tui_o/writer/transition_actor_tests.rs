@@ -261,11 +261,11 @@ fn run_with(chain: &Chain, readers: Option<ReaderConfig>, held: Arc<AtomicBool>)
     )
 }
 
-fn run_writer(
+fn run_writer<A: AlarmSink + 'static>(
     chain: &Chain,
     readers: Option<ReaderConfig>,
     held: Arc<AtomicBool>,
-    writer: Writer,
+    writer: ChannelWriter<FakePort, Arc<FakeLease>, A>,
     provider: ShadowProvider,
 ) -> Run {
     let (t0, w0) = (tokio::time::Instant::now(), SystemTime::now());
@@ -1289,3 +1289,6 @@ async fn codex_observation_real_not_found_retry_is_owed_before_due_and_after_res
 
 #[path = "transition_actor_bo_tests.rs"]
 pub(crate) mod bo;
+
+#[path = "transition_actor_ba_tests.rs"]
+mod ba;

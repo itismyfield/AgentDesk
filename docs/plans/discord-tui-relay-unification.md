@@ -190,8 +190,8 @@ causes were confirmed by reading the tree and the live runtime sessions dir.
 - Consequence B (the real symptom): the session is kept "active/recovering" by
   recovery semantics (`restore_inflight` after a completed/`cleared_by_bridge`
   turn), not by the missing jsonl. `restore_inflight_turns` runs at boot
-  (`runtime_bootstrap.rs:1862`), emitting `recovery_fired reason=restore_inflight`
-  (`recovery_engine.rs:1464`).
+  (`runtime_bootstrap/queued_recovery.rs`, `restore_and_hold`), emitting
+  `recovery_fired reason=restore_inflight` (`recovery_engine/restore_inflight.rs`).
 - **Note:** the filename host segment is `unknown-host` because `HOSTNAME` /
   `COMPUTERNAME` are unset in the dcserver process (`tmux_common.rs:294`). This
   is *consistent* (all files use `unknown-host`), so it is **not** a host

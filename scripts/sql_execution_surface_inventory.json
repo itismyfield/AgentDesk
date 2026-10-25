@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "bfdd01e74bd40ced33e8ced77eee99ce87149841",
+  "measured_at_sha": "59de6c356914bfe3af6d166a70d8d2ab0f575c56",
   "records": [
     {
       "root": "migrations/postgres",
@@ -31438,6 +31438,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:0db64500c9d3e7a5a6b3e94310ea7dc2fbc80acb8a84d35bc116706282c30ea9"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/health/o_transition/codex_retention_e2e_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:279c614e1365c4b4b3e64ca44a10788c265a86b489c32dccc626a95a1cb0f9ff"
     },
     {
       "root": "src",
