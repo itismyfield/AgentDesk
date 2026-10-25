@@ -16,7 +16,7 @@
 //!     waiting behind a normal turn's readiness phase.
 //!
 //! Lock discipline (the freeze-bug fix): the per-pane armed state lock is a
-//! LEAF. It is taken only for a brief flip/read in [`observe_and_decide`],
+//! LEAF. It is taken only for a brief flip/read in [`observe_and_decide_with_source`],
 //! [`pane_still_disarmed_for_send`], [`rearm_for_retry`], and [`clear_for_tmux`],
 //! and is NEVER held across tmux I/O. Only the per-pane composer lock is held
 //! across the send. This removes the old global-latch-held-across-submit
@@ -137,14 +137,6 @@ static COMPACT_TRIGGER_STATE: LazyLock<Mutex<CompactTriggerState>> = LazyLock::n
 /// = input + cache_create + cache_read). Idempotency is keyed on this reliable
 /// signal, never on a cosmetic `auto_compacted` string heuristic. Every call
 /// records `occupied` as the pane's `last_occupied` for the F3 pre-send re-read.
-fn observe_and_decide(
-    pane: &CompactPaneKey,
-    occupied: u64,
-    threshold: CompactThreshold,
-) -> Option<u64> {
-    observe_and_decide_with_source(pane, occupied, threshold, CompactWindowSource::Proven)
-}
-
 fn observe_and_decide_with_source(
     pane: &CompactPaneKey,
     occupied: u64,
@@ -382,7 +374,7 @@ pub(in crate::services) fn observe_active_usage(
 /// Degrade-safe no-ops that never touch the armed flag: a non-Claude provider
 /// (Codex compacts natively), an unresolvable window, or a `0`/disabled percent.
 /// A `0`/low `usage_tokens` is deliberately NOT short-circuited: it is the
-/// post-compact re-arm signal handled inside [`observe_and_decide`].
+/// post-compact re-arm signal handled inside [`observe_and_decide_with_source`].
 pub(in crate::services) fn maybe_inject_compact(
     turn_identity: ManagedCompactTurnIdentity,
     provider: &ProviderKind,
@@ -539,6 +531,14 @@ fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn observe_and_decide(
+        pane: &CompactPaneKey,
+        occupied: u64,
+        threshold: CompactThreshold,
+    ) -> Option<u64> {
+        observe_and_decide_with_source(pane, occupied, threshold, CompactWindowSource::Proven)
+    }
 
     fn pane() -> CompactPaneKey {
         CompactPaneKey {

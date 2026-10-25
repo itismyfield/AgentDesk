@@ -158,6 +158,15 @@ async fn startup_legacy_returns_before_settings_or_policy_store_io() {
         restore(&http, &shared, &ProviderKind::Claude),
     )
     .await;
+    let held = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        restore_only(&http, &shared, &ProviderKind::Claude, 331),
+    )
+    .await;
+    assert!(
+        matches!(held, Ok(Ok(()))),
+        "startup_legacy_held_replay_precedes_lock_and_io_contract"
+    );
     assert_eq!(
         super::super::STORE_READS.load(std::sync::atomic::Ordering::SeqCst),
         before,

@@ -115,6 +115,7 @@ pub(super) fn render_time_line(last_activity_unix: Option<i64>, started_at_unix:
 /// spinner/progress state. Wait states retain their specific labels because the
 /// spinner does not communicate monitor, wakeup, subagent, or workflow details.
 /// Completed turns retain the pre-#4892 labels.
+#[cfg(test)]
 pub(super) fn render_activity_line(status: &DerivedStatus) -> String {
     render_activity_line_with_last_tool(status, None)
 }

@@ -1465,10 +1465,10 @@ mod tests {
             "agentdesk.routines.register({ name: 'Created Later', tick() { return { action: 'skip' }; } });",
         )
         .unwrap();
-        let after = RoutineScriptLoader::new_shared(&[absolute.clone()]).unwrap();
+        let after = RoutineScriptLoader::new_shared(std::slice::from_ref(&absolute)).unwrap();
 
         assert!(Arc::ptr_eq(&before.state, &after.state));
-        assert_eq!(after.load_dirs(&[absolute.clone()]).unwrap(), 1);
+        assert_eq!(after.load_dirs(std::slice::from_ref(&absolute)).unwrap(), 1);
         assert!(before.has_script("created.js").unwrap());
         std::fs::remove_dir_all(absolute).unwrap();
     }

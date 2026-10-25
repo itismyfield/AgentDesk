@@ -315,8 +315,11 @@ enum VerifyStep {
 }
 
 #[cfg(test)]
+type VerifyHook = (VerifyStep, Box<dyn FnOnce()>);
+
+#[cfg(test)]
 thread_local! {
-    static VERIFY_HOOKS: std::cell::RefCell<Vec<(VerifyStep, Box<dyn FnOnce()>)>> =
+    static VERIFY_HOOKS: std::cell::RefCell<Vec<VerifyHook>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 

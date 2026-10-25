@@ -25,18 +25,16 @@ pub use checkpoint::{
     RecoveryStoreError, RecoveryTransition,
 };
 pub use detector::{
-    DetectorSignal, MailboxStallKind, classify_trigger, mailbox_kind_from_name,
-    trigger_from_error_message,
+    DetectorSignal, classify_trigger, mailbox_kind_from_name, trigger_from_error_message,
 };
-pub use handoff::{FallbackSpawnPlan, RecoveryIntake, dual_processing, effective_handles};
+#[cfg(test)]
+pub use handoff::effective_handles;
+pub use handoff::{FallbackSpawnPlan, RecoveryIntake};
 pub use policy::{
-    OrgAgentInput, OrgChannelInput, PolicyError, RecoveryCatalog, RecoveryConfigWire,
-    RecoveryPolicy, TriggerKind, WorkspaceMode, build_recovery_catalog,
-    load_org_recovery_catalog_from_yaml, validate_distinct_fallback_agent,
+    OrgAgentInput, OrgChannelInput, PolicyError, RecoveryCatalog, RecoveryConfigWire, TriggerKind,
+    build_recovery_catalog, validate_distinct_fallback_agent,
 };
-pub use restore::{
-    RestorePlan, RestoreSessionMode, format_restore_packet, session_mode_for_provider,
-};
+pub use restore::RestorePlan;
 
 use checkpoint::{last_n_events, prepare_event};
 use policy::ChannelRecoveryBinding;
@@ -63,6 +61,7 @@ pub struct RecoveryRuntime {
     claimed_turns: HashMap<String, String>,
     open_keys: HashSet<(String, String)>,
     spawned: Vec<FallbackSpawnPlan>,
+    #[cfg(test)]
     mailbox_handoff_calls: u32,
     pending_restore: HashMap<String, String>,
     max_checkpoint_bytes: usize,
@@ -77,6 +76,7 @@ impl Default for RecoveryRuntime {
             claimed_turns: HashMap::new(),
             open_keys: HashSet::new(),
             spawned: Vec::new(),
+            #[cfg(test)]
             mailbox_handoff_calls: 0,
             pending_restore: HashMap::new(),
             max_checkpoint_bytes: DEFAULT_MAX_CHECKPOINT_BYTES,
@@ -85,10 +85,12 @@ impl Default for RecoveryRuntime {
 }
 
 impl RecoveryRuntime {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[cfg(test)]
     pub fn with_max_checkpoint_bytes(mut self, max_checkpoint_bytes: usize) -> Self {
         self.max_checkpoint_bytes = max_checkpoint_bytes.max(1);
         self
@@ -105,14 +107,17 @@ impl RecoveryRuntime {
         self.catalog = RecoveryCatalog::default();
     }
 
+    #[cfg(test)]
     pub fn catalog(&self) -> &RecoveryCatalog {
         &self.catalog
     }
 
+    #[cfg(test)]
     pub fn mailbox_handoff_calls(&self) -> u32 {
         self.mailbox_handoff_calls
     }
 
+    #[cfg(test)]
     pub fn spawned(&self) -> &[FallbackSpawnPlan] {
         &self.spawned
     }
@@ -132,6 +137,7 @@ impl RecoveryRuntime {
         )
     }
 
+    #[cfg(test)]
     pub fn claim_turn(&mut self, channel_id: &str, turn_id: &str) {
         self.claimed_turns
             .insert(channel_id.to_string(), turn_id.to_string());
@@ -168,6 +174,7 @@ impl RecoveryRuntime {
         }
     }
 
+    #[cfg(test)]
     pub fn allows_cli_turn(&self, channel_id: &str, agent_id: &str) -> bool {
         match self.states.get(channel_id) {
             Some(state) if state.lock_held() => {
@@ -350,20 +357,6 @@ impl RecoveryRuntime {
             .agent_provider(&binding.policy.as_ref()?.fallback_agent_id)
     }
 
-    pub fn is_fallback_writer(&self, channel_id: &str, provider: &ProviderKind) -> bool {
-        let Some(state) = self.states.get(channel_id) else {
-            return false;
-        };
-        if !state.lock_held() {
-            return false;
-        }
-        state.active_writer_agent_id == state.fallback_agent_id
-            && self
-                .writer_provider(state, &state.active_writer_agent_id)
-                .as_ref()
-                == Some(provider)
-    }
-
     pub fn owner_may_retake(&self, channel_id: &str) -> bool {
         let Some(state) = self.states.get(channel_id) else {
             return false;
@@ -469,6 +462,7 @@ impl RecoveryRuntime {
         Some(plan)
     }
 
+    #[cfg(test)]
     pub fn abort(&mut self, channel_id: &str) {
         if let Some(state) = self.states.get_mut(channel_id) {
             state.status = ChannelRecoveryStatus::Aborted;
@@ -540,18 +534,33 @@ impl RecoveryRuntime {
 
 mod durable;
 #[cfg(test)]
+pub use durable::observe_durable;
+#[cfg(test)]
 pub(crate) use durable::test_store;
 pub(crate) use durable::{
     OperationPlan, PendingOperation, acknowledge_start_durable, active_channels, owner_provider,
     pending_operation, recovery_state, retry_interrupted_durable, try_execution,
 };
 pub use durable::{
-    abort_takeover_durable, allows_cli_turn, allows_cli_turn_for_provider, attach_pg_pool,
-    channel_recovery_intake, clear_catalog, complete_turn_durable, fallback_prompt_prefix,
-    fallback_provider, hydrate_from_pg, inherit_workspace, install_catalog, lease_for_provider,
-    observe_durable, observe_with_checkpoint_durable, take_restore_packet,
+    allows_cli_turn_for_provider, channel_recovery_intake, clear_catalog, complete_turn_durable,
+    fallback_prompt_prefix, fallback_provider, hydrate_from_pg, inherit_workspace, install_catalog,
+    lease_for_provider, observe_with_checkpoint_durable, take_restore_packet,
     try_restore_owner_durable,
 };
 
 #[cfg(test)]
 mod tests;
+
+pub fn peek_restore_packet(channel: &str) -> Option<String> {
+    durable::lock(&durable::coordinator().runtime)
+        .pending_restore
+        .get(channel)
+        .cloned()
+}
+
+#[cfg(test)]
+pub(crate) fn stage_restore_packet_for_test(channel: &str, packet: &str) {
+    durable::lock(&durable::coordinator().runtime)
+        .pending_restore
+        .insert(channel.into(), packet.into());
+}

@@ -583,35 +583,10 @@ pub(super) fn resolve_headless_workspace(
             })?
         })
 }
-pub(super) fn native_fast_mode_override_for_turn(
-    provider: &ProviderKind,
-    channel_fast_mode_setting: Option<bool>,
-) -> Option<bool> {
-    if matches!(provider, ProviderKind::Claude | ProviderKind::Codex) {
-        channel_fast_mode_setting
-    } else {
-        None
-    }
-}
-
-pub(super) fn codex_goals_override_for_turn(
-    provider: &ProviderKind,
-    channel_codex_goals_setting: Option<bool>,
-) -> Option<bool> {
-    if matches!(provider, ProviderKind::Codex) {
-        channel_codex_goals_setting
-    } else {
-        None
-    }
-}
-pub(super) fn effective_fast_mode_channel_id(
-    channel_id: ChannelId,
-    thread_parent: Option<(ChannelId, Option<String>)>,
-) -> ChannelId {
-    thread_parent
-        .map(|(parent_channel_id, _)| parent_channel_id)
-        .unwrap_or(channel_id)
-}
+mod feature_settings;
+pub(super) use feature_settings::{
+    codex_goals_override_for_turn, feature_key, native_fast_mode_override_for_turn,
+};
 
 pub(super) fn select_final_path<'a>(
     dispatch: &'a str,
@@ -1190,8 +1165,17 @@ mod thread_role_inheritance_tests {
                 .as_deref(),
             workspace.to_str()
         );
-        let fast_mode_key =
-            effective_fast_mode_channel_id(final_thread, Some(final_parent.clone()));
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let fast_mode_key = rt.block_on(feature_key(
+            &shared,
+            &ProviderKind::Claude,
+            final_thread,
+            Some(&final_parent),
+        ));
         assert_eq!(fast_mode_key, final_parent.0);
         assert_ne!(fast_mode_key, incoming_channel);
         let workspace = workspace.to_str();

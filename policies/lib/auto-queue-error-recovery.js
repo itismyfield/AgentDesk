@@ -6,9 +6,6 @@
  *   - `notifyAutoQueueEntryFailure(stuck, failure)` raises a human-alert
  *     WARN log line when an entry transitions to `failed` because of stuck
  *     dispatches (orphan/cancelled/failed/phantom).
- *   - `_createConsultationDispatch(entry, agentId, preflightMeta)` creates
- *     a counterpart-provider consultation dispatch when preflight asks for
- *     one (used by #256).
  *
  * Depends on `policies/lib/auto-queue-log` and `policies/lib/auto-queue-phase-gate`
  * (for the shared `loadPhaseGateCardLabel` card-label formatter), plus the
@@ -32,51 +29,6 @@ function notifyAutoQueueEntryFailure(stuck, failure) {
   );
 }
 
-// ── Consultation dispatch helper (#256) ─────────────────────────
-function _createConsultationDispatch(entry, agentId, preflightMeta) {
-  // Find the counterpart agent for consultation
-  var agent = agentdesk.db.query(
-    "SELECT cli_provider FROM agents WHERE id = ?",
-    [agentId]
-  );
-  var provider = (agent.length > 0) ? agent[0].cli_provider : "claude";
-  var counterProvider = (provider === "claude") ? "codex" : "claude";
-  var counterAgent = agentdesk.db.query(
-    "SELECT id FROM agents WHERE cli_provider = ? LIMIT 1",
-    [counterProvider]
-  );
-  var consultAgentId = (counterAgent.length > 0) ? counterAgent[0].id : agentId;
-
-  try {
-    var dispatchId = agentdesk.dispatch.create(
-      entry.kanban_card_id,
-      consultAgentId,
-      "consultation",
-      "[Consultation] " + entry.title
-    );
-    if (dispatchId) {
-      agentdesk.autoQueue.recordConsultationDispatch(
-        entry.id,
-        entry.kanban_card_id,
-        dispatchId,
-        "consultation_dispatch_created",
-        preflightMeta
-      );
-      autoQueueLog("info", "Created consultation dispatch " + dispatchId + " for " + entry.kanban_card_id, {
-        entry_id: entry.id,
-        card_id: entry.kanban_card_id,
-        dispatch_id: dispatchId
-      });
-    }
-  } catch (e) {
-    autoQueueLog("warn", "Consultation dispatch failed for " + entry.kanban_card_id + ": " + e, {
-      entry_id: entry.id,
-      card_id: entry.kanban_card_id
-    });
-  }
-}
-
 module.exports = {
-  notifyAutoQueueEntryFailure: notifyAutoQueueEntryFailure,
-  createConsultationDispatch: _createConsultationDispatch
+  notifyAutoQueueEntryFailure: notifyAutoQueueEntryFailure
 };

@@ -212,12 +212,12 @@ fn save_runtime_bot_settings_checked(
     };
 
     let mut json: serde_json::Value = match fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({})),
+        Ok(content) => serde_json::from_str(&content).map_err(|err| config_io_error(&path, err))?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
         Err(err) => return Err(err),
     };
     let Some(obj) = json.as_object_mut() else {
-        return Ok(());
+        return Err(config_io_error(&path, "settings JSON must be an object"));
     };
 
     let yaml_manages_bot = super::config_path_for_write()
@@ -444,20 +444,22 @@ fn save_runtime_bot_settings_checked(
     write_bytes_atomically(&path, &rendered)
 }
 
-pub(crate) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
+fn try_save_bot_settings(token: &str, settings: &DiscordBotSettings) -> std::io::Result<()> {
     let yaml_path = super::config_path_for_write();
     let yaml_snapshot = yaml_path
         .as_ref()
-        .and_then(|path| capture_file_snapshot(path).ok());
-    let json_path = bot_settings_path();
+        .map(|path| capture_file_snapshot(path))
+        .transpose()?;
+    let json_path = Some(
+        bot_settings_path()
+            .ok_or_else(|| std::io::Error::other("settings runtime 경로를 찾을 수 없습니다"))?,
+    );
     let json_snapshot = json_path
         .as_ref()
-        .and_then(|path| capture_file_snapshot(path).ok());
+        .map(|path| capture_file_snapshot(path))
+        .transpose()?;
 
-    if let Err(err) = persist_bot_auth_to_yaml_checked(token, settings) {
-        tracing::warn!("failed to persist bot settings yaml: {err}");
-        return;
-    }
+    persist_bot_auth_to_yaml_checked(token, settings)?;
 
     if let Err(err) = save_runtime_bot_settings_checked(token, settings) {
         let mut rollback_failed = false;
@@ -480,15 +482,28 @@ pub(crate) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
             }
         }
 
-        if rollback_failed {
-            tracing::warn!(
-                "failed to persist runtime bot settings and at least one rollback step failed: {err}"
-            );
+        let message = if rollback_failed {
+            format!("settings 저장 실패, rollback 일부 실패: {err}")
         } else {
-            tracing::warn!(
-                "failed to persist runtime bot settings; yaml/json changes rolled back: {err}"
-            );
-        }
+            format!("settings 저장 실패, YAML/JSON rollback 완료: {err}")
+        };
+        return Err(std::io::Error::other(message));
+    }
+    Ok(())
+}
+
+impl DiscordBotSettings {
+    pub(in crate::services::discord) fn try_save_bot_settings(
+        &self,
+        token: &str,
+    ) -> std::io::Result<()> {
+        try_save_bot_settings(token, self)
+    }
+}
+
+pub(crate) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
+    if let Err(error) = try_save_bot_settings(token, settings) {
+        tracing::warn!(%error, "failed to persist bot settings");
     }
 }
 

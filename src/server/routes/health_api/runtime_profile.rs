@@ -1,6 +1,8 @@
 //! Runtime-profile health projection and gateway standby semantics.
 use super::*;
 
+mod managed_herdr;
+
 pub(super) fn attach_runtime_profile(json: &mut serde_json::Value, config: &crate::config::Config) {
     json["runtime_profile"] = serde_json::json!(config.cluster.runtime_profile);
     json["modules"] = serde_json::json!(config.cluster.runtime_profile.modules());
@@ -10,7 +12,7 @@ pub(super) fn attach_runtime_profile(json: &mut serde_json::Value, config: &crat
 }
 
 /// The boot `session_hosts` view and the admission switch. No E7 runs here; `last_e7` is `never`
-/// until a launch records one. Admission is read only once a channel is configured.
+/// until the managed config upkeep reads one. Admission is read only once a channel is configured.
 pub(crate) fn herdr_health(config: &crate::config::Config) -> serde_json::Value {
     use crate::config::session_hosts::{BootSessionHosts, with_boot, with_boot_migration};
     with_boot_migration(|metadata| {
@@ -29,6 +31,7 @@ pub(crate) fn herdr_health(config: &crate::config::Config) -> serde_json::Value 
                 let local = boot.local_node() == Some(node);
                 let mut entry =
                     serde_json::json!({"node": node, "local": local, "last_e7": "never"});
+                managed_herdr::endpoint(key, &mut entry);
                 if endpoint.mode == crate::config::session_hosts::EndpointMode::UserDefault {
                     entry["mode"] = "user_default".into();
                     entry["socket"] = endpoint.socket_path.to_string_lossy().into_owned().into();
@@ -51,6 +54,7 @@ pub(crate) fn herdr_health(config: &crate::config::Config) -> serde_json::Value 
                 view["candidate"] = serde_json::json!(metadata.map(|m| m.candidate()));
                 view["applied"] = serde_json::json!(boot.config());
             }
+            managed_herdr::summarize(&mut view);
             attach_local_herdr(&mut view);
             view
         };

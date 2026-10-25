@@ -280,6 +280,23 @@ fn append(path: &Path, text: &str) {
     file.write_all(text.as_bytes()).unwrap();
 }
 
+/// Writes the same records under a new file at `path`. The original is moved aside, not removed,
+/// so the filesystem cannot hand its freed inode to the new file.
+fn replace_source(path: &Path) {
+    let aside = path.with_extension("replaced");
+    std::fs::rename(path, &aside).unwrap();
+    std::fs::write(path, std::fs::read(&aside).unwrap()).unwrap();
+    let (old, new) = (
+        std::fs::metadata(&aside).unwrap(),
+        std::fs::metadata(path).unwrap(),
+    );
+    assert_ne!(
+        (old.dev(), old.ino()),
+        (new.dev(), new.ino()),
+        "a new file, not the logged one"
+    );
+}
+
 struct Setup {
     provider: ProviderKind,
     channel: u64,

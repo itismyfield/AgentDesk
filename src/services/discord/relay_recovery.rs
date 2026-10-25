@@ -36,9 +36,9 @@ use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
 
 use super::health::HealthRegistry;
-use super::relay_health::{
-    DurableFrontierObservation, RelayActiveTurn, RelayHealthSnapshot, RelayStallState,
-};
+#[cfg(test)]
+use super::relay_health::DurableFrontierObservation;
+use super::relay_health::{RelayActiveTurn, RelayHealthSnapshot, RelayStallState};
 use super::{
     SharedData, destructive_cancel_gate, health, inflight, mailbox_clear_recovery_marker,
     mailbox_finish_turn, mailbox_snapshot, recovery, saturating_decrement_global_active,
@@ -75,7 +75,7 @@ pub(super) mod leaked_row_sweep;
 mod reattach_apply;
 #[path = "relay_recovery_circuit_alert_producer.rs"]
 mod relay_recovery_circuit_alert_producer;
-pub(super) use apply::*;
+use apply::*;
 use auto_heal_apply::apply_relay_recovery_plan;
 #[cfg(test)]
 use auto_heal_attempts::{

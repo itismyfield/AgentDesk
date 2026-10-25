@@ -32,6 +32,7 @@ pub mod meetings;
 pub(crate) mod o_channel_activation;
 pub mod postgres;
 pub mod prompt_manifests;
+pub(crate) mod provider_session_prompts;
 pub mod relay_dead_letter;
 pub(crate) mod replay_disposition;
 pub mod scheduled_messages;

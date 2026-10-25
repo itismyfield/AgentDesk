@@ -1203,27 +1203,6 @@ fn set_dispatch_status_with_backends_and_sync(
     })
 }
 
-pub(crate) fn set_dispatch_status_without_queue_sync_with_backends(
-    pg_pool: Option<&PgPool>,
-    dispatch_id: &str,
-    to_status: &str,
-    result: Option<&serde_json::Value>,
-    transition_source: &str,
-    allowed_from: Option<&[&str]>,
-    touch_completed_at: bool,
-) -> Result<usize> {
-    set_dispatch_status_with_backends_and_sync(
-        pg_pool,
-        dispatch_id,
-        to_status,
-        result,
-        transition_source,
-        allowed_from,
-        touch_completed_at,
-        false,
-    )
-}
-
 pub fn load_dispatch_row_with_backends(
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,

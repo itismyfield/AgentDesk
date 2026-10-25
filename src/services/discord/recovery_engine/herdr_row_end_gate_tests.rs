@@ -36,9 +36,7 @@ fn each_held_pass_names_its_gate_pg() {
             run.pass().await;
             assert_eq!(reason(&run), Some("transcript_open"), "open turn");
             append(&run.source, &terminal(&ProviderKind::Claude, &run.row));
-            let bytes = std::fs::read(&run.source).unwrap();
-            std::fs::remove_file(&run.source).unwrap();
-            std::fs::write(&run.source, bytes).unwrap();
+            replace_source(&run.source);
             run.pass().await;
             assert_eq!(reason(&run), Some("file_identity"), "replaced source");
             let transition = run.shared.session_transition_lock(run.channel);

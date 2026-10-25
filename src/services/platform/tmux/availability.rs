@@ -173,13 +173,13 @@ mod availability_cache_tests {
         }));
 
         for _ in 1..TMUX_AVAILABILITY_FAILURE_THRESHOLD {
-            now = now + step;
+            now += step;
             assert!(resolve_tmux_availability(&mut cache, now, || {
                 TmuxAvailabilityProbe::Unknown
             }));
         }
 
-        now = now + step;
+        now += step;
         assert!(!resolve_tmux_availability(&mut cache, now, || {
             TmuxAvailabilityProbe::Unknown
         }));
@@ -251,7 +251,7 @@ mod availability_cache_tests {
             assert!(resolve_tmux_availability(&mut cache, now, || {
                 TmuxAvailabilityProbe::Unknown
             }));
-            now = now + step;
+            now += step;
         }
 
         assert!(!resolve_tmux_availability(&mut cache, now, || {

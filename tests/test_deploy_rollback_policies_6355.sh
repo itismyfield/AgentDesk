@@ -135,6 +135,7 @@ done
 if [ -f "$POLICY_HELPER" ]; then
     printf '. %q\n' "$POLICY_HELPER" >>"$CODE/lib.sh"
 fi
+printf '. %q\n' "$REPO_ROOT/scripts/lib/deploy_allow_degraded.sh" >>"$CODE/lib.sh"
 # Promotion through the plist regeneration; the dashboard and skills swaps are not modelled.
 # shellcheck disable=SC2016  # Literal source lines, matched verbatim.
 PROMOTE_SEG="$(extract_segment 'REL_BINARY="$ADK_REL/bin/agentdesk"' \

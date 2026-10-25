@@ -3,6 +3,7 @@
 //! This module is intentionally pure and has no production caller. It cannot
 //! perform Discord I/O, persist state, mutate legacy stores, or replace legacy
 //! authority. A later slice must provide separately reviewed adapter wiring.
+#![cfg(test)]
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Candidate {
@@ -430,7 +431,8 @@ mod tests {
 
     #[test]
     fn every_bind_guard_clause_is_required() {
-        let mutations: [(&str, fn(&mut BindGuard)); 6] = [
+        type GuardMutation = fn(&mut BindGuard);
+        let mutations: [(&str, GuardMutation); 6] = [
             ("journal ownership", |guard| {
                 guard.protection = ProtectionEvidence::Missing
             }),
