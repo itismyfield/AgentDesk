@@ -387,10 +387,21 @@ fn restart_restores_nothing(tag: &str, change: impl FnOnce(&Fixture, &Path)) {
 // A rollout file replaced since its hook logged it is not the logged source.
 #[test]
 fn a_restart_restores_no_codex_rollout_replaced_since_it_was_logged_pg() {
+    use std::os::unix::fs::MetadataExt;
     restart_restores_nothing("replaced-rollout", |_, path| {
-        let text = std::fs::read(path).unwrap();
-        std::fs::remove_file(path).unwrap();
-        std::fs::write(path, text).unwrap();
+        // Moved aside, not removed: a freed inode could be handed to the new file.
+        let aside = path.with_extension("replaced");
+        std::fs::rename(path, &aside).unwrap();
+        std::fs::write(path, std::fs::read(&aside).unwrap()).unwrap();
+        let (old, new) = (
+            std::fs::metadata(&aside).unwrap(),
+            std::fs::metadata(path).unwrap(),
+        );
+        assert_ne!(
+            (old.dev(), old.ino()),
+            (new.dev(), new.ino()),
+            "a new rollout file"
+        );
     });
 }
 

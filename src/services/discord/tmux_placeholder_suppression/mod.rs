@@ -23,8 +23,7 @@ mod unicode_units_tests;
 
 pub(super) use self::evidence::{
     GuardedDeliveredElsewhereSignal, GuardedNonterminalDeleteDecision, cleanup_current_output_eof,
-    guarded_cleanup_delivered_elsewhere_signal, guarded_nonterminal_delete_decision,
-    placeholder_real_body_exposure_evidence,
+    guarded_cleanup_delivered_elsewhere_signal, placeholder_real_body_exposure_evidence,
 };
 pub(super) use self::ops::{
     FallbackPlaceholderCleanupDecision, apply_placeholder_suppression,
@@ -37,7 +36,7 @@ pub(super) use self::ops::{
 #[cfg(test)]
 use self::evidence::{
     apply_terminal_committed_delete_proof_gate,
-    guarded_cleanup_delivered_elsewhere_signal_from_anchor,
+    guarded_cleanup_delivered_elsewhere_signal_from_anchor, guarded_nonterminal_delete_decision,
 };
 use self::ops::strip_placeholder_indicators_for_preserve;
 

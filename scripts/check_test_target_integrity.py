@@ -138,6 +138,7 @@ LIB_INVENTORY_STATIC_ONLY_BY_PLATFORM = {
         "services::process::simple_cancel_watcher_tests::linux_proc_stat_parser_handles_comm_with_spaces_and_parens",
     }),
     "linux": frozenset({
+        "cli::doctor::orchestrator::managed_herdr_config::tests::launchd_job_drift_is_reported_from_its_definition_without_touching_it",
         "cli::init::launchd_plist_tests::clamp_launchd_nofile_soft_limit_never_exceeds_host_hard_limit",
         "cli::init::launchd_plist_tests::generate_launchd_plist_release_sets_clamped_soft_number_of_files_limit",
         "cli::init::launchd_plist_tests::generate_launchd_plist_uses_requested_fresh_home_and_root_only",

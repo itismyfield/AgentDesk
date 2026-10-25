@@ -76,6 +76,13 @@ instead of silently downgrading. Machine-readable reports include
 `coverage_class`, `coverage_class_actual`, `run_id`, and `failure_attribution`
 on each scenario.
 
+A `wait_for_discord_text` step (or an `E-36` request) with `relay_author: provider`
+matches only bodies posted by the cell's provider bot, and `provider_text_present`
+applies the same author check to the final presence assertion. Notify and
+announce bot posts that quote a marker therefore never count as delivery.
+`E-4` scopes its direct-input body; `E-1`, `E-2`, `E-36`, `E-50` and `E-51` scope
+every turn marker, on legacy and Herdr cells.
+
 Provider-specific scenarios (`E-6` claude `/compact`, `E-7` codex `/compact`)
 narrow the list. TUI-keystroke-only scenarios (`E-4`, `E-10`, `E-12`) include
 only the two `*-tui` cells. `E-13` covers the Claude Code pipe/headless
@@ -227,6 +234,12 @@ Covered P0/P1 backlog items:
 - `foreign-active destructive restart refusal` (#2935): `E-17`, orchestrator-owned
   hold of a foreign `claude-tui` mailbox while a `codex-tui` restart is attempted
   (guard-only, no real restart).
+- `/compact recap not relayed as input`: `E-6`, Claude cells. The oracle is the
+  two continuation openings `injected_prompt_policy.rs` classifies; no bot post may
+  quote either, so a relayed recap or a direct-input notice for it fails.
+- `multi-unit characters across chunk boundaries`: `E-15`'s second (UTF-16) turn,
+  all cells. Every post stays within 2000 UTF-16 units with no U+FFFD or lone
+  surrogate, and the emoji payload must reach at least two relay bodies.
 
 Remaining exact gaps:
 
@@ -304,6 +317,13 @@ checks inside scenarios that never ran. Dry runs contribute no executed passes.
 The matrix forwards these totals and reports partial coverage when either dormant
 scenarios or skipped assertions remain, even if all executed scenarios passed.
 
+Every prompt send appends a `prompt_sends` row (`send_state: attempted`) before it
+leaves and fills `message_id` with `send_state: acknowledged` when the response
+returns; provider contact is claimed only after that acknowledgement. When the
+phase deadline expires, including inside a failure handler's teardown or inside
+one of E-18's Herdr text-stop subcases, the report row still carries those rows
+and the contact fact.
+
 Post-deploy relay continuity uses a narrower operational wrapper around the
 same driver:
 
@@ -313,7 +333,7 @@ python3 scripts/e2e/post_deploy_relay_continuity.py --fixture pass
 python3 scripts/e2e/post_deploy_relay_continuity.py \
     --cell claude-tui \
     --dry-run \
-    --deploy-command 'AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 scripts/deploy-release.sh --skip-review'
+    --deploy-command 'AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 scripts/deploy-release.sh'
 ```
 
 The live form adds `--confirm-live` and runs only TUI cells (`claude-tui` or
@@ -349,6 +369,14 @@ not false, `fully_recovered` not false, and no unallowed degraded reasons). A
 only the status and the `ok`/`degraded` flags, never `fully_recovered` or an
 unlisted degraded reason. A failed `launchctl kickstart` fails the step. Other
 bodies keep polling until timeout and then fail with the last health summary.
+
+`/api/health/detail.boot_incarnation` is a random id generated once per dcserver
+process (the public body does not carry it). A restart step reads it before the
+kickstart and passes only when health returns with a different value; an
+unchanged value fails the step as `restart not observed`, and a missing value is
+unevaluable before any kickstart. Herdr restarts and the observe-only `verify`
+use the same comparison; `verify` falls back to the uptime inference only when
+either side lacks the field.
 
 Unknown channels, including other cells, still fail default strict readiness.
 Public health probes request `/api/health/detail` for an Unknown waiver only

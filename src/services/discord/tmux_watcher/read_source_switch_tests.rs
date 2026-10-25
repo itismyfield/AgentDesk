@@ -11,7 +11,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::session_host::test_support::InjectedLivenessGuard;
 use crate::services::session_host::{HostLiveness, HostSessionRef};
 use poise::serenity_prelude::{ChannelId, Http};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

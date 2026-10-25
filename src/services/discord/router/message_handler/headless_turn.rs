@@ -134,7 +134,7 @@ async fn start_reserved_headless_turn_admitted(
             )
         });
     let early_fast_mode_channel_id =
-        effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
+        feature_key(shared, &provider, channel_id, early_thread_parent.as_ref()).await;
     if let GoalCommandKind::Lifecycle(command) = classify_codex_goal_command_for_provider(
         &provider,
         prompt,
@@ -349,7 +349,7 @@ async fn start_reserved_headless_turn_admitted(
     };
 
     let fast_mode_channel_id =
-        effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
+        feature_key(shared, &provider, channel_id, early_thread_parent.as_ref()).await;
     super::super::super::commands::reset_provider_session_if_pending(
         &ctx.http,
         shared,

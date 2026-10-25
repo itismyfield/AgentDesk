@@ -28,7 +28,7 @@ env:
 jobs:
   macos_hosted:
     name: Trusted macOS check (hosted)
-    # Pin the arm64 image for H2 measurements; the host-triple check rejects image drift.
+    # Pin the arm64 image so a runner image change is an explicit edit.
     runs-on: macos-15
     steps:
       # Heavy steps skip only on a successful run=false, which scheduled and manual runs never get.
@@ -84,16 +84,6 @@ jobs:
       - name: cargo check
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         run: cargo check --all-targets
-
-      # H2 tmux boundary ratchet, macOS lane; inert until the baseline lands.
-      - name: H2 tmux boundary measurement (macos, inert)
-        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
-        run: bash scripts/ci/h2_measure.sh --lane macos --inert
-
-      # H2 R-O module map, macOS lane; a no-op (no rustc-dev install) until the baseline lands.
-      - name: H2 module map (macos, inert)
-        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
-        run: python3 scripts/ci/h2_modmap.py --lane macos --inert
 
       - name: cargo test (non-PG, targeted subset)
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'

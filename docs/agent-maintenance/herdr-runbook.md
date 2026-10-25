@@ -59,13 +59,13 @@ admission은 해당 프로세스의 공통 스위치다. 특정 채널만 멈추
 
 - 검증한 서버 바이너리를 버전별 경로에 고정하고 배포물 식별값을 운영 기록에 남긴다.
 - 클라이언트 업데이트와 실행 서버 바이너리 교체를 별도 작업으로 관리한다.
-- 무인 서버 교체·자동 재시작을 허용하지 않는다.
+- 무인 서버 교체·자동 재시작을 허용하지 않는다. 아래 config 자동 보장도 서버를 재시작·정지·reload하지 않는다.
 - 관리 대상 서버를 사용자 개인 Herdr 환경과 분리한다. named session 이름만으로 설정까지 분리된다고 가정하지 않는다.
-- 운영 중 정규 config 수정이나 `reload-config`를 복구 수단으로 사용하지 않는다.
+- 관리 config를 손으로 고치거나 `reload-config`를 복구 수단으로 쓰지 않는다. 관리 config는 아래 자동 보장만 고치며, 고친 내용은 실행 중 서버에 적용되지 않는다.
 
 현재 adapter의 protocol은 22이며 restore 설정 검증인 E7이 허용하는 서버 버전은 **0.9.3 하나**다. 일반 ping handshake는 버전 문자열 일치를 요구하지 않지만 E7은 별도의 검증 버전 목록을 적용한다. 새 버전의 protocol이 같다는 이유만으로 운영 입력 호환성을 승인하지 않는다.
 
-근거: `src/services/session_host/herdr/model.rs:11`, `:15`; `src/services/session_host/herdr/observe.rs:117`, `:153`.
+근거: `src/services/session_host/herdr/model.rs:13`, `:17`; `src/services/session_host/herdr/observe.rs:120`, `:163`.
 
 관리 서버의 canonical config는 다음 바이트열이다. 마지막 줄의 줄바꿈도 포함한다.
 
@@ -74,11 +74,51 @@ admission은 해당 프로세스의 공통 스위치다. 특정 채널만 멈추
 resume_agents_on_restore = false
 ```
 
-E7은 `<herdr_home>/config.toml`의 내용, 서버 프로세스의 `HERDR_CONFIG_PATH`, `XDG_CONFIG_HOME=<herdr_home>/xdg`, 파일 수정 시각과 서버 시작 시각, socket peer의 PID·시작 식별을 함께 확인한다. config는 서버 시작보다 1초 넘게 앞서 작성되어 있어야 한다. 파일을 시작 후 다시 쓰거나 내용을 추가하면 검증을 통과한다고 가정하지 않는다.
+E7은 `<herdr_home>/config.toml`의 내용, 서버 프로세스의 `HERDR_CONFIG_PATH`, `XDG_CONFIG_HOME=<herdr_home>/xdg`, 파일 수정 시각과 서버 시작 시각, socket peer의 PID·시작 식별을 함께 확인한다. config는 서버 시작보다 1초 넘게 앞서 작성되어 있어야 한다. AgentDesk가 config를 고친 경우에는 그 publication 기록 시각도 서버 시작보다 1초 넘게 앞서야 한다. 파일을 시작 후 다시 쓰거나 내용을 추가하면 검증을 통과한다고 가정하지 않는다.
 
-근거: `src/services/session_host/herdr/observe.rs:20`, `:88`, `:103`, `:127`, `:134`.
+근거: `src/services/session_host/herdr/observe.rs:20`, `:125`, `:130`, `:138`.
 
-[O-U-1] 실제 서비스 관리자, 실행 파일 고정 경로, 재시작 정책, socket·디렉터리 소유권과 권한은 배포 환경에서 확인해야 한다. 특정 launchd label과 config mode 0444를 코드가 설치·강제하는 것으로 간주하지 않는다. E7에는 mode 0444 검사가 없다.
+#### 2.1.1 전용(legacy_dedicated) endpoint의 config 자동 보장
+
+AgentDesk가 이 노드의 `legacy_dedicated` endpoint가 선언한 `<herdr_home>/config.toml`을 위 canonical 바이트로 맞춘다. 사람이 파일을 준비할 필요가 없다.
+
+- 시점: dcserver 부팅 때 설치된 BOOT snapshot 기준으로 1회, 이후 process마다 하나인 점검 task가 30초마다, 그리고 `agentdesk doctor --fix`. 세 경로가 같은 writer와 같은 home lock(`.agentdesk-config.lock`)을 쓴다. migration이 거부돼 이전 승인 snapshot으로 부팅하면 그 snapshot의 home만 고친다. live YAML의 새 endpoint는 dcserver 재시작 뒤에 대상이 된다.
+- 이미 canonical이면 아무것도 쓰지 않는다. 바이트·inode·mtime이 그대로이고 lock·기록 파일도 만들지 않는다. 일반 `agentdesk doctor`와 health 조회는 언제나 쓰지 않는다.
+- 내용이 다르면 원본 전체를 `config.toml.bak.<epoch>-<nanos>.<uuid>`(0600)에 남긴 뒤 원자 교체한다. 순서는 `.agentdesk-config-state`에 `v1 preparing` 확정 → 백업 확정 → canonical 교체 → `v1 committed <초> <나노초>` 확정이다. 백업을 자동으로 지우거나 원본을 자동 복원하지 않는다.
+- 다른 writer가 lock을 쥐고 있으면(busy) 다음 30초 tick에 다시 시도한다. busy 자체는 health 사유가 아니다.
+- 쓰기를 거부하는 경우: home이 개인 Herdr 경로(`~/.config/herdr`, `$XDG_CONFIG_HOME/herdr`, `~/.local/bin/herdr`, `/opt/homebrew/bin/herdr`)와 겹치거나 symlink·hardlink를 거치는 경우, 실행 계정 소유가 아니거나 group/other 쓰기 권한이 있는 경우, 같은 home을 서로 다른 socket·경로로 선언한 경우다. dcserver 실행 계정의 `HOME`이나 `XDG_CONFIG_HOME`이 관리 home 안을 가리키면 개인 경계를 확인할 수 없으므로 이 노드의 모든 관리 home 쓰기를 거부한다. 한 endpoint의 거부가 다른 home의 보장을 막지 않는다.
+
+**적용과 재시작.** 실행 중 서버는 config를 다시 읽지 않는다. 고친 config는 다음 서버 시작부터 적용되고, 그전까지 그 서버는 E7 Unverified로 생성·입력이 거부된다(fail-closed). 기다려도 Off로 바뀌지 않는다. 운영자는 기존 서비스 관리자로 서버를 계획 재시작한다.
+
+1. 실행 중인 작업과 대기 입력의 보존·정지 계획을 확인한다.
+2. health `herdr.endpoints.<key>.managed_config.earliest_start_after` 또는 doctor 출력의 "E7 accepts a server started after …" 시각을 확인한다. Committed 기록 뒤 **2.1초 이상** 지나야 한다. Linux는 process 시작 시각이 최대 1초 이르게 읽힌다.
+3. 그 시각 뒤에 서비스 관리자로 서버를 시작한다. KeepAlive가 더 일찍 올린 서버는 Unverified로 남으므로 다시 계획 재시작한다.
+4. health의 `last_e7`이 `off`가 되고 `managed_config.reason`이 사라졌는지 확인한다.
+
+중단된 publication을 이어 끝낸 경우(Recovered)에도 새 Committed 시각이 생기므로 그 뒤에 다시 재시작해야 한다. AgentDesk는 herdr 재시작·정지·reload, job 설치·수정, 바이너리 교체, pane 정리를 하지 않는다. `agentdesk doctor --fix --allow-restart`의 재시작 권한도 dcserver 서비스에만 해당한다.
+
+**health 상세(`/api/health/detail`의 `herdr`).** 로컬 전용 endpoint마다 `managed_config`(`config`, `backup`, `reason`, `observed_at`, `earliest_start_after`)와 마지막 E7(`last_e7`)을 보이고, `managed_config_reasons`에 고정 사유를 모은다. 이 사유는 아직 top-level `status`·`degraded_reasons`와 Discord 알림에 연결하지 않았다(공통 경고 owner 연결 대기).
+
+| 사유 | 의미와 조치 |
+|---|---|
+| `herdr_config_restart_required` | config는 canonical이지만 실행 중 서버가 그보다 먼저 시작했다. 위 재시작 절차 |
+| `herdr_config_fix_failed` | 백업·쓰기·fsync가 실패했다. 디스크·권한을 확인한 뒤 다음 tick이나 `doctor --fix` 결과를 본다 |
+| `herdr_managed_home_unsafe` | 위 거부 조건에 걸렸다. 전용 디렉터리·소유자·권한·dcserver 환경을 고친다. 고치기 전에는 아무것도 쓰지 않는다 |
+| `herdr_config_record_unreadable` | `.agentdesk-config-state`가 손상됐거나 v1 형식이 아니다. 자동으로 지우지 않는다. 수동: 서버를 정지하고 config.toml이 canonical인지 확인한 뒤 기록을 다른 곳으로 옮기고 `agentdesk doctor --fix`를 실행한 다음 2.1초 이상 지나 서버를 시작한다 |
+| `herdr_job_env_mismatch` | 실행 중 서버의 `HERDR_CONFIG_PATH`·`XDG_CONFIG_HOME`이 선언한 home과 다르다. job 정의를 고치고 계획 재시작한다 |
+| `herdr_config_observation_stale` | 점검 기록이 90초 넘게 갱신되지 않았다. dcserver 로그의 점검 task를 확인한다 |
+
+health의 기존 `herdr.restart_required`는 BOOT와 live `session_hosts` 차이(dcserver 재시작 필요)이며 위 사유와 다른 의미다.
+
+**launchd job 점검.** macOS의 `agentdesk doctor`는 `~/Library/LaunchAgents/com.agentdesk.herdr.plist`의 `Label`과 `EnvironmentVariables`의 `HERDR_CONFIG_PATH`·`XDG_CONFIG_HOME`이 `<herdr_home>/config.toml`·`<herdr_home>/xdg`를 가리키는지 읽기만 하고 불일치·누락·읽기 실패·여러 전용 home의 대응 불명을 보고한다. 이 결과는 다음 시작 정의일 뿐이며 실행 중 서버의 판정은 E7이 한다. doctor는 job을 설치·수정·load·재시작하지 않는다.
+
+근거: `src/services/session_host/herdr/managed_config.rs`, `managed_config/path.rs`, `managed_config/maintenance.rs`, `src/cli/doctor/orchestrator/managed_herdr_config.rs`, `src/server/routes/health_api/runtime_profile/managed_herdr.rs`.
+
+[O-U-1] 실제 서비스 관리자, 실행 파일 고정 경로, socket·디렉터리 소유권과 권한은 배포 환경에서 확인해야 한다. 코드는 launchd job을 설치·강제하지 않는다. E7에는 config mode 0444 검사가 없고, writer는 canonical인 기존 파일의 mode를 바꾸지 않는다.
+
+#### 2.1.2 사용자 기본(user_default) endpoint
+
+사용자 개인 Herdr 서버의 config는 위 자동 보장의 대상이 아니다. 자동 writer는 개인 Herdr 설정을 바꾸지 않는다. 개인 설정 변경은 owner 동의 흐름으로만 하고, 적용 시점은 다음 서버 시작이다. 절차는 [herdr-user-default.md](herdr-user-default.md)를 따른다. doctor의 launchd job 점검도 전용 endpoint만 본다.
 
 ### 2.2 AgentDesk·O·프로젝트·provider 환경
 

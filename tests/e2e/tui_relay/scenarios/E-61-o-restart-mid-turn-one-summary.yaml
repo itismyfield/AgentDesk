@@ -23,8 +23,8 @@ steps:
       poll_interval_s: 1
   - wait_for_discord_text: "[E2E:E61:BEFORE]"
     timeout_s: 180
-  - restart_dcserver:
-      target: dev
+  # The run picks dev or release from --base-url or --restart-target-override.
+  - restart_dcserver: {}
   - wait_for_discord_text: "[E2E:E61:AFTER]"
     timeout_s: 300
 assertions:

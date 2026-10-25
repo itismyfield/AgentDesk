@@ -15,33 +15,43 @@ steps:
   - request_key: S01
     send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S01]"
     body_marker: "[E2E:E36:{run_id}:S01]"
+    relay_author: provider
   - request_key: S02
     send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S02]"
     body_marker: "[E2E:E36:{run_id}:S02]"
+    relay_author: provider
   - request_key: S03
     send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S03]"
     body_marker: "[E2E:E36:{run_id}:S03]"
+    relay_author: provider
   - request_key: S04
     send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S04]"
     body_marker: "[E2E:E36:{run_id}:S04]"
+    relay_author: provider
   - request_key: S05
     send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S05]"
     body_marker: "[E2E:E36:{run_id}:S05]"
+    relay_author: provider
   - request_key: S06
     send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S06]"
     body_marker: "[E2E:E36:{run_id}:S06]"
+    relay_author: provider
   - request_key: S07
     send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S07]"
     body_marker: "[E2E:E36:{run_id}:S07]"
+    relay_author: provider
   - request_key: S08
     send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S08]"
     body_marker: "[E2E:E36:{run_id}:S08]"
+    relay_author: provider
   - request_key: S09
     send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S09]"
     body_marker: "[E2E:E36:{run_id}:S09]"
+    relay_author: provider
   - request_key: S10
     send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S10]"
     body_marker: "[E2E:E36:{run_id}:S10]"
+    relay_author: provider
   - request_key: QA
     send_discord_prompt: |
       E2E E36 timed response fixture. Follow these steps exactly:
@@ -51,8 +61,10 @@ steps:
       4. After it returns emit exactly one line: [E2E:E36:{run_id}:QA:DONE]
     hold_marker: "[E2E:E36:{run_id}:QA:HOLD]"
     body_marker: "[E2E:E36:{run_id}:QA:DONE]"
+    relay_author: provider
   - request_key: QB
     send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:QB]"
     body_marker: "[E2E:E36:{run_id}:QB]"
+    relay_author: provider
 assertions:
   - no_duplicate_content: true

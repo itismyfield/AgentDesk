@@ -453,4 +453,10 @@ fn herdr_real_server_launch_input_bytes_and_refusals() {
     );
     std::thread::sleep(Duration::from_millis(500));
     assert!(!marker.exists());
+    drop(server);
+    managed_config::missing_config_writer_then_later_real_server_is_off();
+    managed_config::running_real_server_stays_unverified_until_a_later_start();
 }
+
+#[path = "managed_config_real_tests.rs"]
+mod managed_config;

@@ -8,51 +8,6 @@ use super::{
     record_commit_tombstone_with_offset, reload, shared_reaction_applier,
     terminal_commit_covers_marker_with_offsets, try_claim_marker,
 };
-/// Watcher terminal-commit chokepoint: a body-visible normal commit covers
-/// every marker whose recorded foreign identity matches the COMMITTED turn
-/// (codex r1) → `⏳ → ✅`. Returns markers drained.
-pub(in crate::services::discord) async fn drain_on_terminal_commit(
-    shared: &Arc<SharedData>,
-    provider: &str,
-    tmux_session_name: &str,
-    channel_id: u64,
-    committed_user_msg_id: u64,
-    committed_started_at: &str,
-) -> usize {
-    drain_on_terminal_commit_with_offset(
-        shared,
-        provider,
-        tmux_session_name,
-        channel_id,
-        committed_user_msg_id,
-        committed_started_at,
-        None,
-    )
-    .await
-}
-
-pub(in crate::services::discord) async fn drain_on_terminal_commit_with_offset(
-    shared: &Arc<SharedData>,
-    provider: &str,
-    tmux_session_name: &str,
-    channel_id: u64,
-    committed_user_msg_id: u64,
-    committed_started_at: &str,
-    committed_turn_start_offset: Option<u64>,
-) -> usize {
-    let applier = shared_reaction_applier(shared.clone());
-    drain_on_terminal_commit_with_applier_and_offset(
-        provider,
-        tmux_session_name,
-        channel_id,
-        now_ms(),
-        committed_user_msg_id,
-        committed_started_at,
-        committed_turn_start_offset,
-        &applier,
-    )
-    .await
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn drain_on_terminal_commit_with_offsets(
@@ -80,6 +35,7 @@ pub(in crate::services::discord) async fn drain_on_terminal_commit_with_offsets(
     .await
 }
 
+#[cfg(test)]
 pub(in crate::services::discord) async fn drain_on_terminal_commit_with_applier(
     provider: &str,
     tmux_session_name: &str,
@@ -103,6 +59,7 @@ pub(in crate::services::discord) async fn drain_on_terminal_commit_with_applier(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(in crate::services::discord) async fn drain_on_terminal_commit_with_applier_and_offset(
     provider: &str,
     tmux_session_name: &str,

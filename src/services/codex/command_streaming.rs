@@ -69,7 +69,7 @@ pub(crate) fn execute_command_streaming_observed(
 
     let readonly_mode = is_readonly_tool_policy(allowed_tools);
     let developer_instructions = compose_codex_developer_instructions(system_prompt, allowed_tools);
-    let prompt = compose_codex_prompt(prompt, None, allowed_tools);
+    let prompt = prompt.to_owned();
 
     if let Some(profile) = remote_profile {
         // Remote tmux can outlive its SSH owner, so this dispatch path remains refused.

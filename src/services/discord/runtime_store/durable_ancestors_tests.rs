@@ -129,7 +129,7 @@ fn ancestor_links_reused_only_with_same_identities() {
     fs::create_dir_all(provider.join("t2")).unwrap();
     assert_eq!(
         publish(&witness, &file("t2")),
-        [provider.clone()],
+        std::slice::from_ref(&provider),
         "new token"
     );
     assert!(publish(&witness, &file("t2")).is_empty(), "steady");
@@ -138,7 +138,7 @@ fn ancestor_links_reused_only_with_same_identities() {
     fs::create_dir(provider.join("t2")).unwrap();
     assert_eq!(
         publish(&witness, &file("t2")),
-        [provider.clone()],
+        std::slice::from_ref(&provider),
         "recreated token"
     );
 
@@ -311,7 +311,11 @@ fn failed_ancestor_flush_is_not_remembered() {
     fsync_ancestors_with(&witness, &root, &token.join("1.json")).unwrap();
     let retried = watch.flushed(Step::Ancestors);
     if reuses(temp.path()) {
-        assert_eq!(retried, [parent.clone()], "only the failed link");
+        assert_eq!(
+            retried,
+            std::slice::from_ref(&parent),
+            "only the failed link"
+        );
     } else {
         assert_eq!(retried, chain(&root, &token));
     }

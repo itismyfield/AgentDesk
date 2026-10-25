@@ -160,6 +160,7 @@ pub(super) async fn handle_stream_content_message(
                             session_id: sid,
                             raw_session_id,
                         } => {
+                            crate::services::provider::session_prompt::observe(ctx.cancel_token, raw_session_id.as_deref().unwrap_or(&sid));
                             new_session_id = Some(sid.clone());
                             new_raw_provider_session_id =
                                 raw_session_id.or_else(|| Some(sid.clone()));
@@ -287,6 +288,7 @@ pub(super) async fn handle_stream_content_message(
                             result,
                             session_id: sid,
                         } => {
+                            if let Some(ref sid) = sid { crate::services::provider::session_prompt::observe(ctx.cancel_token, sid); }
                             let session_died_retry = result == "__session_died_retry__";
                             if !session_died_retry { ctx.cancel_token.native_stop.completed(); }
                             if session_died_retry {

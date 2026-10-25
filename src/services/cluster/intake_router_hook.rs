@@ -38,7 +38,7 @@ mod o_route_tests;
 pub(crate) mod owner_record;
 mod session_owner;
 
-use session_owner::SessionOwnerResolution;
+pub(crate) use session_owner::{SessionOwnerResolution, resolve_session_owner};
 
 pub(crate) use super::intake_routing_config::{
     EffectiveIntakeRoutingConfig, IntakeRoutingMode, effective_intake_routing_config,

@@ -1,5 +1,5 @@
 id: E-15
-title: 2000자 초과 응답 청크 완전성 (#2838 P0-2) — head→mid→tail 순서 + 중복 0
+title: 2000자 초과 응답 청크 완전성 (#2838 P0-2) — head→mid→tail 순서 + 중복 0, UTF-16 다중 단위 변형 포함
 agent_mode: real_live
 coverage_class: live
 # Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
@@ -16,6 +16,15 @@ notes: |
   The interior markers are requested at explicit positions so the assertion is
   robust to minor model output variance while still proving the >2000-char body
   arrived intact across chunk boundaries.
+
+  The second turn is the UTF-16 variant. The ASCII turn spends one UTF-16 unit
+  per character; here every line carries supplementary-plane emoji (two UTF-16
+  units, four UTF-8 bytes each) and Hangul (one unit, three bytes), so any chunk
+  boundary lands among multi-unit characters. utf16_chunk_integrity holds every
+  bot post to the 2000-unit budget, rejects U+FFFD or a lone surrogate left by a
+  split character, and requires the emoji to reach at least two relay bodies, so
+  a response that never crossed a boundary cannot pass. The emoji avoid the
+  status-chrome prefixes (📦, 🔚, ✅, ⚠️) a chunk could otherwise start with.
 steps:
   - send_prompt: |
       긴 응답 완전성 테스트입니다. 아래를 정확히 순서대로 출력해줘. 설명·요약 금지.
@@ -25,14 +34,29 @@ steps:
       4) 마지막 줄: [E2E:E15:END]
   - wait_for_discord_text: "[E2E:E15:END]"
     timeout_s: 300
+  - wait_idle_s: 3
+  - send_prompt: |
+      UTF-16 경계 테스트입니다. 아래를 정확히 순서대로 출력해줘. 설명·요약·코드블록 금지.
+      1) 첫 줄: [E2E:E15U:BEGIN]
+      2) 그다음 "E15U-LINE-NNN 🧪🌏🎯🪐🧪🌏🎯🪐 가나다라마바사" 형식으로 001부터 120까지 한 줄에 하나씩 (총 120줄, 0 채움 3자리, 이모지 8개와 한글 7자는 매 줄 그대로)
+      3) 60번째 줄(E15U-LINE-060) 바로 다음 줄에 단독으로: [E2E:E15U:MID]
+      4) 마지막 줄: [E2E:E15U:END]
+  - wait_for_discord_text: "[E2E:E15U:END]"
+    timeout_s: 300
 assertions:
+  # First, so a broken chunk is reported as such before marker checks read the bodies.
+  - utf16_chunk_integrity:
+      max_units: 2000
+      min_chunks: 2
   - raw_message_count_between_markers:
-      min: 1
-      max: 40
+      min: 3
+      max: 80
   - relay_latency_within:
       max_seconds: 300
   - text_present: "[E2E:E15:BEGIN]"
   - text_present: "[E2E:E15:END]"
+  - text_present: "[E2E:E15U:BEGIN]"
+  - text_present: "[E2E:E15U:END]"
   - no_control_chars: true
   # Full span must relay in order across chunk boundaries: BEGIN, an early
   # interior line, the MID sentinel, a late interior line, then END. If the
@@ -44,11 +68,21 @@ assertions:
       - "[E2E:E15:MID]"
       - "E15-LINE-150"
       - "[E2E:E15:END]"
+  - ordered_text_present:
+      - "[E2E:E15:END]"
+      - "[E2E:E15U:BEGIN]"
+      - "E15U-LINE-010"
+      - "[E2E:E15U:MID]"
+      - "E15U-LINE-110"
+      - "[E2E:E15U:END]"
   # Boundary sentinels must not be re-emitted (e.g. a chunk-retry that re-sends
   # the first chunk, or an ACK-timeout re-relay).
   - no_duplicate_marker: "[E2E:E15:BEGIN]"
   - no_duplicate_marker: "[E2E:E15:END]"
+  - no_duplicate_marker: "[E2E:E15U:BEGIN]"
+  - no_duplicate_marker: "[E2E:E15U:END]"
   - no_status_chrome: true
+  # Grouped by prompt send time, so each of the two turns needs exactly one.
   - completion_per_turn:
       exact: 1
       marker: "[E2E:E15:END]"

@@ -22,9 +22,9 @@ use crate::services::tui_o::shadow::{CaptureBatch, CapturedRecord, IDENTITY_VERS
 pub const SEGMENT_MAX_BYTES: u64 = 64 << 20;
 /// Per-channel spool ceiling; reaching it pauses the source instead of dropping records.
 pub const SPOOL_CAP_BYTES: u64 = 1 << 30;
-/// Replayable versions: v3 only reads Codex `turn_aborted` as Idle and v4 only keys Claude rows v3
-/// blocked, so older frames keep every delivered unit's key. Appends roll to a current segment.
-const READABLE_IDENTITY_VERSIONS: [u32; 3] = [2, 3, 4];
+/// Replayable versions: v3 reads Codex `turn_aborted` as Idle, v4 keys multi-block Claude rows and
+/// v5 skips Codex `additional_tools`, so older frames keep their unit keys. Appends roll forward.
+const READABLE_IDENTITY_VERSIONS: [u32; 4] = [2, 3, 4, 5];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {

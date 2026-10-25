@@ -330,6 +330,8 @@ pub(in crate::services::discord) mod tests {
 
     // ---- controller adapter (fake gateway driving the REAL controller) --
 
+    type ReplaceHook = Box<dyn FnOnce() -> GatewayFuture<'static, ()> + Send>;
+
     // Minimal `TurnGateway` fake for the recovery short-replace controller path.
     // Only `replace_message_with_outcome` is exercised (`Replace { Active }`
     // transport); the non-terminal `Active` lifecycle makes `post_send_finalize`
@@ -341,8 +343,7 @@ pub(in crate::services::discord) mod tests {
         replace_calls: AtomicUsize,
         delete_calls: AtomicUsize,
         pub(in crate::services::discord) replacements: std::sync::Mutex<Vec<(MessageId, String)>>,
-        replace_hook:
-            std::sync::Mutex<Option<Box<dyn FnOnce() -> GatewayFuture<'static, ()> + Send>>>,
+        replace_hook: std::sync::Mutex<Option<ReplaceHook>>,
     }
 
     impl RecoveryFakeGateway {

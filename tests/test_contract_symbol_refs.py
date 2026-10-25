@@ -9,7 +9,6 @@ these tests target: doc-anchor extraction, the code-derived Rust-anchor parser
 gate, the set comparison, and the distinct-anchor floor. Each round-2/round-3
 false-pass has a dedicated reproduction.
 """
-# H2 cases also check Python import bindings and the public script's exit status.
 
 from __future__ import annotations
 
@@ -608,55 +607,6 @@ class RelayContractPathFilterTest(unittest.TestCase):
         self.assertEqual(stale, [], "update REFERENCE_SOURCE_MODULES or drop the entry")
 
 
-class H2ContractCliTest(unittest.TestCase):
-    def run_contract(self, text):
-        with tempfile.TemporaryDirectory() as tmp:
-            doc = Path(tmp, "h2.md")
-            doc.write_text(text, encoding="utf-8")
-            return subprocess.run([sys.executable, str(SCRIPT_PATH), "--h2-doc", str(doc)],
-                                  capture_output=True, text=True)
-
-    def test_matching_h2_document_passes_the_script(self):
-        proc = self.run_contract(CHECKER.H2_DOC.read_text(encoding="utf-8"))
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("H2 contract symbol-ref check passed", proc.stdout)
-
-    def test_document_only_symbol_warns_with_diagnostic(self):
-        text = CHECKER.H2_DOC.read_text(encoding="utf-8") + "\n`sym:missing::entry`\n"
-        proc = self.run_contract(text)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        self.assertIn("H2 contract: sym:missing::entry has no imported reference", proc.stdout)
-
-    def test_import_only_symbol_warns_with_diagnostic(self):
-        for symbol in ("h2_cfg_compare::compare_cfgs", "h2_cfg_collect::seal", "h2_cfg_collect::read_manifest",
-                       "h2_env::environment", "h2_env::check_host"):
-            with self.subTest(symbol=symbol):
-                text = CHECKER.H2_DOC.read_text(encoding="utf-8").replace(f"`sym:{symbol}`", "")
-                proc = self.run_contract(text)
-                self.assertEqual(proc.returncode, 0, proc.stdout)
-                self.assertIn(f"H2 contract: imported {symbol} is not documented", proc.stdout)
-
-    def test_main_preserves_import_search_path_on_h2_success_and_error(self):
-        probe = textwrap.dedent("""
-            import runpy
-            import sys
-            checker = runpy.run_path(sys.argv[1])
-            before = sys.path[:]
-            result = checker["main"](["--h2-doc", sys.argv[2]])
-            assert result == int(sys.argv[3]), result
-            assert sys.path == before, (before, sys.path)
-        """)
-        with tempfile.TemporaryDirectory() as tmp:
-            for doc, expected in ((CHECKER.H2_DOC, 0), (Path(tmp, "missing.md"), 1)):
-                with self.subTest(doc=doc):
-                    proc = subprocess.run(
-                        [sys.executable, "-c", probe, str(SCRIPT_PATH), str(doc), str(expected)],
-                        capture_output=True, text=True,
-                    )
-                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-                    self.assertEqual(proc.stderr, "")
-
-
 class CliSeverityTest(unittest.TestCase):
     def test_equality_floor_and_form_drift_warns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -664,15 +614,13 @@ class CliSeverityTest(unittest.TestCase):
             doc.write_text("`sym:module::old`", encoding="utf-8")
             source.write_text(_block("    use super::new as _;", cfg="#[cfg(windows)]"), encoding="utf-8")
             report = CHECKER.build_report(doc=doc, rust_sources={source: ("module",)})
-        with patch.object(CHECKER, "build_report", return_value=report), \
-                patch.object(CHECKER, "check_h2_contract", return_value=[]), patch("sys.stdout") as stdout:
+        with patch.object(CHECKER, "build_report", return_value=report), patch("sys.stdout") as stdout:
             self.assertEqual(CHECKER.main([]), 0)
         self.assertIn("warning", str(stdout.write.call_args_list))
 
     def test_missing_reference_source_still_fails(self) -> None:
         report = CHECKER.build_report(doc_anchors=set(), rust_sources={Path("/missing/source.rs"): ("module",)})
-        with patch.object(CHECKER, "build_report", return_value=report), \
-                patch.object(CHECKER, "check_h2_contract", return_value=[]), patch("sys.stdout"):
+        with patch.object(CHECKER, "build_report", return_value=report), patch("sys.stdout"):
             self.assertEqual(CHECKER.main([]), 1)
 
     def test_scanner_exception_cannot_pass(self) -> None:

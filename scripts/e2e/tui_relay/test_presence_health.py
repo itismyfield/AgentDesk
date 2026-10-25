@@ -191,6 +191,7 @@ class PresenceHealth(unittest.TestCase):
     def test_e6_restart_adapter_passes_its_target(self):
         with patch.object(driver, "_guard_no_foreign_active_turns"), \
                 patch.object(driver.subprocess, "run", return_value=SimpleNamespace(returncode=0)), \
+                patch.object(driver, "_boot_incarnation", side_effect=["before", "after"]), \
                 patch.object(driver, "wait_for_health") as wait:
             driver.restart_dcserver_for_e2e(target="dev", args=SimpleNamespace(restart_script=None),
                 base_url="http://offline.invalid", cell="claude-tui", channel_id=TARGET,

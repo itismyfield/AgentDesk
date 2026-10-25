@@ -15,7 +15,7 @@ const DEFERRED_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WaitTermination {
+pub(crate) enum WaitTermination {
     AlreadyOwned,
     CreateFailed,
     Persisted,

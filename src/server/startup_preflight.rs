@@ -1,7 +1,8 @@
 //! Startup checks that must run after runtime dependencies are published and
 //! before cluster bootstrap begins.
 
-/// Runs the non-blocking Codex hook trust-hash check during server startup.
+/// Runs the non-blocking Codex hook trust-hash check during server startup, then starts
+/// the process's one managed Herdr config upkeep task.
 ///
 /// This stage preserves the former `server::run` behavior: the check probes the
 /// same resolved Codex executable that session launches use, and any failed
@@ -12,6 +13,8 @@ pub(crate) fn run() {
         crate::services::claude_tui::hook_bundle::probe_codex_cli_version,
         crate::services::claude_tui::hook_bundle::run_codex_hook_startup_self_check,
     );
+    #[cfg(unix)]
+    crate::services::session_host::managed_config::maintenance::spawn();
 }
 
 fn run_with<Resolve, Probe, Check>(resolve: Resolve, probe: Probe, check: Check)

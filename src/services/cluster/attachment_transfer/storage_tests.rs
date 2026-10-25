@@ -80,9 +80,14 @@ async fn attachment_bundle_store_restart_identity_integrity_expiry_and_cleanup_p
     foreign.identity.provider = "codex".into();
     assert!(store::load(&pool, &foreign).await.is_err());
     assert!(
-        store::validate_refs(&pool, &[reference.clone()], "claude", "other-channel")
-            .await
-            .is_err()
+        store::validate_refs(
+            &pool,
+            std::slice::from_ref(&reference),
+            "claude",
+            "other-channel"
+        )
+        .await
+        .is_err()
     );
     let mut incomplete = reference.clone();
     incomplete.source_count = 1;

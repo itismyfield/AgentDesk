@@ -43,9 +43,7 @@ fn unresolved_reads_keep_the_row_as_production_does_pg() {
                 pane.garbled = false;
                 pane.screen = Some(READY.into());
             });
-            let bytes = std::fs::read(&run.source).unwrap();
-            std::fs::remove_file(&run.source).unwrap();
-            std::fs::write(&run.source, bytes).unwrap();
+            replace_source(&run.source);
             run.pass().await;
             assert_kept(&run, &saved, "replaced source").await;
             run.close().await;

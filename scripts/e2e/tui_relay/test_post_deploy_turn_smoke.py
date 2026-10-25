@@ -28,7 +28,7 @@ SCENARIOS = ROOT / "tests/e2e/tui_relay/scenarios"
 FIXTURES = ROOT / "tests/e2e/tui_relay/fixtures/turn_smoke"
 RUN_ID = "post-deploy-smoke-turns-fixture"
 CHANNELS = {"claude-tui": "1509350490461180105", "codex-tui": "1509350778043895902"}
-PROVIDER_BOT = "1479000000000000001"
+NOTIFY_BOT = "1480000000000000009"
 CLEARED = "세션을 초기화했어요."
 
 
@@ -41,8 +41,10 @@ class LiveShapedDiscord:
 
     base_url = "http://offline.invalid"
 
-    def __init__(self, *, after_clear: str = "deliver"):
+    def __init__(self, *, after_clear: str = "deliver", provider: str = "claude", answer_author: str | None = None):
         self.after_clear = after_clear
+        self.provider_bot = assertions.provider_bot_id(provider)
+        self.answer_author = answer_author or self.provider_bot
         self.ids = itertools.count(1_000)
         self.messages: list[dict] = []
         self.channel_id = None
@@ -65,16 +67,16 @@ class LiveShapedDiscord:
     def send(self, channel_id, content):  # noqa: ARG002
         sent = self._post(content, author=assertions.OUR_BOT_ID)
         if content.startswith("!clear"):
-            self._post(CLEARED, author=PROVIDER_BOT)
+            self._post(CLEARED, author=self.provider_bot)
             return sent
         marker = content[content.index("[E2E:") : content.index("]") + 1]
         if marker.endswith(":AFTER_CLEAR]") and self.after_clear == "withhold":
-            self._post("✅ 완료", author=PROVIDER_BOT)
+            self._post("✅ 완료", author=self.provider_bot)
         elif marker.endswith(":AFTER_CLEAR]") and self.after_clear == "duplicate":
-            self._post(marker, author=PROVIDER_BOT)
-            self._post(f"🆕 새 세션 시작\n\n{marker}", author=PROVIDER_BOT)
+            self._post(marker, author=self.provider_bot)
+            self._post(f"🆕 새 세션 시작\n\n{marker}", author=self.provider_bot)
         else:
-            self._post(marker, author=PROVIDER_BOT)
+            self._post(marker, author=self.answer_author)
         return sent
 
     def fetch_messages(self, channel_id, *, after_id=None, limit=100):  # noqa: ARG002
@@ -86,7 +88,7 @@ class LiveShapedDiscord:
         return next((m for m in observed if predicate(m)), None), observed
 
 
-def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver") -> dict:
+def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver", answer_author: str | None = None) -> dict:
     scenario = next(
         s for s in driver.load_scenarios(SCENARIOS, cell=cell) if s["id"] == scenario_id
     )
@@ -110,7 +112,8 @@ def run_live_shaped(scenario_id: str, cell: str, *, after_clear: str = "deliver"
         patch("run_tui_relay.assert_cell_idle", return_value={"status": "idle"}),
     ):
         return driver.run_scenario(
-            scenario, args=args, run_id=RUN_ID, client=LiveShapedDiscord(after_clear=after_clear)
+            scenario, args=args, run_id=RUN_ID,
+            client=LiveShapedDiscord(after_clear=after_clear, provider=driver.cell_provider(cell), answer_author=answer_author),
         )
 
 
@@ -128,6 +131,19 @@ def verdict(result: dict, scenario_id: str, cell: str, log_fixture: str | None) 
         log_counts=log_counts,
         driver_rc=0 if result["status"] == "pass" else 1,
     )
+
+
+class ProviderAuthorDelivery(unittest.TestCase):
+    """A turn marker counts only from the cell's provider bot, never a notify/announce body quoting it."""
+
+    def test_legacy_turn_waits_reject_notify_and_announce_bodies(self):
+        for scenario_id, cell in (("E-50", "claude-tui"), ("E-51", "codex-tui")):
+            for author in (NOTIFY_BOT, assertions.OUR_BOT_ID):
+                with self.subTest(scenario=scenario_id, author=author):
+                    result = run_live_shaped(scenario_id, cell, answer_author=author)
+                    self.assertEqual(result["status"], "fail", result.get("reason"))
+                    self.assertIn("timeout waiting for Discord text", result["reason"])
+            self.assertEqual(run_live_shaped(scenario_id, cell)["status"], "pass")
 
 
 class TurnSmokeFromCollectedEvidence(unittest.TestCase):
@@ -228,13 +244,14 @@ class HerdrTurnSmoke(unittest.TestCase):
                 "row": dict(channel="41", provider="claude", state="bound", nonce="same",
                             pane="provider_running", launch_evidence="recorded", input_hold=None)}
 
-    def collect(self, after_clear="deliver"):
+    def collect(self, after_clear="deliver", answer_author=None):
         scenario = next(s for s in driver.load_scenarios(SCENARIOS, cell="claude-herdr") if s["id"] == "E-50")
         args = Namespace(cell="claude-herdr", channel_id="41", base_url="http://127.0.0.1:8797",
                          dry_run=False, hard_reset_session_each=False, reset_before_each=False,
                          allow_destructive=False, final_refetches=1)
         with patch.object(driver.herdr, "observe", return_value=self.evidence()), patch.object(driver.herdr.time, "sleep"):
-            return driver.run_scenario(scenario, args=args, client=LiveShapedDiscord(after_clear=after_clear), run_id=RUN_ID)
+            return driver.run_scenario(scenario, args=args, run_id=RUN_ID,
+                                       client=LiveShapedDiscord(after_clear=after_clear, answer_author=answer_author))
 
     def judge(self, result):
         return turn_smoke.judge(report={"run_id": RUN_ID, "channel_id": "41", "cell": "claude-herdr", "scenarios": [result]},
@@ -251,6 +268,13 @@ class HerdrTurnSmoke(unittest.TestCase):
         args = observe.call_args.args[1]
         self.assertEqual((args.herdr_endpoint, args.herdr_status_bin), ("test", "/test/agentdesk"))
         self.assertTrue(observe.call_args.kwargs["cold"])
+
+    def test_herdr_turn_waits_reject_notify_and_announce_bodies(self):
+        for author in (NOTIFY_BOT, assertions.OUR_BOT_ID):
+            with self.subTest(author=author):
+                result = self.collect(answer_author=author)
+                self.assertEqual(result["status"], "fail", result.get("reason"))
+                self.assertIn("Herdr Discord marker timeout", result["reason"])
 
     def test_herdr_delivery_counts_and_missing_observations_fail_closed(self):
         for behavior, expected in (("deliver", True), ("withhold", False), ("duplicate", False)):
@@ -408,7 +432,7 @@ class ConfiguredHerdrClassification(unittest.TestCase):
             if not content.startswith("!clear"):
                 return original(client, channel, content)
             sent = client._post(content, author=assertions.OUR_BOT_ID)
-            client._post("세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled(59)", author=PROVIDER_BOT)
+            client._post("세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled(59)", author=client.provider_bot)
             return sent
         with patch.object(LiveShapedDiscord, "send", refusing):
             result = run_live_shaped("E-50", "claude-tui")

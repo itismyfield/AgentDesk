@@ -117,10 +117,23 @@ pub(super) fn spawn_retries(
         let deleter = super::super::queued_placeholders::SerenityStalePlaceholderDeleter {
             http: Arc::clone(http),
         };
+        #[cfg(unix)]
+        let http = Arc::clone(http);
         tokio::spawn(async move {
             for attempt in 0.. {
                 tokio::time::sleep(backoff(attempt)).await;
                 let report = settle_once(&shared, &provider, &deleter, &mut restore).await;
+                // Boot skipped this channel's consents; replay them once its merges have landed.
+                #[cfg(unix)]
+                if restore.queue.is_none() && restore.marker.is_none() {
+                    let replay =
+                        crate::services::discord::router::herdr_consent::startup::restore_only;
+                    if let Err(error) =
+                        replay(&http, &shared, &provider, restore.channel.get()).await
+                    {
+                        tracing::warn!(%error, "held channel consent replay kept inputs held");
+                    }
+                }
                 if report.settled {
                     break;
                 }
