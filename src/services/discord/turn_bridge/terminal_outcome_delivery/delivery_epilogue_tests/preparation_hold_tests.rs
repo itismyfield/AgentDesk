@@ -553,18 +553,14 @@ async fn a2_cleanup_refusal_then_success_delivers_once_without_requeue() {
     let empty = view("", false);
     let mut captures = std::collections::VecDeque::from([Some(view("person draft", false))]);
     captures.extend(std::iter::repeat_n(Some(empty.clone()), 40));
-    let record_path = path.clone();
     let spy = SpyGuard::install(SpyState {
         captures,
-        captures_after_send: Some(std::iter::repeat_n(Some(empty), 10).collect()),
-        on_send: Some(Box::new(move |call| {
-            if call == "keys:Enter" {
-                writeln!(std::fs::OpenOptions::new().append(true).open(&record_path).unwrap(), "{}",
-                serde_json::json!({"type":"user", "sessionId":"transient-sid", "message":{"content":frame}})).unwrap();
-            }
-        })),
         ..SpyState::default()
     });
+    // The managed attempt reads and types through tmux; Enter records the prompt as Claude does.
+    let tmux = crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::ScriptedTmux::new(&empty);
+    let receipt = serde_json::json!({"type":"user", "sessionId":"transient-sid", "message":{"content":frame}});
+    tmux.on_enter(&path, &receipt.to_string());
     crate::services::claude_tui::composer_lock::guard_draft(
         &session,
         crate::services::claude_tui::composer_lock::DraftGuard::RecoveryRequired,
@@ -604,14 +600,9 @@ async fn a2_cleanup_refusal_then_success_delivers_once_without_requeue() {
         "successful submit clears a transient admission refusal"
     );
     assert!(cap.exact_user_receipt());
-    assert_eq!(
-        spy.calls()
-            .iter()
-            .filter(|c| c.as_str() == "keys:Enter")
-            .count(),
-        1
-    );
-    drop(spy);
+    assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
+    assert!(!spy.calls().iter().any(|c| c.as_str() == "keys:Enter"));
+    drop((spy, tmux));
     let (mut ctx, mut state) = driver.parts();
     ctx.watcher_delivery_pin = None;
     state.user_text_owned = frame.into();

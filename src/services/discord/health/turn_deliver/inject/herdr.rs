@@ -4,16 +4,34 @@
 use std::path::Path;
 use std::time::Instant;
 
-use super::names::{unconfirmed_name, veto_name};
+use super::names::veto_name;
 use super::{InjectAttempt, Input, unconfirmed};
 use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedRecord, HostedState};
-use crate::services::claude_tui::busy_inject::{self, Unconfirmed, Veto};
+use crate::services::claude_tui::busy_inject::{self, ReceiptError, Veto};
 use crate::services::claude_tui::composer_lock::{self, ComposerAdmission};
 use crate::services::claude_tui::host_input::{InputRun, run_herdr};
 use crate::services::claude_tui::input::TuiInputAction;
 use crate::services::discord::SharedData;
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::{HerdrTarget, herdr_endpoints};
+
+/// Herdr retains transcript-based confirmation independently of Claude tmux injection.
+#[derive(Clone, Copy)]
+enum Unconfirmed {
+    PasteFailed,
+    EnterFailed,
+    ContaminatedSubmit,
+    NotObserved,
+}
+
+fn unconfirmed_name(detail: Unconfirmed) -> &'static str {
+    match detail {
+        Unconfirmed::PasteFailed => "paste_failed",
+        Unconfirmed::EnterFailed => "enter_failed",
+        Unconfirmed::ContaminatedSubmit => "contaminated_submit",
+        Unconfirmed::NotObserved => "not_observed",
+    }
+}
 
 /// The Herdr gate refused before the paste; nothing reached the pane.
 const HERDR_REFUSED: &str = "herdr_refused";
@@ -72,7 +90,7 @@ pub(super) fn run(
     }
     let locked = composer_lock::try_with_composer_mutation_lock(session, || {
         if let Err(veto) = judge(pane, session, transcript) {
-            return InjectAttempt::NotSent(veto_name(veto));
+            return InjectAttempt::NotSent(veto);
         }
         let Ok(offset) = std::fs::metadata(transcript).map(|meta| meta.len()) else {
             return InjectAttempt::NotSent(veto_name(Veto::TranscriptUnavailable));
@@ -91,7 +109,7 @@ pub(super) fn run(
             TuiInputAction::Enter,
         ];
         let result = match run_herdr(pane, &plan, None) {
-            // The server's write ACK is not Claude's receipt; the transcript decides, as on tmux.
+            // Herdr keeps its transcript receipt policy after the server's write ACK.
             InputRun::Applied => {
                 let timing = &busy_inject::TIMING;
                 let deadline = Instant::now() + timing.confirm_window;
@@ -99,6 +117,10 @@ pub(super) fn run(
                 if let Err(detail) =
                     busy_inject::await_receipt(receipt, deadline, timing.confirm_poll)
                 {
+                    let detail = match detail {
+                        ReceiptError::NotObserved => Unconfirmed::NotObserved,
+                        ReceiptError::ContaminatedSubmit => Unconfirmed::ContaminatedSubmit,
+                    };
                     return unconfirmed(input, session, turn_id, unconfirmed_name(detail));
                 }
                 tracing::info!(
@@ -134,22 +156,22 @@ pub(super) fn run(
 
 /// The pane's composer is empty and unguarded, no modal shows, and the screen and transcript both
 /// show a live turn, so the Enter queues behind it.
-fn judge(pane: &HerdrTarget, session: &str, transcript: &Path) -> Result<(), Veto> {
+fn judge(pane: &HerdrTarget, session: &str, transcript: &Path) -> Result<(), &'static str> {
     use crate::services::tmux_common as tc;
-    let capture = pane.capture(-80).ok_or(Veto::PaneUnavailable)?;
+    let capture = pane.capture(-80).ok_or(veto_name(Veto::PaneUnavailable))?;
     if tc::tmux_capture_indicates_claude_tui_interactive_modal(&capture) {
-        return Err(Veto::Modal);
+        return Err(veto_name(Veto::Modal));
     }
     let admission = composer_lock::composer_admission(session, || Some(capture.clone()));
     if admission != ComposerAdmission::Any
         || tc::tmux_capture_indicates_claude_tui_prompt_draft(&capture)
         || !tc::tmux_capture_indicates_claude_tui_exact_empty_composer(&capture)
     {
-        return Err(Veto::Draft);
+        return Err("draft");
     }
     let turn = crate::services::tui_turn_state::observe_claude_jsonl_turn_state(transcript);
     if !turn.is_busy() || !tc::tmux_capture_indicates_claude_tui_busy(&capture) {
-        return Err(Veto::NotBusy);
+        return Err(veto_name(Veto::NotBusy));
     }
     Ok(())
 }
