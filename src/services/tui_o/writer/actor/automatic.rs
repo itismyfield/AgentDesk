@@ -35,6 +35,47 @@ pub(super) async fn ready(job: &mut Job, key: &str) -> Result<(), PolicyHold> {
     }
 }
 
+/// Re-derive the source claim under final authority and bind age to the verified second probe.
+pub(super) fn codex_evidence(
+    job: &Job,
+    key: &str,
+    snapshot: &super::super::transition_cleanup::Snapshot,
+    cursor: &crate::services::tui_o::store::spool::Cursor,
+) -> Option<crate::services::tui_o::store::spool::RetentionEvidenceV1> {
+    use super::super::transition_cleanup::Termination;
+    use crate::services::tui_o::store::spool::RetentionEvidenceV1;
+    let Some(Termination::Retention(claim)) = &job.request.termination else {
+        return None;
+    };
+    let Some(super::super::codex_snapshot::Observation::Complete(observed)) = &snapshot.codex
+    else {
+        return None;
+    };
+    let fresh = super::codex_retention::for_hop(
+        observed,
+        key,
+        &cursor.source,
+        claim.hop_seq,
+        &claim.end.pane,
+    )
+    .ok()?;
+    if fresh != **claim || job.automatic.is_none() {
+        return None;
+    }
+    let last = job.probes.get(key)?.last_dialogue?;
+    let now = (job.wall)();
+    if !super::automatic_age::old_enough(Some(last), now) {
+        return None;
+    }
+    Some(RetentionEvidenceV1 {
+        claim: fresh,
+        min_age_secs: 7 * 24 * 60 * 60,
+        last_dialogue: chrono::DateTime::from(last),
+        observed_at: chrono::DateTime::from(now),
+        scope: job.scope.as_ref()?.digest.to_string(),
+    })
+}
+
 fn policy_hold(reason: PolicyHold) -> PolicyHold {
     #[cfg(test)]
     if super::transition::test_hooks::retention_mutant("collapse_policy") {

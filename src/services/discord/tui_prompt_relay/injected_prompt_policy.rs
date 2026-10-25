@@ -9,6 +9,7 @@
 
 use super::super::response_sanitizer::subagent_notification_card;
 use super::super::tui_task_card::strip_terminal_controls;
+use super::super::{DISCORD_MSG_LIMIT, formatting::discord_message_units};
 
 const LOCAL_COMMAND_STDOUT_OPEN: &str = "<local-command-stdout>";
 const LOCAL_COMMAND_STDOUT_CLOSE: &str = "</local-command-stdout>";
@@ -292,7 +293,49 @@ pub(super) fn format_ssh_direct_prompt_notification(
     _tmux_session_name: &str,
     prompt: &str,
 ) -> String {
-    super::super::session_notice::subtext("⌨️", prompt)
+    let prompt = strip_terminal_controls(prompt)
+        .replace("\r\n", "\n")
+        .replace(['\r', '\u{2028}', '\u{2029}'], "\n");
+    let mut output = String::from("-# ⌨️ ");
+    let mut units = discord_message_units(&output);
+    // Keep source-scalar boundaries so a clamp cannot split a Markdown escape
+    // or the zero-width mention guard attached to an at-sign.
+    let mut checkpoints = Vec::new();
+    for ch in prompt.chars() {
+        let escaped = match ch {
+            '\n' => "\n-# ".to_string(),
+            '@' => "@\u{200b}".to_string(),
+            '<' => "‹".to_string(),
+            '>' => "›".to_string(),
+            '\\' | '`' | '*' | '_' | '~' | '|' | '[' | ']' | '#' | '-' | '+' | '.' | '(' | ')'
+            | '!' => format!("\\{ch}"),
+            _ => ch.to_string(),
+        };
+        let next_units = units + discord_message_units(&escaped);
+        if next_units > DISCORD_MSG_LIMIT {
+            break;
+        }
+        checkpoints.push((output.len(), units));
+        output.push_str(&escaped);
+        units = next_units;
+    }
+    let mut omitted = prompt.chars().count() - checkpoints.len();
+    if omitted == 0 {
+        return output;
+    }
+    loop {
+        let suffix = format!("… (이하 {omitted}자)");
+        if units + discord_message_units(&suffix) <= DISCORD_MSG_LIMIT {
+            output.push_str(&suffix);
+            return output;
+        }
+        let (end, previous_units) = checkpoints
+            .pop()
+            .expect("the notice header leaves room for the omission marker");
+        output.truncate(end);
+        units = previous_units;
+        omitted += 1;
+    }
 }
 
 #[cfg(test)]

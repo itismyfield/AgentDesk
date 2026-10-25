@@ -1,4 +1,5 @@
-use chrono::TimeZone;
+use crate::services::tui_o::shadow::capture::Fingerprint;
+use chrono::{TimeZone, Utc};
 
 use super::super::tests::{enabled, initialized};
 use super::super::{OEra, OStore, STORE_DIR_NAME};
@@ -74,6 +75,7 @@ fn record(source: &SourceId) -> TransitionCleanup {
             prefix_hash: hex::encode(Sha256::digest(b"")),
             fingerprint: Fingerprint::path(source).unwrap(),
         },
+        retention: None,
         ended: ExecutionEnd {
             host: "mac-book".into(),
             pane: "AgentDesk-claude-e2e".into(),
@@ -157,13 +159,21 @@ fn transition_retire_writes_retired_and_its_audit_in_one_cursor_over_the_expecte
     ];
     for (stale, audit) in refused {
         let before = fixture.cursor_bytes();
-        let result = channel.retire_transition(&stale, audit);
+        let result = channel.retire_transition(
+            &stale,
+            audit,
+            crate::services::tui_o::shadow::ShadowProvider::Claude,
+        );
         assert!(matches!(result, Err(StoreError::Rejected(_))), "{result:?}");
         assert_eq!(fixture.cursor_bytes(), before);
         assert_eq!(channel.cursor(&fixture.source), Some(&expected));
     }
     channel
-        .retire_transition(&expected, record(&fixture.source))
+        .retire_transition(
+            &expected,
+            record(&fixture.source),
+            crate::services::tui_o::shadow::ShadowProvider::Claude,
+        )
         .unwrap();
     let retired = Cursor {
         retired: true,
@@ -184,7 +194,11 @@ fn transition_retire_whose_directory_sync_fails_is_not_done_though_the_new_file_
     let expected = channel.cursor(&fixture.source).unwrap().clone();
     let kind = std::io::ErrorKind::Other;
     let planted = fault::plant(&fixture.channel_dir(), Step::ReplaceDirSync, kind, Some(1));
-    let result = channel.retire_transition(&expected, record(&fixture.source));
+    let result = channel.retire_transition(
+        &expected,
+        record(&fixture.source),
+        crate::services::tui_o::shadow::ShadowProvider::Claude,
+    );
     drop(planted);
     assert!(matches!(result, Err(StoreError::Io(_))), "{result:?}");
     let on_disk = cursor_file(&fixture).unwrap();
@@ -220,4 +234,74 @@ fn transition_facts_keep_each_failed_read_an_error() {
     let facts = channel.read_transition_facts([&fixture.source]);
     assert!(facts.rotation.is_err() && facts.checkpoint.is_err());
     assert!(facts.witnesses[&source_key(&fixture.source)].is_err());
+}
+
+#[test]
+fn codex_retention_store_requires_complete_audit_before_single_cursor_write() {
+    use crate::services::tui_o::shadow::ShadowProvider;
+    let fixture = Fixture::new();
+    std::fs::write(&fixture.source.path, b"").unwrap();
+    let mut channel = fixture.open();
+    channel.attach_source(&fixture.source).unwrap();
+    let expected = channel.cursor(&fixture.source).unwrap().clone();
+    let unchanged = fixture.cursor_bytes();
+    let mut audit = record(&fixture.source);
+    assert!(
+        channel
+            .retire_transition(&expected, audit.clone(), ShadowProvider::Codex)
+            .is_err()
+    );
+    assert_eq!(fixture.cursor_bytes(), unchanged);
+    audit.ended.first_seq = audit.hop_seq;
+    audit.ended.last_seq = audit.hop_seq;
+    audit.retention = Some(RetentionEvidenceV1 {
+        claim: RetentionClaimV1 {
+            version: 1,
+            provider: ShadowProvider::Codex,
+            channel: 7,
+            old: expected.source.clone(),
+            hop_seq: audit.hop_seq,
+            binding_seq: 1,
+            binder_seq: 1,
+            binder_nonce: "old-nonce".into(),
+            successor: SourceId {
+                session_id: "new".into(),
+                ..fixture.source.clone()
+            },
+            observation: format!("hrot-codex-observation-v1:{}", "1".repeat(64)),
+            end: audit.ended.clone(),
+            basis: RetentionBasisV1::SamePane,
+        },
+        min_age_secs: 604800,
+        last_dialogue: audit.at,
+        observed_at: audit.at + chrono::Duration::days(7),
+        scope: format!("hrot-scope-v2:{}", "2".repeat(64)),
+    });
+    for variant in ["young", "age_policy", "scope_v1", "source", "binder"] {
+        let mut bad = audit.clone();
+        let evidence = bad.retention.as_mut().unwrap();
+        match variant {
+            "young" => evidence.observed_at -= chrono::Duration::nanoseconds(1),
+            "age_policy" => evidence.min_age_secs = 1,
+            "scope_v1" => evidence.scope = evidence.scope.replace("v2", "v1"),
+            "source" => evidence.claim.old.session_id.push('x'),
+            "binder" => evidence.claim.binding_seq = evidence.claim.binder_seq + 1,
+            _ => unreachable!(),
+        }
+        assert!(
+            channel
+                .retire_transition(&expected, bad, ShadowProvider::Codex)
+                .is_err(),
+            "{variant}"
+        );
+        assert_eq!(fixture.cursor_bytes(), unchanged, "{variant}: write zero");
+    }
+    channel
+        .retire_transition(&expected, audit.clone(), ShadowProvider::Codex)
+        .unwrap();
+    drop(channel);
+    let actual = fixture.open().cursor(&fixture.source).unwrap().clone();
+    assert!(actual.retired);
+    assert_eq!(actual.transition_cleanup, Some(audit));
+    assert_eq!(std::fs::read(&fixture.source.path).unwrap(), b"");
 }

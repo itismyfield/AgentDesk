@@ -11,7 +11,8 @@ Current tracker: #3747
 ## Background
 
 Dispatch Discord notification idempotency is currently guarded through two
-`kv_meta` keys in `src/services/dispatches/discord_delivery.rs`:
+`kv_meta` keys in `src/services/dispatches/discord_delivery/guard.rs`
+(`reserving_key`, `notified_key`):
 
 - `dispatch_reserving:{dispatch_id}` claims an in-flight notification send.
 - `dispatch_notified:{dispatch_id}` marks the semantic notification as already
