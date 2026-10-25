@@ -11,6 +11,7 @@ from . import herdr
 
 LIMITATION = "dcserver incarnation change is not proven; operator restart evidence is required"
 UPTIME_NOTE = "restart inferred from server uptime below time since mark; no boot id"
+INCARNATION_NOTE = "restart proven by a changed dcserver boot_incarnation"
 # Whole-second uptime truncation plus 1 s spare for clock skew; elapsed starts after the mark
 # response, so a restart during the mark request is excluded rather than covered by margin.
 UPTIME_MARGIN_S = 2
@@ -76,6 +77,16 @@ def usable_clock(clock):
     """A supported boot-clock reading with finite, non-negative seconds."""
     return (isinstance(clock, dict) and clock.get("clock") in BOOT_CLOCKS.values()
             and type(clock.get("seconds")) in (int, float) and math.isfinite(clock["seconds"]) and clock["seconds"] >= 0)
+
+
+def incarnation_evidence(after, mark):
+    """Compare boot incarnations when both sides carry one; None falls back to uptime."""
+    before = mark["observation"].get("server_values", {}).get("boot_incarnation")
+    now = after.get("server_values", {}).get("boot_incarnation")
+    if not all(isinstance(value, str) and value for value in (before, now)):
+        return None
+    return {"restart_evidence": "boot_incarnation" if before != now else "not_observed",
+            "boot_incarnation_before": before, "boot_incarnation_after": now}
 
 
 def restart_evidence(after, mark, verify_clock):
@@ -154,12 +165,16 @@ def run(driver, args):
                 restart["after"] = after
                 if any(after["row"].get(k) != mark["observation"]["row"].get(k) for k in ("channel", "provider", "nonce")):
                     raise ValueError("restart target row continuity failed")
-                restart.update(restart_evidence(after, mark, verify_clock))
+                restart.update(incarnation_evidence(after, mark) or restart_evidence(after, mark, verify_clock))
+                if restart["restart_evidence"] == "not_observed" and "boot_incarnation_before" in restart:
+                    raise ValueError(f"boot_incarnation stayed {restart['boot_incarnation_before']}; restart not observed")
                 if restart["restart_evidence"] == "not_observed":
                     raise ValueError(f"server uptime {restart['uptime_secs']}s is not below {restart['elapsed_secs']:.3f}s "
                                      f"since mark minus {UPTIME_MARGIN_S}s; restart not observed")
                 if restart["restart_evidence"] == "server_uptime":
                     restart["limitation"] = UPTIME_NOTE
+                if restart["restart_evidence"] == "boot_incarnation":
+                    restart["limitation"] = INCARNATION_NOTE
                 restart["status"] = "verified"
                 restart["followup_scope"] = "Post-restart turn only; original E-8/E-19 acceptance is not claimed."
                 client = driver.discord.DiscordClient(base_url=args.base_url, timeout_s=args.turn_start_timeout_s)

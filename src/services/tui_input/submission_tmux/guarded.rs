@@ -93,7 +93,6 @@ impl Geometry {
             format!("#{{==:#{{pane_id}},{}}}", self.pane),
             format!("#{{==:#{{pane_width}},{}}}", self.width),
             format!("#{{==:#{{pane_height}},{}}}", self.height),
-            "#{==:#{window-size},manual}".into(),
             "#{==:#{window_panes},1}".into(),
             "#{==:#{pane_dead},0}".into(),
             format!("#{{==:#{{pid}},{}}}", self.server_pid),

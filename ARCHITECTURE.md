@@ -46,6 +46,8 @@ src/
 │   │   │   ├── health_snapshot_tests.rs
 │   │   │   ├── herdr_policy.rs
 │   │   │   ├── herdr_policy_tests.rs
+│   │   │   ├── managed_herdr_config.rs
+│   │   │   ├── managed_herdr_config_tests.rs
 │   │   │   ├── observation_checks.rs
 │   │   │   ├── observation_tests.rs
 │   │   │   ├── provider_credentials.rs
@@ -213,6 +215,7 @@ src/
 │   ├── postgres/
 │   │   ├── advisory_lock.rs
 │   │   ├── advisory_lock_tests.rs
+│   │   ├── agent_sync.rs
 │   │   ├── shared_config.rs
 │   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
@@ -223,6 +226,8 @@ src/
 │   │   ├── repository.rs
 │   │   ├── retention.rs
 │   │   ├── storage_stats.rs
+│   │   └── tests.rs
+│   ├── provider_session_prompts/
 │   │   └── tests.rs
 │   ├── relay_dead_letter/
 │   │   └── migration_tests.rs
@@ -281,6 +286,7 @@ src/
 │   ├── o_piece_delivery.rs
 │   ├── o_piece_ledger_tests.rs
 │   ├── postgres.rs
+│   ├── provider_session_prompts.rs
 │   ├── relay_dead_letter.rs
 │   ├── replay_disposition.rs
 │   ├── replay_disposition_tests.rs
@@ -471,6 +477,10 @@ src/
 │   │   │   │   ├── amplification_records_tests.rs
 │   │   │   │   ├── amplification_verdict_tests.rs
 │   │   │   │   └── resource_regression_tests.rs
+│   │   │   ├── runtime_profile/
+│   │   │   │   ├── managed_herdr.rs
+│   │   │   │   └── managed_herdr_tests.rs
+│   │   │   ├── boot_incarnation_tests.rs
 │   │   │   ├── db_collection.rs
 │   │   │   ├── db_deadline_tests.rs
 │   │   │   ├── host_guard_tests.rs
@@ -1030,6 +1040,10 @@ src/
 │   │   │   ├── replacement_tests.rs
 │   │   │   └── test_setup.rs
 │   │   ├── commands/
+│   │   │   ├── config/
+│   │   │   │   ├── provider_settings/
+│   │   │   │   │   └── revision_tests.rs
+│   │   │   │   └── provider_settings.rs
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
 │   │   │   │   │   ├── codex_end_tests/
@@ -1082,6 +1096,11 @@ src/
 │   │   │   │   ├── render_recovery.rs
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── session/
+│   │   │   │   └── autocomplete.rs
+│   │   │   ├── system_prompt/
+│   │   │   │   ├── reconstruct.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── text_commands/
 │   │   │   │   ├── command_dispatch_contract_tests/
 │   │   │   │   │   └── source_guard_tests.rs
@@ -1110,6 +1129,7 @@ src/
 │   │   │   ├── sidecar.rs
 │   │   │   ├── skill.rs
 │   │   │   ├── stop.rs
+│   │   │   ├── system_prompt.rs
 │   │   │   ├── text_commands.rs
 │   │   │   ├── tmux_recreate.rs
 │   │   │   ├── tool_call.rs
@@ -1516,6 +1536,8 @@ src/
 │   │   │   ├── retirement_tests.rs
 │   │   │   └── tick.rs
 │   │   ├── prompt_builder/
+│   │   │   ├── system_prompt_audit/
+│   │   │   │   └── tests.rs
 │   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs
 │   │   │   ├── dispatch_contract_tests.rs
@@ -1525,7 +1547,8 @@ src/
 │   │   │   ├── memory_scope_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── section_dedupe.rs
-│   │   │   └── session_anchors.rs
+│   │   │   ├── session_anchors.rs
+│   │   │   └── system_prompt_audit.rs
 │   │   ├── queue_dispatch/
 │   │   │   ├── canary_workspace.rs
 │   │   │   ├── canary_workspace_tests.rs
@@ -1724,6 +1747,7 @@ src/
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── live_entry_tests.rs
 │   │   │   │   ├── queue_effects.rs
+│   │   │   │   ├── reply_context.rs
 │   │   │   │   ├── stale_turn.rs
 │   │   │   │   ├── stale_turn_host_tests.rs
 │   │   │   │   ├── stale_turn_witness_tests.rs
@@ -1758,6 +1782,7 @@ src/
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
 │   │   │   │   │   ├── dispatch_runtime.rs
+│   │   │   │   │   ├── feature_settings.rs
 │   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── input_effect_tests.rs
@@ -1771,10 +1796,13 @@ src/
 │   │   │   │   │   ├── route_queue_tests.rs
 │   │   │   │   │   ├── runtime_transition.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
+│   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   └── producer_error_test_support.rs
+│   │   │   │   ├── provider_isolation/
+│   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
 │   │   │   │   │   ├── clear_tests.rs
 │   │   │   │   │   ├── legacy_clear_tests.rs
@@ -2602,6 +2630,8 @@ src/
 │   │   │   ├── activity_notice_tests.rs
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── operator_notice.rs
+│   │   │   ├── operator_notice_tests.rs
 │   │   │   ├── supervisor.rs
 │   │   │   ├── supervisor_deadline_tests.rs
 │   │   │   ├── supervisor_injected_tests.rs
@@ -2847,6 +2877,10 @@ src/
 │   │   ├── voice_sensitivity.rs
 │   │   ├── watcher_summary_authority_tests.rs
 │   │   └── zombie_foreground_release.rs
+│   ├── discord_config_audit/
+│   │   ├── bot_settings.rs
+│   │   ├── db_agents.rs
+│   │   └── legacy_bot.rs
 │   ├── dispatch_gate/
 │   │   ├── auth_profiles/
 │   │   │   └── selection_tests.rs
@@ -2916,7 +2950,8 @@ src/
 │   ├── maintenance/
 │   │   ├── jobs/
 │   │   │   ├── db_retention/
-│   │   │   │   └── image_retention.rs
+│   │   │   │   ├── image_retention.rs
+│   │   │   │   └── queue_and_dispatch.rs
 │   │   │   ├── db_retention.rs
 │   │   │   ├── hang_dump_cleanup.rs
 │   │   │   ├── memento_consolidation.rs
@@ -2998,9 +3033,7 @@ src/
 │   │   │   ├── availability.rs
 │   │   │   ├── health_probe.rs
 │   │   │   ├── liveness.rs
-│   │   │   ├── session_inventory.rs
-│   │   │   ├── sized.rs
-│   │   │   └── sized_cleanup_tests.rs
+│   │   │   └── session_inventory.rs
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs
@@ -3021,6 +3054,8 @@ src/
 │   │   │   ├── authority.rs
 │   │   │   ├── executor.rs
 │   │   │   └── target.rs
+│   │   ├── session_prompt/
+│   │   │   └── tests.rs
 │   │   ├── cancel_token_claude_interrupt.rs
 │   │   ├── cancel_token_cleanup.rs
 │   │   ├── cancel_token_codex_owed.rs
@@ -3033,7 +3068,8 @@ src/
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
 │   │   ├── registry.rs
-│   │   └── session_probe.rs
+│   │   ├── session_probe.rs
+│   │   └── session_prompt.rs
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs
@@ -3126,6 +3162,11 @@ src/
 │   │   └── trusted_target.rs
 │   ├── session_host/
 │   │   ├── herdr/
+│   │   │   ├── managed_config/
+│   │   │   │   ├── maintenance.rs
+│   │   │   │   ├── maintenance_tests.rs
+│   │   │   │   ├── path.rs
+│   │   │   │   └── publication.rs
 │   │   │   ├── policy/
 │   │   │   │   ├── consent/
 │   │   │   │   │   ├── apply_owner.rs
@@ -3177,6 +3218,9 @@ src/
 │   │   │   ├── launch_host_t19_real_tests.rs
 │   │   │   ├── launch_host_tests.rs
 │   │   │   ├── launch_policy_tests.rs
+│   │   │   ├── managed_config.rs
+│   │   │   ├── managed_config_real_tests.rs
+│   │   │   ├── managed_config_tests.rs
 │   │   │   ├── model.rs
 │   │   │   ├── observe.rs
 │   │   │   ├── pane_probe.rs
@@ -3212,6 +3256,11 @@ src/
 │   │   ├── test_support.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs
+│   ├── session_resume/
+│   │   ├── catalog/
+│   │   │   └── tests.rs
+│   │   ├── catalog.rs
+│   │   └── errors.rs
 │   ├── settings/
 │   │   └── runtime_config_put.rs
 │   ├── slo/
@@ -3781,6 +3830,7 @@ src/
 │   ├── recovery_defer.rs
 │   ├── release_source.rs
 │   ├── remote_stub.rs
+│   ├── resident_loops.rs
 │   ├── retrospectives.rs
 │   ├── review_decision.rs
 │   ├── scheduled_messages.rs

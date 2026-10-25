@@ -588,6 +588,46 @@ class HerdrExpectedFailure(unittest.TestCase):
                 self.assertEqual(len(sends), 4)  # HTTP hold, command hold, !stop, one next prompt; no resend.
 
 
+    def test_deadline_in_text_stop_subcase_keeps_send_ids_and_contact(self):
+        import io
+        import urllib.error
+        from unittest.mock import Mock
+        from tui_relay import herdr
+        scenario = driver.yaml.safe_load((Path(__file__).resolve().parents[3] / 'tests/e2e/tui_relay/scenarios/E-18-stop-mid-turn-cancel.yaml').read_text())
+        args = Namespace(cell='claude-herdr', channel_id='41', base_url='http://unused.test', dry_run=False,
+                         hard_reset_session_each=False, reset_before_each=False, allow_destructive=True, final_refetches=1)
+        rows, ids = [], iter(range(450, 500))
+        client = Mock()
+        client.send_control.side_effect = [{'id': '100'}, {'id': '200'}, {'id': '300'}, {'id': '400'}]
+        def send(channel, text):
+            if text == '!stop':
+                raise driver.PhaseDeadlineExpired('phase deadline inside the nested text-stop subcase')
+            if 'E18S:OK' in text:
+                rows.clear()
+            marker = '[E2E:E18S:OK]' if 'E18S:OK' in text else '[E2E:E18:OK]'
+            rows.append({'id': str(501 + len(rows)), 'content': marker, 'author': {'id': '42', 'bot': True}})
+            return {'id': str(next(ids))}
+        client.send.side_effect = send
+        client.wait_for_message.side_effect = lambda channel, **k: (next((r for r in rows if k['predicate'](r)), None), list(rows))
+        client.fetch_messages.side_effect = lambda *a, **k: list(rows)
+        error = assertions.AssertionError('cancel_turn HTTP 409: session host is not legacy tmux')
+        error.__cause__ = urllib.error.HTTPError('http://unused.test', 409, 'conflict', {}, io.BytesIO())
+        sink = {}
+        with patch.object(herdr, 'observe', return_value={'herdr': {}}), patch.object(herdr.time, 'sleep'), \
+             patch.object(driver, 'tmux', None), patch.object(driver, 'cancel_turn', side_effect=error), \
+             patch.dict('os.environ', {'AGENTDESK_E2E_ALLOW_DESTRUCTIVE': '1'}):
+            with self.assertRaises(driver.PhaseDeadlineExpired):
+                driver.run_scenario(scenario, args=args, client=client, run_id='stop', partial_result_sink=sink)
+        result = sink['result']
+        self.assertTrue(result['real_provider_contacted'], result)
+        self.assertEqual(result['agent_mode_actual'], 'real_live')
+        self.assertEqual([case['id'] for case in result['subcases']], ['E-18', 'E-18-stop'])
+        self.assertEqual(result['prompt_sends'], [
+            {'step': 'send_provider_hold_prompt', 'send_state': 'acknowledged', 'message_id': '450'},
+            {'step': 'send_provider_hold_prompt', 'send_state': 'acknowledged', 'message_id': '451'},
+            {'step': 'send_text_stop', 'send_state': 'attempted'}])
+
+
 class HerdrScopedGapRepairs(unittest.TestCase):
     execute = HerdrExpectedFailure.execute
     def test_after_clear_timeout_does_not_inherit_successful_followup_gap(self):
@@ -625,7 +665,8 @@ class HerdrScopedGapRepairs(unittest.TestCase):
                 return {'ok': True, 'message_id': '102'}
         def wait(channel, **kwargs):
             for marker in ('[E2E:E51:run:T1]', '[E2E:E51:run:T2]'):
-                row = {'id': '101' if marker.endswith('T1]') else '103', 'content': marker, 'author': {'bot': True}}
+                row = {'id': '101' if marker.endswith('T1]') else '103', 'content': marker,
+                       'author': {'id': assertions.provider_bot_id('codex'), 'bot': True}}
                 if kwargs['predicate'](row):
                     rows.append(row); return row, rows
             return None, rows

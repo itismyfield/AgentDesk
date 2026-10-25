@@ -7,4 +7,3 @@
 
 pub(crate) use crate::services::dispatches::outbox_queue::dispatch_outbox_loop;
 pub use crate::services::dispatches::outbox_route::resolve_channel_alias_pub;
-pub(crate) use crate::services::dispatches::outbox_route::use_counter_model_channel;

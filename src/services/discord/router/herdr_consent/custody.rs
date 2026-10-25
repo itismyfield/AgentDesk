@@ -133,19 +133,28 @@ impl LiveSink {
                 "mailbox custody reference must bind its source and queued generation".into(),
             );
         }
+        use crate::services::turn_orchestrator as queue;
         let provider = self.provider.clone();
         let token_hash = self.shared.token_hash.clone();
         let channel = ChannelId::new(intent.channel);
-        let (disk, _) = tokio::task::spawn_blocking(move || {
-            crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+        // Drain writes the marker before trimming the queue and requeue writes the queue before
+        // deleting the marker, so queue reads around the marker read see an item in transit.
+        let disk = tokio::task::spawn_blocking(move || {
+            let read =
+                || queue::load_channel_pending_queue_checked(&provider, &token_hash, channel);
+            let mut items = read()?.0;
+            let marker = queue::load_channel_pending_dispatch_marker_checked(
                 &provider,
                 &token_hash,
                 channel,
-            )
+            )?;
+            items.extend(marker.map(|(item, _)| item));
+            items.extend(read()?.0);
+            Ok::<_, String>(items)
         })
         .await
         .map_err(|e| e.to_string())??;
-        let matches = |item: &crate::services::turn_orchestrator::Intervention| {
+        let matches = |item: &queue::Intervention| {
             item.source_message_queued_generations()
                 .iter()
                 .any(|source| {
@@ -160,7 +169,12 @@ impl LiveSink {
             .await
             .map_err(|e| format!("mailbox unavailable: {e:?}"))?;
         let persisted = disk.iter().any(matches);
-        let restored = live.intervention_queue.iter().any(matches);
+        // A drained head is live as the dispatch reservation or the active turn it became.
+        let source = poise::serenity_prelude::MessageId::new(intent.source_message);
+        let restored = live.intervention_queue.iter().any(matches)
+            || [live.pending_user_dispatch, live.active_user_message_id].contains(&Some(source))
+            || live.pending_user_dispatch_source_ids.contains(&source)
+            || live.active_absorbed_source_ids.contains(&source);
         if persisted != restored {
             return Err("mailbox custody is not durably restored; retry recovery".into());
         }

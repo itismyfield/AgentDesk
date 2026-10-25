@@ -1310,6 +1310,14 @@ fn discord_relayed_user_prompt_format_is_recognized_3527() {
     assert!(is_discord_relayed_user_prompt(
         "[Reply context] ...\n[User: 0hbujang (ID: 343742347365974026)] hi"
     ));
+    let reply = "[Reply context — earlier messages]\nbot: earlier\n\n[Reply context — replied-to message]\nAuthor: bot\nContent: quote\n[End of reply context — the user's reply follows]\n\n[User: Alice (ID: 77)] hi";
+    for prompt in [
+        reply.to_string(),
+        reply.replace('\n', ""),
+        reply.replace('\n', " "),
+    ] {
+        assert!(is_discord_relayed_user_prompt(&prompt));
+    }
     // codex #3527 r2: the legacy pane observer submits join("")/join(" ")
     // collapsed variants of one block, so the marker can be MID-LINE — the
     // whole-string scan must catch those too, not just the newline variant.

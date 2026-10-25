@@ -85,7 +85,7 @@ fn a_herdr_claim_commits_only_under_its_admission_and_keeps_the_incumbent() {
             Ok(WatcherClaimAction::SpawnFresh),
         ),
     ];
-    for (channel, (name, host, expected)) in (5340_1..).zip(cases) {
+    for (channel, (name, host, expected)) in (53_401..).zip(cases) {
         assert_eq!(
             claim(&watchers, channel, name, host, false),
             expected,
@@ -113,17 +113,17 @@ fn a_herdr_claim_commits_only_under_its_admission_and_keeps_the_incumbent() {
     }
 
     let incumbent = watchers
-        .get(&ChannelId::new(5340_5))
+        .get(&ChannelId::new(53_405))
         .expect("admitted claim installed");
     let (cancel, paused) = (incumbent.cancel.clone(), incumbent.paused.clone());
     drop(incumbent);
     withhold_herdr_execution(admitted_name, Some("p8-n1"));
     for replace in [false, true] {
-        let again = claim(&watchers, 5340_5, admitted_name, WatchHost::Herdr, replace);
+        let again = claim(&watchers, 53_405, admitted_name, WatchHost::Herdr, replace);
         assert_eq!(again, Err(WatchWithheld), "replace={replace}");
     }
     let kept = watchers
-        .get(&ChannelId::new(5340_5))
+        .get(&ChannelId::new(53_405))
         .expect("incumbent stays installed");
     assert!(Arc::ptr_eq(&kept.cancel, &cancel) && Arc::ptr_eq(&kept.paused, &paused));
     assert!(!cancel.load(Ordering::Relaxed) && !paused.load(Ordering::Relaxed));
@@ -144,7 +144,7 @@ fn a_withhold_waits_for_a_claim_that_read_the_admission() {
         let watchers = watchers.clone();
         std::thread::spawn(move || {
             CLAIM_PAUSE.set(Some((paused_tx, resume_rx)));
-            claim(&watchers, 5340_11, name, WatchHost::Herdr, false)
+            claim(&watchers, 534_011, name, WatchHost::Herdr, false)
         })
     };
     paused_rx
@@ -172,7 +172,7 @@ fn a_withhold_waits_for_a_claim_that_read_the_admission() {
         1,
         "the claim that read the admission installed once"
     );
-    let next = claim(&watchers, 5340_12, name, WatchHost::Herdr, true);
+    let next = claim(&watchers, 534_012, name, WatchHost::Herdr, true);
     assert_eq!(
         next,
         Err(WatchWithheld),
@@ -180,7 +180,7 @@ fn a_withhold_waits_for_a_claim_that_read_the_admission() {
     );
     assert_eq!(
         watchers.owner_channel_for_tmux_session(name),
-        Some(ChannelId::new(5340_11))
+        Some(ChannelId::new(534_011))
     );
 }
 
@@ -209,12 +209,12 @@ fn a_claim_takes_no_source_authority() {
     let contended = source_authority_contention_key_for_tests(|| {
         results.push(claim(
             &watchers,
-            5340_21,
+            534_021,
             admitted_name,
             WatchHost::Herdr,
             false,
         ));
-        results.push(claim(&watchers, 5340_22, withheld, WatchHost::Herdr, false));
+        results.push(claim(&watchers, 534_022, withheld, WatchHost::Herdr, false));
     });
     release_tx.send(()).unwrap();
     holder.join().unwrap();

@@ -8,6 +8,7 @@ isolation: required
 steps:
   - send_prompt: "응답에 정확히 한 줄로 [E2E:E1:OK] 만 출력해줘."
   - wait_for_discord_text: "[E2E:E1:OK]"
+    relay_author: provider
     timeout_s: 240
 assertions:
   - message_count_between_markers:
@@ -18,6 +19,8 @@ assertions:
       max: 12
   - relay_latency_within:
       max_seconds: 240
+  # Only the cell's provider bot may deliver the answer; a notify/announce body quoting it is not delivery.
+  - provider_text_present: "[E2E:E1:OK]"
   - no_status_chrome: true
   - completion_per_turn:
       exact: 1

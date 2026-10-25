@@ -234,10 +234,6 @@ fn recovery_enabled(channel_id: &str) -> bool {
         .is_some_and(|policy| policy.enabled)
 }
 
-pub fn allows_cli_turn(channel_id: &str, agent_id: &str) -> bool {
-    lock(&coordinator().runtime).allows_cli_turn(channel_id, agent_id)
-}
-
 pub fn allows_cli_turn_for_provider(channel_id: &str, provider: &ProviderKind) -> bool {
     lock(&coordinator().runtime).allows_cli_turn_for_provider(channel_id, provider)
 }
@@ -371,6 +367,7 @@ fn apply_completion(
     Ok(event.map(|_| ()))
 }
 
+#[cfg(test)]
 pub async fn observe_durable(input: ObserveInput) -> ObserveOutcome {
     observe_with_checkpoint_durable(input, None, None).await
 }
@@ -440,43 +437,6 @@ pub async fn try_restore_owner_durable(
                 "recovery restore did not commit; owner remains fenced");
             None
         }
-    }
-}
-
-pub async fn abort_takeover_durable(channel_id: &str, generation: i64, fallback_agent_id: &str) {
-    let result = coordinator()
-        .transition(channel_id, |runtime| {
-            let Some(state) = runtime.states.get(channel_id) else {
-                return Err(conflict("recovery state is absent"));
-            };
-            if state.generation != generation
-                || state.active_writer_agent_id != fallback_agent_id
-                || state.status != ChannelRecoveryStatus::FallbackRunning
-            {
-                return Err(conflict("failed spawn no longer owns the takeover"));
-            }
-            runtime
-                .append_event(
-                    channel_id,
-                    fallback_agent_id,
-                    CheckpointEventKind::Stall,
-                    CheckpointPayload::compact(
-                        fallback_agent_id,
-                        "",
-                        "fallback startup aborted",
-                        "",
-                        Vec::new(),
-                        "retry primary ownership",
-                        "",
-                    ),
-                )
-                .map_err(|error| conflict(error.message()))?;
-            runtime.abort(channel_id);
-            Ok(Some(()))
-        })
-        .await;
-    if let Err(error) = result {
-        tracing::warn!(channel_id, error = %error, "fallback compensation did not commit");
     }
 }
 

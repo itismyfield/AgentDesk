@@ -378,7 +378,7 @@ class HerdrDegradedWaiver(unittest.TestCase):
         client = Mock()
         client.send_control.return_value = {"id": "100"}
         client.fetch_messages.return_value = []
-        detail = degraded()
+        detail = {**degraded(), "boot_incarnation": "boot-1"}
         detail["herdr"]["reconnect"].update(channels=1, published=1)
         self.http.side_effect = lambda _base, path, **_: (200, detail if path.endswith("/detail") else {"status": "healthy"})
         self.args.herdr_isolated_server = self.args.allow_destructive = True
@@ -661,6 +661,26 @@ class RestartObserveOnly(unittest.TestCase):
         self.assertGreaterEqual(restart["elapsed_secs"], 60)
         self.assertTrue(all(c.args[0] == ["agentdesk", "herdr", "status"] for c in self.cli.call_args_list))
         self.assertEqual(self.scenario.call_args.args[0]["id"], "E-19-observe-only")
+
+    def test_changed_boot_incarnation_proves_restart(self):
+        self.http.return_value = (200, {**health(), "boot_incarnation": "boot-1"})
+        self.assertEqual(self.run_mode("mark")[0], 0)
+        self.publishable(None)
+        self.http.return_value[1]["boot_incarnation"] = "boot-2"
+        rc, report = self.run_mode("verify")
+        self.assertEqual(rc, 0, report)
+        restart = report["restart_observation"]
+        self.assertEqual((restart["restart_evidence"], restart["boot_incarnation_before"], restart["boot_incarnation_after"]),
+                         ("boot_incarnation", "boot-1", "boot-2"))
+        self.assertEqual(restart["limitation"], herdr_restart.INCARNATION_NOTE)
+        self.scenario.assert_called_once()
+
+    def test_unchanged_boot_incarnation_refuses_even_when_uptime_looks_restarted(self):
+        self.http.return_value = (200, {**health(), "boot_incarnation": "boot-1"})
+        self.marked(uptime=3)
+        self.http.return_value[1]["boot_incarnation"] = "boot-1"
+        restart = self.assert_refused("boot_incarnation stayed boot-1; restart not observed")["restart_observation"]
+        self.assertEqual(restart["restart_evidence"], "not_observed")
 
     def test_server_uptime_older_than_mark_refuses_followup(self):
         self.run_mode("mark")

@@ -14,6 +14,7 @@ pub(crate) mod native_stop;
 mod output_reader;
 mod registry;
 pub(crate) mod session_probe;
+pub(crate) mod session_prompt;
 pub(crate) use output_reader::herdr_provider_terminal_only;
 pub use output_reader::{fold_read_output_result, poll_output_file_until_result};
 #[cfg(test)]
@@ -442,12 +443,7 @@ pub fn parse_provider_and_channel_from_tmux_name(
 ) -> Option<(ProviderKind, String)> {
     let prefix = format!("{}-", TMUX_SESSION_PREFIX);
     let stripped = session_name.strip_prefix(&prefix)?;
-    let suffix = tmux_env_suffix();
-    let without_suffix = if !suffix.is_empty() {
-        stripped.strip_suffix(suffix).unwrap_or(stripped)
-    } else {
-        stripped
-    };
+    let without_suffix = stripped.strip_suffix(tmux_env_suffix()).unwrap_or(stripped);
     for entry in provider_registry() {
         let prefix = format!("{}-", entry.id);
         if let Some(rest) = without_suffix.strip_prefix(&prefix) {
@@ -687,6 +683,7 @@ impl CancelSource {
 /// Cooperative cancellation token shared by provider runtimes and Discord orchestration.
 pub struct CancelToken {
     pub cancelled: AtomicBool,
+    pub(crate) prompt_capture: std::sync::OnceLock<std::sync::Arc<session_prompt::Capture>>,
     child_pid: Mutex<Option<CapturedProcess>>,
     cancel_source: Mutex<Option<String>>,
     cancel_source_kind: Mutex<Option<CancelSource>>,
@@ -747,6 +744,7 @@ impl CancelToken {
 
         Self {
             cancelled: AtomicBool::new(false),
+            prompt_capture: std::sync::OnceLock::new(),
             child_pid: Mutex::new(None),
             cancel_source: Mutex::new(None),
             cancel_source_kind: Mutex::new(None),

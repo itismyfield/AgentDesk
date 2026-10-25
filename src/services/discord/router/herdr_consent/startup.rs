@@ -1,5 +1,6 @@
 //! Recovery owns interruption authority before this process admits consented apply.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::config::session_hosts::{self, EndpointMode};
@@ -13,7 +14,9 @@ use crate::services::session_host::policy::consent::{
 use poise::serenity_prelude as serenity;
 
 pub(super) use crate::services::session_host::policy::consent::boot_recovery::PROCESS as BOOT;
-static RECOVERY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Serializes replay and keeps each provider's channels whose boot queue merge is still held.
+static RECOVERY: tokio::sync::Mutex<BTreeSet<(String, u64)>> =
+    tokio::sync::Mutex::const_new(BTreeSet::new());
 
 struct Local {
     node: String,
@@ -90,30 +93,64 @@ pub(in crate::services::discord) async fn restore(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) -> Result<(), String> {
-    restore_excluding(http, shared, provider, &std::collections::BTreeSet::new()).await
+    restore_excluding(http, shared, provider, &BTreeSet::new()).await
 }
 
 pub(in crate::services::discord) async fn restore_excluding(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
-    blocked: &std::collections::BTreeSet<u64>,
+    blocked: &BTreeSet<u64>,
 ) -> Result<(), String> {
     let Some(local) = selected() else {
         return Ok(());
     };
-    let _recovery = RECOVERY.lock().await;
+    let mut held = RECOVERY.lock().await;
+    held.retain(|(owner, _)| owner != provider.as_str());
+    held.extend(
+        blocked
+            .iter()
+            .map(|channel| (provider.as_str().to_owned(), *channel)),
+    );
     let interrupted =
         tokio::task::spawn_blocking(move || interrupt(&super::store(), &local, &BOOT))
             .await
             .map_err(|error| format!("consent boot recovery: {error}"))
             .and_then(|result| result);
-    let replayed = super::recover_excluding(http, shared, provider, blocked).await;
+    let replay = super::Replay::Excluding(blocked);
+    let replayed = super::recover(http, shared, provider, replay).await;
     match (interrupted, replayed) {
         (Ok(()), result) => result,
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err(replay)) => Err(format!("{error}; consent replay also failed: {replay}")),
     }
+}
+
+/// Replays the Applied consents boot left for `channel` once its held queue merge lands.
+/// Boot interruption already ran for this process before any held retry started.
+pub(in crate::services::discord) async fn restore_only(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: u64,
+) -> Result<(), String> {
+    if selected().is_none() {
+        return Ok(());
+    }
+    let mut held = RECOVERY.lock().await;
+    if !held.remove(&(provider.as_str().to_owned(), channel)) {
+        return Ok(());
+    }
+    let still: BTreeSet<u64> = held
+        .iter()
+        .filter(|(owner, _)| owner == provider.as_str())
+        .map(|(_, channel)| *channel)
+        .collect();
+    let replay = super::Replay::Only {
+        channel,
+        held: &still,
+    };
+    super::recover(http, shared, provider, replay).await
 }
 
 #[cfg(test)]
