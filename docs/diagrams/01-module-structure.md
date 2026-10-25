@@ -49,11 +49,10 @@ package "CLI  (src/cli/)" as CLIPkg #Lavender {
 ' Server (Axum HTTP)
 ' ============================================================
 package "Server  (src/server/)" as ServerPkg #Honeydew {
-    [mod.rs / boot.rs\n(Axum boot)] as ServerBoot
+    [mod.rs\n(Axum boot)] as ServerBoot
     [ws.rs\n(WebSocket /ws)] as WS
-    [tick.rs\n(3-Tier Tick)] as Tick
+    [mod.rs policy_tick_loop\n(3-Tier Tick)] as Tick
     [worker_registry.rs] as Workers
-    [background.rs] as Background
 
     package "Routes  (src/server/routes/)" as RoutesPkg #MintCream {
         [mod.rs\n(route registration)] as RouteMod
@@ -153,7 +152,6 @@ package "Discord Service  (src/services/discord/)" as DiscordPkg #AliceBlue {
         [message_handler.rs] as MsgHandler
         [intake_gate.rs] as IntakeGate
         [thread_binding.rs] as ThreadBind
-        [control_intent.rs] as ControlIntent
     }
 
     package "Turn Bridge  (turn_bridge/)" as TurnPkg {
@@ -181,7 +179,7 @@ package "Discord Service  (src/services/discord/)" as DiscordPkg #AliceBlue {
     [tmux_reaper.rs] as TmuxReaper
     [recovery_engine.rs] as Recovery
     [session_runtime.rs] as SessRT
-    [prompt_builder.rs] as PromptBuilder
+    [prompt_builder/] as PromptBuilder
     [shared_memory.rs] as SharedMem
     [meeting_orchestrator.rs] as MeetingOrch
     [model_catalog.rs] as ModelCat
@@ -231,10 +229,10 @@ package "Support Services" as SupportPkg #Ivory {
     }
 
     [auto_queue/runtime.rs] as AQRuntime
-    [dispatches.rs] as SvcDispatches
+    [dispatches/] as SvcDispatches
     [kanban.rs] as SvcKanban
     [retrospectives.rs] as Retro
-    [api_friction.rs] as ApiFriction
+    [api_friction/] as ApiFriction
 }
 
 ' ============================================================
@@ -243,7 +241,6 @@ package "Support Services" as SupportPkg #Ivory {
 package "GitHub  (src/github/)" as GithubPkg #Honeydew {
     [sync.rs\n(issue sync)] as GhSync
     [triage.rs\n(auto-triage)] as GhTriage
-    [dod.rs\n(DoD mirroring)] as GhDod
 }
 
 ' ============================================================
@@ -272,7 +269,6 @@ ServerBoot --> RouteMod : mount /api
 ServerBoot --> WS : mount /ws
 ServerBoot --> Tick : spawn tick loops
 ServerBoot --> Workers : register workers
-ServerBoot --> Background : spawn tasks
 ServerBoot --> DashApp : serve static\n/dashboard/dist/
 
 ' --- Tick -> Policy Engine ---
@@ -332,7 +328,6 @@ PipelineTop --> EngineCore
 ' --- GitHub ---
 GhSync --> GitHubAPI : gh CLI
 GhTriage --> GitHubAPI
-GhDod --> GitHubAPI
 GhSync --> DbMod
 
 ' --- Memory backends ---

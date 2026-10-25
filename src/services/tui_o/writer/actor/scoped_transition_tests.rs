@@ -272,3 +272,203 @@ where
     assert!(!actor.writer.is_stopped());
     nonce
 }
+
+/// Keeps retry production, census and Apply on the same actor-owned ChannelStore cache.
+pub(crate) async fn exercise_local_retry_retention_for_tests<P, L, A, B>(
+    mut writer: ChannelWriter<P, L, A>,
+    bindings: Arc<B>,
+    context: impl Fn() -> Context,
+    mut request: Request,
+    scope: crate::services::tui_o::writer::transition_port::ScopeDigest,
+    retry: super::super::super::pieces::Derived,
+    make_unsent: impl FnOnce(),
+) -> (
+    crate::services::tui_o::writer::transition_port::Reply,
+    crate::services::tui_o::writer::transition_port::Reply,
+)
+where
+    P: DiscordPort,
+    L: DeliveryLease,
+    A: AlarmSink,
+    B: BindingEvents,
+{
+    use crate::services::tui_o::store::ledger::{LocalRetryMark, PieceOutcome};
+    use crate::services::tui_o::writer::transition_cleanup::{Owed, Refusal, Verdict};
+    use crate::services::tui_o::writer::transition_port::Idle;
+    let channel = writer.channel();
+    let deriver = super::super::fresh_resume::configured_deriver(
+        channel,
+        ShadowProvider::Codex,
+        writer.store().ledger(),
+    );
+    let (_stop, stopped) = watch::channel(false);
+    let gate = Arc::new(OwnershipGate::default());
+    gate.acquired();
+    let t0 = Instant::now();
+    let w0 = std::time::SystemTime::now();
+    let wall: Wall = Arc::new(move || w0 + (Instant::now() - t0));
+    let (port, receiver) = TransitionPort::new(82, gate, wall, stopped.clone());
+    let mut actor = Actor {
+        writer,
+        deriver,
+        owed: VecDeque::new(),
+        verified: None,
+        sources: Sources::new(channel, ShadowProvider::Codex, bindings.clone()),
+        bindings,
+        transitions: Transitions::new(Some(receiver), stopped),
+        notice: None,
+        waiting: Waiting::default(),
+        clock: (Instant::now(), chrono::Utc::now()),
+        scope_hold: None,
+        boot_previous_nonce: None,
+    };
+    actor
+        .sources
+        .resume(&mut actor.writer, &mut actor.deriver, &mut actor.owed)
+        .unwrap();
+    // Restore replays sealed records; the real writer removes those already Posted from owed.
+    actor.deliver_owed().await;
+    assert!(
+        actor.owed.is_empty(),
+        "all restored native output was already Posted"
+    );
+    assert!(!actor.writer.has_local_retry());
+    make_unsent();
+    assert_eq!(
+        actor.writer.deliver(&retry).await,
+        crate::services::tui_o::writer::deliver::Step::Done
+    );
+    assert!(
+        actor.owed.is_empty(),
+        "zero actor queue remains empty while writer creates local retry"
+    );
+    let pending =
+        crate::services::tui_o::writer::local_retry::pending(actor.writer.store().ledger())
+            .expect("actual actor-owned Unsent POST settles NotFound and retains a local retry");
+    let root_serial = pending.root_serial;
+    let piece = pending.piece;
+    let original = actor.writer.store().ledger().piece(root_serial).unwrap();
+    assert_eq!(original.local_retry, Some(LocalRetryMark::Budget));
+    assert_eq!(original.outcome, Some(PieceOutcome::NotFound));
+    assert_eq!(actor.writer.store().ledger().unresolved(), None);
+    let before_due = Instant::now();
+    let held = retry_retention_request(
+        &mut actor,
+        &port,
+        Operation::AutomaticApply(
+            request.clone(),
+            scope,
+            Idle(Arc::new(|| Box::pin(std::future::ready(true)))),
+        ),
+        context(),
+    )
+    .await;
+    assert!(
+        before_due.elapsed() < Duration::from_secs(30),
+        "must observe retry before its due"
+    );
+    assert_eq!(
+        held.summary
+            .as_ref()
+            .unwrap()
+            .obligations
+            .as_ref()
+            .unwrap()
+            .owed,
+        1,
+        "zero ordinary queue plus one local retry remains one exact obligation"
+    );
+    assert!(
+        held.hops
+            .iter()
+            .any(|hop| hop.judged.verdict == Verdict::Refused(Refusal::OutputOwed(Owed::Queue)))
+    );
+    assert!(
+        actor.writer.has_local_retry(),
+        "Apply must not consume retry or advance delivery"
+    );
+
+    tokio::time::advance(Duration::from_secs(31)).await;
+    let due_now = actor.utc_now();
+    assert_eq!(
+        actor.writer.retry_local(due_now).await,
+        crate::services::tui_o::writer::deliver::Step::Done
+    );
+    let (serial, attempt) = actor
+        .writer
+        .store()
+        .ledger()
+        .latest_piece(&piece.unit_key, piece.index)
+        .unwrap();
+    assert!(serial > root_serial);
+    assert_eq!(
+        attempt.local_retry,
+        Some(LocalRetryMark::Attempt { root_serial })
+    );
+    assert!(matches!(attempt.outcome, Some(PieceOutcome::Posted(_))));
+    assert!(!actor.writer.has_local_retry());
+    assert!(actor.owed.is_empty());
+    request.job_id.push_str("-after-posted");
+    let inspected = retry_retention_request(
+        &mut actor,
+        &port,
+        Operation::Inspect(request.clone()),
+        context(),
+    )
+    .await;
+    assert_eq!(
+        inspected
+            .summary
+            .as_ref()
+            .unwrap()
+            .obligations
+            .as_ref()
+            .unwrap()
+            .owed,
+        0
+    );
+    let scope = inspected.scope.unwrap().unwrap().digest;
+    let applied = retry_retention_request(
+        &mut actor,
+        &port,
+        Operation::AutomaticApply(
+            request,
+            scope,
+            Idle(Arc::new(|| Box::pin(std::future::ready(true)))),
+        ),
+        context(),
+    )
+    .await;
+    (held, applied)
+}
+
+async fn retry_retention_request<P, L, A, B>(
+    actor: &mut Actor<P, L, A, B>,
+    port: &TransitionPort,
+    operation: Operation,
+    context: Context,
+) -> crate::services::tui_o::writer::transition_port::Reply
+where
+    P: DiscordPort,
+    L: DeliveryLease,
+    A: AlarmSink,
+    B: BindingEvents,
+{
+    let requested = port.request(operation, context);
+    tokio::pin!(requested);
+    assert!(
+        futures::poll!(&mut requested).is_pending(),
+        "request must traverse actual mailbox"
+    );
+    let unsettled = watch::channel(None).0;
+    for _ in 0..300 {
+        actor.poll_transition(true, &unsettled).await;
+        if let Poll::Ready(reply) = futures::poll!(&mut requested) {
+            return reply.unwrap();
+        }
+        test_hooks::settle_workers();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    panic!("actual scoped actor request did not finish");
+}

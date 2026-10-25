@@ -186,7 +186,7 @@
 >
 > Last refreshed: 2026-07-03 (#3998 S1-f1 — the six turn-output controller owner getters now compile default ON. Unset, `=1`, and `=true` enable the controller; `=0` and `=false` are the explicit per-owner rollback opt-outs. Release had already run env-ON since #3794, so that soak transfers to compiled-default ON. The release `~/.adk/release/config/launchd.env` entries forcing all six `=1` are now redundant; removing them is an operations cleanup, not part of this PR. Legacy-arm deletion remains a follow-up slice).
 >
-> Last refreshed: 2026-07-03 (#3998 S1-f2 — the six turn-output controller rollout flags are retired. The controller path is unconditional for structurally eligible arms; the deleted rollback lever is replaced by git revert. The A6b `tui_prompt_relay_controller_cutover.rs` module and read-only `turn_output_controller_rollout` health surface were removed. Retained legacy exclusions in §8.1.1 are unchanged).
+> Last refreshed: 2026-07-03 (#3998 S1-f2 — the six turn-output controller rollout flags are retired. The controller path is unconditional for structurally eligible arms; the deleted rollback lever is replaced by git revert. The A6b `tui_prompt_relay_controller_cutover.rs` (removed) module and read-only `turn_output_controller_rollout` health surface were removed. Retained legacy exclusions in §8.1.1 are unchanged).
 >
 > Last refreshed: 2026-07-04 (#4081 — `outbound/delivery_record.rs` gains a bounded recent-content fingerprint ring (BLAKE3, 16 entries / 15 min TTL, keyed channel + RAW pre-format body + watcher generation) recorded by the existing `record_delivered_frontier_with_body` writer, plus the read predicate `recent_delivered_content_matches`. The canonical fingerprint representation is the RAW pre-format extractor body at ALL record sites; the last formatted-representation holdout — the cancel/stop terminal replace in `turn_bridge/mod.rs`, which recorded the `format_for_discord_*` + `[Stopped]` display text — now records the raw `remaining_response` via the `terminal_delivery::record_stopped_turn_terminal_replace_delivery` helper. The duplicate-relay refusal itself lives in `tmux_watcher/turn_identity.rs` (3-signal conjunction: degenerate legacy lease key AND byte-identical recent RAW body AND no fresh in-range assistant output) and returns before the commit path. No new durable writer, retry, cleanup, delivery API shape, or direct-send callsite; the production callsite coverage map is unchanged).
 >
@@ -198,7 +198,7 @@
 
 This is the single source of truth for "where is each Discord outbound callsite
 on the v3 migration path?". The former compatibility facade
-`src/services/discord/outbound/legacy.rs` was removed in #2535 after the last
+`src/services/discord/outbound/legacy.rs` (removed) was removed in #2535 after the last
 production producers moved to direct v3 envelopes. The outbound API now lives
 in `src/services/discord/outbound/{message, policy, decision, result, delivery,
 transport}.rs`, plus the #3089 A1 turn-output controller skeleton in
@@ -279,7 +279,8 @@ directly.
 `mixed` for `placeholder_sends` is the load-bearing finding: any future
 guard must scope to "new callsites" rather than "no `.send_message`/`.edit_message`
 allowed", because the streaming rollover path in
-`services/discord/tmux.rs:4750-4900` legitimately bypasses outbound for
+`src/services/discord/tmux_watcher/provider_output_guard.rs` (`guard_rollover`,
+which edits through `http::edit_channel_message`) legitimately bypasses outbound for
 order-preserving multi-message stream continuation (see §4 exclusions).
 
 `mixed` for `dm_reply` is intentionally narrow: sub-2k text now uses
@@ -300,22 +301,22 @@ These callsites already use the unified delivery engine. Rows marked
 
 | File:line | Producer | Notes |
 |---|---|---|
-| `src/server/routes/dispatches/discord_delivery.rs:782` (`post_dispatch_message_to_channel_with_delivery`) | `dispatch_outbox` | **migrated_v3**. Builds a v3 `DiscordOutboundMessage` with `OutboundTarget::Channel`, `DiscordOutboundPolicy::dispatch_outbox()`, and summary-based minimal fallback. Correlation = `dispatch:<id>`, semantic = `dispatch:<id>:notify`. |
-| `src/server/routes/dispatches/discord_delivery.rs:3153` (`send_review_result_message_via_http`) | `review_notifications` | **migrated_v3**. Pass/Unknown verdict followups use `DiscordOutboundPolicy::review_notification()`. Correlation = `review:<card_id>`, semantic = `review:<dispatch>:<verdict>:<api_base>`. Per-producer static `review_followup_deduper()`. |
-| `src/server/routes/dispatches/outbox.rs:1124` (`post_dispatch_completion_summary`) | final dispatch thread callback | **migrated_v3**. Ensures the dispatch thread is postable, then posts the completion summary through v3 with a per-producer `dispatch_completion_summary_deduper()`. |
-| `src/services/issue_announcements.rs:408` (`send_issue_announcement_message`) | issue announcements | **migrated_v3**. Review-style policy, `OutboundOperation::Edit` for edits, and the shared process-wide outbound deduper. |
-| `src/services/discord/discord_io.rs:478` (`deliver_channel_message`) | CLI text/DM helper | **migrated_v3**. Used by `--discord-sendmessage` / `--discord-senddm` *after* the DM channel has been resolved. Static `discord_io_deduper`; no caller-supplied delivery id means `without_idempotency()`. |
+| `src/services/dispatches/discord_delivery/transport.rs` (`post_dispatch_message_to_channel_with_delivery`) | `dispatch_outbox` | **migrated_v3**. Builds a v3 `DiscordOutboundMessage` with `OutboundTarget::Channel`, `DiscordOutboundPolicy::dispatch_outbox()`, and summary-based minimal fallback. Correlation = `dispatch:<id>`, semantic = `dispatch:<id>:notify`. |
+| `src/services/dispatches/discord_delivery/orchestration.rs` (`send_review_result_message_via_http`) | `review_notifications` | **migrated_v3**. Pass/Unknown verdict followups use `DiscordOutboundPolicy::review_notification()`. Correlation = `review:<card_id>`, semantic = `review:<dispatch>:<verdict>:<api_base>`. Per-producer static `review_followup_deduper()`. |
+| `src/services/dispatches/outbox_route.rs` (`post_dispatch_completion_summary`) | final dispatch thread callback | **migrated_v3**. Ensures the dispatch thread is postable, then posts the completion summary through v3 with a per-producer `dispatch_completion_summary_deduper()`. |
+| `src/services/issue_announcements.rs` (`send_issue_announcement_message`) | issue announcements | **migrated_v3**. Review-style policy, `OutboundOperation::Edit` for edits, and the shared process-wide outbound deduper. |
+| `src/services/discord/discord_io.rs` (`deliver_channel_message`) | CLI text/DM helper | **migrated_v3**. Used by `--discord-sendmessage` / `--discord-senddm` *after* the DM channel has been resolved. Static `discord_io_deduper`; no caller-supplied delivery id means `without_idempotency()`. |
 | `src/services/discord/outbound/manual_delivery.rs` (`deliver_manual_notification`) | manual `/api/discord/send` | **migrated_v3 for sub-2k text**. Over-limit content remains a compatibility shim to `post_text_attachment` (announce) or `deliver_chunked_manual_notification` (notify). Moved from `health/` to `outbound/` in #3038 S1 with `health::` compatibility re-exports preserved. |
 | `src/services/discord/outbound/manual_delivery.rs` (`deliver_manual_dm_notification`) | `dm_reply` / `/api/discord/send-dm` | **migrated_v3 for sub-2k text** using `OutboundTarget::DmUser(UserId)`. The v3 transport resolves the DM channel and duplicate delivery returns before a second resolve. Over-limit content keeps the compatibility attachment/chunk path. Moved from `health/` to `outbound/` in #3038 S1. |
 | `src/services/discord/gateway/outbound_messages.rs` (`send_intake_placeholder`) | `placeholder_sends` (intake) | **migrated_v3**. Posts the `"..."` placeholder before a turn via direct v3. Uses `preserve_inline_content().without_idempotency()` to preserve streaming behavior. |
 | `src/services/discord/gateway/outbound_messages.rs` (`edit_outbound_message`) | `placeholder_sends` (edit) | **migrated_v3**. Encodes edit through `OutboundOperation::Edit`. |
 | `src/services/discord/task_notification_delivery/gateway.rs` via `gateway/outbound_messages.rs` | durable task-notification cards | **migrated_v3**. Create uses the row's stable nonce with enforcement; edit returns a classified confirmed-missing result only for structured Discord `404/10008`. The PG card authority, not the process deduper, decides create/edit/replacement ownership. |
 | `src/services/discord/formatting/long_send_rollback.rs` via `http.rs` | durable task-response replies | **nonce-hardened required-reference compatibility path**. Sink and watcher share the exact `response_turn_key`; each physical reply chunk derives a distinct stable nonce and sets `enforce_nonce=true`. A retry after Discord POST success but response `sent`-CAS failure reconciles the returned message id instead of duplicating the reply. |
-| `src/services/discord/gateway.rs:400` (`TurnGateway::{send_message, edit_message}`) | turn-bridge messages/edits | **migrated_v3 transitively via gateway**. Used for handoff, rollover freeze, snapshot, stable update, and terminal edit. |
+| `src/services/discord/gateway.rs` (`TurnGateway::{send_message, edit_message}`) | turn-bridge messages/edits | **migrated_v3 transitively via gateway**. Used for handoff, rollover freeze, snapshot, stable update, and terminal edit. |
 | `src/services/discord/outbound/reaction_control.rs` (`send_reaction_control_reply_http`) | reaction-control lifecycle replies | **migrated_v3 and nonce-hardened**. Queued-card POST and queue-reaction failure fallbacks use referenced v3 lifecycle notices. Correlation = `intake-reaction-control:<channel_id>:<message_id>`, semantic = `intake-reaction-control:<channel_id>:<message_id>:<reason_key>`; the same identity derives an enforced stable Discord create nonce for bounded replay suppression across process-local deduper restarts. |
-| `src/services/discord/monitoring_status.rs:115` (`deliver_monitoring_status`) | monitoring status | **migrated_v3**. Status banner send + edit with `preserve_inline_content`; edits use `without_idempotency()`. |
-| `src/services/discord/meeting_orchestrator.rs:754, 796` (`meeting_outbound_message` / edit path) | meeting status / cancel / parse-error | **migrated_v3**. Stable meeting dedup metadata plus `OutboundOperation::Edit`. |
-| `src/services/routines/discord_log.rs:486, 531` (`deliver_or_update_discord_summary`) | routine Discord summary | **migrated_v3**. Uses direct v3 send/edit and disables semantic dedupe for repeated summary writes. |
+| `src/services/discord/monitoring_status.rs` (`deliver_monitoring_status`) | monitoring status | **migrated_v3**. Status banner send + edit with `preserve_inline_content`; edits use `without_idempotency()`. |
+| `src/services/discord/meeting_orchestrator/selection_runtime.rs` (`meeting_outbound_message` / edit path) | meeting status / cancel / parse-error | **migrated_v3**. Stable meeting dedup metadata plus `OutboundOperation::Edit`. |
+| `src/services/routines/discord_log.rs` (`send_or_edit_run_log`; formerly `deliver_or_update_discord_summary`) | routine Discord summary | **migrated_v3**. Uses direct v3 send/edit and disables semantic dedupe for repeated summary writes. |
 | `src/integration_tests/discord_flow/scenarios.rs` (removed in #3035 Phase 1) | integration test harness | Mock-Discord roundtrip for §1.2 validation; legacy-sqlite-only harness deleted. |
 | `src/integration_tests/agents_setup_e2e.rs` (removed in #3035 Phase 1) | integration test | Wizard-ready E2E; legacy-sqlite-only harness deleted. |
 
@@ -327,7 +328,7 @@ notifications, intake reaction-control replies, and gateway/turn-bridge
 placeholder sends/edits, plus durable task-notification cards).
 
 No production caller uses the removed legacy facade. Verify with
-`git grep -n 'deliver_outbound' -- src/services src/bin tests`.
+`git grep -n 'deliver_outbound' -- src tests`.
 
 ### 3.B Direct sends (bypass outbound)
 
@@ -345,12 +346,12 @@ interaction tokens or ephemeral visibility.
 |---|---|---|
 | `src/services/discord/commands/restart.rs:185, 194, 223` | `/restart` ACK | excluded — interaction reply |
 | `src/services/discord/commands/receipt.rs:57, 138` | `/receipt` ACK | excluded |
-| `src/services/discord/commands/fast_mode.rs:83, 109` | `/fast` ACK | excluded |
+| `src/services/discord/commands/fast_mode.rs` (`cmd_fast`) | `/fast` ACK | excluded |
 | `src/services/discord/commands/help.rs:77, 83` | `/help` ACK | excluded |
 | `src/services/discord/commands/mod.rs:93` | shared command reply helper | excluded |
 | `src/services/discord/commands/skill.rs:141, 158, 161, 187, 206, 209, 247, 314, 321, 330` | `/skill` family ACK | excluded |
 | `src/services/discord/commands/control.rs:452, 456, 478, 510, 532, 550, 559, 564` | `/stop`, `/clear`, `/down` ACK | excluded |
-| `src/services/discord/commands/diagnostics.rs:759, 765, 780, 833, 839, 854, 883, 893, 961` | `/sessions`, `/deletesession`, `/debug` ACK | excluded |
+| `src/services/discord/commands/diagnostics/mod.rs` (`cmd_sessions`, `cmd_deletesession`, `cmd_debug`) | `/sessions`, `/deletesession`, `/debug` ACK | excluded |
 | `src/services/discord/commands/session.rs:72, 114, 125, 153, 362, 365` | `/start` ACK | excluded |
 | `src/services/discord/commands/config.rs:756, 762, 767, 801, 824, 837, 845, 870, 885, 892, 917, 944` | `/allowed`, `/adduser`, `/removeuser`, `/public` ACK | excluded |
 | `src/services/discord/commands/meeting_cmd.rs:33, 42, 83, 97` | `/meeting` ACK | excluded |
@@ -367,11 +368,11 @@ fallback policy). Excluded by #1175.
 
 | File:line | Notes | Triage |
 |---|---|---|
-| `src/services/discord/discord_io.rs:390` (`send_file_to_channel`) | CLI `--discord-sendfile` | excluded — attachment is the payload |
-| `src/services/discord/router/message_handler.rs:4598` | text-command file output | excluded |
+| `src/services/discord/discord_io.rs` (`send_file_to_channel`) | CLI `--discord-sendfile` | excluded — attachment is the payload |
+| `src/services/discord/commands/text_commands.rs` (`handle_text_command_with_uploads`, file branch) | text-command file output (moved out of `router/message_handler.rs`) | excluded |
 | `src/services/discord/commands/text_commands.rs:975` | text-command attached output | excluded |
 | `src/services/discord/outbound/manual_delivery.rs` (`post_text_attachment`) | announce-bot oversize fallback | excluded — attachment fallback that remains a compatibility shim while the v3 outbound text contract truncates first |
-| `src/services/discord/router/message_handler.rs:4820` | skill-running banner (file path) | excluded |
+| `src/services/discord/commands/text_commands.rs` (`handle_text_command_with_uploads`, skill branch) | skill-running banner (moved out of `router/message_handler.rs`) | excluded |
 | `src/services/discord/commands/skill.rs:273, 339` | skill announce | excluded |
 
 Total attachments-bucket: **7 callsites**.
@@ -386,8 +387,8 @@ stream/placeholder lifecycle contract lands.
 
 | File:line | Notes | Triage |
 |---|---|---|
-| `src/services/discord/formatting.rs:1944, 1960, 1963, 1991, 2046, 2153, 2210` (`send_long_message_raw`, `replace_long_message_raw`) | streaming chunker | **blocker**: needs a future streaming lifecycle variant, not just static split metadata. |
-| `src/services/discord/router/message_handler.rs:179, 1542, 1571, 2096, 2103, 3104, 3505, 3513, 3531, 3539, 3558, 3563, 3602` | watchdog / restore / upload notices | mixed — some are short, some forward to `send_long_message_raw`. Triage: **medium priority**; short notices can migrate now, streaming-forwarding paths wait for the lifecycle contract. |
+| `src/services/discord/formatting/long_send_rollback.rs` (`send_long_message_raw_with_rollback` family), `src/services/discord/formatting/replace_long_message.rs` (`replace_long_message_raw`) | streaming chunker | **blocker**: needs a future streaming lifecycle variant, not just static split metadata. |
+| `src/services/discord/router/message_handler.rs` (pre-split line list dropped; the direct notices now live under `router/message_handler/`, e.g. `attachments.rs`, `goal_lifecycle.rs`, `pre_admission_control.rs`) | watchdog / restore / upload notices | mixed — some are short, some forward to `send_long_message_raw`. Triage: **medium priority**; short notices can migrate now, streaming-forwarding paths wait for the lifecycle contract. |
 
 Total chunker-bucket: **20 callsites**.
 
@@ -398,15 +399,21 @@ into a single Discord placeholder message, freezes it on rollover, and posts
 a fresh placeholder for the continuation. Order-preservation across multiple
 messages is the invariant; outbound-layer dedup would corrupt it.
 
+Snapshot note: the rows below predate the `tmux.rs` → `tmux_watcher/`
+decomposition and were not re-audited. The watcher no longer calls
+`.say`/`send_message` directly; rollover edits go through
+`src/services/discord/tmux_watcher/provider_output_guard.rs` (`guard_rollover`)
+and overload retries through `src/services/discord/tmux_overload_retry.rs`.
+
 | File:line | Notes | Triage |
 |---|---|---|
-| `src/services/discord/tmux.rs:1101` (`edit_placeholder_with_operation`) | placeholder bookkeeping | **blocker** — order-preserving stream continuation |
-| `src/services/discord/tmux.rs:4752, 4762, 4793, 4834, 4843` | rollover freeze + new placeholder + fallback `say` | blocker (rollover order) |
-| `src/services/discord/tmux.rs:4888, 4896` | ready-for-input failure notice | candidate — short fixed string. **low priority**, design question: do we want this dedup-keyed by tmux session? |
-| `src/services/discord/tmux.rs:4970, 4974` | context-limit notice | candidate — short fixed string. **low priority**, same design question. |
-| `src/services/discord/tmux.rs:5048, 5052` | auth-error notice | candidate — same shape. **low priority**. |
-| `src/services/discord/tmux.rs:5168, 5176` | provider-overload retry notice | candidate — same shape. **low priority**. |
-| `src/services/discord/tmux.rs:5442` | stale-session recovery edit | candidate — single edit. **medium priority**. |
+| `src/services/discord/tmux.rs` (pre-split `edit_placeholder_with_operation`, no longer present) | placeholder bookkeeping | **blocker** — order-preserving stream continuation |
+| `src/services/discord/tmux.rs` (pre-split) | rollover freeze + new placeholder + fallback `say` | blocker (rollover order) |
+| `src/services/discord/tmux.rs` (pre-split) | ready-for-input failure notice | candidate — short fixed string. **low priority**, design question: do we want this dedup-keyed by tmux session? |
+| `src/services/discord/tmux.rs` (pre-split) | context-limit notice | candidate — short fixed string. **low priority**, same design question. |
+| `src/services/discord/tmux.rs` (pre-split) | auth-error notice | candidate — same shape. **low priority**. |
+| `src/services/discord/tmux.rs` (pre-split) | provider-overload retry notice | candidate — same shape. **low priority**. |
+| `src/services/discord/tmux.rs` (pre-split) | stale-session recovery edit | candidate — single edit. **medium priority**. |
 
 Total tmux-bucket: **15 callsites**, of which ~9 are short lifecycle notices
 that could migrate, and the rollover/freeze path (~6) is a hard blocker.
@@ -418,9 +425,9 @@ These are notifications that *could* migrate but currently sit on
 
 | File:line | Notes | Triage |
 |---|---|---|
-| `src/services/discord/router/message_handler.rs:179` (`announce_alert`) | alert-channel announce | candidate — **medium priority**; passes via dedicated alert channel, no thread routing |
-| `src/services/discord/router/message_handler.rs:1542, 1571` (`send_session_restore_notice`) | restore-bot announce + provider fallback | candidate — **medium priority**; would benefit from dedup so duplicate restores in retry loops don't double-post |
-| `src/services/discord/router/message_handler.rs:3104` (watchdog timeout notice) | turn-watchdog timeout | candidate — **medium priority**; fixed-shape notice |
+| `src/services/discord/router/message_handler.rs` (`announce_alert`, no longer present) | alert-channel announce | candidate — **medium priority**; passes via dedicated alert channel, no thread routing |
+| `src/services/discord/router/message_handler.rs` (`send_session_restore_notice`, no longer present) | restore-bot announce + provider fallback | candidate — **medium priority**; would benefit from dedup so duplicate restores in retry loops don't double-post |
+| `src/services/discord/router/message_handler.rs` (watchdog timeout notice, no longer present) | turn-watchdog timeout | candidate — **medium priority**; fixed-shape notice |
 
 These overlap with §B.3 in some places — counted once here.
 
@@ -428,9 +435,9 @@ These overlap with §B.3 in some places — counted once here.
 
 | File:line | Notes |
 |---|---|
-| `src/server/routes/discord.rs:88` (`channel_messages`) | GET-only proxy to `discord.com/api/v10/channels/{id}/messages` |
-| `src/server/routes/discord.rs:135` (`channel_info`) | GET-only proxy to `/channels/{id}` |
-| `src/server/routes/discord.rs:16` (`list_bindings`) | DB-only, no Discord call |
+| `src/server/routes/discord.rs` (`channel_messages`) | GET-only proxy to `discord.com/api/v10/channels/{id}/messages` |
+| `src/server/routes/discord.rs` (`channel_info`) | GET-only proxy to `/channels/{id}` |
+| `src/server/routes/discord.rs` (`list_bindings`) | DB-only, no Discord call |
 | `src/server/routes/messages.rs:61` (`create_message`) | INSERT into `messages` (postgres), not a Discord send |
 
 Dashboard never sends to Discord through these routes; the dashboard's send
@@ -453,7 +460,7 @@ button hits the manual outbound API, which is covered under §3.A
 3. **Landed in #2535 — final legacy bridge removal.**
    Issue announcements, monitoring status, meeting notifications, routine
    Discord logs, and the CLI text helper now build v3 envelopes directly.
-   `outbound/legacy.rs` was deleted; `transport.rs` owns the shared
+   `outbound/legacy.rs` (removed) was deleted; `transport.rs` owns the shared
    `DiscordOutboundClient`, `HttpOutboundClient`, fingerprint helper, and
    in-memory deduper.
 4. **Next — attachment-capable v3 transport.**
@@ -649,8 +656,8 @@ revert.
   `AGENTDESK_RECOVERY_RELAY_CONTROLLER`, and
   `AGENTDESK_TUI_PROMPT_RELAY_CONTROLLER`.
 - The read-only health key `turn_output_controller_rollout` and
-  `outbound/turn_output_controller_rollout_health.rs` are deleted.
-- A6b has no independent transport; `tui_prompt_relay_controller_cutover.rs` is
+  `outbound/turn_output_controller_rollout_health.rs` (removed) are deleted.
+- A6b has no independent transport; `tui_prompt_relay_controller_cutover.rs` (removed) is
   deleted and the bridge site-5 route is the A5 structural decision alone.
 - Anchored A4/A5 long-chunk terminal delivery is controller-routed when its
   structural conditions are satisfied (#3998 S1-d).
@@ -673,8 +680,8 @@ changing runtime behavior.
 
 | owner / arm | code condition | decision / rationale | blocker / re-eval | pin test |
 |---|---|---|---|---|
-| A2b sink `NoRange` / `cutover_range == None` short-replace | `src/services/discord/session_relay_sink.rs:884-895` requires `cutover_range.is_some()` before controller routing; the legacy replace arm starts at `session_relay_sink.rs:990`. | **RETAIN.** This is the no-advance class: without a real ordered `[start,end)` range, the controller has no offset authority to commit. | #4048 advance-authority work / #3998 legacy-retirement follow-up. | `structural_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path` |
-| A2b sink empty body | `src/services/discord/session_relay_sink.rs:891-895` requires `!relay_text.is_empty()` before controller routing. | **RETAIN.** Legacy zero-chunk replace is committed/advanced; the controller returns `Skipped`, so migrating would flip Skipped-vs-advance semantics. | #4047 / #4048 semantics re-eval. | `controller_skips_empty_body_so_cutover_gate_keeps_it_legacy`; `structural_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path` |
+| A2b sink `NoRange` / `cutover_range == None` short-replace | `src/services/discord/session_relay_sink.rs` (`deliver_response`, `cutover_short_replace`) requires `cutover_range.is_some()` before controller routing; otherwise the legacy replace arm runs. | **RETAIN.** This is the no-advance class: without a real ordered `[start,end)` range, the controller has no offset authority to commit. | #4048 advance-authority work / #3998 legacy-retirement follow-up. | `structural_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path` |
+| A2b sink empty body | `src/services/discord/session_relay_sink.rs` (`deliver_response`, `cutover_short_replace`) requires `!relay_text.is_empty()` before controller routing. | **RETAIN.** Legacy zero-chunk replace is committed/advanced; the controller returns `Skipped`, so migrating would flip Skipped-vs-advance semantics. | #4047 / #4048 semantics re-eval. | `controller_skips_empty_body_so_cutover_gate_keeps_it_legacy`; `structural_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path` |
 | A3 standby empty body | `src/services/discord/standby_relay.rs:77-79` gates short-replace on `!formatted.is_empty()`; legacy replace starts at `standby_relay.rs:814`. | **RETAIN.** Same empty-body parity class as A2b/A4/A5: controller `Skipped` would not match legacy committed replace. | #4047 / #4048 semantics re-eval. | `standby_short_replace_should_cutover_pins_both_conditions` |
 | A3 standby transport-only `NoLease` | `src/services/discord/standby_relay.rs:672-725` uses `toc::NoLease`, `lease_key: None`, `advance: None`, and `heartbeat: None`. | **RETAIN.** Standby has no lease, no offset authority, and no heartbeat to unify; this is intentionally transport-only instead of inventing a lease. | #3998 legacy-retirement follow-up. | `edited_original_returns_true_and_does_not_delete_original`; `fallback_after_edit_failure_returns_true_and_preserves_original` |
 | A3 standby `placeholder_msg_id == None` new-message send | `src/services/discord/standby_relay.rs:893-895` calls legacy `formatting::send_long_message_raw`. | **RETAIN.** Anchor-less fresh-send is not a controller verb yet, same class as watcher no-placeholder (#4053) and A6a `None`-placeholder fresh-send. | #3998 legacy-retirement follow-up after an anchor-less fresh-send verb exists. | `none_placeholder_new_message_stays_legacy` |

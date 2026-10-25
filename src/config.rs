@@ -2999,11 +2999,9 @@ pub fn load_graceful() -> Config {
 /// the number of independent cascades that are possible.
 ///
 /// The convention here is that every acquisition site recovers the guard
-/// rather than propagating the `PoisonError`. Of the 290 direct
-/// `shared_test_env_lock().lock()` sites, 288 spell it
-/// `unwrap_or_else(|poison| poison.into_inner())` literally; the remaining two
-/// recover identically in a different syntax -- `placeholder_live_events`
-/// matches on `Err(poisoned) => poisoned.into_inner()`, and
+/// rather than propagating the `PoisonError`; direct `shared_test_env_lock().lock()`
+/// sites pass an `into_inner` recovery to `unwrap_or_else`, except that
+/// `placeholder_live_events` matches on `Err(poisoned) => poisoned.into_inner()`, and
 /// `turn_orchestrator::SharedEnvLock::lock` is a forwarding shim whose single
 /// caller `lock_test_env()` applies the `unwrap_or_else`. The canonical
 /// `test_env_lock::acquire_shared_test_env_lock` path recovers too.

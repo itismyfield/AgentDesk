@@ -90,10 +90,15 @@ pub(in crate::services::discord) async fn tmux_verdict_gate(
 
 /// A known historical host must confirm death; missing evidence never stands for absence.
 pub(in crate::services::discord) fn historical_execution_ended(name: &str) -> bool {
+    historical_execution_liveness(name) == Some(HostLiveness::DeadOrAbsent)
+}
+
+/// Only an explicit local tmux/process marker permits a historical liveness probe.
+pub(crate) fn historical_execution_liveness(name: &str) -> Option<HostLiveness> {
     let HostKindMarker::Known(kind @ (HostKind::Tmux | HostKind::Process)) =
         read_host_kind_marker(name)
     else {
-        return false;
+        return None;
     };
-    host_for(kind).liveness(HostSessionRef { kind, name }) == HostLiveness::DeadOrAbsent
+    Some(host_for(kind).liveness(HostSessionRef { kind, name }))
 }

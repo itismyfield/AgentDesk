@@ -1,5 +1,10 @@
 # AgentDesk 기술부채 종합 감사 — 2026-05-12
 
+<!-- doc-path-refs: removed src/server/routes/routes_tests.rs src/integration_tests.rs src/services/onboarding.rs src/server/auth.rs policies/merge-automation.js -->
+<!-- doc-path-refs: proposed watchdog_prealert.rs tmux_stall_detection.rs envvars.rs tmux_output_parser.rs migrations/POLICY.md -->
+
+> 2026-10-25 주: 2026-05-12 시점 기록이다. 그 뒤 삭제된 파일과 제안만 되고 만들어지지 않은 파일은 이 문서 머리의 `doc-path-refs` 주석에 적었다.
+
 **감사 방식:** 6개 영역 병렬 read-only Explore 에이전트
 **대상 코드량:** Rust 579 파일 / 약 445,573줄 + 정책/스크립트/대시보드
 **감사 영역:** Discord layer, Server/HTTP, Dispatch/Engine/Pipeline, Voice/Recovery, Services/DB/Config, Scripts/Dashboard/Policies
@@ -71,7 +76,7 @@
 | 21 | `tmux.rs` stall detection → `tmux_stall_detection.rs` 분리 | Discord |
 | 22 | Voice TTS retry/timeout/sleep 상수 → `RetryPolicy` enum + config | Voice |
 | 23 | Dispatch cancellation cascade: 부모→자식 취소 전파 | Dispatch |
-| 24 | DB row 파싱: `kanban_cards/mod.rs:283-310`의 `unwrap_or(None)` 28회 → 스키마 typed parser | DB |
+| 24 | DB row 파싱: `src/db/kanban_cards/mod.rs`의 `unwrap_or(None)` 28회(감사 시점. 현재 `src/db/kanban_cards/`에는 없음) → 스키마 typed parser | DB |
 | 25 | `_sqlite_test`/`_pg` 이중 경로 통합 (dispatch_context.rs:1600-1800) | Dispatch |
 | 26 | 환경변수 중앙 registry (`envvars.rs`) — `AGENTDESK_ROOT_DIR`, `AGENTDESK_CONFIG` 등 산개 통합 | Config |
 | 27 | Scripts: `_http-client.sh`(retry/timeout) + `_service-manager.sh`(launchctl wrapper) | Scripts |
@@ -195,8 +200,8 @@
 |---|---|---|---|---|
 | `policies/auto-queue.js` | 1,582 | Phase gate + dispatch + lifecycle + error recovery | phase-gate-verdict / dispatch-activation / lifecycle / error-recovery | P0 |
 | `policies/merge-automation.js` | 2,501 | PR merge check + conflict + GitHub API + Discord notify | github-pr-adapter / merge-conflict-resolver / notification-dispatcher | P0 |
-| `dashboard/components/SettingsView.tsx` | 3,832 | UI + API + validation + state + persistence | `SettingsForm` / `SettingsValidator` / `useSettingsPersistence` | P1 |
-| `dashboard/components/agent-manager/KanbanTab.tsx` | 3,882 | Kanban + card + dispatch + timeline + auto-queue panel | `KanbanBoardController` / `CardEditor` / `DispatchTracker` / `TimelineRenderer` | P1 |
+| `dashboard/src/components/SettingsView.tsx` | 3,832 | UI + API + validation + state + persistence | `SettingsForm` / `SettingsValidator` / `useSettingsPersistence` | P1 |
+| `dashboard/src/components/agent-manager/KanbanTab.tsx` | 3,882 | Kanban + card + dispatch + timeline + auto-queue panel | `KanbanBoardController` / `CardEditor` / `DispatchTracker` / `TimelineRenderer` | P1 |
 | `scripts/deploy-release.sh` | 1,048 | Build + sign + copy + health-check + cluster + manifest + cleanup | `binary-signer` / `artifact-promoter` / `health-verifier` / `cluster-deployer` | P1 |
 
 **핵심 부채:** 정책 파일 26개에서 `agentdesk.db.query()` 126회 직접 호출 (DB facade 부재), `deploy.sh`/`deploy-release.sh` 중복 로직, 하드코딩 (`com.itismyfield.agentdesk`, `$HOME/ObsidianVault/...`), e2e 테스트가 정책/대시보드 배포 검증 안 함.
