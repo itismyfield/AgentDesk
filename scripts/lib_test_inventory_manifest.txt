@@ -2017,6 +2017,7 @@ services::claude::herdr_turn::boot_host_tests::boot_launch_host_forwards_endpoin
 services::claude::herdr_turn::coldstop_input_tests::coldstop_claude_closed_never_begins_input_or_mutation
 services::claude::herdr_turn::composer::composer_tests::herdr_claude_composer_waits_from_busy_to_ready_before_exactly_one_submit
 services::claude::herdr_turn::composer::composer_tests::herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or_enter
+services::claude::herdr_turn::first_input::tests::cold_herdr_payload_commit_refusal_preserves_raw_and_hold_with_zero_keys
 services::claude::herdr_turn::first_input::tests::cold_herdr_submit_returns_before_source_and_emits_init_before_one_paste_enter
 services::claude::herdr_turn::provider_terminal_tests::a_compact_summary_neither_starts_nor_splits_a_herdr_claude_turn
 services::claude::herdr_turn::provider_terminal_tests::a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal
@@ -2999,6 +3000,7 @@ services::codex::herdr_guard_tests::both_codex_tmux_entries_refuse_a_herdr_chann
 services::codex::herdr_turn::coldstop_input_tests::coldstop_actual_typed_outcomes_keep_indeterminate_unsubmitted_held
 services::codex::herdr_turn::coldstop_input_tests::coldstop_input_boundary_never_calls_write_or_start
 services::codex::herdr_turn::composer_tests::codex_actual_composer_entry_preserves_draft_modal_busy_and_capture_failure
+services::codex::herdr_turn::first_input::pg_tests::cold_codex_herdr_payload_commit_refusal_preserves_raw_and_hold_with_zero_keys_pg
 services::codex::herdr_turn::first_input::pg_tests::cold_codex_herdr_submit_keeps_hold_and_returns_before_session_start_pg
 services::codex::herdr_turn::observed_input_tests::a_followup_builds_its_turn_start_only_under_settlement
 services::codex::relay_separator_tests::codex_second_agent_message_carries_paragraph_separator_3431

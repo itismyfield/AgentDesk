@@ -735,6 +735,7 @@ src/
 │   │   │   │   ├── a1_stash_tests.rs
 │   │   │   │   ├── hold_tests.rs
 │   │   │   │   └── paste_footer_tests.rs
+│   │   │   ├── epoch.rs
 │   │   │   ├── ownership.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_interleave_tests.rs
@@ -817,6 +818,8 @@ src/
 │   │   ├── memento_feedback.rs
 │   │   ├── memento_writer_hook.rs
 │   │   ├── mod.rs
+│   │   ├── owner_input.rs
+│   │   ├── owner_input_tests.rs
 │   │   ├── prompt_readiness.rs
 │   │   ├── session.rs
 │   │   ├── source_verify.rs
@@ -1246,6 +1249,7 @@ src/
 │   │   │   │   │   └── turn_mode_reading_tests.rs
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
+│   │   │   │   ├── inject_codex_v2_tests.rs
 │   │   │   │   └── inject_tests.rs
 │   │   │   ├── unbound_owners/
 │   │   │   │   └── tests.rs
@@ -1789,6 +1793,8 @@ src/
 │   │   │   │   │   ├── retry_prompt/
 │   │   │   │   │   │   ├── tests.rs
 │   │   │   │   │   │   └── wiring_tests.rs
+│   │   │   │   │   ├── session_preparation/
+│   │   │   │   │   │   └── restore_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
@@ -3308,7 +3314,8 @@ src/
 │   │   ├── input_key_tests.rs
 │   │   ├── mod.rs
 │   │   ├── submission.rs
-│   │   └── submission_tmux.rs
+│   │   ├── submission_tmux.rs
+│   │   └── target_epoch.rs
 │   ├── tui_o/
 │   │   ├── alarm/
 │   │   │   └── sink.rs
@@ -3693,7 +3700,10 @@ src/
 │   │   ├── queued_head/
 │   │   │   ├── v2/
 │   │   │   │   ├── owner_tests/
+│   │   │   │   │   ├── fixtures/
+│   │   │   │   │   │   └── previous_v2_reader.rs
 │   │   │   │   │   ├── conservation_tests.rs
+│   │   │   │   │   ├── epoch_tests.rs
 │   │   │   │   │   └── pg_tests.rs
 │   │   │   │   ├── source_admission/
 │   │   │   │   │   ├── tests/

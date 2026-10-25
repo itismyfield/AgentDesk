@@ -1745,6 +1745,7 @@ services::cluster::intake_worker::replay_hold_tests::replay_hold_committed_after
 services::cluster::intake_worker::replay_hold_tests::replay_hold_survives_worker_replacement_and_foreign_claim_owners_pg
 services::cluster::intake_worker::replay_hold_tests::replay_schema_preserves_normal_worker_delivery_and_preaccept_attempt_budget_pg
 services::cluster::machine_resources::store::tests::postgres_machine_history_is_durable_ordered_deduplicated_and_retained
+services::codex::herdr_turn::first_input::pg_tests::cold_codex_herdr_payload_commit_refusal_preserves_raw_and_hold_with_zero_keys_pg
 services::codex::herdr_turn::first_input::pg_tests::cold_codex_herdr_submit_keeps_hold_and_returns_before_session_start_pg
 services::discord::admin_host_guard::tests::a_clear_goes_ahead_on_any_host_while_a_reset_refuses_a_kept_session_pg
 services::discord::admin_host_guard::tests::a_configured_channel_refuses_a_dispatch_reset_before_any_change_pg
@@ -1871,6 +1872,8 @@ services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_r
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reused_head_veto_keeps_one_original_queue_entry_pg
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_sole_head_live_entry_injects_once_and_has_no_pending_rest_marker_pg
 services::discord::health::turn_deliver::inject::first_input::pg_tests::cold_submit_returns_exact_attempt_and_releases_writer_before_source_pg
+services::discord::health::turn_deliver::inject::first_input::pg_tests::completion_clock_keeps_retained_a_fence_without_touching_active_b_pg
+services::discord::health::turn_deliver::inject::first_input::pg_tests::live_payload_refusal_proof_preserves_raw_without_becoming_restart_authority_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_ack_without_the_exact_receipt_stays_unconfirmed_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_refusal_or_unreachable_server_hands_the_input_back_pg
@@ -1889,7 +1892,6 @@ services::discord::health::turn_deliver::inject_codex_tests::queued_codex_receip
 services::discord::health::turn_deliver::inject_codex_tests::queued_codex_same_owner_serializes_two_inputs_across_effect_pg
 services::discord::health::turn_deliver::inject_codex_tests::queued_codex_unknown_restart_waits_for_complete_receipt_without_retyping_pg
 services::discord::health::turn_deliver::inject_codex_tests::queued_codex_v2_compat_clear_keeps_original_and_marker_pg
-services::discord::health::turn_deliver::inject_codex_tests::queued_codex_v2_real_entry_uses_permit_adapter_and_native_receipt_pg
 services::discord::health::turn_deliver::inject_tests::a_busy_pane_takes_the_input_whoever_holds_the_channel_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
