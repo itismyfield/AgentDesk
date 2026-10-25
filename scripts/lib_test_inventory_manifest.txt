@@ -230,6 +230,8 @@ config::cluster_role::tests::unknown_role_cannot_silently_participate_in_hub_ele
 config::cluster_semaphore_config_tests::cluster_intake_routing_parses_defaults_and_yaml_fields
 config::cluster_semaphore_config_tests::cluster_nodes_parse_max_concurrent_dispatches
 config::cluster_semaphore_config_tests::cluster_semaphores_parse_kebab_scope_and_default_capacity
+config::disk_write::tests::a_save_through_a_dangling_symlink_is_refused
+config::disk_write::tests::a_save_writes_back_only_the_memento_server_the_file_names
 config::disk_write::tests::an_unchanged_injected_mcp_server_is_not_written
 config::disk_write::tests::round_trip_gate_refuses_a_render_that_drops_secrets_without_echoing_them
 config::disk_write::tests::save_refuses_a_config_that_lost_a_secret_the_file_holds
@@ -15276,6 +15278,7 @@ utils::secret_file::private_directory::tests::failed_writes_preserve_phase_and_r
 utils::secret_file::private_directory::tests::symlink_permissions_and_second_owner_are_rejected
 utils::secret_file::tests::audit_or_harden_secret_file_corrects_existing_mode
 utils::secret_file::tests::audit_or_harden_secret_file_refuses_symlink_without_chmoding_target
+utils::secret_file::tests::replace_secret_file_through_a_symlink_keeps_the_target_directory_mode
 utils::secret_file::tests::write_secret_file_creates_owner_only_file
 utils::secret_file::tests::write_secret_file_preserving_parent_mode_keeps_existing_parent_permissions
 utils::wip_detect::tests::clean_repo_suppresses_warning
