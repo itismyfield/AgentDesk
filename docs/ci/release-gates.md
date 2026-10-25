@@ -58,9 +58,9 @@ planner와 각 실행 leg는 원장의 declared-ignored ID를 같은 방식으�
 선택 집합에 자식이 빠졌거나 분할 결과가 관계를 깨면 계획·실행 검사가 실패한다.
 추가 summary 예산은 그 shard에 있는 선언된 부모의 자식 수로 정하고,
 자식의 실행 출력은 선언된 부모도 실제로 선택·실행됐을 때만 받는다.
-`nested_libtest.py check`는 ignored 재실행 callsite·출력 경로·함수 hash·inventory와
-원장 및 PG hash/harness 정합성을 검사한다. 새 PG 상속 관계가 기존 hash에서
-갈라지면 hardening이 실패하므로 누락을 green으로 바꾸지 않는다. 실제 시험은 `run_test_lane.py`의 exact-ID
+hardening이 부르는 `nested_libtest.py check`는 이제 ignored 재실행 callsite·출력 경로·함수 hash와
+소스 인벤토리(자식의 `#[ignore]`·linux 컴파일·선언된 부모)만 검사한다. nextest는 시험마다
+프로세스를 따로 쓰므로 원장·PG hash/harness 정합성은 더 보지 않는다. 실제 시험은 `run_test_lane.py`의 exact-ID
 판정을 거치며, replay ID도 판정 누락과 미등록 ignore를 거부한다. 모든 ID가 ignored면
 실행 0건이므로 실패한다. 샤드별 PostgreSQL 서비스는 계속 필요하다.
 
@@ -315,7 +315,7 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 | Gate | main 커맨드 | 재현 커맨드 (로컬) |
 | --- | --- | --- |
 | Full tests | `rust_tests` worker의 `cargo nextest run`(계획된 exact ID, worker당 PostgreSQL 서버 하나) → `test_evidence` 감사 | PostgreSQL 환경에서 `cargo nextest run --lib --profile ci` |
-| Lint (main) | `lint`의 `npm run test:policies`, `just fmt-check`, `just lint`, `Non-lib tests and doctests`(`test-non-pg`의 `--all-targets` 줄을 `--bins --test '*'`로, `cargo test --doc ClaudeBinary`) | `just check` |
+| Lint (main) | `lint`의 `npm run test:policies`, `just fmt-check`, `just lint`, `Non-lib tests and doctests`(필터 없는 `cargo test --bins --test '*'` 한 번, `cargo test --doc ClaudeBinary`) | `just check` |
 | PostgreSQL tests | 같은 `rust_tests` 실행 | PostgreSQL 환경에서 `cargo nextest run --lib --profile ci` |
 | High-risk recovery | 같은 `rust_tests` 실행 | `cargo nextest run --lib --profile ci high_risk_recovery::` |
 

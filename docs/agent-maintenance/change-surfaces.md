@@ -407,8 +407,8 @@ time for diagnostics; neither is a stored approval value.
   `session_relay_sink/task_notification_context.rs`, and
   `placeholder_live_events/tests.rs`, plus
   `tmux_watcher/terminal_direct_fallback.rs` for the fail-closed retry gate.
-  `just test` runs the non-PG task/card filters; `just test-postgres` runs the
-  unique-winner and crash-window replay cases.
+  `just test-non-pg` runs the non-PG task/card cases; `just test-postgres` runs every
+  lib test, the unique-winner and crash-window replay cases included.
 - related_issues: #4055, #3654, #4097.
 
 ### `policy_engine`
@@ -1988,7 +1988,7 @@ time for diagnostics; neither is a stored approval value.
   allowlist in T4-B2c, and widening it means widening the declaration-only rule
   in the same change.
 - tests: `services::discord::health::reachability::{verdict,discovery,tail,obligation}::tests`
-  in the `test-non-pg` lane; `tests/test_reachability_row_independence.py` and
+  in the nextest lib run; `tests/test_reachability_row_independence.py` and
   `tests/test_reachability_canonical_equivalence.py` for the gates themselves;
   `just reachability-mutation-runner` for the Rust half of the mutation runner,
   which needs a compiler and is therefore out of the fast lane.

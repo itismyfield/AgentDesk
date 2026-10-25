@@ -16,9 +16,8 @@ DEBUG_JOBS = ("full_macos", "full_windows", "rust_build", "postgres_full",
 DEBUG_KEYS = ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG")
 PG_STEP = "cargo test (e2e smoke against PostgreSQL)"
 PG_CARGO = "cargo test --test e2e -- --test-threads=1"
-NON_PG_CARGO = 'cargo test --bins --examples --benches --test \'*\' -- "${NON_PG_SKIP_ARGS[@]}"'
+NON_PG_CARGO = "cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres"
 NATIVE_LIB_STEP = "Compare and run non-PG lib tests"
-FILTER_SOURCE = "source scripts/ci/non-pg-test-filter.sh"
 
 
 def load_module(name: str, path: Path):
@@ -79,7 +78,7 @@ def nightly_contract_problems(text: str) -> list[str]:
 
     for name, platform in (("full_macos", "macos"), ("full_windows", "windows")):
         run = (step_of(jobs, name, "cargo test (non-PG, non-lib targets)") or {}).get("run", "")
-        need(FILTER_SOURCE in run and NON_PG_CARGO in run,
+        need(run.strip() == NON_PG_CARGO,
              f"{name} changed its canonical non-PG non-lib sweep")
         lib = step_of(jobs, name, NATIVE_LIB_STEP) or {}
         need(lib.get("run", "").strip() == f"bash scripts/ci/nextest-native.sh {platform} {platform}-lib pg-classifier",

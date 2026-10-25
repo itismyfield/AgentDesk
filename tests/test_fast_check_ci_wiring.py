@@ -73,110 +73,6 @@ TRUSTED_LIB_RUN = (
     "selectors:scripts/ci/macos-trusted-selectors.txt"
 )
 
-EXPECTED_TEST_NON_PG_COMMANDS = (
-    "cargo test --lib engine::ops::kv_ops::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib server::routes::docs::inventory::endpoints::part_0 -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::task_completion_v1::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::session_host:: -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib source_registry -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib delivery_lease_key -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::session_relay_sink::delivery_orchestration_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::verdict::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::discovery::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::tail::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::ledger::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::observation::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::obligation::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::divergence::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib server::routes::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib formatting -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib delivery_record -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::outbound::receipt_index::tests"
-    " -- --skip _pg --skip pg_ --skip postgres",
-    (
-        "cargo test --lib services::discord::recovery_known_ids::recovery_known_message_ids_tests"
-        " -- --skip _pg --skip pg_ --skip postgres"
-    ),
-    (
-        "cargo test --lib services::discord::tmux::placeholder_suppression::evidence::tests"
-        " -- --skip _pg --skip pg_ --skip postgres"
-    ),
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::watcher_lifecycle::tests::tests::turn_starts_reuse_healthy_runtime_path_incumbent_after_handoff -- --exact",
-    "cargo test --lib server::claude_oauth_usage_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::turn_bridge::headless_delivery",
-    "cargo test --lib services::dispatches::outbox_claiming::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::dispatches::discord_delivery::guard::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib discord_thread_create -- --test-threads=1",
-    "cargo test --lib reaction_control::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib intake_queue_transaction::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib pending_reaction_failure_adapter_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib intake_dispatch_invariant_queued_entrypoints_promote_markers -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::router::intake_dispatch::tests::telemetry_only_unopted -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib attachment -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib mailbox_reaction_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::zombie_foreground_release::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::placeholder_controller::queued_card_gate::tests"
-    " -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib queue_status_presentation::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib status_panel_singleton_store -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib busy_followup_retry_store -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::claude_tui::input::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::tmux_common::sentinel_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::turn_bridge::followup_requeue::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::busy_followup_retry::tests -- --skip _pg --skip pg_ --skip postgres",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight::destructive_commit::tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight::save_store::bridge_entry_guard_tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight::save_store::identity_gate::bridge_entry::tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::current_message_anchor::tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::guards::tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_loop::tool_arms::authority_tests -- --test-threads=1",
-    "cargo test --lib services::discord::gateway::tests -- --skip _pg --skip pg_ --skip postgres",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::gateway::outbound_messages::classified_edit_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::queued::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::intake_turn::placeholder_handoff::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission_actor::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::cleanup::tests::late_already_finalized_cleanup_releases_mailbox_and_rearms_once_4906 -- --exact --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::cleanup::tests::mailbox_release_backstop_coalesces_duplicate_arms_and_eventually_fires_4906 -- --exact --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::placeholder_reclaim::redrive_reclaim_e2e_tests::live_tmux_redrive_reclaim_cycle_terminates_4299 -- --exact --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::placeholder_sweeper::abandon_guard::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact",
-    "cargo test --lib services::discord::outbound::delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact",
-    "cargo test --lib canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib session_canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::observability::metrics::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::observability::turn_lifecycle::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::observability::recovery_audit::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib cli::args::tests::legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract",
-    "cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --all-targets routines -- --skip _pg --skip pg_ --skip postgres",
-    "python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "cargo test --lib services::discord::model_catalog -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::commands::model_ui::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::runtime_bootstrap::shutdown::lifecycle_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::tui_prompt_relay::session_rotation_settle::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::tui_prompt_relay::injected_prompt_policy::session_resetting_lifecycle_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::tui_prompt_dedupe::session_rotation::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --doc ClaudeBinary",
-)
-
 
 def job_block(workflow: str, job_name: str) -> str:
     marker = re.compile(rf"^  {re.escape(job_name)}:\n", re.MULTILINE)
@@ -844,23 +740,17 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("check: fmt-check lint cargo-check test", justfile)
-        self.assertIn("test: test-non-pg", justfile)
-        self.assertEqual(
-            just_recipe_commands(justfile, "test-non-pg"),
-            EXPECTED_TEST_NON_PG_COMMANDS,
-        )
+        self.assertEqual(just_recipe_commands(justfile, "test"), ("cargo nextest run --lib --profile ci",))
+        # Local non-PG lib tests take the native CI path; the other commands equal CI Main's non-lib step.
+        recipe = just_recipe_commands(justfile, "test-non-pg")
+        self.assertTrue(any(command.startswith('RUNNER_TEMP="$PWD/target/nextest-local" GITHUB_WORKSPACE="$PWD" '
+                                               "bash scripts/ci/nextest-native.sh") for command in recipe))
+        self.assertTrue(any(command.endswith(" local-non-pg pg-classifier") for command in recipe))
+        non_lib = [command for command in recipe if command.startswith("cargo test ")]
+        self.assertEqual(non_lib, ["cargo test --bins --test '*' -- --skip _pg --skip pg_ --skip postgres",
+                                   "cargo test --doc ClaudeBinary"])
 
         main_jobs = yaml.safe_load(MAIN_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        recipe = just_recipe_commands(justfile, "test-non-pg")
-        non_lib = [
-            command.replace(" --all-targets", " --bins --test '*'").replace(
-                "-- --skip _pg --skip pg_ --skip postgres",
-                '-- "${NON_PG_SKIP_ARGS[@]}"',
-            )
-            for command in recipe
-            if "cargo test --lib " not in command
-        ]
-        self.assertIn("cargo test --doc ClaudeBinary", non_lib)
         lint_run = next(step["run"] for step in main_jobs["lint"]["steps"] if step.get("name") == "just lint")
         observed = next(line.strip().split(" | tee ")[0] for line in lint_run.splitlines() if line.strip().startswith("cargo clippy "))
         self.assertEqual(observed.replace(" --message-format=json", ""), just_recipe_commands(justfile, "lint")[0])
@@ -880,7 +770,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "mkdir -p target/clippy-observation",
                 "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
                 "python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1",
-                "source scripts/ci/non-pg-test-filter.sh",
                 *non_lib,
                 "sccache --show-stats || true",
             ],
@@ -890,12 +779,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for job_name in ("full_macos", "full_windows"):
             with self.subTest(job=job_name):
                 job = job_block(nightly, job_name)
-                # Lib tests run through the audited native path; the other targets keep the skip filter.
+                # Lib tests run through the audited native path; the other targets run whole.
                 self.assertIn("pg-classifier", job)
-                self.assertIn("source scripts/ci/non-pg-test-filter.sh", job)
-                self.assertIn(
-                    'cargo test --bins --examples --benches --test \'*\' -- "${NON_PG_SKIP_ARGS[@]}"', job
-                )
+                self.assertIn("cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres", job)
         self.assertIn("cargo test --test e2e -- --test-threads=1", job_block(nightly, "postgres_full"))
 
     def test_relay_authority_contract_job_uses_pinned_recipe(self) -> None:
@@ -1877,7 +1763,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "H2 module map (macos, inert)",
                 "Install cargo-nextest",
                 "cargo nextest (non-PG, targeted lib selectors)",
-                "cargo test (non-PG, targeted non-lib selectors)",
+                "cargo test (non-PG, non-lib targets)",
                 "Fresh user portable smoke",
             },
         )

@@ -6,11 +6,14 @@ repository is already clippy-clean.
 ## Entrypoints
 
 - `just check`: local aggregate for `just fmt-check`, staged clippy,
-  `cargo check --workspace --all-features --all-targets`, the existing
-  non-Postgres test subset, and the targeted `ClaudeBinary` compile-fail
-  doctest guard.
-- `just test-postgres`: existing PostgreSQL test lane for CI jobs with a
-  Postgres service.
+  `cargo check --workspace --all-features --all-targets` and `just test`.
+- `just test`: the CI nextest run, `cargo nextest run --lib --profile ci`, over every
+  lib test; the PostgreSQL ones need a dedicated test server.
+- `just test-non-pg`: without PostgreSQL, the lib tests the source PG classifier leaves
+  out through the native CI path, then every non-lib test and the `ClaudeBinary`
+  compile-fail doctests.
+- `just test-postgres`: every lib test against an explicit
+  `POSTGRES_TEST_DATABASE_URL_BASE` server.
 - `just lint-strict`: target end state, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`. This is intentionally not wired into required
   CI yet.
@@ -72,8 +75,8 @@ production-only, test-aware, or repo-wide before adding hard gates.
 
 ## Non-Postgres Test Scope
 
-`just test-non-pg` keeps a targeted non-Postgres subset for local `just check`.
-CI no longer runs it: on `main` push and dispatch, every nightly, and on PRs whose
+`just test-non-pg` runs the classifier's non-PG lib tests locally the way the native
+nightly does. CI does not call it: on `main` push and dispatch, every nightly, and on PRs whose
 `rust_tests` filter is on, `rust_build` archives the lib tests and plans every listed test
 over six `rust_tests` workers, each with its own PostgreSQL service, and
 `test_evidence` audits that every planned test ran. PR, main and nightly keep the same
