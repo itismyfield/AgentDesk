@@ -118,12 +118,16 @@ full workspace gates until remaining Unix-only tmux tests are made portable or
 cfg-guarded.
 `ci-nightly.yml` has the same Windows boundary today: its Windows lane runs
 default-feature lib tests through nextest and the other targets with `cargo test`.
-`ci-main.yml` `windows_cache_warm` builds the same Windows compile on every
-`main` push (`cargo check --workspace --all-targets` and `cargo test --lib
---no-run`, no tests run) and saves the registry and sccache entries the PR
-Windows jobs restore. It is advisory (`continue-on-error`) and not a required
-context; `scripts/check-ci-runner-hardening.sh` keeps its env, setup steps and
-rust-cache inputs equal to the PR Windows jobs so both hash to the same keys.
+`ci-windows-cache-warm.yml` `windows_cache_warm` builds the same Windows compile
+when a `main` push changes `Cargo.lock`, `Cargo.toml`, `rust-toolchain.toml` or
+the cargo config, and once a day inside the 7-day cache eviction window
+(`cargo check --workspace --all-targets` and `cargo test --lib --no-run`, no
+tests run). It saves the registry and sccache entries the PR Windows jobs
+restore. A day without a warm only slows those jobs; it never decides them. It
+is advisory (`continue-on-error`) and not a required context;
+`scripts/check-ci-runner-hardening.sh` keeps its env, setup steps and
+rust-cache inputs equal to the PR Windows jobs so both hash to the same keys,
+and rejects a second warm job in `ci-main.yml`.
 
 ### Local Windows GNU compile check from macOS
 

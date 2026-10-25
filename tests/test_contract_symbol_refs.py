@@ -568,7 +568,11 @@ class WiringTest(unittest.TestCase):
         # The required-context judge reads the forced lint run for Lint and Fast check.
         judge = yaml.safe_load(workflow)["jobs"]["required_contexts"]
         self.assertIn("lint", judge["needs"])
-        self.assertLessEqual({"Lint", "Fast check (ubuntu-latest)"}, set(judge["strategy"]["matrix"]["context"]))
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "ci"))
+        import nextest_required
+        sys.path.pop(0)
+        _same_repo, contexts = nextest_required.matrix_branches(judge["strategy"]["matrix"]["context"])
+        self.assertLessEqual({"Lint", "Fast check (ubuntu-latest)"}, set(contexts))
 
 
 class RelayContractPathFilterTest(unittest.TestCase):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject a `cargo test` name filter in CI Main, CI Nightly and Trusted macOS.
+"""Reject a `cargo test` name filter in CI Main, CI Nightly, Trusted macOS and the Windows cache warm.
 
 A libtest filter that matches nothing still exits 0, so these workflows run whole test targets and
 leave lib test selection to the nextest jobs. Only the exact commands in ALLOWED keep a filter.
@@ -16,7 +16,7 @@ from pathlib import Path
 import yaml
 
 WORKFLOWS = (".github/workflows/ci-main.yml", ".github/workflows/ci-nightly.yml",
-             ".github/workflows/ci-macos-trusted.yml")
+             ".github/workflows/ci-macos-trusted.yml", ".github/workflows/ci-windows-cache-warm.yml")
 ALLOWED = frozenset({"cargo test --doc ClaudeBinary"})
 CARGO_VALUE = frozenset({"--test", "--bin", "--example", "--bench", "-p", "--package", "--exclude", "-F",
                          "--features", "--profile", "--target", "--target-dir", "--manifest-path", "-j",

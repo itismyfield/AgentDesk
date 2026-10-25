@@ -174,6 +174,20 @@ lib 시험 identity는 `rust_build`의 nextest list와 소스 인벤토리 대�
 | PostgreSQL tests | 같은 `rust_tests` 실행 | PostgreSQL 환경에서 `cargo nextest run --lib --profile ci` |
 | High-risk recovery | 같은 `rust_tests` 실행 | `cargo nextest run --lib --profile ci high_risk_recovery::` |
 
+### 필수 context 9개의 발행
+
+`required_contexts`의 matrix는 PR 이벤트 payload로 갈린다. 같은 저장소 PR(작성자가 Dependabot이 아닌)은
+`Required contexts publisher` job 하나가 9개 이름을 `nextest_required.py publish-required-contexts`로 판정하고
+PR head SHA에 check run으로 게시한다. 9개를 먼저 in_progress로 열고, FAIL을 PASS보다 먼저 닫으며, API 오류가
+나면 남은 것을 failure로 닫는다. 같은 이름·head에 더 늦게 시작했거나 시작 시각이 같은 다른 실행의 check run이
+보이면 그 context를 success로 올리지 않는다. fork·Dependabot PR은 토큰이 읽기 전용이라 지금처럼 이름마다 native
+job 하나가 판정한다.
+
+- **publisher만 실패했을 때**: worker 실패가 없으므로 `ci-pr-infra-retry.yml`은 `no-op:no-worker-failure`로 끝난다.
+  known-flaky 재시도도 publisher를 거울 job으로 보지 않아 `no-op:unlisted-failure`로 끝난다(지금 허용 목록은 비어 있다).
+  운영자가 그 실행의 **Re-run failed jobs**로 publisher를 다시 돌린다. 9개 context가 in_progress·failure로 남아 있는
+  동안 머지는 막힌다.
+
 ## 2. Path Filter Policy
 
 ### Always-on (필터 없음)

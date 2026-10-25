@@ -66,6 +66,8 @@ UNREACHABLE_RUST_FILES = (
      "src/services/discord/tmux_watcher/terminal_direct_fallback.rs"),
 )
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
+WARM_WORKFLOW = REPO_ROOT / ".github/workflows/ci-windows-cache-warm.yml"
+PUBLISHER_LIST = "'[\"Required contexts publisher\"]'"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
 MACOS_TRUSTED_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
 TRUSTED_LIB_RUN = (
@@ -108,6 +110,11 @@ def eval_step_if(condition: object, context: dict[str, str]) -> bool:
     """
     if condition is None or isinstance(condition, bool):
         return condition is not False
+    return bool(eval_expression(condition, context))
+
+
+def eval_expression(condition: object, context: dict[str, object]) -> object:
+    """The value of an expression, keeping Actions' `a && b || c` operand result."""
     expr = str(condition).strip()
     if expr.startswith("${{") and expr.endswith("}}"):
         expr = expr[3:-2].strip()
@@ -130,7 +137,7 @@ def eval_step_if(condition: object, context: dict[str, str]) -> bool:
         else:
             raise AssertionError(f"unknown name {name!r} in step condition: {condition!r}")
         pos = match.end()
-    return bool(eval("".join(python), {"__builtins__": {}}))
+    return eval("".join(python), {"__builtins__": {}})
 
 
 MACOS_FILTER_SCENARIOS = (
@@ -1146,10 +1153,45 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     result.stderr,
                 )
 
+    def test_judge_matrix_branches_on_the_pull_request_payload_only(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import nextest_required
+        judge = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["required_contexts"]
+        matrix = judge["strategy"]["matrix"]["context"]
+        inner = re.fullmatch(r"\$\{\{ fromJSON\((.*)\) \}\}", matrix).group(1)
+        native = list(nextest_required.CONTEXTS)
+        events = {
+            "same-repository PR": ("itismyfield/AgentDesk", "itismyfield", [nextest_required.PUBLISHER]),
+            "fork PR": ("ydkimtrust-svg/AgentDesk", "ydkimtrust-svg", native),
+            "same-repository Dependabot PR": ("itismyfield/AgentDesk", "dependabot[bot]", native),
+            "deleted fork": (None, "someone", native),
+        }
+        steps = {step.get("name"): step.get("if") for step in judge["steps"]}
+        for label, (head_repo, author, expected) in events.items():
+            # Neither upstream results nor the rerunning actor may move a PR between branches.
+            for extra in ({}, {"needs.changes.result": "failure", "github.actor": "operator", "github.run_attempt": "2"}):
+                with self.subTest(event=label, extra=extra):
+                    context = {"github.event.pull_request.head.repo.full_name": head_repo,
+                               "github.repository": "itismyfield/AgentDesk",
+                               "github.event.pull_request.user.login": author, **extra}
+                    self.assertEqual(json.loads(eval_expression(inner, context)), expected)
+            for value in expected:
+                with self.subTest(event=label, context=value):
+                    runs = {name: eval_step_if(condition, {"matrix.context": value}) for name, condition in steps.items()}
+                    publisher = value == nextest_required.PUBLISHER
+                    self.assertEqual(runs["Publish required contexts"], publisher)
+                    self.assertEqual(runs["Verify pinned judge and CI structure for the publisher"], publisher)
+                    self.assertEqual(runs["Judge required context"], not publisher)
+                    self.assertEqual(runs["Verify pinned judge and CI structure"], value in nextest_required.PINNED_CONTEXTS)
+        self.assertNotIn(nextest_required.PUBLISHER, native)
+
     def test_required_judge_job_is_pinned_fail_closed(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import nextest_required
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         judge = job_block(workflow, "required_contexts")
         closure_if = 'required needs closure job "required_contexts" must exist with its exact if'
+        exact_judge = "required_contexts must retain its exact judge, pins and needs"
         mutations = {
             "job deleted": ("", None),
             "changes dependency deleted": (judge.replace("      - changes\n", "", 1), None),
@@ -1161,8 +1203,19 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "checkout provenance": (judge.replace("      - uses: actions/checkout@v4\n", "      - uses: actions/checkout@v4\n        with:\n          repository: attacker/green-judge\n", 1), None),
             "extra step": (judge.replace("      - uses: actions/checkout@v4\n", "      - uses: actions/checkout@v4\n      - run: printf 'exit 0\\n' > scripts/ci/nextest_required.py\n", 1), None),
             "judge weakened": (judge.replace('        run: python3 scripts/ci/nextest_ci.py required-context "${{ matrix.context }}"\n', "        run: 'true'\n", 1), None),
-            "context dropped": (judge.replace("          - Library test sweep (ubuntu-latest)\n", "", 1), None),
-            "context added by include": (judge.replace("          - Lint\n", "          - Lint\n        include:\n          - context: Lint\n", 1), None),
+            "context dropped": (judge.replace('"Library test sweep (ubuntu-latest)",', "", 1), exact_judge),
+            "context added by include": (judge.replace("        context: ${{", "        include:\n          - context: Lint\n        context: ${{", 1), exact_judge),
+            "same-repo list renders Lint": (judge.replace(PUBLISHER_LIST, PUBLISHER_LIST[:-2] + ',"Lint"]\'', 1), exact_judge),
+            "same-repo list is the native nine": (judge.replace(PUBLISHER_LIST, "'" + json.dumps(list(nextest_required.CONTEXTS), separators=(",", ":")) + "'", 1), exact_judge),
+            "predicate reads needs": (judge.replace("(github.event.pull_request.head.repo.full_name", "(needs.changes.outputs.rust_tests == 'true' && github.event.pull_request.head.repo.full_name", 1), exact_judge),
+            "predicate reads actor": (judge.replace("github.event.pull_request.user.login", "github.actor", 1), exact_judge),
+            "native pin continue-on-error": (judge.replace("      - name: Verify pinned judge and CI structure\n", "      - name: Verify pinned judge and CI structure\n        continue-on-error: true\n", 1), exact_judge),
+            "publisher pin fails the job": (judge.replace("        continue-on-error: true\n", "", 1), exact_judge),
+            "publish step if deleted": (judge.replace("        if: ${{ matrix.context == 'Required contexts publisher' }}\n        env:\n", "        env:\n", 1), exact_judge),
+            "publish on the merge sha": (judge.replace("HEAD_SHA: ${{ github.event.pull_request.head.sha }}", "HEAD_SHA: ${{ github.sha }}", 1), exact_judge),
+            "pin outcome dropped": (judge.replace("          PINS_OUTCOME: ${{ steps.pins.outcome }}\n", "", 1), exact_judge),
+            "judge permissions write-all": (judge.replace("    permissions:\n      checks: write\n      contents: read\n", "    permissions: write-all\n", 1), exact_judge),
+            "job name fixed to Lint": (judge.replace("    name: ${{ matrix.context }}\n", "    name: Lint\n", 1), exact_judge),
             "backstop scoped away": (judge.replace("matrix.context == 'Script checks' || ", "", 1), None),
             "stale judge pin": (re.sub(r"(pin scripts/ci/nextest_required\.py )[0-9a-f]{64}", r"\g<1>" + "0" * 64, judge), "required_contexts must retain its exact judge, pins and needs"),
         }
@@ -1366,6 +1419,24 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(pr, extra_workflows=extra)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertIn("must publish every required context only from the required_contexts judge", result.stderr)
+
+    def test_only_the_judge_may_write_check_runs(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        lint = job_block(workflow, "lint")
+        gh_post = "gh api -X POST repos/o/r/check-runs -f name=Lint -f head_sha=x\n"
+        cases = (
+            ("PR lint job checks: write", workflow.replace(lint, lint.replace("    runs-on:", "    permissions:\n      checks: write\n    runs-on:", 1), 1), {}, {}, "lint must not grant checks: write"),
+            ("PR top-level write-all", workflow.replace("\njobs:\n", "\npermissions: write-all\n\njobs:\n", 1), {}, {}, "<workflow> must not grant checks: write"),
+            ("other workflow checks: write", workflow, {"ci-extra.yml": "name: extra\non: push\npermissions:\n  checks: write\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n"}, {}, "<workflow> must not grant checks: write"),
+            ("workflow step calls check-runs", workflow, {"ci-extra.yml": "name: extra\non: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: " + gh_post}, {}, "ci-extra.yml: only scripts/ci/nextest_required.py may call"),
+            ("another script calls check-runs", workflow, {}, {"scripts/ci/rogue_publish.sh": gh_post}, "rogue_publish.sh: only scripts/ci/nextest_required.py may call"),
+        )
+        for label, pr, extra, files, reason in cases:
+            with self.subTest(case=label):
+                self.assertTrue(pr != workflow or extra or files)
+                result = self.run_hardening_fixture(pr, extra_workflows=extra, extra_files=files)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(reason, result.stderr)
 
     def test_helper_content_pin_kills_all_prior_mutation_classes(self) -> None:
         helper = (REPO_ROOT / "scripts/required-check-mirror.sh").read_text(
@@ -1913,6 +1984,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
         hardening_script: str | None = None,
         mirror_helper: str | None = None,
         nested_checker: str | None = NESTED_CHECKER_STUB,
+        extra_files: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1927,6 +1999,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 trusted, encoding="utf-8"
             )
             (workflows / "ci-main.yml").write_text(MAIN_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
+            (workflows / WARM_WORKFLOW.name).write_text(WARM_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
             (workflows / "ci-nightly.yml").write_text(NIGHTLY_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
             for name, content in (extra_workflows or {}).items():
                 (workflows / name).write_text(content, encoding="utf-8")
@@ -1950,6 +2023,9 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             # Workflow fixtures isolate wiring; the real checker has its own declaration tests.
             if nested_checker is not None:
                 (root / "scripts/ci/nested_libtest.py").write_text(nested_checker, encoding="utf-8")
+            for name, content in (extra_files or {}).items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(content, encoding="utf-8")
             return subprocess.run(
                 ["bash", "scripts/check-ci-runner-hardening.sh"],
                 cwd=root,
@@ -2158,8 +2234,8 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_main_windows_warm_times_out_steps_before_advisory_job(self) -> None:
-        job = yaml.safe_load(MAIN_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["windows_cache_warm"]
+    def test_windows_warm_times_out_steps_before_advisory_job(self) -> None:
+        job = yaml.safe_load(WARM_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["windows_cache_warm"]
         self.assertIs(job["continue-on-error"], True)
         compile_steps = [step for step in job["steps"] if "cargo" in step.get("run", "")]
         self.assertEqual(len(compile_steps), 2)
@@ -2170,35 +2246,32 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
         budget = sum(step["timeout-minutes"] for step in compile_steps)
         self.assertGreaterEqual(job["timeout-minutes"], budget + 30)
 
-    def test_hardening_rejects_main_windows_warm_that_misses_pr_cache_key(self) -> None:
-        source = MAIN_WORKFLOW.read_text(encoding="utf-8")
-        warm = source.index("\n  # Warms the shared cargo registry cache")
+    def test_hardening_rejects_windows_warm_that_misses_pr_cache_key_or_trigger(self) -> None:
+        source = WARM_WORKFLOW.read_text(encoding="utf-8")
+        main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        warm_job = source[source.index("  # Warms the shared cargo registry cache"):]
         variants = {
-            "missing": (source[:warm] + "\n", "windows_cache_warm is missing"),
-            "save-if": (
-                source[:warm] + source[warm:].replace(
-                    "${{ github.ref == 'refs/heads/main' }}",
-                    "${{ github.event_name == 'pull_request' }}",
-                ),
-                "rust-cache must save the shared key from main only",
-            ),
-            "env drift": (
-                source[:warm] + source[warm:].replace(
-                    '      CARGO_PROFILE_TEST_DEBUG: "0"\n    steps:', "    steps:", 1
-                ),
-                "env must equal check_fast_cross_os",
-            ),
-            "runs tests": (
-                source.replace("cargo test --lib --no-run", "cargo test --lib"),
-                "without running tests",
-            ),
+            "missing": (source.replace("  windows_cache_warm:\n", "  windows_cache_warmed:\n", 1), None, "windows_cache_warm is missing"),
+            "save-if": (source.replace("${{ github.ref == 'refs/heads/main' }}", "${{ github.event_name == 'pull_request' }}"),
+                        None, "rust-cache must save the shared key from main only"),
+            "env drift": (source.replace('      CARGO_PROFILE_TEST_DEBUG: "0"\n    steps:', "    steps:", 1), None, "env must equal check_fast_cross_os"),
+            "runs tests": (source.replace("cargo test --lib --no-run", "cargo test --lib"), None, "without running tests"),
+            "sccache disabled": (source.replace('  SCCACHE_GHA_ENABLED: "true"\n', '  SCCACHE_GHA_ENABLED: "false"\n', 1), None, "sccache must write"),
+            "sccache read-only": (source.replace("  SCCACHE_GHA_RW_MODE: READ_WRITE\n", "  SCCACHE_GHA_RW_MODE: READ_ONLY\n", 1), None, "sccache must write"),
+            "sccache enable unset": (source.replace('  SCCACHE_GHA_ENABLED: "true"\n', "", 1), None, "sccache must write"),
+            "sccache mode unset": (source.replace("  SCCACHE_GHA_RW_MODE: READ_WRITE\n", "", 1), None, "sccache must write"),
+            "lockfile not watched": (source.replace("      - Cargo.lock\n", "", 1), None, "push paths must include"),
+            "toolchain not watched": (source.replace("      - rust-toolchain.toml\n", "", 1), None, "push paths must include"),
+            "push off main": (source.replace("      - main\n", "      - release\n", 1), None, "push must run on main only"),
+            "no schedule": (source.replace('  schedule:\n    - cron: "30 16 * * *"\n', "", 1), None, "exactly one daily schedule"),
+            "no dispatch": (source.replace("  workflow_dispatch:\n", "", 1), None, "must keep workflow_dispatch"),
+            "still warmed on every main push": (source, main.rstrip("\n") + "\n\n" + warm_job, "a second warm would double"),
         }
-        for name, (mutated, reason) in variants.items():
+        for name, (mutated, mutated_main, reason) in variants.items():
             with self.subTest(name):
-                self.assertNotEqual(mutated, source)
-                result = self.run_hardening_fixture(
-                    PR_WORKFLOW.read_text(encoding="utf-8"), {"ci-main.yml": mutated}
-                )
+                self.assertNotEqual((mutated, mutated_main), (source, None))
+                extra = {WARM_WORKFLOW.name: mutated, **({"ci-main.yml": mutated_main} if mutated_main else {})}
+                result = self.run_hardening_fixture(PR_WORKFLOW.read_text(encoding="utf-8"), extra)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(reason, result.stderr)
 
@@ -2441,9 +2514,9 @@ jobs:
         mutations = job_block(workflow, "relay_authority_mutations")
         cases = (
             ("plain no is not the false boolean", judge, "      fail-fast: false\n", "      fail-fast: no\n"),
-            ("quoted context changes the pinned scalar style", judge, "          - Lint\n", '          - "Lint"\n'),
+            ("quoted step name changes the pinned scalar style", judge, "      - name: Publish required contexts\n", '      - name: "Publish required contexts"\n'),
             ("explicit str tag is not discarded", judge, "          BASH_ENV: /dev/null\n", "          BASH_ENV: !!str /dev/null\n"),
-            ("judge timeout leading zero is not decimal 10", judge, "    timeout-minutes: 10\n", "    timeout-minutes: 010\n"),
+            ("judge timeout leading zero is not decimal 15", judge, "    timeout-minutes: 15\n", "    timeout-minutes: 015\n"),
             ("job timeout leading zero is not decimal 45", mutations, "    timeout-minutes: 45\n", "    timeout-minutes: 055\n"),
         )
         for label, job, old, new in cases:

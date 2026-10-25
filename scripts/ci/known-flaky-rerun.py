@@ -175,6 +175,7 @@ def classify_run(repo: str, run_id: str, attempt: int, known: set[str]) -> tuple
     if not failures or any(job.get("conclusion") not in {"failure", "success", "skipped"} for job in jobs):
         return False, "no-op:incomplete-jobs"
     sources, mirrors = [], []
+    # The same-repository publisher is not a mirror: its failure falls through to the unlisted-failure no-op.
     mirror_jobs = {name for name, _ in MIRRORS} | set(CONTEXTS)
     for job in failures:
         steps = job.get("steps") or []

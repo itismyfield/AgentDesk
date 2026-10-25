@@ -9,7 +9,7 @@ error() {
 }
 
 python3 scripts/ci/nested_libtest.py check || error "nested libtest declarations must pass validation"
-python3 scripts/ci/cargo_test_filters.py || error "main, nightly and trusted cargo test commands must not carry a name filter"
+python3 scripts/ci/cargo_test_filters.py || error "main, nightly, trusted and Windows warm cargo test commands must not carry a name filter"
 
 readonly REQUIRED_CONTEXTS_JSON='["Lint", "Script checks", "Fast check (ubuntu-latest)", "High-risk recovery", "Dashboard (Node 22)", "Fast targeted tests (ubuntu-latest)", "relay-authority-contract", "Library test sweep (ubuntu-latest)", "Fast check cross OS required context (ubuntu-latest)"]'
 readonly REQUIRED_CHECK_MIRROR_SHA256="57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
@@ -359,17 +359,11 @@ unless closure.sort == expected_closure_if.keys.sort
 end
 
 judge_sha256 = Digest::SHA256.file("scripts/ci/nextest_required.py").hexdigest
-expected_required_job = {
-  "name" => "${{ matrix.context }}",
-  "needs" => expected_closure_if.keys - ["required_contexts"],
-  "if" => "${{ !cancelled() }}",
-  "runs-on" => "ubuntu-latest",
-  "timeout-minutes" => 10,
-  "strategy" => {"fail-fast" => false, "matrix" => {"context" => required_contexts}},
-  "steps" => [
-    {"uses" => "actions/checkout@v4"},
-    {"name" => "Verify pinned judge and CI structure", "if" => "${{ matrix.context == 'Script checks' || matrix.context == 'relay-authority-contract' }}",
-     "env" => {"BASH_ENV" => "/dev/null"}, "shell" => "bash", "run" => <<~SH},
+# Same-repository PRs get the one publisher; fork and Dependabot PRs (read-only token) the nine native names.
+publisher = "Required contexts publisher"
+same_repo_pr = "github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'"
+context_matrix = "${{ fromJSON((#{same_repo_pr}) && '#{JSON.generate([publisher])}' || '#{JSON.generate(required_contexts)}') }}"
+pin_run = <<~SH
        pin() {
          actual="$(sha256sum "$1" | cut -d ' ' -f 1)"
          if [ "$actual" != "$2" ]; then
@@ -382,8 +376,28 @@ expected_required_job = {
        scripts/check-ci-runner-hardening.sh
        python3 scripts/check_writer_gate_ci_wiring.py
      SH
-    {"name" => "Judge required context", "env" => {"BASH_ENV" => "/dev/null", "NEEDS_JSON" => "${{ toJSON(needs) }}"},
+expected_required_job = {
+  "name" => "${{ matrix.context }}",
+  "needs" => expected_closure_if.keys - ["required_contexts"],
+  "if" => "${{ !cancelled() }}",
+  "runs-on" => "ubuntu-latest",
+  "timeout-minutes" => 15,
+  "permissions" => {"checks" => "write", "contents" => "read"},
+  "strategy" => {"fail-fast" => false, "matrix" => {"context" => context_matrix}},
+  "steps" => [
+    {"uses" => "actions/checkout@v4"},
+    {"name" => "Verify pinned judge and CI structure", "if" => "${{ matrix.context == 'Script checks' || matrix.context == 'relay-authority-contract' }}",
+     "env" => {"BASH_ENV" => "/dev/null"}, "shell" => "bash", "run" => pin_run},
+    {"name" => "Judge required context", "if" => "${{ matrix.context != '#{publisher}' }}",
+     "env" => {"BASH_ENV" => "/dev/null", "NEEDS_JSON" => "${{ toJSON(needs) }}"},
      "run" => "python3 scripts/ci/nextest_ci.py required-context \"${{ matrix.context }}\""},
+    {"name" => "Verify pinned judge and CI structure for the publisher", "id" => "pins",
+     "if" => "${{ matrix.context == '#{publisher}' }}", "continue-on-error" => true,
+     "env" => {"BASH_ENV" => "/dev/null"}, "shell" => "bash", "run" => pin_run},
+    {"name" => "Publish required contexts", "if" => "${{ matrix.context == '#{publisher}' }}",
+     "env" => {"BASH_ENV" => "/dev/null", "NEEDS_JSON" => "${{ toJSON(needs) }}", "PINS_OUTCOME" => "${{ steps.pins.outcome }}",
+               "HEAD_SHA" => "${{ github.event.pull_request.head.sha }}", "GH_TOKEN" => "${{ github.token }}"},
+     "run" => "python3 scripts/ci/nextest_ci.py publish-required-contexts"},
   ],
 }
 unless canonical_yaml(jobs["required_contexts"]) == canonical_yaml(expected_required_job)
@@ -393,7 +407,7 @@ end
 required_key_node = jobs_node.children.each_slice(2).find { |key_node, _| key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == "required_contexts" }&.first
 required_source = required_key_node && raw_job_source(path, required_key_node).gsub(/\b[0-9a-f]{64}\b/, "<sha256>")
 required_source_sha256 = required_source && Digest::SHA256.hexdigest(required_source)
-unless required_source_sha256 == "385a40ff89e00c08686c8e204b6bb8d62667a1160b8db4f2b4b93412bc767a65"
+unless required_source_sha256 == "0403a98121c21c8c1f2310167bba9f8ee1510c5a4c4b893dc7bcfc3081f32f55"
   warn "#{path}: required_contexts source bytes changed (scalar tags/styles and exact step surface are pinned); found #{required_source_sha256 || '<missing>'}"
   exit 1
 end
@@ -969,6 +983,7 @@ RUBY
 trusted_workflow=".github/workflows/ci-macos-trusted.yml"
 pr_workflow=".github/workflows/ci-pr.yml"
 main_workflow=".github/workflows/ci-main.yml"
+warm_workflow=".github/workflows/ci-windows-cache-warm.yml"
 nightly_workflow=".github/workflows/ci-nightly.yml"
 validate_main_script_check_shards() {
   if ! ruby - "$main_workflow" <<'RUBY'
@@ -1125,23 +1140,34 @@ RUBY
 }
 validate_main_lint_and_nextest
 
-validate_main_windows_cache_warm() {
-  if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
+validate_windows_cache_warm() {
+  if ! ruby - "$warm_workflow" "$pr_workflow" "$main_workflow" <<'RUBY'
 require "yaml"
-main_path, pr_path = ARGV
-main = YAML.load_file(main_path)
+warm_path, pr_path, ci_main_path = ARGV
+warm = YAML.load_file(warm_path)
 pr = YAML.load_file(pr_path)
 errors = []
-label = "#{main_path} job windows_cache_warm"
-job = main.fetch("jobs", {})["windows_cache_warm"]
+label = "#{warm_path} job windows_cache_warm"
+job = warm.fetch("jobs", {})["windows_cache_warm"]
 unless job.is_a?(Hash)
   warn "#{label} is missing; PR Windows jobs would compile cold"
   exit 1
 end
+# Dependency or toolchain changes on main, plus a daily run inside the 7-day cache eviction window.
+trigger = warm[true] || warm["on"]
+push = trigger.is_a?(Hash) ? trigger["push"] : nil
+warm_paths = ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml", ".cargo/config", warm_path]
+errors << "#{warm_path}: push must run on main only" unless push.is_a?(Hash) && push["branches"] == ["main"]
+errors << "#{warm_path}: push paths must include #{warm_paths.inspect}" unless push.is_a?(Hash) && (warm_paths - Array(push["paths"])).empty?
+errors << "#{warm_path}: must keep exactly one daily schedule" unless trigger.is_a?(Hash) && Array(trigger["schedule"]).length == 1
+errors << "#{warm_path}: must keep workflow_dispatch" unless trigger.is_a?(Hash) && trigger.key?("workflow_dispatch")
+# The PR side is READ_ONLY on purpose, so these are asserted directly rather than compared.
+errors << "#{warm_path}: sccache must write the shared GHA cache" unless warm.dig("env", "SCCACHE_GHA_ENABLED") == "true" && warm.dig("env", "SCCACHE_GHA_RW_MODE") == "READ_WRITE"
+errors << "#{ci_main_path}: windows_cache_warm moved to #{warm_path}; a second warm would double the Windows minutes" if YAML.load_file(ci_main_path).fetch("jobs", {}).key?("windows_cache_warm")
 
 # rust-cache and sccache hash these env prefixes, so both workflows must agree.
 hashed = ->(env) { (env || {}).select { |key, _| key.to_s.match?(/\A(CARGO|CC|CFLAGS|CXX|CMAKE|RUST)/) } }
-errors << "#{label}: workflow CARGO/RUST env must equal #{pr_path}" unless hashed.(main["env"]) == hashed.(pr["env"])
+errors << "#{label}: workflow CARGO/RUST env must equal #{pr_path}" unless hashed.(warm["env"]) == hashed.(pr["env"])
 
 setup = ->(steps) do
   Array(steps).take_while { |step| step["uses"].to_s.start_with?("actions/checkout", "actions/setup-python", "dtolnay/", "mozilla-actions/", "Swatinem/") || step["if"] == "runner.os == 'macOS'" }
@@ -1149,7 +1175,7 @@ setup = ->(steps) do
     .map { |step| step.reject { |key, _| %w[name if].include?(key) } }
 end
 compile = ->(steps) { Array(steps).select { |step| step["run"].to_s.include?("cargo") } }
-main_compile = compile.(job["steps"])
+warm_compile = compile.(job["steps"])
 
 pr_compile_steps = {
   "check_fast_cross_os" => "cargo check",
@@ -1164,10 +1190,10 @@ pr_compile_steps.each do |pr_id, step_name|
   errors << "#{label}: env must equal #{pr_id}" unless job["env"] == pr_job["env"]
   errors << "#{label}: setup steps before the compile must equal #{pr_id}" unless setup.(job["steps"]) == setup.(pr_job["steps"])
   pr_shape = Array(pr_job["steps"]).select { |step| step["name"] == step_name }.map { |step| step.slice("shell", "env") }
-  errors << "#{label}: compile step shell/env must equal #{pr_id} #{step_name.inspect}" unless pr_shape.length == 1 && main_compile.map { |step| step.slice("shell", "env") }.uniq == pr_shape
+  errors << "#{label}: compile step shell/env must equal #{pr_id} #{step_name.inspect}" unless pr_shape.length == 1 && warm_compile.map { |step| step.slice("shell", "env") }.uniq == pr_shape
 end
 pr_check = compile.(pr.dig("jobs", "check_fast_cross_os", "steps")).map { |step| step["run"].strip }
-errors << "#{label}: cargo check must equal check_fast_cross_os" unless main_compile.first&.fetch("run", "")&.strip == pr_check.first
+errors << "#{label}: cargo check must equal check_fast_cross_os" unless warm_compile.first&.fetch("run", "")&.strip == pr_check.first
 
 expected_cache = {
   "cache-targets" => false,
@@ -1177,7 +1203,7 @@ expected_cache = {
 }
 cache_steps = Array(job["steps"]).select { |step| step["uses"] == "Swatinem/rust-cache@v2" }
 errors << "#{label}: rust-cache must save the shared key from main only" unless cache_steps.map { |step| step["with"] } == [expected_cache]
-commands = main_compile.map { |step| step["run"].strip }
+commands = warm_compile.map { |step| step["run"].strip }
 errors << "#{label}: must build exactly check + lib test binary without running tests" unless commands == ["cargo check --workspace --all-targets", "cargo test --lib --no-run"]
 errors << "#{label}: must not gate or depend on other jobs" if job.key?("needs") || job.key?("if")
 errors << "#{label}: must stay advisory (continue-on-error: true)" unless job["continue-on-error"] == true
@@ -1187,10 +1213,10 @@ errors.each { |message| warn message }
 exit(errors.empty? ? 0 : 1)
 RUBY
   then
-    error "$main_workflow must warm the Windows cargo cache the PR Windows jobs restore"
+    error "$warm_workflow must warm the Windows cargo cache the PR Windows jobs restore"
   fi
 }
-validate_main_windows_cache_warm
+validate_windows_cache_warm
 
 workflow_files() {
   find .github/workflows -maxdepth 1 -type f \
@@ -1212,6 +1238,7 @@ validate_required_context_uniqueness() {
   while IFS= read -r -d '' workflow; do
     if ! ruby - "$workflow" "$pr_workflow" <<'RUBY'
 require "yaml"
+require "json"
 
 path, pr_path = ARGV
 begin
@@ -1387,8 +1414,13 @@ end
 if path == pr_path
   scripts = jobs["scripts"]
   judge = jobs["required_contexts"]
-  unless judge.is_a?(Hash) && judge["name"] == "${{ matrix.context }}" && Array(judge.dig("strategy", "matrix", "context")).include?(required_context)
-    warn "#{path}: required Script checks context must be a literal matrix value of jobs.required_contexts"
+  matrix = judge.is_a?(Hash) ? judge.dig("strategy", "matrix", "context") : nil
+  branches = matrix.is_a?(String) &&
+    /\A\$\{\{ fromJSON\(\([^()]+\) && '(\[[^']*\])' \|\| '(\[[^']*\])'\) \}\}\z/.match(matrix)
+  same_repo, fork = branches ? [JSON.parse(branches[1]), JSON.parse(branches[2])] : [[], []]
+  # Only the fork/Dependabot branch may render it; same-repository PRs publish it through the Checks API.
+  unless judge["name"] == "${{ matrix.context }}" && fork.include?(required_context) && !same_repo.include?(required_context)
+    warn "#{path}: required Script checks context must be a fork-branch matrix value of jobs.required_contexts"
     exit 1
   end
   unless scripts.is_a?(Hash) && scripts["name"] != required_context
@@ -1415,8 +1447,8 @@ RUBY
   done < <(workflow_files)
 }
 
-# The nine branch-protection names come only from the required_contexts judge matrix in ci-pr.yml;
-# any other job or workflow that can render one would publish a result the judge never saw.
+# The nine branch-protection names come only from the required_contexts judge in ci-pr.yml (its matrix
+# or its check runs); any other job, workflow or checks writer could publish a result the judge never saw.
 validate_required_context_publishers() {
   if ! command -v ruby >/dev/null 2>&1; then
     error "ruby is required to validate required context publishers structurally"
@@ -1480,6 +1512,23 @@ workflow_paths.each do |path|
 
     errors << "#{path}: required #{context} context must be published only by #{pr_path} jobs.required_contexts; publishers: #{publishers.inspect}"
   end
+  # Check runs carry required names too, so only the judge may hold checks: write.
+  scopes = {"<workflow>" => document.is_a?(Hash) ? document["permissions"] : nil}
+  jobs.each { |job_id, job| scopes[job_id.to_s] = job["permissions"] if job.is_a?(Hash) }
+  scopes.each do |scope, permissions|
+    writes_checks = permissions == "write-all" || (permissions.is_a?(Hash) && permissions["checks"] == "write")
+    next unless writes_checks && !(path == pr_path && scope == "required_contexts")
+
+    errors << "#{path}: #{scope} must not grant checks: write; only #{pr_path} jobs.required_contexts publishes check runs"
+  end
+end
+
+self_path = "scripts/check-ci-runner-hardening.sh"
+(Dir.glob(".github/**/*", File::FNM_DOTMATCH) + Dir.glob("scripts/**/*")).sort.each do |file|
+  next if !File.file?(file) || file.include?("/__pycache__/") || [self_path, "scripts/ci/nextest_required.py"].include?(file)
+  next unless File.binread(file).include?("check-runs")
+
+  errors << "#{file}: only scripts/ci/nextest_required.py may call the check-runs API"
 end
 
 errors.each { |message| warn message }

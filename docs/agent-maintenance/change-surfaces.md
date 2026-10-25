@@ -196,19 +196,26 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
   pins the calculated execution surface of the `jobs.scripts`
   writer-protection/aggregate pair, the nextest jobs (`rust_build`,
   `rust_tests`, `test_evidence`) and the `required_contexts` judge. The judge
-  job publishes all nine branch-protection names as one matrix and runs
-  `scripts/ci/nextest_required.py` over `toJSON(needs)`. For `Script checks`
-  and `relay-authority-contract` it first compares the SHA-256 of the judge and
-  of the gate itself, then runs only the verified gate copy, so a skipped or
-  altered gate leaves those contexts red.
+  matrix is one expression over the PR payload: a same-repository PR (author not
+  Dependabot) gets the single `Required contexts publisher`, which judges the
+  nine branch-protection names with `scripts/ci/nextest_required.py` over
+  `toJSON(needs)` and publishes them as check runs on the PR head; a fork or
+  Dependabot PR gets the nine names as native jobs. For `Script checks` and
+  `relay-authority-contract` the native pin step, or the publisher's pin step
+  whose outcome feeds those two verdicts, first compares the SHA-256 of the
+  judge and of the gate itself, then runs only the verified gate copy, so a
+  skipped or altered gate leaves those contexts red.
 - fixed surfaces: the judge job's `name`, `needs`, job-level `if`, `runs-on`,
-  matrix, checkout provenance, pin step and judge step are pinned by value and
+  `permissions`, matrix expression (both branch lists), checkout provenance,
+  both pin steps, the judge step and the publish step are pinned by value and
   by source bytes (pins normalised), so YAML scalar tags and styles such as
   `!!str`, `no` or `010` stay in the comparison. Each extra shard job runs
   `./scripts/ci-script-checks.sh` exactly once with the `scripts` aggregate's
   effective execution and its own `SCRIPT_CHECK_SHARD`. Plain
   YAML-boolean-like job IDs fail closed, while quoted `"yes"` remains a valid
-  string job ID. No other job or workflow may render one of the nine names.
+  string job ID. No other job or workflow may render one of the nine names,
+  grant `checks: write` (or `write-all`), or name the `check-runs` API outside
+  `scripts/ci/nextest_required.py`.
   The wiring table below is the single statement of the recursive `needs`
   closure of the judge and of each member's `needs` and job-level `if`;
   `tests/test_fast_check_ci_wiring.py` requires it to equal `ci-pr.yml`
@@ -241,13 +248,15 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
 - update procedure: an intentional edit of `scripts/ci/nextest_required.py`
   or of the gate makes the judge's `Script checks` and
   `relay-authority-contract` contexts red until the matching `pin` line in
-  `required_contexts` holds the new `shasum -a 256` digest. A gate edit that
+  both `required_contexts` pin steps holds the new `shasum -a 256` digest. A gate edit that
   changes a pinned job also needs the in-gate semantic or source-range digest
   the failure message prints. Then rerun the gate and
   `python3 -m unittest tests.test_fast_check_ci_wiring`.
 - tests: `tests/test_fast_check_ci_wiring.py` mutation-tests the judge surface,
-  the closure `if`s, the publisher uniqueness rule and both digest backstops;
-  `tests/test_comment_only_ci_gate.py` replays the judge over simulated runs.
+  both matrix branches, the closure `if`s, the publisher uniqueness rule and
+  both digest backstops; `tests/test_nextest_required.py` drives the publisher
+  against a Checks API double; `tests/test_comment_only_ci_gate.py` replays the
+  judge over simulated runs.
 - threat model — not covered: branch protection and hosted-runner policy;
   compromise of the runner, checkout action, or hashing tool; a coordinated
   edit of repository-local guards and their pins; or successful-but-different

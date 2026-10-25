@@ -162,6 +162,17 @@ sys.stdout.write((p / file).read_text())
         self.assertIn("attempt-cap", out)
         self.assertEqual(calls, [])
 
+    def test_infra_retry_ignores_a_publisher_only_failure(self):
+        # A Checks API outage fails only the publisher; no worker failed, so an operator reruns it.
+        command = self.infra_command()
+        self.jobs({**self.job(900, "success"), "name": "Rust tests (worker 0)"},
+                  {**self.job(901), "name": nextest_required.PUBLISHER,
+                   "steps": [dict(name="Publish required contexts", conclusion="failure")]})
+        (self.path / "901.log").write_text("::error::POST repos/o/r/check-runs: gh exited 1: HTTP 502: Server Error\n")
+        out, calls = self.run_retry(command=command)
+        self.assertIn("decision=no-op:no-worker-failure", out)
+        self.assertFalse(any(c[:2] == ["run", "rerun"] for c in calls), calls)
+
     def test_flaky_exception_still_runs_workflow_infra_fallback_once(self):
         command = self.infra_command()
         self.script.write_text("raise RuntimeError('classifier fixture failure')\n")
@@ -274,6 +285,13 @@ sys.stdout.write((p / file).read_text())
                 (self.path / "902.log").write_text(judge_log(context, failed))
                 self.assertIn("rerun-requested:known-flaky", self.run_retry()[0])
 
+    def test_publisher_failure_is_never_a_known_flaky_mirror(self):
+        # Same-repository PRs judge every context in the publisher job; its failure is left to an operator rerun.
+        self.mirrored_failure(name=nextest_required.PUBLISHER, steps=[
+            dict(name="Publish required contexts", conclusion="failure"),
+        ])
+        self.assertIn("no-op:unlisted-failure", self.assert_no_retry())
+
     def test_mirror_requires_its_own_classified_failed_source(self):
         self.mirrored_failure()
         jobs = json.loads((self.path / "jobs.json").read_text())["jobs"]
@@ -340,7 +358,8 @@ class Parser(unittest.TestCase):
     def test_mirror_contracts_match_the_trusted_workflow(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/ci-pr.yml").read_text())["jobs"]
         judge = jobs["required_contexts"]
-        self.assertEqual(set(judge["strategy"]["matrix"]["context"]), set(nextest_required.CONTEXTS))
+        same_repo, fork = nextest_required.matrix_branches(judge["strategy"]["matrix"]["context"])
+        self.assertEqual((same_repo, fork), ([nextest_required.PUBLISHER], list(nextest_required.CONTEXTS)))
         self.assertEqual([s["run"] for s in judge["steps"] if s.get("name") == retry.JUDGE_STEP],
                          ['python3 scripts/ci/nextest_ci.py required-context "${{ matrix.context }}"'])
         judged = {job for groups in nextest_required.CONTEXTS.values() for group, _ in groups for job in group}

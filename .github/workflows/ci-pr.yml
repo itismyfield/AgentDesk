@@ -846,6 +846,8 @@ jobs:
           exit "$status"
 
   # The nine branch-protection names; each is N AND its own checks, judged by nextest_required.py.
+  # Same-repository PRs judge all nine on one runner and publish them as check runs on the PR head;
+  # fork and Dependabot PRs get a read-only token, so they keep one native job per name.
   required_contexts:
     name: ${{ matrix.context }}
     needs:
@@ -864,20 +866,14 @@ jobs:
       - check_fast_cross_os_targets
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    permissions:
+      checks: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
-        context:
-          - Lint
-          - Script checks
-          - Fast check (ubuntu-latest)
-          - High-risk recovery
-          - Dashboard (Node 22)
-          - Fast targeted tests (ubuntu-latest)
-          - relay-authority-contract
-          - Library test sweep (ubuntu-latest)
-          - Fast check cross OS required context (ubuntu-latest)
+        context: ${{ fromJSON((github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') && '["Required contexts publisher"]' || '["Lint","Script checks","Fast check (ubuntu-latest)","High-risk recovery","Dashboard (Node 22)","Fast targeted tests (ubuntu-latest)","relay-authority-contract","Library test sweep (ubuntu-latest)","Fast check cross OS required context (ubuntu-latest)"]') }}
     steps:
       - uses: actions/checkout@v4
       # Script checks and relay-authority-contract also re-verify the CI structure from pinned gate bytes.
@@ -894,15 +890,45 @@ jobs:
               exit 1
             fi
           }
-          pin scripts/ci/nextest_required.py 432795141303ad5cb2fb8ce22166e387169402459baab831f17d60632035a27f
-          pin scripts/check-ci-runner-hardening.sh d9d20c1c24e9f7ea43b1c873d5883465634e1bf407171d2c83523f67bec2c2d8
+          pin scripts/ci/nextest_required.py 252bd376af4aaabd5016ab54e162ebaf46e802f8ae3254b956194d51a2581e58
+          pin scripts/check-ci-runner-hardening.sh 7efe856ee7e4e191d877b424927dd112e3a78e61731810648a63d2a922537cc3
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required context
+        if: ${{ matrix.context != 'Required contexts publisher' }}
         env:
           BASH_ENV: /dev/null
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: python3 scripts/ci/nextest_ci.py required-context "${{ matrix.context }}"
+      # The publisher folds this outcome into those two verdicts instead of failing before it publishes.
+      - name: Verify pinned judge and CI structure for the publisher
+        id: pins
+        if: ${{ matrix.context == 'Required contexts publisher' }}
+        continue-on-error: true
+        env:
+          BASH_ENV: /dev/null
+        shell: bash
+        run: |
+          pin() {
+            actual="$(sha256sum "$1" | cut -d ' ' -f 1)"
+            if [ "$actual" != "$2" ]; then
+              echo "::error file=$1::content hash mismatch: expected $2, found $actual; review it and update every pin together"
+              exit 1
+            fi
+          }
+          pin scripts/ci/nextest_required.py 252bd376af4aaabd5016ab54e162ebaf46e802f8ae3254b956194d51a2581e58
+          pin scripts/check-ci-runner-hardening.sh 7efe856ee7e4e191d877b424927dd112e3a78e61731810648a63d2a922537cc3
+          scripts/check-ci-runner-hardening.sh
+          python3 scripts/check_writer_gate_ci_wiring.py
+      - name: Publish required contexts
+        if: ${{ matrix.context == 'Required contexts publisher' }}
+        env:
+          BASH_ENV: /dev/null
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          PINS_OUTCOME: ${{ steps.pins.outcome }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/nextest_ci.py publish-required-contexts
 
   pg15_owner_proof:
     name: PostgreSQL 15 owner proof

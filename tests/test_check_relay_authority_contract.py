@@ -24,6 +24,8 @@ assert _spec and _spec.loader
 contract = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = contract
 _spec.loader.exec_module(contract)
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "ci"))
+import nextest_required as required  # noqa: E402
 
 
 def active_lane(*, command: list[str] | None = None, minimum: int = 2) -> dict[str, object]:
@@ -55,7 +57,7 @@ def write_workflow(
             "changes": {"outputs": {"rust_tests_skip": contract.VERIFIED_RUST_SKIP}},
             contract.JUDGE_JOB: {
                 "if": "${{ !cancelled() }}", "needs": list(contract.JUDGE_NEEDS),
-                "strategy": {"fail-fast": False, "matrix": {"context": [contract.RELAY_AUTHORITY_CONTEXT]}},
+                "strategy": {"fail-fast": False, "matrix": {"context": required.matrix_expression()}},
                 "steps": [{"run": "python3 scripts/ci/nextest_ci.py required-context x"}],
             },
             contract.BUILD_JOB: {"steps": [{"name": "Archive, list, compare and plan",
@@ -115,6 +117,7 @@ class ManifestContract(unittest.TestCase):
             (contract.JUDGE_JOB, "needs", [need for need in judge_needs if need != contract.RELAY_AUTHORITY_MUTATIONS_JOB], "must always judge"),
             (contract.JUDGE_JOB, "needs", [need for need in judge_needs if need != "test_evidence"], "must always judge"),
             (contract.JUDGE_JOB, "strategy", {"fail-fast": False, "matrix": {"context": ["Lint"]}}, "must always judge"),
+            (contract.JUDGE_JOB, "strategy", {"fail-fast": False, "matrix": {"context": list(required.CONTEXTS)}}, "must always judge"),
             (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "needs", ["changes"], "must use the verified skip"),
             (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "if", "false", "must use the verified skip"),
             (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "if", contract.RUST_REQUIRED_IF.replace("!= 'true'", "== 'false'"), "must use the verified skip"),
@@ -133,6 +136,33 @@ class ManifestContract(unittest.TestCase):
                 workflow.parent.mkdir(parents=True)
                 workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
                 with self.assertRaisesRegex(contract.ManifestError, message):
+                    contract.validate_workflow_contract(root, lanes, True)
+
+    def test_judge_matrix_must_be_the_canonical_two_branch_expression(self) -> None:
+        lanes, _ = contract.load_active_lanes(REPO_ROOT / contract.DEFAULT_MANIFEST)
+        original = yaml.safe_load((REPO_ROOT / contract.PR_WORKFLOW).read_text(encoding="utf-8"))
+        native = list(required.CONTEXTS)
+        without_relay = [name for name in native if name != contract.RELAY_AUTHORITY_CONTEXT]
+        canonical = required.matrix_expression()
+        self.assertEqual(original["jobs"][contract.JUDGE_JOB]["strategy"]["matrix"]["context"], canonical)
+        rejected = {
+            "fork list without relay": required.matrix_expression(fork=without_relay),
+            "fork list with relay twice": required.matrix_expression(fork=native + [contract.RELAY_AUTHORITY_CONTEXT]),
+            "same-repo list renders a required name": required.matrix_expression(same_repo=[required.PUBLISHER, "Lint"]),
+            "same-repo list without the publisher": required.matrix_expression(same_repo=native),
+            "arbitrary string": "relay-authority-contract",
+            "expression from another predicate": canonical.replace("github.repository", "github.event.repository.full_name"),
+            "non-canonical JSON spacing": canonical.replace("'[\"Required", "'[ \"Required"),
+        }
+        for label, matrix in rejected.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as temporary:
+                payload = copy.deepcopy(original)
+                payload["jobs"][contract.JUDGE_JOB]["strategy"]["matrix"]["context"] = matrix
+                root = Path(temporary)
+                workflow = root / contract.PR_WORKFLOW
+                workflow.parent.mkdir(parents=True)
+                workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
+                with self.assertRaisesRegex(contract.ManifestError, "must always judge"):
                     contract.validate_workflow_contract(root, lanes, True)
 
     def test_verified_skip_output_rejects_missing_or_partial_proofs(self) -> None:

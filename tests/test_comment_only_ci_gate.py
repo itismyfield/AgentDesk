@@ -696,8 +696,9 @@ class WorkflowSimulation:
             return {}
         needs = {name: {"result": self.results[name], "outputs": self.changes if name == "changes" else {}}
                  for name in judge["needs"]}
-        return {context: nextest_required.context_verdict(context, needs)
-                for context in judge["strategy"]["matrix"]["context"]}
+        # The publisher judges the fork-branch names with the same function, so one set covers both branches.
+        _same_repo, contexts = nextest_required.matrix_branches(judge["strategy"]["matrix"]["context"])
+        return {context: nextest_required.context_verdict(context, needs) for context in contexts}
 
     def job_runs(self, job: dict) -> bool:
         """A job-level `if:`; one without a status function implies success(), as in Actions."""

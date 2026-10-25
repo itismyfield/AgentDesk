@@ -1,6 +1,7 @@
 """Required-context verdicts, comparison base and worker failure class for the nextest CI.
 
   required-context  one branch-protection context from `toJSON(needs)`: N AND its own checks
+  publish-required-contexts  all nine contexts as check runs on the PR head (same-repository PRs)
   comparison-base   the SHA a plan is compared with: merge ref -> HEAD^1, PR head -> merge-base
   classify-worker   infra / test / unknown / pass per worker attempt; a run is retryable only when
                     every failed worker is infra, and infra needs the caller's log evidence
@@ -10,11 +11,14 @@
 nextest_ci.py registers these subcommands; this module holds no state of its own.
 """
 
+from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
+from urllib.parse import quote
 
 # Jobs whose success is N: one archive build, every planned worker, and the result audit.
 N_JOBS = ("rust_build", "rust_tests", "test_evidence")
@@ -32,6 +36,31 @@ CONTEXTS = {
         (N_JOBS, ("rust_tests",)), (("check_fast_cross_os", "check_fast_cross_os_targets"), ("cross_os_rust",))),
 }
 MAX_ATTEMPTS = 2  # the first attempt plus one infra retry
+# Same-repository PRs judge all nine names on one runner and publish them through the Checks API;
+# fork and Dependabot PRs get a read-only token, so they keep one native job per name.
+PUBLISHER = "Required contexts publisher"
+SAME_REPO_PR = ("github.event.pull_request.head.repo.full_name == github.repository"
+                " && github.event.pull_request.user.login != 'dependabot[bot]'")
+PINNED_CONTEXTS = ("Script checks", "relay-authority-contract")
+ACTIONS_APP_ID = 15368
+_MATRIX = re.compile(r"\$\{\{ fromJSON\(\((?P<pred>[^()]+)\) && '(?P<same>\[[^']*\])' \|\| '(?P<fork>\[[^']*\])'\) \}\}")
+
+
+def matrix_expression(same_repo=(PUBLISHER,), fork=tuple(CONTEXTS)):
+    """The judge matrix: the same-repository list when SAME_REPO_PR holds, else the fork list."""
+    dump = lambda names: json.dumps(list(names), separators=(",", ":"))  # noqa: E731
+    return f"${{{{ fromJSON(({SAME_REPO_PR}) && '{dump(same_repo)}' || '{dump(fork)}') }}}}"
+
+
+def matrix_branches(value):
+    """(same-repository contexts, fork contexts) of a canonical judge matrix, else ValueError."""
+    match = _MATRIX.fullmatch(value) if isinstance(value, str) else None
+    if not match or match["pred"] != SAME_REPO_PR:
+        raise ValueError("judge matrix is not the canonical same-repository/fork expression")
+    same, fork = json.loads(match["same"]), json.loads(match["fork"])
+    if value != matrix_expression(same, fork):
+        raise ValueError("judge matrix is not in canonical form")
+    return same, fork
 
 
 def artifact_name(worker, attempt):
@@ -93,6 +122,134 @@ def cmd_required_context(ci, args):
         print(line if ok else f"::error::{args.name}: {line}")
     print(f"{args.name}: {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
+
+
+class PublishError(Exception):
+    """A Checks API call failed or answered with a check run that is not the one asked for."""
+
+
+def gh_api(method, path, body=None):
+    """One REST call through the runner's gh CLI; the parsed JSON response."""
+    argv = ["gh", "api", "-X", method, path, "-H", "Accept: application/vnd.github+json"]
+    if body is not None:
+        argv += ["--input", "-"]
+    done = subprocess.run(argv, input=None if body is None else json.dumps(body), capture_output=True, text=True)
+    if done.returncode != 0:
+        raise PublishError(f"{method} {path}: gh exited {done.returncode}: {done.stderr.strip()[:300]}")
+    try:
+        return json.loads(done.stdout)
+    except ValueError as exc:
+        raise PublishError(f"{method} {path}: unreadable response: {exc}") from exc
+
+
+def _started(run):
+    try:
+        return datetime.fromisoformat(str(run["started_at"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def superseded(api, repo, head, name, own, external_id):
+    """Why this run must not publish success for `name`, or None.
+
+    Another run's check of the same name, app and head that started at or after ours (a tie has no
+    order) supersedes it; an incomplete listing is not proof that none does. API errors propagate.
+    """
+    runs, page = [], 1
+    while True:
+        body = api("GET", f"repos/{repo}/commits/{head}/check-runs?check_name={quote(name)}"
+                   f"&filter=all&per_page=100&page={page}")
+        batch = body.get("check_runs") if isinstance(body, dict) else None
+        if not isinstance(batch, list):
+            return "check run listing unreadable"
+        runs += batch
+        if len(batch) < 100:
+            break
+        page += 1
+    mine = [r for r in runs if isinstance(r, dict) and r.get("id") == own["id"]]
+    if len(mine) != 1 or mine[0].get("external_id") != external_id or _started(mine[0]) is None:
+        return "own check run is missing from the listing"
+    start = _started(mine[0])
+    for run in runs:
+        if not isinstance(run, dict) or run.get("id") == own["id"]:
+            continue
+        app = run.get("app") if isinstance(run.get("app"), dict) else {}
+        if run.get("name") != name or run.get("head_sha") != head or app.get("id") != ACTIONS_APP_ID:
+            continue
+        other = _started(run)
+        if other is None or run.get("external_id") == external_id or other >= start:
+            return f"check run {run.get('id')} ({run.get('external_id')}) is not provably older"
+    return None
+
+
+def publish_required_contexts(env, api=gh_api, print_=print):
+    """Judge the nine contexts and publish them on the PR head; 0 only when all nine published success.
+
+    Every context opens in_progress first and closes failures before successes, so an interrupted run
+    leaves in_progress or failure behind, never a full set of successes over a real failure.
+    """
+    head, repo = env.get("HEAD_SHA", ""), env.get("GITHUB_REPOSITORY", "")
+    run_id, attempt = env.get("GITHUB_RUN_ID", ""), env.get("GITHUB_RUN_ATTEMPT", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", head) or not repo or not run_id.isdigit() or not attempt.isdigit():
+        print_("::error::publisher inputs missing: HEAD_SHA, GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT")
+        return 1
+    external_id = f"{run_id}:{attempt}:{head}"
+    try:
+        needs = json.loads(env.get("NEEDS_JSON") or "")
+    except ValueError:
+        needs = None
+    opened, closed, rc = {}, set(), 0
+    try:
+        for name in CONTEXTS:
+            run = api("POST", f"repos/{repo}/check-runs", {
+                "name": name, "head_sha": head, "status": "in_progress", "external_id": external_id,
+                "output": {"title": name, "summary": f"Judging run {external_id}"}})
+            run = run if isinstance(run, dict) else {}
+            app = run.get("app") if isinstance(run.get("app"), dict) else {}
+            if not isinstance(run.get("id"), int) or run.get("name") != name or run.get("head_sha") != head \
+                    or app.get("id") != ACTIONS_APP_ID:
+                raise PublishError(f"created check run for {name!r} is not an Actions check run on {head}")
+            opened[name] = run
+        verdicts = {}
+        for name in CONTEXTS:
+            ok, lines = context_verdict(name, needs)
+            if name in PINNED_CONTEXTS and env.get("PINS_OUTCOME") != "success":
+                ok, lines = False, [*lines, f"pinned judge and CI structure: {env.get('PINS_OUTCOME')!r}"]
+            if ok and (why := superseded(api, repo, head, name, opened[name], external_id)):
+                ok, lines = False, [*lines, f"not published as success: {why}"]
+            verdicts[name] = ok, lines
+        for name in sorted(CONTEXTS, key=lambda n: verdicts[n][0]):
+            ok, lines = verdicts[name]
+            conclusion = "success" if ok else "failure"
+            done = api("PATCH", f"repos/{repo}/check-runs/{opened[name]['id']}", {
+                "status": "completed", "conclusion": conclusion,
+                "output": {"title": f"{name}: {'PASS' if ok else 'FAIL'}", "summary": "\n".join([*lines, external_id])}})
+            if not isinstance(done, dict) or done.get("conclusion") != conclusion:
+                raise PublishError(f"closing {name!r} did not record {conclusion}")
+            closed.add(name)
+            for line in lines:
+                print_(line if ok else f"::error::{name}: {line}")
+            print_(f"{name}: {'PASS' if ok else 'FAIL'}")
+            rc |= 0 if ok else 1
+    except PublishError as exc:
+        print_(f"::error::{exc}")
+        rc = 1
+    finally:
+        for name, run in opened.items():
+            if name in closed:
+                continue
+            rc = 1
+            try:
+                api("PATCH", f"repos/{repo}/check-runs/{run['id']}", {
+                    "status": "completed", "conclusion": "failure",
+                    "output": {"title": f"{name}: FAIL", "summary": f"publisher aborted\n{external_id}"}})
+            except PublishError as exc:
+                print_(f"::error::{name}: could not close after abort: {exc}")
+    return rc
+
+
+def cmd_publish_required_contexts(ci, args):
+    return publish_required_contexts(os.environ)
 
 
 def _git(repo, *argv):
@@ -237,6 +394,8 @@ def register(sub):
     r = sub.add_parser("required-context")
     r.add_argument("name", help="exact branch-protection context name")
     r.add_argument("--needs-json", help="JSON text or @file (default: $NEEDS_JSON)")
+    sub.add_parser("publish-required-contexts",
+                   help="needs $HEAD_SHA, $NEEDS_JSON, $PINS_OUTCOME, $GH_TOKEN and the GITHUB_* run identity")
     c = sub.add_parser("comparison-base")
     c.add_argument("--repo", default=".")
     c.add_argument("--head", default="HEAD", help="the commit under test")
@@ -261,6 +420,7 @@ def register(sub):
     t = sub.add_parser("selector-audit")
     t.add_argument("--plan", required=True)
     t.add_argument("--selectors", default="scripts/ci/targeted-test-selectors.txt")
-    return {"required-context": cmd_required_context, "comparison-base": cmd_comparison_base,
+    return {"required-context": cmd_required_context, "publish-required-contexts": cmd_publish_required_contexts,
+            "comparison-base": cmd_comparison_base,
             "classify-worker": cmd_classify_worker, "collect-results": cmd_collect_results,
             "selector-audit": cmd_selector_audit}
