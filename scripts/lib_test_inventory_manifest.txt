@@ -990,6 +990,7 @@ dispatch::dispatch_status::auto_queue_terminal_sync_policy_tests::plan_and_plan_
 dispatch::dispatch_status::auto_queue_terminal_sync_policy_tests::review_enabled_work_dispatches_hold_auto_queue_entry_until_card_terminal
 dispatch::dispatch_status::auto_queue_terminal_sync_policy_tests::scope_assessment_terminal_completion_never_finalizes_auto_queue_entry
 dispatch::dispatch_status::auto_queue_terminal_sync_policy_tests::side_path_dispatch_types_are_all_skipped_on_completion
+dispatch::dispatch_status::review_skip::semaphore_pg_tests::a_skipped_review_frees_its_semaphore_slot_pg
 dispatch::dispatch_status::review_skip_pg_tests::a_failed_review_skip_changes_nothing
 dispatch::dispatch_status::review_skip_pg_tests::a_skipped_review_dispatch_is_cancelled_not_deleted
 dispatch::dispatch_status::terminal_timestamp_tests::postgres_terminal_timestamps_preserve_first_finish_and_respect_touch_flag
@@ -1414,6 +1415,7 @@ server::routes::auto_queue_admission_pg_tests::manual_add_waits_for_uncommitted_
 server::routes::auto_queue_admission_pg_tests::order_callback_rolls_back_every_entry_on_insert_failure_pg
 server::routes::auto_queue_admission_pg_tests::order_callback_waits_for_uncommitted_completion_and_refuses_pg
 server::routes::auto_queue_admission_pg_tests::patch_reopen_of_completed_run_entry_answers_conflict_pg
+server::routes::auto_queue_admission_pg_tests::restore_keeps_a_deleted_cards_entry_skipped_pg
 server::routes::auto_queue_admission_pg_tests::restore_waits_on_the_run_token_before_locking_the_run_row_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::dispatch_next_route_completes_drained_run_through_canonical_writer_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
@@ -1834,6 +1836,7 @@ services::agent_recovery::tests::test_008_fallback_equals_primary_or_missing_age
 services::agent_recovery::tests::test_009_dual_processing_fails
 services::agent_recovery::tests::test_010_owner_healthy_without_fallback_inflight_restores_from_wal
 services::agent_recovery::wakeup::tests::wake_before_sleep_is_retained_and_provider_scoped
+services::agents::query::blocked_signal_pg_tests::blocked_signal_skips_a_deleted_in_progress_card_pg
 services::agents::query::tests::dispatched_session_service_maps_empty_rows
 services::agents::query::tests::dispatched_session_service_maps_happy_row
 services::agents::query::tests::timeline_service_maps_empty_rows
@@ -1953,6 +1956,7 @@ services::auto_queue::route::fsm::tests::recovery_reattach_path_rechecks_cancell
 services::auto_queue::route::fsm::tests::restore_attach_existing_path_rechecks_cancelled_run_pg
 services::auto_queue::route::phase_gate::tests::attachment_free_gate_uses_newest_entry_single_run_pg
 services::auto_queue::route::phase_gate::tests::cancelled_run_rejects_dispatch_attach_pg
+services::auto_queue::route::phase_gate::tests::deleted_card_rejects_dispatch_attach_pg
 services::auto_queue::route::phase_gate::tests::sandbox_preflight_metadata_disables_external_side_effects_only_when_safe
 services::auto_queue::route::phase_gate_catalog::tests::catalog_exposes_typed_declaration_and_unavailable_deploy_gate
 services::auto_queue::route::phase_gate_catalog::tests::default_kind_present_in_catalog
