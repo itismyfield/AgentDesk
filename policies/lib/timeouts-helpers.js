@@ -14,8 +14,9 @@ function getTimeoutInterval(key, fallbackMinutes) {
   return "-" + val + " minutes";
 }
 
+// PG GREATEST skips NULLs, so a card without a dispatch still compares on its own timestamps.
 function latestCardActivityExpr(cardAlias, dispatchAlias) {
-  return "MAX(COALESCE(" + dispatchAlias + ".created_at, ''), COALESCE(" + cardAlias + ".updated_at, ''), COALESCE(" + cardAlias + ".started_at, ''))";
+  return "GREATEST(" + dispatchAlias + ".created_at, " + cardAlias + ".updated_at, " + cardAlias + ".started_at)";
 }
 
 function parseLocalTimestampMs(value) {
