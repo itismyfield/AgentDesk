@@ -26,7 +26,6 @@ mod fast_mode;
 mod goals;
 mod help;
 mod inspect;
-mod meeting_cmd;
 mod model_picker;
 mod model_ui;
 mod node;
@@ -52,10 +51,6 @@ pub(super) const SESSION_CLEARED_RESPONSE: &str = "세션을 초기화했어요.
 
 pub(super) fn session_started_response(path: &str) -> String {
     format!("`{path}`에서 세션을 시작했어요.")
-}
-
-pub(super) fn session_restored_response(path: &str) -> String {
-    format!("`{path}`에서 세션을 복원했어요.")
 }
 
 pub(in crate::services::discord) fn owner_error_response(summary: &str, detail: &str) -> String {
@@ -147,35 +142,33 @@ pub(super) use fast_mode::cmd_fast;
 pub(super) use goals::cmd_goals;
 pub(super) use help::cmd_help;
 pub(super) use inspect::cmd_adk;
-pub(super) use meeting_cmd::cmd_meeting;
 pub(super) use model_picker::cmd_model;
 pub(super) use node::cmd_node;
 pub(in crate::services::discord) use node::{
     channel_node_override, handle_node_picker_interaction, is_node_picker_custom_id,
 };
-pub(super) use receipt::{cmd_receipt, cmd_usage};
-pub(super) use recovery_ops::{cmd_deadlock_recover, cmd_machine_flip, cmd_stuck_pr_rebase};
+pub(super) use receipt::cmd_usage;
 pub(super) use restart::cmd_restart;
-pub(super) use session::{cmd_pwd, cmd_resume, cmd_start};
+pub(super) use session::{cmd_pwd, cmd_resume};
 pub(super) use sidecar::cmd_sidecar;
 pub(in crate::services::discord) use skill::build_provider_skill_prompt;
 pub(super) use skill::{cmd_cc, cmd_skill};
 pub(in crate::services::discord) use text_commands::handle_text_command_with_uploads;
 pub(super) use tool_call::cmd_tool_call;
 pub(super) use tui_passthrough::{cmd_compact, cmd_context, cmd_cost, cmd_effort};
+pub(super) use voice::cmd_voice;
 pub(in crate::services::discord) use voice::{
     auto_join_voice_channels, handle_vc_text_command, join_voice_channel, notify_voice_alert,
     register_songbird, voice_occupancy,
 };
-pub(super) use voice::{cmd_vc_join, cmd_vc_leave, cmd_voice};
 
 #[cfg(test)]
 mod response_wording_tests {
     use super::{
         ALREADY_STOPPING_RESPONSE, NO_ACTIVE_TURN_RESPONSE, SESSION_CLEARED_RESPONSE,
-        STOPPING_RESPONSE, owner_error_response, session_restored_response,
-        session_started_response, shell_command_execution_error_response,
-        shell_command_output_response, shell_command_task_error_response,
+        STOPPING_RESPONSE, owner_error_response, session_started_response,
+        shell_command_execution_error_response, shell_command_output_response,
+        shell_command_task_error_response,
     };
 
     #[test]
@@ -187,10 +180,6 @@ mod response_wording_tests {
         assert_eq!(
             session_started_response("/tmp/work"),
             "`/tmp/work`에서 세션을 시작했어요."
-        );
-        assert_eq!(
-            session_restored_response("/tmp/work"),
-            "`/tmp/work`에서 세션을 복원했어요."
         );
     }
 

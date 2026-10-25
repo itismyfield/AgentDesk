@@ -341,8 +341,7 @@ pub(in crate::services::discord) fn high_risk_enabled_via_env() -> bool {
         .unwrap_or(false)
 }
 
-/// Risk tier of every registered slash command, mirroring the text tiers; the
-/// recovery commands run launchctl/ssh/git pipelines, so they are opt-in.
+/// Risk tier of every registered slash command, mirroring the text tiers.
 pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
     use CommandRisk::*;
     &[
@@ -355,17 +354,14 @@ pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
         ("/metrics", ReadOnly),
         ("/allowedtools", ReadOnly),
         ("/sessions", ReadOnly),
-        ("/receipt", ReadOnly),
         ("/usage", ReadOnly),
         ("/adk", ReadOnly),
         ("/cost", ReadOnly),
         ("/context", ReadOnly),
-        ("/start", Mutating),
         ("/resume", Mutating),
         ("/down", Mutating),
         ("/cc", Mutating),
         ("/skill", Mutating),
-        ("/meeting", Mutating),
         ("/model", Mutating),
         ("/node", Mutating),
         ("/fast", Mutating),
@@ -381,14 +377,9 @@ pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
         ("/debug", Mutating),
         ("/sidecar", Mutating),
         ("/voice", Mutating),
-        ("/vc_join", Mutating),
-        ("/vc_leave", Mutating),
         ("/adk-phase", Mutating),
         ("/shell", ShellOrToolGrant),
         ("/allowed", ShellOrToolGrant),
-        ("/deadlock-recover", ShellOrToolGrant),
-        ("/machine-flip", ShellOrToolGrant),
-        ("/stuck-pr-rebase", ShellOrToolGrant),
         ("/allowall", CredentialSystem),
         ("/adduser", CredentialSystem),
         ("/removeuser", CredentialSystem),
@@ -573,20 +564,23 @@ mod command_policy_tests {
         }
     }
 
+    /// A text command that still has a registered slash twin keeps its tier.
     #[test]
     fn common_registered_slash_surfaces_keep_the_same_risk() {
         let mut compared = 0;
         for (risk, _, names) in registered_cases() {
             for name in names.split_whitespace() {
-                // Voice uses separate slash names.
-                if name == "!vc" {
-                    continue;
+                let slash = format!("/{}", &name[1..]);
+                if SLASH_COMMAND_RISKS
+                    .iter()
+                    .any(|(registered, _)| *registered == slash)
+                {
+                    assert_eq!(slash_command_risk(&slash), risk, "{slash}");
+                    compared += 1;
                 }
-                assert_eq!(slash_command_risk(&format!("/{}", &name[1..])), risk);
-                compared += 1;
             }
         }
-        assert_eq!(compared, 32);
+        assert_eq!(compared, 26);
     }
 
     #[test]

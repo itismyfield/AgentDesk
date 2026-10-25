@@ -220,7 +220,6 @@ pub(super) async fn run_bot_framework_setup(
 pub(in crate::services::discord) fn run_bot_build_slash_commands()
 -> Vec<poise::Command<Data, Error>> {
     let mut slash_commands = vec![
-        commands::cmd_start(),
         commands::cmd_resume(),
         commands::cmd_pwd(),
         commands::cmd_status(),
@@ -245,8 +244,6 @@ pub(in crate::services::discord) fn run_bot_build_slash_commands()
         commands::cmd_context(),
         commands::cmd_adk(),
         commands::cmd_voice(),
-        commands::cmd_vc_join(),
-        commands::cmd_vc_leave(),
     ];
     slash_commands.extend([
         commands::cmd_queue(),
@@ -260,13 +257,8 @@ pub(in crate::services::discord) fn run_bot_build_slash_commands()
         commands::cmd_adduser(),
         commands::cmd_removeuser(),
         commands::cmd_usage(),
-        commands::cmd_receipt(),
         commands::cmd_help(),
-        commands::cmd_meeting(),
         commands::cmd_restart(),
-        commands::cmd_deadlock_recover(),
-        commands::cmd_machine_flip(),
-        commands::cmd_stuck_pr_rebase(),
         commands::cmd_adk_phase(),
     ]);
     slash_commands

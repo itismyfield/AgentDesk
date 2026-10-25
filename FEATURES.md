@@ -235,7 +235,7 @@ On `onTick`, scans `backlog` cards without `assigned_agent_id`:
 
 ### Meeting Flow
 
-1. `/meeting start <agenda> [provider]` to begin
+1. Start from the dashboard Meetings page or `POST /api/round-table-meetings/start`
 2. Participant selection (auto or manual per settings)
 3. Round progression:
    - Primary provider works one round

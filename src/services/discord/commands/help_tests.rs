@@ -80,3 +80,39 @@ fn help_advertises_explicit_queue_cancellation_not_reaction_removal() {
     assert!(body.contains("`/queue` shows IDs"));
     assert!(!body.contains("reaction remove"));
 }
+
+/// Retired slash commands stay out of the registration that the boot-time
+/// guild overwrite publishes, so Discord drops them.
+#[test]
+fn retired_slash_commands_are_not_registered() {
+    let registered: BTreeSet<String> = run_bot_build_slash_commands()
+        .iter()
+        .map(|command| command.name.to_string())
+        .collect();
+    for retired in [
+        "start",
+        "receipt",
+        "meeting",
+        "vc_join",
+        "vc_leave",
+        "deadlock-recover",
+        "machine-flip",
+        "stuck-pr-rebase",
+    ] {
+        assert!(!registered.contains(retired), "/{retired} is registered");
+    }
+}
+
+/// `/help` lists only the text session controls agents can send today, not
+/// the other `!` commands.
+#[test]
+fn help_lists_only_working_agent_text_commands() {
+    let body = build_slash_help_messages(&ProviderKind::Claude, &run_bot_build_slash_commands())
+        .join("\n");
+    let listed: BTreeSet<&str> = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("`!"))
+        .map(|rest| &rest[..rest.find([' ', '`']).unwrap_or(rest.len())])
+        .collect();
+    assert_eq!(listed, BTreeSet::from(["clear", "stop"]));
+}
