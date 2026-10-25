@@ -11,7 +11,8 @@ record="$dir/results/worker-0"
 # The checked-out commit, which a manual trusted run may set apart from GITHUB_SHA.
 sha="$(git rev-parse HEAD)"
 ci() { python3 scripts/ci/nextest_ci.py "$@"; }
-mkdir -p "$dir"
+# nextest extracts only into a directory that already exists.
+mkdir -p "$dir/extract"
 
 cargo nextest archive --lib --archive-file "$archive"
 cargo nextest list --archive-file "$archive" --workspace-remap "$GITHUB_WORKSPACE" \

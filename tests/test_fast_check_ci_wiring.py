@@ -483,8 +483,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         ids = (REPO_ROOT / "scripts/ci/pg15_required_ids.txt").read_text(encoding="utf-8").split()
         self.assertTrue(ids)
         self.assertEqual(len(ids), len(set(ids)))
-        manifest = (REPO_ROOT / "scripts/lib_test_inventory_manifest.txt").read_text(encoding="utf-8")
-        inventoried = set(manifest.split("[tests]\n", 1)[1].split("\n[", 1)[0].split())
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import rust_test_sources
+        inventoried = rust_test_sources.compiled_lib_tests(REPO_ROOT)
         self.assertEqual([test_id for test_id in ids if test_id not in inventoried], [])
         ledger = (REPO_ROOT / "scripts/known_test_failures.txt").read_text(encoding="utf-8")
         patterns = [line.split("|")[1].strip() for line in ledger.splitlines()

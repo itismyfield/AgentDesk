@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -28,8 +27,7 @@ def load_module(name: str, path: Path):
     return module
 
 
-INTEGRITY = load_module("check_test_target_integrity",
-                        ROOT / "scripts/check_test_target_integrity.py")
+FILTERS = load_module("cargo_test_filters", ROOT / "scripts/ci/cargo_test_filters.py")
 
 
 def workflow_triggers(document: dict) -> dict:
@@ -94,14 +92,11 @@ def nightly_contract_problems(text: str) -> list[str]:
     return problems
 
 
-def integrity_commands(text: str) -> list[str]:
-    with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as handle:
-        handle.write(text)
-        path = Path(handle.name)
-    try:
-        return [rendered for _, _, rendered in INTEGRITY.extract_commands(path)]
-    finally:
-        path.unlink()
+def filter_rule_commands(text: str) -> list[str]:
+    """The `cargo test` commands the no-name-filter rule judges in a nightly workflow text."""
+    steps = [step for job in yaml.safe_load(text)["jobs"].values() for step in job.get("steps", [])]
+    return [" ".join(words) for step in steps if isinstance(step.get("run"), str)
+            for words in FILTERS.commands(step["run"])]
 
 
 def override_pg_profile(text):
@@ -162,15 +157,15 @@ class NightlyRepairWiringTests(unittest.TestCase):
                 self.assertIsInstance(yaml.safe_load(mutated), dict)
                 self.assertNotEqual(nightly_contract_problems(mutated), [])
 
-    def test_target_integrity_still_sees_the_direct_cargo_command(self) -> None:
-        self.assertIn(PG_CARGO, integrity_commands(self.text))
+    def test_filter_rule_sees_the_direct_cargo_command(self) -> None:
+        self.assertIn(PG_CARGO, filter_rule_commands(self.text))
 
-    def test_wrapping_cargo_silently_loses_target_integrity_coverage(self) -> None:
+    def test_wrapping_cargo_does_not_hide_it_from_the_filter_rule(self) -> None:
         for name, mutate in WRAPPER_MUTANTS:
             with self.subTest(mutant=name):
                 mutated = mutate(self.text)
                 self.assertNotEqual(mutated, self.text)
-                self.assertNotIn(PG_CARGO, integrity_commands(mutated))
+                self.assertIn(PG_CARGO, filter_rule_commands(mutated))
 
     def test_each_job_profile_entry_is_required(self) -> None:
         for job in DEBUG_JOBS:

@@ -66,12 +66,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from check_test_target_integrity import (  # noqa: E402
-    LIB_INVENTORY_KNOWN_CARGO_ONLY,
-    expected_lib_static_only,
-    load_lib_inventory_manifest,
-)
-
 # In multi-threaded mode libtest emits a result as two unsynchronised writes --
 # `test <id> ... ` and then the verdict -- onto a stdout it shares with every
 # test thread and with any child process that inherited the descriptor. A
@@ -367,8 +361,14 @@ def derive_expected_selection(manifest_path: Path, platform_name: str,
 
     The manifest is the *static* inventory. libtest lists what compiled for the
     host, so the two differ by the exact, reviewed sets #5144 pinned; reuse
-    those constants rather than restating them.
+    those constants rather than restating them. Only this manifest mode needs the
+    inventory module; an `--expected-ids` run must not import it.
     """
+    from check_test_target_integrity import (
+        LIB_INVENTORY_KNOWN_CARGO_ONLY,
+        expected_lib_static_only,
+        load_lib_inventory_manifest,
+    )
     try:
         manifest_ids = load_lib_inventory_manifest(manifest_path)
     except (OSError, ValueError) as error:
