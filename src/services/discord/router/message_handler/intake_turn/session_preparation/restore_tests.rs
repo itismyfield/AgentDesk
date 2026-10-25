@@ -66,7 +66,8 @@ async fn preparation_restores_provider_session_and_memento_from_memory() {
         use std::io::{Read, Write};
         let (mut connection, _) = listener.accept().unwrap();
         let mut request = [0u8; 4096];
-        connection.read(&mut request).unwrap();
+        let received = connection.read(&mut request).unwrap();
+        assert!(received > 0, "restore must issue an HTTP request");
         let body = r#"{"session_id":"restored-sid"}"#;
         write!(connection,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
     });

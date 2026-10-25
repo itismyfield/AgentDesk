@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::TestRuntimeRootGuard;
 
 #[test]
 fn bootstrap_excludes_preparation_and_payload_commit_is_idempotent() {
