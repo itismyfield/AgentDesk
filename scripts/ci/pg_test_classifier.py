@@ -434,8 +434,10 @@ def discover_pg_inventory(
 
     Supported indirect references are bare/free-function calls, fully-qualified
     free functions, single- and multi-segment associated calls, and UFCS calls of
-    the form ``<Type as Trait>::method()``. Test and helper bodies use the same
-    reference extractor and both mask block-local functions and impls.
+    the form ``<Type as Trait>::method()``. Names resolve through nested ``use …::*``
+    globs and ``use`` re-exports, and a path starting at a child module is relative to it.
+    Test and helper bodies use the same reference extractor and both mask
+    block-local functions and impls.
 
     Out of scope are block-local call graphs, method-level dispatch within an
     impl (an impl is conservatively treated as one type-level item), and UFCS
