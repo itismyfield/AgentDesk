@@ -9,6 +9,7 @@ use crate::services::gemini;
 use crate::services::provider::ProviderKind;
 
 mod reports;
+mod session_details;
 
 pub(in crate::services::discord) use reports::{
     build_health_report, build_inflight_report, build_queue_report, build_status_report,
@@ -384,3 +385,6 @@ pub(in crate::services::discord) async fn cmd_debug(ctx: Context<'_>) -> Result<
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod recovery_command_tests;
