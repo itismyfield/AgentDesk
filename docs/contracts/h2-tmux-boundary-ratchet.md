@@ -1,5 +1,7 @@
 # H2 — Rust prod 경계 tmux 직접 조작 사이트 래칫
 
+<!-- doc-path-refs: proposed scripts/ci/h2_admissions.toml scripts/ci/h2_baseline_services.toml scripts/ci/h2_baseline_others.toml -->
+
 ## 1. 범위와 현재 상태
 
 이 계약은 `src/**`의 **root lib 타깃 prod 코드 중 owner 밖** tmux 직접 조작 사이트의 증가를 제한한다.

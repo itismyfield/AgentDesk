@@ -63,7 +63,7 @@ docs` workflow가 누적 drift를 maintenance PR로 갱신한다. 단, giant-fil
 registry 불일치나 필수 metadata 누락처럼 generator가 검증하는 유지보수
 invariant 위반은 별도의 hard gate다.
 
-- [Module inventory](generated/module-inventory.md)
+- Module inventory: `docs/generated/module-inventory.md` (untracked; 위 generator로 로컬에서 생성)
 - [Route inventory](generated/route-inventory.md)
 - [Bootstrap worker inventory](generated/worker-inventory.md)
 

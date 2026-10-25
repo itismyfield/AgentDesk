@@ -4,7 +4,7 @@ schema_version: "2"
 status: "implemented"
 topic_slug: "agentdesk-automation-candidate-pipeline"
 topic_folder: "agentdesk-automation-candidate-pipeline"
-linked_prd: "./agentdesk-automation-candidate-pipeline-prd.md"
+linked_prd: "./automation-candidate-pipeline-prd.md"
 traceability_mode: "req-task-test"
 generated_by: "spec-writer"
 created_at: "2026-05-02"
@@ -17,9 +17,9 @@ updated_at: "2026-05-02"
 
 ## Linked Documents
 
-- PRD: [agentdesk-automation-candidate-pipeline-prd.md](./agentdesk-automation-candidate-pipeline-prd.md)
-- 원 Recommender PRD: [agentdesk-automation-candidate-recommender-prd.md](../agentdesk-automation-candidate-recommender/agentdesk-automation-candidate-recommender-prd.md)
-- Enrichment Spec (P0): [agentdesk-observation-provider-enrichment-spec.md](../agentdesk-observation-provider-enrichment/agentdesk-observation-provider-enrichment-spec.md)
+- PRD: [automation-candidate-pipeline-prd.md](./automation-candidate-pipeline-prd.md)
+- 원 Recommender PRD: `agentdesk-automation-candidate-recommender-prd.md`(repo에 없는 문서)
+- Enrichment Spec (P0): [observation-provider-enrichment-spec.md](./observation-provider-enrichment-spec.md)
 
 ## State
 
@@ -148,7 +148,7 @@ updated_at: "2026-05-02"
   7. scoring_summary 포함: scored/deduped/ema_scored/reopt_count/saturation_ticks/fast_fail_ticks
   ```
 
-- [TSK-P0E-011] **JS 테스트** (`policies/__tests__/recommender-saturation.test.js`):
+- [TSK-P0E-011] **JS 테스트** (`policies/__tests__/recommender-saturation.test.js`(없음)):
   - fast-fail: 2틱 all-dedup → `reopt_count === 1`
   - EMA tier: ema_scored < 0.3 연속 5틱 → `reopt_count === 1`
   - EMA 계산: scored=1 → `ema_scored ≈ 0.1`
@@ -164,7 +164,7 @@ updated_at: "2026-05-02"
 - [TSK-P1D-003] detector checkpoint schema 구현: `seen_candidates: {}` (signature → first_seen_at ISO string, TTL 72h), `pending_reviews: []`, `dispatched_ref: []`.
 - [TSK-P1D-004] 품질 게이트 구현: evidence_age 계산, score 확인, approved/dispatched 존재 여부 확인.
 - [TSK-P1D-005] approval prompt 생성: candidate signature, score, evidence 요약, kv_meta 기록 지시 포함.
-- [TSK-P1D-006] JS 테스트 추가 (`policies/__tests__/detector.test.js`): (1) 게이트 통과 시 action:"agent" 확인, (2) 이미 approved 후보 skip 확인, (3) evidence_age 초과 시 reject 확인, (4) 중복 emit 방지 확인.
+- [TSK-P1D-006] JS 테스트 추가 (`policies/__tests__/detector.test.js`(없음)): (1) 게이트 통과 시 action:"agent" 확인, (2) 이미 approved 후보 skip 확인, (3) evidence_age 초과 시 reject 확인, (4) 중복 emit 방지 확인.
 
 ### Phase P1: Automation Executor
 
@@ -172,7 +172,7 @@ updated_at: "2026-05-02"
 - [TSK-P1E-002] executor checkpoint schema 구현: `dispatched_signatures: {}` (signature → dispatched_at ISO string, TTL 7d).
 - [TSK-P1E-003] dispatch 중복 방지: `candidate_dispatched:*` ctx.observations 확인 + checkpoint `dispatched_signatures` 확인.
 - [TSK-P1E-004] dispatch prompt 구현: GitHub Issue 생성 요청, Kanban 카드 생성 요청, `candidate_dispatched:{signature}` kv_meta 기록 지시 포함.
-- [TSK-P1E-005] JS 테스트 추가 (`policies/__tests__/executor.test.js`): (1) approved 후보 수신 시 action:"agent" 확인, (2) dispatched 후보 skip 확인, (3) 후보 없으면 action:"complete" 확인.
+- [TSK-P1E-005] JS 테스트 추가 (`policies/__tests__/executor.test.js`(없음)): (1) approved 후보 수신 시 action:"agent" 확인, (2) dispatched 후보 skip 확인, (3) 후보 없으면 action:"complete" 확인.
 
 ---
 
