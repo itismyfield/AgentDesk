@@ -208,35 +208,3 @@ pub(super) struct DeadSessionCleanup {
     pub(super) session_name: String,
     pub(super) observed: HostLiveness,
 }
-
-impl DeadSessionCleanup {
-    /// A cleanup candidate unless the pane is live. A failed probe stays a candidate
-    /// with its answer, so the host guard keeps the session instead of reading it as dead.
-    pub(super) async fn probe(
-        channel_id: u64,
-        channel_name: &str,
-        session_name: &str,
-    ) -> Option<Self> {
-        let probe = crate::services::tmux_diagnostics::probe_tmux_session_pane_liveness;
-        let observed = HostLiveness::from(probe(session_name).await);
-
-        let marker = crate::services::tmux_common::session_dead_marker_path(session_name);
-        if observed != HostLiveness::Live {
-            let (channel_name, session_name) = (channel_name.into(), session_name.into());
-            return Some(Self {
-                channel_id,
-                channel_name,
-                session_name,
-                observed,
-            });
-        }
-        if std::path::Path::new(&marker).exists() {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 🧹 clearing stale .pane_dead marker for {session_name} — tmux session is alive"
-            );
-            let _ = std::fs::remove_file(&marker);
-        }
-        None
-    }
-}
