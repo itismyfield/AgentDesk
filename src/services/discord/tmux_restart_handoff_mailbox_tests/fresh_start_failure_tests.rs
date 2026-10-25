@@ -334,12 +334,18 @@ async fn run_case(
     .await
     .unwrap();
     let error = result.expect_err("the fresh turn fails to start");
-    let held = capability.as_ref().and_then(|cap| cap.preparation_hold());
+    // A write that failed after the fence stays a typed guarded hold, never a requeue.
+    let failure = capability.as_ref().map(|cap| cap.classify_failure());
+    let held = matches!(
+        failure,
+        Some(
+            crate::services::discord::inflight::SubmissionFailure::GuardedStopped(
+                crate::services::claude_tui::host_input::InputRun::Indeterminate { .. }
+            )
+        )
+    );
     if uncertain {
-        assert!(
-            held.as_ref().is_some_and(|hold| !hold.may_requeue()),
-            "send ACK remains a typed uncertain hold: {error} {held:?}"
-        );
+        assert!(held, "send ACK remains a typed uncertain hold: {error}");
         let sends = std::fs::read_to_string(launch.path().join("sends")).unwrap_or_default();
         assert_eq!(
             sends, "paste-buffer\n",
@@ -465,7 +471,7 @@ async fn run_case(
         calls,
         exit_reason,
         successor_row: successor_saved.map(|saved| (saved, std::fs::read(&row_path).ok())),
-        held: held.is_some(),
+        held,
         retained_input: crate::services::discord::inflight::load_inflight_state_read_only(
             &provider,
             channel_raw,

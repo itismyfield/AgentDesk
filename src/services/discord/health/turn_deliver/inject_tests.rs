@@ -1292,11 +1292,13 @@ impl InjectPane {
         self.set("cap.before", &pane);
     }
 
-    /// A menu above the composer, so the paste is vetoed as `modal` before any key.
+    /// A menu above the composer, so the paste is vetoed as `modal` before any key. It replaces
+    /// any screen an earlier paste drew.
     pub(crate) fn menu(&self) {
         let menu = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel";
         let pane = format!("{menu}\n{BORDER}\n❯\u{00a0}\n{BORDER}\n{FOOTER}");
         self.set("cap.before", &pane);
+        let _ = fs::remove_file(self.path("pasted"));
     }
 
     /// A pane whose turn has ended; with an ended transcript the paste is vetoed as `not_busy`.
