@@ -81,6 +81,9 @@ def check(repo, prompts):
         print('inspection_unavailable')
         return 2
     print(f'inspected_files={inspected} candidate_urls={candidates_count} unknown_paths={unknown} skipped_files={skipped}')
+    if not inspected:
+        print('inspection_unavailable: no_prompt_files')
+        return 2
     if not candidates_count:
         print('no_applicable_urls')
     return int(unknown > 0)

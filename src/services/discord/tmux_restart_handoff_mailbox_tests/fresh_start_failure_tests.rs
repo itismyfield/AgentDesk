@@ -52,23 +52,31 @@ fn launchable_tmux() -> (tempfile::TempDir, Vec<crate::config::TestEnvVarGuard>)
     (dir, env)
 }
 
-/// The fresh turn as intake runs it on its provider thread: a ready composer whose first
-/// send-keys fails after the submission fence.
+/// An uncertain first send, or a successful submit followed by a confirmed dead pane.
 fn fail_fresh_turn(
     channel: u64,
     cancel: Arc<CancelToken>,
     sender: std::sync::mpsc::Sender<StreamMessage>,
     workspace: String,
+    uncertain: bool,
 ) -> Result<(), String> {
     let rule = "─".repeat(80);
-    let ready = format!("Claude Code v2.1.289\n\n{rule}\n\u{276f} \n{rule}\n  MCP: 2");
+    let ready = format!(
+        "Claude Code v2.1.289\n\n{rule}\n\u{276f} \n{rule}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+    );
+    if !uncertain {
+        let fake = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .nth(1)
+            .unwrap();
+        std::fs::write(fake.join("pane_dead"), "").unwrap();
+    }
     // The driver registers this session in the prompt-dedupe tables the dedupe tests own.
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let _spy = SpyGuard::install(SpyState {
         captures: std::iter::repeat_n(Some(ready), 64).collect(),
-        fail_send: Some((0, Err("send-keys failed".to_string()))),
+        fail_send: uncertain.then(|| (0, Err("send-keys failed".to_string()))),
         ..SpyState::default()
     });
     let clearance = cleared(NAME);
@@ -192,6 +200,8 @@ struct Outcome {
     exit_reason: String,
     /// The durable row's bytes when a successor saved it and after the bridge exited.
     successor_row: Option<(Vec<u8>, Option<Vec<u8>>)>,
+    held: bool,
+    retained_input: Option<String>,
 }
 
 /// How far a successor got between A's teardown and A's bridge settlement.
@@ -211,6 +221,7 @@ enum Successor {
 async fn run_case(
     channel_raw: u64,
     successor: Option<(Arc<CancelToken>, Successor)>,
+    uncertain: bool,
 ) -> (Arc<CancelToken>, Outcome) {
     let tmux = FakeTmux::install(NAME);
     tmux.mark_missing();
@@ -239,6 +250,13 @@ async fn run_case(
     row.turn_nonce = a.turn_nonce().map(str::to_owned);
     // Intake stamps the prelaunch kind of a Claude TUI turn before saving its row.
     row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+    let capability = uncertain.then(|| {
+        crate::services::discord::inflight::install_managed_submission_boundary(
+            &mut row,
+            &crate::services::turn_host::TurnHost::Tmux,
+        )
+        .unwrap()
+    });
     let message = MessageId::new(MESSAGE);
     let started = crate::services::discord::mailbox_try_start_turn(
         &shared,
@@ -286,11 +304,38 @@ async fn run_case(
         tx.clone(),
         workspace.path().display().to_string(),
     );
-    let result =
-        tokio::task::spawn_blocking(move || fail_fresh_turn(channel_raw, actor, sender, dir))
-            .await
-            .unwrap();
+    let observer = capability.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::services::claude_tui::guarded_outcome::with_owner(
+            observer.as_ref().map(|cap| cap.observer()),
+            || {
+                crate::services::claude_tui::submission_fence::with_scope(
+                    observer.as_ref().map(|cap| cap.fence()),
+                    || fail_fresh_turn(channel_raw, actor, sender, dir, uncertain),
+                )
+            },
+        )
+    })
+    .await
+    .unwrap();
     let error = result.expect_err("the fresh turn fails to start");
+    let held = capability.as_ref().and_then(|cap| cap.preparation_hold());
+    if uncertain {
+        assert!(
+            held.as_ref().is_some_and(|hold| !hold.may_requeue()),
+            "send ACK remains a typed uncertain hold: {error} {held:?}"
+        );
+        let retained = crate::services::discord::inflight::load_inflight_state_read_only(
+            &provider,
+            channel_raw,
+        )
+        .unwrap();
+        assert_eq!(
+            retained.user_text, "hello",
+            "uncertain payload retains its original durable custody"
+        );
+        assert_eq!(retained.turn_nonce, a_nonce);
+    }
     let calls = tmux.take_calls();
     let reason_path = crate::services::tmux_common::session_temp_path(NAME, "exit_reason");
     let exit_reason = std::fs::read_to_string(reason_path).unwrap_or_default();
@@ -354,8 +399,10 @@ async fn run_case(
     }
     let frame =
         crate::services::discord::router::message_handler::producer_error_frame(channel_raw, error);
-    tx.send(frame.expect("a failure after the fence reaches the bridge"))
-        .unwrap();
+    if !uncertain {
+        tx.send(frame.expect("a confirmed hard failure reaches the bridge"))
+            .unwrap();
+    }
     drop(tx);
     tokio::time::timeout(std::time::Duration::from_secs(20), completion_rx)
         .await
@@ -398,6 +445,12 @@ async fn run_case(
         calls,
         exit_reason,
         successor_row: successor_saved.map(|saved| (saved, std::fs::read(&row_path).ok())),
+        held: held.is_some(),
+        retained_input: crate::services::discord::inflight::load_inflight_state_read_only(
+            &provider,
+            channel_raw,
+        )
+        .map(|row| row.user_text),
     };
     crate::services::tmux_common::cleanup_session_temp_files(NAME);
     (a, outcome)
@@ -406,12 +459,17 @@ async fn run_case(
 fn assert_torn_down(outcome: &Outcome) {
     let called = |command: &str| outcome.calls.iter().any(|call| call.starts_with(command));
     assert!(called("new-session"), "{:?}", outcome.calls);
-    assert!(called("capture-pane"), "audit: {:?}", outcome.calls);
+    assert!(
+        called("list-panes"),
+        "confirmed dead pane: {:?}",
+        outcome.calls
+    );
     assert!(called("kill-session"), "kill: {:?}", outcome.calls);
     assert!(
         outcome
             .exit_reason
-            .contains("claude tui fresh turn failed:"),
+            .contains("claude tui session died before turn completion")
+            && !outcome.held,
         "{}",
         outcome.exit_reason
     );
@@ -424,7 +482,7 @@ async fn a_failed_fresh_start_releases_its_mailbox_episode_and_keeps_the_queue()
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let _endpoint = published_endpoint();
-    let (a, outcome) = run_case(6_333_511, None).await;
+    let (a, outcome) = run_case(6_333_511, None, false).await;
     assert_torn_down(&outcome);
     assert!(outcome.holder.is_none(), "A's token is released");
     assert_eq!(outcome.active_message, None);
@@ -448,7 +506,8 @@ async fn a_failed_fresh_start_leaves_a_successor_episode_untouched() {
         (6_333_513, Successor::RowSaved),
     ] {
         let b = Arc::new(CancelToken::new());
-        let (_, outcome) = run_case(channel, Some((b.clone(), stage))).await;
+        let (_, outcome) = run_case(channel, Some((b.clone(), stage)), false).await;
+        assert_torn_down(&outcome);
         assert_successor_untouched(stage, &b, outcome);
     }
 }
@@ -462,12 +521,12 @@ async fn same_second_fresh_failure_keeps_b_episode_7219() {
     let _endpoint = published_endpoint();
     let b = Arc::new(CancelToken::new());
     let stage = Successor::RowSavedSameSecond;
-    let (_, outcome) = run_case(6_333_514, Some((b.clone(), stage))).await;
+    let (_, outcome) = run_case(6_333_514, Some((b.clone(), stage)), false).await;
+    assert_torn_down(&outcome);
     assert_successor_untouched(stage, &b, outcome);
 }
 
 fn assert_successor_untouched(stage: Successor, b: &Arc<CancelToken>, outcome: Outcome) {
-    assert_torn_down(&outcome);
     assert!(
         outcome
             .holder
@@ -494,5 +553,43 @@ fn assert_successor_untouched(stage: Successor, b: &Arc<CancelToken>, outcome: O
         }
         (Successor::Admitted, None) => {}
         (stage, row) => panic!("{stage:?}: successor row saved = {}", row.is_some()),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bundle_uncertain_fresh_send_preserves_payload_pane_and_successor() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let _endpoint = published_endpoint();
+    for (channel, stage) in [
+        (6_333_515, None),
+        (6_333_516, Some(Successor::RowSavedSameSecond)),
+    ] {
+        let b = Arc::new(CancelToken::new());
+        let (_, outcome) = run_case(channel, stage.map(|s| (b.clone(), s)), true).await;
+        assert!(
+            outcome.held,
+            "an uncertain send never becomes a legacy hard failure"
+        );
+        assert_eq!(
+            outcome
+                .calls
+                .iter()
+                .filter(|call| call.starts_with("kill-session"))
+                .count(),
+            0,
+            "uncertain payload custody never authorizes kill: {:?}",
+            outcome.calls
+        );
+        assert_eq!(outcome.queued, 1, "the original queued input stays");
+        if let Some(stage) = stage {
+            assert_successor_untouched(stage, &b, outcome);
+        } else {
+            assert_eq!(
+                outcome.retained_input.as_deref(),
+                Some("hello"),
+                "uncertain payload custody survives bridge cleanup"
+            );
+        }
     }
 }

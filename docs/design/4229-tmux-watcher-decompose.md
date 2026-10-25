@@ -12,7 +12,7 @@
 
 ### F1 — **캡처가 5개가 아니라 6개다. 빠뜨리면 컴파일이 안 된다.** (오케스트레이터 직접 확인)
 
-`tmux_watcher.rs:3501`:
+`tmux_watcher.rs`(작성 당시 3501행):
 ```rust
 if false && pct >= ctx_cfg.compact_pct && !is_prompt_too_long && compact_cooldown_ok {
 ```
@@ -28,7 +28,7 @@ if false && pct >= ctx_cfg.compact_pct && !is_prompt_too_long && compact_cooldow
 **그런데 FLAWED인 지점:**
 1. checker 자신의 메시지가 "ceiling 아래면 **현재 측정값으로** 낮추라"고 한다 (`check_hotfile_ratchet.py:146-150`). 예약은 그 의도를 우회한다.
 2. **만료 조건("#4973 머지 시 또는 4주")을 강제하는 checker가 없다.** 주석뿐이라 잊혀도 CI가 안 잡는다 → 이름만 다른 영구 캡 인상이 된다.
-3. **admission count 해석이 틀렸다.** `ratchet_admission_history.toml:3-8`에 count는 metric별이 아니라 **파일별 누적**이라고 명시돼 있다. 실제: hotfile `count=2` 1건(`:64-70`), giant `count=1`(`:16-22`)과 `count=3`(`:72-78`). 즉 "hotfile 2 / giant 3"은 독립 횟수가 아니라 **파일 전체 시퀀스의 현재 count가 3**이다. (다음 admission이 4가 되어 `count > 3`으로 경고가 뜬다는 결론 자체는 유효 — `ratchet_admission.py:31`, `:267-285`.)
+3. **admission count 해석이 틀렸다.** `ratchet_admission_history.toml:3-8`에 count는 metric별이 아니라 **파일별 누적**이라고 명시돼 있다. 실제: hotfile `count=2` 1건(`:64-70`), giant `count=1`(`:16-22`)과 `count=3`(`:72-78`). 즉 "hotfile 2 / giant 3"은 독립 횟수가 아니라 **파일 전체 시퀀스의 현재 count가 3**이다. (다음 admission이 4가 되어 `count > 3`으로 경고가 뜬다는 결론 자체는 유효 — `ratchet_admission.py`의 `ADMISSION_WARN_THRESHOLD`, `admission_warning_messages`.)
 4. **R=60의 근거가 무효.** PR #4972의 net `+8`은 맞지만, #4973이 그 접근을 **무동작 판정**했다. 실패한 접근의 비용을 승인된 계약의 하한으로 쓸 수 없다.
 
 **결정 필요(둘 중 하나):**
@@ -129,7 +129,7 @@ scripts/audit_maintainability_config.toml:35             tmux_watcher/** = 700
 - `235–3565` `tmux_output_watcher_with_restore` — **3331줄, 파일의 93.3%**
 - `431–3553` `'watcher_loop: loop`
 
-**모듈 경로 주의**: `tmux.rs:2720`이 `#[path = "tmux_watcher.rs"] mod tmux_watcher;`라서 논리 경로는 `services::discord::tmux::tmux_watcher`다 (`services::discord::tmux_watcher`가 **아님**).
+**모듈 경로 주의**: `tmux.rs`가 `#[path = "tmux_watcher.rs"] mod tmux_watcher;`라서 논리 경로는 `services::discord::tmux::tmux_watcher`다 (`services::discord::tmux_watcher`가 **아님**).
 
 ### 루프 본문 블록 맵 (재측정, #4229 스테이지 라벨)
 
@@ -205,7 +205,7 @@ new_cap = measured_after_slice + R      (R = 60)
 
 ### S-A — W7b: terminal token update + auto-compact tail ← **해제 슬라이스**
 
-- **이동**: `tmux_watcher.rs:3425–3552` → 신규 `src/services/discord/tmux_watcher/terminal_token_update.rs`
+- **이동**: `tmux_watcher.rs`(작성 당시 3425–3552행) → 신규 `src/services/discord/tmux_watcher/terminal_token_update.rs`
 - **정확한 내용**: 단일 `if let Some(tokens) = result_usage.map(|usage| usage.context_occupancy_input_tokens()) { … }` 문장. 내부: ADK 세션키 빌드, `shared.core` 락 하 `channel_name` 조회, `thread_channel_id` 파싱, `resolve_role_binding` → `agent_id`, `watcher_terminal_token_update_status(...)`로 `post_adk_session_status(...)`, auto-compact 임계 평가, pg cooldown-key `bind`/`execute`, `enqueue_outbox_best_effort` 🗜️ 알림.
 - **신규 심볼**: `pub(super) async fn run_watcher_terminal_token_update(ctx: WatcherTerminalTokenUpdateContext<'_>)`
 - **Context 구조체 (5필드, 전부 읽기 전용)**: `shared: &Arc<SharedData>`, `channel_id: ChannelId`, `tmux_session_name: &str`, `result_usage: Option<TokenUsage>`, `watcher_direct_terminal_idle_committed: bool`
@@ -229,7 +229,7 @@ new_cap = measured_after_slice + R      (R = 60)
 
 ### S-C — W7a: missing-inflight liveness fallback
 
-- **이동**: `3335–3423` → `tmux_watcher/post_commit_observation.rs`
+- **이동**: `3335–3423` → `tmux_watcher/post_commit_observation.rs` (제안)
 - **내용**: `missing_inflight_after_session_bound_delivery`, `probe_tmux_session_liveness` 게이트, `recent_turn_stop_for_watcher_range`, `terminal_cleanup_committed` 프로브, `missing_inflight_fallback_observation` 플랜과 3개 arm(recent-stop 억제 / dead-tmux drain + `handle_tmux_watcher_observed_death` + `break` / degraded 표기).
 - **Outcome enum**: `{BreakWatcherLoop, Fallthrough}` — `break 'watcher_loop` 1개.
 - **신규 모듈 크기**: 89 + ~40 ≈ **~130**. PASS.

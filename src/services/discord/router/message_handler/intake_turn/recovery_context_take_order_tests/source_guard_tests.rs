@@ -31,10 +31,8 @@ const BRIDGE_IDS: [&str; 3] = [
 ];
 const STALE_CALL: &str = "abort_terminal_dispatch_at_turn_start(";
 const EXECUTED: &str = "return Ok(IntakeExecution::Executed);";
-pub(crate) const CONTEXT_TAKE: &str =
-    "let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));";
-pub(crate) const REMINDER_TAKE: &str =
-    "take_and_merge_feedback_reminder(shared, &provider, channel_id, reply_context);";
+pub(crate) const CONTEXT_TAKE: &str = "retry_prompt::prepare(";
+pub(crate) const REMINDER_TAKE: &str = "retry_prompt::prepare(";
 const RACE_LOSS: &str = "return race_loss::handle_race_loss_enqueue(";
 const PLACEHOLDER_POSTED: &str = "intake_latency.mark_placeholder_posted();";
 /// Where the recovered reply context enters the prompt (`TurnContext`).

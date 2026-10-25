@@ -1,5 +1,7 @@
 use super::super::*;
 
+pub(in crate::services::discord) mod retry_prompt_context;
+
 /// Shared Agent Knowledge placement for a turn.
 ///
 /// #5168: this used to also carry the memento `external_recall` / file-backend
@@ -111,7 +113,10 @@ pub(super) fn build_headless_trigger_context(
     source: Option<&str>,
     metadata: Option<&serde_json::Value>,
 ) -> Option<String> {
-    let source = source.map(str::trim).filter(|value| !value.is_empty());
+    // An iMessage prompt carries its own `[아이메시지 요청 · …]` header, so the source line only repeats it.
+    let source = source
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "imessage");
     let metadata = metadata.filter(|value| !value.is_null());
     if source.is_none() && metadata.is_none() {
         return None;

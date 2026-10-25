@@ -1,5 +1,9 @@
 # #743 create-pr lifecycle 재설계
 
+<!-- doc-path-refs: removed policies/merge-automation.js policies/deploy-pipeline.js -->
+
+> 2026-10-25 주: `policies/merge-automation.js`와 `policies/deploy-pipeline.js`는 그 뒤 삭제됐다. 아래 `파일:줄` 좌표는 설계 당시 기준이다.
+
 ## Background
 
 AgentDesk의 create-pr lifecycle(리뷰 통과 → 에이전트 dispatch로 PR 생성 → CI → 머지)에서 여러 race condition이 누적. PR #742(#701)에서 Codex adversarial review 12 라운드 중 "개별 race 패치로는 못 닫는다"는 결론 → #743으로 재설계 deferred.

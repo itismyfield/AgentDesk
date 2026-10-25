@@ -16,6 +16,7 @@ use crate::services::discord::runtime_store::fsync_parent_dir;
 use crate::services::tui_o::shadow::{SourceId, UnitKey};
 
 /// This build includes both the ledger reader and the guarded writer consumer.
+// CONSUMED-BY: scripts/deploy-release.sh via `agentdesk build-info` (src/cli/build_info.rs).
 pub const OPERATOR_RESUME_SUPPORTED: bool = true;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

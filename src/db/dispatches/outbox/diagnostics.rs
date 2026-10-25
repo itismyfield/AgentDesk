@@ -1,5 +1,7 @@
 use sqlx::{Postgres, Transaction};
 
+use super::model::DispatchOutboxClaimCandidate;
+
 pub(crate) fn wait_reason_from_routing_diagnostics(
     diagnostics: &serde_json::Value,
 ) -> Option<String> {
@@ -39,12 +41,13 @@ pub(crate) fn wait_reason_from_routing_diagnostics(
         .or_else(|| Some("no route candidate is currently available".to_string()))
 }
 
+/// Records a skipped claim's diagnostics; an error has aborted `tx`, so the caller must drop it.
 pub(crate) async fn record_routing_diagnostics_pg(
     tx: &mut Transaction<'_, Postgres>,
-    outbox_id: i64,
-    dispatch_id: &str,
+    candidate: &DispatchOutboxClaimCandidate,
     diagnostics: &serde_json::Value,
-) {
+) -> Result<(), sqlx::Error> {
+    let (outbox_id, dispatch_id) = (candidate.id, candidate.dispatch_id.as_str());
     let preferred_owner = diagnostics
         .get("selected")
         .and_then(|selected| selected.get("decision"))
@@ -53,7 +56,7 @@ pub(crate) async fn record_routing_diagnostics_pg(
     let constraint_results = diagnostics.get("constraint_results");
     let wait_reason = wait_reason_from_routing_diagnostics(diagnostics);
 
-    if let Err(error) = sqlx::query(
+    sqlx::query(
         "UPDATE dispatch_outbox
             SET routing_diagnostics = $2,
                 claim_owner = $3,
@@ -76,15 +79,15 @@ pub(crate) async fn record_routing_diagnostics_pg(
     .bind(wait_reason.as_deref())
     .execute(&mut **tx)
     .await
-    {
+    .inspect_err(|error| {
         tracing::warn!(
             outbox_id,
             dispatch_id,
             error = %error,
             "[dispatch-outbox] failed to record routing diagnostics"
         );
-    }
-    if let Err(error) = sqlx::query(
+    })?;
+    sqlx::query(
         "UPDATE task_dispatches
             SET routing_diagnostics = $2,
                 constraint_results = $3,
@@ -96,13 +99,14 @@ pub(crate) async fn record_routing_diagnostics_pg(
     .bind(constraint_results)
     .execute(&mut **tx)
     .await
-    {
+    .inspect_err(|error| {
         tracing::warn!(
             dispatch_id,
             error = %error,
             "[dispatch-outbox] failed to record dispatch routing diagnostics"
         );
-    }
+    })?;
+    Ok(())
 }
 
 pub(crate) async fn record_task_dispatch_routing_diagnostics_pg(

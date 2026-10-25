@@ -9,29 +9,41 @@ use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::writer::transition_port::Context;
 
+#[path = "transition_scope/codex.rs"]
+pub(crate) mod codex;
+
 const DOMAIN: &[u8] = b"agentdesk/hrot/transition-scope\0";
 const VERSION: u8 = 1;
 const PREFIX: &str = "hrot-scope-v1:";
+const CODEX_PREFIX: &str = "hrot-scope-v2:";
 
 /// SHA-256 of one scope's canonical bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ScopeDigest([u8; 32]);
+pub(crate) struct ScopeDigest([u8; 32], u8);
 
 impl ScopeDigest {
     /// A digest as this version shows it; another version or length is refused, never guessed.
     #[cfg(test)]
     pub(crate) fn parse(shown: &str) -> Result<Self, String> {
-        let hex = shown.strip_prefix(PREFIX).ok_or("not a v1 scope digest")?;
+        let (hex, version) = shown
+            .strip_prefix(PREFIX)
+            .map(|hex| (hex, 1))
+            .or_else(|| shown.strip_prefix(CODEX_PREFIX).map(|hex| (hex, 2)))
+            .ok_or("unknown scope digest version")?;
         let bytes = hex::decode(hex)
             .ok()
             .and_then(|bytes| bytes.try_into().ok());
-        Ok(Self(bytes.ok_or("a v1 scope digest is 64 hex digits")?))
+        Ok(Self(
+            bytes.ok_or("a scope digest is 64 hex digits")?,
+            version,
+        ))
     }
 }
 
 impl std::fmt::Display for ScopeDigest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{PREFIX}{}", hex::encode(self.0))
+        let prefix = if self.1 == 1 { PREFIX } else { CODEX_PREFIX };
+        write!(f, "{prefix}{}", hex::encode(self.0))
     }
 }
 
@@ -66,10 +78,33 @@ pub(crate) fn approve(
     request: &Request,
     context: &Context,
 ) -> Result<ScopeApproval, String> {
+    if snapshot.provider == ShadowProvider::Codex {
+        let Some(Termination::Retention(claim)) = &request.termination else {
+            return Err("Codex observation identity is not a retention approval".into());
+        };
+        let key = source_key(&claim.old);
+        let next = snapshot
+            .rotation
+            .successors
+            .get(&key)
+            .ok_or("retention hop is absent")?;
+        let (seq, pane) = hop(snapshot, &key, next).map_err(|why| format!("hop: {why:?}"))?;
+        super::retention_claim(snapshot, request, &key, next, seq, pane.as_deref())
+            .map_err(|why| format!("retention: {why:?}"))?;
+        let Some(super::super::codex_snapshot::Observation::Complete(current)) = &snapshot.codex
+        else {
+            return Err("Codex observation is unknown".into());
+        };
+        if context.tmux != current.target.tmux || context.nonce != current.target.nonce {
+            return Err("Codex approval names another current execution".into());
+        }
+    }
     if request.channel != snapshot.channel {
         return Err("the request names another channel".into());
     }
-    if !matches!(request.termination, Some(Termination::Confirmed(_))) {
+    if snapshot.provider == ShadowProvider::Claude
+        && !matches!(request.termination, Some(Termination::Confirmed(_)))
+    {
         return Err("no checked end: inspect only".into());
     }
     let unverified = |detail: &String| format!("the execution is not verified: {detail}");
@@ -100,7 +135,12 @@ pub(crate) fn approve(
     }
     hops.sort_by(|a, b| (a.seq, &a.pane, &a.key).cmp(&(b.seq, &b.pane, &b.key)));
     let bytes = encode(request, snapshot.provider, context, &hops);
-    let digest = ScopeDigest(Sha256::digest(&bytes).into());
+    let version = if snapshot.provider == ShadowProvider::Codex {
+        2
+    } else {
+        VERSION
+    };
+    let digest = ScopeDigest(Sha256::digest(&bytes).into(), version);
     Ok(ScopeApproval { digest, hops })
 }
 
@@ -113,7 +153,11 @@ pub(super) fn encode(
     hops: &[ScopeHop],
 ) -> Vec<u8> {
     let mut out = DOMAIN.to_vec();
-    out.push(VERSION);
+    out.push(if provider == ShadowProvider::Codex {
+        2
+    } else {
+        VERSION
+    });
     let int = |out: &mut Vec<u8>, n: u64| out.extend(n.to_be_bytes());
     let bytes = |out: &mut Vec<u8>, b: &[u8]| {
         int(out, b.len() as u64);
@@ -133,6 +177,40 @@ pub(super) fn encode(
             int(&mut out, end.first_seq);
             int(&mut out, end.last_seq);
             bytes(&mut out, end.basis.as_bytes());
+        }
+        Some(Termination::Retention(claim)) => {
+            out.push(4);
+            out.push(claim.version);
+            int(&mut out, claim.channel);
+            for seq in [claim.hop_seq, claim.binding_seq, claim.binder_seq] {
+                int(&mut out, seq);
+            }
+            for source in [&claim.old, &claim.successor] {
+                bytes(&mut out, source.session_id.as_bytes());
+                bytes(&mut out, source.path.as_os_str().as_encoded_bytes());
+                int(&mut out, source.dev);
+                int(&mut out, source.ino);
+            }
+            for field in [
+                &claim.binder_nonce,
+                &claim.observation,
+                &claim.end.host,
+                &claim.end.pane,
+                &claim.end.basis,
+            ] {
+                bytes(&mut out, field.as_bytes());
+            }
+            int(&mut out, claim.end.first_seq);
+            int(&mut out, claim.end.last_seq);
+            match &claim.basis {
+                crate::services::tui_o::store::spool::RetentionBasisV1::SamePane => out.push(0),
+                crate::services::tui_o::store::spool::RetentionBasisV1::LocalHistorical {
+                    context_digest,
+                } => {
+                    out.push(1);
+                    bytes(&mut out, context_digest.as_bytes());
+                }
+            }
         }
         Some(Termination::Implied(basis)) => {
             out.push(2);

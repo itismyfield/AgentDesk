@@ -71,7 +71,9 @@ impl Receipt {
             {
                 return Some(record.pointer("/message/content").is_some_and(|content| {
                     match content {
-                        serde_json::Value::String(text) => text == expected,
+                        serde_json::Value::String(text) => {
+                            crate::services::claude_tui::busy_inject::exact_receipt(text, expected)
+                        }
                         serde_json::Value::Array(blocks) => {
                             !blocks.is_empty()
                                 && blocks
@@ -81,7 +83,12 @@ impl Receipt {
                                     .iter()
                                     .map(|b| b.get("text").and_then(|v| v.as_str()))
                                     .collect::<Option<Vec<_>>>()
-                                    .is_some_and(|rows| rows.join("\n") == expected)
+                                    .is_some_and(|rows| {
+                                        crate::services::claude_tui::busy_inject::exact_receipt(
+                                            &rows.join("\n"),
+                                            expected,
+                                        )
+                                    })
                         }
                         _ => false,
                     }

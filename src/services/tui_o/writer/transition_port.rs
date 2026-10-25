@@ -18,6 +18,9 @@ use crate::services::tui_o::shadow::SourceId;
 /// Envelopes a run's mailbox holds before its actor takes one.
 const MAILBOX: usize = 4;
 
+/// The actor Inspect budget, shared with the read-only sweep deadline.
+pub(crate) const INSPECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The wall clock the actor's probes stamp, read on the worker as each probe starts.
 pub(crate) type Wall = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 
@@ -59,6 +62,7 @@ pub(crate) struct Context {
     pub nonce: String,
     /// The channel's session transition lock, taken only around each retirement.
     pub lock: Arc<tokio::sync::Mutex<()>>,
+    pub codex: Option<Arc<dyn super::codex_snapshot::Observer>>,
 }
 
 pub(crate) struct Envelope {
@@ -158,6 +162,9 @@ pub(crate) struct Diagnostics {
     pub history: Result<HistoryView, String>,
     pub overlaps: Vec<Overlap>,
     pub candidates: Vec<Candidate>,
+    pub codex: Option<super::codex_snapshot::Observation>,
+    pub observation_id: Option<Result<String, String>>,
+    pub reading: usize,
 }
 
 /// An old source of the judgment by its spool key, with the pane its hop resolves to, if any.
@@ -204,6 +211,7 @@ impl Reply {
 /// The sending side of one run's mailbox.
 #[derive(Clone)]
 pub(crate) struct TransitionPort {
+    provider: Option<crate::services::tui_o::shadow::ShadowProvider>,
     suspension: super::suspension::Suspension,
     generation: u64,
     run: Arc<()>,
@@ -222,6 +230,22 @@ pub(crate) struct Receiver {
 }
 
 impl TransitionPort {
+    pub(crate) fn with_provider(
+        mut self,
+        provider: crate::services::tui_o::shadow::ShadowProvider,
+    ) -> Self {
+        #[cfg(test)]
+        if super::deliver::bo_mutant("provider_wiring") {
+            return self;
+        }
+        self.provider = Some(provider);
+        self
+    }
+
+    pub(crate) fn provider(&self) -> Option<crate::services::tui_o::shadow::ShadowProvider> {
+        self.provider
+    }
+
     pub(crate) fn with_suspension(mut self, suspension: super::suspension::Suspension) -> Self {
         self.suspension = suspension;
         self
@@ -243,6 +267,7 @@ impl TransitionPort {
     ) -> (Self, Receiver) {
         let (run, (send, receive)) = (Arc::new(()), mpsc::channel(MAILBOX));
         let port = Self {
+            provider: None,
             suspension: Default::default(),
             generation,
             run: Arc::clone(&run),

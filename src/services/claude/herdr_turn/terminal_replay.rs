@@ -24,7 +24,7 @@ pub(crate) enum TurnOutput {
     Tool,
 }
 
-/// The transcript could not be read, or another turn's records share the turn's range.
+/// The transcript could not be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Unobserved;
 
@@ -40,18 +40,57 @@ pub(crate) fn replay_herdr_turn(
     Some((terminal.start, terminal.kind, terminal.end))
 }
 
-/// The row end's one read: `None` unless the last turn closed, else the input's turn if it reads.
-pub(crate) fn closed_turn(
+/// What a transcript shows of the input's own turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TurnRead {
+    Terminal(Terminal),
+    /// No record is stamped at or after the input, or no terminal follows it yet.
+    NoTerminal,
+    /// Another turn's records share the range; `after_prompt` when they follow the input's prompt.
+    Mixed {
+        after_prompt: bool,
+    },
+}
+
+/// The row end's I read: `None` unless the last turn closed, else the input's turn once its time
+/// is known.
+pub(crate) fn closed_turn_read(
     file: &mut std::fs::File,
     submitted_at: Option<chrono::DateTime<chrono::Utc>>,
     len: u64,
-) -> Option<Option<Terminal>> {
+) -> Option<Option<TurnRead>> {
     let bytes = read_prefix(file, len).ok()?;
     let records = complete_records(&bytes);
     if !last_turn_closed(&bytes, &records) {
         return None;
     }
-    Some(submitted_at.and_then(|at| turn_in(&records, at, len).ok().flatten()))
+    Some(submitted_at.map(|at| turn_read(&records, at, len)))
+}
+
+/// The row end's E read once the writer is gone, as `ended_turn` reads the transcript.
+pub(crate) fn ended_turn_read(
+    file: &mut std::fs::File,
+    submitted_at: chrono::DateTime<chrono::Utc>,
+    len: u64,
+) -> Result<TurnRead, Unobserved> {
+    let bytes = read_prefix(file, len)?;
+    let (records, torn) = records_to_end(&bytes);
+    if !torn.trim_ascii().is_empty() && mutant("prb_torn_tail_unobserved") {
+        return Err(Unobserved);
+    }
+    Ok(turn_read(&records, submitted_at, len))
+}
+
+fn turn_read(
+    records: &[(u64, &str)],
+    submitted_at: chrono::DateTime<chrono::Utc>,
+    len: u64,
+) -> TurnRead {
+    match turn_in(records, submitted_at, len) {
+        Ok(Some(terminal)) => TurnRead::Terminal(terminal),
+        Ok(None) => TurnRead::NoTerminal,
+        Err(Interleaved { after_prompt }) => TurnRead::Mixed { after_prompt },
+    }
 }
 
 /// What the row pass reads of a Herdr turn from its own start once its provider is gone.
@@ -70,16 +109,16 @@ pub(crate) fn ended_turn(
     submitted_at: chrono::DateTime<chrono::Utc>,
     len: u64,
 ) -> Result<EndedTurn, Unobserved> {
-    let bytes = read_prefix(file, len)?;
-    let (records, torn) = records_to_end(&bytes);
-    if !torn.trim_ascii().is_empty() && mutant("prb_torn_tail_unobserved") {
-        return Err(Unobserved);
-    }
-    Ok(match turn_in(&records, submitted_at, len) {
-        Ok(Some(_)) => EndedTurn::Terminal,
-        Ok(None) => EndedTurn::NoTerminal,
-        Err(Unobserved) => EndedTurn::Mixed,
+    Ok(match ended_turn_read(file, submitted_at, len)? {
+        TurnRead::Terminal(_) => EndedTurn::Terminal,
+        TurnRead::NoTerminal => EndedTurn::NoTerminal,
+        TurnRead::Mixed { .. } => EndedTurn::Mixed,
     })
+}
+
+/// Another turn's records in the input's range: output before its prompt, or a second prompt.
+struct Interleaved {
+    after_prompt: bool,
 }
 
 /// `Ok(None)` while no record is stamped at or after the input, or no terminal follows it yet.
@@ -87,7 +126,7 @@ fn turn_in(
     records: &[(u64, &str)],
     submitted_at: chrono::DateTime<chrono::Utc>,
     len: u64,
-) -> Result<Option<Terminal>, Unobserved> {
+) -> Result<Option<Terminal>, Interleaved> {
     let Some((start, at)) = records.iter().enumerate().find_map(|(at, (start, line))| {
         (start_offset::eligible(line, &submitted_at) || mutant("start_offset_reader_only"))
             .then_some((*start, at))
@@ -96,8 +135,11 @@ fn turn_in(
     };
     let (local, rx) = std::sync::mpsc::channel();
     let (mut lines, mut output) = (HerdrTurnLines::default(), Vec::new());
+    let mut after_prompt = false;
     for (record_start, line) in &records[at..] {
+        let (seen, mixed) = (lines.prompt_seen, lines.mixed);
         lines.process(line, &local);
+        after_prompt |= !mixed && lines.mixed && seen;
         output.extend(rx.try_iter().filter_map(|message| match message {
             StreamMessage::Text { content } => Some(TurnOutput::Text(content)),
             StreamMessage::ToolUse { .. } => Some(TurnOutput::Tool),
@@ -117,7 +159,7 @@ fn turn_in(
         }
     }
     if lines.mixed {
-        return Err(Unobserved);
+        return Err(Interleaved { after_prompt });
     }
     Ok(None)
 }

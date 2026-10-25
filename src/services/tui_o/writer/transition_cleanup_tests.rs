@@ -163,6 +163,8 @@ impl Fixture {
             sources.insert(key(n), facts);
         }
         let snapshot = Snapshot {
+            reading: 0,
+            codex: None,
             channel: CHANNEL,
             provider: ShadowProvider::Claude,
             home: Home::Settled,
@@ -281,6 +283,7 @@ fn transition_cleanup_synthetic_59_hops_are_eligible_with_drafts_bound_to_each_c
                 fingerprint: fingerprint(n),
             },
             ended: ended(),
+            retention: None,
         };
         assert_eq!(**draft, expected, "hop {n}");
     }
@@ -870,6 +873,8 @@ mod operations_shape {
         }
         let current = sources[OLD as usize].clone();
         let snapshot = Snapshot {
+            reading: 0,
+            codex: None,
             channel: CHANNEL,
             provider: ShadowProvider::Claude,
             home: Home::Settled,
@@ -1001,6 +1006,8 @@ mod operations_shape {
                 facts.insert(source_key(&cursor.source), source_facts);
             }
             Snapshot {
+                reading: 0,
+                codex: None,
                 channel: CHANNEL,
                 provider: ShadowProvider::Claude,
                 home: Home::Settled,
@@ -1057,3 +1064,151 @@ mod operations_shape {
 
 #[path = "transition_scope_tests.rs"]
 mod scope_tests;
+
+fn codex_retention_fixture() -> Fixture {
+    use crate::services::tui_o::writer::codex_snapshot::{
+        HostPath, Observation, Snapshot as CodexSnapshot, Target,
+    };
+    use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
+    let mut fixture = Fixture::synthetic();
+    fixture.snapshot.provider = ShadowProvider::Codex;
+    let nonce = "11111111111111111111111111111111".to_string();
+    let current = CodexSnapshot {
+        target: Target {
+            channel: CHANNEL,
+            tmux: PANE.into(),
+            nonce: nonce.clone(),
+            host: "mac-book".into(),
+            owner_runtime_root: "/runtime".into(),
+            host_path: HostPath::Legacy,
+        },
+        context: BindingContext {
+            schema: 1,
+            provider: "codex".into(),
+            created_at: fixture.request.at,
+            execution_nonce: nonce,
+            tmux_session: PANE.into(),
+            channel_id: Some(CHANNEL),
+            owner_runtime_root: "/runtime".into(),
+            host: Some("mac-book".into()),
+            expected_native_session_id: None,
+            launch_mode: "fresh".into(),
+            provider_root: Some("/o".into()),
+            first_prompt_digest: None,
+            source_policy: Some("shadow".into()),
+        },
+        current: source(OLD),
+        held: vec![source(OLD)],
+        tail: 1000,
+        log_digest: "full-strict-log".into(),
+        census_digest: "complete-census".into(),
+        panes: vec![],
+    };
+    fixture.snapshot.codex = Some(Observation::Complete(Box::new(current)));
+    let observation = scope::codex::identity(fixture.snapshot.codex.as_ref().unwrap()).unwrap();
+    fixture.request.termination = Some(Termination::Retention(Box::new(RetentionClaimV1 {
+        version: 1,
+        provider: ShadowProvider::Codex,
+        channel: CHANNEL,
+        old: source(0),
+        hop_seq: hop_seq(0),
+        binding_seq: 1,
+        binder_seq: 1,
+        binder_nonce: "22222222222222222222222222222222".into(),
+        successor: source(1),
+        observation,
+        basis: RetentionBasisV1::SamePane,
+        end: ExecutionEnd {
+            host: "mac-book".into(),
+            pane: PANE.into(),
+            first_seq: hop_seq(0),
+            last_seq: hop_seq(0),
+            basis: "old nonce superseded".into(),
+        },
+    })));
+    fixture
+}
+
+#[test]
+fn codex_retention_consumer_requires_complete_source_specific_claim_and_existing_owed_gates() {
+    use crate::services::tui_o::writer::codex_snapshot::Observation;
+    let mut fixture = codex_retention_fixture();
+    assert!(matches!(verdict(&fixture.judge(), 0), Verdict::Eligible(_)));
+    assert!(matches!(
+        verdict(&fixture.judge(), 1),
+        Verdict::Unknown(Unclear::TerminationIncomplete)
+    ));
+    fixture.snapshot.obligations.as_mut().unwrap().owed = 1;
+    assert_eq!(
+        verdict(&fixture.judge(), 0),
+        &Verdict::Refused(Refusal::OutputOwed(Owed::Queue))
+    );
+    fixture.snapshot.obligations.as_mut().unwrap().owed = 0;
+    fixture.snapshot.codex = Some(Observation::Unknown("incomplete census".into()));
+    assert!(matches!(
+        verdict(&fixture.judge(), 0),
+        Verdict::Unknown(Unclear::TerminationUnread(_))
+    ));
+    fixture.request.termination = None;
+    assert_eq!(
+        verdict(&fixture.judge(), 0),
+        &Verdict::Refused(Refusal::CodexDeferred)
+    );
+}
+
+#[test]
+fn codex_retention_claim_distinguishes_pending_binder_and_hop_sequences() {
+    let mut fixture = codex_retention_fixture();
+    let Some(Termination::Retention(claim)) = &mut fixture.request.termination else {
+        unreachable!()
+    };
+    claim.binding_seq = 3;
+    claim.binder_seq = 2;
+    assert!(matches!(
+        verdict(&fixture.judge(), 0),
+        Verdict::Unknown(Unclear::TerminationIncomplete)
+    ));
+    let Some(Termination::Retention(claim)) = &mut fixture.request.termination else {
+        unreachable!()
+    };
+    claim.binding_seq = 1;
+    claim.hop_seq += 1;
+    assert!(matches!(
+        verdict(&fixture.judge(), 0),
+        Verdict::Unknown(Unclear::TerminationIncomplete)
+    ));
+}
+
+#[test]
+fn codex_retention_scope_v2_binds_complete_full_tail_and_rejects_observation_only() {
+    use crate::services::tui_o::writer::codex_snapshot::Observation;
+    use crate::services::tui_o::writer::transition_port::Context;
+    use std::sync::Arc;
+    let mut fixture = codex_retention_fixture();
+    let context = Context {
+        codex: None,
+        tmux: PANE.into(),
+        nonce: "11111111111111111111111111111111".into(),
+        lock: Arc::default(),
+    };
+    let approved = scope::approve(&fixture.snapshot, &fixture.request, &context).unwrap();
+    assert!(approved.digest.to_string().starts_with("hrot-scope-v2:"));
+    assert_eq!(
+        scope::ScopeDigest::parse(&approved.digest.to_string()),
+        Ok(approved.digest)
+    );
+    let Some(Observation::Complete(current)) = &mut fixture.snapshot.codex else {
+        unreachable!()
+    };
+    current.tail += 1;
+    assert!(scope::approve(&fixture.snapshot, &fixture.request, &context).is_err());
+    let identity = scope::codex::identity(fixture.snapshot.codex.as_ref().unwrap()).unwrap();
+    let Some(Termination::Retention(claim)) = &mut fixture.request.termination else {
+        unreachable!()
+    };
+    claim.observation = identity;
+    let changed = scope::approve(&fixture.snapshot, &fixture.request, &context).unwrap();
+    assert_ne!(approved.digest, changed.digest);
+    fixture.request.termination = None;
+    assert!(scope::approve(&fixture.snapshot, &fixture.request, &context).is_err());
+}

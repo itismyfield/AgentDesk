@@ -90,6 +90,13 @@ pub(crate) fn legacy_hop_candidates(
 }
 
 impl<B: BindingEvents> Sources<B> {
+    pub(crate) fn reading_count(&self) -> usize {
+        self.readers
+            .iter()
+            .filter(|reader| reader.reading())
+            .count()
+    }
+
     pub(crate) fn transition_provider(&self) -> ShadowProvider {
         self.provider
     }

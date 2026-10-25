@@ -12,6 +12,8 @@ use crate::services::tui_o::writer::host::{
 };
 
 use super::*;
+#[path = "host_bo_provider_tests.rs"]
+mod bo_provider;
 #[path = "late_adopt_binding_tests.rs"]
 mod late_binding;
 #[path = "late_adopt_cleanup_tests.rs"]

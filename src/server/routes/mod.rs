@@ -59,7 +59,7 @@ mod session_evidence;
 pub mod settings;
 mod skill_usage_analytics;
 pub mod skills_api;
-mod skills_manifest_audit;
+pub(crate) mod skills_manifest_audit;
 #[path = "../state.rs"]
 pub mod state;
 pub mod stats;

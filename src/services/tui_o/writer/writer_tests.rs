@@ -929,7 +929,7 @@ mod local_retry_tests;
 mod tool_card_replay;
 
 #[path = "actor_tests.rs"]
-mod actor;
+pub(crate) mod actor;
 #[path = "codex_herdr_drive_tests.rs"]
 pub(crate) mod codex_herdr_drive;
 #[path = "operator_resume_tests.rs"]
@@ -968,3 +968,7 @@ async fn a_gateway_return_ends_the_pause_in_process_health() {
     assert_eq!(writer.deliver(&piece("m2", "b")).await, Step::NoGateway);
     assert_eq!(health_reasons(), paused);
 }
+
+pub(crate) use actor::rotation::retire_tests::transition_actor_tests::bo::{
+    with_blocked_codex, with_ready_codex, with_ready_codex_and_claude, with_ready_codex_backlog,
+};

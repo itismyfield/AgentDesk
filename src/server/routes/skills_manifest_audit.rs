@@ -19,38 +19,58 @@ const ROSTER_SOURCE_UNAVAILABLE: &str = "roster_source_unavailable";
 const NO_MANIFEST: &str = "no_manifest";
 const UNREADABLE_MANIFEST: &str = "unreadable_manifest";
 const UNPARSABLE_MANIFEST: &str = "unparsable_manifest";
-/// The flat `agents` key belongs to the Python distributor (`AGENT_WORKSPACES`,
-/// which also accepts globs like `ch-*`); Rust parses `targets` only.
-const FLAT_ROSTER_UNAVAILABLE: &str = "flat_distribution_roster_unavailable";
+const UNREADABLE_SKILL_DIRECTORY: &str = "unreadable_skill_directory";
 /// The distributor does not walk this workspace. A manually created, renamed
 /// or deleted directory is indistinguishable from a dead id, so this is a skip.
 const NESTED_ID_MISMATCH: &str = "nested_workspace_id_mismatch";
-/// `<runtime_root>/workspaces/` also holds non-agent dirs (the AgentDesk checkout at
-/// `workspaces/agentdesk`), so "walked but off the roster" is not evidence of a dead id.
-const WORKSPACE_NAMESPACE_UNCONFIRMED: &str = "workspace_namespace_unconfirmed";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DirectoryScope {
+    OwnManifest,
+    AnyManifest,
+}
 
 /// `None` means "source failed", which is not an empty set and never becomes one.
 #[derive(Debug, Default)]
-pub(super) struct ManifestAuditRequest {
+pub(crate) struct ManifestAuditRequest {
     roster: Option<BTreeSet<String>>,
     distributed_workspaces: Option<BTreeSet<String>>,
-    manifests: Vec<PathBuf>,
+    manifests: Vec<(PathBuf, DirectoryScope)>,
 }
 
 #[derive(Debug, Default)]
-pub(super) struct ManifestAuditReport {
+pub(crate) struct ManifestAuditReport {
     findings: Vec<Value>,
     skipped: BTreeSet<&'static str>,
+    inspection_errors: Vec<Value>,
 }
 
 impl ManifestAuditReport {
-    pub(super) fn to_json(&self) -> Value {
+    pub(crate) fn to_json(&self) -> Value {
         json!({
             // False while any premise is unconfirmed, so empty `findings` never reads as clean.
             "audited": self.skipped.is_empty(),
             "audit_skipped": &self.skipped,
             "findings": &self.findings,
+            "inspection_errors": &self.inspection_errors,
         })
+    }
+
+    pub(crate) fn warning(&self) -> Option<String> {
+        if self.findings.is_empty() && self.skipped.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "skill manifest audit: findings={} skipped={} sample={}",
+            self.findings.len(),
+            json!(&self.skipped),
+            json!(self.findings.iter().take(5).collect::<Vec<_>>()),
+        ))
+    }
+
+    fn unavailable(&mut self, reason: &'static str, path: &std::path::Path) {
+        self.skipped.insert(reason);
+        self.inspection_errors
+            .push(json!({"reason": reason, "path": path.display().to_string()}));
     }
 }
 
@@ -69,7 +89,18 @@ struct AuditManifest {
     legacy: BTreeMap<String, AuditEntry>,
 }
 
-/// `workspaces` is the nested axis Rust deploys against; `agents` is flat-only.
+impl AuditManifest {
+    fn skill_names(&self) -> BTreeSet<String> {
+        self.skills
+            .keys()
+            .chain(self.legacy.keys())
+            .chain(self.global_core_skills.iter())
+            .cloned()
+            .collect()
+    }
+}
+
+/// Workspace selectors and agent selectors have separate namespaces.
 #[derive(Debug, Default, Deserialize)]
 struct AuditEntry {
     #[serde(default)]
@@ -89,14 +120,32 @@ fn pinned_agent_ids(raw: &[String]) -> BTreeSet<String> {
         .collect()
 }
 
-/// Only `Directory` roots carry a `manifest.json`; the markdown-file root must not.
-/// Only a definite `Ok(false)` drops a path: a probe error stays in as unreadable.
-fn skill_manifest_paths(runtime_root: Option<PathBuf>, home: Option<PathBuf>) -> Vec<PathBuf> {
+/// Only directory roots carry a `manifest.json`; the markdown-file root must not.
+/// The runtime manifest is required; an installed vault source also needs its manifest.
+pub(crate) fn skill_manifest_paths(
+    runtime_root: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Vec<(PathBuf, DirectoryScope)> {
+    let required = runtime_root
+        .as_ref()
+        .map(|root| crate::runtime_layout::managed_skills_manifest_path(root));
     skill_roots(runtime_root, home)
         .into_iter()
-        .filter(|(_, kind)| *kind == SkillRootKind::Directory)
-        .map(|(root, _)| root.join("manifest.json"))
-        .filter(|path| path.try_exists().unwrap_or(true))
+        .filter(|(_, kind)| *kind != SkillRootKind::MarkdownFile)
+        .filter_map(|(root, kind)| {
+            let path = root.join("manifest.json");
+            (Some(&path) == required.as_ref()
+                || path.try_exists().unwrap_or(true)
+                || (kind == SkillRootKind::ManagedDirectory && root.try_exists().unwrap_or(true)))
+            .then_some((
+                path,
+                if kind == SkillRootKind::CachedDirectory {
+                    DirectoryScope::AnyManifest
+                } else {
+                    DirectoryScope::OwnManifest
+                },
+            ))
+        })
         .collect()
 }
 
@@ -106,18 +155,18 @@ fn manifest_path_sources() -> (Option<PathBuf>, Option<PathBuf>) {
     (crate::config::runtime_root(), dirs::home_dir())
 }
 
-fn default_manifest_paths() -> Vec<PathBuf> {
+fn default_manifest_paths() -> Vec<(PathBuf, DirectoryScope)> {
     let (runtime_root, home) = manifest_path_sources();
     skill_manifest_paths(runtime_root, home)
 }
 
 /// Union of both "an agent by this id exists" authorities, split from the async
 /// caller so it is testable without a database.
-fn build_manifest_audit_request(
+pub(crate) fn build_manifest_audit_request(
     config_agent_ids: BTreeSet<String>,
     db_agent_ids: Option<BTreeSet<String>>,
     distributed_workspaces: Option<BTreeSet<String>>,
-    manifests: Vec<PathBuf>,
+    manifests: Vec<(PathBuf, DirectoryScope)>,
 ) -> ManifestAuditRequest {
     ManifestAuditRequest {
         roster: db_agent_ids.map(|db| config_agent_ids.union(&db).cloned().collect()),
@@ -135,23 +184,48 @@ fn distributed_workspaces() -> Option<BTreeSet<String>> {
         .map(|names| names.into_iter().collect())
 }
 
-pub(super) async fn manifest_audit_request(
+pub(crate) async fn manifest_audit_request(
     config: &crate::config::Config,
     pool: &PgPool,
 ) -> ManifestAuditRequest {
-    let db_agent_ids = crate::db::agents::load_all_agent_channel_bindings_pg(pool)
-        .await
-        .ok()
-        .map(|bindings| bindings.into_keys().collect());
+    let db_agent_ids = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        crate::db::agents::load_all_agent_channel_bindings_pg(pool),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .map(|bindings| bindings.into_keys().collect());
+    let config_agent_ids = config.agents.iter().map(|agent| agent.id.clone()).collect();
+    tokio::task::spawn_blocking(move || {
+        runtime_manifest_audit_request(config_agent_ids, db_agent_ids)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+fn runtime_manifest_audit_request(
+    config_agent_ids: BTreeSet<String>,
+    db_agent_ids: Option<BTreeSet<String>>,
+) -> ManifestAuditRequest {
     build_manifest_audit_request(
-        config.agents.iter().map(|agent| agent.id.clone()).collect(),
+        config_agent_ids,
         db_agent_ids,
         distributed_workspaces(),
         default_manifest_paths(),
     )
 }
 
-pub(super) fn audit_skill_manifest_agents(request: ManifestAuditRequest) -> ManifestAuditReport {
+pub(crate) fn unavailable_manifest_audit_request(
+    config: &crate::config::Config,
+) -> ManifestAuditRequest {
+    runtime_manifest_audit_request(
+        config.agents.iter().map(|agent| agent.id.clone()).collect(),
+        None,
+    )
+}
+
+pub(crate) fn audit_skill_manifest_agents(request: ManifestAuditRequest) -> ManifestAuditReport {
     let mut report = ManifestAuditReport::default();
     match request.roster.as_ref() {
         None => report.skipped.insert(ROSTER_SOURCE_UNAVAILABLE),
@@ -159,31 +233,54 @@ pub(super) fn audit_skill_manifest_agents(request: ManifestAuditRequest) -> Mani
         Some(_) => false,
     };
     let roster = request.roster.as_ref().filter(|roster| !roster.is_empty());
-    // The workspace namespace counts as agent-only only while the roster answers for
-    // every walked directory (see `WORKSPACE_NAMESPACE_UNCONFIRMED`).
-    let namespace_unconfirmed = roster.is_some_and(|roster| {
-        request
-            .distributed_workspaces
-            .as_ref()
-            .is_some_and(|dirs| dirs.iter().any(|dir| !roster.contains(dir)))
-    });
     if request.manifests.is_empty() {
         report.skipped.insert(NO_MANIFEST);
     }
-    for path in &request.manifests {
+    let mut parsed = Vec::new();
+    let mut listed_anywhere = BTreeSet::new();
+    for (path, scope) in &request.manifests {
         let Ok(raw) = std::fs::read_to_string(path) else {
-            report.skipped.insert(UNREADABLE_MANIFEST);
+            report.unavailable(
+                if matches!(path.try_exists(), Ok(false)) {
+                    NO_MANIFEST
+                } else {
+                    UNREADABLE_MANIFEST
+                },
+                path,
+            );
             continue;
         };
         let Ok(manifest) = serde_json::from_str::<AuditManifest>(&raw) else {
-            report.skipped.insert(UNPARSABLE_MANIFEST);
+            report.unavailable(UNPARSABLE_MANIFEST, path);
             continue;
         };
-        // `agents` is flat and `workspaces` nested in both maps; the flat skip does not
-        // stop grading, so a mixed manifest keeps both verdicts.
+        listed_anywhere.extend(manifest.skill_names());
+        parsed.push((path, scope, manifest));
+    }
+    for (path, scope, manifest) in parsed {
+        let own_names = manifest.skill_names();
+        let listed = match scope {
+            DirectoryScope::OwnManifest => &own_names,
+            DirectoryScope::AnyManifest => &listed_anywhere,
+        };
+        audit_skill_directories(path, listed, &mut report);
         for (skill, entry) in manifest.skills.iter().chain(manifest.legacy.iter()) {
-            if !pinned_agent_ids(&entry.agents).is_empty() {
-                report.skipped.insert(FLAT_ROSTER_UNAVAILABLE);
+            if let Some(roster) = roster {
+                for selector in entry
+                    .agents
+                    .iter()
+                    .filter(|id| !id.trim().is_empty() && id.as_str() != "*")
+                {
+                    let matches = glob::Pattern::new(selector)
+                        .ok()
+                        .is_some_and(|pattern| roster.iter().any(|id| pattern.matches(id)));
+                    if !matches {
+                        report.findings.push(json!({
+                            "kind": "unknown_agent", "manifest": path.display().to_string(),
+                            "skill": skill, "agent_id": selector,
+                        }));
+                    }
+                }
             }
             for agent_id in pinned_agent_ids(&entry.workspaces) {
                 let walked = request
@@ -192,21 +289,56 @@ pub(super) fn audit_skill_manifest_agents(request: ManifestAuditRequest) -> Mani
                     .is_some_and(|dirs| dirs.contains(&agent_id));
                 if !walked {
                     report.skipped.insert(NESTED_ID_MISMATCH);
-                } else if namespace_unconfirmed {
-                    report.skipped.insert(WORKSPACE_NAMESPACE_UNCONFIRMED);
-                } else if roster.is_some_and(|roster| !roster.contains(&agent_id)) {
-                    // Unreachable: a walked off-roster id sets `namespace_unconfirmed`
-                    // first. Dormant until an independent namespace authority exists.
-                    report.findings.push(json!({
-                        "manifest": path.display().to_string(),
-                        "skill": skill,
-                        "agent_id": agent_id,
-                    }));
                 }
             }
         }
     }
     report
+}
+
+fn audit_skill_directories(
+    path: &std::path::Path,
+    listed: &BTreeSet<String>,
+    report: &mut ManifestAuditReport,
+) {
+    let Some(root) = path.parent() else { return };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        report.unavailable(UNREADABLE_SKILL_DIRECTORY, root);
+        return;
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => paths.push(entry.path()),
+            Err(_) => report.unavailable(UNREADABLE_SKILL_DIRECTORY, root),
+        }
+    }
+    paths.sort();
+    for dir in paths {
+        let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name == "_shared" || name.starts_with('.') {
+            continue;
+        }
+        match std::fs::metadata(dir.join("SKILL.md")) {
+            Ok(metadata) if metadata.is_file() && !listed.contains(name) => {
+                report.findings.push(
+                    json!({"kind": "unlisted_skill", "manifest": path.display().to_string(),
+                    "skill": name, "path": dir.display().to_string()}),
+                );
+            }
+            Err(error)
+                if !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                report.unavailable(UNREADABLE_SKILL_DIRECTORY, &dir)
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

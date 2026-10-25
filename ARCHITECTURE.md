@@ -7,7 +7,7 @@ High-signal navigation guide for contributors. The generated inventories under `
 - `src/` — runtime code: CLI, HTTP server, Discord bot, orchestration, policy engine, persistence.
 - `policies/` — JavaScript lifecycle hooks loaded by `src/engine`.
 - `dashboard/` — React/Vite UI for the web dashboard.
-- `docs/generated/module-inventory.md` — generated Rust module inventory.
+- `docs/generated/module-inventory.md` — generated Rust module inventory (untracked; build it with the generator above).
 - `docs/generated/route-inventory.md` — generated HTTP/WebSocket route inventory.
 - `docs/generated/worker-inventory.md` — generated supervised worker inventory.
 
@@ -25,7 +25,8 @@ src/
 │   │   ├── runtime_config.rs
 │   │   └── transport.rs
 │   ├── dcserver/
-│   │   └── startup.rs
+│   │   ├── startup.rs
+│   │   └── startup_audit_tests.rs
 │   ├── direct/
 │   │   └── auto_queue_add.rs
 │   ├── doctor/
@@ -36,6 +37,8 @@ src/
 │   │   ├── orchestrator/
 │   │   │   ├── api_exposure.rs
 │   │   │   ├── config_dir_checks.rs
+│   │   │   ├── configuration_audit.rs
+│   │   │   ├── configuration_audit_tests.rs
 │   │   │   ├── dispatch_outbox.rs
 │   │   │   ├── dispatch_outbox_tests.rs
 │   │   │   ├── fd_usage.rs
@@ -65,6 +68,7 @@ src/
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
+│   ├── build_info.rs
 │   ├── channel_provider.rs
 │   ├── client.rs
 │   ├── dcserver.rs
@@ -97,6 +101,9 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── config/
+│   ├── runtime_root_guard/
+│   │   ├── process_tests.rs
+│   │   └── test_process.rs
 │   ├── session_hosts/
 │   │   ├── migration/
 │   │   │   ├── consent_holds.rs
@@ -119,6 +126,8 @@ src/
 │   ├── readers_live_reload_tests.rs
 │   ├── retired_relay_tests.rs
 │   ├── runtime_profile.rs
+│   ├── runtime_root_guard.rs
+│   ├── runtime_root_tests.rs
 │   ├── runtime_settings.rs
 │   ├── runtime_validation.rs
 │   ├── session_hosts.rs
@@ -249,6 +258,7 @@ src/
 │   ├── calendar_sync.rs
 │   ├── campaigns.rs
 │   ├── cancel_tombstones.rs
+│   ├── discarded_tx_result_scan_tests.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
 │   ├── fixture_target.rs
@@ -718,6 +728,7 @@ src/
 │   │   │   ├── screen/
 │   │   │   │   └── paste_footer.rs
 │   │   │   ├── stash_tests/
+│   │   │   │   ├── a1_stash_tests.rs
 │   │   │   │   ├── hold_tests.rs
 │   │   │   │   └── paste_footer_tests.rs
 │   │   │   ├── ownership.rs
@@ -764,6 +775,8 @@ src/
 │   │   │   └── guarded_submission.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
+│   │   │   ├── fresh_hold_tests.rs
+│   │   │   ├── fresh_lifecycle.rs
 │   │   │   ├── host_draft.rs
 │   │   │   ├── host_draft_tests.rs
 │   │   │   ├── mod.rs
@@ -772,10 +785,15 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   └── prompt_ready_setup_tests.rs
 │   │   │   ├── draft_hold.rs
+│   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
+│   │   │   ├── hold_lifecycle_tests.rs
+│   │   │   ├── legacy_submission.rs
 │   │   │   ├── literal_chunks.rs
+│   │   │   ├── preparation_hold.rs
 │   │   │   ├── submission.rs
-│   │   │   └── timeout_draft_tests.rs
+│   │   │   ├── timeout_draft_tests.rs
+│   │   │   └── user_receipt.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
 │   │   ├── busy_inject.rs
@@ -979,6 +997,7 @@ src/
 │   │   ├── abandon_request_store/
 │   │   │   └── probe_contract_tests.rs
 │   │   ├── busy_followup_retry_store/
+│   │   │   ├── hold_release_tests.rs
 │   │   │   ├── policy.rs
 │   │   │   └── policy_tests.rs
 │   │   ├── catch_up/
@@ -1134,7 +1153,11 @@ src/
 │   │   │   │   │   └── termination.rs
 │   │   │   │   ├── automatic.rs
 │   │   │   │   ├── automatic_idle.rs
-│   │   │   │   └── automatic_idle_tests.rs
+│   │   │   │   ├── automatic_idle_tests.rs
+│   │   │   │   ├── codex_census.rs
+│   │   │   │   ├── codex_context.rs
+│   │   │   │   ├── codex_context_tests.rs
+│   │   │   │   └── codex_retention_e2e_tests.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
@@ -1271,6 +1294,8 @@ src/
 │   │   │   │   └── snapshot.rs
 │   │   │   ├── host_recovery_guard/
 │   │   │   │   └── log_state.rs
+│   │   │   ├── managed_submission/
+│   │   │   │   └── evidence.rs
 │   │   │   ├── model/
 │   │   │   │   ├── circuit_evidence.rs
 │   │   │   │   ├── identity.rs
@@ -1528,6 +1553,12 @@ src/
 │   │   ├── queued_dequeue_dispatch_guard_wiring_tests/
 │   │   │   └── source_guard_tests.rs
 │   │   ├── recovery_engine/
+│   │   │   ├── herdr_row_end/
+│   │   │   │   ├── diagnostics.rs
+│   │   │   │   ├── diagnostics_tests.rs
+│   │   │   │   ├── outcome.rs
+│   │   │   │   ├── owner.rs
+│   │   │   │   └── placeholder.rs
 │   │   │   ├── legacy_restart_replay/
 │   │   │   │   └── proof.rs
 │   │   │   ├── manual_rebind/
@@ -1579,9 +1610,11 @@ src/
 │   │   │   ├── herdr_reader.rs
 │   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── herdr_row_end.rs
+│   │   │   ├── herdr_row_end_gate_tests.rs
 │   │   │   ├── herdr_row_end_guard_tests.rs
 │   │   │   ├── herdr_row_end_live.rs
 │   │   │   ├── herdr_row_end_rig_tests.rs
+│   │   │   ├── herdr_row_end_settle_tests.rs
 │   │   │   ├── herdr_row_end_tests.rs
 │   │   │   ├── host_reconcile.rs
 │   │   │   ├── host_reconcile_tests.rs
@@ -1733,6 +1766,9 @@ src/
 │   │   │   │   │   │   └── requeue_tests.rs
 │   │   │   │   │   ├── recovery_context_take_order_tests/
 │   │   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   │   ├── retry_prompt/
+│   │   │   │   │   │   ├── tests.rs
+│   │   │   │   │   │   └── wiring_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
@@ -1745,6 +1781,7 @@ src/
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── replay_start.rs
 │   │   │   │   │   ├── replay_start_tests.rs
+│   │   │   │   │   ├── retry_prompt.rs
 │   │   │   │   │   ├── route_claim_tests.rs
 │   │   │   │   │   ├── route_queue_tests.rs
 │   │   │   │   │   ├── runtime_transition.rs
@@ -1800,6 +1837,11 @@ src/
 │   │   │   │   ├── voice_announcement_scope.rs
 │   │   │   │   ├── watchdog.rs
 │   │   │   │   └── watchdog_host_tests.rs
+│   │   │   ├── response_format/
+│   │   │   │   ├── retry_prompt_context/
+│   │   │   │   │   ├── store.rs
+│   │   │   │   │   └── tests.rs
+│   │   │   │   └── retry_prompt_context.rs
 │   │   │   ├── authorization.rs
 │   │   │   ├── dispatch_trigger.rs
 │   │   │   ├── herdr_consent.rs
@@ -2140,6 +2182,7 @@ src/
 │   │   │   │   └── clear_waiting.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── headless_row_tests.rs
+│   │   │   │   ├── restarted_herdr_sweep_tests.rs
 │   │   │   │   └── retire_tests.rs
 │   │   │   ├── turn_retirement/
 │   │   │   │   ├── codex.rs
@@ -2295,11 +2338,16 @@ src/
 │   │   │   │   ├── replay_hold_tests.rs
 │   │   │   │   └── span_tests.rs
 │   │   │   ├── completion_postlude/
+│   │   │   │   ├── prelude_lifecycle/
+│   │   │   │   │   ├── receipt_fallback_tests.rs
+│   │   │   │   │   ├── settlement_pg_tests.rs
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── channel_episode_scope.rs
 │   │   │   │   ├── channel_writeback.rs
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── legacy_summary.rs
-│   │   │   │   └── legacy_summary_tests.rs
+│   │   │   │   ├── legacy_summary_tests.rs
+│   │   │   │   └── prelude_lifecycle.rs
 │   │   │   ├── entry_abort_cold_error_tests/
 │   │   │   │   └── provider_failure_tests.rs
 │   │   │   ├── finalize_epilogue/
@@ -2307,7 +2355,9 @@ src/
 │   │   │   ├── followup_requeue/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── person_draft_tests.rs
-│   │   │   │   └── draft_release.rs
+│   │   │   │   ├── attempt.rs
+│   │   │   │   ├── draft_release.rs
+│   │   │   │   └── preparation_notice.rs
 │   │   │   ├── headless_delivery/
 │   │   │   │   ├── durable_outbox.rs
 │   │   │   │   ├── intake_outbox_argument.rs
@@ -2375,6 +2425,7 @@ src/
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
 │   │   │   │   │   ├── codex_empty_tests.rs
+│   │   │   │   │   ├── preparation_hold_tests.rs
 │   │   │   │   │   ├── provider_failure_tests.rs
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
@@ -2385,6 +2436,7 @@ src/
 │   │   │   │   ├── busy_followup_retry.rs
 │   │   │   │   ├── cancel_prompt_replace.rs
 │   │   │   │   ├── cancelled_body_retirement_tests.rs
+│   │   │   │   ├── completion_proof.rs
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── delivery_epilogue_tests.rs
@@ -3161,6 +3213,7 @@ src/
 │   │   ├── herdr_host.rs
 │   │   ├── herdr_host_tests.rs
 │   │   ├── herdr_registry.rs
+│   │   ├── herdr_registry_census_tests.rs
 │   │   ├── herdr_socket_rig_tests.rs
 │   │   ├── herdr_t14_client_tests.rs
 │   │   ├── herdr_terminate_real_tests.rs
@@ -3288,6 +3341,7 @@ src/
 │   │   │   │   ├── submit_floor.rs
 │   │   │   │   └── submit_floor_tests.rs
 │   │   │   ├── spool/
+│   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
@@ -3314,6 +3368,12 @@ src/
 │   │   │   │   ├── automatic.rs
 │   │   │   │   ├── automatic_age.rs
 │   │   │   │   ├── automatic_age_tests.rs
+│   │   │   │   ├── codex_age.rs
+│   │   │   │   ├── codex_age_tests.rs
+│   │   │   │   ├── codex_history.rs
+│   │   │   │   ├── codex_history_tests.rs
+│   │   │   │   ├── codex_retention.rs
+│   │   │   │   ├── codex_retention_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── scoped_submission_tests.rs
@@ -3361,6 +3421,8 @@ src/
 │   │   │   │   ├── scoped_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
+│   │   │   ├── transition_scope/
+│   │   │   │   └── codex.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
@@ -3370,6 +3432,7 @@ src/
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── always_on_repost_tests.rs
 │   │   │   ├── binding.rs
+│   │   │   ├── bo_post_tests.rs
 │   │   │   ├── boundary_pending_health_tests.rs
 │   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_end_empty_session_tests.rs
@@ -3379,6 +3442,7 @@ src/
 │   │   │   ├── codex_end_proof_tests.rs
 │   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── codex_launch_cause_tests.rs
+│   │   │   ├── codex_snapshot.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deferred.rs
 │   │   │   ├── deferred_pg_tests.rs
@@ -3398,6 +3462,7 @@ src/
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
+│   │   │   ├── host_bo_provider_tests.rs
 │   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_codex_turn_mark_tests.rs
 │   │   │   ├── host_first_init_tests.rs
@@ -3463,6 +3528,9 @@ src/
 │   │   │   ├── tool_result_repost_tests.rs
 │   │   │   ├── tool_result_tests.rs
 │   │   │   ├── tool_results.rs
+│   │   │   ├── transition_actor_ba_backlog_tests.rs
+│   │   │   ├── transition_actor_ba_tests.rs
+│   │   │   ├── transition_actor_bo_tests.rs
 │   │   │   ├── transition_actor_tests.rs
 │   │   │   ├── transition_apply_tests.rs
 │   │   │   ├── transition_automatic_tests.rs
@@ -3500,11 +3568,16 @@ src/
 │   │   ├── topology.rs
 │   │   └── turn_mode.rs
 │   ├── tui_prompt_dedupe/
+│   │   ├── binding_context/
+│   │   │   ├── inventory.rs
+│   │   │   └── inventory_tests.rs
 │   │   ├── binding_events/
 │   │   │   ├── codex/
 │   │   │   │   ├── commit/
 │   │   │   │   │   └── resume_companions.rs
 │   │   │   │   ├── commit.rs
+│   │   │   │   ├── observation.rs
+│   │   │   │   ├── observation_tests.rs
 │   │   │   │   ├── settled.rs
 │   │   │   │   └── terminal.rs
 │   │   │   ├── admission_tests.rs
@@ -3541,6 +3614,7 @@ src/
 │   │   │   │   └── codex_launch_cause.rs
 │   │   │   ├── adopt_skip.rs
 │   │   │   ├── binding_access.rs
+│   │   │   ├── binding_access_tests.rs
 │   │   │   ├── claude_source.rs
 │   │   │   ├── codex_cursor.rs
 │   │   │   ├── codex_hook.rs
@@ -3891,8 +3965,8 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/services/discord/placeholder_controller/queued_card_gate.rs` | #5035: sole enforcement point for destroying a channel's queued `📬` card. Evaluates contract G (G1 ∧ G2) under the channel persist lock over the whole mailbox queue and hands out a `QueuedCardTeardown` token no other module can construct. |
 | `src/services/discord/gateway.rs` / `discord_io.rs` / `queue_io.rs` | Discord gateway bridge and outbound/inbound message plumbing. |
 | `src/services/discord/commands/` | Slash command handlers for session, config, diagnostics, meetings, models, receipts, skills. |
-| `src/services/discord/agentdesk_config.rs` / `config_audit.rs` | YAML/DB/legacy config source-of-truth handling and audits. |
-| `src/services/discord/prompt_builder.rs` / `shared_memory.rs` / `role_map.rs` | Turn prompt assembly and org/shared memory context. |
+| `src/services/discord/agentdesk_config.rs` | YAML/DB/legacy config source-of-truth handling. |
+| `src/services/discord/prompt_builder/` / `shared_memory.rs` / `role_map.rs` | Turn prompt assembly and org/shared memory context. |
 
 ### Provider and Execution Services
 
@@ -3909,7 +3983,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 
 | Path | Purpose |
 | --- | --- |
-| `src/server/boot.rs` / `src/server/mod.rs` | Axum boot, router assembly, background/tick startup. |
+| `src/server/mod.rs` | Axum boot, router assembly, background/tick startup. |
 | `src/server/routes/mod.rs` | API route registration under `/api`. |
 | `src/server/routes/dispatches/` | Dispatch CRUD, Discord delivery, outbox, thread reuse. |
 | `src/server/routes/review_verdict/` | Review verdict and decision routes plus review-state storage helpers. |
@@ -3918,7 +3992,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 
 ## Generated Inventories
 
-- `docs/generated/module-inventory.md` is the fastest way to answer “which module owns this code?”
+- `docs/generated/module-inventory.md` is the fastest way to answer “which module owns this code?” It is untracked; generate it locally first (see `docs/generated/README.md`).
 - `docs/generated/route-inventory.md` is the authoritative endpoint-to-handler map. Prefer it over manually maintained tables.
 - `docs/generated/worker-inventory.md` shows every supervised worker, its start stage, restart policy, and owner.
 - `python3 scripts/generate_inventory_docs.py --check` is the CI drift gate for these inventories, the generated `src/` snapshot above, and the top-level module coverage table.
@@ -3946,7 +4020,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 
 ### Kanban or review state is wrong
 
-1. `src/kanban.rs` — high-level card orchestration.
+1. `src/kanban/` — high-level card orchestration (`transition_core.rs`, `transition_cleanup.rs`, `hooks.rs`).
 2. `src/engine/transition.rs` — canonical state transitions.
 3. `src/engine/ops/kanban_ops.rs` — review-state sync bridge and SQL-side helpers.
 4. `src/server/routes/review_verdict/` — review verdict/decision HTTP surface.
@@ -3962,8 +4036,8 @@ This table is generated from the current `src/` root and fails CI when a new top
 
 1. `src/bootstrap.rs` — config/db/runtime assembly.
 2. `src/config.rs` — config load/defaults.
-3. `src/db/mod.rs` and `src/db/schema.rs` — DB open/migrations.
-4. `src/launch.rs`, `src/server/boot.rs`, `src/server/mod.rs` — runtime and HTTP boot.
+3. `src/db/mod.rs` and `src/db/postgres.rs` (`POSTGRES_MIGRATOR`, which embeds `migrations/postgres/`) — DB open/migrations.
+4. `src/launch.rs`, `src/server/mod.rs` (`run`) — runtime and HTTP boot.
 
 ## Policy and Runtime Flow
 
@@ -3971,7 +4045,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 - Hook contracts live in `src/engine/hooks.rs`.
 - Policy loading and execution live in `src/engine/loader.rs` and `src/engine/mod.rs`.
 - Rust bridge functions live in `src/engine/ops.rs` plus `src/engine/ops/*.rs`.
-- Tick orchestration lives in `src/server/tick.rs` and the server boot path.
+- Tick orchestration lives in `src/server/mod.rs` (`policy_tick_loop`) and the supervised workers in `src/server/worker_registry.rs`.
 
 ## Session Execution Paths
 
@@ -4050,6 +4124,6 @@ restart does not render a still-alive tmux pane "unusable":
 
 ## Data Model Anchors
 
-- `src/db/schema.rs` is the authoritative schema.
+- `migrations/postgres/` is the authoritative schema; `src/db/postgres.rs` (`POSTGRES_MIGRATOR`) applies it.
 - Most operational state hangs off `agents`, `kanban_cards`, `task_dispatches`, `sessions`, `auto_queue_runs`, `auto_queue_entries`, `github_repos`, and `kv_meta`.
-- If a doc or handler disagrees with the schema, trust `src/db/schema.rs` and update the doc.
+- If a doc or handler disagrees with the schema, trust `migrations/postgres/` and update the doc.
