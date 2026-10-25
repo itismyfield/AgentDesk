@@ -165,7 +165,10 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
     let notice = matching[0];
     assert_eq!(notice, &expected);
     assert!(notice.starts_with("-# ⌨️ "), "{notice}");
-    assert_eq!(notice.lines().count(), 1, "{notice}");
-    assert!(notice.ends_with(" (+1줄)"), "{notice}");
-    assert!(!notice.contains(request.text), "{notice}");
+    assert_eq!(notice.lines().count(), 2, "{notice}");
+    assert!(
+        notice.lines().all(|line| line.starts_with("-# ")),
+        "{notice}"
+    );
+    assert!(notice.ends_with(request.text), "{notice}");
 }

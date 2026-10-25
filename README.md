@@ -664,7 +664,7 @@ agentdesk deploy                                 # Build workspace + promote to 
 ```
 
 `migrate postgres-cutover` was retired after the production cutover landed
-(2026-04-19); restore `src/cli/migrate/postgres_cutover.rs` from history only
+(2026-04-19); restore `src/cli/migrate/postgres_cutover.rs` (removed) from history only
 for an explicitly approved emergency re-cutover.
 
 ## API Overview
@@ -751,24 +751,24 @@ AgentDesk/
 ├── src/                        # Rust source
 │   ├── main.rs                 # Entry point + CLI dispatch
 │   ├── config.rs               # YAML configuration
-│   ├── kanban.rs               # Kanban state machine + transition hooks
+│   ├── kanban/                 # Kanban state machine + transition hooks
 │   ├── pipeline.rs             # Pipeline config resolution
 │   ├── cli/                    # CLI commands (dcserver, init, client)
 │   ├── db/                     # PostgreSQL schema helpers, migrations, typed queries
 │   ├── dispatch/               # Dispatch creation, outbox, delivery
 │   ├── engine/                 # QuickJS policy engine + bridge ops
-│   │   └── ops/                # ~21 bridge namespaces (cards, kanban, dispatch, kv, http, runtime, quality, ...)
-│   ├── github/                 # Issue sync, auto-triage, DoD mirroring
+│   │   └── ops/                # Bridge namespaces (cards, kanban, dispatch, kv, http, runtime, quality, ...)
+│   ├── github/                 # Issue sync, auto-triage
 │   ├── server/                 # Axum HTTP server + WebSocket
-│   │   └── routes/             # 270 API route handlers
+│   │   └── routes/             # HTTP route handlers (list: docs/generated/route-inventory.md)
 │   └── services/               # Provider integrations + platform abstractions
 │       ├── discord/            # Serenity/Poise gateway, router, recovery
 │       │   └── watchers/lifecycle.rs   # Tmux watcher lifecycle (extracted from tmux.rs in #1435)
-│       ├── dispatches.rs       # Dispatch service layer
+│       ├── dispatches/         # Dispatch service layer
 │       ├── turn_orchestrator.rs # Turn lifecycle management
 │       ├── issue_announcements.rs # Notify-bot routing for issue cards (#1448 follow-up)
 │       ├── retrospectives.rs   # Terminal card retrospectives
-│       └── api_friction.rs     # API friction reporting
+│       └── api_friction/       # API friction reporting
 ├── policies/                   # JavaScript policy files (repo canonical; release mirror hot-reload)
 ├── dashboard/                  # React 19 + TypeScript + Vite + Tailwind
 ├── docs/                       # ADRs and design documents

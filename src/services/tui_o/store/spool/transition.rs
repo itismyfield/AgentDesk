@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use super::{
     ChannelStore, Cursor, StoreError, TransitionCleanup, rejected, source_key, write_cursor,
 };
-use crate::services::tui_o::shadow::SourceId;
+use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::cleanup_witness::CleanupWitness;
 use crate::services::tui_o::store::rotation::Rotation;
 
@@ -25,8 +25,25 @@ impl ChannelStore {
         &mut self,
         expected: &Cursor,
         audit: TransitionCleanup,
+        provider: ShadowProvider,
     ) -> Result<(), StoreError> {
+        #[cfg(test)]
+        if crate::services::tui_o::writer::actor::codex_retention::mutant("skip_store_write") {
+            return Ok(());
+        }
         self.mutate(|store| {
+            let retention_valid = match provider {
+                ShadowProvider::Claude => audit.retention.is_none(),
+                ShadowProvider::Codex => audit
+                    .retention
+                    .as_ref()
+                    .is_some_and(|evidence| evidence.valid(expected, &audit, store.init.channel)),
+            };
+            if !retention_valid {
+                return Err(rejected(
+                    "transition retention evidence is absent or invalid",
+                ));
+            }
             let key = source_key(&expected.source);
             let spool =
                 (store.sources.get_mut(&key)).ok_or_else(|| rejected("source not attached"))?;

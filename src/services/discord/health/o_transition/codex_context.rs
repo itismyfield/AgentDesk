@@ -23,6 +23,7 @@ struct Read {
     binding: dedupe::TuiRuntimeBinding,
     current: crate::services::tui_o::shadow::SourceId,
     host: census::HostInventory,
+    physical: Option<String>,
     census: String,
     tail: u64,
     log: String,
@@ -80,6 +81,10 @@ pub(super) async fn prepare(
     shared: Arc<SharedData>,
     channel: u64,
 ) -> Result<Prepared, Unavailable> {
+    prepare_current(shared, channel).await
+}
+
+async fn prepare_current(shared: Arc<SharedData>, channel: u64) -> Result<Prepared, Unavailable> {
     let binding = shared
         .tmux_watchers
         .channel_binding(&ChannelId::new(channel))
@@ -176,6 +181,7 @@ pub(super) async fn prepare(
             binding,
             current,
             host,
+            physical,
             census,
             tail: log.tail,
             log: log.digest,
@@ -211,8 +217,19 @@ fn same_pin(left: &dedupe::TuiRuntimeBinding, right: &dedupe::TuiRuntimeBinding)
 }
 
 impl Observer for Read {
+    fn refresh(&self) -> model::Refresh<'_> {
+        Box::pin(async move {
+            prepare_current(Arc::clone(&self.shared), self.target.channel)
+                .await
+                .map(|prepared| prepared.observer)
+                .map_err(|error| format!("{}: {}", error.component.as_str(), error.reason))
+        })
+    }
+
     fn observe(&self, authority: &TmuxSourceAuthority<'_>) -> Result<model::Inputs, String> {
         if authority.session() != self.target.tmux
+            || context::stable_host_identity().as_deref() != Some(self.target.host.as_str())
+            || tc::current_tmux_owner_marker() != self.target.owner_runtime_root
             || context::observe_spawn_nonce_marker(authority.session())
                 != SpawnNonceMarker::Known(self.target.nonce.clone())
             || context::execution_context("codex", &self.target.nonce)? != self.context
@@ -229,6 +246,10 @@ impl Observer for Read {
             || !same_pin(&current_binding(authority)?, &self.binding)
         {
             return Err("current Codex publication/context changed".into());
+        }
+        let host = census::host_inventory(self.physical.as_deref(), &self.target.tmux)?;
+        if host.identity != self.host.identity || host.live != self.host.live {
+            return Err("Codex host inventory changed after preparation".into());
         }
         #[cfg(unix)]
         {

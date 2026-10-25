@@ -2,8 +2,8 @@
 
 ## Summary
 
-- `policy_tick_loop` is already isolated from the main server runtime on this branch. `src/server/worker_registry.rs:365-377` starts a dedicated OS thread and builds a `current_thread` Tokio runtime only for policy ticks.
-- The `#735` code change still matters because `src/server/mod.rs:480-547` now runs each tick hook through `spawn_blocking`, adds a 5s timeout, and skips overlap while a timed-out hook is still finishing.
+- `policy_tick_loop` is already isolated from the main server runtime on this branch. `src/server/worker_registry/registry.rs` (`start_worker`, `"policy-tick"` thread) starts a dedicated OS thread and builds a `current_thread` Tokio runtime only for policy ticks.
+- The `#735` code change still matters because `src/server/mod.rs` (`policy_tick_loop`, `fire_tick_hook_by_name_with_timeout`, `POLICY_TICK_HOOK_TIMEOUT`) now runs each tick hook through `spawn_blocking`, adds a 5s timeout, and skips overlap while a timed-out hook is still finishing.
 - Local baseline profiling on `2026-04-17` with the real repository policy files and an empty test DB measured:
   - `OnTick1min`: `5ms`
   - `OnTick5min`: `7ms`
@@ -52,8 +52,8 @@ These are exactly the kind of queries that stay fast on an empty DB and degrade 
 
 ### 3. `timeouts.js` 5-minute path includes synchronous HTTP fan-out
 
-- `policies/timeouts.js:1474-1498` runs multiple sections in `onTick5min`
-- `policies/timeouts.js:1357-1429` (`_section_O`) queries idle sessions and then issues one `agentdesk.http.post(.../force-kill)` per candidate session
+- `policies/timeouts.js` (`timeouts.onTick5min`) runs multiple sections in `onTick5min`
+- `_section_O` (now in `policies/timeouts/idle-kill.js`) queries idle sessions and then issues one `agentdesk.http.post(.../force-kill)` per candidate session
 
 This is the strongest explanation for the observed `onTick5min` outliers. A run that finds many idle sessions can spend most of its wall clock time in repeated local HTTP requests even if raw DB time stays moderate.
 
@@ -74,7 +74,7 @@ These logs let production data separate:
 Current evidence points to data-dependent policy logic, not baseline QuickJS overhead:
 
 - Most likely 1-minute culprit: `policies/auto-queue.js:463-545`
-- Most likely 5-minute culprit: `policies/timeouts.js:1357-1429` inside `timeouts.onTick5min`
+- Most likely 5-minute culprit: `_section_O` (`policies/timeouts/idle-kill.js`) inside `timeouts.onTick5min`
 - Least supported hypothesis after local profiling: "QuickJS dispatch itself normally takes 8-10s"
 
 So the short-term `#735` fix is correct as damage control:
