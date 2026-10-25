@@ -73,14 +73,16 @@ pub(in crate::services::discord::tmux::tmux_watcher) fn source_authority_with_sp
     }
 }
 
+type SourceSpan = Option<(u64, u64)>;
+
 /// #5948 (I18): split one contiguous source byte range at the same boundary
 /// `split_decoded_chunk_at_terminal_boundary` splits the payload at, so each
 /// forwarded frame names exactly the bytes it carries. `None` in ⇒ `None` out on
 /// both sides: a range the caller cannot name must never be invented for it.
 pub(in crate::services::discord::tmux::tmux_watcher) fn split_source_span_at_terminal_boundary(
-    span: Option<(u64, u64)>,
+    span: SourceSpan,
     terminal_len: usize,
-) -> (Option<(u64, u64)>, Option<(u64, u64)>) {
+) -> (SourceSpan, SourceSpan) {
     let Some((start, end)) = span else {
         return (None, None);
     };

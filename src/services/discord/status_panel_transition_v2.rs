@@ -431,7 +431,8 @@ mod tests {
 
     #[test]
     fn every_bind_guard_clause_is_required() {
-        let mutations: [(&str, fn(&mut BindGuard)); 6] = [
+        type GuardMutation = fn(&mut BindGuard);
+        let mutations: [(&str, GuardMutation); 6] = [
             ("journal ownership", |guard| {
                 guard.protection = ProtectionEvidence::Missing
             }),

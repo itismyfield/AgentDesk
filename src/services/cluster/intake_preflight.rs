@@ -641,11 +641,8 @@ mod tests {
 
     #[test]
     fn missing_source_expectations_fail_closed() {
-        let cases: Vec<(
-            &str,
-            PreflightReasonCode,
-            Box<dyn Fn(&mut TargetPreflightPolicy)>,
-        )> = vec![
+        type PolicyMutation = Box<dyn Fn(&mut TargetPreflightPolicy)>;
+        let cases: Vec<(&str, PreflightReasonCode, PolicyMutation)> = vec![
             (
                 "release_sha",
                 PreflightReasonCode::SourceReleaseShaMissing,

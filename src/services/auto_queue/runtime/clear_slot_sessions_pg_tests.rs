@@ -64,18 +64,18 @@ mod tests {
             resettable_statuses.len()
         );
 
-        let reset_rows: Vec<(String, Option<String>, Option<String>, i64, Option<String>)> =
-            sqlx::query_as(
-                "SELECT status, active_dispatch_id, session_info, tokens, claude_session_id
+        type ResetRow = (String, Option<String>, Option<String>, i64, Option<String>);
+        let reset_rows: Vec<ResetRow> = sqlx::query_as(
+            "SELECT status, active_dispatch_id, session_info, tokens, claude_session_id
          FROM sessions
          WHERE thread_channel_id = $1
            AND session_key LIKE 'clear-slot-batch-%'
          ORDER BY session_key",
-            )
-            .bind(&target_thread_id_text)
-            .fetch_all(&pool)
-            .await
-            .expect("load reset slot sessions"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+        )
+        .bind(&target_thread_id_text)
+        .fetch_all(&pool)
+        .await
+        .expect("load reset slot sessions"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
         assert_eq!(reset_rows.len(), resettable_statuses.len());
         assert!(reset_rows.iter().all(|row| {
             row == &(
@@ -87,14 +87,15 @@ mod tests {
             )
         }));
 
-        let preserved_rows: Vec<(
+        type PreservedRow = (
             String,
             String,
             Option<String>,
             Option<String>,
             i64,
             Option<String>,
-        )> = sqlx::query_as(
+        );
+        let preserved_rows: Vec<PreservedRow> = sqlx::query_as(
             "SELECT session_key, status, active_dispatch_id, session_info, tokens, claude_session_id
          FROM sessions
          WHERE session_key IN ('clear-slot-disconnected', 'clear-slot-unrelated')

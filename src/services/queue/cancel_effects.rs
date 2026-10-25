@@ -23,8 +23,10 @@ use std::{
 };
 
 #[cfg(test)]
-static PRE_PURGE_HOOK_FOR_TESTS: LazyLock<Mutex<HashMap<ChannelId, (Vec<Intervention>, String)>>> =
-    LazyLock::new(Default::default);
+type PrePurgeHooks = HashMap<ChannelId, (Vec<Intervention>, String)>;
+
+#[cfg(test)]
+static PRE_PURGE_HOOK_FOR_TESTS: LazyLock<Mutex<PrePurgeHooks>> = LazyLock::new(Default::default);
 
 #[cfg(test)]
 pub(crate) fn set_pre_purge_hook_for_test(
