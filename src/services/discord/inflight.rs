@@ -60,12 +60,11 @@ use circuit_removal::handoff_before_discard_locked;
 // is named nowhere outside `store` (it only flows as a return type), so it keeps
 // its module-tree visibility there without a parent re-export.
 pub(in crate::services::discord) use destructive_commit::{
-    CommitError, CommitEvidence, DestructiveCancelCommitOutcome, DestructiveCancelPinField,
-    commit_destructive_cancel_locked,
+    CommitEvidence, DestructiveCancelCommitOutcome, commit_destructive_cancel_locked,
 };
 pub(in crate::services::discord) use episode_guard::{
-    InflightEpisodeLockError, InflightEpisodePin, LockedInflightEpisode,
-    adopt_and_lock_inflight_episode, lock_inflight_episode,
+    InflightEpisodePin, LockedInflightEpisode, adopt_and_lock_inflight_episode,
+    lock_inflight_episode,
 };
 pub(in crate::services::discord) use managed_submission::{
     ManagedSubmission, SubmissionFailure, install_managed_submission_boundary,
@@ -105,8 +104,7 @@ use self::rebind_reap::{reap_abandoned_rebind_origin_locked_in_root, rebind_orig
 use self::rebind_reap::{
     REBIND_ORIGIN_DEADLINE_SECS_DEFAULT, WatcherLiveness,
     ownerless_external_input_inflight_is_stale_at, proven_dead_from_signals,
-    reap_dead_watcher_rebind_origin_locked, reap_dead_watcher_rebind_origin_locked_in_root,
-    should_reap_dead_watcher_rebind_origin,
+    reap_dead_watcher_rebind_origin_locked_in_root, should_reap_dead_watcher_rebind_origin,
 };
 mod removal;
 #[cfg(test)]
@@ -135,14 +133,14 @@ pub(in crate::services::discord) use self::restart_mark::{
 
 mod watcher_state;
 pub(in crate::services::discord) use self::watcher_state::{
-    WatcherProgressOutcome, WatcherRelayWatermarkOutcome, WatcherRelayWatermarkPatch,
-    WatcherStreamProgressPatch, WatcherTerminalCommitOutcome, WatcherTerminalCommitPatch,
+    WatcherProgressOutcome, WatcherRelayWatermarkPatch, WatcherStreamProgressPatch,
+    WatcherTerminalCommitOutcome, WatcherTerminalCommitPatch,
     commit_watcher_terminal_delivery_locked, persist_watcher_relay_watermark_locked,
     persist_watcher_stream_progress_locked,
 };
 #[cfg(test)]
 use self::watcher_state::{
-    commit_watcher_terminal_delivery_locked_in_root,
+    WatcherRelayWatermarkOutcome, commit_watcher_terminal_delivery_locked_in_root,
     persist_watcher_relay_watermark_locked_in_root, persist_watcher_stream_progress_locked_in_root,
 };
 
@@ -263,7 +261,6 @@ use self::clear_store::normalize_response_sent_offset;
 use self::clear_store::{
     clear_inflight_state_if_matches_identity_after_delivery_in_root,
     clear_inflight_state_if_matches_identity_in_root,
-    clear_inflight_state_if_matches_identity_turn_nonce_in_root,
     clear_inflight_state_if_matches_tmux_response_in_root,
     clear_rebind_origin_inflight_state_if_matches_identity_in_root,
     refresh_inflight_last_offset_if_matches_identity_in_root,

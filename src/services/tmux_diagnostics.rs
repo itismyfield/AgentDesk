@@ -19,6 +19,7 @@ pub fn tmux_session_exists(tmux_session_name: &str) -> bool {
 /// wedge Discord intake. A timeout or join failure is treated conservatively
 /// as "present": stale-busy recovery must never release a turn unless absence
 /// was positively observed.
+#[cfg(test)]
 pub async fn probe_tmux_session_exists(tmux_session_name: &str) -> bool {
     let name = tmux_session_name.to_string();
     tokio::time::timeout(

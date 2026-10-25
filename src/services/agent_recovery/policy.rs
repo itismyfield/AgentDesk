@@ -443,6 +443,7 @@ pub fn build_recovery_catalog(
     Ok(catalog)
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct OrgRecoveryDocument {
     #[serde(default)]
@@ -453,6 +454,7 @@ struct OrgRecoveryDocument {
     channels: Option<OrgRecoveryChannelsWire>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct OrgRecoveryAgentWire {
     #[serde(default)]
@@ -467,12 +469,14 @@ struct OrgRecoveryAgentWire {
     recovery: Option<RecoveryConfigWire>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct OrgRecoveryChannelsWire {
     #[serde(default)]
     by_id: Option<BTreeMap<String, OrgRecoveryChannelWire>>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct OrgRecoveryChannelWire {
     #[serde(default)]
@@ -486,6 +490,7 @@ struct OrgRecoveryChannelWire {
     recovery: Option<RecoveryConfigWire>,
 }
 
+#[cfg(test)]
 pub fn load_org_recovery_catalog_from_yaml(yaml: &str) -> Result<RecoveryCatalog, PolicyError> {
     let document: OrgRecoveryDocument =
         serde_yaml::from_str(yaml).map_err(|_| PolicyError::UnknownOwner {

@@ -109,43 +109,6 @@ pub(super) fn save_channel_queued_placeholders(
     }
 }
 
-fn save_entries_checked(
-    path: Option<PathBuf>,
-    entries: &[(MessageId, MessageId)],
-) -> Result<(), String> {
-    let path = path.ok_or_else(|| "AgentDesk runtime root unavailable".to_owned())?;
-    if entries.is_empty() {
-        match fs::remove_file(&path) {
-            Ok(()) => runtime_store::fsync_parent_dir(&path).map_err(|error| error.to_string()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.to_string()),
-        }
-    } else {
-        let payload: Vec<_> = entries
-            .iter()
-            .map(|(user, placeholder)| QueuedPlaceholderEntry {
-                user_message_id: user.get(),
-                placeholder_message_id: placeholder.get(),
-            })
-            .collect();
-        let json = serde_json::to_string_pretty(&payload).map_err(|error| error.to_string())?;
-        runtime_store::atomic_write(&path, &json)?;
-        runtime_store::fsync_parent_dir(&path).map_err(|error| error.to_string())
-    }
-}
-
-fn snapshot_map(
-    map: &dashmap::DashMap<(ChannelId, MessageId), MessageId>,
-    channel_id: ChannelId,
-) -> Vec<(MessageId, MessageId)> {
-    map.iter()
-        .filter_map(|kv| {
-            let (channel, user) = *kv.key();
-            (channel == channel_id).then_some((user, *kv.value()))
-        })
-        .collect()
-}
-
 fn save_channel_entries(path: Option<PathBuf>, entries: &[(MessageId, MessageId)]) {
     let Some(path) = path else {
         return;
@@ -230,23 +193,6 @@ pub(super) fn load_channel_queued_placeholders_checked(
         }
     }
     Ok(loaded)
-}
-
-pub(super) fn persist_channel_from_map_checked(
-    map: &dashmap::DashMap<(ChannelId, MessageId), MessageId>,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel: ChannelId,
-) -> Result<(), String> {
-    let result = save_entries_checked(
-        channel_file_path(provider, token_hash, channel),
-        &snapshot_map(map, channel),
-    );
-    #[cfg(test)]
-    if crate::services::discord::inflight::scoped_restore_mutant("persist-error-complete") {
-        return Ok(());
-    }
-    result
 }
 
 pub(super) fn load_queue_exit_placeholder_clears(

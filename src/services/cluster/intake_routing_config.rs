@@ -208,6 +208,7 @@ fn effective_intake_routing_config_for_with_known(
     }
 }
 
+#[cfg(test)]
 fn effective_intake_routing_config_for(
     config: &ClusterIntakeRoutingConfig,
     env_override: Option<&str>,

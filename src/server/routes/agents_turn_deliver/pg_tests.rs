@@ -1509,7 +1509,10 @@ mod s1a {
                 episode: Some(episode.clone()),
                 contract: Some(contract(&f, guid)),
             };
-            assert_eq!(inject_hook::starts_seen(f.channel), [seen.clone()]);
+            assert_eq!(
+                inject_hook::starts_seen(f.channel),
+                std::slice::from_ref(&seen)
+            );
             assert_eq!(f.row(guid).await.episode_key, Some(episode));
             end_turn(&f.shared, f.channel).await;
             let off = f

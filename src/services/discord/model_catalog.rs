@@ -852,13 +852,6 @@ pub(in crate::services::discord) fn spawn_claude_model_catalog_refresh(
 }
 
 #[cfg(test)]
-pub(in crate::services::discord) fn spawn_test_claude_model_catalog_refresh(
-    refreshes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-) -> tokio::task::JoinHandle<()> {
-    claude::spawn_test_background_refresh(refreshes)
-}
-
-#[cfg(test)]
 pub(in crate::services::discord) fn spawn_test_claude_model_catalog_refresh_after_claim(
     refreshes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     after_claim: impl Fn() + Send + Sync + 'static,
