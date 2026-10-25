@@ -21,7 +21,8 @@ WINDOWS_STEP = "Discord thread-create cross-process lock"
 WINDOWS_COMMAND = "cargo test --lib discord_thread_create -- --test-threads=1"
 PG_CARGO = ('cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" '
             "--nocapture --test-threads=1")
-NON_PG_CARGO = 'cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"'
+NON_PG_CARGO = 'cargo test --bins --examples --benches --test \'*\' -- "${NON_PG_SKIP_ARGS[@]}"'
+NATIVE_LIB_STEP = "Compare and run non-PG lib tests"
 FILTER_SOURCE = "source scripts/ci/non-pg-test-filter.sh"
 
 
@@ -93,12 +94,15 @@ def nightly_contract_problems(text: str) -> list[str]:
          "full_macos does not actually brew install tmux")
     need("tmux -V" in opus, "full_macos prints no tmux provisioning evidence")
 
-    for name in ("full_macos", "full_windows"):
-        run = (step_of(jobs, name, "cargo test (non-PG)") or {}).get("run", "")
+    for name, platform in (("full_macos", "macos"), ("full_windows", "windows")):
+        run = (step_of(jobs, name, "cargo test (non-PG, non-lib targets)") or {}).get("run", "")
         need(FILTER_SOURCE in run and NON_PG_CARGO in run,
-             f"{name} changed its canonical non-PG sweep")
-        need("run_non_pg_filter_replay" in run,
-             f"{name} stopped replaying the tests the non-PG skips take with them")
+             f"{name} changed its canonical non-PG non-lib sweep")
+        lib = (step_of(jobs, name, NATIVE_LIB_STEP) or {}).get("run", "")
+        need(f"rust_test_sources.py compare --platform {platform} " in lib,
+             f"{name} stopped comparing its native nextest list with the sources")
+        need('--only "$NEXTEST_DIR/pg.json"' in lib and "pg_test_classifier.py classify --list" in lib,
+             f"{name} stopped selecting its lib tests through the PG classifier")
 
     pg = step_of(jobs, "postgres_full", PG_STEP) or {}
     lines = [line.strip() for line in pg.get("run", "").splitlines()]
@@ -161,8 +165,10 @@ STRUCTURAL_MUTANTS = (
      lambda t: t.replace("        timeout-minutes: 45", "        timeout-minutes: 30", 1)),
     ("leaves no PostgreSQL job budget for E2E and cleanup",
      lambda t: t.replace("    timeout-minutes: 90", "    timeout-minutes: 45", 1)),
-    ("drops the non-PG replay",
-     lambda t: t.replace("          run_non_pg_filter_replay\n", "", 1)),
+    ("drops the native PG classification",
+     lambda t: t.replace(' --only "$NEXTEST_DIR/pg.json"', "", 1)),
+    ("drops the native source comparison",
+     lambda t: t.replace("rust_test_sources.py compare --platform windows ", "rust_test_sources.py check ", 1)),
 )
 
 WRAPPER_MUTANTS = (
