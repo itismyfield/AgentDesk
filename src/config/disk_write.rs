@@ -165,11 +165,11 @@ fn read_config_on_disk(path: &Path) -> Result<Option<Config>> {
 /// Drops the MCP server `load` injected: the file never named it and it is unchanged.
 fn drop_injected_mcp_server(
     config: &mut Config,
-    file: &Config,
+    on_disk: Option<&Config>,
     injected: Option<(String, McpServerConfig)>,
 ) {
     if let Some((name, server)) = injected
-        && !file.mcp_servers.contains_key(&name)
+        && !on_disk.is_some_and(|file| file.mcp_servers.contains_key(&name))
         && config.mcp_servers.get(&name) == Some(&server)
     {
         config.mcp_servers.remove(&name);
@@ -180,11 +180,11 @@ fn drop_injected_mcp_server(
 /// back and later default changes still apply.
 fn without_runtime_derivations(path: &Path, config: &Config, on_disk: Option<&Config>) -> Config {
     let mut config = config.clone();
-    let file = on_disk.cloned().unwrap_or_default();
-    drop_injected_mcp_server(&mut config, &file, super::default_memento_mcp_server());
+    drop_injected_mcp_server(&mut config, on_disk, super::default_memento_mcp_server());
     let Some(root) = super::runtime_root_for_config_path(path) else {
         return config;
     };
+    let file = on_disk.cloned().unwrap_or_default();
     let resolves_to =
         |raw: &PathBuf, value: &PathBuf| super::resolve_runtime_path(&root, raw) == *value;
     for (value, raw) in [
@@ -445,24 +445,18 @@ mod tests {
         let mut edited = server.clone();
         edited.url = "https://elsewhere.example/mcp".to_string();
         let injected = || Some(("memento".to_string(), server.clone()));
-        let (unnamed, mut named) = (Config::default(), Config::default());
-        named
-            .mcp_servers
-            .insert("memento".to_string(), server.clone());
+        let mut named = Config::default();
+        named.mcp_servers = [("memento".to_string(), server.clone())].into();
         let mut config = Config::default();
 
-        config
-            .mcp_servers
-            .insert("memento".to_string(), server.clone());
-        drop_injected_mcp_server(&mut config, &named, injected());
+        config.mcp_servers = [("memento".to_string(), server.clone())].into();
+        drop_injected_mcp_server(&mut config, Some(&named), injected());
         assert_eq!(config.mcp_servers.get("memento"), Some(&server));
-        drop_injected_mcp_server(&mut config, &unnamed, injected());
+        drop_injected_mcp_server(&mut config, None, injected());
         assert!(config.mcp_servers.is_empty());
 
-        config
-            .mcp_servers
-            .insert("memento".to_string(), edited.clone());
-        drop_injected_mcp_server(&mut config, &unnamed, injected());
+        config.mcp_servers = [("memento".to_string(), edited.clone())].into();
+        drop_injected_mcp_server(&mut config, None, injected());
         assert_eq!(config.mcp_servers.get("memento"), Some(&edited));
     }
 
@@ -489,6 +483,16 @@ mod tests {
         };
 
         assert_eq!(saved_url("injected", ""), None);
+        let source = dir.path().join("source").join("agentdesk.yaml");
+        write_secret_config(&source, "");
+        let fresh = dir.path().join("fresh").join("agentdesk.yaml");
+        save_to_path(&fresh, &crate::config::load_from_path(&source).unwrap()).unwrap();
+        let raw: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&fresh).unwrap()).unwrap();
+        assert!(
+            raw["mcp_servers"]["memento"].is_null(),
+            "a new file gets no injected server"
+        );
         let written = format!(
             "mcp_servers:\n  memento:\n    url: {}\n    auth:\n      type: bearer\n      token_env_var: MEMENTO_ACCESS_KEY\n",
             default.url
