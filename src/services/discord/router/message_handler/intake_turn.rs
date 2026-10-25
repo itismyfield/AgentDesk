@@ -3,6 +3,7 @@ use super::super::super::turn_view_reconciler::note_intake_turn_started_current_
 use super::provider_dispatch::producer_panic;
 use super::voice_announcement_route::route_voice_transcript_announcement_once;
 use super::*;
+use crate::services::provider::session_prompt;
 
 mod intake_dispatch;
 use intake_dispatch::build_intake_inflight_state;
@@ -1598,17 +1599,10 @@ pub(super) async fn handle_text_message(
                 fresh: force_fresh_provider_session || session_was_cleared,
             })
             .await;
+        built_system_prompt.arm_audit(&cancel_token, shared, &provider, channel_id, &turn_id, sak_for_system);
         let system_prompt_owned = built_system_prompt.system_prompt;
         if let Some(manifest) = built_system_prompt.manifest {
             crate::db::prompt_manifests::spawn_save_prompt_manifest(shared.pg_pool.clone(), manifest);
-        }
-        if sak_for_system.is_some() {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 📦 SAK in system prompt ({} chars) for channel {}",
-                sak_for_system.unwrap().len(),
-                channel_id.get()
-            );
         }
         let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
         // #3813 Phase 1a: prompt prep complete — this mark sits INSIDE the
@@ -2293,6 +2287,7 @@ pub(super) async fn handle_text_message(
         tokio::task::spawn_blocking(move || {
             let _original_registration = producer_registration;
             let _upload_lifetime = materialized_uploads;
+            let prompt_capture = session_prompt::Scope::enter(&cancel_token_clone);
             let result = crate::services::platform::with_provider_execution_context(
                 provider_execution_context,
                 || {
@@ -2332,7 +2327,7 @@ pub(super) async fn handle_text_message(
             );
 
             match result {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => prompt_capture.success(),
                 Ok(Err(e)) => {
                     tracing::warn!("  [streaming] Error: {}", e);
                     if let Some(message) = super::provider_dispatch::producer_error(submission.as_ref(), channel_id.get(), e) {

@@ -11,6 +11,7 @@ mod layer_rendering;
 mod manifest;
 mod memory_guidance;
 mod session_anchors;
+pub(crate) mod system_prompt_audit;
 
 pub(crate) use channel_recent_context::{
     ChannelRecentContextManifestInput, load_channel_recent_context,
@@ -34,6 +35,7 @@ use memory_guidance::proactive_memory_guidance;
 pub(super) struct BuiltSystemPrompt {
     pub(super) system_prompt: String,
     pub(super) manifest: Option<PromptManifest>,
+    pub(super) anchor_count: usize,
 }
 
 struct PromptManifestLayerHash<'a> {
@@ -684,6 +686,7 @@ pub(super) fn build_system_prompt_with_manifest(
     BuiltSystemPrompt {
         system_prompt: system_prompt_owned,
         manifest,
+        anchor_count: 0,
     }
 }
 

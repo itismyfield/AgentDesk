@@ -837,6 +837,8 @@ db::prompt_manifests::tests::prompt_manifest_save_applies_write_time_cap_via_glo
 db::prompt_manifests::tests::prompt_manifest_save_fetch_round_trip_pg
 db::prompt_manifests::tests::prompt_manifest_token_estimate_is_chars_div_four
 db::prompt_manifests::tests::prompt_manifest_totals_exclude_disabled_layers
+db::provider_session_prompts::tests::system_prompt_concurrent_starts_remain_bounded_pg
+db::provider_session_prompts::tests::system_prompt_sixth_session_retains_five_and_original_is_immutable_pg
 db::relay_dead_letter::migration_tests::state_constraint_preserves_unknown_legacy_rows_and_fences_new_writes_pg
 db::relay_dead_letter::migration_tests::upgrade_path_preserves_original_migration_checksums_pg
 db::relay_dead_letter::tests::deferred_rows_do_not_starve_a_never_tried_row_pg
@@ -3909,6 +3911,10 @@ services::discord::commands::response_wording_tests::bare_shell_command_error_us
 services::discord::commands::response_wording_tests::owner_error_detail_is_folded_and_markdown_safe
 services::discord::commands::response_wording_tests::shared_command_states_use_korean_responses
 services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_and_process_of_a_refused_session_pg
+services::discord::commands::system_prompt::tests::system_prompt_active_native_binding_precedes_persisted_session
+services::discord::commands::system_prompt::tests::system_prompt_command_registered
+services::discord::commands::system_prompt::tests::system_prompt_missing_snapshot_is_labeled_reconstructed
+services::discord::commands::system_prompt::tests::system_prompt_saved_snapshot_and_pg_absence_choose_correct_source_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unconfirmed_tmux_host_runs_and_ends_the_session_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unsettled_herdr_channel_runs_and_warns_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_that_runs_answers_only_the_cleared_notice_pg
@@ -6140,6 +6146,11 @@ services::discord::prompt_builder::section_dedupe::tests::large_section_still_re
 services::discord::prompt_builder::section_dedupe::tests::would_be_duplicate_does_not_mutate
 services::discord::prompt_builder::session_anchors::tests::session_anchors_use_native_claude_system_prompt_on_launch_and_resume
 services::discord::prompt_builder::session_anchors::tests::session_anchors_use_native_codex_developer_instructions
+services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_fences_cannot_close_the_wrapper
+services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_header_distinguishes_origins_and_anchors
+services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_lines_and_emoji_keep_every_character
+services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_masks_keys_and_token_shapes_and_counts_values_once
+services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_utf16_boundaries_and_roundtrip
 services::discord::queue_dispatch::canary_workspace::tests::canary_without_core_session_and_unresolved_workspace_parks_original_pg
 services::discord::queue_dispatch::canary_workspace::tests::workspace_hold_stays_on_the_sessionless_codex_canary_pg
 services::discord::queue_dispatch::input_effect_tests::automatic_dequeue_restores_a_head_capped_after_selection_and_takes_the_tail
@@ -7232,6 +7243,7 @@ services::discord::router::message_handler::intake_turn::replay_start_tests::kic
 services::discord::router::message_handler::intake_turn::replay_start_tests::kickoff_tests::b_kickoff_durable_failure_restores_original_head_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::kickoff_tests::b_kickoff_late_start_keeps_full_custody_and_queue_view_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::kickoff_tests::b_queued_finish_exposes_durable_failure_before_restore_pg
+services::discord::router::message_handler::intake_turn::replay_start_tests::system_prompt_tests::system_prompt_intake_saves_without_automatic_posts_and_storage_failure_keeps_turn_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::undecided_or_held_intake_start_keeps_custody_without_input_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests::b_absorbed_sources_survive_leader_forwarding_into_real_worker_claim_fence_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests::b_actual_leader_begin_races_spawned_worker_and_loser_keeps_delivery_custody_pg
@@ -12131,6 +12143,10 @@ services::provider::session_probe::tests::legacy_pane_override_and_typed_probe_s
 services::provider::session_probe::tests::qwen_common_probe_keeps_the_legacy_tmux_alias_only
 services::provider::session_probe::tests::tmux_alive_and_missing_collapse_like_the_legacy_bool
 services::provider::session_probe::tests::unresolved_herdr_and_failed_probes_never_read_as_dead
+services::provider::session_prompt::tests::system_prompt_capture_joins_success_and_native_id_in_either_order_once
+services::provider::session_prompt::tests::system_prompt_capture_scope_unwinds_and_final_resume_clears_fresh_candidate
+services::provider::session_prompt::tests::system_prompt_records_real_codex_config_and_claude_argv
+services::provider::session_prompt::tests::system_prompt_resume_failure_and_unarmed_turns_store_nothing
 services::provider_auth::tests::detect_provider_credentials_reports_env_presence_without_auth_claim
 services::provider_auth::tests::env_file_contains_key_requires_non_empty_supported_key
 services::provider_auth::tests::gemini_corrupt_creds_are_not_unconfigured

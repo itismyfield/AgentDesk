@@ -2,11 +2,39 @@ use super::*;
 use crate::services::memory::{SessionAnchorRequest, load_session_anchor_prompt};
 
 impl BuiltSystemPrompt {
+    pub(in crate::services::discord) fn arm_audit(
+        &self,
+        token: &crate::services::provider::CancelToken,
+        shared: &SharedData,
+        provider: &ProviderKind,
+        channel: ChannelId,
+        turn: &str,
+        sak: Option<&str>,
+    ) {
+        crate::services::provider::session_prompt::arm(
+            token,
+            shared.pg_pool.clone(),
+            provider,
+            channel.get(),
+            turn,
+            self.anchor_count,
+        );
+        if let Some(sak) = sak {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 📦 SAK in system prompt ({} chars) for channel {}",
+                sak.len(),
+                channel.get()
+            );
+        }
+    }
+
     pub(in crate::services::discord) async fn with_session_anchors(
         mut self,
         request: SessionAnchorRequest<'_>,
     ) -> Self {
-        if let Some(anchors) = load_session_anchor_prompt(request).await {
+        if let Some((anchors, count)) = load_session_anchor_prompt(request).await {
+            self.anchor_count = count;
             self.append_anchor_layer(&anchors);
         }
         self
@@ -46,6 +74,7 @@ mod tests {
         let mut built = BuiltSystemPrompt {
             system_prompt: "existing instructions".into(),
             manifest: None,
+            anchor_count: 0,
         };
         built.append_anchor_layer("[ANCHOR MEMORY]\n- persistent preference");
         let instructions = crate::services::codex::compose_codex_developer_instructions(

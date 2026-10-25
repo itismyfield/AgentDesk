@@ -33,6 +33,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::intake_outbox_dispatch_stamp::tests
   --skip db::o_channel_activation::fence_tests
   --skip db::prompt_manifests::tests
+  --skip db::provider_session_prompts::tests
   --skip db::relay_dead_letter::migration_tests
   --skip db::relay_dead_letter::tests
   --skip db::replay_disposition::register_tests
@@ -103,6 +104,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::codex_clear_relaunch_tests
   --skip services::discord::commands::control::codex_clear_retirement_tests
   --skip services::discord::commands::restart::host_guard_tests
+  --skip services::discord::commands::system_prompt::tests
   --skip services::discord::commands::text_commands::clear_refusal_reply_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
   --skip services::discord::health::o_transition::codex_context::tests
@@ -453,6 +455,9 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_report::consent_clear_tests::legacy_actual_clear_ignores_unreadable_consent_storage
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_keeps_unrelated_error_on_first_observation
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_rechecks_one_transient_before_stable_hold
+  services::discord::commands::system_prompt::tests::system_prompt_active_native_binding_precedes_persisted_session
+  services::discord::commands::system_prompt::tests::system_prompt_command_registered
+  services::discord::commands::system_prompt::tests::system_prompt_missing_snapshot_is_labeled_reconstructed
   services::discord::health::o_transition::codex_context::tests::codex_fixture_pins_identity_when_inherited_host_source_is_missing
   services::discord::health::o_transition::codex_context::tests::codex_prepare_unknown_preserves_nonce_component_in_stats_and_log
   services::discord::health::o_transition::codex_context::tests::codex_prepare_without_explicit_identity_refuses_host_identity

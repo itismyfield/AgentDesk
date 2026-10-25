@@ -194,7 +194,7 @@ pub(crate) struct SessionAnchorRequest<'a> {
 
 pub(crate) async fn load_session_anchor_prompt(
     request: SessionAnchorRequest<'_>,
-) -> Option<String> {
+) -> Option<(String, usize)> {
     let SessionAnchorRequest {
         settings,
         provider,
@@ -220,7 +220,7 @@ pub(crate) async fn load_session_anchor_prompt(
         session_id,
         fresh,
     ) {
-        return render_snapshot(&snapshot);
+        return render_snapshot(&snapshot).map(|text| (text, snapshot.count));
     }
     if settings.backend != MemoryBackendKind::Memento {
         if settings.memento_fallback {
@@ -304,7 +304,7 @@ pub(crate) async fn load_session_anchor_prompt(
         );
         snapshot
     };
-    render_snapshot(&snapshot)
+    render_snapshot(&snapshot).map(|text| (text, snapshot.count))
 }
 
 fn render_snapshot(snapshot: &AnchorSnapshot) -> Option<String> {
