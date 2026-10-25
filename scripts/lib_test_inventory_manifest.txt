@@ -9753,7 +9753,7 @@ services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_t
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_steering_record_read_before_its_hook_joins_the_running_turn
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_steering_record_scanned_before_the_claim_joins_the_running_turn
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::native_turn_tests::codex_direct_turn_left_with_an_open_tool_is_never_a_captured_answer
-services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::notify_inline_prompt_entrypoints_use_the_channel_provider_and_single_line
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::notify_prompt_entrypoints_use_the_channel_provider_and_preserve_direct_text
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::claude_claim_beside_a_watcher_on_the_previous_transcript_picks_the_bridge_owner
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::codex_direct_answer_reaches_discord_once_beside_a_relay_jsonl_watcher
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::idle_observer_waits_out_a_session_bound_row_only_when_the_watcher_reads_its_output
@@ -9796,6 +9796,7 @@ services::discord::tui_prompt_relay::tests::fenced_admission_tests::dormant_resu
 services::discord::tui_prompt_relay::tests::fenced_admission_tests::released_dormant_resumption_writes_only_its_own_undelivered_tail_once
 services::discord::tui_prompt_relay::tests::formats_ssh_direct_prompt_notification
 services::discord::tui_prompt_relay::tests::formats_ssh_direct_prompt_notification_escapes_code_fence
+services::discord::tui_prompt_relay::tests::formats_ssh_direct_prompt_notification_preserves_safe_multiline_text
 services::discord::tui_prompt_relay::tests::formats_ssh_direct_prompt_notification_strips_terminal_controls
 services::discord::tui_prompt_relay::tests::formats_ssh_direct_prompt_notification_with_truncation
 services::discord::tui_prompt_relay::tests::genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight

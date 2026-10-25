@@ -376,8 +376,13 @@ fn catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected(
 fn provider_background_subtext_never_recovers_or_becomes_actionable_too_old() {
     use CatchUpClassification::{NotAllowed, SelfAuthored, SystemKind};
 
-    let text = "-# ✅ Background command \"short task\" completed (exit code 0)";
-    for age_secs in [60, 3_600] {
+    for (text, age_secs) in [
+        "-# ✅ Background command \"short task\" completed (exit code 0)",
+        "-# ⌨️ first \\*\\*bold\\*\\*\n-# second\n-# third",
+    ]
+    .into_iter()
+    .flat_map(|text| [60, 3_600].map(|age_secs| (text, age_secs)))
+    {
         for (author_id, author_is_bot, expected) in [
             (CURRENT_BOT_ID, true, SelfAuthored),
             (CURRENT_BOT_ID, false, SelfAuthored),
