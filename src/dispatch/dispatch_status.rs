@@ -2139,8 +2139,15 @@ mod review_skip_pg_tests {
             .await
             .expect_err("the injected card fault must fail the restore");
 
-        assert!(error.to_string().contains("injected card update fault"), "{error}");
-        let expected = (Some("dispatched".to_string()), 1, Some("review-1".to_string()));
+        assert!(
+            error.to_string().contains("injected card update fault"),
+            "{error}"
+        );
+        let expected = (
+            Some("dispatched".to_string()),
+            1,
+            Some("review-1".to_string()),
+        );
         let (review, review_state_rows, session_dispatch, card_status) = state(&pool).await;
         assert_eq!((review, review_state_rows, session_dispatch), expected);
         assert_eq!(card_status, "review");

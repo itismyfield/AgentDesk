@@ -164,12 +164,17 @@ async fn a_bulk_update_of_plain_rows_takes_no_source_locks_pg() {
     .await
     .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(locks, 0, "a plain bulk update must not lock every row's sources");
+    assert_eq!(
+        locks, 0,
+        "a plain bulk update must not lock every row's sources"
+    );
 
     assert_fenced(
-        sqlx::query("UPDATE intake_outbox SET claim_owner = 'bulk-owner' WHERE channel_id = 'bulk'")
-            .execute(&pool)
-            .await,
+        sqlx::query(
+            "UPDATE intake_outbox SET claim_owner = 'bulk-owner' WHERE channel_id = 'bulk'",
+        )
+        .execute(&pool)
+        .await,
         "a held row inside a bulk update still keeps its claim",
     );
     finish(fixture, pool).await;

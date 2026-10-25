@@ -34,7 +34,9 @@ pub(super) async fn restore_auto_queue_mainline_after_review_skip_on_pg(
 
     // One transaction: a crash can no longer leave the card in review with its review
     // dispatch gone, and the cancelled dispatch keeps its history and event rows.
-    let db = |what: &'static str| move |error: sqlx::Error| anyhow::anyhow!("{what} for {card_id}: {error}");
+    let db = |what: &'static str| {
+        move |error: sqlx::Error| anyhow::anyhow!("{what} for {card_id}: {error}")
+    };
     let mut tx = pool.begin().await.map_err(db("begin review skip"))?;
     let live_reviews: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM task_dispatches
