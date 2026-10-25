@@ -134,6 +134,16 @@ presence check only; reviewers still confirm the content was refreshed. CI runs
 this gate in `--warning-only` mode during the initial rollout for #1432; remove
 that flag when the quiet-week promotion is approved.
 
+## Doc Path Reference Gate
+
+`python3 scripts/check_doc_path_refs.py` fails when a hand-written doc (any
+tracked `*.md` outside `docs/generated/`) names a repo path that does not exist
+or a `path:line` past the end of the file. CI runs it through
+`tests/test_doc_path_refs.sh`. In these pages, name code as `path` plus a symbol
+(`src/kanban/hooks.rs` (`fire_dynamic_hooks`)) rather than `path:line`. Mark a
+path that is intentionally gone or not yet created with `(removed)` /
+`(proposed)` after it, or declare it once per doc; `--help` lists the markers.
+
 ## Maintainability Hard Gates
 
 CI runs `python3 scripts/audit_maintainability.py --check` and blocks on these
