@@ -16,7 +16,7 @@ mod host_refusal;
 pub(crate) mod inflight_create_log;
 mod placeholder_handoff;
 pub(super) mod race_loss;
-mod replay_start;
+pub(super) mod replay_start;
 mod retry_prompt;
 mod runtime_transition;
 mod stale_dispatch_guard;

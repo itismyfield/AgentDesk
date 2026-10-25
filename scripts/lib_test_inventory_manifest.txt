@@ -867,6 +867,7 @@ db::replay_disposition::hold_notice::tests::p2_missing_receipt_is_not_an_unnotif
 db::replay_disposition::hold_notice::tests::p2_notice_payload_pins_the_first_hold_nonce_pg
 db::replay_disposition::hold_notice::tests::p2_notice_routing_normalizes_missing_empty_and_padded_session_pg
 db::replay_disposition::hold_notice::tests::p3_missing_notice_receipt_is_distinct_from_malformed_pg
+db::replay_disposition::hold_notice::tests::p4_recovery_cannot_withhold_the_current_live_owner_pg
 db::replay_disposition::hold_notice::tests::recovery_enqueue_failure_keeps_original_tuple_and_delivery_custody_pg
 db::replay_disposition::hold_notice::tests::recovery_hold_notice_serializes_with_the_live_hold_writer_pg
 db::replay_disposition::hold_notice::tests::same_receipt_repeat_and_reopen_keep_one_permanent_notice_pg
@@ -6649,6 +6650,7 @@ services::discord::recovery_engine::restore_inflight::ready_without_output_tests
 services::discord::recovery_engine::restore_inflight::ready_without_output_tests::restart_partial_eof_preserves_unproven_actor_and_retries_ownerless_failures
 services::discord::recovery_engine::restore_inflight::ready_without_output_tests::watcher_offset_at_eof_preserves_unsent_body_on_failed_delivery_then_retries
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::p3_restart_backfills_old_withheld_without_readopting_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::p4_dormant_no_store_history_retry_still_fetches_and_enqueues
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::recovery_history_retry_reads_the_canonical_fence_before_and_after_http_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::recovery_malformed_notice_retains_raw_episode_and_has_a_healthy_control_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::recovery_pg_only_restart_paginates_without_an_execution_permit_pg
@@ -6946,6 +6948,7 @@ services::discord::replay_policy::live::observer_tests::p2_physical_facts_need_o
 services::discord::replay_policy::live::observer_tests::p2_quiet_retry_is_exact_once_and_success_is_one_response_pg
 services::discord::replay_policy::live::observer_tests::p3_file_text_is_activity_not_a_stale_error_pg
 services::discord::replay_policy::live::observer_tests::p3_unconsumed_stderr_cannot_stall_terminal_classification_pg
+services::discord::replay_policy::live::observer_tests::p4_stale_reader_without_bridge_stale_decision_is_durably_held_pg
 services::discord::replay_policy::live::observer_tests::recovery_codex_stderr_descendant_is_cancelled_and_joined_pg
 services::discord::replay_policy::live_tests::decision_wakes_on_a_fact_recorded_after_its_check_pg
 services::discord::replay_policy::live_tests::direct_adapter_completes_the_observation_past_its_done_pg
@@ -7254,6 +7257,15 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::source_guard_tests::headless_guards_reject_commented_steps
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::source_guard_tests::headless_guards_reject_reordered_steps_and_count_coded_bans
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_active_headless_start_registers_canonical_original_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_exact_begin_ack_loss_never_clears_or_starts_again_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_exact_headless_quiet_stale_keeps_reservation_and_metadata_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_final_dispatch_refuses_a_changed_driver_scope_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_headless_activity_stale_withheld_does_not_restart_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_headless_distinct_reservations_same_body_do_not_collapse_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_off_headless_without_store_still_starts_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_reopened_store_new_state_consumes_held_reservation_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_u3_health_reservation_webhook_and_native_start_pg
 services::discord::router::message_handler::headless_turn::routine_metadata::memory_scope_tests::routine_memory_group_absent_hint_preserves_main_bytes
 services::discord::router::message_handler::headless_turn::routine_metadata::memory_scope_tests::routine_memory_group_reaches_binding_and_three_tier_hint
 services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::fresh_process_turn_suppresses_tmux_but_keeps_isolated_session_key

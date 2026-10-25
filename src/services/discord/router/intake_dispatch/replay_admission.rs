@@ -11,12 +11,8 @@ use crate::services::provider::CancelToken;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
-/// This process's owner incarnation for the attempts it begins.
-static INCARNATION: std::sync::LazyLock<String> =
-    std::sync::LazyLock::new(|| uuid::Uuid::new_v4().to_string());
-
 pub(crate) fn incarnation() -> &'static str {
-    &INCARNATION
+    crate::services::discord::replay_policy::incarnation()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +69,16 @@ pub(crate) fn dormant_start(channel: &str) -> Option<ReplayStart> {
     (producers_for(channel) == ProducerMode::Dormant).then_some(ReplayStart(None))
 }
 
+/// TUI input stays with its existing owner even in an active non-TUI channel.
+pub(crate) fn dormant_start_for_driver(
+    channel: &str,
+    driver: crate::services::provider_hosting::ProviderSessionDriver,
+) -> Option<ReplayStart> {
+    (driver == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting
+        || producers_for(channel) == ProducerMode::Dormant)
+        .then_some(ReplayStart(None))
+}
+
 /// Hash of the prompt a start actually submits.
 pub(crate) fn input_hash(prompt: &str) -> String {
     hex::encode(Sha256::digest(prompt.as_bytes()))
@@ -118,6 +124,17 @@ pub(crate) struct ReplayStart(Option<StartPermit>);
 impl ReplayStart {
     pub(crate) fn receipt_id(&self) -> Option<i64> {
         self.0.as_ref().map(|permit| permit.attempt().receipt_id())
+    }
+
+    pub(crate) fn in_scope(self, driver: &str, runtime: &str) -> Result<Self, PermitRefusal> {
+        if self
+            .0
+            .as_ref()
+            .is_some_and(|permit| !permit.matches_start_scope(driver, runtime))
+        {
+            return Err(PermitRefusal::TargetMismatch);
+        }
+        Ok(self)
     }
 
     /// An exact retry's start: the approved local reset runs only now, after its begin committed.

@@ -231,6 +231,7 @@ src/services/discord/router/intake_gate/busy_inject/payload_tests.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
+src/services/discord/router/message_handler/headless_turn/replay_start_tests.rs
 src/services/discord/router/message_handler/intake_turn/claim_bootstrap.rs
 src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs
 src/services/discord/router/message_handler/intake_turn/retry_prompt/tests.rs
@@ -673,6 +674,7 @@ services::discord::router::intake_gate::busy_inject::payload_tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::codex_resume_companion_queue_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
+services::discord::router::message_handler::headless_turn::replay_start_tests
 services::discord::router::message_handler::intake_turn::claim_bootstrap::recap_cleanup_tests
 services::discord::router::message_handler::intake_turn::replay_start_tests
 services::discord::router::message_handler::intake_turn::replay_start_tests::kickoff_tests
@@ -1267,6 +1269,7 @@ db::replay_disposition::hold_notice::tests::p2_missing_receipt_is_not_an_unnotif
 db::replay_disposition::hold_notice::tests::p2_notice_payload_pins_the_first_hold_nonce_pg
 db::replay_disposition::hold_notice::tests::p2_notice_routing_normalizes_missing_empty_and_padded_session_pg
 db::replay_disposition::hold_notice::tests::p3_missing_notice_receipt_is_distinct_from_malformed_pg
+db::replay_disposition::hold_notice::tests::p4_recovery_cannot_withhold_the_current_live_owner_pg
 db::replay_disposition::hold_notice::tests::recovery_enqueue_failure_keeps_original_tuple_and_delivery_custody_pg
 db::replay_disposition::hold_notice::tests::recovery_hold_notice_serializes_with_the_live_hold_writer_pg
 db::replay_disposition::hold_notice::tests::same_receipt_repeat_and_reopen_keep_one_permanent_notice_pg
@@ -2135,6 +2138,7 @@ services::discord::replay_policy::live::observer_tests::p2_physical_facts_need_o
 services::discord::replay_policy::live::observer_tests::p2_quiet_retry_is_exact_once_and_success_is_one_response_pg
 services::discord::replay_policy::live::observer_tests::p3_file_text_is_activity_not_a_stale_error_pg
 services::discord::replay_policy::live::observer_tests::p3_unconsumed_stderr_cannot_stall_terminal_classification_pg
+services::discord::replay_policy::live::observer_tests::p4_stale_reader_without_bridge_stale_decision_is_durably_held_pg
 services::discord::replay_policy::live::observer_tests::recovery_codex_stderr_descendant_is_cancelled_and_joined_pg
 services::discord::replay_policy::live_tests::decision_wakes_on_a_fact_recorded_after_its_check_pg
 services::discord::replay_policy::live_tests::direct_adapter_completes_the_observation_past_its_done_pg
@@ -2221,6 +2225,15 @@ services::discord::router::message_handler::codex_resume_companion_queue_tests::
 services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_partial_settlement_failure_preserves_queue_and_retries
 services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_settlement_preserves_queue_then_admits_once
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests::goal_clear_reports_a_refusal_before_any_session_clear_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_active_headless_start_registers_canonical_original_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_exact_begin_ack_loss_never_clears_or_starts_again_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_exact_headless_quiet_stale_keeps_reservation_and_metadata_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_final_dispatch_refuses_a_changed_driver_scope_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_headless_activity_stale_withheld_does_not_restart_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_headless_distinct_reservations_same_body_do_not_collapse_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_off_headless_without_store_still_starts_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_reopened_store_new_state_consumes_held_reservation_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p4_u3_health_reservation_webhook_and_native_start_pg
 services::discord::router::message_handler::intake_turn::claim_bootstrap::recap_cleanup_tests::discord_claim_clears_the_idle_card_only_for_the_winning_turn_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::exact_retry_starts_only_through_its_continuation_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::held_dispatch_is_not_inherited_by_an_active_start_pg

@@ -825,7 +825,7 @@ async fn exact_retry_reenters_only_through_its_own_continuation_pg() {
     .await
     .unwrap();
     let ReplayDecision::AllowStartupRetry(retry) =
-        decide_stale(&pool, Some(attempt), &observation.unwrap()).await
+        decide_stale(&pool, Some(attempt), &observation.unwrap(), None).await
     else {
         panic!("no-effect attempt allows one retry");
     };
@@ -948,7 +948,7 @@ async fn exact_retry_refuses_a_different_request_before_begin_pg() {
         observation.record(item);
     }
     let ReplayDecision::AllowStartupRetry(retry) =
-        decide_stale(&pool, Some(attempt), &observation).await
+        decide_stale(&pool, Some(attempt), &observation, None).await
     else {
         panic!("no-effect attempt allows one retry");
     };

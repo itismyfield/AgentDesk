@@ -4,7 +4,6 @@ mod hold_notice;
 mod settle;
 mod start;
 pub(crate) use hold_notice::recover_hold_notice;
-#[cfg(test)]
 pub(crate) use hold_notice::withhold_and_notify;
 pub(crate) use start::{
     BeginAck, BeginFrom, CanonicalInput, EffectProjection, begin, bind_session,
@@ -127,6 +126,7 @@ pub(crate) async fn classify_no_effect(
 }
 
 /// Holds the attempt with its reason and preserved result; the receipt keeps blocking either way.
+#[cfg(test)]
 pub(crate) async fn withhold(
     pool: &PgPool,
     attempt: &ExactAttempt,

@@ -51,6 +51,7 @@ pub(super) async fn resume(
         id,
         &state.provider,
         &state.channel_id.to_string(),
+        crate::services::discord::replay_policy::incarnation(),
         Some(&capture),
         NoticeRouting {
             bot: "notify",
@@ -74,8 +75,10 @@ pub(super) async fn resume_pg_only(pool: Option<&sqlx::PgPool>, provider: &str) 
             "SELECT id, channel_id FROM intake_outbox WHERE id>$1
                AND lower(btrim(provider))=lower(btrim($2))
                AND replay_disposition IN ('withheld','started_unclassified','startup_failed_no_effect')
-               AND replay_preserved -> 'stale_replay_notice' IS NULL ORDER BY id LIMIT 64",
-        ).bind(cursor).bind(provider).fetch_all(pool).await;
+               AND replay_preserved -> 'stale_replay_notice' IS NULL
+               AND (replay_disposition='withheld' OR replay_owner_incarnation IS DISTINCT FROM $3)
+             ORDER BY id LIMIT 64",
+        ).bind(cursor).bind(provider).bind(crate::services::discord::replay_policy::incarnation()).fetch_all(pool).await;
         let page = match page {
             Ok(page) => page,
             Err(error) => {
@@ -96,6 +99,7 @@ pub(super) async fn resume_pg_only(pool: Option<&sqlx::PgPool>, provider: &str) 
                 id,
                 provider,
                 &channel,
+                crate::services::discord::replay_policy::incarnation(),
                 None,
                 NoticeRouting {
                     bot: "notify",

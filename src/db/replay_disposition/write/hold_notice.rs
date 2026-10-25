@@ -1,15 +1,12 @@
 //! Commit a withheld request and its one notification without a partial handoff.
 
-#[cfg(test)]
 use super::{ExactAttempt, settle};
 use super::{WriteError, commit, refused};
 use crate::db::replay_disposition::hold_notice::{self, HoldNotice, NoticeRouting, outbox};
 use crate::services::message_outbox::OutboxMessage;
 use sqlx::PgPool;
-#[cfg(test)]
 use sqlx::Row;
 
-#[cfg(test)]
 pub(crate) async fn withhold_and_notify(
     pool: &PgPool,
     attempt: &ExactAttempt,
@@ -124,6 +121,7 @@ pub(crate) async fn recover_hold_notice(
     receipt_id: i64,
     provider: &str,
     channel: &str,
+    current_incarnation: &str,
     capture: Option<&serde_json::Value>,
     routing: NoticeRouting<'_>,
 ) -> Result<HoldNotice, WriteError> {
@@ -131,8 +129,9 @@ pub(crate) async fn recover_hold_notice(
     let row: (String, Option<String>, Option<String>, Option<serde_json::Value>) = sqlx::query_as(
         "SELECT replay_disposition, replay_episode_nonce, replay_owner_incarnation, replay_preserved
            FROM intake_outbox WHERE id=$1 AND lower(btrim(provider))=lower(btrim($2))
-             AND channel_id=$3 FOR UPDATE",
-    ).bind(receipt_id).bind(provider).bind(channel).fetch_optional(&mut *tx).await
+             AND channel_id=$3 AND (replay_disposition='withheld'
+                 OR replay_owner_incarnation IS DISTINCT FROM $4) FOR UPDATE",
+    ).bind(receipt_id).bind(provider).bind(channel).bind(current_incarnation).fetch_optional(&mut *tx).await
         .map_err(WriteError::Storage)?.ok_or(WriteError::CasMiss)?;
     let (disposition, nonce, incarnation, stored) = row;
     if !matches!(

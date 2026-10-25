@@ -35,11 +35,17 @@ pub(in crate::services::discord) async fn stale_resume(
     };
     let receipt = attempt.receipt_id();
     if legacy_raced {
-        withhold(pool, &attempt, "legacy retry claimed the request").await;
+        withhold(
+            pool,
+            &attempt,
+            "legacy retry claimed the request",
+            Some(inflight),
+        )
+        .await;
         live.settle(Verdict::Held);
         return StaleResume::Hold;
     }
-    match decide_stale(pool, Some(attempt), &observation).await {
+    match decide_stale(pool, Some(attempt), &observation, Some(inflight)).await {
         ReplayDecision::AllowStartupRetry(retry) => {
             live.settle(Verdict::Retried);
             StaleResume::Exact(retry)
@@ -73,22 +79,26 @@ async fn classify_terminal(
     if let Some(verdict) = token.replay_attempt().and_then(|live| live.verdict()) {
         return verdict == Verdict::Ordinary;
     }
-    if token.replay_attempt().is_some_and(|live| live.stale()) {
-        return false;
-    }
-    let Some((pool, live, attempt, observation)) = decide_live(pool, token, true).await else {
+    let unmatched_stale = token.replay_attempt().is_some_and(|live| live.stale());
+    let Some((pool, live, attempt, observation)) = decide_live(pool, token, !unmatched_stale).await
+    else {
         return false;
     };
-    let ordinary = match observation.terminal_evidence() {
-        Some(evidence) => write::classify_normal(pool, &attempt, &evidence)
+    let ordinary = match (unmatched_stale, observation.terminal_evidence()) {
+        (false, Some(evidence)) => write::classify_normal(pool, &attempt, &evidence)
             .await
             .inspect_err(|error| {
                 tracing::warn!(receipt = attempt.receipt_id(), kind = ?evidence.kind(), %error,
                     "ordinary terminal was not classified; the request stays held")
             })
             .is_ok(),
-        None => {
-            withhold(pool, &attempt, observation.hold_reason()).await;
+        _ => {
+            let reason = if unmatched_stale {
+                "reader stale without a bridge decision"
+            } else {
+                observation.hold_reason()
+            };
+            withhold(pool, &attempt, reason, Some(inflight)).await;
             false
         }
     };
@@ -142,7 +152,13 @@ pub(in crate::services::discord) async fn hold_recovery(
     }
     bar_legacy_retry(inflight);
     if let Some((pool, live, attempt, _)) = decide_live(pool, token, false).await {
-        withhold(pool, &attempt, "recovery sentinel after start").await;
+        withhold(
+            pool,
+            &attempt,
+            "recovery sentinel after start",
+            Some(inflight),
+        )
+        .await;
         live.settle(Verdict::Held);
     }
     true

@@ -816,7 +816,7 @@ async fn p3_file_text_is_activity_not_a_stale_error_pg() {
     let live = live(&pool, "claude", "file-phrase").await;
     let tok = token(&live);
     let tap = RawTap::for_file(Some(&tok));
-    tap.file_line("Conversation not found.");
+    tap.file_activity();
     tap.finish(true, Seen::StderrDrained);
     assert!(!live.stale(), "assistant text is not a bridge Error");
     assert!(!super::super::ordinary_outcome(Some(&pool), &tok, &inflight(&live)).await);
@@ -882,6 +882,31 @@ async fn recovery_codex_stderr_descendant_is_cancelled_and_joined_pg() {
         "bridge Error must be delivered"
     );
     assert!(!super::super::error_is_ordinary(Some(&pool), &tok, &inflight(&live), false).await);
+    assert_eq!(live.verdict(), Some(Verdict::Held));
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn p4_stale_reader_without_bridge_stale_decision_is_durably_held_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(4).await;
+    let live = live(&pool, "claude", "unmatched-stale").await;
+    let tok = token(&live);
+    let state = inflight(&live);
+    live.record(Seen::Broken);
+    live.mark_stale();
+    assert!(!super::super::error_is_ordinary(Some(&pool), &tok, &state, false).await);
+    let stored: String =
+        sqlx::query_scalar("SELECT replay_disposition FROM intake_outbox WHERE id=$1")
+            .bind(state.replay_receipt_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored, "withheld",
+        "unmatched stale cannot stay unclassified"
+    );
     assert_eq!(live.verdict(), Some(Verdict::Held));
     pool.close().await;
     db.drop().await;

@@ -1,0 +1,370 @@
+//! Headless starts keep their reservation, source and prepared side inputs across an exact retry.
+use super::super::provider_dispatch::replay_scope;
+use super::*;
+use crate::db::replay_disposition::write::CanonicalInput;
+use crate::services::cluster::attachment_transfer::uploads::PendingUploads;
+use crate::services::discord::gateway::{HeadlessExactGateway, TurnGateway};
+use crate::services::discord::replay_policy::permit::EffectTarget;
+use crate::services::discord::replay_policy::{self, ExactHandoff, ExactRetry};
+use crate::services::discord::router::intake_dispatch::replay_admission::{
+    self as admission, PreparedEffectProjection, ReplayAdmissionContext, ReplayPreflight,
+    ReplayStart, StartStop,
+};
+
+tokio::task_local! { static REENTRY: Arc<OwnedRequest>; }
+
+pub(super) struct Request<'a> {
+    pub ctx: &'a serenity::Context,
+    pub shared: &'a Arc<SharedData>,
+    pub provider: &'a ProviderKind,
+    pub agent: Option<&'a str>,
+    pub channel: ChannelId,
+    pub text: &'a str,
+    pub owner: UserId,
+    pub owner_name: &'a str,
+    pub token: &'a str,
+    pub source: Option<&'a str>,
+    pub metadata: Option<&'a serde_json::Value>,
+    pub channel_hint: Option<&'a str>,
+    pub tmux_label: Option<&'a str>,
+    pub dm_hint: Option<bool>,
+    pub reservation: HeadlessTurnReservation,
+}
+
+pub(super) struct Prepared<'a> {
+    pub prompt: &'a str,
+    pub cwd: &'a str,
+    pub reply: Option<&'a str>,
+    pub uploads: &'a PendingUploads,
+    pub session_key: Option<&'a str>,
+    pub remote: bool,
+    pub tmux: Option<&'a str>,
+}
+
+impl Request<'_> {
+    fn key(&self) -> String {
+        format!(
+            "headless:{}:{}:{}",
+            self.provider.as_str(),
+            self.channel,
+            self.reservation.turn_id(self.channel)
+        )
+    }
+
+    fn input(&self) -> CanonicalInput {
+        CanonicalInput {
+            request_key: self.key(),
+            ..admission::discord_input(
+                self.provider.as_str(),
+                self.channel.get(),
+                self.reservation.user_msg_id.get(),
+                [],
+                self.text,
+            )
+        }
+    }
+
+    pub(super) async fn early(&self) -> Result<(), StartStop> {
+        let channel = self.channel.to_string();
+        if retrying() {
+            return if REENTRY
+                .with(|old| old.provider == *self.provider && old.agent.as_deref() == self.agent)
+            {
+                Ok(())
+            } else {
+                Err(StartStop::Deferred("headless exact owner changed".into()))
+            };
+        }
+        if admission::dormant_start(&channel).is_some() {
+            return Ok(());
+        }
+        let (name, remote) = self
+            .shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get(&self.channel)
+            .map(|session| {
+                (
+                    session.channel_name.clone(),
+                    session.remote_profile_name.is_some(),
+                )
+            })
+            .unwrap_or_default();
+        let tmux = routine_tmux_session_name(
+            self.provider,
+            self.metadata,
+            self.tmux_label,
+            name.as_deref().or(self.channel_hint),
+        );
+        let scope =
+            replay_scope::selected(self.provider, self.channel.get(), remote, tmux.as_deref());
+        if admission::dormant_start_for_driver(&channel, scope.driver).is_some() {
+            return Ok(());
+        }
+        if let Some(turn) = self.metadata.and_then(|value| value.get("turn_id"))
+            && turn.as_str() != Some(self.reservation.turn_id(self.channel).as_str())
+        {
+            return Err(StartStop::Deferred(
+                "headless reservation differs from its durable turn identity".into(),
+            ));
+        }
+        let pool = self
+            .shared
+            .pg_pool
+            .as_ref()
+            .ok_or_else(|| StartStop::Deferred("no replay store".into()))?;
+        let instance =
+            crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+        let context = ReplayAdmissionContext::production(pool, &instance, admission::incarnation())
+            .for_channel(&channel);
+        match admission::preflight_source(&context, &self.input()).await {
+            ReplayPreflight::Admit(_) | ReplayPreflight::LegacyUnprotected => Ok(()),
+            ReplayPreflight::ConsumeProtected(_) => Err(StartStop::Consumed),
+            other => Err(StartStop::Deferred(format!("{other:?}"))),
+        }
+    }
+
+    pub(super) async fn admit(
+        &self,
+        inflight: &mut InflightTurnState,
+        prepared: Prepared<'_>,
+    ) -> Result<(ReplayStart, bool), StartStop> {
+        let channel = self.channel.to_string();
+        let continuation = replay_policy::take_continuation();
+        if continuation.is_none()
+            && let Some(start) = admission::dormant_start(&channel)
+        {
+            return Ok((start, false));
+        }
+        let scope = replay_scope::selected(
+            self.provider,
+            self.channel.get(),
+            prepared.remote,
+            prepared.tmux,
+        );
+        if let Some(start) = admission::dormant_start_for_driver(&channel, scope.driver) {
+            return if continuation.is_none() {
+                Ok((start, false))
+            } else {
+                Err(StartStop::Consumed)
+            };
+        }
+        let session_key = prepared
+            .session_key
+            .ok_or_else(|| StartStop::Deferred("headless session is unbound".into()))?;
+        if REENTRY
+            .try_with(|old| old.session_key.as_str() != session_key || old.cwd != prepared.cwd)
+            .unwrap_or(false)
+        {
+            return Err(StartStop::Deferred(
+                "headless exact session routing or cwd changed".into(),
+            ));
+        }
+        let pool = self
+            .shared
+            .pg_pool
+            .as_ref()
+            .ok_or_else(|| StartStop::Deferred("no replay store".into()))?;
+        let bound: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE session_key=$1)")
+                .bind(session_key)
+                .fetch_one(pool)
+                .await
+                .map_err(|error| StartStop::Deferred(error.to_string()))?;
+        if !bound {
+            return Err(StartStop::Deferred(
+                "headless session binding was not acknowledged".into(),
+            ));
+        }
+        let uploads: Vec<String> = prepared
+            .uploads
+            .iter()
+            .map(|upload| upload.history_record())
+            .collect();
+        let input = CanonicalInput {
+            owner_id: self.owner.to_string(),
+            agent_id: self.agent.unwrap_or_default().into(),
+            attachments: serde_json::json!(uploads),
+            reply_context: prepared.reply.map(str::to_owned),
+            provenance: if continuation.is_some() {
+                "reentry"
+            } else {
+                "new_input"
+            },
+            ..self.input()
+        };
+        let projection = PreparedEffectProjection {
+            target: EffectTarget::ProviderStart {
+                provider: self.provider.as_str().into(),
+                channel,
+            },
+            input_hash: admission::input_hash(prepared.prompt),
+            session_key: Some(session_key.into()),
+            binding: serde_json::json!({"turn_nonce":inflight.turn_nonce, "user_msg_id":inflight.user_msg_id,
+                "placeholder_msg_id":inflight.current_msg_id, "turn_id":self.reservation.turn_id(self.channel),
+                "source":self.source, "metadata":self.metadata, "request_owner_name":self.owner_name,
+                "channel_name_hint":self.channel_hint, "tmux_session_label":self.tmux_label,
+                "is_dm_hint":self.dm_hint, "session_key":session_key, "cwd":prepared.cwd,
+                "driver_scope":scope.driver.as_str(), "runtime_scope":scope.runtime}),
+        };
+        super::super::intake_turn::replay_start::common::begin(
+            self.shared,
+            self.provider,
+            self.channel,
+            inflight,
+            input,
+            projection,
+            continuation,
+        )
+        .await
+    }
+
+    pub(super) fn gateway(
+        &self,
+        inflight: &InflightTurnState,
+        uploads: &PendingUploads,
+        cwd: &str,
+    ) -> Arc<dyn TurnGateway> {
+        let (Some(receipt), Some(session_key)) =
+            (inflight.replay_receipt_id, inflight.session_key.as_ref())
+        else {
+            return Arc::new(HeadlessGateway);
+        };
+        let owned = Arc::new(OwnedRequest {
+            ctx: self.ctx.clone(),
+            shared: self.shared.clone(),
+            provider: self.provider.clone(),
+            agent: self.agent.map(str::to_owned),
+            channel: self.channel,
+            text: self.text.into(),
+            owner: self.owner,
+            owner_name: self.owner_name.into(),
+            token: self.token.into(),
+            source: self.source.map(str::to_owned),
+            metadata: self.metadata.cloned(),
+            channel_hint: self.channel_hint.map(str::to_owned),
+            tmux_label: self.tmux_label.map(str::to_owned),
+            dm_hint: self.dm_hint,
+            reservation: self.reservation,
+            receipt,
+            session_key: session_key.clone(),
+            cwd: cwd.into(),
+            reply: inflight.followup_reply_context.clone(),
+            uploads: uploads.clone(),
+            sources: inflight.source_message_ids.clone(),
+        });
+        Arc::new(HeadlessExactGateway::new(move |channel, retry| {
+            let owned = Arc::clone(&owned);
+            Box::pin(async move { owned.retry(channel, retry).await })
+        }))
+    }
+}
+
+struct OwnedRequest {
+    ctx: serenity::Context,
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    agent: Option<String>,
+    channel: ChannelId,
+    text: String,
+    owner: UserId,
+    owner_name: String,
+    token: String,
+    source: Option<String>,
+    metadata: Option<serde_json::Value>,
+    channel_hint: Option<String>,
+    tmux_label: Option<String>,
+    dm_hint: Option<bool>,
+    reservation: HeadlessTurnReservation,
+    receipt: i64,
+    session_key: String,
+    cwd: String,
+    reply: Option<String>,
+    uploads: PendingUploads,
+    sources: Vec<u64>,
+}
+
+impl OwnedRequest {
+    async fn retry(self: Arc<Self>, channel: ChannelId, retry: ExactRetry) -> ExactHandoff {
+        let mut sources: Vec<_> = retry.sources.iter().map(|id| id.get()).collect();
+        let mut expected = self.sources.clone();
+        sources.sort_unstable();
+        sources.dedup();
+        expected.sort_unstable();
+        expected.dedup();
+        if channel != self.channel
+            || retry.user_message_id != self.reservation.user_msg_id
+            || retry.request_owner != self.owner
+            || retry.text != self.text
+            || retry.reply_context != self.reply
+            || sources != expected
+            || retry.permit.receipt_id() != self.receipt
+        {
+            return ExactHandoff::Refused;
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while crate::services::discord::mailbox_snapshot(&self.shared, channel)
+            .await
+            .cancel_token
+            .is_some()
+        {
+            if tokio::time::Instant::now() >= deadline {
+                return ExactHandoff::Refused;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let context = Arc::clone(&self);
+        REENTRY
+            .scope(context, async {
+                let start = super::start_reserved_headless_turn_with_owner(
+                    &self.ctx,
+                    channel,
+                    &self.text,
+                    &self.owner_name,
+                    self.owner,
+                    &self.shared,
+                    &self.token,
+                    self.source.as_deref(),
+                    self.metadata.clone(),
+                    self.channel_hint.clone(),
+                    self.tmux_label.clone(),
+                    self.dm_hint,
+                    self.reservation,
+                );
+                let (result, handoff) = replay_policy::hand_over(retry.permit, start).await;
+                if let Err(error) = result {
+                    tracing::warn!(%error, "headless exact start refused");
+                }
+                handoff
+            })
+            .await
+    }
+}
+
+pub(super) fn retrying() -> bool {
+    REENTRY.try_with(|_| ()).is_ok()
+}
+
+pub(super) fn reply(current: Option<String>) -> Option<String> {
+    REENTRY.try_with(|old| old.reply.clone()).unwrap_or(current)
+}
+
+pub(super) fn take_uploads(current: &mut PendingUploads) -> PendingUploads {
+    REENTRY
+        .try_with(|old| old.uploads.clone())
+        .unwrap_or_else(|_| std::mem::take(current))
+}
+
+pub(super) fn take_session_retry_context(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    turn: Option<&str>,
+) -> Option<super::super::super::turn_start::FormattedSessionRetryContext> {
+    if retrying() {
+        None
+    } else {
+        super::super::super::turn_start::take_session_retry_context(shared, channel, turn)
+    }
+}

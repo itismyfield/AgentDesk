@@ -71,7 +71,7 @@ async fn stale_attempt_retries_only_on_committed_no_effect_evidence_pg() {
     let before = stored(&pool, probe.receipt_id()).await;
     let legacy = observed(&probe, &[], true);
     assert!(matches!(
-        decide_stale(&pool, None, &legacy).await,
+        decide_stale(&pool, None, &legacy, None).await,
         ReplayDecision::NotApplicable
     ));
     assert_eq!(
@@ -84,7 +84,7 @@ async fn stale_attempt_retries_only_on_committed_no_effect_evidence_pg() {
     let (id, previous) = (quiet.receipt_id(), quiet.nonce().to_string());
     let observation = observed(&quiet, &[Seen::Terminal(TerminalKind::Error)], true);
     let ReplayDecision::AllowStartupRetry(permit) =
-        decide_stale(&pool, Some(quiet), &observation).await
+        decide_stale(&pool, Some(quiet), &observation, None).await
     else {
         panic!("complete no-effect evidence must allow one retry");
     };
@@ -117,7 +117,7 @@ async fn stale_attempt_retries_only_on_committed_no_effect_evidence_pg() {
         let attempt = start(&pool, &format!("held-{n}")).await;
         let (id, nonce) = (attempt.receipt_id(), attempt.nonce().to_string());
         let observation = observed(&attempt, &extra, complete);
-        let decision = decide_stale(&pool, Some(attempt), &observation).await;
+        let decision = decide_stale(&pool, Some(attempt), &observation, None).await;
         assert!(
             matches!(decision, ReplayDecision::WithholdReplay { persisted: true }),
             "{extra:?} complete={complete}: {decision:?}"
@@ -161,7 +161,7 @@ async fn stale_decision_failures_hold_without_a_permit_pg() {
         .await
         .unwrap();
     let quiet = observed(&elsewhere, &[], true);
-    let decision = decide_stale(&pool, Some(elsewhere), &quiet).await;
+    let decision = decide_stale(&pool, Some(elsewhere), &quiet, None).await;
     assert!(
         matches!(
             decision,
@@ -175,7 +175,7 @@ async fn stale_decision_failures_hold_without_a_permit_pg() {
     let lost = start(&pool, "lost-no-effect").await;
     let id = lost.receipt_id();
     let quiet = observed(&lost, &[], true);
-    let decision = decide_stale(&pool, Some(lost), &quiet).await;
+    let decision = decide_stale(&pool, Some(lost), &quiet, None).await;
     assert!(
         matches!(
             decision,
@@ -189,7 +189,7 @@ async fn stale_decision_failures_hold_without_a_permit_pg() {
     let active = start(&pool, "lost-hold").await;
     let id = active.receipt_id();
     let busy = observed(&active, &[Seen::Activity(Activity::Tool)], true);
-    let decision = decide_stale(&pool, Some(active), &busy).await;
+    let decision = decide_stale(&pool, Some(active), &busy, None).await;
     assert!(
         matches!(
             decision,

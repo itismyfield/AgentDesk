@@ -1091,3 +1091,55 @@ async fn recovery_unprojected_lookup_failure_retains_bytes_until_authority_retur
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn p4_dormant_no_store_history_retry_still_fetches_and_enqueues() {
+    use crate::services::discord::turn_bridge::recovery_text::{
+        auto_retry_with_history, release_retry_pending,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    assert!(shared.pg_pool.is_none());
+    let hits = Arc::new(AtomicUsize::new(0));
+    let observed = hits.clone();
+    let app = axum::Router::new().fallback(move || {
+        let observed = observed.clone();
+        async move {
+            observed.fetch_add(1, Ordering::SeqCst);
+            axum::Json(serde_json::json!([]))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = serenity::HttpBuilder::new("test-token")
+        .proxy(format!("http://{}", listener.local_addr().unwrap()))
+        .ratelimiter_disabled(true)
+        .build();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let channel = ChannelId::new(7_330_431);
+    let user = MessageId::new(7_330_432);
+    auto_retry_with_history(
+        &http,
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        user,
+        "original",
+    )
+    .await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "off must reach the actual history GET without PG"
+    );
+    let snapshot = shared.mailbox(channel).snapshot().await;
+    assert!(
+        snapshot
+            .intervention_queue
+            .iter()
+            .any(|item| item.message_id == user)
+    );
+    release_retry_pending(channel);
+    server.abort();
+}

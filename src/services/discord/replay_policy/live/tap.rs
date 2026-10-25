@@ -81,7 +81,7 @@ impl RawTap {
         }
     }
 
-    pub(crate) fn file_line(&self, _line: &str) {
+    pub(crate) fn file_activity(&self) {
         if !self.active() {
             return;
         }

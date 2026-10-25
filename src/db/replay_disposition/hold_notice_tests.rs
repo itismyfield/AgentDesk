@@ -589,6 +589,7 @@ async fn recovery_hold_notice_serializes_with_the_live_hold_writer_pg() {
             attempt.receipt_id(),
             "claude",
             "123456789",
+            "incarnation-current",
             Some(&body),
             ROUTING
         ),
@@ -611,6 +612,7 @@ async fn recovery_hold_notice_serializes_with_the_live_hold_writer_pg() {
             attempt.receipt_id(),
             "codex",
             "123456789",
+            "incarnation-current",
             None,
             ROUTING
         )
@@ -618,8 +620,16 @@ async fn recovery_hold_notice_serializes_with_the_live_hold_writer_pg() {
         Err(write::WriteError::CasMiss)
     ));
     assert!(matches!(
-        write::recover_hold_notice(&pool, attempt.receipt_id(), "claude", "999", None, ROUTING)
-            .await,
+        write::recover_hold_notice(
+            &pool,
+            attempt.receipt_id(),
+            "claude",
+            "999",
+            "incarnation-current",
+            None,
+            ROUTING
+        )
+        .await,
         Err(write::WriteError::CasMiss)
     ));
     let tuple: (String, String) = sqlx::query_as(
@@ -635,6 +645,7 @@ async fn recovery_hold_notice_serializes_with_the_live_hold_writer_pg() {
         attempt.receipt_id(),
         "claude",
         "123456789",
+        "incarnation-current",
         None,
         ROUTING,
     )
@@ -657,6 +668,7 @@ async fn recovery_enqueue_failure_keeps_original_tuple_and_delivery_custody_pg()
             attempt.receipt_id(),
             "claude",
             "123456789",
+            "incarnation-current",
             None,
             ROUTING
         )
@@ -676,6 +688,7 @@ async fn recovery_enqueue_failure_keeps_original_tuple_and_delivery_custody_pg()
             attempt.receipt_id(),
             "claude",
             "123456789",
+            "incarnation-current",
             None,
             ROUTING
         )
@@ -683,6 +696,30 @@ async fn recovery_enqueue_failure_keeps_original_tuple_and_delivery_custody_pg()
         .is_ok()
     );
     assert_eq!(snapshot(&pool, attempt.receipt_id()).await.2, 1);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn p4_recovery_cannot_withhold_the_current_live_owner_pg() {
+    let (db, pool) = fixture().await;
+    let attempt = start(&pool, "current-owner").await;
+    let before = snapshot(&pool, attempt.receipt_id()).await;
+    let result = write::recover_hold_notice(
+        &pool,
+        attempt.receipt_id(),
+        "claude",
+        "123456789",
+        "incarnation-a",
+        None,
+        ROUTING,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(write::WriteError::CasMiss)),
+        "live owner must keep its started attempt: {result:?}"
+    );
+    assert_eq!(snapshot(&pool, attempt.receipt_id()).await, before);
     pool.close().await;
     db.drop().await;
 }

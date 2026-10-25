@@ -16,6 +16,14 @@ use crate::services::provider::CancelToken;
 use live::{LiveAttempt, RawObservation, Verdict};
 use sqlx::PgPool;
 
+/// Admission and restart recovery compare the same process owner incarnation.
+static INCARNATION: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+
+pub(crate) fn incarnation() -> &'static str {
+    &INCARNATION
+}
+
 #[derive(Debug)]
 pub(crate) enum ReplayDecision {
     /// No protected attempt is attached; the existing path runs unchanged.
@@ -32,6 +40,7 @@ pub(crate) async fn decide_stale(
     pool: &PgPool,
     attempt: Option<ExactAttempt>,
     observation: &RawObservation,
+    capture: Option<&InflightTurnState>,
 ) -> ReplayDecision {
     let Some(attempt) = attempt else {
         return ReplayDecision::NotApplicable;
@@ -49,18 +58,32 @@ pub(crate) async fn decide_stale(
     } else {
         observation.hold_reason()
     };
-    let persisted = withhold(pool, &attempt, reason).await;
+    let persisted = withhold(pool, &attempt, reason, capture).await;
     ReplayDecision::WithholdReplay { persisted }
 }
 
-async fn withhold(pool: &PgPool, attempt: &ExactAttempt, reason: &str) -> bool {
-    let preserved = serde_json::json!({ "hold": { "nonce": attempt.nonce(), "reason": reason } });
-    write::withhold(pool, attempt, reason, &preserved)
-        .await
-        .inspect_err(|error| {
-            tracing::warn!(receipt = attempt.receipt_id(), %error, "replay hold was not committed")
-        })
-        .is_ok()
+async fn withhold(
+    pool: &PgPool,
+    attempt: &ExactAttempt,
+    reason: &str,
+    capture: Option<&InflightTurnState>,
+) -> bool {
+    let preserved = serde_json::json!({
+        "hold": { "nonce": attempt.nonce(), "reason": reason },
+        "recovery_snapshot": capture,
+    });
+    write::withhold_and_notify(
+        pool, attempt, reason, &preserved,
+        crate::db::replay_disposition::hold_notice::NoticeRouting {
+            bot: "notify",
+            session_key: capture.and_then(|state| state.session_key.as_deref()),
+        },
+    )
+    .await
+    .inspect_err(|error| {
+        tracing::warn!(receipt = attempt.receipt_id(), %error, "replay hold and notice were not committed")
+    })
+    .is_ok()
 }
 
 /// The right to prepare one exact retry of a committed no-effect nonce.

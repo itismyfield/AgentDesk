@@ -227,7 +227,7 @@ where
                         continue;
                     }
 
-                    tap.file_line(trimmed);
+                    tap.file_activity();
                     if !process_line(trimmed, state) {
                         return Ok(ReadOutputResult::Cancelled {
                             offset: committed_offset,

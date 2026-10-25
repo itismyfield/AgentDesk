@@ -97,6 +97,10 @@ pub(crate) fn execute_streaming_local_process(
 
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
+    #[cfg(test)]
+    let exe = std::env::var_os("ADK_TEST_PROCESS_WRAPPER_EXE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(exe);
 
     let env_vars = crate::services::provider_auth_profile::merge_overlay_env(
         resolution

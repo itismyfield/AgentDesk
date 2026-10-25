@@ -1175,6 +1175,8 @@ src/
 │   │   │   ├── streaming_status.rs
 │   │   │   └── tool_markdown.rs
 │   │   ├── gateway/
+│   │   │   ├── headless.rs
+│   │   │   ├── headless_exact.rs
 │   │   │   ├── intake_placeholder_retirement_tests.rs
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
@@ -1785,6 +1787,9 @@ src/
 │   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   ├── foreign_row_refusal_tests.rs
 │   │   │   │   │   ├── process_mailbox.rs
+│   │   │   │   │   ├── recovery_context_take_order_tests.rs
+│   │   │   │   │   ├── replay_start.rs
+│   │   │   │   │   ├── replay_start_tests.rs
 │   │   │   │   │   └── routine_metadata.rs
 │   │   │   │   ├── intake_turn/
 │   │   │   │   │   ├── race_loss/
@@ -1794,6 +1799,8 @@ src/
 │   │   │   │   │   │   └── requeue_tests.rs
 │   │   │   │   │   ├── recovery_context_take_order_tests/
 │   │   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   │   ├── replay_start/
+│   │   │   │   │   │   └── common.rs
 │   │   │   │   │   ├── retry_prompt/
 │   │   │   │   │   │   ├── tests.rs
 │   │   │   │   │   │   └── wiring_tests.rs
@@ -1819,7 +1826,8 @@ src/
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
-│   │   │   │   │   └── producer_error_test_support.rs
+│   │   │   │   │   ├── producer_error_test_support.rs
+│   │   │   │   │   └── replay_scope.rs
 │   │   │   │   ├── provider_isolation/
 │   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/

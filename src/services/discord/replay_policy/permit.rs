@@ -70,6 +70,17 @@ impl StartPermit {
         &self.attempt
     }
 
+    pub(crate) fn matches_start_scope(&self, driver: &str, runtime: &str) -> bool {
+        driver == "legacy-prompt"
+            && [("driver_scope", driver), ("runtime_scope", runtime)]
+                .iter()
+                .all(|(key, expected)| {
+                    self.binding
+                        .get(key)
+                        .is_none_or(|stored| stored.as_str() == Some(*expected))
+                })
+    }
+
     /// Spends the permit on its own target and prepared input; a mismatch drops it without the effect.
     pub(crate) fn consume<R>(
         self,
