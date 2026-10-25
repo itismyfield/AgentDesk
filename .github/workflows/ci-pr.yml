@@ -947,7 +947,6 @@ jobs:
               - 'src/services/discord/relay_recovery_circuit_breaker.rs'
               - 'src/services/discord/replace_outcome_policy.rs'
               - 'src/services/discord/replay_policy.rs'
-              - 'src/services/discord/restart_mode/**'
               - 'src/services/discord/router/**'
               - 'src/services/discord/runtime_bootstrap.rs'
               - 'src/services/discord/runtime_bootstrap/**'
