@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Component, PathBuf};
 
 const TTL: u64 = 30 * 60;
-const SCHEMA: u32 = 2;
+const SCHEMA: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -366,14 +366,7 @@ impl ConsentStore {
                 }
                 if retry && current.state == State::Applied {
                     Self::append_intent(&mut current, &intent, &question_preview)?;
-                    let changed = current.unresolved_intents().iter().any(|intent| {
-                        current.intent_previews.iter().any(|held| {
-                            held.store == intent.store
-                                && held.id == intent.id
-                                && held.preview != current.preview
-                        })
-                    });
-                    if !current.releasable_intents().is_empty() || !changed {
+                    if !current.needs_new_generation() {
                         already_applied = true;
                         return serde_json::to_vec(&current).map_err(|e| e.to_string());
                     }

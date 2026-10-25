@@ -85,6 +85,47 @@ pub(crate) trait RowSource {
 pub(crate) trait HoldSource {
     const INTRODUCED: bool;
     async fn unresolved(&self, channels: &BTreeSet<u64>) -> Result<Vec<u64>, String>;
+    /// Held channels for this move; only a return reserved for `candidate` lets its input pass.
+    async fn blocking(
+        &self,
+        channels: &BTreeSet<u64>,
+        _candidate: &BootSessionHosts,
+    ) -> Result<Vec<u64>, String> {
+        self.unresolved(channels).await
+    }
+    /// Runs after `approved` is durable: the returns reserved for it are now adopted.
+    async fn adopted(
+        &self,
+        _approved: &BootSessionHosts,
+        _channels: &BTreeSet<u64>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Names one channel's endpoint binding; a returned input is reserved for exactly this value.
+#[cfg(unix)]
+pub(crate) fn binding_digest(hosts: &SessionHostsConfig, channel: u64) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let mapped = super::projected_channels(hosts).ok()?.remove(&channel)?;
+    let mode = hosts.herdr.endpoints.get(&mapped.key)?.mode;
+    let ChannelEndpoint {
+        key,
+        execution_node,
+        socket_path,
+        herdr_home,
+        herdr_session,
+    } = mapped;
+    let bound = (
+        channel,
+        key,
+        execution_node,
+        socket_path,
+        herdr_home,
+        herdr_session,
+        mode,
+    );
+    Some(Sha256::digest(serde_json::to_vec(&bound).ok()?).into())
 }
 
 pub(crate) struct NoHoldStore;
@@ -274,6 +315,8 @@ async fn select_projection<S: ApprovalStore, R: RowSource, H: HoldSource>(
             vec![],
         );
     }
+    let hold_changes = consent_holds::affected_user_default(&approved, &candidate, &changes);
+    let consult = H::INTRODUCED && !hold_changes.is_empty();
     if !changes.is_empty() {
         if !rows.available() {
             return selection.diagnose(
@@ -292,9 +335,8 @@ async fn select_projection<S: ApprovalStore, R: RowSource, H: HoldSource>(
                 );
             }
         };
-        let hold_changes = consent_holds::affected_user_default(&approved, &candidate, &changes);
-        let held = if H::INTRODUCED && !hold_changes.is_empty() {
-            holds.unresolved(&hold_changes).await
+        let held = if consult {
+            holds.blocking(&hold_changes, &candidate).await
         } else {
             Ok(HOLDS_NOT_INTRODUCED.to_vec())
         };
@@ -324,6 +366,10 @@ async fn select_projection<S: ApprovalStore, R: RowSource, H: HoldSource>(
     }
     if let Err(error) = store.save(&candidate) {
         return selection.diagnose("approval_snapshot_not_durable", &changes, vec![error]);
+    }
+    // A missed record stays provable while this approval stands; the return command re-checks it.
+    if consult && let Err(error) = holds.adopted(&candidate, &hold_changes).await {
+        tracing::warn!(%error, "returned consent inputs keep their reservation after approval");
     }
     HostsBootSelection::new(candidate.clone(), &candidate)
 }

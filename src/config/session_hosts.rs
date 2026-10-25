@@ -200,6 +200,14 @@ pub(crate) fn validate(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>
 }
 
 fn validate_effective(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>> {
+    for (key, endpoint) in &config.session_hosts.herdr.endpoints {
+        ensure!(
+            endpoint.mode != EndpointMode::UserDefault,
+            "session_hosts.herdr.endpoints.{key}.mode: user_default support pieces have not \
+             landed; keep the existing legacy_dedicated endpoint until support is complete \
+             (지원 조각 미착지)"
+        );
+    }
     let channels = projected_channels(&config.session_hosts)?;
     for &channel in channels.keys() {
         bound_as_tui(config, CHANNELS_KEY, channel, &["claude", "codex"])?;
@@ -215,11 +223,6 @@ fn projected_channels(hosts: &SessionHostsConfig) -> Result<BTreeMap<u64, Channe
     for (key, endpoint) in &herdr.endpoints {
         let at = format!("session_hosts.herdr.endpoints.{key}");
         let filled = |value: &str| !value.trim().is_empty();
-        ensure!(
-            endpoint.mode != EndpointMode::UserDefault,
-            "{at}.mode: user_default support pieces have not landed; keep the existing \
-             legacy_dedicated endpoint until support is complete (지원 조각 미착지)"
-        );
         ensure!(
             filled(key),
             "session_hosts.herdr.endpoints has an empty key"
@@ -358,7 +361,7 @@ pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) ->
 pub(crate) fn with_boot_migration<R>(read: impl FnOnce(Option<&BootMigration>) -> R) -> R {
     #[cfg(test)]
     if FORCED.with(|forced| forced.borrow().is_some()) {
-        return read(None);
+        return FORCED_MIGRATION.with(|forced| read(forced.borrow().as_ref()));
     }
     read(BOOT_MIGRATION.get())
 }
@@ -388,11 +391,24 @@ pub(crate) fn local_node() -> Option<String> {
 #[cfg(test)]
 thread_local! {
     static FORCED: std::cell::RefCell<Option<BootSessionHosts>> = const { std::cell::RefCell::new(None) };
+    static FORCED_MIGRATION: std::cell::RefCell<Option<BootMigration>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Replaces the boot section on this thread until dropped.
 #[cfg(test)]
-pub(crate) struct ForcedSessionHosts(Option<BootSessionHosts>);
+pub(crate) struct ForcedSessionHosts(Option<BootSessionHosts>, Option<BootMigration>);
+
+/// Installs a real selection's hosts and migration metadata on this thread until dropped.
+#[cfg(test)]
+pub(crate) fn force_selected_for_test(
+    selection: migration::HostsBootSelection,
+) -> ForcedSessionHosts {
+    let (hosts, metadata) = selection.into_parts();
+    ForcedSessionHosts(
+        FORCED.with(|forced| forced.replace(Some(hosts))),
+        FORCED_MIGRATION.with(|forced| forced.replace(Some(metadata))),
+    )
+}
 
 #[cfg(test)]
 pub(crate) fn force_for_test(
@@ -442,7 +458,10 @@ pub(crate) fn force_with_claude_guard_for_test(
         channels,
         local_node: local_node.map(str::to_owned),
     };
-    ForcedSessionHosts(FORCED.with(|forced| forced.replace(Some(boot))))
+    ForcedSessionHosts(
+        FORCED.with(|forced| forced.replace(Some(boot))),
+        FORCED_MIGRATION.with(|forced| forced.take()),
+    )
 }
 
 /// Fixes `channels` as the boot section of this whole process; only an isolated child may call it.
@@ -477,6 +496,7 @@ impl ForcedSessionHosts {
 impl Drop for ForcedSessionHosts {
     fn drop(&mut self) {
         FORCED.with(|forced| *forced.borrow_mut() = self.0.take());
+        FORCED_MIGRATION.with(|forced| *forced.borrow_mut() = self.1.take());
     }
 }
 
