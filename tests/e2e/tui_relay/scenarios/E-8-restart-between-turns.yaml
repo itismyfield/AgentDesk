@@ -11,8 +11,8 @@ steps:
   - wait_for_discord_text: "[E2E:E8:PRE]"
     timeout_s: 240
   - wait_idle_s: 3
-  - restart_dcserver:
-      target: dev
+  # The run picks dev or release from --base-url or --restart-target-override.
+  - restart_dcserver: {}
   - wait_idle_s: 15
   - send_prompt: "응답에 정확히 한 줄로 [E2E:E8:POST] 만 출력해줘."
   - wait_for_discord_text: "[E2E:E8:POST]"

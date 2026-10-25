@@ -10,9 +10,8 @@ import re
 import subprocess
 import time
 import urllib.error
-import urllib.parse
 
-from . import assertions, health_readiness, http_auth, known_gap
+from . import assertions, health_readiness, http_auth, known_gap, restart_guard
 
 TMUX_STEPS = {
     "kill_pane", "capture_session_identity", "assert_session_preserved",
@@ -227,13 +226,7 @@ def expected_cancel_refusal(error):
 
 
 def validate_restart_binding(scenario, args):
-    port = urllib.parse.urlparse(getattr(args, "base_url", "")).port
-    expected = {8797: "dev", 8791: "release"}.get(port)
-    for step in scenario.get("steps", []):
-        if "restart_dcserver" in step:
-            target = getattr(args, "restart_target_override", None) or (step["restart_dcserver"] or {}).get("target", "release")
-            if target not in ("dev", "release") or (expected and target != expected):
-                raise ValueError(f"restart target {target!r} does not match base URL {args.base_url}")
+    restart_guard.validate_binding(scenario, args)
 
 
 def omissions(scenario):
@@ -560,9 +553,7 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 before = [r for r in executions if r.get("provider") == driver.cell_provider(args.cell) and r.get("state") == "bound"]
                 if len(before) != 1 or not before[0].get("nonce") or before[0].get("pane") != "provider_running":
                     raise assertions.AssertionError("restart requires one running target row")
-                target = args.restart_target_override or (step["restart_dcserver"] or {}).get("target", "release")
-                if target not in ("dev", "release"):
-                    raise ValueError("invalid dcserver restart target")
+                target = restart_guard.target(step["restart_dcserver"], args)
                 incarnation = driver._boot_incarnation(args.base_url)
                 subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.agentdesk.{target}"], check=True, timeout=90)
                 deadline = time.monotonic() + 90

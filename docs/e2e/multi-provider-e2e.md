@@ -234,6 +234,12 @@ Covered P0/P1 backlog items:
 - `foreign-active destructive restart refusal` (#2935): `E-17`, orchestrator-owned
   hold of a foreign `claude-tui` mailbox while a `codex-tui` restart is attempted
   (guard-only, no real restart).
+- `/compact recap not relayed as input`: `E-6`, Claude cells. The oracle is the
+  two continuation openings `injected_prompt_policy.rs` classifies; no bot post may
+  quote either, so a relayed recap or a direct-input notice for it fails.
+- `multi-unit characters across chunk boundaries`: `E-15`'s second (UTF-16) turn,
+  all cells. Every post stays within 2000 UTF-16 units with no U+FFFD or lone
+  surrogate, and the emoji payload must reach at least two relay bodies.
 
 Remaining exact gaps:
 

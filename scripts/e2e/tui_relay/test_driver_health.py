@@ -3606,6 +3606,26 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
         self.assertIsNone(outcome["passed"])
         self.assertEqual(outcome["required_feature"], "two_message_panel")
 
+    def e15_turns(self, terminal):
+        # Each turn's posts are stamped at its own send, so completion_per_turn attributes them per prompt.
+        rows, sent = [], []
+        line = "E15U-LINE-{:03} 🧪🌏🎯🪐🧪🌏🎯🪐 가나다라마바사".format
+        turns = [["[E2E:E15:BEGIN]\nE15-LINE-010\n[E2E:E15:MID]\nE15-LINE-150\n[E2E:E15:END]"],
+                 ["[E2E:E15U:BEGIN]\n" + "\n".join(map(line, range(1, 41))),
+                  "\n".join(map(line, range(41, 61))) + "\n[E2E:E15U:MID]\n" + "\n".join(map(line, range(61, 91))),
+                  "\n".join(map(line, range(91, 121))) + "\n[E2E:E15U:END]"]]
+
+        def send_prompt(*_args, **_kwargs):
+            sent_at = driver.dt.datetime.now(driver.dt.timezone.utc).isoformat()
+            for body in turns[len(sent)] + ([terminal] if terminal != "absent" else []):
+                rows.append({"id": str(120 + len(rows)), "content": body, "timestamp": sent_at,
+                             "author": {"id": "provider", "bot": True}})
+            sent.append(sent_at)
+            return {"id": "111"}
+
+        self.client.send_prompt.side_effect = send_prompt
+        return rows
+
     def test_e9_e15_require_summary_and_reject_retired_panels_without_feature_gates(self):
         self.stub(driver, "restart_dcserver_for_e2e", return_value={"before": "a", "after": "b"})
         self.stub(driver, "assert_health", return_value={"status": "healthy"})
@@ -3620,6 +3640,8 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
                              "author": {"id": "provider", "bot": True}}]
                     if terminal != "absent":
                         rows.append({**rows[0], "id": "130", "content": terminal, "timestamp": (stamp + driver.dt.timedelta(seconds=2)).isoformat()})
+                    if scenario_id == "E-15":
+                        rows = self.e15_turns(terminal)
                     self.client.fetch_messages.side_effect = lambda *a, **k: [
                         row for row in rows if self.client.send_prompt.called and int(row["id"]) > int(k.get("after_id") or 0)]
                     rc, report, _ = self.main_result(self.load(scenario_id))
@@ -4132,6 +4154,55 @@ class PhasePartialEvidenceContract(_OutcomeFixture, unittest.TestCase):
                 self.client.fetch_messages.side_effect = error
                 with self.assertRaises(type(error)): self.main_result(self.scenario())
                 self.assertEqual(self.client.send_control.call_count, 1)
+
+
+class RestartTargetParameterized(_OutcomeFixture, unittest.TestCase):
+    """The run, not the YAML, names the restarted server; a mismatch is refused before any send."""
+
+    def restart_step(self, scenario_id):
+        path = next((ROOT / "tests/e2e/tui_relay/scenarios").glob(f"{scenario_id}-*.yaml"))
+        return next(step for step in driver.yaml.safe_load(path.read_text())["steps"] if "restart_dcserver" in step)
+
+    def test_no_active_scenario_hard_codes_a_restart_target(self):
+        for path in sorted((ROOT / "tests/e2e/tui_relay/scenarios").glob("*.yaml")):
+            for step in driver.yaml.safe_load(path.read_text()).get("steps") or []:
+                if "restart_dcserver" in step:
+                    with self.subTest(path=path.name):
+                        self.assertNotIn("target", step["restart_dcserver"] or {})
+
+    def test_restart_scenarios_restart_the_server_under_test(self):
+        restart = self.stub(driver, "restart_dcserver_for_e2e", return_value={"before": "a", "after": "b"})
+        for base_url, override, expected in (("http://127.0.0.1:8791", None, "release"),
+                                             ("http://127.0.0.1:8797", None, "dev"),
+                                             ("http://agentdesk.test", "dev", "dev"),
+                                             ("http://agentdesk.test", None, "release")):
+            for scenario_id in ("E-8", "E-9", "E-10", "E-14", "E-61"):
+                with self.subTest(base_url=base_url, override=override, scenario=scenario_id):
+                    restart.reset_mock()
+                    self.args.base_url, self.args.restart_target_override = base_url, override
+                    scenario = {**self.scenario(scenario_id, [self.restart_step(scenario_id)]), "agent_mode": "controlled"}
+                    rc, report, _ = self.main_result(scenario)
+                    self.assertEqual((rc, report["scenarios"][0]["status"]), (0, "pass"), report["scenarios"][0].get("reason"))
+                    self.assertEqual(restart.call_args.kwargs["target"], expected)
+
+    def test_target_disagreeing_with_base_url_is_refused_before_any_send(self):
+        restart = self.stub(driver, "restart_dcserver_for_e2e", return_value={"before": "a", "after": "b"})
+        for base_url, override, declared in (("http://127.0.0.1:8791", None, "dev"),
+                                             ("http://127.0.0.1:8791", "dev", None),
+                                             ("http://127.0.0.1:8797", None, "release")):
+            with self.subTest(base_url=base_url, override=override, declared=declared):
+                self.client.send_prompt.reset_mock()
+                self.client.send_control.reset_mock()
+                self.args.base_url, self.args.restart_target_override = base_url, override
+                step = {"restart_dcserver": {"target": declared} if declared else {}}
+                rc, report, _ = self.main_result(self.scenario("E-X", [{"send_prompt": "hello"}, step]))
+                row = report["scenarios"][0]
+                self.assertEqual((rc, row["status"]), (1, "fail"))
+                self.assertEqual(row["failure_attribution"]["source"], "config")
+                self.assertIn("does not match base URL", row["reason"])
+                self.client.send_control.assert_not_called()
+                self.client.send_prompt.assert_not_called()
+        restart.assert_not_called()
 
 
 class E37CodexModelLocalControl(unittest.TestCase):

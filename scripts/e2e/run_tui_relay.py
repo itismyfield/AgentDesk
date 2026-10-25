@@ -1053,6 +1053,7 @@ ASSERTION_OPTIONS = {
     "no_duplicate_marker_with_known_gap": {"marker", "known_gap"},
     "deliver_result": {"delivery", "inject_veto"}, "completion_per_turn": {"exact", "marker"},
     "turn_summary_after_body": {"body_marker", "header", "before_marker", "tool_label", "output_owner"}, "autonomous_background_turn": {"armed_marker", "auto_marker"},
+    "utf16_chunk_integrity": {"max_units", "min_chunks"},
 }
 
 
@@ -3271,6 +3272,12 @@ def run_scenario(
                 scenario_id=scenario_id,
             )
         return result
+    try:
+        restart_guard.validate_binding(scenario, args)
+    except ValueError as error:
+        result.update(status="fail", reason=str(error))
+        result["failure_attribution"] = _failure_attribution("config", str(error))
+        return result
 
     durable_probe = bool(scenario.get("durable_delivery_probe"))
     if durable_probe and not args.dry_run:
@@ -4041,7 +4048,7 @@ def run_one_cell(
                 raise ScenarioStepAssertionError(str(error), record=record) from error
         elif "restart_dcserver" in step:
             restart_options = step["restart_dcserver"] or {}
-            target = args.restart_target_override or restart_options.get("target", "release")
+            target = restart_guard.target(restart_options, args)
             record.setdefault("restart_incarnations", []).append(restart_dcserver_for_e2e(
                 target=target,
                 args=args,
@@ -4832,6 +4839,10 @@ def run_assertion(
         record["autonomous_background_turn"] = {"binding": binding, **evidence}
     elif spec.get("no_duplicate_content"):
         assertions.no_duplicate_content(window)
+    elif "utf16_chunk_integrity" in spec:
+        params = spec["utf16_chunk_integrity"]
+        assertions.utf16_chunk_integrity(window, max_units=int(params.get("max_units", 2000)),
+                                         min_chunks=int(params.get("min_chunks", 2)))
     elif "text_present" in spec:
         assertions.text_present(window, needle=expand_marker(spec["text_present"]))
     elif "provider_text_present" in spec:
