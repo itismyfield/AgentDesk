@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "227488f6d43b96cd34fc4e856aeb93d976855ba0",
+  "measured_at_sha": "eb78c7e6d70b98346146067f3e9ef15230da0475",
   "records": [
     {
       "root": "migrations/postgres",
@@ -13771,6 +13771,87 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:8d28570549798dea22f605eac22718161e196f7a3b7ccbf4bbba48b7ef6b0efa"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/postgres/agent_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:16f47a048071dee0f73657a23e21555705827d5eeb85d0ffac463cbe1999b2dd"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/postgres/agent_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2818b29bdd8bc0c2343fc74201c5e9179a18a798c5570da2fc356655e98e0834"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/postgres/agent_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:72dc8245ef5f7bc6c6e2a47411ba7b10cab437d27abaeabc896917da8ba18e47"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/postgres/agent_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7bae2c48ccf1e06d608df1ebc886908a5dfbfc57f8263f6cb42fc87ca331f45d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/postgres/agent_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8092427edc65413e896fef2c4c643d20861ca04f7eb1962d631bc3647c47a7cd"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/postgres/agent_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:86f76bacab7aa5d54b80bec1bad3b65ecaf5ce9e3520e07b29cf23cdf77f55fa"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/postgres/agent_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:4400bd1a7ad0304952b3e659deefcd325307c72bac24144405764acbf12eca3c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/postgres/agent_sync.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:956b892028e714d1fa728d30227ec799b0f13ced4e849de8162fdde37a1555b9"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/postgres/agent_sync.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e79a95c41721df5acc214d9dc9cb14aadc2ef0affb227b107f6a7a11fbd0f3fe"
     },
     {
       "root": "src",
@@ -31397,6 +31478,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/health/o_transition/codex_retention_e2e_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:279c614e1365c4b4b3e64ca44a10788c265a86b489c32dccc626a95a1cb0f9ff"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/health/recovery.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",
@@ -39340,6 +39430,51 @@
       "symbol": "raw_sql",
       "classification": "STATIC",
       "fingerprint": "sha256:c0b9520dfc4e74f1ee48de63d772c38a5417111f8a64e2880c43faba12d1fdd6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/maintenance/jobs/db_retention/queue_and_dispatch.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0865288f12746c408b7cde250f96cdc82e2b9418299ff6ef92a7dda7658beb0b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/maintenance/jobs/db_retention/queue_and_dispatch.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:64cbd842e8b8a804a72e789052ae87fd8dd92d559349d3dad8a099b22f585c02"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/maintenance/jobs/db_retention/queue_and_dispatch.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:669280a2d34ba64458ce589473f0c1aabb21323d483c6a37d7e7c037bc503e49"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/maintenance/jobs/db_retention/queue_and_dispatch.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7ee8208ec041441f57bf9a1a79a4f5bf888365a7ebb6522fc49d5bf7a8cd958d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/maintenance/jobs/db_retention/queue_and_dispatch.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:853081731da7ee00e62217bba79fe4fb1efc07304a3e3ba20a3ebdf6b70b47ce"
     },
     {
       "root": "src",

@@ -1157,7 +1157,8 @@ src/
 │   │   │   │   ├── automatic_idle_tests.rs
 │   │   │   │   ├── codex_census.rs
 │   │   │   │   ├── codex_context.rs
-│   │   │   │   └── codex_context_tests.rs
+│   │   │   │   ├── codex_context_tests.rs
+│   │   │   │   └── codex_retention_e2e_tests.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
@@ -3342,6 +3343,7 @@ src/
 │   │   │   │   ├── submit_floor.rs
 │   │   │   │   └── submit_floor_tests.rs
 │   │   │   ├── spool/
+│   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
@@ -3368,8 +3370,12 @@ src/
 │   │   │   │   ├── automatic.rs
 │   │   │   │   ├── automatic_age.rs
 │   │   │   │   ├── automatic_age_tests.rs
+│   │   │   │   ├── codex_age.rs
+│   │   │   │   ├── codex_age_tests.rs
 │   │   │   │   ├── codex_history.rs
 │   │   │   │   ├── codex_history_tests.rs
+│   │   │   │   ├── codex_retention.rs
+│   │   │   │   ├── codex_retention_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── scoped_submission_tests.rs
@@ -3524,6 +3530,8 @@ src/
 │   │   │   ├── tool_result_repost_tests.rs
 │   │   │   ├── tool_result_tests.rs
 │   │   │   ├── tool_results.rs
+│   │   │   ├── transition_actor_ba_backlog_tests.rs
+│   │   │   ├── transition_actor_ba_tests.rs
 │   │   │   ├── transition_actor_bo_tests.rs
 │   │   │   ├── transition_actor_tests.rs
 │   │   │   ├── transition_apply_tests.rs

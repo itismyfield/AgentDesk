@@ -398,3 +398,137 @@ async fn bo_codex_identity_observes_full_tail_context_and_census_without_writing
     }
     halt(actor.stop, actor.task).await;
 }
+/// The real permission-aware log must never be entered with current source authority held.
+/// The assertion turns accidental lock reentry into a finite test failure before delegating.
+struct GuardedProductionBindingLog {
+    inner: crate::services::tui_o::writer::binding::ChannelBindingLog,
+}
+
+impl crate::services::tui_o::writer::binding::BindingEvents for GuardedProductionBindingLog {
+    fn binding_events_since(
+        &self,
+        channel: u64,
+        after: u64,
+    ) -> Result<Vec<crate::services::tui_o::writer::binding::BindingEvent>, String> {
+        assert!(
+            !hooks::snapshot_authority_held(),
+            "[ba:legacy_reentry] permission-aware production binding read reentered source authority"
+        );
+        crate::services::tui_o::writer::binding::BindingEvents::binding_events_since(
+            &self.inner,
+            channel,
+            after,
+        )
+    }
+
+    fn subscribe(&self, channel: u64) -> watch::Receiver<u64> {
+        crate::services::tui_o::writer::binding::BindingEvents::subscribe(&self.inner, channel)
+    }
+}
+
+/// Restores a real pre-existing backlog, preserving its persisted rotation and delivery permission.
+pub(crate) async fn with_ready_codex_backlog<T, F, Fut>(
+    sources: Vec<SourceId>,
+    pane: String,
+    configured: bool,
+    run: F,
+) -> (T, Vec<Cursor>, Option<usize>)
+where
+    F: FnOnce(Arc<crate::services::tui_o::writer::host::Readiness>) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    use crate::services::tui_o::writer::binding::ChannelBindingLog;
+    use sha2::{Digest, Sha256};
+    let originals: Vec<_> = sources
+        .iter()
+        .map(|source| std::fs::read(&source.path).unwrap())
+        .collect();
+    let harness = Harness::build_channel(7, |_| {
+        sources
+            .iter()
+            .map(|source| InitSource {
+                source_id: source.clone(),
+                delivery_start: 0,
+                prefix_hash: hex::encode(Sha256::digest([])),
+            })
+            .collect()
+    });
+    let mut rotation = Rotation::default();
+    for (index, pair) in sources.windows(2).enumerate() {
+        rotation.successors.insert(
+            source_key(&pair[0]),
+            Successor {
+                source: pair[1].clone(),
+                seq: Some(index as u64 + 2),
+                tmux_session: Some(pane.clone()),
+                drain_to: Some(std::fs::metadata(&pair[0].path).unwrap().len()),
+                proof: None,
+            },
+        );
+    }
+    harness.channel().write_rotation(&rotation).unwrap();
+    harness.gate.acquired();
+    let ready = Arc::new(crate::services::tui_o::writer::host::Readiness::default());
+    let (host, stopping) = watch::channel(false);
+    let (stop, stopped) = watch::channel(false);
+    let (resumed, ready_state) = watch::channel(false);
+    let (port, receiver) = TransitionPort::new(
+        1,
+        Arc::clone(&harness.gate),
+        Arc::new(SystemTime::now),
+        stopping.clone(),
+    );
+    let port = port.with_provider(ShadowProvider::Codex);
+    let task = transition_port::spawning(receiver, || {
+        spawn_projecting(
+            &WriterConfig { enabled: true },
+            configured.then_some(ReaderConfig { dormant: false }),
+            harness.writer(),
+            ShadowProvider::Codex,
+            Arc::new(GuardedProductionBindingLog {
+                inner: ChannelBindingLog::new(7, ShadowProvider::Codex),
+            }),
+            (stopped, resumed, watch::channel(None).0, Owing::default()),
+        )
+    })
+    .expect("actual backlog actor started");
+    for _ in 0..200 {
+        let store = harness.channel();
+        if *ready_state.borrow()
+            && sources.iter().all(|source| {
+                store.cursor(source).is_some_and(|cursor| {
+                    cursor.captured_through == std::fs::metadata(&source.path).unwrap().len()
+                })
+            })
+            && harness.port.posts().len() == sources.len()
+        {
+            break;
+        }
+        polls(1).await;
+    }
+    assert!(*ready_state.borrow());
+    assert_eq!(
+        harness.port.posts().len(),
+        sources.len(),
+        "actual native dialogue was posted before retention"
+    );
+    let _hosted = ready.host_port_for_test(7, &harness.gate, port, (ready_state, stopping));
+    let result = run(ready).await;
+    polls(3).await;
+    assert!(!task.is_finished(), "retention actor remains available");
+    let cursors = sources
+        .iter()
+        .map(|source| harness.channel().cursor(source).unwrap().clone())
+        .collect();
+    let reading = harness.alarms.readers();
+    for (source, before) in sources.iter().zip(originals) {
+        assert_eq!(
+            std::fs::read(&source.path).unwrap(),
+            before,
+            "retention leaves native transcript bytes unchanged"
+        );
+    }
+    halt(stop, task).await;
+    drop(host);
+    (result, cursors, reading)
+}
