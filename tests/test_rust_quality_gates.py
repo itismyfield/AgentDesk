@@ -73,7 +73,8 @@ class QualityWiringTest(unittest.TestCase):
             finished = {"reason": "build-finished", "success": True}
             for run in (RUN, PR_RUN):
                 env["CLIPPY_BASE_REF"] = "HEAD^1"
-                for payload, rc, expected in ((stream(*([warning] * 952), finished), 0, 0), (stream(*([warning] * 953), finished), 0, 1), ("garbage", 0, 1), ("garbage", 17, 17)):
+                limit = json.loads((ROOT / "scripts/clippy_warning_baseline.json").read_text())["warnings"]
+                for payload, rc, expected in ((stream(*([warning] * limit), finished), 0, 0), (stream(*([warning] * (limit + 1)), finished), 0, 1), ("garbage", 0, 1), ("garbage", 17, 17)):
                     with self.subTest(run=run, cargo_rc=rc, gate_rc=expected):
                         env.update(PAYLOAD=payload, RC=str(rc))
                         report = root / "target/clippy-observation/report.json"
