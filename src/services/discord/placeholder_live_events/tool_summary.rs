@@ -357,12 +357,14 @@ fn anonymize_accounts(input: &str) -> String {
         Regex::new(&format!(r"(?i)((?:\b(?:username|user|login|owner)[ \t]*[:=][ \t]*|--(?:owner|username)(?:=|[ \t]+)))({WORD})")).ok()
     });
     static ADDRESS: LazyLock<Option<Regex>> = LazyLock::new(|| {
-        Regex::new(
-            r#"(?i)(?:^|[\s'"])([a-z0-9_.+-]+)@([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})(?:\b|:)"#,
-        )
-        .ok()
+        Regex::new(r#"(?i)(?:^|[\s'"])([a-z0-9_.+-]+)@([a-z0-9][a-z0-9.-]*)"#).ok()
     });
-    let (Some(label), Some(address)) = (LABEL.as_ref(), ADDRESS.as_ref()) else {
+    static VERSION_OR_TAG: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(r"(?i)^(?:v?\d+(?:\.\d+){0,2}(?:[-+][0-9a-z.-]*)?|latest|next|beta|alpha|canary|rc|stable|nightly|lts)$").ok()
+    });
+    let (Some(label), Some(address), Some(version_or_tag)) =
+        (LABEL.as_ref(), ADDRESS.as_ref(), VERSION_OR_TAG.as_ref())
+    else {
         return "***".into();
     };
     let masked = label.replace_all(input, |capture: &regex::Captures<'_>| {
@@ -374,7 +376,11 @@ fn anonymize_accounts(input: &str) -> String {
     });
     address
         .replace_all(&masked, |capture: &regex::Captures<'_>| {
-            capture[0].replacen(&capture[1], "***", 1)
+            if version_or_tag.is_match(&capture[2]) {
+                capture[0].to_string()
+            } else {
+                capture[0].replacen(&capture[1], "***", 1)
+            }
         })
         .into_owned()
 }

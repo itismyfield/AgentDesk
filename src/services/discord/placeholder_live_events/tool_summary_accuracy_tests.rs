@@ -98,6 +98,9 @@ fn accuracy_usernames_outside_paths_are_anonymous_without_hiding_commands() {
         "username=LaneAlice cargo check",
         "user: LaneAlice",
         "ssh LaneAlice@example.test uptime",
+        "ssh LaneAlice@mac-mini uptime",
+        "scp a LaneAlice@10.0.0.2:/tmp",
+        "ssh LaneAlice@localhost",
         "client --username LaneAlice",
         "client --owner LaneAlice /home/LaneAlice/src/lib.rs",
         "alice@example.test",
@@ -119,6 +122,7 @@ fn accuracy_usernames_outside_paths_are_anonymous_without_hiding_commands() {
         "npx -y create-vite@latest my-app",
         "cargo install ripgrep@14.1.0",
         "uvx ruff@latest check",
+        "uvx ruff@0.6.0-rc.1 check",
         "inspect repo owner permissions",
         "inspect username handling",
     ] {
@@ -127,6 +131,23 @@ fn accuracy_usernames_outside_paths_are_anonymous_without_hiding_commands() {
             raw.replace('_', "\\_")
         );
         assert!(description_text(raw, true).is_some(), "{raw}");
+    }
+    for version in [
+        "v18",
+        "0.6",
+        "1.2.3+build.4",
+        "next",
+        "beta",
+        "alpha",
+        "canary",
+        "rc",
+        "stable",
+        "nightly",
+        "lts",
+    ] {
+        let raw = format!("uvx package@{version} check");
+        assert_eq!(text(&raw, 120).unwrap().replace('\u{200b}', ""), raw);
+        assert!(description_text(&raw, true).is_some(), "{raw}");
     }
     assert!(description_text("alice@example.test", true).is_none());
 }
