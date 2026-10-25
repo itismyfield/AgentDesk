@@ -27,6 +27,7 @@ pub(in crate::services::discord) struct TurnCompletionEvent {
 }
 
 impl TurnCompletionEvent {
+    #[cfg(test)]
     pub(in crate::services::discord) fn new(channel_id: ChannelId) -> Self {
         Self {
             channel_id,
@@ -35,6 +36,7 @@ impl TurnCompletionEvent {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::services::discord) fn for_turn(channel_id: ChannelId, turn_id: u64) -> Self {
         Self {
             channel_id,

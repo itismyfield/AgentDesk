@@ -355,6 +355,7 @@ fn merge_entries(
         .collect()
 }
 
+#[cfg(test)]
 fn catalog_from_raw_sources(
     gateway_raw: Option<&[u8]>,
     api_raw: Option<&[u8]>,
@@ -714,13 +715,6 @@ pub(super) fn spawn_background_refresh(
             refresh_and_log,
         ))
     })
-}
-
-#[cfg(test)]
-pub(super) fn spawn_test_background_refresh(
-    refreshes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-) -> tokio::task::JoinHandle<()> {
-    spawn_test_background_refresh_after_claim(refreshes, || {})
 }
 
 #[cfg(test)]

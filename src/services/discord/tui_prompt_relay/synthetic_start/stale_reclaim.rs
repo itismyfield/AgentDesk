@@ -4,6 +4,7 @@ use super::*;
 #[path = "claim_entry_tests.rs"]
 mod claim_entry_tests;
 
+#[cfg(test)]
 pub(in crate::services::discord::tui_prompt_relay) async fn finish_tui_direct_synthetic_pre_save_failure(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

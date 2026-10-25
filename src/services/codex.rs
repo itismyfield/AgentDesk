@@ -35,6 +35,7 @@ pub(crate) use tui_session_launch::{
     verified_warm_preflight,
 };
 
+use crate::services::provider::session_prompt;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read};
@@ -420,6 +421,7 @@ pub(crate) fn codex_direct_tui_hook_overrides_enabled() -> bool {
 }
 
 fn codex_config_overrides(options: &CodexLaunchOptions) -> Vec<String> {
+    session_prompt::codex_options(options);
     let mut overrides = Vec::new();
     if let Some(effort) = options.reasoning_effort.as_deref() {
         overrides.push(format!("model_reasoning_effort={effort:?}"));
@@ -501,6 +503,7 @@ pub(crate) fn build_codex_exec_args(options: &CodexLaunchOptions) -> Vec<String>
 }
 
 fn build_codex_wrapper_cli_args(options: &CodexLaunchOptions, codex_bin: &str) -> Vec<String> {
+    session_prompt::codex_options(options);
     let mut args = vec!["--codex-bin".to_string(), codex_bin.to_string()];
     if let Some(model) = options.model.as_deref() {
         args.push("--codex-model".to_string());
@@ -1202,14 +1205,6 @@ pub fn execute_command_streaming(
         },
         None,
     )
-}
-
-fn compose_codex_prompt(
-    prompt: &str,
-    _system_prompt: Option<&str>,
-    _allowed_tools: Option<&[String]>,
-) -> String {
-    prompt.to_string()
 }
 
 pub(crate) fn compose_codex_developer_instructions(

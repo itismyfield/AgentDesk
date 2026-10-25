@@ -2407,3 +2407,6 @@ fn held_dispatch_is_not_inherited_by_an_active_start_pg() {
         host.db.drop().await;
     });
 }
+
+#[path = "system_prompt_tests.rs"]
+mod system_prompt_tests;

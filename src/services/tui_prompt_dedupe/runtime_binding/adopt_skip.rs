@@ -85,8 +85,9 @@ pub(crate) fn adopt_claude_continuation_explained(
 
 /// Herdr panes by logical key: the latest installed or judged execution's nonce and whether a
 /// reconcile admitted it. A withheld pane keeps its binding and cursor; tmux panes are not listed.
-static HERDR_EXECUTIONS: LazyLock<Mutex<HashMap<String, (String, bool)>>> =
-    LazyLock::new(Default::default);
+type HerdrExecutions = HashMap<String, (String, bool)>;
+
+static HERDR_EXECUTIONS: LazyLock<Mutex<HerdrExecutions>> = LazyLock::new(Default::default);
 // Until a Herdr pane is listed the hook path reads this flag and takes no lock; tests keep the flag
 // per thread but run the same atomic operations on it.
 #[cfg(not(test))]
@@ -127,7 +128,7 @@ pub(crate) fn herdr_listing_order(logical: &str) -> std::sync::Arc<Mutex<()>> {
 
 /// Changes `logical`'s hold in the source authority hooks adopt under, so a hook past its check
 /// commits before the change returns and a later hook sees the change.
-fn change_hold(logical: &str, change: impl FnOnce(&mut HashMap<String, (String, bool)>)) {
+fn change_hold(logical: &str, change: impl FnOnce(&mut HerdrExecutions)) {
     let order = herdr_listing_order(logical);
     #[cfg(test)]
     if let Err(std::sync::TryLockError::WouldBlock) = order.try_lock() {
@@ -163,7 +164,7 @@ thread_local! {
 pub(crate) fn herdr_claim_admission(
     logical: &str,
     herdr_host: bool,
-) -> Result<Option<std::sync::MutexGuard<'static, HashMap<String, (String, bool)>>>, ()> {
+) -> Result<Option<std::sync::MutexGuard<'static, HerdrExecutions>>, ()> {
     #[cfg(test)]
     ADMISSION_PAUSE.with_borrow_mut(|pause| {
         pause.as_ref()?;

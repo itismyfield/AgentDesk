@@ -217,6 +217,7 @@ fn init_tracing_once() -> Result<()> {
         .with_writer(RedactingStdout)
         .try_init()
         .map_err(|error| anyhow::anyhow!("Failed to initialize tracing subscriber: {error}"))?;
+    crate::services::resident_loops::install_panic_hook();
     Ok(())
 }
 
@@ -246,6 +247,7 @@ fn init_dcserver_tracing_once() -> Result<()> {
         .map_err(|error| {
             anyhow::anyhow!("Failed to initialize dcserver tracing subscriber: {error}")
         })?;
+    crate::services::resident_loops::install_panic_hook();
     Ok(())
 }
 

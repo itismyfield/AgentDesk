@@ -52,7 +52,7 @@ pub(super) async fn update_streaming_status_tick(
             channel_id.get(),
             "streaming_tick",
         );
-        let mut last_status_update = *render.last_status_update;
+        let last_status_update = tokio::time::Instant::now();
         let mut spin_idx = *render.spin_idx;
         let mut placeholder_msg_id = *render.placeholder_msg_id;
         let mut placeholder_from_restored_inflight = *render.placeholder_from_restored_inflight;
@@ -94,7 +94,6 @@ pub(super) async fn update_streaming_status_tick(
             }};
         }
 
-        last_status_update = tokio::time::Instant::now();
         let indicator = SPINNER[spin_idx % SPINNER.len()];
         spin_idx += 1;
 

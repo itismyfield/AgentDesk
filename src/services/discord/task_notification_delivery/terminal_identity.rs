@@ -14,6 +14,7 @@ pub(in crate::services::discord) fn footer_background_marker_session_key(
 }
 
 impl TaskCardEvent {
+    #[cfg(test)]
     pub(in crate::services::discord) fn from_task_prompt(
         channel_id: u64,
         provider: &str,
@@ -73,6 +74,7 @@ impl TaskCardEvent {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::services::discord) fn from_subagent_prompt(
         channel_id: u64,
         provider: &str,

@@ -30,7 +30,8 @@ def validate(scenario, args):
             or scenario.get("e36_normal_intake") != {"sequential_count": 10, "queued_followup": True,
                                                      "reset_free": True, "intake_log_format": "adk-tracing-text-v1"}
             or [s.get("request_key") for s in steps] != KEYS
-            or any(set(s) - {"request_key", "send_discord_prompt", "body_marker", "hold_marker"}
+            or any(set(s) - {"request_key", "send_discord_prompt", "body_marker", "hold_marker", "relay_author"}
+                   or s.get("relay_author", "provider") != "provider"
                    or not s.get("send_discord_prompt") or not s.get("body_marker") for s in steps)):
         raise assertions.AssertionError("E36 requires its twelve normal inputs, reset-free single-cell 3540s profile")
 
@@ -334,8 +335,9 @@ def run(evidence, scenario, client, window, record, run_id, after_id):
         return request
 
     def complete(request, excluded=(), narrow=None):
+        author = assertions.provider_bot_id(d.cell_provider(args.cell)) if request.get("relay_author") == "provider" else None
         found, observed = d.wait_for_discord_text_with_tui_idle_draft_guard(
-            client=client, channel_id=channel, cell=args.cell, after_id=str(request["discord_before_id"]),
+            client=client, channel_id=channel, cell=args.cell, after_id=str(request["discord_before_id"]), author_id=author,
             needle=request["body_marker"], prompt=request["prompt"], thread_channel_id=None,
             timeout_s=max(0, request["deadline"] - d.time.monotonic()), debug_label="E36:" + request["request_key"])
         ingest(observed)

@@ -33,6 +33,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::intake_outbox_dispatch_stamp::tests
   --skip db::o_channel_activation::fence_tests
   --skip db::prompt_manifests::tests
+  --skip db::provider_session_prompts::tests
   --skip db::relay_dead_letter::migration_tests
   --skip db::relay_dead_letter::tests
   --skip db::replay_disposition::register_tests
@@ -96,6 +97,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::admin_host_guard::tests
   --skip services::discord::commands::cancel_backstop_tests
+  --skip services::discord::commands::config::provider_settings::revision_tests
+  --skip services::discord::commands::config::provider_settings::truthful_tests
   --skip services::discord::commands::control::clear_end_tests
   --skip services::discord::commands::control::clear_entry_tests
   --skip services::discord::commands::control::clear_persist_failure_tests
@@ -103,6 +106,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::codex_clear_relaunch_tests
   --skip services::discord::commands::control::codex_clear_retirement_tests
   --skip services::discord::commands::restart::host_guard_tests
+  --skip services::discord::commands::system_prompt::tests
   --skip services::discord::commands::text_commands::clear_refusal_reply_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
   --skip services::discord::health::o_transition::codex_context::tests
@@ -451,6 +455,13 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::intake_router_hook::owner_record::tests::idempotency_key_is_composed_and_normalized
   services::cluster::intake_worker::dispatch_stamp_tests::classifier_branch_guard_rejects_commented_calls
   services::cluster::machine_resources::store::tests::recorder_queue_is_bounded_without_waiting_for_the_database
+  services::discord::commands::config::provider_settings::revision_tests::truthful_shared_feature_reset_is_consumed_by_the_first_parent_or_thread_turn
+  services::discord::commands::config::provider_settings::revision_tests::truthful_shared_feature_scope_warns_which_session_loses_context
+  services::discord::commands::config::provider_settings::truthful_tests::truthful_failed_fast_and_goals_save_never_publish_or_reset
+  services::discord::commands::config::provider_settings::truthful_tests::truthful_headless_claude_fast_persists_and_schedules_real_reset
+  services::discord::commands::config::provider_settings::truthful_tests::truthful_inherited_feature_reset_follows_thread_key_once
+  services::discord::commands::config::provider_settings::truthful_tests::truthful_parent_thread_and_explicit_false_keys_remain_readable
+  services::discord::commands::config::provider_settings::truthful_tests::truthful_pending_reset_migration_preserves_feature_and_provider
   services::discord::commands::control::clear_persist_failure_tests::a_clear_whose_queue_write_fails_twice_still_resets_the_session_and_warns
   services::discord::commands::control::clear_persist_failure_tests::a_clear_whose_write_fails_stops_the_released_turn_once_and_runs_no_old_backlog
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
@@ -459,6 +470,9 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_report::consent_clear_tests::legacy_actual_clear_ignores_unreadable_consent_storage
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_keeps_unrelated_error_on_first_observation
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_rechecks_one_transient_before_stable_hold
+  services::discord::commands::system_prompt::tests::system_prompt_active_native_binding_precedes_persisted_session
+  services::discord::commands::system_prompt::tests::system_prompt_command_registered
+  services::discord::commands::system_prompt::tests::system_prompt_missing_snapshot_is_labeled_reconstructed
   services::discord::health::o_transition::codex_context::tests::codex_fixture_pins_identity_when_inherited_host_source_is_missing
   services::discord::health::o_transition::codex_context::tests::codex_fixture_restores_all_environment_before_root_unlock
   services::discord::health::o_transition::codex_context::tests::codex_prepare_unknown_preserves_nonce_component_in_stats_and_log
@@ -592,6 +606,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::herdr_consent::custody::tests::live_custody_replays_a_lost_response_and_wake_without_recreating_payload
   services::discord::router::herdr_consent::custody::tests::live_mailbox_crash_at_receipt_release_wake_or_ack_replays_one_original_payload
   services::discord::router::herdr_consent::custody::tests::live_mailbox_custody_sink_passes_shared_durable_conformance
+  services::discord::router::herdr_consent::custody::tests::live_mailbox_drained_head_releases_and_wakes_from_its_dispatch_marker
   services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
   services::discord::router::intake_dispatch::tests::codex_turn_hold::a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode
   services::discord::router::intake_dispatch::tests::codex_turn_hold::a_turn_mode_input_the_queue_cannot_hold_fails_before_its_checkpoint

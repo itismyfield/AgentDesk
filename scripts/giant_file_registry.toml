@@ -141,7 +141,6 @@ grandfathered_baseline_paths = [
   # as well as `grandfathered` below (win-locked: a re-expanded tmux_runtime
   # cannot be re-grandfathered — it would have to land as a full [[entry]] or
   # shrink). The split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord_config_audit.rs",
   "src/services/dispatched_sessions.rs",
   "src/services/dispatches/discord_delivery/orchestration.rs",
   "src/services/dispatches/outbox_route.rs",
@@ -474,13 +473,6 @@ decompose_issue = "#7160"
 
 [[entry]]
 file = "src/services/discord/router/message_handler/headless_turn.rs"
-decision = "shrink"
-owner = "discord-relay"
-deadline = "2027-01-31"
-decompose_issue = "#7160"
-
-[[entry]]
-file = "src/services/discord_config_audit.rs"
 decision = "shrink"
 owner = "discord-relay"
 deadline = "2027-01-31"

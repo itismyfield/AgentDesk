@@ -250,6 +250,7 @@ jobs:
               - 'src/db/postgres/advisory_lock_tests.rs'
               - 'src/db/postgres/test_db_reclaim.rs'
               - 'src/db/prompt_manifests/tests.rs'
+              - 'src/db/provider_session_prompts/tests.rs'
               - 'src/db/relay_dead_letter.rs'
               - 'src/db/relay_dead_letter/migration_tests.rs'
               - 'src/db/replay_disposition/register_tests.rs'
@@ -351,6 +352,8 @@ jobs:
               - 'src/services/discord/admin_host_guard_tests.rs'
               - 'src/services/discord/catch_up/too_old_drop_pg_tests.rs'
               - 'src/services/discord/commands/cancel_backstop_tests.rs'
+              - 'src/services/discord/commands/config/provider_settings.rs'
+              - 'src/services/discord/commands/config/provider_settings/revision_tests.rs'
               - 'src/services/discord/commands/control/clear_end_tests.rs'
               - 'src/services/discord/commands/control/clear_entry_tests.rs'
               - 'src/services/discord/commands/control/clear_persist_failure_tests.rs'
@@ -367,6 +370,7 @@ jobs:
               - 'src/services/discord/commands/control/codex_clear_retirement_tests.rs'
               - 'src/services/discord/commands/control/consent_clear_tests.rs'
               - 'src/services/discord/commands/restart.rs'
+              - 'src/services/discord/commands/system_prompt/tests.rs'
               - 'src/services/discord/commands/text_commands/clear_http_overlap_tests.rs'
               - 'src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs'
               - 'src/services/discord/commands/tui_passthrough.rs'
@@ -440,6 +444,7 @@ jobs:
               - 'src/services/discord/router/message_handler/intake_turn/claim_bootstrap.rs'
               - 'src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/retry_prompt/tests.rs'
+              - 'src/services/discord/router/message_handler/intake_turn/system_prompt_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_activation_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs'
@@ -983,6 +988,7 @@ jobs:
               - 'src/services/discord/turn_presence/activity/tail.rs'
               - 'src/services/discord/turn_presence/supervisor.rs'
               - 'src/services/discord/turn_presence/supervisor_tests.rs'
+              - 'src/services/discord/turn_presence/unknown_notice.rs'
               - 'src/services/discord/voice_barge_in/**'
               - 'src/services/discord/zombie_foreground_release.rs'
               - 'src/services/git/**'
@@ -2103,12 +2109,12 @@ jobs:
             tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
           fi
 
-      # Keep Rust available for inventory fallback and the H2 module-map driver.
+      # Keep Rust available for the lib inventory fallback.
       - name: Install Rust toolchain for lib inventory
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
-          components: clippy, rustc-dev, llvm-tools  # tools/modmap-driver links rustc_private; Linux needs libLLVM from llvm-tools
+          components: clippy
 
       - name: Setup sccache for lib inventory
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -2210,17 +2216,6 @@ jobs:
         run: |
           python3 scripts/check_contract_symbol_refs.py
           python3 -m unittest tests.test_contract_symbol_refs
-
-      # H2 tmux boundary ratchet, Linux lane; inert (no-op / warn-only) until activation.
-      - name: H2 tmux boundary measurement (linux, inert)
-        run: bash scripts/ci/h2_measure.sh --lane linux --inert
-
-      # H2 R-O module map: module/cfg driver self-tests are required; only the repo map stays inert until activation.
-      - name: H2 module map (linux, inert)
-        timeout-minutes: 30
-        env:
-          RUSTC_WRAPPER: ""
-        run: python3 scripts/ci/h2_modmap.py --lane linux --inert --canary --suite tests.test_h2_session_driver --suite tests.test_h2_session_e2e
 
       - name: Upload maintainability audit artifact
         if: always()

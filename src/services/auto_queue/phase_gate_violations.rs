@@ -19,7 +19,6 @@
 
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Serialize;
-use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::{

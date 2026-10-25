@@ -87,14 +87,15 @@ mod tests {
             )
         }));
 
-        let preserved_rows: Vec<(
+        type PreservedRow = (
             String,
             String,
             Option<String>,
             Option<String>,
             i64,
             Option<String>,
-        )> = sqlx::query_as(
+        );
+        let preserved_rows: Vec<PreservedRow> = sqlx::query_as(
             "SELECT session_key, status, active_dispatch_id, session_info, tokens, claude_session_id
          FROM sessions
          WHERE session_key IN ('clear-slot-disconnected', 'clear-slot-unrelated')

@@ -319,11 +319,39 @@ pub(in crate::services::discord) async fn retry(
     Ok(true)
 }
 
-pub(super) async fn recover_excluding(
+/// Which Applied consents one replay pass owns.
+#[derive(Clone, Copy)]
+pub(super) enum Replay<'a> {
+    /// Consents with no releasable input in these still-held channels.
+    Excluding(&'a std::collections::BTreeSet<u64>),
+    /// Consents with releasable input in `channel` and none in a still-held channel.
+    Only {
+        channel: u64,
+        held: &'a std::collections::BTreeSet<u64>,
+    },
+}
+
+impl Replay<'_> {
+    fn owns(self, consent: &Consent) -> bool {
+        let channels: Vec<u64> = consent
+            .releasable_intents()
+            .iter()
+            .map(|intent| intent.channel)
+            .collect();
+        let (held, required) = match self {
+            Self::Excluding(held) => (held, None),
+            Self::Only { channel, held } => (held, Some(channel)),
+        };
+        !channels.iter().any(|channel| held.contains(channel))
+            && required.is_none_or(|channel| channels.contains(&channel))
+    }
+}
+
+pub(super) async fn recover(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
-    blocked: &std::collections::BTreeSet<u64>,
+    scope: Replay<'_>,
 ) -> Result<(), String> {
     let local = session_hosts::local_node();
     let enabled = session_hosts::with_boot(|boot| {
@@ -355,11 +383,7 @@ pub(super) async fn recover_excluding(
         {
             continue;
         }
-        if consent
-            .releasable_intents()
-            .iter()
-            .any(|intent| blocked.contains(&intent.channel))
-        {
+        if !scope.owns(&consent) {
             continue;
         }
         let bot = match http.get_current_user().await {

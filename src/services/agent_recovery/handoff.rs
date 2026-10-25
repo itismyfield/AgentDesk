@@ -74,6 +74,7 @@ pub fn format_fallback_prompt(
     body
 }
 
+#[cfg(test)]
 pub fn effective_handles(yaml_owned: bool, overlay: Option<RecoveryIntake>) -> bool {
     match overlay {
         Some(RecoveryIntake::Skip) => false,
@@ -82,6 +83,7 @@ pub fn effective_handles(yaml_owned: bool, overlay: Option<RecoveryIntake>) -> b
     }
 }
 
+#[cfg(test)]
 pub fn dual_processing(
     owner_yaml_owned: bool,
     owner_overlay: Option<RecoveryIntake>,
