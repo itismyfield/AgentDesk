@@ -69,11 +69,6 @@ MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 WARM_WORKFLOW = REPO_ROOT / ".github/workflows/ci-windows-cache-warm.yml"
 PUBLISHER_LIST = "'[\"Required contexts publisher\"]'"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
-MACOS_TRUSTED_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
-TRUSTED_LIB_RUN = (
-    "bash scripts/ci/nextest-native.sh macos macos-trusted "
-    "selectors:scripts/ci/macos-trusted-selectors.txt"
-)
 
 
 def job_block(workflow: str, job_name: str) -> str:
@@ -139,14 +134,6 @@ def eval_expression(condition: object, context: dict[str, object]) -> object:
         pos = match.end()
     return eval("".join(python), {"__builtins__": {}})
 
-
-MACOS_FILTER_SCENARIOS = (
-    ("success", "false", False),
-    ("success", "true", True),
-    ("success", "", True),
-    ("failure", "false", True),
-    ("failure", "", True),
-)
 
 
 def replace_last(source: str, old: str, new: str) -> str:
@@ -731,34 +718,15 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 )["cross_os_rust"]
                 self.assertFalse(selects(survivors, sample))
 
-    def assert_trusted_hosted_selector(self, line: str) -> None:
-        """The hosted job runs the selector file once, and the file keeps `line`."""
-        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        self.assertEqual(job_block(workflow, "macos_hosted").count(TRUSTED_LIB_RUN), 1)
-        selectors = (REPO_ROOT / "scripts/ci/macos-trusted-selectors.txt").read_text(encoding="utf-8")
-        self.assertIn(line, selectors.splitlines())
-
-    def test_trusted_macos_exact_lanes_match_the_macos_source_inventory(self) -> None:
-        # The trusted run is not a PR check, so a stale ids file must already fail here, on Linux.
-        self.assert_trusted_hosted_selector(
-            "herdr_loaded_image_macos_ | | exact scripts/ci/herdr_loaded_image_macos_ids.txt")
+    def test_herdr_macos_ids_file_matches_the_macos_source_inventory(self) -> None:
+        # Local Mac evidence reads this list as --expected-ids; no PR job compiles these tests.
         sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
-        import nextest_ci
         import rust_test_sources
+        ids = (REPO_ROOT / "scripts/ci/herdr_loaded_image_macos_ids.txt").read_text(encoding="utf-8").split()
         macos = rust_test_sources.compiled_lib_tests(REPO_ROOT, "macos")
-        rows = [row for row in nextest_ci.load_selectors(REPO_ROOT / "scripts/ci/macos-trusted-selectors.txt") if row[2]]
-        self.assertTrue(rows)
-        for name, skips, exact in rows:
-            with self.subTest(selector=name):
-                want = set((REPO_ROOT / exact).read_text(encoding="utf-8").split())
-                self.assertEqual({t for t in macos if name in t and not any(s in t for s in skips)}, want)
-                self.assertFalse(want & rust_test_sources.compiled_lib_tests(REPO_ROOT, "linux"))
-
-    def test_trusted_macos_hosted_lane_runs_single_message_panel_tests(self) -> None:
-        self.assert_trusted_hosted_selector("single_message_panel::tests | _pg pg_ postgres")
-
-    def test_trusted_macos_hosted_lane_runs_placeholder_live_events_tests(self) -> None:
-        self.assert_trusted_hosted_selector("placeholder_live_events | _pg pg_ postgres")
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(set(ids), {t for t in macos if "herdr_loaded_image_macos_" in t})
+        self.assertFalse(set(ids) & rust_test_sources.compiled_lib_tests(REPO_ROOT, "linux"))
 
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
@@ -1787,74 +1755,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("must retain exact needs: changes", result.stderr)
 
-    def test_trusted_macos_runs_busy_retry_regressions_on_hosted_runner(self) -> None:
-        self.assert_trusted_hosted_selector("_4888 |")
-
-    def test_trusted_macos_has_only_an_unconditional_hosted_job(self) -> None:
-        workflow = yaml.safe_load(MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8"))
-        jobs = workflow["jobs"]
-        self.assertNotIn("macos_self_hosted", jobs)
-        self.assertNotIn("resolve_macos_runner", jobs)
-        self.assertEqual(set(jobs), {"macos_hosted"})
-        hosted = jobs["macos_hosted"]
-        self.assertEqual(hosted["name"], "Trusted macOS check (hosted)")
-        self.assertEqual(hosted["runs-on"], "macos-15")
-        self.assertNotIn("needs", hosted)
-        self.assertNotIn("if", hosted)
-
-    def assert_filter_gates_exactly(self, job_name: str, gated: set[str]) -> None:
-        """`gated` skips only on a successful run=false; other steps never skip."""
-        workflow = yaml.safe_load(MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8"))
-        steps = workflow["jobs"][job_name]["steps"]
-        start = next(i for i, step in enumerate(steps) if step.get("id") == "rust_filter")
-        conditions = {step["name"]: step.get("if") for step in steps[start + 1 :]}
-        self.assertLessEqual(gated, set(conditions))
-        for outcome, run, gated_runs in MACOS_FILTER_SCENARIOS:
-            context = {
-                "steps.rust_filter.outcome": outcome,
-                "steps.rust_filter.outputs.run": run,
-            }
-            for name, condition in conditions.items():
-                with self.subTest(job=job_name, step=name, outcome=outcome, run=run):
-                    self.assertEqual(
-                        eval_step_if(condition, context), gated_runs or name not in gated
-                    )
-
-    def test_trusted_macos_hosted_job_gates_only_heavy_steps(self) -> None:
-        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        hosted = job_block(workflow, "macos_hosted")
-        header, steps = hosted.split("    steps:\n", 1)
-        self.assertNotIn("rust_filter", header)
-        checkout = steps.index("      - uses: actions/checkout@v4\n")
-        filter_step = step_block(hosted, "Decide whether heavy steps are needed")
-        self.assertLess(checkout, steps.index(filter_step))
-        self.assertIn("fetch-depth: 0", steps[checkout : steps.index(filter_step)])
-        parsed = yaml.safe_load(workflow)["jobs"]["macos_hosted"]
-        filter_config = next(step for step in parsed["steps"] if step.get("id") == "rust_filter")
-        self.assertEqual(filter_config["continue-on-error"], True)
-        self.assertEqual(filter_config["shell"], "bash")
-        self.assertEqual(filter_config["env"], {"EVENT_NAME": "${{ github.event_name }}"})
-        self.assertEqual(
-            filter_config["run"],
-            'python3 scripts/ci/macos-trusted-rust-filter.py --event "$EVENT_NAME" '
-            '--base-ref origin/main >> "$GITHUB_OUTPUT"',
-        )
-        self.assert_filter_gates_exactly(
-            "macos_hosted",
-            {
-                "Install Rust toolchain",
-                "Install Opus on macOS",
-                "Cache Cargo dependencies",
-                "cargo check",
-                "Install cargo-nextest",
-                "cargo nextest (non-PG, targeted lib selectors)",
-                "cargo test (non-PG, non-lib targets)",
-                "Fresh user portable smoke",
-            },
-        )
-        self.assertIn("Disable sccache on hosted macOS", hosted)
-        self.assertNotIn("Configure local sccache", hosted)
-
     def assert_hosted_sccache_reset(self, run: str) -> None:
         with tempfile.TemporaryDirectory() as temp:
             github_env = Path(temp) / "github-env"
@@ -1877,11 +1777,11 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(entries.get("RUSTC_WRAPPER"), "")
         self.assertEqual(entries.get("SCCACHE_GHA_ENABLED"), "")
 
-    def test_trusted_macos_hosted_sccache_reset_writes_both_empty_values(self) -> None:
-        workflow = yaml.safe_load(MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8"))
+    def test_nightly_macos_sccache_reset_writes_both_empty_values(self) -> None:
+        workflow = yaml.safe_load(NIGHTLY_WORKFLOW.read_text(encoding="utf-8"))
         disable = next(
-            step for step in workflow["jobs"]["macos_hosted"]["steps"]
-            if step.get("name") == "Disable sccache on hosted macOS"
+            step for step in workflow["jobs"]["full_macos"]["steps"]
+            if step.get("name") == "Disable sccache on macOS"
         )
         self.assertEqual(disable["shell"], "bash")
         self.assertNotIn("if", disable)
@@ -2010,12 +1910,6 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             workflows.mkdir(parents=True)
             (root / "scripts").mkdir()
             (workflows / "ci-pr.yml").write_text(pr_workflow, encoding="utf-8")
-            trusted = (REPO_ROOT / ".github/workflows/ci-macos-trusted.yml").read_text(
-                encoding="utf-8"
-            )
-            (workflows / "ci-macos-trusted.yml").write_text(
-                trusted, encoding="utf-8"
-            )
             (workflows / "ci-main.yml").write_text(MAIN_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
             (workflows / WARM_WORKFLOW.name).write_text(WARM_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
             (workflows / "ci-nightly.yml").write_text(NIGHTLY_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
@@ -2054,7 +1948,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
 
     def test_hardening_rejects_routing_outside_repository_hosted_runner_policy(self) -> None:
         pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        trusted = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        probe = "name: Runner probe\non: push\njobs:\n  probe:\n    runs-on: macos-15\n    steps:\n      - run: echo ok\n"
         variants = {
             "scalar": "    runs-on: self-hosted\n",
             "list": "    runs-on: [self-hosted, macOS]\n",
@@ -2149,10 +2043,10 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             "empty-runner-list": "    runs-on: []\n",
         }
         for name, runner in variants.items():
-            for path in ("ci-macos-trusted.yml", "extra.yaml"):
+            for path in ("runner-probe.yml", "extra.yaml"):
                 with self.subTest(runner=name, workflow=path):
-                    mutated = trusted.replace("    runs-on: macos-15\n", runner, 1)
-                    self.assertNotEqual(mutated, trusted)
+                    mutated = probe.replace("    runs-on: macos-15\n", runner, 1)
+                    self.assertNotEqual(mutated, probe)
                     result = self.run_hardening_fixture(
                         pr_workflow, extra_workflows={path: mutated}
                     )
@@ -2196,25 +2090,6 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                     PR_WORKFLOW.read_text(encoding="utf-8"), {"runner-probe.yaml": workflow}
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_hardening_keeps_trusted_macos_scheduled_and_uncancelled(self) -> None:
-        pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        trusted = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        mutations = {
-            "push": ("  workflow_dispatch:\n", "  push:\n    branches: [main]\n  workflow_dispatch:\n"),
-            "no-cron": ("    - cron: ", "    - not-cron: "),
-            "cancel": ("  cancel-in-progress: false\n", "  cancel-in-progress: true\n"),
-            "shared-group": ("${{ github.event_name }}-", ""),
-        }
-        for name, (old, new) in mutations.items():
-            with self.subTest(mutation=name):
-                mutated = trusted.replace(old, new, 1)
-                self.assertNotEqual(mutated, trusted)
-                result = self.run_hardening_fixture(
-                    pr_workflow, extra_workflows={"ci-macos-trusted.yml": mutated}
-                )
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("no run may cancel another", result.stderr)
 
     def test_hardening_distinguishes_retired_variable_reads_from_prose(self) -> None:
         variants = {

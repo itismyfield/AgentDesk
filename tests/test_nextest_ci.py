@@ -600,45 +600,6 @@ class NativePlan(Fixture):
         self.assertIn("outside the listed universe", self.plan(["m::a"], workers=1,
                                                               build={**BUILD, "--only": self.dir / "pg.json"})[1])
 
-    def test_select_takes_the_libtest_union_and_rejects_a_dead_selector(self):
-        self.write("list.json", nextest_list(["m::health_a", "m::health_pg", "x::_4888_pg"]))
-        self.write("sel.txt", "health | _pg pg_ postgres\n_4888 |\n")
-        rc, err = self.run_cli("select", "--universe", self.dir / "list.json", "--selectors", self.dir / "sel.txt",
-                               "--json-out", self.dir / "out.json")
-        self.assertEqual(rc, 0, err)
-        self.assertEqual(json.loads((self.dir / "out.json").read_text())["selected"], ["m::health_a", "x::_4888_pg"])
-        self.write("sel.txt", "health | _pg pg_ postgres\nrenamed_module |\n")
-        rc, err = self.run_cli("select", "--universe", self.dir / "list.json", "--selectors", self.dir / "sel.txt",
-                               "--json-out", self.dir / "out.json")
-        self.assertEqual(rc, 1)
-        self.assertIn("selectors match no listed test: ['renamed_module']", err)
-
-    def test_an_exact_selector_picks_precisely_its_ids_file(self):
-        self.write("list.json", nextest_list(["m::lane_a", "m::lane_b", "m::other"], ignored=["m::lane_ign"]))
-        (self.dir / "ids.txt").write_text("m::lane_a\nm::lane_b\n")
-
-        def select(row):
-            self.write("sel.txt", f"other |\n{row}\n")
-            return self.run_cli("select", "--universe", self.dir / "list.json", "--selectors", self.dir / "sel.txt",
-                                "--json-out", self.dir / "out.json")
-        rc, err = select(f"lane_ | _ign | exact {self.dir / 'ids.txt'}")
-        self.assertEqual(rc, 0, err)
-        self.assertEqual(json.loads((self.dir / "out.json").read_text())["selected"], ["m::lane_a", "m::lane_b", "m::other"])
-        for ids, reason in (("m::lane_a\nm::lane_b\nm::lane_gone\n", "missing ['m::lane_gone']"),
-                            ("m::lane_a\n", "extra ['m::lane_b']")):
-            with self.subTest(reason):
-                (self.dir / "ids.txt").write_text(ids)
-                rc, err = select(f"lane_ | _ign | exact {self.dir / 'ids.txt'}")
-                self.assertEqual(rc, 1)
-                self.assertIn(reason, err)
-        (self.dir / "ids.txt").write_text("m::lane_a\nm::lane_b\nm::lane_ign\n")
-        rc, err = select(f"lane_ | | exact {self.dir / 'ids.txt'}")
-        self.assertEqual(rc, 1)
-        self.assertIn("ignored ['m::lane_ign']", err)
-        for row in ("lane_ | | exact", "lane_ | | ids.txt", "lane_ | | exact a b"):
-            with self.subTest(row=row):
-                self.assertEqual(select(row)[0], 1)
-
     def test_identity_from_copies_scope_and_build(self):
         head = self.plan_ok(["m::a"], workers=1, build={**BUILD, "--features": "default,extra"})
         rc, err = self.run_cli("plan", "--universe", self.dir / "list.json", "--archive", self.archive, "--workers", 1,
@@ -805,9 +766,13 @@ esac
         (self.bin / "rustc").write_text("#!/bin/sh\necho 'host: aarch64-apple-darwin'\n")
         (self.bin / "rustc").chmod(0o755)
         self.write("native-list.json", nextest_list(["m::a", "m::health_b", "m::health_pg_c"]))
-        self.write("selectors.txt", "health | _pg pg_ postgres\n")
+        # The real exemptions name repository tests; this tree has none of them.
+        classifier = self.repo / "scripts/ci/pg_test_classifier.py"
+        text = classifier.read_text()
+        start = text.index("EXEMPT = {")
+        classifier.write_text(text[:start] + "EXEMPT = {}\n_UNUSED_EXEMPT = {" + text[start + len("EXEMPT = {"):])
 
-    def native(self, selection, ran, exit_code=0):
+    def native(self, ran, exit_code=0):
         self.write("junit.xml", junit([(n, "", 0.1) for n in ran]))
         temp = self.dir / "runner"
         self.sp.run(["rm", "-rf", str(temp)], check=True)
@@ -816,53 +781,32 @@ esac
                "GITHUB_WORKSPACE": str(self.repo), "GITHUB_STEP_SUMMARY": str(self.dir / "summary.md"),
                "NATIVE_LIST": str(self.dir / "native-list.json"), "NATIVE_JUNIT": str(self.dir / "junit.xml"),
                "NATIVE_EXIT": str(exit_code), "GITHUB_RUN_ID": "9"}
-        done = self.sp.run(["bash", "scripts/ci/nextest-native.sh", "macos", "macos-trusted", selection],
+        done = self.sp.run(["bash", "scripts/ci/nextest-native.sh", "macos", "macos-lib", "pg-classifier"],
                            cwd=self.repo, env=env, capture_output=True, text=True)
         plan = temp / "nextest/plan/plan.json"
         tests = [t[1] for t in json.loads(plan.read_text())["workers"][0]["tests"]] if plan.exists() else None
         return done.returncode, done.stdout + done.stderr, tests
 
-    def test_selectors_scope_runs_their_union_and_passes_only_when_all_ran(self):
-        selection = f"selectors:{self.dir / 'selectors.txt'}"
-        rc, out, tests = self.native(selection, ["m::health_b"])
-        self.assertEqual((rc, tests), (0, ["m::health_b"]), out)
-        self.assertIn("## nextest macos-trusted: PASS", (self.dir / "summary.md").read_text())
+    def test_pg_classifier_scope_plans_every_non_pg_test_and_passes_only_when_all_ran(self):
+        rc, out, tests = self.native(["m::a", "m::health_b", "m::health_pg_c"])
+        self.assertEqual((rc, tests), (0, ["m::a", "m::health_b", "m::health_pg_c"]), out)
+        self.assertIn("## nextest macos-lib: PASS", (self.dir / "summary.md").read_text())
 
     def test_a_planned_test_missing_from_the_run_fails_despite_exit_zero(self):
-        rc, out, tests = self.native(f"selectors:{self.dir / 'selectors.txt'}", [])
+        rc, out, tests = self.native(["m::a", "m::health_b"])
         self.assertEqual(rc, 1, out)
-        self.assertEqual(tests, ["m::health_b"])
+        self.assertEqual(tests, ["m::a", "m::health_b", "m::health_pg_c"])
 
     def test_a_source_test_missing_from_the_native_list_fails_before_running(self):
         self.write("native-list.json", nextest_list(["m::a", "m::health_b"]))
-        rc, out, tests = self.native(f"selectors:{self.dir / 'selectors.txt'}", ["m::health_b"])
+        rc, out, tests = self.native(["m::a", "m::health_b"])
         self.assertEqual((rc, tests), (1, None), out)
         self.assertIn("static_only 1", out)
 
-    def test_an_exact_selector_off_its_ids_file_fails_before_planning(self):
-        (self.dir / "ids.txt").write_text("m::health_b\n")
-        self.write("selectors.txt", f"health | _pg | exact {self.dir / 'ids.txt'}\n")
-        rc, out, tests = self.native(f"selectors:{self.dir / 'selectors.txt'}", ["m::health_b"])
-        self.assertEqual((rc, tests), (0, ["m::health_b"]), out)
-        (self.dir / "ids.txt").write_text("m::health_b\nm::health_gone\n")
-        rc, out, tests = self.native(f"selectors:{self.dir / 'selectors.txt'}", ["m::health_b"])
-        self.assertEqual((rc, tests), (1, None), out)
-        self.assertIn("missing ['m::health_gone']", out)
-
     def test_a_nonzero_run_exit_fails_even_with_every_test_passing(self):
-        rc, out, _ = self.native(f"selectors:{self.dir / 'selectors.txt'}", ["m::health_b"], exit_code=100)
+        rc, out, _ = self.native(["m::a", "m::health_b", "m::health_pg_c"], exit_code=100)
         self.assertEqual(rc, 1, out)
         self.assertIn("nextest exited 100", out)
-
-    def test_pg_classifier_scope_plans_every_non_pg_test(self):
-        # The real exemptions name repository tests; this tree has none of them.
-        classifier = self.repo / "scripts/ci/pg_test_classifier.py"
-        text = classifier.read_text()
-        start = text.index("EXEMPT = {")
-        classifier.write_text(text[:start] + "EXEMPT = {}\n_UNUSED_EXEMPT = {" + text[start + len("EXEMPT = {"):])
-        rc, out, tests = self.native("pg-classifier", ["m::a", "m::health_b", "m::health_pg_c"])
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(tests, ["m::a", "m::health_b", "m::health_pg_c"])
 
 
 class RustSources(unittest.TestCase):

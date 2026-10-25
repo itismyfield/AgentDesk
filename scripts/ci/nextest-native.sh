@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Native macOS/Windows lib tests through the PR worker path on one worker: archive, list, source
 # compare, selection, plan, verify-archive, run with exit-code/JUnit record, audit and summary.
-# Usage: nextest-native.sh <platform> <scope> pg-classifier|selectors:<file>
+# Usage: nextest-native.sh <platform> <scope> pg-classifier
 set -euo pipefail
 
 platform="$1" scope="$2" selection="$3"
 dir="$RUNNER_TEMP/nextest"
 archive="$dir/lib-tests.tar.zst"
 record="$dir/results/worker-0"
-# The checked-out commit, which a manual trusted run may set apart from GITHUB_SHA.
+# The checked-out commit, which a dispatch on another ref sets apart from GITHUB_SHA.
 sha="$(git rev-parse HEAD)"
 ci() { python3 scripts/ci/nextest_ci.py "$@"; }
 # nextest extracts only into a directory that already exists.
@@ -19,16 +19,9 @@ cargo nextest list --archive-file "$archive" --workspace-remap "$GITHUB_WORKSPAC
   --ignore-default-filter --message-format json >"$dir/universe.json"
 python3 scripts/ci/rust_test_sources.py compare --platform "$platform" --list "$dir/universe.json" \
   --json-out "$dir/compare.json"
-case "$selection" in
-  pg-classifier)
-    python3 scripts/ci/pg_test_classifier.py classify --list "$dir/universe.json" --json-out "$dir/selection.json"
-    key=non_pg ;;
-  selectors:*)
-    ci select --universe "$dir/universe.json" --selectors "${selection#selectors:}" --json-out "$dir/selection.json"
-    key=selected ;;
-  *) echo "ERROR unknown selection $selection" >&2; exit 2 ;;
-esac
-ci plan --universe "$dir/universe.json" --only "$dir/selection.json" --only-key "$key" --archive "$archive" \
+[ "$selection" = pg-classifier ] || { echo "ERROR unknown selection $selection" >&2; exit 2; }
+python3 scripts/ci/pg_test_classifier.py classify --list "$dir/universe.json" --json-out "$dir/selection.json"
+ci plan --universe "$dir/universe.json" --only "$dir/selection.json" --archive "$archive" \
   --workers 1 --sha "$sha" --scope "$scope" --rust-version 1.94.1 \
   --nextest-version "$(cargo nextest --version | awk 'NR==1 {print $2}')" \
   --target "$(rustc -vV | sed -n 's/^host: //p')" --output "$dir/plan"

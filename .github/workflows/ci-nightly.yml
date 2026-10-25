@@ -120,7 +120,6 @@ jobs:
           } >> "$GITHUB_ENV"
 
       # #6006: three macOS failures reported `start tmux fixture: ... NotFound`.
-      # ci-macos-trusted.yml already provisions tmux; this hosted lane did not.
       # `tmux -V` is direct provisioning evidence in the log, not an assumption.
       - name: Install Opus on macOS
         run: |

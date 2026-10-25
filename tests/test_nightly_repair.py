@@ -128,7 +128,7 @@ STRUCTURAL_MUTANTS = (
      lambda t: t.replace("bash scripts/ci/nextest-native.sh windows windows-lib pg-classifier",
                          "cargo nextest run --lib", 1)),
     ("narrows the native run to a filter",
-     lambda t: t.replace("macos macos-lib pg-classifier", "macos macos-lib selectors:scripts/ci/macos-trusted-selectors.txt", 1)),
+     lambda t: t.replace("macos macos-lib pg-classifier", "macos macos-lib relay_recovery", 1)),
     ("skips the native run",
      lambda t: t.replace("        run: bash scripts/ci/nextest-native.sh macos",
                          "        if: false\n        run: bash scripts/ci/nextest-native.sh macos", 1)),

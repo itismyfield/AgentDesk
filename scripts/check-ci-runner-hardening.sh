@@ -9,7 +9,7 @@ error() {
 }
 
 python3 scripts/ci/nested_libtest.py check || error "nested libtest declarations must pass validation"
-python3 scripts/ci/cargo_test_filters.py || error "main, nightly, trusted and Windows warm cargo test commands must not carry a name filter"
+python3 scripts/ci/cargo_test_filters.py || error "main, nightly and Windows warm cargo test commands must not carry a name filter"
 
 readonly REQUIRED_CONTEXTS_JSON='["Lint", "Script checks", "Fast check (ubuntu-latest)", "High-risk recovery", "Dashboard (Node 22)", "Fast targeted tests (ubuntu-latest)", "relay-authority-contract", "Library test sweep (ubuntu-latest)", "Fast check cross OS required context (ubuntu-latest)"]'
 readonly REQUIRED_CHECK_MIRROR_SHA256="57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
@@ -980,7 +980,6 @@ RUBY
   fi
 }
 
-trusted_workflow=".github/workflows/ci-macos-trusted.yml"
 pr_workflow=".github/workflows/ci-pr.yml"
 main_workflow=".github/workflows/ci-main.yml"
 warm_workflow=".github/workflows/ci-windows-cache-warm.yml"
@@ -1539,9 +1538,6 @@ RUBY
   fi
 }
 
-if [ ! -f "$trusted_workflow" ]; then
-  error "missing $trusted_workflow"
-fi
 if [ ! -f "$pr_workflow" ]; then
   error "missing $pr_workflow"
 fi
@@ -1558,17 +1554,6 @@ done < <(workflow_files)
 
 validate_required_context_uniqueness
 validate_required_context_publishers
-
-# Trusted macOS runs on a timer or by hand only and no run cancels another:
-# a per-push run outlasts the gap between main pushes and never finishes.
-if [ -f "$trusted_workflow" ] && ! ruby -ryaml -e '
-  doc = YAML.safe_load(File.read(ARGV[0])); trigger = doc[true] || doc["on"]; group = doc["concurrency"] || {}
-  crons = trigger.is_a?(Hash) ? Array(trigger["schedule"]) : []
-  exit(trigger.is_a?(Hash) && trigger.keys.sort == %w[schedule workflow_dispatch] && crons.any? &&
-    crons.all? { |entry| entry.is_a?(Hash) && entry["cron"].is_a?(String) } &&
-    group["cancel-in-progress"] == false && group["group"].to_s.include?("github.event_name"))' "$trusted_workflow"; then
-  error "$trusted_workflow must trigger only on schedule and workflow_dispatch, and no run may cancel another"
-fi
 
 # Superseded PR heads must release hosted runners immediately. Required
 # contexts remain fail-closed on the newest exact SHA; branch protection never

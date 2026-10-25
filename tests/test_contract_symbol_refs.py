@@ -552,18 +552,14 @@ class WiringTest(unittest.TestCase):
         workflow = (REPO_ROOT / ".github" / "workflows" / "ci-pr.yml").read_text(
             encoding="utf-8"
         )
-        macos_workflow = (
-            REPO_ROOT / ".github" / "workflows" / "ci-macos-trusted.yml"
-        ).read_text(encoding="utf-8")
-        for name, source in (("ci-pr", workflow), ("ci-macos-trusted", macos_workflow)):
-            self.assertFalse(
-                "ci_relax_safe" in source,
-                f"{name} retains the retired CI relaxation output/condition",
-            )
-            self.assertFalse(
-                "tui-relay-stabilization" in source,
-                f"{name} still grants a branch-name CI escape hatch",
-            )
+        self.assertFalse(
+            "ci_relax_safe" in workflow,
+            "ci-pr retains the retired CI relaxation output/condition",
+        )
+        self.assertFalse(
+            "tui-relay-stabilization" in workflow,
+            "ci-pr still grants a branch-name CI escape hatch",
+        )
 
         # The required-context judge reads the forced lint run for Lint and Fast check.
         judge = yaml.safe_load(workflow)["jobs"]["required_contexts"]

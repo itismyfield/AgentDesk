@@ -493,7 +493,7 @@ if run_check contracts "Nested libtest declarations"; then
 "$PYTHON" -m unittest tests.test_nested_libtest
 fi
 
-if run_check contracts "Unfiltered cargo test in main, nightly and trusted"; then
+if run_check contracts "Unfiltered cargo test in main, nightly and Windows warm"; then
 "$PYTHON" -m unittest tests.test_cargo_test_filters
 fi
 
@@ -615,10 +615,6 @@ if run_check contracts "Portable deployable path lint"; then
   tests.test_portable_docs_examples \
   tests.test_operator_init_portable \
   tests.test_portable_operator_migration
-fi
-
-if run_check contracts "CI macOS Trusted Rust path filter"; then
-"$PYTHON" -m unittest tests.test_macos_trusted_rust_filter
 fi
 
 if run_check contracts "Legacy restart replay activation validator (#5925)"; then

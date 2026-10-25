@@ -6,7 +6,6 @@
   audit           per-worker artifacts -> verdict JSON and Markdown summary; any gap is red
   base-diff       compare a plan with the plan of a fixed comparison base SHA; every lost test needs a
                   matching scripts/ci/test-removal-justifications.txt row and every row a matching loss
-  select          lib test names a `cargo test FILTER -- --skip S…` selector file picks, as a plan --only input
   required-context, comparison-base, classify-worker   see nextest_required.py
 
 Every input format carries a version and is rejected when it does not match; a missing or
@@ -307,10 +306,10 @@ def adopt_identity(args):
     args.cargo_profile, args.nextest_profile = build["cargo_profile"], build["nextest_profile"]
 
 
-def only_listed(universe, ignored, path, key="non_pg"):
-    """Keep the lib tests a selection JSON names under key (classifier non_pg, or select's selected)."""
+def only_listed(universe, ignored, path):
+    """Keep the lib tests pg_test_classifier.py's JSON names under non_pg."""
     try:
-        names = set(json.loads(Path(path).read_text())[key])
+        names = set(json.loads(Path(path).read_text())["non_pg"])
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise PlanError(f"cannot read non_pg names from {path}: {exc}") from exc
     keep = {t for t in universe if t[1] in names}
@@ -327,7 +326,7 @@ def cmd_plan(args):
     build = build_identity(args)
     universe, ignored = load_universe(args.universe)
     if args.only:
-        universe, ignored = only_listed(universe, ignored, args.only, args.only_key)
+        universe, ignored = only_listed(universe, ignored, args.only)
     timings, invalid = load_timings(args.timings or [])
     weights, timing = weights_for(universe, timings)
     timing["invalid_records"] = invalid
@@ -567,43 +566,6 @@ def cmd_audit(args):
     return 0 if verdict["verdict"] == "pass" else 1
 
 
-def load_selectors(path):
-    """[(filter, skips, exact)] from `<filter> | <skip> <skip>… [| exact <ids file>]` rows, libtest substring
-    semantics; an exact row must pick precisely the runnable ids its file lists."""
-    rows = []
-    for n, line in enumerate(Path(path).read_text().splitlines(), 1):
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        name, sep, rest = (part.strip() for part in line.partition("|"))
-        skips, pinned, exact = (part.strip() for part in rest.partition("|"))
-        if not sep or not name or " " in name or (pinned and not re.fullmatch(r"exact \S+", exact)):
-            raise PlanError(f"{path}:{n}: need `<filter> | <skip substrings> [| exact <ids file>]`")
-        rows.append((name, tuple(skips.split()), exact.split()[1] if pinned else None))
-    if not rows:
-        raise PlanError(f"{path} selects nothing")
-    return rows
-
-
-def cmd_select(args):
-    runnable, ignored = load_universe(args.universe)
-    names = {t[1] for t in runnable | ignored}
-    rows = load_selectors(args.selectors)
-    hits = {f: {n for n in names if f in n and not any(s in n for s in skips)} for f, skips, _ in rows}
-    dead = [f for f, _, _ in rows if not hits[f]]
-    if dead:
-        raise PlanError(f"selectors match no listed test: {dead}")
-    for f, _, exact in (row for row in rows if row[2]):
-        want = {line.strip() for line in Path(exact).read_text().splitlines() if line.strip()}
-        unrun = hits[f] & {t[1] for t in ignored}
-        if hits[f] != want or unrun:
-            raise PlanError(f"selector {f!r} must pick exactly the runnable ids of {exact}: missing "
-                            f"{sorted(want - hits[f])}, extra {sorted(hits[f] - want)}, ignored {sorted(unrun)}")
-    picked = sorted(set().union(*hits.values()))
-    Path(args.json_out).write_text(json.dumps({"selected": picked}, indent=0) + "\n")
-    print(f"selected {len(picked)} of {len(names)} listed tests with {len(rows)} selectors")
-    return 0
-
-
 REMOVAL_KINDS = ("removed", "runnable->ignored")
 
 
@@ -713,8 +675,7 @@ def main(argv=None):
     p.add_argument("--retry-policy", default="scripts/ci/nextest-retry-policy.toml")
     p.add_argument("--today", help="YYYY-MM-DD for policy expiry (default: UTC today)")
     p.add_argument("--identity-from", help="plan.json whose scope and build flags this plan takes")
-    p.add_argument("--only", help="selection JSON; plan only the tests it names under --only-key")
-    p.add_argument("--only-key", default="non_pg", help="non_pg (pg_test_classifier.py) or selected (select)")
+    p.add_argument("--only", help="pg_test_classifier.py JSON; plan only the tests it names under non_pg")
     p.add_argument("--output", required=True)
     v = sub.add_parser("verify-archive")
     v.add_argument("--plan", required=True)
@@ -737,14 +698,10 @@ def main(argv=None):
     b.add_argument("--justifications", required=True, help="scripts/ci/test-removal-justifications.txt")
     b.add_argument("--source-removed", required=True, help="rust_test_sources.py removed JSON")
     b.add_argument("--json-out", required=True)
-    c = sub.add_parser("select")
-    c.add_argument("--universe", required=True)
-    c.add_argument("--selectors", required=True, help="e.g. scripts/ci/macos-trusted-selectors.txt")
-    c.add_argument("--json-out", required=True)
     delegated = nextest_required.register(sub)
     args = parser.parse_args(argv)
     handler = {"plan": cmd_plan, "verify-archive": cmd_verify_archive,
-               "audit": cmd_audit, "base-diff": cmd_base_diff, "select": cmd_select}.get(args.command)
+               "audit": cmd_audit, "base-diff": cmd_base_diff}.get(args.command)
     try:
         return handler(args) if handler else delegated[args.command](_SELF, args)
     except PlanError as exc:

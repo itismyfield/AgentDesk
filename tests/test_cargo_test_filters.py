@@ -1,4 +1,4 @@
-"""A `cargo test` name filter in CI Main, Nightly or Trusted macOS can select nothing and stay green."""
+"""A `cargo test` name filter in CI Main, Nightly or the Windows warm can select nothing and stay green."""
 from __future__ import annotations
 
 import shutil
@@ -31,7 +31,6 @@ class CargoTestFilters(unittest.TestCase):
     def test_a_name_filter_or_expansion_in_any_of_the_three_workflows_fails(self) -> None:
         main_cmd = "cargo test --bins --test '*' -- --skip _pg --skip pg_ --skip postgres\n"
         nightly_cmd = "cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres\n"
-        trusted_cmd = "run: cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres --test-threads=1\n"
         cases = (
             ("main filter before --", ".github/workflows/ci-main.yml", main_cmd,
              main_cmd.replace("--test '*' --", "--test '*' transition --"), "transition"),
@@ -44,8 +43,6 @@ class CargoTestFilters(unittest.TestCase):
             ("nightly skip array", ".github/workflows/ci-nightly.yml", "\n          " + nightly_cmd,
              "\n          " + nightly_cmd.replace("--skip _pg --skip pg_ --skip postgres", '"${SKIP_ARGS[@]}"'),
              "SKIP_ARGS"),
-            ("trusted loop variable", ".github/workflows/ci-macos-trusted.yml", trusted_cmd,
-             trusted_cmd.replace("--test '*' --", "--test '*' \"$filter\" --"), "$filter"),
         )
         for label, workflow, old, new, word in cases:
             with self.subTest(label=label):

@@ -85,14 +85,16 @@ three jobs; `scripts/check-ci-runner-hardening.sh` allows them to differ only in
 
 The `lint` job runs fmt, clippy, the policy JS tests, the non-lib side of the
 recipe's `--all-targets` lines (`--bins --test '*'`), and the `ClaudeBinary`
-compile-fail doctests. The nightly macOS and Windows lanes and `CI macOS Trusted`
-run `scripts/ci/nextest-native.sh`: native source compare, plan, preflight, run
-record and audit on one worker. Nightly plans the non-PG lib tests that
-`scripts/ci/pg_test_classifier.py` selects; trusted plans the selector union in
-`scripts/ci/macos-trusted-selectors.txt`. A selector row ending in `| exact <ids file>`
-must pick exactly the runnable ids that file lists, so the macOS-only
-`herdr_loaded_image_macos_` tests fail selection if one goes missing or appears.
-Both run the non-lib targets with `cargo test` and the non-Postgres skips.
+compile-fail doctests. The nightly macOS and Windows lanes run
+`scripts/ci/nextest-native.sh`: native source compare, plan, preflight, run
+record and audit on one worker. They plan the non-PG lib tests that
+`scripts/ci/pg_test_classifier.py` selects, then run the non-lib targets with
+`cargo test` and the non-Postgres skips.
+
+The macOS-only `herdr_loaded_image_macos_` tests compile on no PR runner.
+`scripts/ci/herdr_loaded_image_macos_ids.txt` lists them and a static test pins it
+to the macOS source inventory. A local Mac run checks that exactly those ran:
+`python3 scripts/run_test_lane.py --lane macos-loaded-image --expected-ids scripts/ci/herdr_loaded_image_macos_ids.txt -- env -u AGENTDESK_ROOT_DIR cargo test --lib herdr_loaded_image_macos_ -- --test-threads=1`.
 
 A broader sweep was attempted with:
 

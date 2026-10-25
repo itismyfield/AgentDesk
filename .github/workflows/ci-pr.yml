@@ -891,7 +891,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 36e32491dc011b63a86cbef66df79316dceb930eaead71b96293589030fc3f5d
-          pin scripts/check-ci-runner-hardening.sh 68c43b88054efeef699a03f40f3bf809b8397f2f669b89fcb78723e335f79983
+          pin scripts/check-ci-runner-hardening.sh a05efe038a695bdcbd2ea51414ce5873330011d1b85dfb2a1d72c2b3b9a1078a
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required context
@@ -917,7 +917,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 36e32491dc011b63a86cbef66df79316dceb930eaead71b96293589030fc3f5d
-          pin scripts/check-ci-runner-hardening.sh 68c43b88054efeef699a03f40f3bf809b8397f2f669b89fcb78723e335f79983
+          pin scripts/check-ci-runner-hardening.sh a05efe038a695bdcbd2ea51414ce5873330011d1b85dfb2a1d72c2b3b9a1078a
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Publish required contexts
