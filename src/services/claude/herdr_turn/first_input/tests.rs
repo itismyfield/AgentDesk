@@ -101,6 +101,7 @@ fn run_case(refuse_commit: bool) {
     let commit_path = crate::config::runtime_root()
         .unwrap()
         .join("runtime/discord_pending_queue/cold-matrix/727398-herdr-owner.json");
+    let effect_mailbox = mailbox.clone();
     let (_, result) = runtime
         .block_on(
             mailbox.v2_cold_bootstrap(1, std::sync::Arc::new(|| 10000), move |frame| {
@@ -112,6 +113,19 @@ fn run_case(refuse_commit: bool) {
                     crate::services::claude_tui::owner_input::active(),
                     "actual Claude Herdr submit requires owner scope"
                 );
+                use crate::services::claude_tui::host_input::{HerdrInput, InputTransport};
+                let mut preparation = HerdrInput::new(&attached.target);
+                InputTransport::load_buffer(&mut preparation, "memory-only", "not submitted")
+                    .unwrap();
+                drop(preparation);
+                let preparing = tokio::runtime::Handle::current()
+                    .block_on(effect_mailbox.v2_request(|slot| slot.as_ref().unwrap().json()))
+                    .unwrap();
+                assert_eq!(
+                    preparing["head_injection"]["payload_window"]["kind"], "bootstrap",
+                    "memory buffer cannot start payload confirmation"
+                );
+                assert!(preparing["head_injection"]["confirmation_deadline_ms"].is_null());
                 let turn = HerdrTurn {
                     pool: &pool,
                     owner,
