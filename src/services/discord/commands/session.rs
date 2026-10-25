@@ -39,8 +39,10 @@ pub(in crate::services::discord) async fn cmd_resume(
     let Some(session_key) =
         super::super::adk_session::build_adk_session_key(shared, channel_id, provider, None).await
     else {
-        ctx.say("이 채널의 session_key를 확인할 수 없어요. `/start`로 세션을 먼저 붙여주세요.")
-            .await?;
+        ctx.say(
+            "이 채널의 session_key를 확인할 수 없어요. agentdesk.yaml에 workspace를 설정해 주세요.",
+        )
+        .await?;
         return Ok(());
     };
 
@@ -152,7 +154,7 @@ pub(in crate::services::discord) async fn cmd_pwd(ctx: Context<'_>) -> Result<()
     match current_path {
         Some(path) => ctx.say(format!("`{}`", path)).await?,
         None => {
-            ctx.say("No active session. Use `/start <path>` first.")
+            ctx.say("No active session. Set a workspace in agentdesk.yaml.")
                 .await?
         }
     };
