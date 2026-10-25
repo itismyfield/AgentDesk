@@ -1847,6 +1847,7 @@ services::discord::commands::control::codex_clear_retirement_tests::relaunch_pre
 services::discord::commands::control::codex_clear_retirement_tests::unretired_pin_in_shadow_mode_parks_restored_input_until_clear_pg
 services::discord::commands::control::codex_clear_retirement_tests::unretired_pin_with_an_old_boundary_parks_restored_input_until_clear_pg
 services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_and_process_of_a_refused_session_pg
+services::discord::commands::system_prompt::tests::system_prompt_idle_channel_uses_latest_scoped_snapshot_read_only_pg
 services::discord::commands::system_prompt::tests::system_prompt_saved_snapshot_and_pg_absence_choose_correct_source_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unconfirmed_tmux_host_runs_and_ends_the_session_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unsettled_herdr_channel_runs_and_warns_pg

@@ -66,7 +66,7 @@ fn system_prompt_masks_keys_and_token_shapes_and_counts_values_once() {
         "ghp_sensitive123",
         "xoxb-123-sensitive",
         &"a9".repeat(16),
-        &"Ab9+Z0".repeat(12),
+        &"Ab9+/Z".repeat(12),
     ];
     let text = format!(
         "--key {}\n--key=\"{}\"\n--key '{}'\n{}\n{}\n{}\n{}\n{}",
@@ -150,4 +150,52 @@ fn system_prompt_masks_bounded_opaque_keys_and_labeled_values() {
             4
         )
     );
+}
+
+#[test]
+fn system_prompt_masks_env_assignments_and_standard_base64() {
+    for assignment in [
+        "AGENTDESK_TOKEN=short-value",
+        "export OPENAI_API_KEY=short-value",
+    ] {
+        let (masked, count) = redact(assignment);
+        assert_eq!(masked, assignment.replace("short-value", "***"));
+        assert_eq!(count, 1);
+    }
+    assert_eq!(
+        redact("Cg47XywrFTAOow60OMNG+FhCCf/mIIMebVLeX1qw"),
+        ("***".into(), 1)
+    );
+    let prompt = format!(
+        "## Secret:\r\nNext line\n{}",
+        "export OPENAI_API_KEY='spaced value'\n".repeat(200)
+    );
+    let (masked, count) = redact(&prompt);
+    assert_eq!(count, 200);
+    assert!(masked.starts_with("## Secret:\r\nNext line\n"));
+    assert_eq!(masked.matches('\n').count(), prompt.matches('\n').count());
+    let rendered = render(&prompt, "session", None, 0, true);
+    assert_eq!(joined(&rendered[1..]), masked);
+    assert!(
+        rendered
+            .iter()
+            .all(|message| message.encode_utf16().count() <= 2000)
+    );
+}
+
+#[test]
+fn system_prompt_preserves_multiline_labels_identifiers_and_hash_paths() {
+    let hash = "a9".repeat(32);
+    for text in [
+        "## Secret:\nNext line".into(),
+        "`build_codex_memento_prompt_for_issue_4309`".into(),
+        "sk-learn-compatible-estimators".into(),
+        format!("/tmp/{hash}/notes"),
+        format!("~/{hash}/notes"),
+        format!("./{hash}/notes"),
+        format!("https://example.com/{hash}"),
+    ] {
+        assert_eq!(redact(&text), (text.clone(), 0), "changed {text}");
+    }
+    assert_eq!(redact(&format!("--key {hash}")), ("--key ***".into(), 1));
 }

@@ -3913,6 +3913,7 @@ services::discord::commands::response_wording_tests::shared_command_states_use_k
 services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_and_process_of_a_refused_session_pg
 services::discord::commands::system_prompt::tests::system_prompt_active_native_binding_precedes_persisted_session
 services::discord::commands::system_prompt::tests::system_prompt_command_registered
+services::discord::commands::system_prompt::tests::system_prompt_idle_channel_uses_latest_scoped_snapshot_read_only_pg
 services::discord::commands::system_prompt::tests::system_prompt_missing_snapshot_is_labeled_reconstructed
 services::discord::commands::system_prompt::tests::system_prompt_saved_snapshot_and_pg_absence_choose_correct_source_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unconfirmed_tmux_host_runs_and_ends_the_session_pg
@@ -6155,7 +6156,9 @@ services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_fen
 services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_header_distinguishes_origins_and_anchors
 services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_lines_and_emoji_keep_every_character
 services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_masks_bounded_opaque_keys_and_labeled_values
+services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_masks_env_assignments_and_standard_base64
 services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_masks_keys_and_token_shapes_and_counts_values_once
+services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_preserves_multiline_labels_identifiers_and_hash_paths
 services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_preserves_paths_urls_and_nonsecret_words
 services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_utf16_boundaries_and_roundtrip
 services::discord::queue_dispatch::canary_workspace::tests::canary_without_core_session_and_unresolved_workspace_parks_original_pg

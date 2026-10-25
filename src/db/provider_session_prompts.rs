@@ -22,6 +22,15 @@ pub(crate) async fn fetch(
         .bind(provider).bind(channel).bind(session).fetch_optional(pool).await
 }
 
+pub(crate) async fn fetch_latest_session_id(
+    pool: &PgPool,
+    provider: &str,
+    channel: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT provider_session_id FROM provider_session_system_prompts WHERE provider=$1 AND channel_id=$2 ORDER BY started_at DESC, provider_session_id DESC LIMIT 1")
+        .bind(provider).bind(channel).fetch_optional(pool).await
+}
+
 pub(crate) async fn save(pool: &PgPool, prompt: &SessionPrompt) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     // Serialize insert/prune for one channel so concurrent starts cannot exceed the bound.

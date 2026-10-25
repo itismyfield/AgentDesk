@@ -7,12 +7,12 @@ const BODY_LIMIT: usize = 2_000 - 8;
 pub(crate) fn redact(input: &str) -> (String, usize) {
     static KEY: LazyLock<Result<Regex, regex::Error>> = LazyLock::new(|| {
         Regex::new(
-            r#"(?i)(--key(?:\s+|=)|\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s`]+)"#,
+            r#"(?i)(--key(?:[ \t]+|=)|\b(?:[a-z][a-z0-9]*_)*(?:api[_-]?key|token|secret|password)[ \t]*[:=][ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s`"'()\[\]{}]+)"#,
         )
     });
     static TOKEN: LazyLock<Result<Regex, regex::Error>> = LazyLock::new(|| {
         Regex::new(
-            r"(?i)(?P<known>\b(?:sk-[a-z0-9_-]{16,}|gh[pousr]_[a-z0-9_]+|github_pat_[a-z0-9_]+|xox[a-z][-.][a-z0-9_.-]+))|(?P<opaque>[a-z0-9+_-]{40,}={0,2}|[a-f0-9]{32,})",
+            r"(?i)^(?:(?P<sk>sk-[a-z0-9_-]{16,})|(?P<known>gh[pousr]_[a-z0-9_]+|github_pat_[a-z0-9_]+|xox[a-z][-.][a-z0-9_.-]+)|[a-z0-9+/_-]{40,}={0,2}|[a-f0-9]{32,})$",
         )
     });
     let (Ok(key), Ok(token)) = (&*KEY, &*TOKEN) else {
@@ -23,27 +23,34 @@ pub(crate) fn redact(input: &str) -> (String, usize) {
         count += 1;
         format!("{}***", &c[1])
     });
-    let tokens = token.replace_all(&keys, |c: &Captures<'_>| {
-        let Some(span) = c.get(0) else {
-            return "***".to_owned();
-        };
-        let value = span.as_str();
-        let path_part = |ch: char| ch.is_ascii_alphanumeric() || "_/+.-=".contains(ch);
-        if c.name("known").is_none()
-            && (keys[..span.start()]
-                .chars()
-                .next_back()
-                .is_some_and(path_part)
-                || keys[span.end()..].chars().next().is_some_and(path_part)
-                || !value.bytes().any(|ch| ch.is_ascii_alphabetic())
-                || !value.bytes().any(|ch| ch.is_ascii_digit()))
-        {
-            return value.to_owned();
+    let delimiter = |ch: char| ch.is_whitespace() || "\"'`()[]{}".contains(ch);
+    let mut output = String::with_capacity(keys.len());
+    for part in keys.split_inclusive(delimiter) {
+        let value = part.trim_end_matches(delimiter);
+        let path = value.starts_with('/')
+            || value.starts_with("~/")
+            || value.starts_with("./")
+            || value.contains("://");
+        let secret = !path
+            && token.captures(value).is_some_and(|c| {
+                let mixed = value.bytes().any(|ch| ch.is_ascii_alphabetic())
+                    && value.bytes().any(|ch| ch.is_ascii_digit());
+                let identifier = value.contains('_')
+                    && value
+                        .bytes()
+                        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'_');
+                c.name("known").is_some()
+                    || (mixed && (c.name("sk").is_some() || (!value.contains('.') && !identifier)))
+            });
+        if secret {
+            count += 1;
+            output.push_str("***");
+        } else {
+            output.push_str(value);
         }
-        count += 1;
-        "***".to_owned()
-    });
-    (tokens.into_owned(), count)
+        output.push_str(&part[value.len()..]);
+    }
+    (output, count)
 }
 
 pub(crate) fn neutralize_fences(input: &str) -> String {
