@@ -133,29 +133,9 @@ fn describe(cache: &ProofCache, result: &Result<NextRestartProof, Unverified>) -
 /// One next-restart check of `socket` with a fresh cache; it writes no config or store and starts no server.
 #[cfg(unix)]
 pub(crate) async fn probe(socket: &Path) -> Result<Value, String> {
-    use super::super::contract::HerdrTransport;
-    use super::super::transport::{HerdrSocketConfig, HerdrSocketTransport};
-    let endpoint = super::super::model::HerdrEndpoint::new("probe", "probe", socket, "probe")
-        .map_err(|error| format!("herdr probe socket {}: {error:?}", socket.display()))?;
-    let transport = std::sync::Arc::new(HerdrSocketTransport::new(
-        &endpoint,
-        HerdrSocketConfig::default(),
-        super::super::wire::LineJsonFraming,
-    ));
-    // Built as the launch host builds its consent source, so the probe judges the same evidence.
-    let (hello, witness) = (transport.clone(), transport.clone());
-    let source = super::peer::SocketPeerSource::new(
-        socket.into(),
-        move || hello.hello().map_err(|_| Unverified::Peer),
-        move || witness.server_witness().map_err(|_| Unverified::Peer),
-    );
-    #[cfg(target_os = "macos")]
-    let source = source
-        .with_generation(move || transport.peer_generation().map_err(|_| Unverified::Changed));
+    let source = super::super::launch_host::probe_source(socket)?;
     let cache = ProofCache::default();
-    let result = cache
-        .next_restart(std::sync::Arc::new(source), &super::LocalChecker)
-        .await;
+    let result = cache.next_restart(source, &super::LocalChecker).await;
     let mut value = describe(&cache, &result);
     value["socket"] = socket.display().to_string().into();
     value["observation"] = "probe_once; nothing is kept".into();
