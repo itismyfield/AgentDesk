@@ -2079,9 +2079,7 @@ services::claude::local_tmux_lifecycle_tests::routine_binding_clear_starts_fresh
 services::claude::process_session_launch::tests::account_switch_drops_only_the_resume_argument_and_its_token
 services::claude::simple_launch_env_tests::simple_command_clears_an_inherited_absolute_compact_window
 services::claude::simple_timeout_2387_tests::timeout_drain_prefers_late_result_when_child_pid_snapshot_is_none
-services::claude::tui_session_launch::guarded_geometry_tests::claude_launch_sizes_only_the_allowlisted_channel_and_keeps_the_rest_unchanged
-services::claude::tui_session_launch::guarded_geometry_tests::guarded_launch_failure_after_create_leaves_nothing_and_the_next_launch_succeeds
-services::claude::tui_session_launch::guarded_geometry_tests::guarded_launch_with_unconfirmed_cleanup_fails_and_keeps_the_ownership_evidence
+services::claude::tui_session_launch::guarded_geometry_tests::claude_launch_guarded_and_other_channels_use_regular_sessions
 services::claude::tui_session_launch::herdr_env_tests::herdr_launch_child_loses_the_herdr_pane_env_while_tmux_keeps_its_launch_env
 services::claude::tui_session_launch::herdr_off_tests::claude_launch_creates_no_tmux_for_a_herdr_configured_channel_ready_or_not
 services::claude::tui_session_launch::herdr_off_tests::claude_launch_entry_stays_on_tmux_and_starts_no_herdr_preparation
@@ -12088,7 +12086,6 @@ services::platform::tmux::session_inventory::tests::u_inventory_complete_stdout
 services::platform::tmux::session_inventory::tests::u_inventory_execution_failures
 services::platform::tmux::session_inventory::tests::u_inventory_no_server_control
 services::platform::tmux::session_server_tests::parse_sessions_with_server_pid_skips_empty_names_and_defaults_bad_pids
-services::platform::tmux::sized::tests::sized_cleanup_removes_only_the_created_identity
 services::platform::tmux::target_safety_tests::blank_session_name_is_not_a_valid_target
 services::platform::tmux::target_safety_tests::tmux_command_enables_utf8_mode
 services::platform::tmux::timeout_tests::kill_session_timeout_reports_hung_tmux
@@ -13388,8 +13385,8 @@ services::tui_input::submission_tmux::guarded::transport_tests::cg_b2a_dormant_d
 services::tui_input::submission_tmux::guarded::transport_tests::cg_b2a_lost_nonzero_and_timeout_ack_are_indeterminate_without_retry
 services::tui_input::submission_tmux::guarded::transport_tests::cg_b2a_pin_rejects_missing_small_nonmanual_split_and_dead
 services::tui_input::submission_tmux::guarded::transport_tests::cg_b2a_replaced_same_name_and_dead_identity_never_enter
-services::tui_input::submission_tmux::guarded::transport_tests::cg_b2a_single_live_manual_160x40_enter_once
-services::tui_input::submission_tmux::guarded::transport_tests::cg_b2a_snapshot_resize_manual_and_split_false_branch_enter_zero
+services::tui_input::submission_tmux::guarded::transport_tests::cg_b2a_single_live_pane_enter_once
+services::tui_input::submission_tmux::guarded::transport_tests::cg_b2a_snapshot_resize_and_split_hold_but_size_mode_change_enters
 services::tui_input::submission_tmux::guarded::transport_tests::cg_b2b_capture_joins_only_soft_wrap_and_keeps_spaces
 services::tui_input::submission_tmux::guarded::transport_tests::cg_b2b_capture_rechecks_snapshot_in_same_tmux_command
 services::tui_input::submission_tmux::guarded::transport_tests::cg_b2b_linked_window_writer_is_never_admitted
