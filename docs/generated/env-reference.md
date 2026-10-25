@@ -161,13 +161,13 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `CARGO_MANIFEST_DIR` | `src/services/maintenance/jobs/target_sweep.rs` | Order matters: `CARGO_MANIFEST_DIR` is set by cargo during dev/test runs (resolving the actual checkout) but is UNSET in the deployed release binary, so it cle… |
 | `CLAUDE_CONFIG_DIR` | `src/services/claude_tui/hook_output_guard.rs`, `src/services/claude_tui/transcript_tail.rs`, `src/services/discord/mcp_credential_watcher.rs`, `src/services/discord/recovery_engine/manual_rebind_override.rs` | The Claude home this host reads rollout transcripts under, honouring the `CLAUDE_CONFIG_DIR` override. |
 | `CODEX_HOME` | `src/services/codex_tui/rollout_tail/discovery.rs` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
-| `COKACDIR_DEBUG` | `src/services/claude.rs` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
+| `COKACDIR_DEBUG` | `src/services/claude.rs` | Global runtime debug flag — set by COKACDIR_DEBUG=1 at startup or toggled by the `!debug` text command. |
 | `COMPUTERNAME` | `src/services/tmux_common.rs` |  |
 | `DATABASE_URL` | `src/db/postgres.rs` |  |
 | `GEMINI_CLIENT_ID` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
 | `GEMINI_CLIENT_SECRET` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs` |  |
-| `HOME` | `src/cli/doctor/orchestrator.rs`, `src/cli/utils.rs`, `src/config/session_hosts.rs`, `src/services/discord/sidecar_interaction.rs`, `src/services/mcp_config.rs`, `src/services/observability/events.rs`, `src/services/operator_connectors.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` | #2655: handler for the `install-memento-session-hook` CLI surface. |
+| `HOME` | `src/cli/doctor/orchestrator.rs`, `src/cli/herdr.rs`, `src/cli/utils.rs`, `src/config/session_hosts.rs`, `src/services/discord/sidecar_interaction.rs`, `src/services/mcp_config.rs`, `src/services/observability/events.rs`, `src/services/operator_connectors.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` | Absolute socket path; defaults to $HOME/.config/herdr/herdr.sock |
 | `HOSTNAME` | `src/server/outbox_worker.rs`, `src/services/scheduled_messages.rs`, `src/services/tmux_common.rs` |  |
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs`, `src/services/stream_json_cli/dialects/agy.rs` |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs`, `src/services/maintenance/jobs/memento_consolidation.rs` |  |

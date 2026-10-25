@@ -114,3 +114,41 @@ fn doctor_uses_the_selected_boot_socket_when_raw_config_omits_the_default() {
         "legacy_doctor_still_returns_before_selected_boot_observation_contract"
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn diagnosis_names_each_loaded_image_refusal_and_never_calls_ambiguity_a_change() {
+    let socket = Path::new("/no-server-image-diagnostics-test/herdr.sock");
+    let cache = ProofCache::default();
+    let mut actions = Vec::new();
+    for (refusal, reason) in [
+        (
+            Unverified::ImageChangedSinceStart,
+            "next_restart_image_changed_since_start",
+        ),
+        (
+            Unverified::ImageTimeAmbiguous,
+            "next_restart_image_time_ambiguous",
+        ),
+        (
+            Unverified::ImageFilesystemUnsupported,
+            "next_restart_image_filesystem_unsupported",
+        ),
+        (
+            Unverified::ImageLayoutUnsupported,
+            "next_restart_image_layout_unsupported",
+        ),
+    ] {
+        record(socket, &cache, &Err(refusal));
+        let view = snapshot(socket);
+        assert_eq!(view["reason"], reason, "{refusal:?}");
+        actions.push(view["action"].as_str().unwrap_or_default().to_owned());
+    }
+    assert!(
+        actions[0].contains("changed after this server process started")
+            && !actions[1].contains("changed after"),
+        "an order-unknown change time is not reported as a later change"
+    );
+    let distinct: std::collections::BTreeSet<_> = actions.iter().collect();
+    assert_eq!(distinct.len(), 4, "each refusal has its own action");
+}

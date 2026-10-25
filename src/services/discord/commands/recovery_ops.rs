@@ -1,13 +1,5 @@
-//! Issue #2653: Discord slash commands for deadlock recovery, machine flip,
-//! and bulk stuck-PR rebase.
-//!
-//! Background
-//! ----------
-//! Recovery sequences that used to require 5–7 manual steps over chat
-//! (promote-release.sh + mtime compare + ssh + codesign + dcserver restart)
-//! are now exposed as discoverable Discord slash commands. Each command runs
-//! a curated bash pipeline against well-known repo scripts and emits a single
-//! transcript back to the channel.
+//! Recovery pipelines behind the `!deadlock-recover`, `!machine-flip` and
+//! `!stuck-pr-rebase` text commands; their slash surfaces were removed.
 //!
 //! Design constraints
 //! ------------------
@@ -22,13 +14,8 @@
 //! * **Preflight** — Each pipeline starts with a preflight block that fails
 //!   fast on missing prerequisites (repo root, gh auth, ssh reachability)
 //!   before any mutating step.
-//! * **Timeout** — Pipelines are bounded by the same total-timeout the
-//!   `!shell` surface uses, so a hung `ssh` cannot pin the bot indefinitely.
 //!
 //! Tested separately via `cargo test --lib recovery_ops::tests`.
-
-use super::super::formatting::send_long_message_ctx;
-use super::super::{Context, Error, check_auth};
 
 /// Maximum length for an operator-supplied argument (peer host, env, branch
 /// prefix, etc.). Keeps the bash payload bounded and rejects pathological
@@ -226,156 +213,6 @@ echo "stuck-pr-rebase: DONE"
 "#
         ),
     }
-}
-
-/// Common runner: validate args, build the script, hand it off to the
-/// platform shell, and stream the transcript back to Discord.
-async fn run_recovery(
-    ctx: Context<'_>,
-    kind: RecoveryKind,
-    command_label: &'static str,
-) -> Result<(), Error> {
-    let user_id = ctx.author().id;
-    let user_name = &ctx.author().name;
-    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
-        return Ok(());
-    }
-    // Recovery commands are RCE-grade — the slash command policy enforces
-    // owner-only + explicit opt-in. `enforce_slash_command_policy` reads
-    // the risk tier from `slash_command_risk` which maps these names to
-    // `ShellOrToolGrant`.
-    if !super::enforce_slash_command_policy(&ctx, command_label).await? {
-        return Ok(());
-    }
-
-    log_command_received!(
-        ctx.channel_id().get(),
-        user_name,
-        command_label,
-        recovery_kind = kind.name()
-    );
-
-    ctx.defer().await?;
-
-    let script = build_recovery_script(&kind);
-    let working_dir = dirs::home_dir()
-        .map(|h| h.display().to_string())
-        .unwrap_or_else(|| "/".to_string());
-
-    let result = tokio::task::spawn_blocking(move || {
-        let mut builder = crate::services::platform::shell::shell_command_builder(&script);
-        builder
-            .current_dir(&working_dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        crate::services::process::configure_child_process_group(&mut builder);
-        match builder.spawn() {
-            Ok(child) => crate::services::shell_guard::wait_with_no_output_timeout(
-                child,
-                crate::services::shell_guard::DEFAULT_NO_OUTPUT_TIMEOUT,
-                crate::services::shell_guard::DEFAULT_TOTAL_TIMEOUT,
-            ),
-            Err(e) => Err(format!("spawn failed: {}", e)),
-        }
-    })
-    .await;
-
-    let response = match result {
-        Ok(Ok(outcome)) => {
-            let stdout = String::from_utf8_lossy(&outcome.stdout);
-            let stderr = String::from_utf8_lossy(&outcome.stderr);
-            let mut parts = Vec::new();
-            if !stdout.is_empty() {
-                parts.push(format!("```\n{}\n```", stdout.trim_end()));
-            }
-            if !stderr.is_empty() {
-                parts.push(super::owner_error_response(
-                    "복구 명령이 오류 출력을 반환했어요.",
-                    stderr.trim_end(),
-                ));
-            }
-            if let Some(cause) = outcome.timed_out {
-                parts.push(super::owner_error_response(
-                    "복구 명령이 제한 시간을 초과해 중지됐어요.",
-                    cause.as_str(),
-                ));
-            } else if parts.is_empty() {
-                parts.push(format!("(종료 코드: {})", outcome.exit_code));
-            } else if outcome.exit_code != 0 {
-                parts.push(format!("(종료 코드: {})", outcome.exit_code));
-            }
-            parts.join("\n")
-        }
-        Ok(Err(e)) => super::owner_error_response("복구 명령을 실행하지 못했어요.", &e),
-        Err(e) => super::owner_error_response(
-            "복구 명령을 처리하는 중 오류가 발생했어요.",
-            &e.to_string(),
-        ),
-    };
-
-    send_long_message_ctx(ctx, &response).await?;
-    log_info_event!(
-        "discord_recovery_command_completed",
-        channel_id = ctx.channel_id().get(),
-        user_name = %user_name,
-        command = %command_label,
-        recovery_kind = kind.name(),
-        status = "completed",
-    );
-    Ok(())
-}
-
-/// `/deadlock-recover [env]` — restart the local dcserver and reap orphans.
-///
-/// `env` defaults to `release`.
-#[poise::command(slash_command, rename = "deadlock-recover")]
-pub(in crate::services::discord) async fn cmd_deadlock_recover(
-    ctx: Context<'_>,
-    #[description = "launchd env label suffix (default: release)"] env: Option<String>,
-) -> Result<(), Error> {
-    let env = env.unwrap_or_else(|| "release".to_string());
-    if let Err(e) = validate_safe_token(&env) {
-        ctx.say(e.user_message("env")).await?;
-        return Ok(());
-    }
-    run_recovery(ctx, RecoveryKind::Deadlock { env }, "/deadlock-recover").await
-}
-
-/// `/machine-flip <peer>` — redeploy locally then ssh deploy to peer.
-#[poise::command(slash_command, rename = "machine-flip")]
-pub(in crate::services::discord) async fn cmd_machine_flip(
-    ctx: Context<'_>,
-    #[description = "peer SSH host (e.g. mac-mini, mac-book)"] peer: String,
-) -> Result<(), Error> {
-    if let Err(e) = validate_safe_token(&peer) {
-        ctx.say(e.user_message("peer")).await?;
-        return Ok(());
-    }
-    run_recovery(ctx, RecoveryKind::MachineFlip { peer }, "/machine-flip").await
-}
-
-/// `/stuck-pr-rebase [label]` — rebuild + force-push every open PR carrying
-/// the given audit label.
-///
-/// `label` defaults to `audit:2026-05-19`.
-#[poise::command(slash_command, rename = "stuck-pr-rebase")]
-pub(in crate::services::discord) async fn cmd_stuck_pr_rebase(
-    ctx: Context<'_>,
-    #[description = "GitHub label selecting PRs to rebase (default: audit:2026-05-19)"]
-    label: Option<String>,
-) -> Result<(), Error> {
-    let label = label.unwrap_or_else(|| "audit:2026-05-19".to_string());
-    if let Err(e) = validate_safe_token(&label) {
-        ctx.say(e.user_message("label")).await?;
-        return Ok(());
-    }
-    run_recovery(
-        ctx,
-        RecoveryKind::StuckPrRebase { label },
-        "/stuck-pr-rebase",
-    )
-    .await
 }
 
 #[cfg(test)]

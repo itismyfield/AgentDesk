@@ -13,9 +13,8 @@ pub(crate) mod windows_job;
 
 pub(crate) use binary_resolver::active_provider_context;
 pub use binary_resolver::{
-    BinaryResolution, apply_binary_resolution, async_resolve_binary_with_login_shell,
-    augment_exec_path, merged_runtime_path, probe_provider_binary_version, resolve_provider_binary,
-    with_provider_execution_context,
+    BinaryResolution, apply_binary_resolution, augment_exec_path, merged_runtime_path,
+    probe_provider_binary_version, resolve_provider_binary, with_provider_execution_context,
 };
 pub use dump_tool::capture_process_dump;
 pub use shell::hostname_short;

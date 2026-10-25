@@ -190,6 +190,7 @@ cli::herdr::tests::m2t_u9_manual_retire_inside_the_terminate_cas_window_pg
 cli::herdr::tests::retire_root_replaced_both_absent_pg
 cli::herdr::tests::status_shows_rows_panes_and_holds_without_paths_pg
 cli::herdr::tests::t_r3_retire_needs_a_read_that_shows_the_execution_ended_pg
+cli::herdr::user_probe::tests::probe_user_default_reports_the_reason_without_config_database_or_writes
 cli::init::launchd_plist_tests::clamp_launchd_nofile_soft_limit_never_exceeds_host_hard_limit
 cli::init::launchd_plist_tests::generate_launchd_plist_release_sets_clamped_soft_number_of_files_limit
 cli::init::launchd_plist_tests::generate_launchd_plist_uses_requested_fresh_home_and_root_only
@@ -290,6 +291,7 @@ config::secret_bearing_config_file_tests::load_from_path_ignores_retired_escalat
 config::secret_bearing_config_file_tests::load_from_path_preserves_retired_shadow_disabled_settings
 config::secret_bearing_config_file_tests::load_from_path_preserves_retired_shadow_enabled_settings
 config::secret_bearing_config_file_tests::save_and_load_harden_secret_bearing_config_file
+config::session_hosts::migration::consent_holds::returns_tests::migration_returned_rollback_passes_only_its_binding_and_adopts_after_durable_approval
 config::session_hosts::migration::consent_holds::tests::hold_selection_checks_old_and_new_user_default_bindings_only
 config::session_hosts::migration::consent_holds::tests::migration_real_hold_source_is_mode_first_and_unchanged_is_read_free
 config::session_hosts::migration::consent_holds::tests::real_consent_holds_distinguish_missing_unresolved_and_unreadable
@@ -316,7 +318,6 @@ config::session_hosts::migration::tests::migration_unavailable_pending_marker_re
 config::session_hosts::migration::tests::migration_unchanged_diagnostic_keeps_candidate_shape_on_every_return
 config::session_hosts::migration::tests::migration_unchanged_projection_does_not_query_rows_holds_or_save
 config::session_hosts::migration::tests::migration_unreadable_snapshots_keep_candidate_channels_and_stop_admission
-config::session_hosts::migration::tests::migration_user_default_validator_reports_key_and_supported_action
 config::session_hosts::tests::boot_selection_logs_once_per_value_even_with_concurrent_readers
 config::session_hosts::tests::cg_d1_boot_env_replaces_yaml_empty_disables_and_invalid_fails_whole_list
 config::session_hosts::tests::claude_guard_channel_runtime_follows_the_hosting_resolver_fallback
@@ -325,6 +326,7 @@ config::session_hosts::tests::guard_and_herdr_checks_read_provider_keys_as_the_i
 config::session_hosts::tests::session_hosts_boot_loader_takes_tui_channels_on_complete_endpoints_and_refuses_the_rest
 config::session_hosts::user_default::tests::legacy_and_explicit_user_sockets_do_not_read_home
 config::session_hosts::user_default::tests::user_default_resolves_only_the_execution_users_socket
+config::session_hosts::user_default_validator_tests::user_default_validator_stays_dormant_while_its_approval_projection_decodes
 config::shared_test_env_lock_tests::acquire_shared_test_env_lock_panics_on_same_thread_reentry_before_deadlock
 config::tool_activity_display::tests::omitted_tool_activity_detail_defaults_to_summary
 config::tool_activity_display::tests::tool_activity_modes_round_trip_without_accepting_unknown_detail
@@ -3713,6 +3715,7 @@ services::discord::commands::command_policy::command_policy_tests::help_formatte
 services::discord::commands::command_policy::command_policy_tests::registered_surface_and_principal_matrix_preserves_exact_ids
 services::discord::commands::command_policy::command_policy_tests::text_registration_and_help_name_the_same_commands
 services::discord::commands::command_policy::command_policy_tests::unknown_selection_is_denied_for_every_principal
+services::discord::commands::config::allowall_tests::allowall_status_reports_without_changing_public_access
 services::discord::commands::config::provider_settings::revision_tests::truthful_active_intake_owner_without_session_is_refused_pg
 services::discord::commands::config::provider_settings::revision_tests::truthful_offline_idle_owner_is_stale_and_does_not_override_local_owner_pg
 services::discord::commands::config::provider_settings::revision_tests::truthful_shared_feature_reset_is_consumed_by_the_first_parent_or_thread_turn
@@ -3872,11 +3875,14 @@ services::discord::commands::diagnostics::recovery_command_tests::status_uses_th
 services::discord::commands::diagnostics::reports::queue_report_tests::queue_report_exposes_all_primary_ids_as_cancel_queued_inputs
 services::discord::commands::diagnostics::reports::runtime_label_tests::inflight_runtime_label_reports_direct_tui_kind
 services::discord::commands::help::tests::help_advertises_explicit_queue_cancellation_not_reaction_removal
+services::discord::commands::help::tests::help_lists_only_working_agent_text_commands
+services::discord::commands::help::tests::retired_slash_commands_are_not_registered
 services::discord::commands::help::tests::slash_registration_help_and_risk_table_name_the_same_commands
 services::discord::commands::inspect::tests::context::context_report_clamps_context_usage_to_window
 services::discord::commands::inspect::tests::context::context_report_omits_other_turns_manifest_when_none
 services::discord::commands::inspect::tests::context::context_report_orders_largest_layers_and_formats_compaction
 services::discord::commands::inspect::tests::formatting::no_data_report_uses_required_phrase_inside_code_fence
+services::discord::commands::inspect::tests::inspect_refuses_unauthorized_users_before_answering
 services::discord::commands::inspect::tests::prompt::privileged_prompt_report_can_show_full_adk_body
 services::discord::commands::inspect::tests::prompt::prompt_report_uses_adk_preview_and_only_redacted_user_preview
 services::discord::commands::model_ui::tests::invariant_model_picker_caps_explicit_entries_and_keeps_selected_catalog_entry
@@ -3885,6 +3891,7 @@ services::discord::commands::model_ui::tests::invariant_model_picker_keeps_valid
 services::discord::commands::model_ui::tests::invariant_model_picker_skips_oversize_catalog_and_persisted_values_without_truncating
 services::discord::commands::model_ui::tests::invariant_model_picker_truncation_is_unicode_character_safe
 services::discord::commands::node::tests::node_unavailable_message_reports_effective_mode_and_source
+services::discord::commands::receipt::tests::usage_period_registers_only_the_mapped_choices
 services::discord::commands::recovery_ops::tests::deadlock_script_contains_health_poll_and_label
 services::discord::commands::recovery_ops::tests::machine_flip_script_preflights_then_deploys_both
 services::discord::commands::recovery_ops::tests::recovery_kind_name_matches_command_surface
@@ -3905,6 +3912,7 @@ services::discord::commands::restart::seed_tests::busy_seed_retries_once_then_re
 services::discord::commands::restart::seed_tests::non_busy_failures_are_not_retried
 services::discord::commands::restart::seed_tests::retry_failure_is_reported_without_a_third_submission
 services::discord::commands::session::autocomplete::tests::resume_session_parameter_registers_autocomplete
+services::discord::commands::session::resume_key_tests::resume_without_a_channel_name_does_not_blame_the_workspace
 services::discord::commands::skill::stop_response_tests::stop_alias_matches_the_stop_owner_failure_reply
 services::discord::commands::system_prompt::tests::system_prompt_active_native_binding_precedes_persisted_session
 services::discord::commands::system_prompt::tests::system_prompt_command_registered
@@ -3934,6 +3942,7 @@ services::discord::commands::tui_passthrough::tests::truthful_effort_overlay_clo
 services::discord::commands::voice::auto_join_tests::disabled_voice_guidance_is_stable
 services::discord::commands::voice::auto_join_tests::notify_dedup_emits_once_per_channel_kind_pair
 services::discord::commands::voice::auto_join_tests::occupancy_registry_isolates_providers_per_guild
+services::discord::commands::voice::sensitivity::tests::reply_announces_auto_revert_only_when_it_happens
 services::discord::compact_turn_authority::tests::external_interactive_turns_are_compact_eligible
 services::discord::compact_turn_authority::tests::monitor_triggered_turn_stays_gated
 services::discord::completion_footer_metadata::tests::completion_footer_fixture_pins_requested_order_and_dedup_4846
@@ -6923,6 +6932,7 @@ services::discord::restart_report::tests::production_path_preserves_attempt_and_
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_preserves_fresh_bootstrap_without_worktree_hint
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_reused_thread_still_updates_divergent_fallback
 services::discord::router::dispatch_trigger::tests::dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches
+services::discord::router::herdr_consent::admission::notice_tests::consent_unverified_hold_notices_once_per_source_and_cause_and_keeps_custody
 services::discord::router::herdr_consent::admission::tests::actual_fifo_receipt_release_readmits_once_then_uses_one_start_and_followup_pg
 services::discord::router::herdr_consent::admission::tests::actual_live_checkpoint_waits_for_second_check_failed_custody_pg
 services::discord::router::herdr_consent::admission::tests::actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg
@@ -6946,6 +6956,11 @@ services::discord::router::herdr_consent::custody::tests::live_mailbox_crash_at_
 services::discord::router::herdr_consent::custody::tests::live_mailbox_custody_sink_passes_shared_durable_conformance
 services::discord::router::herdr_consent::custody::tests::live_mailbox_drained_head_releases_and_wakes_from_its_dispatch_marker
 services::discord::router::herdr_consent::custody::tests::live_outbox_custody_sink_passes_shared_durable_conformance_pg
+services::discord::router::herdr_consent::return_input::tests::applied_boot_replay_never_runs_a_returned_input
+services::discord::router::herdr_consent::return_input::tests::applied_retry_replays_its_receipt_without_preview_and_reconsents_only_new_input
+services::discord::router::herdr_consent::return_input::tests::recordless_retry_reruns_admission_once_and_continues_to_one_card
+services::discord::router::herdr_consent::return_input::tests::return_refuses_and_writes_nothing_until_every_precondition_holds
+services::discord::router::herdr_consent::return_input::tests::returned_inputs_roll_back_twice_and_each_original_runs_once_in_fifo
 services::discord::router::herdr_consent::service_tests::actual_applied_startup_keeps_failed_consent_retryable_and_releases_later_once
 services::discord::router::herdr_consent::service_tests::actual_component_owner_guard_precedes_store_for_allowed_allowall_and_missing_owner
 services::discord::router::herdr_consent::service_tests::actual_component_rejects_stale_nonce_and_wrong_message_before_peer_or_apply
@@ -8016,6 +8031,7 @@ services::discord::shared_state::restart_lifecycle_tests::check_deferred_restart
 services::discord::shared_state::restart_lifecycle_tests::legacy_actor_store_matrix_preserves_unwritten_flags
 services::discord::shared_state::restart_lifecycle_tests::shutdown_first_guard_rejects_commented_and_reordered_stores
 services::discord::shared_state::restart_lifecycle_tests::shutdown_reader_observes_live_writer_and_clone
+services::discord::sidecar_interaction::tests::local_mac_follows_this_hosts_name
 services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_command_injection_attempt
 services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_plain
 services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_unicode
@@ -12836,6 +12852,9 @@ services::session_host::herdr::policy::consent::preview::tests::consent_peer_fac
 services::session_host::herdr::policy::consent::preview::tests::consent_preview_binds_existing_missing_and_symlink_cas
 services::session_host::herdr::policy::consent::preview::tests::consent_preview_checks_whole_candidate_without_publication
 services::session_host::herdr::policy::consent::preview::tests::consent_preview_rechecks_original_and_candidate_after_checker
+services::session_host::herdr::policy::consent::settlement::return_tests::applied_retry_reconsents_only_awaiting_input_on_another_preview
+services::session_host::herdr::policy::consent::settlement::return_tests::clear_discards_an_open_return_and_release_cannot
+services::session_host::herdr::policy::consent::settlement::return_tests::returned_input_stays_held_never_releases_and_closes_only_after_adoption
 services::session_host::herdr::policy::consent::settlement::tests::consent_bulk_inventory_distinguishes_absence_unknown_newer_and_corruption
 services::session_host::herdr::policy::consent::settlement::tests::consent_bulk_waits_for_live_publication_but_not_an_abandoned_marker
 services::session_host::herdr::policy::consent::settlement::tests::consent_legacy_schema_defaults_to_unresolved_and_duplicate_scopes_are_separate
@@ -12876,6 +12895,7 @@ services::session_host::herdr::policy::consent::workflow::tests::workflow_retry_
 services::session_host::herdr::policy::consent::workflow::tests::workflow_retry_requires_current_owner_and_node_and_invalidates_old_buttons
 services::session_host::herdr::policy::consent::workflow::tests::workflow_schema_two_is_newer_to_the_r1_reader_and_schema_one_still_loads
 services::session_host::herdr::policy::consent::workflow::tests::workflow_unsent_card_ttl_starts_at_reservation
+services::session_host::herdr::policy::diagnostics::tests::diagnosis_names_each_loaded_image_refusal_and_never_calls_ambiguity_a_change
 services::session_host::herdr::policy::diagnostics::tests::diagnosis_reports_refusal_and_bounded_checker_output_without_reading_files
 services::session_host::herdr::policy::diagnostics::tests::doctor_uses_the_selected_boot_socket_when_raw_config_omits_the_default
 services::session_host::herdr::policy::diagnostics::tests::health_checker_bounds_unicode_and_preserves_error_after_the_retained_prefix
@@ -12913,6 +12933,21 @@ services::session_host::herdr::policy::grant_store::tests::durable_grant_missing
 services::session_host::herdr::policy::grant_store::tests::durable_grant_roundtrip_survives_owner_restart_without_rechecking_current_files
 services::session_host::herdr::policy::grant_store::tests::grant_restoration_scopes_verified_foreign_and_current_codec_failures
 services::session_host::herdr::policy::grant_store::tests::grant_save_rejects_non_roundtripping_authority_before_creating_store_files
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_change_after_start_stays_refused_later
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_child_role
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_dead_pid_and_missing_generation_fail_closed
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_decoy_mapping_never_selected
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_exec_between_image_and_closing_generation_is_changed
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_ffi_layout_matches_sdk
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_hfs_second_resolution_is_never_verified
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_install_then_delayed_start_is_verified
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_install_then_immediate_start_is_verified
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_non_arm64_or_offset_layouts_are_unsupported
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_rename_replacement_is_refused
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_retargeted_launch_path_is_refused
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_same_inode_overwrite_after_start_is_refused
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_same_microsecond_change_is_ambiguous
+services::session_host::herdr::policy::peer::loaded_image::tests::herdr_loaded_image_macos_self_matches_main_header_region
 services::session_host::herdr::policy::peer::tests::policy_loaded_image_construction_is_os_adapter_only
 services::session_host::herdr::policy::peer::tests::policy_peer_accepts_only_the_peers_default_config
 services::session_host::herdr::policy::peer::tests::policy_peer_checker_replacement_invalidates_its_observed_image

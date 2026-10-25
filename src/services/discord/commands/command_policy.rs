@@ -142,7 +142,7 @@ pub(super) const TEXT_COMMANDS: &[(&str, TextCommandId, &str)] = {
             Start,
             "`!start <path>` — Start session at directory",
         ),
-        ("!down", Down, "`!down <file>` — Download file from server"),
+        ("!down", Down, ""),
         ("!cc", Cc, "`!cc <skill>` — Legacy alias for `!skill`"),
         ("!skill", Skill, "`!skill <skill>` — Run a provider skill"),
         (
@@ -231,11 +231,12 @@ impl TextCommandId {
     pub(super) fn text_surface(self) -> TextCommandSurface {
         use TextCommandId::*;
         match self {
-            Sessions | Receipt | Usage | Model | Fast | Goals | DeleteSession | Restart => {
+            // `!down` would attach any host file for every authorized user.
+            Sessions | Receipt | Usage | Down | Model | Fast | Goals | DeleteSession | Restart => {
                 TextCommandSurface::Unavailable
             }
             Help | Pwd | Health | Status | Inflight | Queue | Metrics | AllowedTools | Start
-            | Down | Cc | Skill | Meeting | Clear | Stop | Debug | Vc | Shell | Allowed
+            | Cc | Skill | Meeting | Clear | Stop | Debug | Vc | Shell | Allowed
             | DeadlockRecover | MachineFlip | StuckPrRebase | AllowAll | AddUser | RemoveUser => {
                 TextCommandSurface::Implemented
             }
@@ -341,8 +342,7 @@ pub(in crate::services::discord) fn high_risk_enabled_via_env() -> bool {
         .unwrap_or(false)
 }
 
-/// Risk tier of every registered slash command, mirroring the text tiers; the
-/// recovery commands run launchctl/ssh/git pipelines, so they are opt-in.
+/// Risk tier of every registered slash command, mirroring the text tiers.
 pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
     use CommandRisk::*;
     &[
@@ -352,21 +352,11 @@ pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
         ("/status", ReadOnly),
         ("/inflight", ReadOnly),
         ("/queue", ReadOnly),
-        ("/metrics", ReadOnly),
-        ("/allowedtools", ReadOnly),
-        ("/sessions", ReadOnly),
-        ("/receipt", ReadOnly),
         ("/usage", ReadOnly),
         ("/adk", ReadOnly),
-        ("/cost", ReadOnly),
-        ("/context", ReadOnly),
         ("/system-prompt", ReadOnly),
-        ("/start", Mutating),
         ("/resume", Mutating),
-        ("/down", Mutating),
-        ("/cc", Mutating),
         ("/skill", Mutating),
-        ("/meeting", Mutating),
         ("/model", Mutating),
         ("/node", Mutating),
         ("/fast", Mutating),
@@ -375,24 +365,12 @@ pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
         ("/effort", Mutating),
         ("/compact", Mutating),
         ("/clear", Mutating),
-        ("/deletesession", Mutating),
         ("/stop", Mutating),
         ("/cancel-queued", Mutating),
         ("/restart", Mutating),
-        ("/debug", Mutating),
         ("/sidecar", Mutating),
         ("/voice", Mutating),
-        ("/vc_join", Mutating),
-        ("/vc_leave", Mutating),
-        ("/adk-phase", Mutating),
-        ("/shell", ShellOrToolGrant),
-        ("/allowed", ShellOrToolGrant),
-        ("/deadlock-recover", ShellOrToolGrant),
-        ("/machine-flip", ShellOrToolGrant),
-        ("/stuck-pr-rebase", ShellOrToolGrant),
         ("/allowall", CredentialSystem),
-        ("/adduser", CredentialSystem),
-        ("/removeuser", CredentialSystem),
     ]
 };
 
@@ -405,8 +383,8 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
         .map_or(CommandRisk::Mutating, |(_, risk)| *risk)
 }
 
-/// Short multi-line block for `!help` and `/help`, listing each tier's slash
-/// commands from [`SLASH_COMMAND_RISKS`] and the high-risk enable state.
+/// Short multi-line block for `!help` and `/help`, listing the slash commands of
+/// each tier in [`SLASH_COMMAND_RISKS`]; tiers without one are left out.
 pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled: bool) -> String {
     let shell_state = if high_risk_enabled {
         "owner-only, ENABLED"
@@ -427,9 +405,7 @@ pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled
             "owner-only",
         ),
     ];
-    let mut lines = vec![
-        "**Command Risk Tiers** (a `!` text command shares the tier of its `/` name)".to_string(),
-    ];
+    let mut lines = vec!["**Command Risk Tiers** (slash commands)".to_string()];
     for (risk, label, access) in tiers {
         let names = SLASH_COMMAND_RISKS
             .iter()
@@ -437,6 +413,9 @@ pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled
             .map(|(name, _)| *name)
             .collect::<Vec<_>>()
             .join(" ");
+        if names.is_empty() {
+            continue;
+        }
         lines.push(format!("`{label}` ({access}): {names}"));
     }
     lines.join("\n")
@@ -501,12 +480,12 @@ mod command_policy_tests {
             (
                 Mutating,
                 Implemented,
-                "!start !down !cc !skill !meeting !clear !stop !debug !vc",
+                "!start !cc !skill !meeting !clear !stop !debug !vc",
             ),
             (
                 Mutating,
                 Unavailable,
-                "!model !fast !goals !deletesession !restart",
+                "!down !model !fast !goals !deletesession !restart",
             ),
             (
                 ShellOrToolGrant,
@@ -557,7 +536,7 @@ mod command_policy_tests {
             }
         }
         assert_eq!(ids.len(), 33);
-        assert_eq!(unavailable, 8);
+        assert_eq!(unavailable, 9);
     }
 
     #[test]
@@ -574,20 +553,23 @@ mod command_policy_tests {
         }
     }
 
+    /// A text command that still has a registered slash twin keeps its tier.
     #[test]
     fn common_registered_slash_surfaces_keep_the_same_risk() {
         let mut compared = 0;
         for (risk, _, names) in registered_cases() {
             for name in names.split_whitespace() {
-                // Voice uses separate slash names.
-                if name == "!vc" {
-                    continue;
+                let slash = format!("/{}", &name[1..]);
+                if SLASH_COMMAND_RISKS
+                    .iter()
+                    .any(|(registered, _)| *registered == slash)
+                {
+                    assert_eq!(slash_command_risk(&slash), risk, "{slash}");
+                    compared += 1;
                 }
-                assert_eq!(slash_command_risk(&format!("/{}", &name[1..])), risk);
-                compared += 1;
             }
         }
-        assert_eq!(compared, 32);
+        assert_eq!(compared, 15);
     }
 
     #[test]
@@ -619,6 +601,6 @@ mod command_policy_tests {
             }
         }
         assert_eq!(listed, implemented);
-        assert_eq!(implemented.len(), 25);
+        assert_eq!(implemented.len(), 24);
     }
 }
