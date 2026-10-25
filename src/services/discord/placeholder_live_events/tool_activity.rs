@@ -21,7 +21,8 @@ struct Row {
     result: Option<bool>,
     elapsed: Option<u64>,
     background: bool,
-    unconfirmed: bool,
+    codex_spawn: bool,
+    launched: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -44,6 +45,7 @@ pub(super) fn observation(
         input: input.map(str::to_owned),
         tool_use_id: id.filter(|id| !id.is_empty()).map(str::to_owned),
         success,
+        source_unix: None,
     }
 }
 
@@ -59,6 +61,7 @@ impl ToolActivityRing {
                 input,
                 tool_use_id,
                 success,
+                source_unix,
             } => {
                 if let Some(success) = success {
                     self.finish(tool_use_id.as_deref(), *success, false);
@@ -67,6 +70,10 @@ impl ToolActivityRing {
                         .as_ref()
                         .and_then(|id| self.rows.iter_mut().find(|r| r.id.as_ref() == Some(id)))
                     {
+                        if let Some(source) = source_unix.filter(|stamp| *stamp > 0) {
+                            existing.started_unix =
+                                existing.started_unix.min(source.min(observed_unix()));
+                        }
                         if existing.summary.is_none() {
                             existing.summary = input
                                 .as_deref()
@@ -82,25 +89,34 @@ impl ToolActivityRing {
                     }
                     self.total = self.total.saturating_add(1);
                     self.completed = false;
+                    let codex_spawn = name
+                        .rsplit('.')
+                        .next()
+                        .is_some_and(|key| key.eq_ignore_ascii_case("spawn_agent"));
                     self.rows.push_back(Row {
                         id: tool_use_id.clone(),
                         class: class(name),
                         summary: input
                             .as_deref()
                             .and_then(|input| safe_tool_summary(name, input, cwd)),
-                        started: Instant::now(),
-                        started_unix: chrono::Utc::now().timestamp(),
+                        started: super::panel_now(),
+                        started_unix: source_unix
+                            .filter(|stamp| *stamp > 0)
+                            .unwrap_or_else(observed_unix)
+                            .min(observed_unix()),
                         result: None,
                         elapsed: None,
-                        unconfirmed: false,
-                        background: matches!(class(name).as_str(), "Task" | "Bash")
-                            && input
-                                .as_deref()
-                                .map(super::status_events::tool_input_value)
-                                .and_then(|value| {
-                                    value.get("run_in_background").and_then(Value::as_bool)
-                                })
-                                .unwrap_or(false),
+                        codex_spawn,
+                        launched: false,
+                        background: codex_spawn
+                            || matches!(class(name).as_str(), "Task" | "Bash")
+                                && input
+                                    .as_deref()
+                                    .map(super::status_events::tool_input_value)
+                                    .and_then(|value| {
+                                        value.get("run_in_background").and_then(Value::as_bool)
+                                    })
+                                    .unwrap_or(false),
                     });
                 }
             }
@@ -162,7 +178,6 @@ impl ToolActivityRing {
     fn finish(&mut self, id: Option<&str>, success: bool, terminal: bool) {
         let exact = id.and_then(|id| self.rows.iter().position(|r| r.id.as_deref() == Some(id)));
         if id.is_some() && exact.is_none() {
-            self.mark_unconfirmed();
             return;
         }
         // Never attach a duplicate result or an unknown ID to an ID-bearing peer.
@@ -178,22 +193,25 @@ impl ToolActivityRing {
                 .position(|r| r.id.is_none() && r.result.is_none())
         };
         let Some(index) = index else {
-            self.mark_unconfirmed();
             return;
         };
         let row = &mut self.rows[index];
-        if row.result.is_some() || row.background && success && !terminal {
+        if row.result.is_some() {
+            return;
+        }
+        if row.background && success && !terminal {
+            if row.codex_spawn {
+                row.launched = true;
+            }
             return;
         }
         row.result = Some(success);
-        row.elapsed = Some(row.started.elapsed().as_secs());
+        row.elapsed = Some(
+            super::panel_now()
+                .saturating_duration_since(row.started)
+                .as_secs(),
+        );
         self.failed = self.failed.saturating_add(usize::from(!success));
-    }
-
-    fn mark_unconfirmed(&mut self) {
-        for row in self.rows.iter_mut().filter(|row| row.result.is_none()) {
-            row.unconfirmed = true;
-        }
     }
 
     pub(super) fn render(&self, limit: usize) -> String {
@@ -201,10 +219,15 @@ impl ToolActivityRing {
             .rows
             .iter()
             .rev()
-            .filter(|r| r.result.is_none())
+            .filter(|r| r.result.is_none() && !r.launched)
             .take(limit.min(DISPLAY_LIMIT))
             .collect::<Vec<_>>();
-        for row in self.rows.iter().rev().filter(|r| r.result.is_some()) {
+        for row in self
+            .rows
+            .iter()
+            .rev()
+            .filter(|r| r.result.is_some() || r.launched)
+        {
             if selected.len() == limit.min(DISPLAY_LIMIT) {
                 break;
             }
@@ -217,7 +240,7 @@ impl ToolActivityRing {
         } else {
             self.rows
                 .iter()
-                .filter(|r| r.result.is_none() && !r.unconfirmed)
+                .filter(|r| r.result.is_none() && !r.launched)
                 .count()
         };
         let mut lines = vec![format!(
@@ -228,7 +251,8 @@ impl ToolActivityRing {
             let glyph = match row.result {
                 Some(true) => "✓",
                 Some(false) => "✗",
-                None if self.completed || row.unconfirmed => "?",
+                None if row.launched => "↗",
+                None if self.completed => "?",
                 None => "▶",
             };
             let summary = row
@@ -238,6 +262,7 @@ impl ToolActivityRing {
                 .unwrap_or_default();
             // Discord refreshes running ages without changing heartbeat render text.
             let time = match row.elapsed {
+                None if row.launched => "  시작됨".to_owned(),
                 Some(elapsed) if row.class == "Bash" || elapsed > 0 => format!("  {elapsed}초"),
                 None => format!("  시작 <t:{}:R>", row.started_unix),
                 _ => String::new(),
@@ -252,6 +277,13 @@ impl ToolActivityRing {
         }
         lines.join("\n")
     }
+}
+
+fn observed_unix() -> i64 {
+    let now = chrono::Utc::now().timestamp();
+    #[cfg(test)]
+    let now = now.saturating_add(super::test_clock::offset().as_secs() as i64);
+    now
 }
 
 impl super::PlaceholderLiveEvents {
@@ -314,7 +346,12 @@ pub(super) fn fit_panel(mut sections: Vec<String>) -> String {
             if index == 0 {
                 Some(section)
             } else {
-                super::tool_summary::safe_section(&section)
+                super::tool_summary::safe_section(&section).or_else(|| {
+                    let title = section.lines().next()?;
+                    ["Plan", "Tasks", "Subagents", "Workflow"]
+                        .contains(&title)
+                        .then(|| format!("{title}\n… [가림]"))
+                })
             }
         })
         .collect();
@@ -337,7 +374,7 @@ pub(super) fn fit_panel(mut sections: Vec<String>) -> String {
         // Reduce oversized activity lists by removing complete oldest rows.
         let mut lines = sections[0].lines().map(str::to_owned).collect::<Vec<_>>();
         if let Some(index) = lines.iter().rposition(|line| {
-            ["▶ ", "✓ ", "✗ ", "? "]
+            ["▶ ", "↗ ", "✓ ", "✗ ", "? "]
                 .iter()
                 .any(|prefix| line.starts_with(prefix))
         }) {
@@ -353,8 +390,21 @@ pub(super) fn fit_panel(mut sections: Vec<String>) -> String {
                 lines.insert(index, "… 외 1개".to_owned());
             }
             sections[0] = lines.join("\n");
-        } else if sections.len() > 1 {
-            sections.pop();
+        } else if let Some(index) = (1..sections.len())
+            .filter(|index| {
+                let lines: Vec<_> = sections[*index].lines().collect();
+                lines.len() > 2 || lines.len() == 2 && lines[1] != "…"
+            })
+            .max_by_key(|index| sections[*index].len())
+        {
+            // Retain every section title while reducing its longest content list.
+            let mut lines: Vec<_> = sections[index].lines().collect();
+            if lines.last() == Some(&"…") {
+                lines.pop();
+            }
+            lines.pop();
+            lines.push("…");
+            sections[index] = lines.join("\n");
         } else {
             // Non-tool header fields have their own bounds; keep whole lines if a caller exceeds them.
             let mut kept = Vec::new();
@@ -378,3 +428,7 @@ pub(super) fn fit_panel(mut sections: Vec<String>) -> String {
 #[cfg(test)]
 #[path = "tool_activity_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tool_activity_accuracy_tests.rs"]
+mod accuracy_tests;

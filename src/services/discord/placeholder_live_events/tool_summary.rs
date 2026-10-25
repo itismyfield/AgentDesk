@@ -3,6 +3,8 @@ use regex::Regex;
 use serde_json::Value;
 use std::sync::LazyLock;
 
+mod code_mode;
+
 fn tool_key(name: &str) -> String {
     name.trim()
         .strip_prefix("functions.")
@@ -23,7 +25,7 @@ pub(crate) fn class(name: &str) -> String {
         "write" | "write_file" => "Write",
         "grep" | "rg" | "search_files" => "Grep",
         "glob" | "find_files" => "Glob",
-        "task" | "agent" => "Task",
+        "task" | "agent" | "spawn_agent" | "collaboration.spawn_agent" => "Task",
         "webfetch" | "web_fetch" => "WebFetch",
         "websearch" | "web_search" => "WebSearch",
         _ => {
@@ -61,6 +63,10 @@ fn field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
 const WORD: &str = r#"(?:'[^']*'|"[^"]*"|[^\s'"\\;&|<>])+"#;
 
 fn credential_command(input: &str) -> bool {
+    credential_command_mode(input, true)
+}
+
+fn credential_command_mode(input: &str, strict: bool) -> bool {
     static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r#"(?:'[^']*'|"[^"]*"|[^\s'"\\;&|<>()])+|[;&|()\r\n]"#).expect("command words")
     });
@@ -101,8 +107,15 @@ fn credential_command(input: &str) -> bool {
         {
             continue;
         }
-        if word.contains(char::is_whitespace) || word.starts_with(['$', '\u{e002}']) {
+        if word.starts_with(['$', '\u{e002}']) {
             return true;
+        }
+        if word.contains(char::is_whitespace) {
+            if strict || wrapper || credential_command_mode(&word, false) {
+                return true;
+            }
+            command = false;
+            continue;
         }
         let executable = word.rsplit('/').next().unwrap_or(&word);
         if executable == "timeout"
@@ -135,11 +148,24 @@ fn credential_command(input: &str) -> bool {
             if wrapper && word == "--" {
                 continue;
             }
-            return true;
+            if strict || wrapper {
+                return true;
+            }
+            command = false;
+            continue;
         }
         if matches!(
             executable,
-            "sshpass" | "htpasswd" | "redis-cli" | "mysql" | "mysqladmin" | "psql" | "op" | "vault"
+            "sshpass"
+                | "htpasswd"
+                | "redis-cli"
+                | "mysql"
+                | "mysqladmin"
+                | "psql"
+                | "op"
+                | "vault"
+                | "mongo"
+                | "mongosh"
         ) || (matches!(executable, "sh" | "bash" | "zsh" | "dash")
             && words
                 .get(index + 1)
@@ -165,25 +191,7 @@ fn credential_executable_line(line: &str) -> bool {
             .expect("leading list markers")
     });
     let stripped = MARKERS.replace(line, "");
-    let mut words = stripped.split_whitespace();
-    let executable = words.next().unwrap_or("").trim_matches(['\'', '"']);
-    let executable = executable.rsplit('/').next().unwrap_or(executable);
-    matches!(
-        executable,
-        "sshpass"
-            | "htpasswd"
-            | "redis-cli"
-            | "mysql"
-            | "mysqladmin"
-            | "psql"
-            | "op"
-            | "vault"
-            | "mongo"
-            | "mongosh"
-    ) || matches!(
-        (executable, words.next().unwrap_or("")),
-        ("docker" | "podman", "login") | ("gh", "auth") | ("aws", "configure")
-    )
+    credential_command_mode(&stripped, false) && shell_masked(&stripped, 0).is_none()
 }
 
 fn short_reference(reference: &str) -> bool {
@@ -344,6 +352,39 @@ fn anonymize_home(input: &str) -> String {
     HOME.replace_all(input, "~").into_owned()
 }
 
+fn anonymize_accounts(input: &str) -> String {
+    static LABEL: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(&format!(r"(?i)((?:\b(?:username|user|login|owner)[ \t]*[:=][ \t]*|--(?:owner|username)(?:=|[ \t]+)))({WORD})")).ok()
+    });
+    static ADDRESS: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(r#"(?i)(?:^|[\s'"])([a-z0-9_.+-]+)@([a-z0-9][a-z0-9.-]*)"#).ok()
+    });
+    static VERSION_OR_TAG: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(r"(?i)^(?:v?\d+(?:\.\d+){0,2}(?:[-+][0-9a-z.-]*)?|latest|next|beta|alpha|canary|rc|stable|nightly|lts)$").ok()
+    });
+    let (Some(label), Some(address), Some(version_or_tag)) =
+        (LABEL.as_ref(), ADDRESS.as_ref(), VERSION_OR_TAG.as_ref())
+    else {
+        return "***".into();
+    };
+    let masked = label.replace_all(input, |capture: &regex::Captures<'_>| {
+        if capture[2].contains(['/', '\\']) {
+            capture[0].to_string()
+        } else {
+            format!("{}***", &capture[1])
+        }
+    });
+    address
+        .replace_all(&masked, |capture: &regex::Captures<'_>| {
+            if version_or_tag.is_match(&capture[2]) {
+                capture[0].to_string()
+            } else {
+                capture[0].replacen(&capture[1], "***", 1)
+            }
+        })
+        .into_owned()
+}
+
 fn sanitized(raw: &str) -> Option<String> {
     // Existing sections have already escaped e.g. `ghp_` into `ghp\_`.
     // Inspect an unescaped probe and drop ambiguous escaped sensitive material.
@@ -392,7 +433,7 @@ fn sanitized(raw: &str) -> Option<String> {
     let masked = redact_tokens(&masked);
     let masked = crate::services::discord::formatting::redact_sensitive_for_placeholder(&masked);
     let masked = crate::utils::redact::redact_known_secrets(&masked);
-    let masked = anonymize_home(&masked);
+    let masked = anonymize_accounts(&anonymize_home(&masked));
     // Recheck without quotes: quoted key/prefix fragments can hide sensitive
     // material. New matches after masking are ambiguous, so omit the detail.
     let dequoted = masked.replace(['\'', '"'], "");
@@ -404,6 +445,7 @@ fn sanitized(raw: &str) -> Option<String> {
             || redact_urls(&dequoted) != dequoted
             || redact_tokens(&dequoted) != dequoted
             || anonymize_home(&dequoted) != dequoted
+            || anonymize_accounts(&dequoted) != dequoted
             || crate::utils::redact::contains_registered_secret(&dequoted))
     {
         return None;
@@ -513,14 +555,20 @@ fn shell_masked(raw: &str, depth: usize) -> Option<String> {
     if depth > 8 || raw.contains('\\') || raw.contains("<<") || !balanced_quotes(raw) {
         return None;
     }
-    static UNWRAP: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?s)^\s*(?:\S*/)?(?:sh|bash|zsh|dash)\s+(?:-l\s+)?(?:-c|-lc)\s+(?:'([^']*)'|"([^"]*)")\s*$"#).expect("single shell command argument")
+    static UNWRAP: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(r#"(?s)^\s*(?:(?:env\s+(?:(?:-i|--ignore-environment)\s+)*)|(?:command\s+)|(?:timeout\s+[0-9.]+[smhd]?\s+))*(?:\S*/)?(?:sh|bash|zsh|dash)\s+(?:-l\s+)?(?:-c|-lc)\s+(?:'([^']*)'|"([^"]*)")\s*((?:(?:&&|\|\||[;|])\s*.+)?)$"#).ok()
     });
-    if let Some(captures) = UNWRAP.captures(raw) {
-        return shell_masked(
+    if let Some(captures) = UNWRAP.as_ref()?.captures(raw) {
+        let inner = shell_masked(
             captures.get(1).or_else(|| captures.get(2))?.as_str(),
             depth + 1,
-        );
+        )?;
+        let rest = captures.get(3)?.as_str();
+        return if rest.is_empty() {
+            Some(inner)
+        } else {
+            Some(format!("{inner} {}", shell_masked(rest, depth + 1)?))
+        };
     }
     let mut masked = String::new();
     let mut substitutions = Vec::new();
@@ -763,7 +811,9 @@ pub(crate) fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> O
     }
     let value = super::status_events::tool_input_value(input);
     if !value.is_object() {
-        return None;
+        return (key == "exec")
+            .then(|| code_mode::summary(value.as_str().unwrap_or(input), cwd))
+            .flatten();
     }
     let cwd = field(&value, &["workdir", "cwd"]).or(cwd);
     match class(name).as_str() {
@@ -805,3 +855,7 @@ mod tool_summary_tests;
 #[cfg(test)]
 #[path = "tool_summary_label_tests.rs"]
 mod tool_summary_label_tests;
+
+#[cfg(test)]
+#[path = "tool_summary_accuracy_tests.rs"]
+mod accuracy_tests;

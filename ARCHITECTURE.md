@@ -1511,6 +1511,8 @@ src/
 │   │   │   ├── status_panel/
 │   │   │   │   ├── completed_kind.rs
 │   │   │   │   └── derived_status.rs
+│   │   │   ├── tool_summary/
+│   │   │   │   └── code_mode.rs
 │   │   │   ├── background_task_events.rs
 │   │   │   ├── channel_visibility.rs
 │   │   │   ├── clock_tests.rs
@@ -1535,8 +1537,10 @@ src/
 │   │   │   ├── task_panel.rs
 │   │   │   ├── tests.rs
 │   │   │   ├── tool_activity.rs
+│   │   │   ├── tool_activity_accuracy_tests.rs
 │   │   │   ├── tool_activity_tests.rs
 │   │   │   ├── tool_summary.rs
+│   │   │   ├── tool_summary_accuracy_tests.rs
 │   │   │   ├── tool_summary_label_tests.rs
 │   │   │   ├── tool_summary_tests.rs
 │   │   │   ├── turn_anchor.rs
@@ -3562,6 +3566,7 @@ src/
 │   │   │   ├── suspension.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── tool_card_accuracy_tests.rs
 │   │   │   ├── tool_card_actor_replay_tests.rs
 │   │   │   ├── tool_card_actor_tests.rs
 │   │   │   ├── tool_card_codex_result_tests.rs
