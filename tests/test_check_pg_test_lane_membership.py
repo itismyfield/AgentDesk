@@ -2266,7 +2266,7 @@ class PgDbCiWiring(unittest.TestCase):
     def test_repost_test_consumers_install_and_preflight_ripgrep(self) -> None:
         consumers = {
             "ci-pr.yml": ("rust_tests",),
-            "ci-main.yml": ("full_non_pg", "postgres"),
+            "ci-main.yml": ("rust_tests",),
             "ci-nightly.yml": ("full_macos", "full_windows", "postgres_full"),
         }
         for workflow, jobs in consumers.items():

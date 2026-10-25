@@ -10,9 +10,11 @@
 
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
-| **Full tests** | `full_non_pg` matrix → `full_non_pg_required_context` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `rust_build` → `rust_tests` 6 worker → `test_evidence`, 판정은 `required_contexts` (+ `lint` compile/fmt/clippy/policy) | `full_macos` + `full_windows` | Main은 push·dispatch에서 같은 전체 sweep 집합을 네 샤드로 나눈다. `full_non_pg`는 `sweep_shards`·`lib_test_prepare`를 필요로 하고 `!cancelled()`일 때 실행한다. `always()` 집계 잡이 모든 샤드의 success만 받아 기존 `Full tests (ubuntu-latest)` 컨텍스트를 보존한다. PR은 `rust_tests`가 true일 때 모든 lib 시험을 nextest 한 번으로 실행하고, 각 worker는 자기 PostgreSQL 서비스를 시작한다. |
-| **PostgreSQL tests** | `postgres` (numeric ID shards + `continuity`) | 같은 nextest 실행(N)의 PG 시험 | `postgres_full` | Main/nightly는 항상 실행. numeric 샤드 수는 `PG_SHARD_COUNT`(현재 8)를 따르고 `continuity` leg가 추가 targeted recipe를 한 번 실행한다. Main은 전체 numeric 집합과 continuity를 실행한다. PR은 PG 시험도 N에 들어 있고 `pg15_owner_proof`가 PostgreSQL 15를 따로 확인한다. |
-| **High-risk recovery** | `high-risk-recovery` | N (선택자는 `scripts/ci/targeted-test-selectors.txt`) | `high_risk_recovery_full` | main/nightly는 무조건 실행 — #5232 R3 에서 `ci-main.yml`의 path filter를 제거했다. PR은 `rust_tests`와 `high_risk_recovery` 중 하나라도 켜지면 N을 요구한다. |
+| **Full tests** | `rust_build` → `rust_tests` 6 worker → `test_evidence` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `rust_build` → `rust_tests` 6 worker → `test_evidence`, 판정은 `required_contexts` (+ `lint` compile/fmt/clippy/policy) | `full_macos` + `full_windows` | Main은 push·dispatch마다 PR과 같은 세 job으로 모든 lib 시험을 nextest 한 번에 실행한다(N). hardening이 두 workflow의 세 job을 `needs`·`if`, PR의 base 비교 단계, main의 baseline 업로드만 빼고 같게 고정한다. PR은 `rust_tests`가 true일 때 N을 실행한다. 각 worker는 자기 PostgreSQL 서비스를 시작한다. Nightly macOS·Windows는 native nextest 목록을 소스와 대조하고, `pg_test_classifier.py`가 고른 non-PG lib 시험을 exact로 실행한다. |
+| **PostgreSQL tests** | 같은 N의 PG 시험 | 같은 N의 PG 시험 | `postgres_full` | Main은 N에 PG 시험이 들어 있다. PR은 이에 더해 `pg15_owner_proof`가 PostgreSQL 15를 따로 확인한다. |
+| **High-risk recovery** | 같은 N (조건 없음) | N (선택자는 `scripts/ci/targeted-test-selectors.txt`) | `high_risk_recovery_full` | main/nightly는 무조건 실행 — #5232 R3 에서 `ci-main.yml`의 path filter를 제거했다. PR은 `rust_tests`와 `high_risk_recovery` 중 하나라도 켜지면 N을 요구한다. |
+
+**시험 삭제·ignore 대조.** PR `rust_build`의 `Compare tests with the comparison base` 단계(`scripts/ci/nextest-base-diff.sh`)가 head 계획을 comparison base(merge ref의 첫 부모)의 계획과 비교한다. base 계획은 그 SHA의 성공한 CI Main run이 14일 보존하는 `nextest-baseline` artifact에서 받는다. 받지 못하거나 SHA·scope·build identity가 다르면 그 job에서 base 계획을 다시 만들고, 경고와 step summary에 fallback을 남긴다. 다시 만들기가 실패하면 단계가 실패한다. Linux 삭제·runnable→ignored는 두 계획으로, macOS·Windows에서만 컴파일되는 시험의 삭제는 `rust_test_sources.py removed`로 base·head 소스를 비교해 찾는다. 각 손실은 `scripts/ci/test-removal-justifications.txt`의 `<binary-id> <test> \| removed\|runnable->ignored \| <이유>` 행과 ID·종류가 정확히 맞아야 하고, 손실에 맞지 않는 행(stale)도 실패다. 보고 전용 모드는 없다. macOS·Windows 전용 시험의 ignore 전환과 매크로가 만든 시험은 소스 대조가 보지 못한다.
 
 **주석 전용 PR.** `ci-pr.yml`의 `changes` job은 `scripts/ci/comment_only_gate.py`로
 PR이 주석만 바꾼 `.rs`(+ 어떤 path filter도 고르지 않는 `*.md`)인지 판정한다. 참이면
@@ -36,7 +38,7 @@ Selection observer required gate가 red로 만드는 observer 사망은 **프로
 
 ### Main 측 library sweep (#5185)
 
-PR은 이 sweep 대신 nextest 한 번으로 모든 lib 시험을 돌린다. 아래는 아직 이 구조를 쓰는 main 설명이다.
+PR과 main은 이 sweep 대신 nextest 한 번으로 모든 lib 시험을 돌린다. 아래는 어느 workflow도 더는 실행하지 않는 `test-selection.py` 도구의 설명이다.
 
 `library_sweep`은 `scripts/ci/test-selection.py plan`이 고른 PR sweep 집합을
 최대 네 샤드로 나눈다. full 모드의 집합은 기존 `--lib` 하네스에서
@@ -312,18 +314,17 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 
 | Gate | main 커맨드 | 재현 커맨드 (로컬) |
 | --- | --- | --- |
-| Full tests | `full_non_pg` matrix의 `Library sweep (selection-set gated)` step → `full_non_pg_required_context` 집계 | PostgreSQL 환경에서 `sweep-matrix`가 출력한 모든 번호에 대해 `SWEEP_SHARD_TOTAL=<matrix job count> python3 scripts/ci/test-selection.py run --lane sweep --shard <n> --full` |
+| Full tests | `rust_tests` worker의 `cargo nextest run`(계획된 exact ID, worker당 PostgreSQL 서버 하나) → `test_evidence` 감사 | PostgreSQL 환경에서 `cargo nextest run --lib --profile ci` |
 | Lint (main) | `lint`의 `npm run test:policies`, `just fmt-check`, `just lint`, `Non-lib tests and doctests`(`test-non-pg`의 `--all-targets` 줄을 `--bins --test '*'`로, `cargo test --doc ClaudeBinary`) | `just check` |
-| Full tests (PR) | `rust_tests` worker의 `cargo nextest run`(계획된 exact ID, worker당 PostgreSQL 서버 하나) | PostgreSQL 환경에서 `cargo nextest run --lib --profile ci` |
-| PostgreSQL tests | `postgres` 각 matrix leg의 `just test-postgres-shard` step | 같은 PostgreSQL 환경에서 `PG_INCLUDE_SHARD=<n> just test-postgres-shard`를 모든 numeric 번호에, `PG_INCLUDE_SHARD=continuity just test-postgres-shard`를 한 번 실행한다. 둘을 합친 선택은 기존 `just test-postgres`와 같다. |
-| High-risk recovery | `high-risk-recovery`의 `High-risk recovery lane` step: `cargo test --lib high_risk_recovery:: -- --test-threads=1` | 동일 |
+| PostgreSQL tests | 같은 `rust_tests` 실행 | PostgreSQL 환경에서 `cargo nextest run --lib --profile ci` |
+| High-risk recovery | 같은 `rust_tests` 실행 | `cargo nextest run --lib --profile ci high_risk_recovery::` |
 
 ## 2. Path Filter Policy
 
 ### Always-on (필터 없음)
 
-- **Full tests** / **PostgreSQL tests** / **High-risk recovery (main)** 는 path filter 없이 `main` push·dispatch에서 계획한다. 이 세 gate는 `changes` 출력에 의존하지 않으며 `ci-main.yml`에는 `changes` job 자체가 없다. `full_non_pg` matrix는 `if: !cancelled()`를 쓰고 required aggregate는 `if: always()`로 전체 샤드 success를 요구한다. PostgreSQL·high-risk-recovery 잡에는 별도 path `if:`가 없다.
-- 커밋 경로가 gate를 닫지 않는다. 실패·취소·skip된 sweep matrix는 집계에서 success로 바뀌지 않는다.
+- **Full tests** / **PostgreSQL tests** / **High-risk recovery** 는 main에서 `Rust tests build and plan`(`rust_build`)이 path filter 없이 push·dispatch마다 계획하고 `rust_tests`·`test_evidence`가 이어 실행한다. 이 job들은 `changes` 출력에 의존하지 않으며 `ci-main.yml`에는 `changes` job 자체가 없다. `rust_build`에는 `if:`가 없고 뒤 두 job은 `rust_build` 성공만 조건으로 둔다.
+- 커밋 경로가 gate를 닫지 않는다. 실패·취소·skip된 worker는 `test_evidence`와 run 결론에서 success로 바뀌지 않는다.
 - main/nightly job 이름은 PR 필수 context(`Lint`, `High-risk recovery`, `Dashboard (Node 22)`)와 겹치지 않는다. 워크플로 이름은 check 이름을 구분하지 않아 같은 SHA에 경쟁 게시가 생기므로, `check-ci-runner-hardening.sh`가 트리거와 무관하게 유효 이름(job ID·matrix 접미사 포함)으로 강제한다(#5083).
 
 ### Conditional (`high_risk_recovery` path filter — `ci-pr.yml` 전용)
@@ -396,19 +397,15 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 
 ## 4. Resource Contention Policy
 
-`PostgreSQL tests` 의 각 샤드와 `High-risk recovery` 는 **각자의 job 에서 `Start PostgreSQL service` 를 따로 실행한다** — 컨테이너를 공유하지 않는다. 공유되는 것은 job 내부에서 여러 테스트가 같은 PG 인스턴스를 CREATE/DROP DATABASE 로 나눠 쓴다는 점이고, 아래 정책은 그 job-내 경합을 다룬다.
+nextest worker 와 PR `pg15_owner_proof` 는 **각자의 job 에서 `Start PostgreSQL service` 를 따로 실행한다** — 컨테이너를 공유하지 않는다. 공유되는 것은 job 내부에서 여러 테스트가 같은 PG 인스턴스를 CREATE/DROP DATABASE 로 나눠 쓴다는 점이고, 아래 정책은 그 job-내 경합을 다룬다.
 
 ### Serial execution
 
 - PR `pg15_owner_proof`(`PostgreSQL 15 owner proof`)는 `rust_build`와 같은 `needs`·`if`로 `postgres:15`를 띄우고, `server_version_num`이 15가 아니면 실패한다. `scripts/ci/pg15_required_ids.txt`의 시험만 `--exact`·`--test-threads=1`로 실행하며 `run_test_lane.py --expected-ids`가 누락·추가·미실행·빈 목록을 실패로 판정한다. `required_contexts`의 `Fast targeted tests (ubuntu-latest)` 판정이 `rust_tests` 필터로 이 결과도 확인한다(`docs/ci/postgres-service-image.md`).
-- Main의 `postgres`는 numeric ID 샤드와 독립 `continuity` leg로 PG matrix를 실행한다. numeric 샤드 수는 `scripts/check_pg_test_lane_membership.py`의 `PG_SHARD_COUNT` 하나에서 정하며(현재 8 numeric + 1 continuity), 이 값으로 SHA256 modulus·full matrix·허용 job 이름을 만든다.
-- `PG_INCLUDE_SHARD`가 있으면 `scripts/ci/non-pg-test-filter.sh`는 기존 단일 PG 선택을 실제 lib harness `--list`로 조회하고, 전체 ID의 `int(SHA256(id), 16) % PG_SHARD_COUNT`가 자기 번호인 시험만 `--exact`로 실행한다. 새 PG 시험은 기존 등록만으로 자동 배정된다. 목록 실패·중복·불완전 summary·빈 shard·잘못된 번호는 source 단계에서 실패한다. env unset은 기존 단일 선택을 유지한다.
-- `PG_INCLUDE_SHARD`는 PG 시험 step에만 `${{ matrix.shard }}`로 설정한다. numeric leg는 자기 PG ID만 실행하며, `continuity` leg는 그 env를 제거한 뒤 기존 `just test-postgres-continuity` recipe를 한 번 실행한다. continuity 대상과 PG ID 집합 사이의 기존 겹침은 유지한다. source·시험 실패를 전파하고, 각 leg 안에서는 `--test-threads=1`을 유지한다.
-- main shard step은 `timeout-minutes: 75` 예산을 유지하고 job timeout을 두지 않는다. `check-ci-runner-hardening.sh`가 planner·matrix·env 출처·step 예산을 고정하고 membership 검사는 전체 lib inventory에서 단일 PG 선택과 shard union 동일·교집합 0을 검사한다. integrity 검사는 canonical 셸 파생 코드를 검증하고 같은 exact 선택을 복원한다.
-- PR infra retry는 `Rust tests (worker N)` 워커만 후보로 본다. 로그가 infra로 분류된 워커만 `classify-worker --infra-evidence`로 넘기고, 워커 아티팩트에 시험 실패·읽을 수 없는 결과가 있거나 분류되지 않은 워커·내려받기 실패·만료된 아티팩트·plan 부재가 있거나, 워커의 시험 단계 로그에 nextest 실패(`LEAK-FAIL`, `error: test run failed`, exit 100)가 있으면 아티팩트가 없어도 모든 워커의 재시도를 막는다. 최초 attempt에서만 한 번 요청하며 default branch checkout과 요청 전 stale-attempt·PR head 검사는 유지한다.
+- PR infra retry는 `Rust tests (worker N)` 워커만 후보로 본다. 로그가 infra로 분류된 워커만 `classify-worker --infra-evidence`로 넘기고, 워커 아티팩트에 시험 실패·읽을 수 없는 결과가 있거나 분류되지 않은 워커·내려받기 실패·만료된 아티팩트·plan 부재가 있거나, 워커의 시험 단계 로그에 nextest 실패(`LEAK-FAIL`, `error: test run failed`, runner의 `##[error]Process completed with exit code 100.` 줄)가 있으면 아티팩트가 없어도 모든 워커의 재시도를 막는다. 최초 attempt에서만 한 번 요청하며 default branch checkout과 요청 전 stale-attempt·PR head 검사는 유지한다.
 - PR `check_fast_cross_os_targets`(`Windows exact targets`)의 `Writer namespace exact Windows targets` step 예산은 `timeout-minutes: 60` 이고 job 수준 timeout 은 두지 않는다. 값은 `check-ci-runner-hardening.sh` 가 고정한다. 2026-10-15~16 PR CI 실측 약 40회가 24~46분(p90 약 42분)이었고 45분 예산에서 #7021(2회) 등 세 건이 시간 초과로 끊겼다. p90 이 40분을 넘었으므로 step 분할을 후속으로 검토한다. 그 뒤 같은 job 이 Windows nextest list 로 `rust_test_sources.py compare --platform windows` 를 30분 예산으로 실행한다.
 - 모든 샤드의 합집합이 미분할 선택과 같고 교집합이 없다는 것은 `check_pg_test_lane_membership.py` 의 filter contract 가 lib inventory 로 검사한다.
-- `high-risk-recovery` job의 `High-risk recovery lane` step은 `cargo test --lib high_risk_recovery:: -- --test-threads=1`을 실행한다 — 동일.
+- nextest worker 는 `.config/nextest.toml` 의 `ci` profile(`test-threads = 1`)로 계획된 시험을 하나씩 실행한다 — `high_risk_recovery::` 도 같다.
 - 이유(#974, `683db919f`): `PgRecoveryTestDatabase::create()` 가 시나리오마다 admin PG connection 을 열어 새 DB 를 만드는데, 기본 병렬 executor 에서는 **admin pool 이 고갈**되어 `pool timed out while waiting for an open connection` 으로 실패했다. `--test-threads=1` 이 순차 실행을 강제해 admin connection 을 재사용하게 한다. 즉 원인은 "테스트 간 lifecycle race" 가 아니라 **connection pool 고갈**이다.
 - #973(`24a0e1cb0`)은 이 항목의 근거가 아니다 — non-PG lane 의 skip 필터가 너무 좁아(`_pg_`, `postgres_`) `*_pg`/`pg_*`/`*postgres` 가 새어 들어간 것과 brittle assertion 을 고친 건이다.
 
@@ -436,7 +433,7 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 | 인프라 종료(job-level, test id 추출 실패 + SIGTERM/signal 15/exit 143/cancel, **real-failure 신호 없음**) | 2회까지 flaky skip, 같은 job 3회 연속이면 `infra::job::<name>` | `_job-level failure; see failing workflow job_` (승격 시) | `agent:project-agentdesk` (승격 시) |
 | Job-level red + 공유 술어 `scripts/ci/real-failure-predicate.sh` 의 real-failure 신호 — SIGTERM 노이즈 혼재 여부 무관 | `job::<name>` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
 
-Main sweep 집계 job은 `aggregate-only: upstream=full_non_pg result=<result>`를 출력한다.
+nextest 전환 전 Main sweep 집계 job은 `aggregate-only: upstream=full_non_pg result=<result>`를 출력했다.
 같은 run에 다른 실패 job이 있고 평가된 result가 failure/cancelled/skipped이면 이 집계의
 job 폴백을 생략하고 실제 shard의 실패를 분류한다. 집계만 실패했거나 표식이 없으면
 기존 job 폴백을 유지한다. 실제 `test … FAILED` 식별자는 표식보다 먼저 수집하므로

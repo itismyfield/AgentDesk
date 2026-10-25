@@ -34,10 +34,8 @@ EXPECTED_SWAP_JOBS = {
         "relay_authority_mutations",
     },
     ".github/workflows/ci-main.yml": {
-        "full_non_pg",
+        "rust_build",
         "lint",
-        "postgres",
-        "high-risk-recovery",
         "scripts",
     },
     ".github/workflows/ci-nightly.yml": {

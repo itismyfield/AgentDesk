@@ -110,13 +110,12 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
                 self.assertIn(LANE, select(self.filters, [path]))
 
     def test_ci_main_runs_the_lane_unconditionally(self) -> None:
-        """#5232 R3: ci-main has no library sweep behind this lane, so a filter
-        miss there is unrecoverable. It pays the lane once per merge instead of
-        gating it, and keeps no unread filter to drift out of date."""
+        """Main's nextest build plans every lib test, this lane included, on every merge;
+        a path filter there would silently skip it, so main keeps none."""
         workflow = WORKFLOW_DIR / "ci-main.yml"
         job = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
-        self.assertNotIn("if", job["high-risk-recovery"])
-        self.assertNotIn("needs", job["high-risk-recovery"])
+        self.assertNotIn("if", job["rust_build"])
+        self.assertNotIn("needs", job["rust_build"])
         self.assertEqual(list(filter_blocks(workflow)), [])
 
     def test_release_gates_doc_agrees_with_ci_main_gating(self) -> None:
@@ -126,7 +125,7 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
         Anchor both directions on the job's own `name`, not on prose."""
         job = yaml.safe_load(
             (WORKFLOW_DIR / "ci-main.yml").read_text(encoding="utf-8")
-        )["jobs"]["high-risk-recovery"]
+        )["jobs"]["rust_build"]
         _, heading, rest = GATES_DOC.read_text(encoding="utf-8").partition(ALWAYS_ON)
         self.assertTrue(heading, f"release-gates.md: `{ALWAYS_ON}` section is gone")
         self.assertEqual(

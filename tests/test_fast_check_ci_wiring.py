@@ -454,6 +454,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
             ("test_evidence", "python3 scripts/ci/nextest_ci.py collect-results", "python3 scripts/ci/nextest_ci.py --help", "exact cargo/test command list"),
             ("test_evidence", "    needs: [changes, rust_build, rust_tests]\n", "    needs: [changes, rust_build]\n", "exact needs"),
             ("rust_build", "          python3 scripts/check_relay_authority_contract.py --nextest-list \"$NEXTEST_DIR/universe.json\"\n", "", "exact cargo/test command list"),
+            ("rust_build", 'nextest-base-diff.sh "$RUNNER_TEMP/nextest"', 'nextest-base-diff.sh "$RUNNER_TEMP/nextest" --report-only', "exact cargo/test command list"),
+            ("rust_build", step_block(job_block(workflow, "rust_build"), "Compare tests with the comparison base"), "", 'exactly one "Compare tests with the comparison base"'),
         )
         for job_id, old, new, reason in mutants:
             with self.subTest(job=job_id, mutation=old):
@@ -465,117 +467,23 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest()), hardening_script=gate)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(reason, result.stderr)
+        # Main runs the PR's N: any drift from the PR jobs, or a lost or shortened baseline, is red.
         main = MAIN_WORKFLOW.read_text(encoding="utf-8")
-        main_sweep = step_block(job_block(main, "full_non_pg"), "Library sweep (selection-set gated)")
-        main_mutated = main.replace(main_sweep, main_sweep.replace("timeout-minutes: 60", "timeout-minutes: 45", 1), 1)
-        self.assertNotEqual(main_mutated, main)
-        result = self.run_hardening_fixture(workflow, extra_workflows={"ci-main.yml": main_mutated})
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("full_non_pg Library sweep (selection-set gated) must keep timeout-minutes: 60", result.stderr)
-
-    def test_library_sweep_shards_keep_validated_matrices_and_required_names(self) -> None:
-        pr_jobs = yaml.safe_load(PR_WORKFLOW.read_text())["jobs"]
-        main_jobs = yaml.safe_load(MAIN_WORKFLOW.read_text())["jobs"]
-        self.assertNotIn("library_sweep", pr_jobs)
-        for jobs, job_id, source, name in (
-            (main_jobs, "full_non_pg", "sweep_shards.outputs.matrix", "Library test sweep (main shard ${{ matrix.shard }})"),
-        ):
-            with self.subTest(job=job_id):
-                self.assertEqual(jobs[job_id]["name"], name)
-                self.assertEqual(jobs[job_id]["strategy"], {"fail-fast": False, "matrix": "${{ fromJSON(needs." + source + ") }}"})
-                sweep = next(step for step in jobs[job_id]["steps"] if step.get("name") == "Library sweep (selection-set gated)")
-                self.assertEqual(sweep["env"]["SWEEP_SHARD_TOTAL"], "${{ strategy.job-total }}")
-        self.assertEqual(main_jobs["sweep_shards"]["steps"][1]["run"], 'matrix=$(python3 scripts/ci/test-selection.py sweep-matrix)\necho "matrix=$matrix" >> "$GITHUB_OUTPUT"\n')
-        aggregate = main_jobs["full_non_pg_required_context"]
-        self.assertEqual(aggregate["name"], "Full tests (ubuntu-latest)")
-        self.assertEqual(aggregate["needs"], "full_non_pg")
-        self.assertEqual(aggregate["if"], "always()")
-        step = aggregate["steps"][0]
-        self.assertEqual(step["env"], {"SWEEP_RESULT": "${{ needs.full_non_pg.result }}"})
-        self.assertEqual(step["run"], 'echo "aggregate-only: upstream=full_non_pg result=$SWEEP_RESULT"\ntest "$SWEEP_RESULT" = success\n')
-        for result in ("success", "failure", "cancelled", "skipped", ""):
-            with self.subTest(result=result):
-                checked = subprocess.run(["bash", "-c", step["run"]], env={**os.environ, "SWEEP_RESULT": result}, capture_output=True)
-                self.assertEqual(checked.returncode == 0, result == "success")
-                self.assertIn(f"aggregate-only: upstream=full_non_pg result={result}\n".encode(), checked.stdout)
-
-    def test_pg_shard_context_is_confined_to_the_unconditional_test_step(self) -> None:
-        for path, job_id, step_name in ((MAIN_WORKFLOW, "postgres", "just test-postgres-shard"),):
-            with self.subTest(workflow=path.name):
-                document = yaml.safe_load(path.read_text())
-                job = document["jobs"][job_id]
-                self.assertNotIn("PG_INCLUDE_SHARD", document.get("env", {}))
-                self.assertNotIn("PG_INCLUDE_SHARD", job.get("env", {}))
-                for step in job["steps"]:
-                    if step.get("name") == step_name:
-                        self.assertEqual(step["env"]["PG_INCLUDE_SHARD"], "${{ matrix.shard }}")
-                        self.assertNotIn("if", step)
-                    else:
-                        self.assertNotIn("PG_INCLUDE_SHARD", step.get("env", {}))
-
-    def test_shard_step_context_and_aggregate_marker_mutants_fail_after_repin(self) -> None:
-        hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
-        gate_sha = hashlib.sha256(hardening.encode()).hexdigest()
-        pr = PR_WORKFLOW.read_text().replace(CI_RUNNER_HARDENING_SHA256, gate_sha)
-        main = MAIN_WORKFLOW.read_text()
-        baseline = self.run_hardening_fixture(pr)
-        self.assertEqual(baseline.returncode, 0, baseline.stderr)
-        pg_line = '          PG_INCLUDE_SHARD: ${{ matrix.shard }}\n'
-        total_line = '          SWEEP_SHARD_TOTAL: ${{ strategy.job-total }}\n'
-        for is_pr, source, pg_job, step_name, sweep_job in (
-            (False, main, "postgres", "just test-postgres-shard", "full_non_pg"),
-        ):
-            pg = job_block(source, pg_job)
-            target = step_block(pg, step_name)
-            for label, altered_job, reason in (
-                ("missing-pg", pg.replace(pg_line, "", 1), "actual PostgreSQL shard step must set PG_INCLUDE_SHARD"),
-                ("job-pg", pg.replace(pg_line, "", 1).replace("    env:\n", "    env:\n      PG_INCLUDE_SHARD: ${{ matrix.shard }}\n", 1), "must not be inherited by the PostgreSQL prelude"),
-                ("prelude-pg", pg.replace("      - name: Start PostgreSQL service\n", "      - name: Start PostgreSQL service\n        env:\n" + pg_line, 1), "must be confined to the actual PostgreSQL shard step"),
-                ("conditional-pg", pg.replace(target, target.replace("        timeout-minutes:", "        if: false\n        timeout-minutes:", 1), 1), "may not set if"),
-                ("missing-total", job_block(source, sweep_job).replace(total_line, "", 1), "semantic structure changed"),
-            ):
-                with self.subTest(pr=is_pr, mutation=label):
-                    job_id = sweep_job if label == "missing-total" else pg_job
-                    original = job_block(source, job_id)
-                    self.assertNotEqual(altered_job, original)
-                    altered = source.replace(original, altered_job, 1)
-                    gate = self._repin_job_hash(hardening, altered, job_id) if is_pr else hardening
-                    result = self.run_hardening_fixture(
-                        altered.replace(gate_sha, hashlib.sha256(gate.encode()).hexdigest()) if is_pr else pr,
-                        {} if is_pr else {"ci-main.yml": altered}, hardening_script=gate)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(reason, result.stderr)
-        marker = '          echo "aggregate-only: upstream=full_non_pg result=$SWEEP_RESULT"\n'
-        altered = main.replace(marker, "", 1)
-        self.assertNotEqual(altered, main)
-        result = self.run_hardening_fixture(pr, {"ci-main.yml": altered})
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("original required status", result.stderr)
-
-    def test_library_sweep_matrix_and_required_status_mutants_fail_after_repin(self) -> None:
-        pr = PR_WORKFLOW.read_text()
-        main = MAIN_WORKFLOW.read_text()
-        hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
-        baseline = self.run_hardening_fixture(pr)
-        self.assertEqual(baseline.returncode, 0, baseline.stderr)
-        for job_id, old, new, reason in (
-            ("sweep_shards", "test-selection.py sweep-matrix", "test-selection.py pg-matrix", "validate and emit the canonical full sweep matrix"),
-            ("full_non_pg", "fromJSON(needs.sweep_shards.outputs.matrix)", "fromJSON(needs.pg_shards.outputs.matrix)", "validated sweep matrix"),
-            ("full_non_pg", "fail-fast: false", "fail-fast: true", "validated sweep matrix"),
-            ("full_non_pg", "run --lane sweep --full --shard", "run --lane sweep --shard", "exactly one unconditional full sweep shard"),
-            ("full_non_pg", "if: ${{ !cancelled() }}", "if: success()", "producer-failure fallback"),
-            ("full_non_pg", "continue-on-error: true", "continue-on-error: false", "semantic structure changed"),
-            ("full_non_pg_required_context", "name: Full tests (ubuntu-latest)", "name: Full tests changed", "original required status"),
-            ("full_non_pg_required_context", "if: always()", "if: success()", "original required status"),
-            ("full_non_pg_required_context", 'test "$SWEEP_RESULT" = success', "true", "original required status"),
-        ):
-            with self.subTest(main=job_id, mutation=old):
+        main_mutants = (
+            ("rust_tests", "worker: [0, 1, 2, 3, 4, 5]", "worker: [0, 1, 2, 3, 4]", "main rust_tests must equal the PR job"),
+            ("test_evidence", "    needs: [rust_build, rust_tests]\n", "    needs: rust_build\n", "main test_evidence must keep needs"),
+            ("rust_build", "          retention-days: 14\n", "          retention-days: 3\n", "nextest-baseline for 14 days"),
+            ("rust_build", "          name: nextest-baseline\n", "          name: nextest-plan-copy\n", "nextest-baseline for 14 days"),
+        )
+        for job_id, old, new, reason in main_mutants:
+            with self.subTest(main_job=job_id, mutation=old):
                 original = job_block(main, job_id)
-                altered = main.replace(original, original.replace(old, new, 1), 1)
-                self.assertNotEqual(altered, main)
-                result = self.run_hardening_fixture(pr, {"ci-main.yml": altered})
+                changed = original.replace(old, new, 1)
+                self.assertNotEqual(changed, original)
+                result = self.run_hardening_fixture(workflow, extra_workflows={"ci-main.yml": main.replace(original, changed, 1)})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(reason, result.stderr)
+
     def test_retired_targeted_lane_regressions_stay_in_the_audited_selectors(self) -> None:
         # The old test_fast and high-risk steps ran these by name; the selector audit now fails the run if one stops matching.
         selectors = (REPO_ROOT / "scripts/ci/targeted-test-selectors.txt").read_text(encoding="utf-8").split()
@@ -930,10 +838,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
 
         main_jobs = yaml.safe_load(MAIN_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        sweep_step = "Library sweep (selection-set gated)"
-        # Main keeps its full sweep until it runs the same nextest jobs as the PR.
-        sweeps = [step for step in main_jobs["full_non_pg"]["steps"] if step.get("name") == sweep_step]
-        self.assertEqual([step["run"] for step in sweeps], ['python3 scripts/ci/test-selection.py run --lane sweep --full --shard "${{ matrix.shard }}"'])
         recipe = just_recipe_commands(justfile, "test-non-pg")
         non_lib = [
             command.replace(" --all-targets", " --bins --test '*'").replace(
@@ -973,12 +877,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for job_name in ("full_macos", "full_windows"):
             with self.subTest(job=job_name):
                 job = job_block(nightly, job_name)
-                self.assertIn("- name: cargo test (non-PG)", job)
+                # Lib tests run as the classifier's exact non-PG set; the other targets keep the skip filter.
+                self.assertIn('--only "$NEXTEST_DIR/pg.json"', job)
+                self.assertIn('--config-file "$NEXTEST_DIR/plan/worker-0.toml" --profile ci --no-tests fail', job)
                 self.assertIn("source scripts/ci/non-pg-test-filter.sh", job)
                 self.assertIn(
-                    'cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"', job
+                    'cargo test --bins --examples --benches --test \'*\' -- "${NON_PG_SKIP_ARGS[@]}"', job
                 )
-                self.assertIn("run_non_pg_filter_replay", job)
         self.assertIn(
             "cargo test --lib discord_thread_create -- --test-threads=1",
             job_block(nightly, "full_windows"),
@@ -1847,7 +1752,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     f"      - name: {step_name}\n{insertion}",
                     1,
                 )
-                result = self.run_hardening_fixture(mutated)
+                # Main must carry the same step policy, since its nextest jobs equal the PR's.
+                main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+                main = main.replace(f"      - name: {step_name}\n", f"      - name: {step_name}\n{insertion}", 1)
+                result = self.run_hardening_fixture(mutated, {"ci-main.yml": main})
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_script_checks_run_accepts_equivalent_scalar_and_block_forms(self) -> None:

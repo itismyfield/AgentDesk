@@ -220,67 +220,6 @@ run_non_pg_filter_replay
             with self.subTest(shard=shard):
                 self.assertEqual(restored[shard], tuple(result.stdout.splitlines()))
 
-    def test_main_pg_shards_run_each_test_postgres_command_once(self) -> None:
-        """Main's PG jobs together run what one test-postgres run does, once each."""
-        job = yaml.safe_load((ROOT / ".github/workflows/ci-main.yml").read_text("utf-8"))["jobs"]["postgres"]
-        [command] = [step["run"].strip() for step in job["steps"] if "just " in str(step.get("run", ""))]
-        membership = load_membership_module()
-        coverage = membership._load_coverage_module(ROOT)
-        justfile = (ROOT / "justfile").read_text("utf-8")
-        script = r'''
-cargo() { if [[ "${!#}" == --list ]]; then cat "$PG_LIST"; else printf '%s\n' "$*" >> "$LOG"; fi; }
-just() {
-  bash -euo pipefail "$RECIPES/$1"
-}
-export -f cargo just
-bash -euo pipefail -c "$1"
-'''
-        with tempfile.TemporaryDirectory() as temp:
-            recipes = Path(temp)
-            skips = membership.load_non_pg_skip_args(ROOT)[1::2]
-            ids = sorted(name for name in membership.load_lib_test_inventory(ROOT)
-                         if any(value in name for value in skips))
-            (recipes / "list.txt").write_text("".join(name + ": test\n" for name in ids) + f"\n{len(ids)} tests, 0 benchmarks\n", "utf-8")
-            for name in re.findall(r"(?m)^([A-Za-z0-9_-]+):", justfile):
-                lines = [line.removeprefix("@") for line in coverage.just_recipe_commands(justfile, name)]
-                (recipes / name).write_text("".join(line + "\n" for line in lines), "utf-8")
-
-            def run(shell_command: str, shard: str | None) -> tuple[int, list[str]]:
-                log = recipes / "cargo.log"
-                log.write_text("", "utf-8")
-                env = {key: value for key, value in os.environ.items() if key != "PG_INCLUDE_SHARD"}
-                env.update(LOG=str(log), RECIPES=str(recipes), PG_LIST=str(recipes / "list.txt"), POSTGRES_TEST_DATABASE_URL_BASE="postgresql://stub:1")
-                if shard is not None:
-                    env["PG_INCLUDE_SHARD"] = shard
-                result = subprocess.run(["bash", "-c", script, "bash", shell_command],
-                                        cwd=ROOT, env=env, capture_output=True, text=True)
-                return result.returncode, log.read_text("utf-8").splitlines()
-
-            rc, whole = run("just test-postgres", None)
-            self.assertEqual(rc, 0)
-            shards = [run(command, str(index)) for index in range(membership.PG_SHARD_COUNT)]
-            continuity_rc, continuity_calls = run(command, "continuity")
-            self.assertEqual(continuity_rc, 0)
-            for shard in ("", str(membership.PG_SHARD_COUNT)):
-                with self.subTest(shard=shard):
-                    rc, calls = run(command, shard)
-                    self.assertNotEqual(rc, 0)
-                    self.assertEqual(calls, [])
-        selection = "test --lib -- "
-        self.assertTrue(whole[0].startswith(selection) and len(whole) > 1)
-        targeted = sorted(whole[1:])
-        for index, (rc, commands) in enumerate(shards):
-            self.assertEqual(rc, 0)
-            self.assertEqual(
-                [line for line in commands if line.startswith(selection)],
-                [selection + " ".join(membership.load_pg_include_shards(ROOT)[index])
-                 + " --nocapture --test-threads=1"],
-            )
-        self.assertEqual(
-            sorted(line for _, commands in shards for line in commands if not line.startswith(selection)) + sorted(continuity_calls),
-            targeted,
-        )
-
     def test_prepared_pg_shards_and_replay_dispatch_without_extra_cargo(self) -> None:
         membership = load_membership_module()
         coverage = membership._load_coverage_module(ROOT)

@@ -73,26 +73,19 @@ production-only, test-aware, or repo-wide before adding hard gates.
 ## Non-Postgres Test Scope
 
 `just test-non-pg` keeps a targeted non-Postgres subset for local `just check`.
-CI no longer runs it: on `main` push and dispatch, `ci-main.yml` plans the
-full adjudicated library sweep and runs `full_non_pg` as four parallel shards,
-each with its own PostgreSQL service. The job needs `sweep_shards` and
-`lib_test_prepare` and runs under `!cancelled()`. An `always()` aggregate
-requires every shard to succeed and retains `Full tests (ubuntu-latest)`.
-PR `library_sweep` uses the same partitioner on its existing selected or full
-set and retains its required mirror. Counter union checks preserve the exact
-filter-plus-replay population, declared ignored IDs share shards with runnable
-IDs, and each leg checks `SWEEP_SHARD_TOTAL` against its planned count before
-execution. Exact-ID adjudication still rejects missing IDs and zero execution.
+CI no longer runs it: on `main` push and dispatch, and on PRs whose `rust_tests`
+filter is on, `rust_build` archives the lib tests and plans every listed test
+over six `rust_tests` workers, each with its own PostgreSQL service, and
+`test_evidence` audits that every planned test ran. Main and PR keep the same
+three jobs; `scripts/check-ci-runner-hardening.sh` allows them to differ only in
+`needs`, `if`, the PR base comparison and the main `nextest-baseline` upload.
 
 The `lint` job runs fmt, clippy, the policy JS tests, the non-lib side of the
 recipe's `--all-targets` lines (`--bins --test '*'`), and the `ClaudeBinary`
-compile-fail doctests. The nightly macOS and Windows lanes run their
-`--all-targets` non-Postgres sweeps. Main and PR PG matrices use the numeric
-shard count from `PG_SHARD_COUNT` (currently eight), plus a separate `continuity` leg. Numeric
-legs run only their PG selection; continuity runs its existing recipe once
-with `PG_INCLUDE_SHARD` removed. Selected PRs schedule only numeric shards
-containing selected IDs, plus continuity, while preserving the existing PG
-and continuity populations.
+compile-fail doctests. The nightly macOS and Windows lanes compare their native
+nextest lists with the sources, run the non-PG lib tests that
+`scripts/ci/pg_test_classifier.py` selects as exact IDs, and run the non-lib
+targets with the non-Postgres skip filter.
 
 A broader sweep was attempted with:
 
@@ -119,7 +112,7 @@ Ubuntu lint jobs (PR `Lint runner`, main `Main lint`) are the authoritative form
 full workspace gates until remaining Unix-only tmux tests are made portable or
 cfg-guarded.
 `ci-nightly.yml` has the same Windows boundary today: its Windows lane runs
-default-feature `cargo test --all-targets`.
+default-feature lib tests through nextest and the other targets with `cargo test`.
 `ci-main.yml` `windows_cache_warm` builds the same Windows compile on every
 `main` push (`cargo check --workspace --all-targets` and `cargo test --lib
 --no-run`, no tests run) and saves the registry and sccache entries the PR

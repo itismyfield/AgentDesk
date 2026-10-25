@@ -489,9 +489,12 @@ class VerifyArchive(Fixture):
 
 
 class BaseDiff(Fixture):
-    def diff(self, base_sha, *extra, baseline="base/plan.json"):
+    def diff(self, base_sha, baseline="base/plan.json", rows="", source=None):
+        self.write("justify.txt", rows)
+        self.write("source-removed.json", source or {"linux": [], "macos": [], "windows": []})
         return self.run_cli("base-diff", "--plan", self.dir / "plan/plan.json", "--baseline", self.dir / baseline,
-                            "--comparison-base-sha", base_sha, "--json-out", self.dir / "diff.json", *extra)
+                            "--comparison-base-sha", base_sha, "--justifications", self.dir / "justify.txt",
+                            "--source-removed", self.dir / "source-removed.json", "--json-out", self.dir / "diff.json")
 
     def test_baseline_from_another_sha_or_missing_is_refused(self):
         self.plan_ok(["m::a", "m::b"], workers=1, out="base")
@@ -512,20 +515,193 @@ class BaseDiff(Fixture):
         self.plan_ok(["m::a", "m::b"], workers=1, out="base", build={**BUILD, "--rust-version": "1.95.0"})
         self.assertEqual(self.diff(SHA)[0], 0)
 
-    def test_removed_and_newly_ignored_tests_fail_unless_report_only(self):
+    def test_removed_and_newly_ignored_tests_fail_without_rows(self):
         self.plan_ok(["m::a", "m::b", "m::c"], workers=1, out="base")
         self.plan_ok(["m::a", "m::new"], ignored=["m::b"], workers=1)
-        rc, _ = self.diff(SHA)
+        rc, err = self.diff(SHA)
         diff = json.loads((self.dir / "diff.json").read_text())
         self.assertEqual(rc, 1)
         self.assertEqual((diff["removed"], diff["runnable_to_ignored"], diff["added"]),
                          ([f"{BIN} m::c"], [f"{BIN} m::b"], [f"{BIN} m::new"]))
-        self.assertEqual(self.diff(SHA, "--report-only")[0], 0)
+        self.assertEqual(diff["unjustified"], [f"{BIN} m::b | runnable->ignored", f"{BIN} m::c | removed"])
+        self.assertIn(f"lost without a justification row: {BIN} m::c | removed", err)
+
+    def test_rows_matching_each_loss_exactly_pass(self):
+        self.plan_ok(["m::a", "m::b", "m::c"], workers=1, out="base")
+        self.plan_ok(["m::a"], ignored=["m::b"], workers=1)
+        rows = f"# intended\n{BIN} m::c | removed | merged into m::a\n{BIN} m::b | runnable->ignored | needs a GPU\n"
+        self.assertEqual(self.diff(SHA, rows=rows), (0, ""))
+
+    def test_stale_or_wrong_kind_rows_fail(self):
+        self.plan_ok(["m::a", "m::b"], workers=1, out="base")
+        self.plan_ok(["m::a"], workers=1)
+        cases = ((f"{BIN} m::b | removed | gone\n{BIN} m::a | removed | still here\n", f"{BIN} m::a | removed"),
+                 (f"{BIN} m::b | runnable->ignored | wrong kind\n", f"{BIN} m::b | runnable->ignored"))
+        for rows, stale in cases:
+            with self.subTest(rows=rows):
+                rc, err = self.diff(SHA, rows=rows)
+                self.assertEqual(rc, 1)
+                self.assertIn(f"matches no loss against {SHA}: {stale}", err)
+        for rows in ("m::b | removed | no binary\n", f"{BIN} m::b | deleted | bad kind\n", f"{BIN} m::b | removed |\n",
+                     f"{BIN} m::b | removed | a\n{BIN} m::b | removed | b\n"):
+            with self.subTest(rows=rows):
+                self.assertEqual(self.diff(SHA, rows=rows)[0], 1)
+
+    def test_tests_only_macos_or_windows_compiled_need_rows_too(self):
+        self.plan_ok(["m::a"], workers=1, out="base")
+        self.plan_ok(["m::a"], workers=1)
+        source = {"linux": [], "macos": ["m::mac"], "windows": ["m::win", "m::mac"]}
+        rc, err = self.diff(SHA, source=source)
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads((self.dir / "diff.json").read_text())["platform_removed"],
+                         {f"{BIN} m::mac": ["macos", "windows"], f"{BIN} m::win": ["windows"]})
+        rows = f"{BIN} m::mac | removed | macOS API retired\n{BIN} m::win | removed | Win32 path retired\n"
+        self.assertEqual(self.diff(SHA, rows=rows, source=source), (0, ""))
 
     def test_pure_addition_passes(self):
         self.plan_ok(["m::a"], workers=1, out="base")
         self.plan_ok(["m::a", "m::b"], workers=1)
         self.assertEqual(self.diff(SHA)[0], 0)
+
+
+class NativePlan(Fixture):
+    """Native macOS/Windows runs plan only the classifier's non-PG tests; a base rebuild copies a plan's identity."""
+
+    def test_only_plans_the_non_pg_names(self):
+        self.write("pg.json", {"non_pg": ["m::a", "m::ign"]})
+        plan = self.plan_ok(["m::a", "m::pg"], ignored=["m::ign"], workers=1,
+                            build={**BUILD, "--only": self.dir / "pg.json"})
+        self.assertEqual((self.worker_tests(plan, 0), plan["ignored"]), (["m::a"], [[BIN, "m::ign"]]))
+        self.write("pg.json", {"non_pg": ["m::a", "m::gone"]})
+        self.assertIn("outside the listed universe", self.plan(["m::a"], workers=1,
+                                                              build={**BUILD, "--only": self.dir / "pg.json"})[1])
+
+    def test_identity_from_copies_scope_and_build(self):
+        head = self.plan_ok(["m::a"], workers=1, build={**BUILD, "--features": "default,extra"})
+        rc, err = self.run_cli("plan", "--universe", self.dir / "list.json", "--archive", self.archive, "--workers", 1,
+                               "--sha", "b" * 40, "--identity-from", self.dir / "plan/plan.json",
+                               "--base-config", self.dir / "base.toml", "--retry-policy", self.dir / "empty.toml",
+                               "--output", self.dir / "rebuilt")
+        self.assertEqual(rc, 0, err)
+        rebuilt = json.loads((self.dir / "rebuilt/plan.json").read_text())["identity"]
+        drop = ("sha", "archive_sha256", "run_id")
+        self.assertEqual({k: v for k, v in rebuilt.items() if k not in drop},
+                         {k: v for k, v in head["identity"].items() if k not in drop})
+
+
+class BaseDiffScript(Fixture):
+    """scripts/ci/nextest-base-diff.sh in a git checkout with gh and cargo stubbed: CI Main's baseline or a rebuild."""
+
+    LIB = "#[test]\nfn a() {}\n#[cfg(windows)]\n#[test]\nfn w() {}\n"
+    GH = """#!/bin/sh
+case "$1 $2" in
+  "run list") [ -n "$GH_RUN_ID" ] && echo "$GH_RUN_ID"; exit 0 ;;
+  "run download") shift 2; while [ "$1" != "--dir" ]; do shift; done
+    [ -n "$GH_BASELINE" ] && mkdir -p "$2" && cp "$GH_BASELINE" "$2/plan.json" ;;
+  *) exit 9 ;;
+esac
+"""
+    CARGO = """#!/bin/sh
+echo "$*" >> "$CARGO_LOG"
+[ "$2" = --version ] && { echo "cargo-nextest 0.9.149"; exit 0; }
+[ -z "$CARGO_FAIL" ] || exit 101
+if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; echo bytes > "$2"; exit 0; fi
+[ "$2" = list ] && cat "$BASE_LIST"
+"""
+
+    def setUp(self):
+        super().setUp()
+        import shutil
+        import subprocess
+        self.sp = subprocess
+        self.repo = self.dir / "repo"
+        for rel in ("scripts/ci/nextest_ci.py", "scripts/ci/nextest_required.py", "scripts/ci/rust_test_sources.py",
+                    "scripts/ci/nextest-base-diff.sh", "scripts/ci/test-removal-justifications.txt", ".config/nextest.toml"):
+            (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(ROOT / rel, self.repo / rel)
+        (self.repo / "Cargo.toml").write_text('[package]\nname = "agentdesk"\n')
+        (self.repo / "src").mkdir()
+        self.base_sha = self.commit(self.LIB, "base")
+        self.git("update-ref", "refs/remotes/origin/main", self.base_sha)
+        self.bin = self.dir / "bin"
+        self.bin.mkdir()
+        for name, text in (("gh", self.GH), ("cargo", self.CARGO)):
+            (self.bin / name).write_text(text)
+            (self.bin / name).chmod(0o755)
+        self.write("base-list.json", nextest_list(["m::a"]))
+
+    def git(self, *argv):
+        return self.sp.run(["git", "-C", str(self.repo), *argv], check=True, capture_output=True, text=True).stdout.strip()
+
+    def commit(self, lib, message):
+        (self.repo / "src/lib.rs").write_text(lib)
+        if not (self.repo / ".git").exists():
+            self.git("init", "-q")
+        self.git("add", "-A")
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", message)
+        return self.git("rev-parse", "HEAD")
+
+    def head_plan(self, names, lib=None):
+        head = self.commit(lib or self.LIB + "#[test]\nfn b() {}\n", "head")
+        self.plan_ok(names, workers=1, out="nextest/plan", sha=head)
+        return head
+
+    def baseline(self, names, **kw):
+        self.plan_ok(names, workers=1, out="main", sha=kw.pop("sha", self.base_sha), **kw)
+        return self.dir / "main/plan.json"
+
+    def run_script(self, head, **env):
+        summary = self.dir / "summary.md"
+        summary.write_text("")
+        full = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "PR_HEAD_SHA": head,
+                "GITHUB_REPOSITORY": "o/r", "GITHUB_WORKSPACE": str(self.repo), "GITHUB_STEP_SUMMARY": str(summary),
+                "CARGO_LOG": str(self.dir / "cargo.log"), "BASE_LIST": str(self.dir / "base-list.json"),
+                "GH_RUN_ID": "", "GH_BASELINE": "", "CARGO_FAIL": "", **env}
+        full.pop("GITHUB_OUTPUT", None)
+        done = self.sp.run(["bash", "scripts/ci/nextest-base-diff.sh", str(self.dir / "nextest")], cwd=self.repo,
+                           env=full, capture_output=True, text=True)
+        cargo = (self.dir / "cargo.log").read_text() if (self.dir / "cargo.log").exists() else ""
+        return done.returncode, done.stdout + done.stderr, summary.read_text(), cargo
+
+    def test_main_baseline_is_used_when_it_matches(self):
+        head = self.head_plan(["m::a", "m::b"])
+        rc, out, summary, cargo = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=str(self.baseline(["m::a"])))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("against CI Main's baseline", summary)
+        self.assertNotIn("archive", cargo)
+
+    def test_missing_or_mismatched_baseline_rebuilds_the_base_plan(self):
+        head = self.head_plan(["m::a", "m::b"])
+        cases = ({}, {"GH_RUN_ID": "5", "GH_BASELINE": str(self.baseline(["m::a"], sha="c" * 40))},
+                 {"GH_RUN_ID": "5", "GH_BASELINE": str(self.baseline(["m::a"], build={**BUILD, "--features": "x"}))})
+        for env in cases:
+            with self.subTest(env=env):
+                (self.dir / "cargo.log").unlink(missing_ok=True)
+                self.sp.run(["rm", "-rf", str(self.dir / "nextest/base")], check=True)
+                self.git("worktree", "prune")
+                rc, out, summary, cargo = self.run_script(head, **env)
+                self.assertEqual(rc, 0, out)
+                self.assertIn("::warning title=nextest baseline fallback::", out)
+                self.assertIn("nextest baseline fallback:", summary)
+                self.assertIn("against the fallback base plan", summary)
+                self.assertIn("nextest archive --lib", cargo)
+
+    def test_loss_fails_on_either_path_and_a_failed_rebuild_never_passes(self):
+        head = self.head_plan(["m::b"])
+        rc, out, _, _ = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=str(self.baseline(["m::a"])))
+        self.assertEqual(rc, 1)
+        self.assertIn(f"lost without a justification row: {BIN} m::a | removed", out)
+        self.sp.run(["rm", "-rf", str(self.dir / "nextest/base")], check=True)
+        self.git("worktree", "prune")
+        rc, out, summary, _ = self.run_script(head, CARGO_FAIL="1")
+        self.assertNotEqual(rc, 0)
+        self.assertNotIn("against the fallback base plan", summary)
+
+    def test_windows_only_source_removal_needs_a_row(self):
+        head = self.head_plan(["m::a"], lib="#[test]\nfn a() {}\n")
+        rc, out, _, _ = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=str(self.baseline(["m::a"])))
+        self.assertEqual(rc, 1)
+        self.assertIn(f"lost without a justification row: {BIN} w | removed", out)
 
 
 class RustSources(unittest.TestCase):
@@ -668,15 +844,15 @@ class RustSources(unittest.TestCase):
             self.assertEqual(self.split(os_name)[0], {"imp::same"})
 
     def test_every_workflow_compare_step_runs_as_written(self):
-        """Each compare command ci-pr.yml runs must parse and write its JSON, not only match a pinned string."""
+        """Each compare command ci-pr.yml and ci-nightly.yml run must parse and write its JSON, not only match a pinned string."""
         import shlex
         import shutil
         import subprocess
         import yaml
-        jobs = yaml.safe_load((ROOT / ".github/workflows/ci-pr.yml").read_text())["jobs"]
-        runs = [s["run"] for job in jobs.values() for s in job.get("steps", [])
-                if "rust_test_sources.py compare" in s.get("run", "")]
-        self.assertEqual(len(runs), 2)
+        runs = [s["run"] for name in ("ci-pr.yml", "ci-nightly.yml")
+                for job in yaml.safe_load((ROOT / ".github/workflows" / name).read_text())["jobs"].values()
+                for s in job.get("steps", []) if "rust_test_sources.py compare" in s.get("run", "")]
+        self.assertEqual(len(runs), 4)
         self.tree({"src/lib.rs": "#[test]\nfn a() {}\n#[cfg(windows)]\n#[test]\nfn w() {}\n"
                                  "#[cfg(unix)]\n#[test]\nfn u() {}\n"})
         (self.root / "scripts/ci").mkdir(parents=True)
@@ -701,6 +877,23 @@ class RustSources(unittest.TestCase):
                 self.assertIn("--json-out", argv)
                 written = json.loads((self.root / argv[argv.index("--json-out") + 1]).read_text())
                 self.assertEqual(written["static_only"], [])
+
+    def test_removed_lists_what_each_platform_stops_compiling(self):
+        lib = ("#[test]\nfn a() {}\n#[cfg(windows)]\n#[test]\nfn w() {}\n#[cfg(target_os = \"macos\")]\n#[test]\nfn m() {}\n"
+               "#[test]\nfn gated() {}\n")
+        base = self.root / "base"
+        base.mkdir()
+        (base / "Cargo.toml").write_text((self.root / "Cargo.toml").read_text())
+        (base / "src").mkdir()
+        (base / "src/lib.rs").write_text(lib)
+        self.tree({"src/lib.rs": lib.replace("#[cfg(windows)]\n#[test]\nfn w() {}\n", "")
+                   .replace("#[test]\nfn gated()", "#[cfg(unix)]\n#[test]\nfn gated()") + "#[test]\nfn new() {}\n"})
+        rc, err = self.cli("removed", "--base-root", base, "--json-out", self.root / "removed.json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads((self.root / "removed.json").read_text()),
+                         {"linux": [], "macos": [], "windows": ["gated", "w"]})
+        (base / "src/lib.rs").write_text("#[cfg(feature = \"unknown\" || x)]\n#[test]\nfn odd() {}\n")
+        self.assertEqual(self.cli("removed", "--base-root", base, "--json-out", self.root / "removed.json")[0], 1)
 
     def compare(self, doc, platform="linux"):
         listed = self.root / "list.json"

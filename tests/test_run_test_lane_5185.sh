@@ -31,7 +31,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUNNER="$REPO_ROOT/scripts/run_test_lane.py"
 REAL_LEDGER="$REPO_ROOT/scripts/known_test_failures.txt"
 REAL_MANIFEST="$REPO_ROOT/scripts/lib_test_inventory_manifest.txt"
-MAIN_WORKFLOW="$REPO_ROOT/.github/workflows/ci-main.yml"
 PYTHON="${PYTHON:-python3}"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-test-lane-5185.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -1005,10 +1004,9 @@ LANE_COMMAND='python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summari
 # development machines finished writing first, so the suite was green
 # locally and red on ubuntu-latest. Dropping `-q` makes grep read to EOF,
 # so sed always completes and the status reflects the match alone.
-# Keep the selector's unsharded fallback and main's sharded entrypoint exact; PR runs nextest instead.
-if ! grep -xF "$LANE_COMMAND" "$REPO_ROOT/scripts/ci/test-selection.py" >/dev/null \
-    || ! sed 's/^[[:space:]]*//' "$MAIN_WORKFLOW" | grep -xF 'run: python3 scripts/ci/test-selection.py run --lane sweep --full --shard "${{ matrix.shard }}"' >/dev/null; then
-    fail_test "Main must run the non-pg-sweep lane through the gate with exactly the pinned shard command"
+# Keep the selector's unsharded fallback exact; PR and main run nextest instead.
+if ! grep -xF "$LANE_COMMAND" "$REPO_ROOT/scripts/ci/test-selection.py" >/dev/null; then
+    fail_test "The selector must keep the non-pg-sweep lane's pinned unsharded command"
 else pass_test
 fi
 
