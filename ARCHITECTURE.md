@@ -2859,6 +2859,10 @@ src/
 │   │   ├── voice_sensitivity.rs
 │   │   ├── watcher_summary_authority_tests.rs
 │   │   └── zombie_foreground_release.rs
+│   ├── discord_config_audit/
+│   │   ├── bot_settings.rs
+│   │   ├── db_agents.rs
+│   │   └── legacy_bot.rs
 │   ├── dispatch_gate/
 │   │   ├── auth_profiles/
 │   │   │   └── selection_tests.rs
