@@ -64,18 +64,18 @@ mod tests {
             resettable_statuses.len()
         );
 
-        type ResetRow = (String, Option<String>, Option<String>, i64, Option<String>);
-        let reset_rows: Vec<ResetRow> = sqlx::query_as(
-            "SELECT status, active_dispatch_id, session_info, tokens, claude_session_id
+        let reset_rows: Vec<(String, Option<String>, Option<String>, i64, Option<String>)> =
+            sqlx::query_as(
+                "SELECT status, active_dispatch_id, session_info, tokens, claude_session_id
          FROM sessions
          WHERE thread_channel_id = $1
            AND session_key LIKE 'clear-slot-batch-%'
          ORDER BY session_key",
-        )
-        .bind(&target_thread_id_text)
-        .fetch_all(&pool)
-        .await
-        .expect("load reset slot sessions"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+            )
+            .bind(&target_thread_id_text)
+            .fetch_all(&pool)
+            .await
+            .expect("load reset slot sessions"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
         assert_eq!(reset_rows.len(), resettable_statuses.len());
         assert!(reset_rows.iter().all(|row| {
             row == &(
