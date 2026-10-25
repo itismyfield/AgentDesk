@@ -1,6 +1,11 @@
 //! Replay receipt transitions; every acknowledgement is returned only after its commit succeeded.
 
+#[cfg(test)]
+mod hold_notice;
+mod settle;
 mod start;
+#[cfg(test)]
+pub(crate) use hold_notice::withhold_and_notify;
 pub(crate) use start::{
     BeginAck, BeginFrom, CanonicalInput, EffectProjection, begin, bind_session,
     ensure_same_request, register_or_reuse,
@@ -36,7 +41,7 @@ impl std::fmt::Display for WriteError {
     }
 }
 
-fn refused(error: sqlx::Error) -> WriteError {
+pub(super) fn refused(error: sqlx::Error) -> WriteError {
     match error.as_database_error().and_then(|db| db.constraint()) {
         Some("replay_disposition_fence") => WriteError::Fenced(error.to_string()),
         _ => WriteError::Storage(error),
@@ -77,26 +82,7 @@ async fn settle(
     hold: Option<(&str, &serde_json::Value)>,
 ) -> Result<(), WriteError> {
     let mut tx = pool.begin().await.map_err(WriteError::Storage)?;
-    let settled = sqlx::query(
-        "UPDATE intake_outbox
-            SET replay_disposition = $4, replay_hold_reason = COALESCE($5, replay_hold_reason),
-                replay_preserved = COALESCE(replay_preserved, '{}'::jsonb) || COALESCE($6, '{}'::jsonb)
-          WHERE id = $1 AND replay_episode_nonce = $2 AND replay_owner_incarnation = $3
-            AND (replay_disposition = 'started_unclassified'
-                 OR (replay_disposition = 'startup_failed_no_effect' AND $4 = 'withheld'))",
-    )
-    .bind(attempt.receipt_id)
-    .bind(&attempt.nonce)
-    .bind(&attempt.incarnation)
-    .bind(disposition)
-    .bind(hold.map(|(reason, _)| reason))
-    .bind(hold.map(|(_, preserved)| preserved))
-    .execute(&mut *tx)
-    .await
-    .map_err(refused)?;
-    if settled.rows_affected() != 1 {
-        return Err(WriteError::CasMiss);
-    }
+    settle::on_tx(&mut tx, attempt, disposition, hold).await?;
     commit(tx).await
 }
 

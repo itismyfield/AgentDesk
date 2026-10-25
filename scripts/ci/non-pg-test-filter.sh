@@ -36,6 +36,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::provider_session_prompts::tests
   --skip db::relay_dead_letter::migration_tests
   --skip db::relay_dead_letter::tests
+  --skip db::replay_disposition::hold_notice::tests
   --skip db::replay_disposition::register_tests
   --skip db::replay_disposition::tests
   --skip db::replay_disposition::write_tests
@@ -350,6 +351,8 @@ NON_PG_FILTER_REPLAY=(
   db::prompt_manifests::tests::prompt_manifest_layer_zero_cap_disables_truncation_for_visibility
   db::prompt_manifests::tests::prompt_manifest_token_estimate_is_chars_div_four
   db::prompt_manifests::tests::prompt_manifest_totals_exclude_disabled_layers
+  db::replay_disposition::hold_notice::tests::malformed_notice_never_reads_as_an_unnotified_legacy_row
+  db::replay_disposition::hold_notice::tests::withheld_notice_is_non_turn_provenance_only_for_its_exact_source_and_reason
   db::scheduled_messages::attachments_pg_tests::image_byte_limit_matches_immutable_definition_and_outbox_migrations
   db::scheduled_messages::attachments_pg_tests::image_create_json_preserves_optional_contract
   engine::ops::config_ops::tests::config_get_raw_keeps_scalar_string_semantics_and_precedence
