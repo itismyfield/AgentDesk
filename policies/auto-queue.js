@@ -55,7 +55,6 @@ var activateRun = _autoQueueDispatchLib.activateRun;
 var PHASE_GATE_HUMAN_ESCALATION_THRESHOLD = _autoQueuePhaseGateLib.PHASE_GATE_HUMAN_ESCALATION_THRESHOLD;
 var PHASE_GATE_FAILURE_TTL_SEC = _autoQueuePhaseGateLib.PHASE_GATE_FAILURE_TTL_SEC;
 var PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC = _autoQueuePhaseGateLib.PHASE_GATE_ALERT_DEBOUNCE_TTL_SEC;
-var PHASE_GATE_AUTOCLOSE_TTL_SEC = _autoQueuePhaseGateLib.PHASE_GATE_AUTOCLOSE_TTL_SEC;
 var PHASE_GATE_GRACE_WINDOW_MS = _autoQueuePhaseGateLib.PHASE_GATE_GRACE_WINDOW_MS;
 var _inferPhaseGatePassVerdict = _autoQueuePhaseGateLib.inferPhaseGatePassVerdict;
 var _phaseGateVerdictMatches = _autoQueuePhaseGateLib.phaseGateVerdictMatches;
@@ -69,10 +68,6 @@ var resetPhaseGateFailureCount = _autoQueuePhaseGateLib.resetPhaseGateFailureCou
 var loadPhaseGateCardLabel = _autoQueuePhaseGateLib.loadPhaseGateCardLabel;
 var handlePhaseGateFailure = _autoQueuePhaseGateLib.handlePhaseGateFailure;
 var _maybeAlertPhaseGateVerdictMismatch = _autoQueuePhaseGateLib.maybeAlertPhaseGateVerdictMismatch;
-var _phaseGateOnlyIssueClosedFailing = _autoQueuePhaseGateLib.phaseGateOnlyIssueClosedFailing;
-var _loadCardForPhaseGateFallback = _autoQueuePhaseGateLib.loadCardForPhaseGateFallback;
-var _extractRepoSlugFromIssueUrl = _autoQueuePhaseGateLib.extractRepoSlugFromIssueUrl;
-var _attemptPhaseGateAutoCloseFallback = _autoQueuePhaseGateLib.attemptPhaseGateAutoCloseFallback;
 var loadPhaseGateState = _autoQueuePhaseGateLib.loadPhaseGateState;
 var savePhaseGateState = _autoQueuePhaseGateLib.savePhaseGateState;
 var clearPhaseGateState = _autoQueuePhaseGateLib.clearPhaseGateState;
@@ -96,7 +91,6 @@ var resumeRunAndActivate = _autoQueueLifecycleLib.resumeRunAndActivate;
 
 // ── error recovery helpers ──────────────────────────────────────────
 var notifyAutoQueueEntryFailure = _autoQueueErrorRecoveryLib.notifyAutoQueueEntryFailure;
-var _createConsultationDispatch = _autoQueueErrorRecoveryLib.createConsultationDispatch;
 
 var autoQueue = {
   name: "auto-queue",
@@ -255,42 +249,6 @@ var autoQueue = {
     }
 
     if (!_phaseGateVerdictMatches(verdict, passVerdict, authoritativeContext, result)) {
-      // #2035: before failing this gate, try the issue_closed-only fallback.
-      // Conservative entry conditions: merge_verified=pass, build_passed=pass,
-      // ONLY issue_closed failing, same commit hash recorded on the card, and
-      // a per-(card, phase, commit) one-shot guard. The fallback issues a
-      // `gh issue close` and then we restart this hook so the gate re-checks
-      // against fresh `issue_closed_at` state. Failures fall through to the
-      // existing pauseRun path so nothing is silently swallowed.
-      var fallback = _attemptPhaseGateAutoCloseFallback(
-        gate.run_id, phase, dispatch.id, authoritativeContext || context, result
-      );
-      if (fallback.attempted) {
-        autoQueueLog("info", "Phase gate autoclose fallback attempted for run " + gate.run_id + " phase " + phase + " — anyClosed=" + !!fallback.anyClosed, {
-          run_id: gate.run_id,
-          dispatch_id: dispatch.id,
-          card_id: state.anchor_card_id || dispatch.kanban_card_id,
-          batch_phase: phase
-        });
-        if (fallback.anyClosed) {
-          // Re-evaluate exactly once with the fresh issue_closed_at state.
-          // We do NOT pauseRun here so the queue continues if all checks
-          // now pass. If they still do not pass, the second invocation will
-          // skip the fallback (one-shot guard) and fall through to the
-          // original pauseRun path.
-          try {
-            autoQueue.onDispatchCompleted({ dispatch_id: dispatch.id });
-          } catch (e) {
-            autoQueueLog("warn", "Phase gate re-evaluation after autoclose threw: " + e, {
-              run_id: gate.run_id,
-              dispatch_id: dispatch.id,
-              card_id: state.anchor_card_id || dispatch.kanban_card_id,
-              batch_phase: phase
-            });
-          }
-          return;
-        }
-      }
       state.status = "failed";
       state.failed_dispatch_id = dispatch.id;
       state.failed_verdict = _phaseGateDiagnosticVerdict(result, verdict);
@@ -378,32 +336,6 @@ var autoQueue = {
         }
       }
       if (gateDispatch.status !== "completed" || !_phaseGateVerdictMatches(gateVerdict, expectedVerdict, siblingContext, gateResult)) {
-        // #2035: sibling gate path — try the issue_closed-only autoclose
-        // fallback before failing. Same one-shot guard as the primary path.
-        if (gateDispatch.status === "completed") {
-          var siblingFallback = _attemptPhaseGateAutoCloseFallback(
-            gate.run_id, phase, gateDispatch.id, siblingContext || gateContext, gateResult
-          );
-          if (siblingFallback.attempted && siblingFallback.anyClosed) {
-            autoQueueLog("info", "Phase gate autoclose fallback attempted for sibling dispatch " + gateDispatch.id + " — anyClosed=true", {
-              run_id: gate.run_id,
-              dispatch_id: gateDispatch.id,
-              card_id: state.anchor_card_id || dispatch.kanban_card_id,
-              batch_phase: phase
-            });
-            try {
-              autoQueue.onDispatchCompleted({ dispatch_id: gateDispatch.id });
-            } catch (e) {
-              autoQueueLog("warn", "Phase gate sibling re-evaluation after autoclose threw: " + e, {
-                run_id: gate.run_id,
-                dispatch_id: gateDispatch.id,
-                card_id: state.anchor_card_id || dispatch.kanban_card_id,
-                batch_phase: phase
-              });
-            }
-            return;
-          }
-        }
         state.status = "failed";
         state.failed_dispatch_id = gateDispatch.id;
         state.failed_verdict = _phaseGateDiagnosticVerdict(gateResult, gateVerdict);

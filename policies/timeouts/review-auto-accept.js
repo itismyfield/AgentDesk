@@ -66,7 +66,8 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
               var rs = reviewState[0];
               // Get finding categories from last completed review dispatch
               var lastReview = agentdesk.db.query(
-                "SELECT result FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'review' AND status = 'completed' ORDER BY rowid DESC LIMIT 1",
+                "SELECT result FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'review' AND status = 'completed' " +
+                "ORDER BY COALESCE(completed_at, updated_at, created_at) DESC, created_at DESC, id DESC LIMIT 1",
                 [sc.id]
               );
               var findingCats = null;
