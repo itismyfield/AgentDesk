@@ -3715,6 +3715,7 @@ services::discord::commands::command_policy::command_policy_tests::help_formatte
 services::discord::commands::command_policy::command_policy_tests::registered_surface_and_principal_matrix_preserves_exact_ids
 services::discord::commands::command_policy::command_policy_tests::text_registration_and_help_name_the_same_commands
 services::discord::commands::command_policy::command_policy_tests::unknown_selection_is_denied_for_every_principal
+services::discord::commands::config::allowall_tests::allowall_status_reports_without_changing_public_access
 services::discord::commands::config::provider_settings::revision_tests::truthful_active_intake_owner_without_session_is_refused_pg
 services::discord::commands::config::provider_settings::revision_tests::truthful_offline_idle_owner_is_stale_and_does_not_override_local_owner_pg
 services::discord::commands::config::provider_settings::revision_tests::truthful_shared_feature_reset_is_consumed_by_the_first_parent_or_thread_turn
@@ -3874,11 +3875,14 @@ services::discord::commands::diagnostics::recovery_command_tests::status_uses_th
 services::discord::commands::diagnostics::reports::queue_report_tests::queue_report_exposes_all_primary_ids_as_cancel_queued_inputs
 services::discord::commands::diagnostics::reports::runtime_label_tests::inflight_runtime_label_reports_direct_tui_kind
 services::discord::commands::help::tests::help_advertises_explicit_queue_cancellation_not_reaction_removal
+services::discord::commands::help::tests::help_lists_only_working_agent_text_commands
+services::discord::commands::help::tests::retired_slash_commands_are_not_registered
 services::discord::commands::help::tests::slash_registration_help_and_risk_table_name_the_same_commands
 services::discord::commands::inspect::tests::context::context_report_clamps_context_usage_to_window
 services::discord::commands::inspect::tests::context::context_report_omits_other_turns_manifest_when_none
 services::discord::commands::inspect::tests::context::context_report_orders_largest_layers_and_formats_compaction
 services::discord::commands::inspect::tests::formatting::no_data_report_uses_required_phrase_inside_code_fence
+services::discord::commands::inspect::tests::inspect_refuses_unauthorized_users_before_answering
 services::discord::commands::inspect::tests::prompt::privileged_prompt_report_can_show_full_adk_body
 services::discord::commands::inspect::tests::prompt::prompt_report_uses_adk_preview_and_only_redacted_user_preview
 services::discord::commands::model_ui::tests::invariant_model_picker_caps_explicit_entries_and_keeps_selected_catalog_entry
@@ -3887,6 +3891,7 @@ services::discord::commands::model_ui::tests::invariant_model_picker_keeps_valid
 services::discord::commands::model_ui::tests::invariant_model_picker_skips_oversize_catalog_and_persisted_values_without_truncating
 services::discord::commands::model_ui::tests::invariant_model_picker_truncation_is_unicode_character_safe
 services::discord::commands::node::tests::node_unavailable_message_reports_effective_mode_and_source
+services::discord::commands::receipt::tests::usage_period_registers_only_the_mapped_choices
 services::discord::commands::recovery_ops::tests::deadlock_script_contains_health_poll_and_label
 services::discord::commands::recovery_ops::tests::machine_flip_script_preflights_then_deploys_both
 services::discord::commands::recovery_ops::tests::recovery_kind_name_matches_command_surface
@@ -3907,6 +3912,7 @@ services::discord::commands::restart::seed_tests::busy_seed_retries_once_then_re
 services::discord::commands::restart::seed_tests::non_busy_failures_are_not_retried
 services::discord::commands::restart::seed_tests::retry_failure_is_reported_without_a_third_submission
 services::discord::commands::session::autocomplete::tests::resume_session_parameter_registers_autocomplete
+services::discord::commands::session::resume_key_tests::resume_without_a_channel_name_does_not_blame_the_workspace
 services::discord::commands::skill::stop_response_tests::stop_alias_matches_the_stop_owner_failure_reply
 services::discord::commands::system_prompt::tests::system_prompt_active_native_binding_precedes_persisted_session
 services::discord::commands::system_prompt::tests::system_prompt_command_registered
@@ -3936,6 +3942,7 @@ services::discord::commands::tui_passthrough::tests::truthful_effort_overlay_clo
 services::discord::commands::voice::auto_join_tests::disabled_voice_guidance_is_stable
 services::discord::commands::voice::auto_join_tests::notify_dedup_emits_once_per_channel_kind_pair
 services::discord::commands::voice::auto_join_tests::occupancy_registry_isolates_providers_per_guild
+services::discord::commands::voice::sensitivity::tests::reply_announces_auto_revert_only_when_it_happens
 services::discord::compact_turn_authority::tests::external_interactive_turns_are_compact_eligible
 services::discord::compact_turn_authority::tests::monitor_triggered_turn_stays_gated
 services::discord::completion_footer_metadata::tests::completion_footer_fixture_pins_requested_order_and_dedup_4846
@@ -8024,6 +8031,7 @@ services::discord::shared_state::restart_lifecycle_tests::check_deferred_restart
 services::discord::shared_state::restart_lifecycle_tests::legacy_actor_store_matrix_preserves_unwritten_flags
 services::discord::shared_state::restart_lifecycle_tests::shutdown_first_guard_rejects_commented_and_reordered_stores
 services::discord::shared_state::restart_lifecycle_tests::shutdown_reader_observes_live_writer_and_clone
+services::discord::sidecar_interaction::tests::local_mac_follows_this_hosts_name
 services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_command_injection_attempt
 services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_plain
 services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_unicode

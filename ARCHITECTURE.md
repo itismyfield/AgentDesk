@@ -1051,6 +1051,7 @@ src/
 │   │   │   ├── config/
 │   │   │   │   ├── provider_settings/
 │   │   │   │   │   └── revision_tests.rs
+│   │   │   │   ├── allowall_tests.rs
 │   │   │   │   └── provider_settings.rs
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
@@ -1109,7 +1110,8 @@ src/
 │   │   │   ├── restart/
 │   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
-│   │   │   │   └── autocomplete.rs
+│   │   │   │   ├── autocomplete.rs
+│   │   │   │   └── resume_key_tests.rs
 │   │   │   ├── skill/
 │   │   │   │   └── stop_response_tests.rs
 │   │   │   ├── system_prompt/
@@ -1122,7 +1124,8 @@ src/
 │   │   │   │   ├── clear_refusal_reply_tests.rs
 │   │   │   │   └── native_stop.rs
 │   │   │   ├── voice/
-│   │   │   │   └── alert.rs
+│   │   │   │   ├── alert.rs
+│   │   │   │   └── sensitivity.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── command_policy.rs
 │   │   │   ├── config.rs
@@ -1131,7 +1134,6 @@ src/
 │   │   │   ├── goals.rs
 │   │   │   ├── help.rs
 │   │   │   ├── help_tests.rs
-│   │   │   ├── meeting_cmd.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── model_picker.rs
 │   │   │   ├── model_ui.rs

@@ -6,8 +6,8 @@
 //! re-renders the device dropdown, so the list reflects whichever Mac is
 //! chosen and refreshes on each (re)selection. Selections are stored in an
 //! in-memory pending map keyed by the card's message id; on button click the
-//! chosen `SidecarLauncher` action runs either locally (mac-book — the
-//! dcserver host) or over SSH (mac-mini).
+//! chosen `SidecarLauncher` action runs locally on the Mac that hosts this
+//! dcserver and over SSH on the other one.
 
 use std::process::Stdio;
 use std::sync::LazyLock;
@@ -17,15 +17,17 @@ use poise::serenity_prelude as serenity;
 
 use super::{Data, Error, check_auth};
 
-/// Host Mac selected by default when the card is first posted (dcserver host).
-pub(in crate::services::discord) const SIDECAR_DEFAULT_MAC: &str = "mac-book";
+/// Host Macs offered by the picker; each name is also its SSH alias.
+const SIDECAR_MACS: [&str; 2] = ["mac-book", "mac-mini"];
+/// Local Mac when this host's name matches no picker entry (previous fixed value).
+const SIDECAR_FALLBACK_LOCAL_MAC: &str = "mac-book";
 
 /// How long a posted picker stays interactive before it is considered stale.
 const SIDECAR_PENDING_TTL: Duration = Duration::from_secs(30 * 60);
 /// Hard cap on how long a connect/disconnect (incl. SSH) may run.
 const SIDECAR_ACTION_TIMEOUT: Duration = Duration::from_secs(20);
-/// Cap on the device-listing probe. Generous enough for the mac-mini SSH probe;
-/// the local mac-book probe returns near-instantly so it never approaches this.
+/// Cap on the device-listing probe. Generous enough for the SSH probe; the
+/// local probe returns near-instantly so it never approaches this.
 const SIDECAR_DEVICES_TIMEOUT: Duration = Duration::from_secs(8);
 
 struct SidecarPending {
@@ -60,30 +62,65 @@ fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/Users/itismyfield".to_string())
 }
 
-/// List Sidecar-connectable devices as seen by the given host Mac.
-/// `mac-book` → local binary; `mac-mini` → over SSH (key/agent auth).
-/// Returns empty on timeout/error; the caller falls back to a static option.
-pub(in crate::services::discord) async fn list_sidecar_devices_on(mac: &str) -> Vec<String> {
-    let mut cmd = if mac == "mac-mini" {
-        let mut c = tokio::process::Command::new("/usr/bin/ssh");
-        c.args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            "-o",
-            "ServerAliveInterval=3",
-            "-o",
-            "ServerAliveCountMax=3",
-            "mac-mini",
-            "~/bin/SidecarLauncher devices",
-        ]);
-        c
-    } else {
+/// Picker entry for the host named `hostname`: case and punctuation are
+/// ignored, so `MacBook-Pro-14` is `mac-book` and `Mac-mini` is `mac-mini`.
+fn sidecar_local_mac_for(hostname: &str) -> &'static str {
+    let squash = |name: &str| -> String {
+        name.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let host = squash(hostname);
+    SIDECAR_MACS
+        .into_iter()
+        .find(|mac| host.starts_with(&squash(mac)))
+        .unwrap_or(SIDECAR_FALLBACK_LOCAL_MAC)
+}
+
+/// The picker entry for the Mac running this dcserver.
+pub(in crate::services::discord) fn sidecar_local_mac() -> &'static str {
+    static LOCAL: LazyLock<&'static str> = LazyLock::new(|| {
+        sidecar_local_mac_for(&crate::services::platform::shell::health_hostname_short())
+    });
+    *LOCAL
+}
+
+/// `SidecarLauncher` on `mac`: the local binary for this host, otherwise over
+/// SSH (key/agent auth). `None` for a name outside the picker.
+fn sidecar_launcher(
+    mac: &str,
+    local_args: &[&str],
+    remote_command: &str,
+) -> Option<tokio::process::Command> {
+    if mac == sidecar_local_mac() {
         let bin = format!("{}/bin/SidecarLauncher", home_dir());
         let mut c = tokio::process::Command::new(bin);
-        c.arg("devices");
-        c
+        c.args(local_args);
+        return Some(c);
+    }
+    let host = SIDECAR_MACS.into_iter().find(|known| *known == mac)?;
+    let mut c = tokio::process::Command::new("/usr/bin/ssh");
+    c.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=8",
+        "-o",
+        "ServerAliveInterval=3",
+        "-o",
+        "ServerAliveCountMax=3",
+        host,
+        remote_command,
+    ]);
+    Some(c)
+}
+
+/// List Sidecar-connectable devices as seen by the given host Mac.
+/// Returns empty on timeout/error; the caller falls back to a static option.
+pub(in crate::services::discord) async fn list_sidecar_devices_on(mac: &str) -> Vec<String> {
+    let Some(mut cmd) = sidecar_launcher(mac, &["devices"], "~/bin/SidecarLauncher devices") else {
+        return Vec::new();
     };
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -125,10 +162,17 @@ pub(in crate::services::discord) fn build_sidecar_components(
     let mac_menu = serenity::CreateSelectMenu::new(
         "sidecar:mac",
         serenity::CreateSelectMenuKind::String {
-            options: vec![
-                select_option("mac-book (이 머신)", "mac-book", selected_mac),
-                select_option("mac-mini", "mac-mini", selected_mac),
-            ],
+            options: SIDECAR_MACS
+                .into_iter()
+                .map(|mac| {
+                    let label = if mac == sidecar_local_mac() {
+                        format!("{mac} (이 머신)")
+                    } else {
+                        mac.to_string()
+                    };
+                    select_option(&label, mac, selected_mac)
+                })
+                .collect(),
         },
     )
     .placeholder("호스트 Mac 선택")
@@ -206,30 +250,11 @@ fn sidecar_remote_command(action: &str, device: &str) -> String {
 }
 
 /// Run `SidecarLauncher <action> "<device>"` on the chosen Mac.
-/// `mac-book` → local binary; `mac-mini` → over SSH (key/agent auth).
 /// Returns `(success, detail)` where detail is trimmed stdout/stderr.
 async fn run_sidecar_action(mac: &str, action: &str, device: &str) -> (bool, String) {
-    let mut cmd = if mac == "mac-mini" {
-        let remote = sidecar_remote_command(action, device);
-        let mut c = tokio::process::Command::new("/usr/bin/ssh");
-        c.args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=8",
-            "-o",
-            "ServerAliveInterval=3",
-            "-o",
-            "ServerAliveCountMax=3",
-            "mac-mini",
-            &remote,
-        ]);
-        c
-    } else {
-        let bin = format!("{}/bin/SidecarLauncher", home_dir());
-        let mut c = tokio::process::Command::new(bin);
-        c.arg(action).arg(device);
-        c
+    let remote = sidecar_remote_command(action, device);
+    let Some(mut cmd) = sidecar_launcher(mac, &[action, device], &remote) else {
+        return (false, format!("알 수 없는 호스트: {mac}"));
     };
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -316,7 +341,7 @@ pub(super) async fn handle_sidecar_interaction(
                 state.updated_at = Instant::now();
             }
             // Defer the update (15-min window) so the per-Mac device probe (SSH
-            // for mac-mini) can run without risking the 3-second ack timeout,
+            // for the other Mac) can run without risking the 3-second ack timeout,
             // then re-render the device dropdown with that Mac's devices.
             component
                 .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
@@ -401,6 +426,16 @@ pub(super) async fn handle_sidecar_interaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Local/SSH routing follows the real host names of both Macs; an
+    /// unrecognised host keeps the previous mac-book default.
+    #[test]
+    fn local_mac_follows_this_hosts_name() {
+        assert_eq!(sidecar_local_mac_for("MacBook-Pro-14"), "mac-book");
+        assert_eq!(sidecar_local_mac_for("Mac-mini"), "mac-mini");
+        assert_eq!(sidecar_local_mac_for("mac-mini.tail9b57d2"), "mac-mini");
+        assert_eq!(sidecar_local_mac_for("WCJY-Home2"), "mac-book");
+    }
 
     #[test]
     fn test_escape_posix_shell_arg_plain() {
