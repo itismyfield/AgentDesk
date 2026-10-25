@@ -758,7 +758,7 @@
     },
     {
       "path": "migrations/postgres/0149_kanban_cards_soft_delete.sql",
-      "sha256": "e933f154f847cf13f7df9d1458b526bb16c0b479e57c5a5b933d66d7decef3fc",
+      "sha256": "0dd2f3c5f177d8b820a70e3141b7eca219e7fa280fde09144907b9a27fb59c09",
       "version": 149
     }
   ],

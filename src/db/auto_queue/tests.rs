@@ -2362,15 +2362,15 @@ mod card_soft_delete_pg_tests {
         let outcome = soft_delete_card_pg(&pool, "card-hist").await;
         assert_eq!(outcome, Ok(CardDeleteOutcome::Deleted));
 
-        let (stamped, dispatches): (bool, i64) = sqlx::query_as(
-            "SELECT kc.deleted_at IS NOT NULL,
+        let (stamped, issue_freed, dispatches): (bool, bool, i64) = sqlx::query_as(
+            "SELECT kc.deleted_at IS NOT NULL, kc.github_issue_number IS NULL,
                     (SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = kc.id)
              FROM kanban_cards kc WHERE kc.id = 'card-hist'",
         )
         .fetch_one(&pool)
         .await
         .expect("card row is kept");
-        assert_eq!((stamped, dispatches), (true, 1));
+        assert_eq!((stamped, issue_freed, dispatches), (true, true, 1));
         assert_eq!(card_status_pg(&pool, "card-hist").await, Ok(None));
         assert_eq!(load_card_json_pg(&pool, "card-hist").await, Ok(None));
         let listed = list_cards_pg(&pool, &ListCardsFilter::default(), &[])

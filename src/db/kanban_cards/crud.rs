@@ -63,7 +63,7 @@ pub async fn upsert_card_from_issue_pg(
             NOW()
          )
          ON CONFLICT (repo_id, github_issue_number)
-         WHERE repo_id IS NOT NULL AND github_issue_number IS NOT NULL AND deleted_at IS NULL
+         WHERE repo_id IS NOT NULL AND github_issue_number IS NOT NULL
          DO NOTHING
          RETURNING id",
     )
@@ -104,7 +104,6 @@ pub async fn upsert_card_from_issue_pg(
              updated_at = NOW()
          WHERE repo_id = $7
            AND github_issue_number = $8
-           AND deleted_at IS NULL
          RETURNING id",
     )
     .bind(&title)

@@ -65,11 +65,16 @@ pub async fn soft_delete_card_pg(
         .await?;
     }
 
-    sqlx::query("UPDATE kanban_cards SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1")
-        .bind(card_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("soft delete card {card_id}: {error}"))?;
+    // Clearing the issue number frees the issue for a fresh card; the URL keeps it.
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET deleted_at = NOW(), github_issue_number = NULL, updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("soft delete card {card_id}: {error}"))?;
     tx.commit()
         .await
         .map_err(|error| format!("commit card delete {card_id}: {error}"))?;

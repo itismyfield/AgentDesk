@@ -716,7 +716,7 @@ pub(crate) async fn collect_generate_skip_breakdown(
         match sqlx::query_as::<_, (String, String, Option<String>)>(
             "SELECT id, status, latest_dispatch_id
              FROM kanban_cards
-             WHERE github_issue_number::BIGINT = $1 AND deleted_at IS NULL
+             WHERE github_issue_number::BIGINT = $1
                AND ($2::TEXT IS NULL OR repo_id = $2)
                AND ($3::TEXT IS NULL OR assigned_agent_id = $3)
              ORDER BY updated_at DESC NULLS LAST, created_at DESC, id DESC
