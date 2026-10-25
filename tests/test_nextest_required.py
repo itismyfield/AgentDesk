@@ -260,6 +260,17 @@ class PublishRequiredContexts(unittest.TestCase):
                 self.assertEqual((rc, api.patches, [m for m, _, _ in api.calls]), (1, [], ["POST"]))
                 self.assertIn("not an Actions check run", out)
 
+    def test_a_close_the_api_did_not_record_is_closed_again_as_failure(self):
+        class Unrecorded(FakeChecks):
+            def __call__(self, method, path, body=None):
+                done = super().__call__(method, path, body)
+                return {**done, "conclusion": None} if method == "PATCH" and len(self.patches) == 1 else done
+        rc, api, out = self.publish(api=Unrecorded())
+        self.assertEqual(rc, 1)
+        self.assertEqual([c for _, c, _, _ in api.patches], ["success"] + ["failure"] * 9)
+        self.assertEqual(api.patches[1][:3], (api.patches[0][0], "failure", f"{api.patches[0][0]}: FAIL"))
+        self.assertIn("did not record success", out)
+
     def test_an_api_error_at_any_call_leaves_no_success_after_it_and_closes_what_it_opened(self):
         total = len(self.publish()[1].calls)
         self.assertEqual(total, 27)
