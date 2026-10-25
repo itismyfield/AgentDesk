@@ -3741,10 +3741,19 @@ services::discord::commands::command_policy::command_policy_tests::help_formatte
 services::discord::commands::command_policy::command_policy_tests::registered_surface_and_principal_matrix_preserves_exact_ids
 services::discord::commands::command_policy::command_policy_tests::text_registration_and_help_name_the_same_commands
 services::discord::commands::command_policy::command_policy_tests::unknown_selection_is_denied_for_every_principal
+services::discord::commands::config::provider_settings::truthful_tests::truthful_failed_fast_and_goals_save_never_publish_or_reset
+services::discord::commands::config::provider_settings::truthful_tests::truthful_foreign_database_owner_is_named_and_blocks_before_save_pg
+services::discord::commands::config::provider_settings::truthful_tests::truthful_headless_claude_fast_persists_and_schedules_real_reset
+services::discord::commands::config::provider_settings::truthful_tests::truthful_inherited_feature_reset_follows_thread_key_once
+services::discord::commands::config::provider_settings::truthful_tests::truthful_parent_thread_and_explicit_false_keys_remain_readable
+services::discord::commands::config::provider_settings::truthful_tests::truthful_pending_reset_migration_preserves_feature_and_provider
 services::discord::commands::config::session_override_cluster_characterization_tests::codex_goals_toggle_round_trip_marks_and_clears_reset
 services::discord::commands::config::session_override_cluster_characterization_tests::fast_mode_reset_entries_stay_provider_scoped
 services::discord::commands::config::session_override_cluster_characterization_tests::fast_mode_toggle_round_trip_marks_and_clears_provider_reset
 services::discord::commands::config::session_override_cluster_characterization_tests::model_override_round_trip_observed_via_would_change_probe
+services::discord::commands::config::session_override_cluster_characterization_tests::truthful_claude_tui_fast_does_not_reset_or_publish
+services::discord::commands::config::session_override_cluster_characterization_tests::truthful_failed_save_does_not_publish_model_or_reset
+services::discord::commands::config::session_override_cluster_characterization_tests::truthful_foreign_owner_cannot_publish_a_setting
 services::discord::commands::control::clear_end_tests::a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
 services::discord::commands::control::clear_end_tests::a_clear_keeps_its_transition_until_the_session_has_ended_pg
 services::discord::commands::control::clear_end_tests::a_clear_whose_tmux_kill_fails_commits_and_warns_pg
@@ -3927,6 +3936,8 @@ services::discord::commands::tool_call::tests::published_sync_failure_response_a
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
 services::discord::commands::tui_passthrough::tests::local_only_whitelist_matches_passthrough_command_set
 services::discord::commands::tui_passthrough::tests::model_command_is_observation_only_local
+services::discord::commands::tui_passthrough::tests::truthful_effort_choices_exclude_rejected_ultracode
+services::discord::commands::tui_passthrough::tests::truthful_effort_overlay_close_is_never_reported_as_verified_level
 services::discord::commands::voice::auto_join_tests::disabled_voice_guidance_is_stable
 services::discord::commands::voice::auto_join_tests::notify_dedup_emits_once_per_channel_kind_pair
 services::discord::commands::voice::auto_join_tests::occupancy_registry_isolates_providers_per_guild
@@ -5392,6 +5403,8 @@ services::discord::model_catalog::claude::tests::source_guard_tests::refresh_sta
 services::discord::model_catalog::tests::invariant_claude_model_alias_validation_preserves_runtime_selector
 services::discord::model_catalog::tests::invariant_claude_model_selector_validation_is_ascii_and_bounded
 services::discord::model_catalog::tests::invariant_model_input_rejects_values_over_discord_option_limit_without_truncating
+services::discord::model_picker_interaction::truthful_tests::truthful_failed_save_response_is_failure_and_keeps_session_state
+services::discord::model_picker_interaction::truthful_tests::truthful_reset_notice_explicitly_warns_about_context_loss
 services::discord::monitoring_status::inline_tests::monitoring_store_render_posts_and_edits_one_inline_provider_surface
 services::discord::org_schema::tests::primary_profile_is_inherited_until_agent_or_channel_explicitly_overrides_it
 services::discord::org_schema::tests::profile_fallback_configuration_validates_and_defaults_to_auto
@@ -7392,6 +7405,7 @@ services::discord::router::message_handler::provider_dispatch::submission_tests:
 services::discord::router::message_handler::provider_dispatch::submission_tests::intake_creator_installs_waiting_and_holds_a_refused_prompt
 services::discord::router::message_handler::provider_dispatch::tests::agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation
 services::discord::router::message_handler::provider_dispatch::tests::configured_herdr_turn_reaches_no_tmux_or_process_driver_until_an_executor_is_wired_pg
+services::discord::router::message_handler::provider_isolation::feature_settings::tests::truthful_legacy_thread_setting_reaches_turn
 services::discord::router::message_handler::provider_isolation::host_tests::a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg
 services::discord::router::message_handler::provider_isolation::source_guard_tests::caller_guards_reject_commented_calls
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_prelaunch_without_raw_seed_keeps_the_wrapper_end_offset

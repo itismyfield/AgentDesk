@@ -2,7 +2,7 @@ use crate::services::provider::ProviderKind;
 
 use super::super::{Context, Error, check_auth};
 use super::config::{
-    channel_fast_mode_enabled, effective_provider_for_channel,
+    channel_fast_mode_setting, effective_provider_for_channel,
     fallback_channel_name_for_feature_toggle, native_fast_mode_supported,
     session_toggle_reset_line, update_channel_fast_mode,
 };
@@ -13,7 +13,7 @@ fn fast_mode_reset_line(reset_pending: bool) -> &'static str {
 
 fn build_fast_enabled_notice(provider: &ProviderKind, reset_pending: bool) -> String {
     format!(
-        "`/fast` 적용 완료: {} 채널의 native fast mode를 켰습니다.\n속도 우선 모드를 강제 적용합니다. provider 정책상 응답은 더 빨라질 수 있지만 사용량/비용은 더 크게 집계될 수 있습니다.\n{}",
+        "`/fast` 설정 저장: {} 채널의 native fast mode를 켜도록 저장했습니다.\n속도 우선 모드는 공급자 정책에 따라 동작합니다. provider 정책상 응답은 더 빨라질 수 있지만 사용량/비용은 더 크게 집계될 수 있습니다.\n{}",
         provider.display_name(),
         fast_mode_reset_line(reset_pending),
     )
@@ -21,7 +21,7 @@ fn build_fast_enabled_notice(provider: &ProviderKind, reset_pending: bool) -> St
 
 fn build_fast_disabled_notice(provider: &ProviderKind, reset_pending: bool) -> String {
     format!(
-        "`/fast` 해제 완료: {} 채널의 native fast mode를 껐습니다.\n다음 턴부터 기본 응답 모드로 되돌립니다.\n{}",
+        "`/fast` 설정 저장: {} 채널의 native fast mode를 끄도록 저장했습니다.\n리셋 후 기본 응답 모드로 실행합니다.\n{}",
         provider.display_name(),
         fast_mode_reset_line(reset_pending),
     )
@@ -54,16 +54,43 @@ pub(in crate::services::discord) async fn cmd_fast(ctx: Context<'_>) -> Result<(
         return Ok(());
     }
 
-    let currently_enabled = channel_fast_mode_enabled(&ctx.data().shared, channel_id);
+    if let Err(error) = ctx
+        .data()
+        .shared
+        .check_settings_owner(&effective_provider, channel_id)
+        .await
+    {
+        ctx.say(error.to_string()).await?;
+        return Ok(());
+    }
+    let runtime_channel_id = channel_id;
+    let channel_id = ctx
+        .data()
+        .shared
+        .feature_command_channel_id(
+            &ctx.serenity_context().http,
+            &effective_provider,
+            channel_id,
+        )
+        .await;
+    let currently_enabled = channel_fast_mode_setting(&ctx.data().shared, channel_id)
+        .await
+        .unwrap_or(false);
     let next_enabled = !currently_enabled;
-    update_channel_fast_mode(
+    if let Err(error) = update_channel_fast_mode(
         &ctx.data().shared,
         &ctx.data().token,
         channel_id,
         &effective_provider,
         next_enabled,
+        runtime_channel_id,
     )
-    .await;
+    .await
+    {
+        ctx.say(format!("설정을 저장하지 못했습니다: {error}"))
+            .await?;
+        return Ok(());
+    }
 
     let reset_pending = ctx
         .data()
@@ -76,6 +103,11 @@ pub(in crate::services::discord) async fn cmd_fast(ctx: Context<'_>) -> Result<(
     } else {
         build_fast_disabled_notice(&effective_provider, reset_pending)
     };
-    ctx.say(notice).await?;
+    let scope = if runtime_channel_id != channel_id {
+        "\n이 스레드는 부모 채널과 설정을 공유합니다."
+    } else {
+        ""
+    };
+    ctx.say(format!("{notice}{scope}")).await?;
     Ok(())
 }

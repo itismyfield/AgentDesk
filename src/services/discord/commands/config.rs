@@ -151,9 +151,9 @@ pub(in crate::services::discord) fn codex_goals_supported(provider: &ProviderKin
 
 pub(in crate::services::discord) fn session_toggle_reset_line(reset_pending: bool) -> &'static str {
     if reset_pending {
-        "다음 사용자 턴 시작 전에 기존 세션을 정리한 뒤 반영됩니다."
+        "다음 사용자 턴 시작 전 세션 리셋이 필요합니다(맥락 소실). 리셋 후 새 세션에 반영됩니다."
     } else {
-        "현재 세션부터 반영됩니다."
+        "현재 세션을 유지하며 다음 사용자 턴부터 반영됩니다."
     }
 }
 
@@ -190,6 +190,10 @@ pub(in crate::services::discord) async fn channel_fast_mode_setting(
     settings
         .channel_fast_modes
         .get(&channel_id.get().to_string())
+        .or_else(|| {
+            SharedData::feature_settings_parent(channel_id)
+                .and_then(|parent| settings.channel_fast_modes.get(&parent.get().to_string()))
+        })
         .copied()
 }
 
@@ -201,6 +205,10 @@ pub(in crate::services::discord) async fn channel_codex_goals_setting(
     settings
         .channel_codex_goals
         .get(&channel_id.get().to_string())
+        .or_else(|| {
+            SharedData::feature_settings_parent(channel_id)
+                .and_then(|parent| settings.channel_codex_goals.get(&parent.get().to_string()))
+        })
         .copied()
 }
 
@@ -298,145 +306,10 @@ fn runtime_model_for_turn(
     }
 }
 
-pub(in crate::services::discord) async fn update_channel_model_override(
-    shared: &Arc<SharedData>,
-    token: &str,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-    next_override: Option<String>,
-) -> bool {
-    if !would_channel_model_override_change(shared, channel_id, next_override.as_deref()) {
-        return false;
-    }
-
-    let current_override = shared
-        .overrides
-        .model_overrides
-        .get(&channel_id)
-        .map(|value| value.clone());
-    let reset_required = session_reset_required_for_model_change(
-        provider,
-        current_override.as_deref(),
-        next_override.as_deref(),
-    );
-
-    match next_override {
-        Some(model) => {
-            shared
-                .overrides
-                .model_overrides
-                .insert(channel_id, model.clone());
-            let mut settings = shared.settings.write().await;
-            settings
-                .channel_model_overrides
-                .insert(channel_id.get().to_string(), model);
-            save_bot_settings(token, &settings);
-        }
-        None => {
-            shared.overrides.model_overrides.remove(&channel_id);
-            let mut settings = shared.settings.write().await;
-            settings
-                .channel_model_overrides
-                .remove(&channel_id.get().to_string());
-            save_bot_settings(token, &settings);
-        }
-    }
-
-    if reset_required {
-        shared
-            .overrides
-            .model_session_reset_pending
-            .insert(channel_id);
-    } else {
-        shared
-            .overrides
-            .model_session_reset_pending
-            .remove(&channel_id);
-    }
-    sync_session_reset_pending(shared, channel_id);
-
-    true
-}
-
-pub(in crate::services::discord) async fn update_channel_fast_mode(
-    shared: &Arc<SharedData>,
-    token: &str,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-    enabled: bool,
-) -> bool {
-    let current_enabled = channel_fast_mode_enabled(shared, channel_id);
-    if current_enabled == enabled {
-        return false;
-    }
-
-    if enabled {
-        shared.overrides.fast_mode_channels.insert(channel_id);
-    } else {
-        shared.overrides.fast_mode_channels.remove(&channel_id);
-    }
-
-    let mut settings = shared.settings.write().await;
-    if enabled {
-        settings
-            .channel_fast_modes
-            .insert(channel_id.get().to_string(), true);
-    } else {
-        settings
-            .channel_fast_modes
-            .insert(channel_id.get().to_string(), false);
-    }
-    settings
-        .channel_fast_mode_reset_pending
-        .retain(|entry| !fast_mode_reset_entry_matches_provider(entry, channel_id, provider));
-    settings
-        .channel_fast_mode_reset_pending
-        .insert(fast_mode_reset_pending_key(channel_id, provider));
-    save_bot_settings(token, &settings);
-
-    clear_fast_mode_reset_pending_for_provider(shared, channel_id, provider);
-    shared
-        .overrides
-        .fast_mode_session_reset_pending
-        .insert(fast_mode_reset_pending_key(channel_id, provider));
-    sync_session_reset_pending(shared, channel_id);
-    true
-}
-
-pub(in crate::services::discord) async fn update_channel_codex_goals(
-    shared: &Arc<SharedData>,
-    token: &str,
-    channel_id: serenity::ChannelId,
-    enabled: bool,
-) -> bool {
-    let current_enabled = channel_codex_goals_enabled(shared, channel_id);
-    if current_enabled == enabled {
-        return false;
-    }
-
-    if enabled {
-        shared.overrides.codex_goals_channels.insert(channel_id);
-    } else {
-        shared.overrides.codex_goals_channels.remove(&channel_id);
-    }
-
-    let channel_key = channel_id.get().to_string();
-    let mut settings = shared.settings.write().await;
-    settings
-        .channel_codex_goals
-        .insert(channel_key.clone(), enabled);
-    settings
-        .channel_codex_goals_reset_pending
-        .insert(channel_key);
-    save_bot_settings(token, &settings);
-
-    shared
-        .overrides
-        .codex_goals_session_reset_pending
-        .insert(channel_id);
-    sync_session_reset_pending(shared, channel_id);
-    true
-}
+mod provider_settings;
+pub(in crate::services::discord) use provider_settings::{
+    update_channel_codex_goals, update_channel_fast_mode, update_channel_model_override,
+};
 
 pub(in crate::services::discord) fn would_channel_model_override_change(
     shared: &Arc<SharedData>,
@@ -982,7 +855,7 @@ mod session_override_cluster_characterization_tests {
     const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
     const AGENTDESK_CONFIG_ENV: &str = "AGENTDESK_CONFIG";
 
-    struct EnvGuard;
+    pub(super) struct EnvGuard;
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
@@ -996,7 +869,7 @@ mod session_override_cluster_characterization_tests {
     /// Pin BOTH the runtime root AND the explicit config path to the temp dir
     /// so `save_bot_settings` (called by the `update_channel_*` helpers under
     /// test) can never fall back to the developer's real cwd/home config.
-    fn isolate_persistence(tmp: &std::path::Path) -> EnvGuard {
+    pub(super) fn isolate_persistence(tmp: &std::path::Path) -> EnvGuard {
         unsafe {
             std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.to_str().unwrap());
             std::env::set_var(
@@ -1011,7 +884,7 @@ mod session_override_cluster_characterization_tests {
     // synchronous `#[test]`: the `test_support` env-lock guard is then never
     // held across an `.await`, keeping the await_holding_lock ratchet flat
     // (same pattern as the S1/S0 queued-placeholder characterization tests).
-    fn test_rt() -> tokio::runtime::Runtime {
+    pub(super) fn test_rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1028,7 +901,7 @@ mod session_override_cluster_characterization_tests {
 
         let shared = make_shared_data_for_tests();
         let channel_id = serenity::ChannelId::new(3_038_400);
-        let provider = ProviderKind::Claude;
+        let provider = ProviderKind::Codex;
         let rt = test_rt();
 
         assert!(!channel_fast_mode_enabled(&shared, channel_id));
@@ -1036,13 +909,17 @@ mod session_override_cluster_characterization_tests {
 
         // Enabling reports a change, flips the enablement set, and marks the
         // provider-scoped session reset as pending.
-        assert!(rt.block_on(update_channel_fast_mode(
-            &shared,
-            "test-token",
-            channel_id,
-            &provider,
-            true,
-        )));
+        assert!(
+            rt.block_on(update_channel_fast_mode(
+                &shared,
+                "test-token",
+                channel_id,
+                &provider,
+                true,
+                channel_id,
+            ))
+            .unwrap()
+        );
         assert!(channel_fast_mode_enabled(&shared, channel_id));
         assert!(fast_mode_reset_pending_for_provider(
             &shared, channel_id, &provider
@@ -1050,13 +927,17 @@ mod session_override_cluster_characterization_tests {
         assert!(any_fast_mode_reset_pending(&shared, channel_id));
 
         // Re-enabling is a no-op: no change is reported.
-        assert!(!rt.block_on(update_channel_fast_mode(
-            &shared,
-            "test-token",
-            channel_id,
-            &provider,
-            true,
-        )));
+        assert!(
+            !rt.block_on(update_channel_fast_mode(
+                &shared,
+                "test-token",
+                channel_id,
+                &provider,
+                true,
+                channel_id,
+            ))
+            .unwrap()
+        );
 
         // The provider-scoped clear reports the pending entry exactly once.
         assert!(clear_fast_mode_reset_pending_for_provider(
@@ -1069,13 +950,17 @@ mod session_override_cluster_characterization_tests {
 
         // Disabling re-marks the provider reset; the channel-wide clear
         // sweeps it (and is a no-op the second time).
-        assert!(rt.block_on(update_channel_fast_mode(
-            &shared,
-            "test-token",
-            channel_id,
-            &provider,
-            false,
-        )));
+        assert!(
+            rt.block_on(update_channel_fast_mode(
+                &shared,
+                "test-token",
+                channel_id,
+                &provider,
+                false,
+                channel_id,
+            ))
+            .unwrap()
+        );
         assert!(!channel_fast_mode_enabled(&shared, channel_id));
         assert!(any_fast_mode_reset_pending(&shared, channel_id));
         assert!(clear_fast_mode_reset_pending_for_channel(
@@ -1097,32 +982,36 @@ mod session_override_cluster_characterization_tests {
         let channel_id = serenity::ChannelId::new(3_038_410);
         let rt = test_rt();
 
-        assert!(rt.block_on(update_channel_fast_mode(
-            &shared,
-            "test-token",
-            channel_id,
-            &ProviderKind::Claude,
-            true,
-        )));
+        assert!(
+            rt.block_on(update_channel_fast_mode(
+                &shared,
+                "test-token",
+                channel_id,
+                &ProviderKind::Codex,
+                true,
+                channel_id,
+            ))
+            .unwrap()
+        );
 
         // The pending entry is keyed `provider:channel`, so the other
         // provider neither observes nor clears it...
         assert!(!fast_mode_reset_pending_for_provider(
             &shared,
             channel_id,
-            &ProviderKind::Codex
+            &ProviderKind::Claude
         ));
         assert!(!clear_fast_mode_reset_pending_for_provider(
             &shared,
             channel_id,
-            &ProviderKind::Codex
+            &ProviderKind::Claude
         ));
         // ...while the channel-wide probe still sees it for the channel.
         assert!(any_fast_mode_reset_pending(&shared, channel_id));
         assert!(fast_mode_reset_pending_for_provider(
             &shared,
             channel_id,
-            &ProviderKind::Claude
+            &ProviderKind::Codex
         ));
     }
 
@@ -1137,21 +1026,27 @@ mod session_override_cluster_characterization_tests {
         let rt = test_rt();
 
         assert!(!channel_codex_goals_enabled(&shared, channel_id));
-        assert!(rt.block_on(update_channel_codex_goals(
-            &shared,
-            "test-token",
-            channel_id,
-            true,
-        )));
+        assert!(
+            rt.block_on(update_channel_codex_goals(
+                &shared,
+                "test-token",
+                channel_id,
+                true,
+            ))
+            .unwrap()
+        );
         assert!(channel_codex_goals_enabled(&shared, channel_id));
 
         // Re-enabling is a no-op.
-        assert!(!rt.block_on(update_channel_codex_goals(
-            &shared,
-            "test-token",
-            channel_id,
-            true,
-        )));
+        assert!(
+            !rt.block_on(update_channel_codex_goals(
+                &shared,
+                "test-token",
+                channel_id,
+                true,
+            ))
+            .unwrap()
+        );
 
         // The toggle marked the goals session reset pending exactly once.
         assert!(clear_codex_goals_reset_pending_for_channel(
@@ -1162,12 +1057,15 @@ mod session_override_cluster_characterization_tests {
         ));
 
         // Disabling re-marks it.
-        assert!(rt.block_on(update_channel_codex_goals(
-            &shared,
-            "test-token",
-            channel_id,
-            false,
-        )));
+        assert!(
+            rt.block_on(update_channel_codex_goals(
+                &shared,
+                "test-token",
+                channel_id,
+                false,
+            ))
+            .unwrap()
+        );
         assert!(!channel_codex_goals_enabled(&shared, channel_id));
         assert!(clear_codex_goals_reset_pending_for_channel(
             &shared, channel_id
@@ -1190,13 +1088,23 @@ mod session_override_cluster_characterization_tests {
             channel_id,
             Some("model-a")
         ));
-        assert!(rt.block_on(update_channel_model_override(
-            &shared,
-            "test-token",
-            channel_id,
-            &provider,
-            Some("model-a".to_string()),
-        )));
+        assert!(
+            rt.block_on(update_channel_model_override(
+                &shared,
+                "test-token",
+                channel_id,
+                &provider,
+                Some("model-a".to_string()),
+            ))
+            .unwrap()
+        );
+        assert!(
+            shared
+                .overrides
+                .model_session_reset_pending
+                .contains(&channel_id)
+        );
+        assert!(shared.overrides.session_reset_pending.contains(&channel_id));
         assert!(!would_channel_model_override_change(
             &shared,
             channel_id,
@@ -1207,24 +1115,98 @@ mod session_override_cluster_characterization_tests {
         ));
 
         // Setting the same override again is a no-op.
-        assert!(!rt.block_on(update_channel_model_override(
-            &shared,
-            "test-token",
-            channel_id,
-            &provider,
-            Some("model-a".to_string()),
-        )));
+        assert!(
+            !rt.block_on(update_channel_model_override(
+                &shared,
+                "test-token",
+                channel_id,
+                &provider,
+                Some("model-a".to_string()),
+            ))
+            .unwrap()
+        );
 
         // Clearing restores the no-override state.
-        assert!(rt.block_on(update_channel_model_override(
-            &shared,
-            "test-token",
-            channel_id,
-            &provider,
-            None,
-        )));
+        assert!(
+            rt.block_on(update_channel_model_override(
+                &shared,
+                "test-token",
+                channel_id,
+                &provider,
+                None,
+            ))
+            .unwrap()
+        );
+        assert!(
+            !shared
+                .overrides
+                .model_session_reset_pending
+                .contains(&channel_id)
+        );
+        assert!(!shared.overrides.session_reset_pending.contains(&channel_id));
         assert!(!would_channel_model_override_change(
             &shared, channel_id, None
         ));
+    }
+    #[test]
+    fn truthful_failed_save_does_not_publish_model_or_reset() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = isolate_persistence(tmp.path());
+        std::fs::create_dir_all(tmp.path().join("config/bot_settings.json")).unwrap();
+        let shared = make_shared_data_for_tests();
+        let channel = serenity::ChannelId::new(6486);
+        let result = test_rt().block_on(update_channel_model_override(
+            &shared,
+            "test-token",
+            channel,
+            &ProviderKind::Codex,
+            Some("model-a".into()),
+        ));
+        assert!(result.is_err());
+        assert!(!shared.overrides.model_overrides.contains_key(&channel));
+        assert!(!shared.overrides.session_reset_pending.contains(&channel));
+    }
+
+    #[test]
+    fn truthful_foreign_owner_cannot_publish_a_setting() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = isolate_persistence(tmp.path());
+        let _hosts =
+            crate::config::session_hosts::force_for_test(Some("local"), &[(6487, "remote")]);
+        let shared = make_shared_data_for_tests();
+        let channel = serenity::ChannelId::new(6487);
+        let result = test_rt().block_on(update_channel_codex_goals(
+            &shared,
+            "test-token",
+            channel,
+            true,
+        ));
+        assert!(result.is_err());
+        assert!(!shared.overrides.codex_goals_channels.contains(&channel));
+        assert!(!shared.overrides.session_reset_pending.contains(&channel));
+    }
+
+    #[test]
+    fn truthful_claude_tui_fast_does_not_reset_or_publish() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = isolate_persistence(tmp.path());
+        let _hosts =
+            crate::config::session_hosts::force_for_test(Some("local"), &[(6488, "local")]);
+        let shared = make_shared_data_for_tests();
+        let channel = serenity::ChannelId::new(6488);
+        let result = test_rt().block_on(update_channel_fast_mode(
+            &shared,
+            "test-token",
+            channel,
+            &ProviderKind::Claude,
+            true,
+            channel,
+        ));
+        assert!(result.is_err());
+        assert!(!shared.overrides.fast_mode_channels.contains(&channel));
+        assert!(!shared.overrides.session_reset_pending.contains(&channel));
     }
 }
