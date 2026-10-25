@@ -407,9 +407,8 @@ fn kicks_drain(ran: &Arc<Mutex<Vec<String>>>) -> queue_io::IdleQueueKickHookRese
     }))
 }
 
-// P1-R chain: return to a legacy binding, adoption, legacy FIFO, closure, user-default again, then a
-// second return to the same or another binding. Each original runs once, in FIFO order, never
-// under the user-default mapping, and a closed return never blocks the next one.
+// Return, adoption, legacy FIFO, closure, user-default, then a second return: each original runs
+// once in FIFO order, never under user-default, and a closed return never blocks the next one.
 #[tokio::test(flavor = "current_thread")]
 async fn returned_inputs_roll_back_twice_and_each_original_runs_once_in_fifo() {
     for (second, adopt) in [("same", true), ("other", true), ("same", false)] {
