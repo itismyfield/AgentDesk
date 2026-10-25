@@ -19,7 +19,6 @@ NON_PG_SHELL_CARGO_CASES = (
     "test_source_exports_filter_and_replays_the_generated_selection",
     "test_pg_shards_partition_the_unsharded_selection",
     "test_static_pg_restoration_is_what_bash_sources",
-    "test_main_pg_shards_run_each_test_postgres_command_once",
 )
 
 class LibInventoryFixtureEnvironment(unittest.TestCase):
