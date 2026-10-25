@@ -46,6 +46,8 @@ src/
 │   │   │   ├── health_snapshot_tests.rs
 │   │   │   ├── herdr_policy.rs
 │   │   │   ├── herdr_policy_tests.rs
+│   │   │   ├── managed_herdr_config.rs
+│   │   │   ├── managed_herdr_config_tests.rs
 │   │   │   ├── observation_checks.rs
 │   │   │   ├── observation_tests.rs
 │   │   │   ├── provider_credentials.rs
@@ -472,6 +474,9 @@ src/
 │   │   │   │   ├── amplification_records_tests.rs
 │   │   │   │   ├── amplification_verdict_tests.rs
 │   │   │   │   └── resource_regression_tests.rs
+│   │   │   ├── runtime_profile/
+│   │   │   │   ├── managed_herdr.rs
+│   │   │   │   └── managed_herdr_tests.rs
 │   │   │   ├── db_collection.rs
 │   │   │   ├── db_deadline_tests.rs
 │   │   │   ├── host_guard_tests.rs
@@ -2609,6 +2614,8 @@ src/
 │   │   │   ├── activity_notice_tests.rs
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── operator_notice.rs
+│   │   │   ├── operator_notice_tests.rs
 │   │   │   ├── supervisor.rs
 │   │   │   ├── supervisor_deadline_tests.rs
 │   │   │   ├── supervisor_injected_tests.rs
@@ -3134,6 +3141,11 @@ src/
 │   │   └── trusted_target.rs
 │   ├── session_host/
 │   │   ├── herdr/
+│   │   │   ├── managed_config/
+│   │   │   │   ├── maintenance.rs
+│   │   │   │   ├── maintenance_tests.rs
+│   │   │   │   ├── path.rs
+│   │   │   │   └── publication.rs
 │   │   │   ├── policy/
 │   │   │   │   ├── consent/
 │   │   │   │   │   ├── apply_owner.rs
@@ -3185,6 +3197,9 @@ src/
 │   │   │   ├── launch_host_t19_real_tests.rs
 │   │   │   ├── launch_host_tests.rs
 │   │   │   ├── launch_policy_tests.rs
+│   │   │   ├── managed_config.rs
+│   │   │   ├── managed_config_real_tests.rs
+│   │   │   ├── managed_config_tests.rs
 │   │   │   ├── model.rs
 │   │   │   ├── observe.rs
 │   │   │   ├── pane_probe.rs
