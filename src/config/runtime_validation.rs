@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn default_strict_loader_rejects_retired_provider_and_channel_runtime() {
-        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _root = crate::config::TestRuntimeRootGuard::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("candidate.yaml");
         let _path = crate::config::test_env::TestEnvVarGuard::set_path_after_shared_test_env_lock(

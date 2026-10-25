@@ -25,7 +25,8 @@ src/
 │   │   ├── runtime_config.rs
 │   │   └── transport.rs
 │   ├── dcserver/
-│   │   └── startup.rs
+│   │   ├── startup.rs
+│   │   └── startup_audit_tests.rs
 │   ├── direct/
 │   │   └── auto_queue_add.rs
 │   ├── doctor/
@@ -36,6 +37,8 @@ src/
 │   │   ├── orchestrator/
 │   │   │   ├── api_exposure.rs
 │   │   │   ├── config_dir_checks.rs
+│   │   │   ├── configuration_audit.rs
+│   │   │   ├── configuration_audit_tests.rs
 │   │   │   ├── dispatch_outbox.rs
 │   │   │   ├── dispatch_outbox_tests.rs
 │   │   │   ├── fd_usage.rs
@@ -98,6 +101,9 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── config/
+│   ├── runtime_root_guard/
+│   │   ├── process_tests.rs
+│   │   └── test_process.rs
 │   ├── session_hosts/
 │   │   ├── migration/
 │   │   │   ├── consent_holds.rs
@@ -120,6 +126,8 @@ src/
 │   ├── readers_live_reload_tests.rs
 │   ├── retired_relay_tests.rs
 │   ├── runtime_profile.rs
+│   ├── runtime_root_guard.rs
+│   ├── runtime_root_tests.rs
 │   ├── runtime_settings.rs
 │   ├── runtime_validation.rs
 │   ├── session_hosts.rs
@@ -250,6 +258,7 @@ src/
 │   ├── calendar_sync.rs
 │   ├── campaigns.rs
 │   ├── cancel_tombstones.rs
+│   ├── discarded_tx_result_scan_tests.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
 │   ├── fixture_target.rs
@@ -1147,7 +1156,8 @@ src/
 │   │   │   │   ├── automatic_idle_tests.rs
 │   │   │   │   ├── codex_census.rs
 │   │   │   │   ├── codex_context.rs
-│   │   │   │   └── codex_context_tests.rs
+│   │   │   │   ├── codex_context_tests.rs
+│   │   │   │   └── codex_retention_e2e_tests.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
@@ -3331,6 +3341,7 @@ src/
 │   │   │   │   ├── submit_floor.rs
 │   │   │   │   └── submit_floor_tests.rs
 │   │   │   ├── spool/
+│   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
@@ -3357,8 +3368,12 @@ src/
 │   │   │   │   ├── automatic.rs
 │   │   │   │   ├── automatic_age.rs
 │   │   │   │   ├── automatic_age_tests.rs
+│   │   │   │   ├── codex_age.rs
+│   │   │   │   ├── codex_age_tests.rs
 │   │   │   │   ├── codex_history.rs
 │   │   │   │   ├── codex_history_tests.rs
+│   │   │   │   ├── codex_retention.rs
+│   │   │   │   ├── codex_retention_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── scoped_submission_tests.rs
@@ -3513,6 +3528,8 @@ src/
 │   │   │   ├── tool_result_repost_tests.rs
 │   │   │   ├── tool_result_tests.rs
 │   │   │   ├── tool_results.rs
+│   │   │   ├── transition_actor_ba_backlog_tests.rs
+│   │   │   ├── transition_actor_ba_tests.rs
 │   │   │   ├── transition_actor_bo_tests.rs
 │   │   │   ├── transition_actor_tests.rs
 │   │   │   ├── transition_apply_tests.rs

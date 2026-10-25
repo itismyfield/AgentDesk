@@ -195,6 +195,14 @@ class PromptRoutes(unittest.TestCase):
         self.assertFalse(any(route.fullmatch('/api/send') for route in routes))
         self.assertIn('.route("/discord/send",', (REPO / 'src/server/routes/domains/ops.rs').read_text())
 
+    def test_no_inspected_prompt_files_is_unavailable(self):
+        for symlink in (False, True):
+            if symlink:
+                self.prompt.symlink_to(self.root / 'missing')
+            with self.subTest(symlink=symlink), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(check(self.root, self.prompts), 2)
+            self.assertIn('inspection_unavailable: no_prompt_files', output.getvalue())
+
     def run_staging(self, *, strict=False, boundary='direct', source='configured', deploy=None):
         deploy = deploy or Path(os.environ.get('AGENTDESK_TEST_DEPLOY_SH', REPO / 'scripts/deploy-release.sh')).read_text()
         parser = deploy.split('# Parse flags non-destructively', 1)[1].split('case "$DEPLOY_FAST"', 1)[0]
@@ -224,7 +232,7 @@ class PromptRoutes(unittest.TestCase):
             script += name + '() {' + deploy.split(name + '() {', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
         script += '''
 rm() { [ "$*" = "-rf $ADK_REL/config/agents.new" ]; }
-rsync() { printf 'STAGED\n' >> "$REPO/events"; cp "$2"/*.prompt.md "$3"; }
+rsync() { printf 'STAGED\n' >> "$REPO/events"; cp -a "$2"/. "$3"; }
 date() { printf 'fixture-time\n'; }
 tmux() {
     [ "$#" = 5 ] && [ "$1 $2 $3" = 'new-session -d -s' ]
@@ -295,6 +303,13 @@ tmux() {
                 self.assertNotIn(b'will continue', result.stdout)
                 self.assertEqual(self.events, ['STAGED'])
                 self.assertEqual((self.root / 'release/config/agents.new/agent.prompt.md').read_bytes(), contents)
+
+    def test_strict_staging_empty_prompt_directory_is_exit_two(self):
+        result = self.run_staging(strict=True)
+        self.assertEqual(result.returncode, 2, result)
+        self.assertIn(b'inspection_unavailable: no_prompt_files', result.stdout)
+        self.assertIn(b'--strict-prompts', result.stdout)
+        self.assertEqual(self.events, ['STAGED'])
 
     def test_strict_staging_success(self):
         for contents, summary in (('http://localhost:1/api/discord/send', b'candidate_urls=1'),
