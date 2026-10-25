@@ -98,7 +98,9 @@ fn run_case(refuse_commit: bool) {
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727398));
     runtime.block_on(mailbox.v2_cold_fixture(root.path().join("herdr-owner.json"),serde_json::json!({"nonce":"claude-herdr-scope","provider":"claude","target":{"host":"herdr","owner":logical,"root":"test","execution_nonce":NONCE},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),727398)).unwrap();
     let socket = rig.socket().display().to_string();
-    let effect_mailbox = mailbox.clone();
+    let commit_path = crate::config::runtime_root()
+        .unwrap()
+        .join("runtime/discord_pending_queue/cold-matrix/727398-herdr-owner.json");
     let (_, result) = runtime
         .block_on(
             mailbox.v2_cold_bootstrap(1, std::sync::Arc::new(|| 10000), move |frame| {
@@ -129,15 +131,18 @@ fn run_case(refuse_commit: bool) {
                     cancel: None,
                 };
 
-                if refuse_commit {
-                    tokio::runtime::Handle::current()
-                        .block_on(effect_mailbox.v2_request(|slot| {
-                            slot.as_mut().unwrap().fault =
-                                crate::services::turn_orchestrator::queued_head::v2::Fault::Before;
-                            Ok(())
-                        }))
-                        .unwrap();
-                }
+                let _watch = refuse_commit.then(|| {
+                    use crate::services::discord::runtime_store::durable_probe::{
+                        Plan, Step, Watch,
+                    };
+                    Watch::new(
+                        &commit_path,
+                        Plan {
+                            fail: vec![Step::ParentSync],
+                            ..Default::default()
+                        },
+                    )
+                });
                 submit(&turn, attached, &tx)
             }),
         )
