@@ -4,7 +4,7 @@ schema_version: "1"
 status: "implemented"
 topic_slug: "agentdesk-automation-candidate-pipeline"
 topic_folder: "agentdesk-automation-candidate-pipeline"
-linked_spec: "./agentdesk-automation-candidate-pipeline-spec.md"
+linked_spec: "./automation-candidate-pipeline-spec.md"
 generated_by: "spec-writer"
 created_at: "2026-05-02"
 updated_at: "2026-05-02"
@@ -15,7 +15,7 @@ updated_at: "2026-05-02"
 # PRD: AgentDesk Automation Candidate Pipeline
 
 > status: `implemented`
-> linked_spec: [agentdesk-automation-candidate-pipeline-spec.md](./agentdesk-automation-candidate-pipeline-spec.md)
+> linked_spec: [automation-candidate-pipeline-spec.md](./automation-candidate-pipeline-spec.md)
 
 ## PRD 업데이트 규칙
 
@@ -139,6 +139,6 @@ updated_at: "2026-05-02"
 
 ## 참고 문서
 
-- [agentdesk-automation-candidate-recommender-prd.md](../agentdesk-automation-candidate-recommender/agentdesk-automation-candidate-recommender-prd.md) — 원 recommender PRD (implemented_in_pr)
-- [agentdesk-observation-provider-enrichment-prd.md](../agentdesk-observation-provider-enrichment/agentdesk-observation-provider-enrichment-prd.md) — P0 enrichment PRD (p0-implemented)
-- [agentdesk-observation-provider-enrichment-spec.md](../agentdesk-observation-provider-enrichment/agentdesk-observation-provider-enrichment-spec.md) — P0 enrichment spec (p0-implemented)
+- `agentdesk-automation-candidate-recommender-prd.md`(repo에 없는 문서) — 원 recommender PRD (implemented_in_pr)
+- [observation-provider-enrichment-prd.md](./observation-provider-enrichment-prd.md) — P0 enrichment PRD (p0-implemented)
+- [observation-provider-enrichment-spec.md](./observation-provider-enrichment-spec.md) — P0 enrichment spec (p0-implemented)

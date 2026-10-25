@@ -2,6 +2,8 @@
 
 Status: **Design** — single_message_panel rollout gate is now default-ON as of #3560 (opt-out via `AGENTDESK_SINGLE_MESSAGE_PANEL=0|false`); Phases A–C of the controller refactor remain in progress. Issue: #3089. Parent EPIC: #3016 (TurnFinalizer single-authority, closed). Folds in: #3235 (idle-tail dedup), #3078 (status-panel lifecycle), #3088 (TUI external-input streaming parity), #3082 (queued-notice chunk split), #3416 (same-turn offset-monotonic backward write).
 
+Line numbers into files that were later split (`tmux_watcher.rs`, `tmux.rs`, `session_relay_sink.rs`, the Discord `mod.rs`) were dropped in 2026-10 because they no longer resolve; the surrounding text names the code.
+
 This document is the synthesis of three independently-authored proposals (Gateway / Finalizer-actor / durable-datamodel), reconciled adversarially, then hardened against a design-review pass (3 High + 4 Medium findings, all folded in). It is the plan of record for #3089; each phase below becomes its own PR.
 
 ---
@@ -15,12 +17,12 @@ Agent **turn output** (live streaming, terminal/final delivery, recovery/standby
 | Surface | frozen? | direct send/replace sites | uses `DeliveryLeaseCell`? |
 |---|---|---|---|
 | `turn_bridge/mod.rs` (+ terminal_delivery.rs, headless_delivery.rs, status_panel.rs, single_message_footer.rs) | #3016 | send-ordered terminal, replace-with-outcome ×3 (cancel / prompt-too-long / normal), streaming rollover, headless enqueue+direct fallback | **yes** (Bridge, `terminal_delivery.rs:517/563`) |
-| `tmux_watcher.rs` | #3016 | ordered terminal fallback, replace-with-outcome, send-with-reference, streaming rollover, placeholder delete/orphan | **yes** (Watcher, `tmux_watcher.rs:5903/6972`) |
+| `tmux_watcher.rs` | #3016 | ordered terminal fallback, replace-with-outcome, send-with-reference, streaming rollover, placeholder delete/orphan | **yes** (Watcher, `tmux_watcher.rs`) |
 | `session_relay_sink.rs` | #3036 | send-long-rollback (long), replace-with-outcome (short), send-with-reference (new) | **yes** (Sink, `session_relay_sink.rs:332/766`) |
 | `standby_relay.rs` | — | send-long-rollback (long), replace-with-outcome (short), send (new) | no |
 | `recovery_engine.rs` | — | replace-long-raw (anchored), send-long-raw (TUI-direct), panel completion | no |
 | `placeholder_sweeper.rs` | — | edit (abandoned badge), delete (orphan panel) | no |
-| `tui_prompt_relay.rs` (external-input / idle-tail tail) | #3016 hotfile | `replace_long_message_raw_with_outcome` for external-input delivery (`tui_prompt_relay.rs:282`); idle-tail read-clamp only (`:2253`) — **not in the lease** (#3235) | no (#3235) |
+| `tui_prompt_relay.rs` (external-input / idle-tail tail) | #3016 hotfile | `replace_long_message_raw_with_outcome` for external-input delivery (`tui_prompt_relay.rs`); idle-tail read-clamp only — **not in the lease** (#3235) | no (#3235) |
 
 Turn-output `send_long_message_raw*` + `replace_long_message_raw*` compress to **~15 direct call sites** (send 8 + replace 6 + the `tui_prompt_relay` external-input replace). `edit`/`delete` are scattered behind surface-local wrappers (`delete_nonterminal_placeholder`, `delete_terminal_placeholder`, `edit_channel_message`).
 
@@ -29,9 +31,9 @@ Turn-output `send_long_message_raw*` + `replace_long_message_raw*` compress to *
 ### 1.2 The four fragmentation axes
 
 1. **`len > 2000` duplicated four ways** under four names with extra per-surface gate bools: `terminal_delivery_should_send_new_chunks` (`can_chain_locally && len>2000`), `watcher_should_send_ordered_new_chunks_for_terminal_fallback` (`full_body && len>2000`), `session_bound_should_send_new_chunks_for_placeholder` (`len>2000`), `standby_should_send_new_chunks_for_placeholder` (`len>2000`). `DISCORD_MSG_LIMIT = 2000` (`mod.rs:217`).
-2. **edit-fail fallback placeholder-delete is asymmetric**: sink/standby **never delete** the original on fallback (#2757, `session_relay_sink.rs:906`, `standby_relay.rs:663`); watcher deletes **conditionally** (`watcher_fallback_edit_failure_can_delete_original_placeholder`). Flattening naively re-opens #2757 (streamed-body loss).
+2. **edit-fail fallback placeholder-delete is asymmetric**: sink/standby **never delete** the original on fallback (#2757, `session_relay_sink.rs`, `standby_relay.rs`); watcher deletes **conditionally** (`watcher_fallback_edit_failure_can_delete_original_placeholder`). Flattening naively re-opens #2757 (streamed-body loss).
 3. **Five failure-signal representations**: `LeaseOutcome{Delivered,NotDelivered,Unknown}` (`mod.rs:1671`); `RelaySinkOutcome{TerminalDelivered,TerminalNotDelivered,TerminalUnknown}` (`stream_relay.rs:361`, ≅ LeaseOutcome); `relay_ok: bool`+`retry_from_offset` (watcher); `RelaySinkError::Transient` (`stream_relay.rs:388`); recovery probe-classified outcome.
-4. **`status_message_id` has no single owner**: created `single_message_footer.rs:91` / `tmux_watcher.rs:3437`, re-bound `mod.rs:4156`, normalized `status_panel.rs`, read by headless cleanup, reclaimed/cleared by sweeper. 10+ files.
+4. **`status_message_id` has no single owner**: created `single_message_footer.rs` / `tmux_watcher.rs`, re-bound in the Discord `mod.rs`, normalized `status_panel.rs`, read by headless cleanup, reclaimed/cleared by sweeper. 10+ files.
 
 ### 1.3 Live motivating defect (#3416)
 
@@ -52,8 +54,8 @@ On the deployed binary, `save_inflight_state_in_root`'s **observe-only** monoton
 
 Two load-bearing correctness facts:
 
-- **`confirmed_end_offset` is deliberately non-durable** (`mod.rs:1574`, reset to 0 on restart). The terminal END is frame-carried on the RESULT StreamFrame; the racy inflight "Part(a)" persist was removed (`tmux_watcher.rs:5142`, `:5991-5995`). Re-persisting END must not re-introduce that race.
-- **#3143**: routing delivery commit through the actor's `Terminal` mailbox left `confirmed_end_offset` stale across the await while the sink deduped on `committed_relay_offset` reads → same range re-relayed → duplicate (`tmux_watcher.rs:6936`). Fix kept commit+advance **inline**.
+- **`confirmed_end_offset` is deliberately non-durable** (`relay_coord.rs` `TmuxRelayCoord`, reset to 0 on restart). The terminal END is frame-carried on the RESULT StreamFrame; the racy inflight "Part(a)" persist was removed (`tmux_watcher.rs`). Re-persisting END must not re-introduce that race.
+- **#3143**: routing delivery commit through the actor's `Terminal` mailbox left `confirmed_end_offset` stale across the await while the sink deduped on `committed_relay_offset` reads → same range re-relayed → duplicate (`tmux_watcher.rs`). Fix kept commit+advance **inline**.
 
 ---
 
@@ -79,7 +81,7 @@ Adopt **Gateway facade (surface unification) + durable delivery-lease state mach
 
 ### 4.1 Invariants
 
-- **I1 — commit+advance is owned by the controller, inline, before any post-send await.** Review fix (H2): an `async deliver_turn_output(...).await -> DeliveryOutcome` that hands the outcome back for the caller to commit is **insufficient** — the watcher already has post-send awaits before advance (`tmux_watcher.rs:6673/6885`, advance `:6972`), so a caller-side commit can land after an await and re-open #3143. Therefore the controller performs `lease.commit() + confirmed_end advance` **internally, synchronously, immediately after confirmed transport success and before it does any cleanup/status/await work**, and returns an already-committed outcome. Enforced by a blocking fake-gateway test asserting the offset is advanced before any post-send await can run.
+- **I1 — commit+advance is owned by the controller, inline, before any post-send await.** Review fix (H2): an `async deliver_turn_output(...).await -> DeliveryOutcome` that hands the outcome back for the caller to commit is **insufficient** — the watcher already has post-send awaits before advance (`tmux_watcher.rs`), so a caller-side commit can land after an await and re-open #3143. Therefore the controller performs `lease.commit() + confirmed_end advance` **internally, synchronously, immediately after confirmed transport success and before it does any cleanup/status/await work**, and returns an already-committed outcome. Enforced by a blocking fake-gateway test asserting the offset is advanced before any post-send await can run.
 - **I2 — ambiguous never advances.** `Unknown`/`Transient` must not advance the committed offset (`mod.rs:1677`).
 - **I3 — durable lease is additive and conservative.** Missing/unknown record → fall back to the conservative side (offset NOT advanced; treat as not-yet-delivered), never "assume delivered".
 - **I4 — controller decides, durable writes go through existing flock CAS helpers** (`bind_status_panel`, `clear_status_panel_if_current`, `save_inflight_state_if_matches_identity`) — no new non-atomic load→mutate→save race.
@@ -140,7 +142,7 @@ struct DeliveredCommit {           // the durable mirror of confirmed_end_offset
 - **`release` clears `delivery_lease` only**; `delivered_frontier` persists. On restart, `delivered_frontier` hydrates `confirmed_end_offset` (no 0-reset); a leftover `delivery_lease` is the in-flight state to reconcile.
 - **Restart lease reconciliation** (review r2 H): local-instance leases (`holder_generation` ≠ current) are **reclaimed immediately** on restart (their process-monotonic deadline is dead); only remote/cluster holders are judged by `deadline_epoch_ms` (wall-clock) + heartbeat.
 - **Write-frequency rule**: persist on lease *transition* (acquire/commit/release), not on every mid-stream advance — mid-stream stays in the memory atomic; keeps frame-carried-END intact and bounds I/O.
-- **"terminal commit" timing** (review M4): `delivered_frontier` is written only **after a confirmed Discord POST and the identity-gated inline advance** (I1) — never the pre-sink Part(a) write that was removed (`tmux_watcher.rs:5142`).
+- **"terminal commit" timing** (review M4): `delivered_frontier` is written only **after a confirmed Discord POST and the identity-gated inline advance** (I1) — never the pre-sink Part(a) write that was removed (`tmux_watcher.rs`).
 - Absorbs `relay_owner_kind` (dual-write during migration), `status_message_id` (→ `delivered_frontier.panel_msg_id`, single authority), `terminal_delivery_committed` (→ presence of `delivered_frontier`), `recovery_relay_attempts` (→ attempts).
 
 ### 4.4 Mixed-binary safety (review fix H3 — this is a hard blocker for Phase B)

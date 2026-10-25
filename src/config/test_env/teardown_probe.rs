@@ -18,6 +18,17 @@ pub(crate) fn before_restore(key: &str) {
     }
 }
 
+/// Observe the point immediately before the root guard restores and unlocks its environment.
+pub(crate) fn on_before_restore(callback: impl FnOnce() + 'static) -> impl Drop {
+    struct Restore(Option<Box<dyn FnOnce()>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            BEFORE_RESTORE.with(|hook| *hook.borrow_mut() = self.0.take());
+        }
+    }
+    Restore(BEFORE_RESTORE.with(|hook| hook.borrow_mut().replace(Box::new(callback))))
+}
+
 struct ClearHook;
 
 impl Drop for ClearHook {
