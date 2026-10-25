@@ -831,7 +831,6 @@
 "src/services/discord/tmux_watcher/turn_stream_collector.rs" = 846
 "src/services/discord/tui_prompt_relay/synthetic_start.rs" = 843
 "src/services/discord/turn_bridge/stream_tick.rs" = 758 # 2026-10-18 giant1031-c1: 1109 -> 758, behavior-preserving decompose to stream_tick/{runtime,output}.rs
-"src/services/discord_config_audit.rs" = 1280
 "src/services/dispatched_sessions.rs" = 1377
 "src/services/dispatches/discord_delivery/orchestration.rs" = 1502
 "src/services/dispatches/outbox_route.rs" = 1178
