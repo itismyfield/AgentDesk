@@ -81,7 +81,7 @@ function staleDispatchedRecoveryConditionsSql() {
     );
   }
 
-  if (conditions.length === 0) return "0";
+  if (conditions.length === 0) return "FALSE";
   return conditions.join(" OR ");
 }
 
