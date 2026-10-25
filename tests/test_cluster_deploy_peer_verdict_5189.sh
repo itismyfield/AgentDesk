@@ -327,8 +327,8 @@ case "$verdict_body" in
     *'health_json_is_ready "$health_body" 1 1 1'*) : ;;
     *) fail_test "the peer verdict must call health_json_is_ready with the same allow flags as the local readiness wait (require_dashboard, allow_reconcile_degraded, allow_no_provider_runtimes)" ;;
 esac
-if ! grep -q 'wait_for_http_service_health "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1' "$DEPLOY_SH"; then
-    fail_test "the local release readiness wait no longer uses flags 1 1 1 -- the peer verdict above is now judging by a different standard than the deploy it gates"
+if ! grep -q '_deploy_wait_with_allow_degraded "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1 1' "$DEPLOY_SH"; then
+    fail_test "the local release readiness wait no longer uses flags 1 1 1 1 -- the peer verdict above is now judging by a different standard than the deploy it gates"
 fi
 
 # --- 3e. the health body must come from the deploy that wrote the marker ------
