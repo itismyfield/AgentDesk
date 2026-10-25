@@ -37,13 +37,7 @@ RAW_SYNC = re.compile(
     r"\b(?:libc|nix|rustix)(?:::\w+)*::f(?:data)?sync\b|\bFlushFileBuffers\b"
 )
 CANONICAL = {Path("src/services/discord/runtime_store.rs"): 1}
-# The restart-v2 backend syncs a parent it holds only by descriptor, so its
-# fd-relative confinement cannot go through a path-based helper.
-_PROTOCOL_V2_FS = Path("src/services/discord/restart_mode/protocol_v2/fs/unix.rs")
-RAW_SYNC_REVIEWED = {
-    (_PROTOCOL_V2_FS, "fsync_fd"): 1,
-    (_PROTOCOL_V2_FS, "open_or_create_child"): 1,
-}
+RAW_SYNC_REVIEWED: dict[tuple[Path, str], int] = {}
 
 
 def open_argument(text: str, start: int) -> str:

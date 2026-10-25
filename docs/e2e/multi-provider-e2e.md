@@ -313,7 +313,7 @@ python3 scripts/e2e/post_deploy_relay_continuity.py --fixture pass
 python3 scripts/e2e/post_deploy_relay_continuity.py \
     --cell claude-tui \
     --dry-run \
-    --deploy-command 'AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 scripts/deploy-release.sh --skip-review'
+    --deploy-command 'AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 scripts/deploy-release.sh'
 ```
 
 The live form adds `--confirm-live` and runs only TUI cells (`claude-tui` or
