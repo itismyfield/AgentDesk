@@ -2306,6 +2306,7 @@ src/
 │   │   │   ├── rehydration.rs
 │   │   │   ├── rehydration_pending_tests.rs
 │   │   │   ├── relay_ownership.rs
+│   │   │   ├── restore_after_rehydration_tests.rs
 │   │   │   ├── session_rotation_settle.rs
 │   │   │   ├── source_tick.rs
 │   │   │   ├── synthetic_orphan_reclaim.rs
@@ -2659,6 +2660,7 @@ src/
 │   │   │   │   ├── restore_core.rs
 │   │   │   │   ├── restore_legacy_tests.rs
 │   │   │   │   ├── restore_mapping.rs
+│   │   │   │   ├── restore_retry.rs
 │   │   │   │   ├── restore_support.rs
 │   │   │   │   ├── restore_tests.rs
 │   │   │   │   ├── resume_companion_restore_tests.rs

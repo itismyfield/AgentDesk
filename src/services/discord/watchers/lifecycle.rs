@@ -112,7 +112,8 @@ pub(in crate::services::discord) mod watcher_install_fixture;
 
 #[path = "lifecycle/restore.rs"]
 mod restore;
-pub(in crate::services::discord) use self::restore::restore_tmux_watchers;
+pub(in crate::services::discord) use self::restore::retry as restore_retry;
+pub(in crate::services::discord) use self::restore_retry::restore_tmux_watchers;
 #[path = "lifecycle/restore_mapping.rs"]
 mod restore_mapping;
 use self::restore_mapping::add_configured_channel_bindings;
