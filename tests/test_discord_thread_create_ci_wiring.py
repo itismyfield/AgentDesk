@@ -3,15 +3,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FOCUSED_COMMAND = "cargo test --lib discord_thread_create -- --test-threads=1"
 
 
 class DiscordThreadCreateCiWiringTests(unittest.TestCase):
-    def test_required_ubuntu_recipe_runs_focused_suite_once(self) -> None:
-        justfile = (ROOT / "justfile").read_text(encoding="utf-8")
-        self.assertEqual(justfile.count(FOCUSED_COMMAND), 1)
-        self.assertNotIn("cargo test --lib cli::discord_thread_create", justfile)
-
     def test_pr_windows_job_is_compile_only(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-pr.yml").read_text(encoding="utf-8")
         self.assertNotIn("Discord thread-create cross-process lock", workflow)

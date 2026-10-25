@@ -18,7 +18,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "scripts/herdr_s3_d4b_manifest.json"
-INVENTORY = ROOT / "scripts/lib_test_inventory_manifest.txt"
 PROFILES = ("now", "slow", "after")
 CASE_FIELDS = ("id", "profile", "piece", "status", "tests")
 LEVELS = ("now", "full")
@@ -28,6 +27,13 @@ def status_ok(status: object) -> bool:
     if status in ("implemented", "pending"):
         return True
     return isinstance(status, str) and status.startswith("blocked:") and len(status) > 8
+
+
+def linux_lib_tests(root: Path) -> set[str]:
+    """Lib tests a linux `cargo test --lib` compiles, read from the sources src/lib.rs reaches."""
+    sys.path.insert(0, str(root / "scripts/ci"))
+    import rust_test_sources as sources
+    return sources.compiled_lib_tests(root)
 
 
 def structure_errors(manifest: dict, inventory: set[str]) -> list[str]:
@@ -108,7 +114,7 @@ def verdict(manifest: dict, results: dict, level: str) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--manifest", type=Path, default=MANIFEST)
-    parser.add_argument("--inventory", type=Path, default=INVENTORY)
+    parser.add_argument("--inventory", type=Path, help="test IDs, one per line, in place of the linux lib sources")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--structure-only", action="store_true", help="check the manifest alone")
     mode.add_argument("--require", choices=LEVELS, help="level whose FAIL sets rc 1; needs --results")
@@ -119,8 +125,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.structure_only and args.results is not None:
         parser.error("--structure-only takes no --results")
     manifest = json.loads(args.manifest.read_text())
-    lines = args.inventory.read_text().splitlines()
-    inventory = {line.strip() for line in lines if line.strip() and not line.startswith("#")}
+    if args.inventory is None:
+        inventory = linux_lib_tests(ROOT)
+    else:
+        lines = args.inventory.read_text().splitlines()
+        inventory = {line.strip() for line in lines if line.strip() and not line.startswith("#")}
     errors = structure_errors(manifest, inventory)
     for error in errors:
         print(f"manifest: {error}")

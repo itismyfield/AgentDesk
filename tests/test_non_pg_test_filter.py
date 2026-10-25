@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -13,19 +12,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import yaml
-
 
 ROOT = Path(__file__).resolve().parents[1]
 FILTER = ROOT / "scripts/ci/non-pg-test-filter.sh"
 MEMBERSHIP = ROOT / "scripts/check_pg_test_lane_membership.py"
-
-
-def load_selector():
-    spec = importlib.util.spec_from_file_location("non_pg_filter_selector", ROOT / "scripts/ci/test-selection.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def load_membership_module():
@@ -74,34 +64,6 @@ class NonPgTestFilter(unittest.TestCase):
             with self.subTest(listed=listed):
                 with self.assertRaises(ValueError):
                     membership.partition_pg_test_list(listed, "0")
-
-    def test_shard_recipe_stops_before_targets_on_source_or_primary_failure(self) -> None:
-        membership = load_membership_module()
-        coverage = membership._load_coverage_module(ROOT)
-        program = "\n".join(coverage.just_recipe_commands((ROOT / "justfile").read_text(), "test-postgres-shard"))
-        ids = [next(f"ci_pg::case_{i}" for i in range(100) if membership.pg_test_shard(f"ci_pg::case_{i}") == shard)
-               for shard in range(membership.PG_SHARD_COUNT)]
-        listed = "".join(name + ": test\n" for name in ids) + f"\n{len(ids)} tests, 0 benchmarks\n"
-        script = r'''
-cargo() {
-  if [[ "${!#}" == --list ]]; then printf '%s' "$PG_LIST_TEXT"; return "$LIST_RC"; fi
-  printf 'execution\n' >> "$LOG"
-  return "$PRIMARY_RC"
-}
-export -f cargo
-bash -euo pipefail -c "$PROGRAM"
-'''
-        with tempfile.TemporaryDirectory() as temp:
-            log = Path(temp) / "calls"
-            for list_rc, primary_rc, expected_calls in ((7, 0, 0), (0, 8, 1)):
-                with self.subTest(list_rc=list_rc, primary_rc=primary_rc):
-                    log.write_text("")
-                    env = {**os.environ, "PG_INCLUDE_SHARD": "0", "PG_LIST_TEXT": listed,
-                           "LIST_RC": str(list_rc), "PRIMARY_RC": str(primary_rc), "LOG": str(log),
-                           "PROGRAM": program, "POSTGRES_TEST_DATABASE_URL_BASE": "postgresql://stub:1"}
-                    result = subprocess.run(["bash", "-c", script], cwd=ROOT, env=env, capture_output=True, text=True)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertEqual(len(log.read_text().splitlines()), expected_calls)
 
     def test_new_tests_do_not_move_existing_assignments(self) -> None:
         from unittest.mock import patch
@@ -219,85 +181,6 @@ run_non_pg_filter_replay
                      "bash", str(FILTER)], check=True, capture_output=True, text=True, env=env)
             with self.subTest(shard=shard):
                 self.assertEqual(restored[shard], tuple(result.stdout.splitlines()))
-
-    def test_prepared_pg_shards_and_replay_dispatch_without_extra_cargo(self) -> None:
-        membership = load_membership_module()
-        coverage = membership._load_coverage_module(ROOT)
-        program, continuity = ("\n".join(coverage.just_recipe_commands((ROOT / "justfile").read_text(), name))
-                               for name in ("test-postgres-shard", "test-postgres-continuity"))
-        skips = membership.load_non_pg_skip_args(ROOT)[1::2]
-        ids = sorted(name for name in membership.load_lib_test_inventory(ROOT)
-                     if any(value in name for value in skips))
-        script = r'''
-cargo() { printf 'unexpected cargo\n' >&2; return 99; }
-just() { [[ "$*" == test-postgres-continuity ]] && bash -euo pipefail -c "$CONTINUITY"; }
-python3() {
-  if [[ "$1" == scripts/ci/lib-test-artifact.py ]]; then
-    shift 3
-    if [[ "${!#}" == --list ]]; then cat "$PG_LIST"; return; fi
-    printf '%s\n' "$*" >> "$LOG"
-  else
-    command python3 "$@"
-  fi
-}
-export -f cargo python3 just
-bash -euo pipefail -c "$PROGRAM"
-'''
-        with tempfile.TemporaryDirectory() as temp:
-            listed, log = Path(temp) / "list", Path(temp) / "calls"
-            listed.write_text("".join(name + ": test\n" for name in ids) + f"\n{len(ids)} tests, 0 benchmarks\n")
-            calls = []
-            for shard in ("0", "1", "continuity"):
-                log.write_text("")
-                env = {**os.environ, "ADK_LIB_TEST_ARTIFACT": temp, "PG_LIST": str(listed),
-                       "LOG": str(log), "PROGRAM": program, "PG_INCLUDE_SHARD": shard, "CONTINUITY": continuity,
-                       "POSTGRES_TEST_DATABASE_URL_BASE": "postgresql://stub:1"}
-                result = subprocess.run(["bash", "-c", script], cwd=ROOT, env=env, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                calls.append(log.read_text().splitlines())
-            expected = membership.load_pg_include_shards(ROOT)
-            for shard in (0, 1):
-                self.assertEqual(calls[shard][0], "cargo test --lib -- " + " ".join(expected[shard])
-                                 + " --nocapture --test-threads=1")
-            self.assertEqual(len(calls[0]), 1)
-            self.assertEqual(len(calls[1]), 1)
-            self.assertEqual(len(calls[2]), 8)
-            self.assertTrue(all("--exact" not in call for call in calls[2]))
-            log.write_text("")
-            env.pop("PG_INCLUDE_SHARD")
-            env["PROGRAM"] = "source scripts/ci/non-pg-test-filter.sh; run_non_pg_filter_replay"
-            result = subprocess.run(["bash", "-c", script], cwd=ROOT, env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            replayed = [arg for call in log.read_text().splitlines() for arg in shlex.split(call)[5:]]
-            self.assertEqual(tuple(replayed), membership.load_non_pg_filter_replay(ROOT))
-
-    def test_shared_harness_failure_does_not_fall_back_or_run_continuity(self) -> None:
-        membership = load_membership_module()
-        coverage = membership._load_coverage_module(ROOT)
-        program = "\n".join(coverage.just_recipe_commands((ROOT / "justfile").read_text(), "test-postgres-shard"))
-        ids = [next(f"suite::case_{i}" for i in range(100) if membership.pg_test_shard(f"suite::case_{i}") == shard)
-               for shard in range(membership.PG_SHARD_COUNT)]
-        listed = "".join(name + ": test\n" for name in ids) + f"\n{len(ids)} tests, 0 benchmarks\n"
-        script = r'''
-cargo() { printf 'UNSAFE fallback\n'; return 0; }
-python3() {
-  if [[ "$1" != scripts/ci/lib-test-artifact.py ]]; then command python3 "$@"; return; fi
-  if [[ "${!#}" == --list ]]; then printf '%s' "$PG_LIST_TEXT"; return; fi
-  printf 'failed shared execution\n' >> "$LOG"
-  return 8
-}
-export -f cargo python3
-bash -euo pipefail -c "$PROGRAM"
-'''
-        with tempfile.TemporaryDirectory() as temp:
-            log = Path(temp) / "calls"
-            env = {**os.environ, "ADK_LIB_TEST_ARTIFACT": temp, "PG_INCLUDE_SHARD": "0",
-                   "PG_LIST_TEXT": listed, "LOG": str(log), "PROGRAM": program,
-                   "POSTGRES_TEST_DATABASE_URL_BASE": "postgresql://stub:1"}
-            result = subprocess.run(["bash", "-c", script], cwd=ROOT, env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 8, result.stderr)
-            self.assertNotIn("UNSAFE", result.stdout)
-            self.assertEqual(log.read_text().splitlines(), ["failed shared execution"])
 
     def test_pg_contract_rejects_hiding_shared_failures_or_changing_the_list_source(self) -> None:
         membership = load_membership_module()

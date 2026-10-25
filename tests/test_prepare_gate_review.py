@@ -25,7 +25,6 @@ class PrepareGateReviewTest(unittest.TestCase):
         commands = [call.args[0][2:] for call in run.call_args_list]
         self.assertEqual(commands, [
             ["--sync-skips"], ["--review-docs-only", "--sync-giant-docs"], [], [],
-            ["--write-lib-inventory-manifest"],
         ])
         self.assertTrue(all(call.kwargs["cwd"] == ROOT for call in run.call_args_list))
         self.assertEqual([Path(call.args[0][1]).name for call in run.call_args_list], [command[0] for command in PREPARE.COMMANDS])
@@ -61,7 +60,7 @@ class PrepareGateReviewTest(unittest.TestCase):
             scripts.mkdir()
             docs = ["ARCHITECTURE.md", "docs/generated/route-inventory.md", "docs/generated/worker-inventory.md",
                     "docs/generated/env-reference.md", "docs/generated/cli-reference.md"]
-            writes = [[], docs[:3], docs[3:4], docs[4:], ["scripts/lib_test_inventory_manifest.txt"]]
+            writes = [[], docs[:3], docs[3:4], docs[4:]]
             for command, outputs in zip(PREPARE.COMMANDS, writes):
                 (scripts / command[0]).write_text(
                     "from pathlib import Path\n" +

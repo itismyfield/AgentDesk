@@ -36,6 +36,8 @@ class RustToken:
     value: str
     line: int
     kind: str = "punct"
+    # Source offset of the token; metadata only, so it takes no part in equality.
+    start: int = field(default=-1, compare=False)
 
 
 def rust_tokens(text):
@@ -68,11 +70,12 @@ def rust_tokens(text):
             start = raw.end()
             end = text.find(marker, start)
             end = len(text) if end < 0 else end
-            tokens.append(RustToken(text[start:end], line, "string"))
+            tokens.append(RustToken(text[start:end], line, "string", index))
             line += text[start:end].count("\n")
             index = min(len(text), end + len(marker))
             continue
         if char == '"' or text.startswith('b"', index):
+            opening = index
             start_line, index = line, index + (2 if char == "b" else 1)
             value = []
             while index < len(text) and text[index] != '"':
@@ -80,7 +83,7 @@ def rust_tokens(text):
                 value.append(text[index:index + step])
                 line += text[index:index + step].count("\n")
                 index += step
-            tokens.append(RustToken("".join(value), start_line, "string"))
+            tokens.append(RustToken("".join(value), start_line, "string", opening))
             index += 1
             continue
         if char == "'":
@@ -90,11 +93,11 @@ def rust_tokens(text):
                 continue
         ident = IDENT.match(text, index)
         if ident:
-            tokens.append(RustToken(ident.group(), line, "ident"))
+            tokens.append(RustToken(ident.group(), line, "ident", index))
             index = ident.end()
             continue
         if char in "#![]{}();=:":
-            tokens.append(RustToken(char, line))
+            tokens.append(RustToken(char, line, "punct", index))
         index += 1
     return tokens
 
@@ -401,6 +404,12 @@ def platform_split(inventory, target_os, features):
         else:
             unknown[test_id] = [site for site, _ in declarations]
     return compiled, excluded, unknown
+
+
+def compiled_lib_tests(repo_root, platform="linux"):
+    """Lib test IDs a plain `cargo test --lib` compiles on one platform, read from the sources alone."""
+    inventory = walk(repo_root / "src/lib.rs", repo_root)
+    return platform_split(inventory, PLATFORMS[platform], default_features(repo_root))[0]
 
 
 def listed_lib_tests(path):

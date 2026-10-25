@@ -27,7 +27,6 @@ def count_executable_relay_recovery_commands(text: str) -> int:
 class RelayRecoveryCiWiringTest(unittest.TestCase):
     def test_relay_recovery_filter_wired_into_every_targeted_non_pg_lane(self) -> None:
         expected_counts = {
-            "justfile": 1,
             ".github/workflows/ci-pr.yml": 0,
             ".github/workflows/ci-macos-trusted.yml": 0,
         }

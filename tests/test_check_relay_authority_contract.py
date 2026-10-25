@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import functools
 import importlib.util
 import io
 import json
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -452,7 +454,7 @@ class AuthoritySurfaceContract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             copied = {contract.DEFAULT_MANIFEST.as_posix(), contract.CONDITION3_MUTATION_SCRIPT.as_posix(),
-                      contract.PR_WORKFLOW.as_posix(), contract.LIB_TEST_INVENTORY.as_posix()}
+                      contract.PR_WORKFLOW.as_posix()}
             copied |= {item["path"] for item in payload["authority_surface"]}
             copied |= {row["judge"] for row in payload["condition3_mutations"]}
             for relative in copied:
@@ -462,9 +464,27 @@ class AuthoritySurfaceContract(unittest.TestCase):
                 mutate(payload, root)
             (root / contract.DEFAULT_MANIFEST).write_text(json.dumps(payload), encoding="utf-8")
             stdout, stderr = io.StringIO(), io.StringIO()
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            # The copy holds only the declared files, so entry tests resolve against this tree's sources.
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
+                    mock.patch.object(contract, "lib_test_ids", return_value=self.real_test_ids()):
                 rc = contract.main(["--repo-root", str(root), "--check-manifest"])
         return rc, stdout.getvalue() + stderr.getvalue()
+
+    @staticmethod
+    @functools.cache
+    def real_test_ids() -> frozenset[str]:
+        return frozenset(contract.lib_test_ids(REPO_ROOT))
+
+    def test_entry_tests_resolve_only_to_lib_tests_the_linux_build_compiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "Cargo.toml").write_text('[package]\nname = "fixture"\n', encoding="utf-8")
+            (root / "src/lib.rs").write_text(
+                "#[cfg(test)]\nmod tests {\n#[test] fn linux_case() {}\n"
+                "#[cfg(windows)]\n#[test] fn windows_case() {}\n}\n// #[test] fn commented() {}\n",
+                encoding="utf-8")
+            self.assertEqual(contract.lib_test_ids(root), {"tests::linux_case"})
 
     def test_checked_in_surface_passes_the_declaration_check(self) -> None:
         rc, output = self.check()
@@ -487,7 +507,7 @@ class AuthoritySurfaceContract(unittest.TestCase):
              "is not a regular file"),
             ("entry test renamed", set_field("src/services/discord/catch_up.rs", "guards",
                                              ["entry_test:services::discord::catch_up::no_such_test"]),
-             "is not in scripts/lib_test_inventory_manifest.txt"),
+             "is not a linux lib test"),
             ("known gap without an issue", set_field("src/server/routes/health_api.rs", "guards", ["known_gap:5996"]),
              "must cite an issue"),
             ("unknown guard kind", set_field(rowless, "guards", ["reviewed:yes"]), "unknown guard"),

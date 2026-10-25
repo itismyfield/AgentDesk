@@ -160,8 +160,7 @@ jobs:
       - name: cargo test (non-PG, non-lib targets)
         shell: bash
         run: |
-          source scripts/ci/non-pg-test-filter.sh
-          cargo test --bins --examples --benches --test '*' -- "${NON_PG_SKIP_ARGS[@]}"
+          cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres
         env:
           RUST_BACKTRACE: 1
 
@@ -223,8 +222,7 @@ jobs:
       - name: cargo test (non-PG, non-lib targets)
         shell: bash
         run: |
-          source scripts/ci/non-pg-test-filter.sh
-          cargo test --bins --examples --benches --test '*' -- "${NON_PG_SKIP_ARGS[@]}"
+          cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres
         env:
           RUST_BACKTRACE: 1
 

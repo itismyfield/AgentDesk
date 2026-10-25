@@ -110,14 +110,10 @@ jobs:
           BASH_ENV: /dev/null
         run: bash scripts/ci/nextest-native.sh macos macos-trusted selectors:scripts/ci/macos-trusted-selectors.txt
 
-      - name: cargo test (non-PG, targeted non-lib selectors)
+      - name: cargo test (non-PG, non-lib targets)
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         shell: bash
-        run: |
-          set -euo pipefail
-          for filter in transition auto_queue cancel review_decision stall_recovery routines invariant; do
-            cargo test --bins --examples --benches --test '*' "$filter" -- --skip _pg --skip pg_ --skip postgres --test-threads=1
-          done
+        run: cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres --test-threads=1
 
       - name: Fresh user portable smoke
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'

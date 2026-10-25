@@ -505,6 +505,10 @@ if run_check contracts "Nested libtest declarations"; then
 "$PYTHON" -m unittest tests.test_nested_libtest
 fi
 
+if run_check contracts "Unfiltered cargo test in main, nightly and trusted"; then
+"$PYTHON" -m unittest tests.test_cargo_test_filters
+fi
+
 # Main still runs the retired lane tooling until it moves to the nextest jobs; keep its unit tests.
 if run_check contracts "Retired PR lane tooling still used by main"; then
 "$PYTHON" -m unittest tests.test_test_lane_coverage tests.test_lane_source_parity tests.test_lane_activation

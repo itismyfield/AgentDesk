@@ -281,22 +281,15 @@ jobs:
           path: target/clippy-observation/
           if-no-files-found: error
 
-      # The nextest workers run every lib test; this runs the non-lib side of the
-      # `--all-targets` filters and the ClaudeBinary compile-fail doctests.
+      # The nextest workers run every lib test; this runs every non-lib test once, unfiltered,
+      # and the ClaudeBinary compile-fail doctests.
       - name: Non-lib tests and doctests
         shell: bash
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
-          source scripts/ci/non-pg-test-filter.sh
-          cargo test --bins --test '*' transition -- "${NON_PG_SKIP_ARGS[@]}" --test-threads=1
-          cargo test --bins --test '*' auto_queue -- "${NON_PG_SKIP_ARGS[@]}"
-          cargo test --bins --test '*' cancel -- "${NON_PG_SKIP_ARGS[@]}"
-          cargo test --bins --test '*' review_decision -- "${NON_PG_SKIP_ARGS[@]}"
-          cargo test --bins --test '*' stall_recovery -- "${NON_PG_SKIP_ARGS[@]}"
-          cargo test --bins --test '*' routines -- "${NON_PG_SKIP_ARGS[@]}"
-          cargo test invariant --bins --test '*' -- "${NON_PG_SKIP_ARGS[@]}"
+          cargo test --bins --test '*' -- --skip _pg --skip pg_ --skip postgres
           cargo test --doc ClaudeBinary
 
       - name: sccache stats

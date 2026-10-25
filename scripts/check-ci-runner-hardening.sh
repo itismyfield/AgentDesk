@@ -8,9 +8,8 @@ error() {
   fail=1
 }
 
-if ! python3 scripts/ci/nested_libtest.py check; then
-  error "nested libtest declarations must pass validation"
-fi
+python3 scripts/ci/nested_libtest.py check || error "nested libtest declarations must pass validation"
+python3 scripts/ci/cargo_test_filters.py || error "main, nightly and trusted cargo test commands must not carry a name filter"
 
 readonly REQUIRED_CONTEXTS_JSON='["Lint", "Script checks", "Fast check (ubuntu-latest)", "High-risk recovery", "Dashboard (Node 22)", "Fast targeted tests (ubuntu-latest)", "relay-authority-contract", "Library test sweep (ubuntu-latest)", "Fast check cross OS required context (ubuntu-latest)"]'
 readonly REQUIRED_CHECK_MIRROR_SHA256="57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"

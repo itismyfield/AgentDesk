@@ -14,11 +14,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import exact_rust_test_proof as proof
-from check_test_target_integrity import render_lib_inventory_manifest
 
 RUNNER = ROOT / "scripts/ci/run-writer-namespace-windows-targets.sh"
 ENGINE = ROOT / "scripts/exact_rust_test_proof.py"
-INVENTORY = ROOT / "scripts/check_test_target_integrity.py"
+INVENTORY = ROOT / "scripts/ci/rust_test_sources.py"
 FAMILY = "services::proof_protocol::namespace::lexical::tests"
 IDS = (
     f"{FAMILY}::sealed_portable_roots_normalize_exactly",
@@ -69,7 +68,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
     def command(self, root: Path, owners: tuple[OwnerFixture, ...]) -> list[str]:
         command = [
             sys.executable, str(root / "scripts/exact_rust_test_proof.py"), "run",
-            "--repo-root", str(root), "--manifest", "scripts/lib_test_inventory_manifest.txt",
+            "--repo-root", str(root), "--platform", "windows",
             "--pass-prefix", "WRITER_NAMESPACE_WINDOWS_TARGET",
             "--gate", "proof_namespace", "src/services/proof_protocol.rs", "namespace",
             "src/services/proof_protocol/namespace.rs", "optional",
@@ -95,16 +94,15 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
     ) -> None:
         source = root / "src/services/proof_protocol/namespace"
         source.mkdir(parents=True)
+        (root / "Cargo.toml").write_text('[package]\nname = "fixture"\n', encoding="utf-8")
         (root / "src/lib.rs").write_text("mod services;\n", encoding="utf-8")
         (root / "src/services/mod.rs").write_text("mod proof_protocol;\n", encoding="utf-8")
         protocol = "mod namespace;\n" if active else ""
         namespace = "mod lexical;\n" if active else ""
         lexical = "#[cfg(test)]\nmod tests {\n" + "".join(f"#[test]\nfn {test_id.rsplit('::', 1)[1]}() {{}}\n" for test_id in IDS) + "}\n"
-        manifest_ids = set(IDS if active else ())
         if optional_active:
             namespace += "mod neutral;\n"
             (source / "neutral.rs").write_text("#[cfg(test)]\nmod tests { #[test] fn synthetic_optional_owner_proof() {} }\n", encoding="utf-8")
-            manifest_ids.add(OPTIONAL_ID)
         if catalog_active:
             namespace += "mod catalog;\n"
             catalog = "#[cfg(test)]\nmod tests {\n" + "".join(f"#[test]\nfn {test_id.rsplit('::', 1)[1]}() {{}}\n" for test_id in CATALOG_IDS) + "}\n"
@@ -119,13 +117,13 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                 catalog = catalog.replace("#[test]\nfn ", "// #[test] fn ", 1)
             elif mutation == "catalog_extra":
                 catalog = catalog[:-2] + "#[test]\nfn unregistered_catalog() {}\n}\n"
-                manifest_ids.add(f"{CATALOG_FAMILY}::unregistered_catalog")
             elif mutation == "catalog_redirected":
                 catalog = '#[path = "catalog_body.rs"]\nmod tests;\n'
             elif mutation == "catalog_include":
                 catalog = 'include!("catalog_body.rs");\n'
+            elif mutation == "catalog_platform_excluded":
+                catalog = catalog.replace("#[test]\nfn ", "#[test]\n#[cfg(unix)]\nfn ", 1)
             (source / "catalog.rs").write_text(catalog, encoding="utf-8")
-            manifest_ids.update(CATALOG_IDS)
         if mutation == "inactive_residue":
             namespace = "mod lexical;\n"
         elif mutation == "duplicate_gate":
@@ -138,20 +136,15 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             namespace = ""
         elif mutation == "extra_same_family":
             lexical = lexical[:-2] + "#[test]\nfn unregistered_same_family() {}\n}\n"
-            manifest_ids.add(f"{FAMILY}::unregistered_same_family")
-        elif mutation == "manifest_neighbor":
-            manifest_ids.remove(IDS[0])
-            manifest_ids.add(IDS[0] + "_neighbor")
-        elif mutation == "manifest_container":
-            manifest_ids.remove(IDS[0])
-            manifest_ids.add("prefix_" + IDS[0])
+        elif mutation == "platform_excluded":
+            lexical = lexical.replace("#[test]\nfn ", "#[test]\n#[cfg(not(windows))]\nfn ", 1)
+        elif mutation == "platform_unknown":
+            lexical = lexical.replace("#[test]\nfn ", '#[test]\n#[cfg(target_arch = "x86")]\nfn ', 1)
         elif mutation == "wrong_source":
             (source / "lexical_alias.rs").write_text("// not the canonical owner\n", encoding="utf-8")
         elif mutation == "unrelated_family":
             namespace += "mod unrelated;\n"
-            other = "services::proof_protocol::namespace::unrelated::tests::allowed"
             (source / "unrelated.rs").write_text("#[cfg(test)]\nmod tests { #[test] fn allowed() {} }\n", encoding="utf-8")
-            manifest_ids.add(other)
         if mutation == "comment_gate":
             protocol = '// mod namespace;\nconst S: &str = "mod namespace;";\nmod namespace_longer;\n'
         (root / "src/services/proof_protocol.rs").write_text(protocol, encoding="utf-8")
@@ -159,10 +152,6 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             (root / "src/services/proof_protocol/namespace.rs").write_text(namespace, encoding="utf-8")
         if active and mutation != "missing_owner":
             (source / "lexical.rs").write_text(lexical, encoding="utf-8")
-        manifest = render_lib_inventory_manifest(manifest_ids)
-        if mutation == "catalog_commented_manifest":
-            manifest = manifest.replace(CATALOG_IDS[0], "commented_" + CATALOG_IDS[0])
-        (root / "scripts/lib_test_inventory_manifest.txt").write_text(manifest, encoding="utf-8")
 
     def fake_cargo(self, root: Path) -> None:
         fake = root / "bin/cargo"
@@ -215,7 +204,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             scratch = root / "tmp"
             scratch.mkdir()
             shutil.copy2(ENGINE, root / "scripts/exact_rust_test_proof.py")
-            shutil.copy2(INVENTORY, root / "scripts/check_test_target_integrity.py")
+            shutil.copy2(INVENTORY, root / "scripts/ci/rust_test_sources.py")
             shutil.copy2(RUNNER, root / "scripts/ci/run-writer-namespace-windows-targets.sh")
             self.assertEqual(RUNNER.read_bytes(), (root / "scripts/ci/run-writer-namespace-windows-targets.sh").read_bytes())
             self.write_graph(root, active=active, optional_active=optional_active, mutation=mutation)
@@ -234,8 +223,6 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                     (root / parent).parent.mkdir(parents=True, exist_ok=True)
                     (root / parent).write_text(f"mod {module};\n", encoding="utf-8")
                     (root / source).write_text("mod windows_contract { #[cfg(test)] mod tests { #[test] fn " + test_id.rsplit("::", 1)[1] + "() {} } }\n", encoding="utf-8")
-                manifest = root / "scripts/lib_test_inventory_manifest.txt"
-                manifest.write_text(render_lib_inventory_manifest(set(IDS) | {item[3] for item in fsync}), encoding="utf-8")
             governed = root / LEXICAL.source
             original = root / "lexical.original"
             if governed.exists():
@@ -254,7 +241,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                 "FAKE_MODE": mode,
                 "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
                 "TMPDIR": str(scratch),
-                "FAKE_MANIFEST": str(root / "scripts/lib_test_inventory_manifest.txt"),
+                "FAKE_MANIFEST": str(root / "Cargo.toml"),
                 "FAKE_IDENTITY": str(governed),
                 "FAKE_ORIGINAL": str(original),
                 "FAKE_UNRELATED": str(unrelated),
@@ -336,14 +323,14 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         self.assert_structural_failure(self.run_fixture(active=False, mutation="inactive_residue"), "gate proof_namespace")
         self.assert_structural_failure(self.run_fixture(mutation="duplicate_gate"), "gate proof_namespace")
 
-    def test_owner_family_closure_source_and_manifest_identity(self) -> None:
+    def test_owner_family_closure_source_and_platform_identity(self) -> None:
         cases = (
             ("duplicate_owner", (LEXICAL,), "owner lexical"),
             ("redirected_owner", (LEXICAL,), "module lexical"),
             ("missing_owner", (LEXICAL,), "owner lexical"),
             ("extra_same_family", (LEXICAL,), "owner lexical"),
-            ("manifest_neighbor", (LEXICAL,), "owner lexical"),
-            ("manifest_container", (LEXICAL,), "owner lexical"),
+            ("platform_excluded", (LEXICAL,), "owner lexical"),
+            ("platform_unknown", (LEXICAL,), "owner lexical"),
             ("wrong_source", (OwnerFixture("lexical", "lexical", "src/services/proof_protocol/namespace/lexical_alias.rs", FAMILY, "required", IDS),), "source site"),
             ("", (OwnerFixture("lexical", "lexical", LEXICAL.source, "services::wrong::tests", "required", IDS),), "does not belong exactly"),
         )
@@ -363,13 +350,10 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             (root / "scripts").mkdir()
             self.write_graph(root, active=True, optional_active=False, mutation="")
             plan = proof.parse_cli(self.command(root, (LEXICAL,))[2:])
-            inventory = proof.collect_static_tests(root / "src/lib.rs", root)
-            windows_inventory = type(inventory)(
-                {test_id: site.replace("/", "\\") for test_id, site in inventory.tests.items()},
-                inventory.module_errors,
-                inventory.duplicate_tests,
-            )
-            with mock.patch.object(proof, "collect_static_tests", return_value=windows_inventory):
+            inventory = proof.walk(root / "src/lib.rs", root)
+            inventory.tests = {test_id: [(site.replace("/", "\\"), chain) for site, chain in found]
+                               for test_id, found in inventory.tests.items()}
+            with mock.patch.object(proof, "walk", return_value=inventory):
                 self.assertEqual(proof.seal(plan).execution_ids, IDS)
 
     def test_owner_sets_are_frozen_globally_disjoint_and_transactional(self) -> None:
@@ -380,7 +364,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             "bad", "gate", "child.rs", "bad", "bad.rs", FAMILY, "required",
             ("services::wrong::tests::compensated",),
         )
-        plan = proof.ProofPlan(ROOT, "manifest", "PROOF", gate, (bad_owner,))
+        plan = proof.ProofPlan(ROOT, "windows", "PROOF", gate, (bad_owner,))
         with self.assertRaisesRegex(proof.ProofError, "does not belong exactly"):
             proof._validate_spec(plan)
         collision = OwnerFixture("other", "other", "src/services/proof_protocol/namespace/other.rs", "services::other::tests", "optional", ("services::other::tests::sealed_portable_roots_normalize_exactly",))
@@ -464,7 +448,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         self.assertEqual(outcome.temp_before, outcome.temp_after, ())
 
     def test_catalog_owner_symmetry_counts_and_fail_closed_shapes(self) -> None:
-        for mutation in ("catalog_wrong_owner", "catalog_duplicate", "catalog_partial", "catalog_spoof", "catalog_extra", "catalog_redirected", "catalog_include", "catalog_commented_manifest"):
+        for mutation in ("catalog_wrong_owner", "catalog_duplicate", "catalog_partial", "catalog_spoof", "catalog_extra", "catalog_redirected", "catalog_include", "catalog_platform_excluded"):
             with self.subTest(mutation=mutation):
                 self.assert_structural_failure(self.run_fixture(owners=(LEXICAL, CATALOG), catalog_active=True, mutation=mutation), "owner")
         collision = OwnerFixture("catalog", "catalog", CATALOG.source, CATALOG_FAMILY, "optional", (CATALOG_IDS[0], IDS[0]))
@@ -493,10 +477,9 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             (root / "src/gate/tests.rs").write_text(
                 "#[test] fn proof_case() {}\n", encoding="utf-8")
             ids = ("gate::tests::proof_case",)
-            (root / "manifest.txt").write_text(
-                render_lib_inventory_manifest(set(ids)), encoding="utf-8")
+            (root / "Cargo.toml").write_text('[package]\nname = "fixture"\n', encoding="utf-8")
             plan = proof.ProofPlan(
-                root, "manifest.txt", "PROOF",
+                root, "windows", "PROOF",
                 proof.GateSpec("g", "src/lib.rs", "gate", "src/gate.rs", "required"),
                 (proof.OwnerSpec("o", "g", "src/gate.rs", "tests",
                                  "src/gate/tests.rs", "gate::tests", "required", ids),))
@@ -525,10 +508,9 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             (root / "src/fake.rs").write_text("mod decoy_only {}\n",
                                               encoding="utf-8")
             ids = ("gate::tests::proof_case",)
-            (root / "manifest.txt").write_text(
-                render_lib_inventory_manifest(set(ids)), encoding="utf-8")
+            (root / "Cargo.toml").write_text('[package]\nname = "fixture"\n', encoding="utf-8")
             plan = proof.ProofPlan(
-                root, "manifest.txt", "PROOF",
+                root, "windows", "PROOF",
                 proof.GateSpec("g", "src/lib.rs", "gate", "src/gate.rs",
                                "required"),
                 (proof.OwnerSpec("o", "g", "src/gate.rs", "tests",

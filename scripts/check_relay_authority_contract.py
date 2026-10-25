@@ -36,7 +36,6 @@ CONDITION3_MUTATION_IF = (
     "steps.mutation_paths.outputs.mutation_sources != 'false'"
     " || steps.mutation_wiring.outputs.wiring_changed != 'false'"
 )
-LIB_TEST_INVENTORY = Path("scripts/lib_test_inventory_manifest.txt")
 MUTATION_FILTER_STEP_ID = "mutation_paths"
 SURFACE_GUARD_KINDS = ("mutation_row", "named_target", "entry_test", "known_gap")
 
@@ -275,11 +274,13 @@ def mutation_filter_patterns(repo_root: Path) -> set[str]:
 
 
 def lib_test_ids(repo_root: Path) -> set[str]:
+    """Lib tests a linux `cargo test --lib` compiles, read from the sources src/lib.rs reaches."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "ci"))
+    import rust_test_sources as sources
     try:
-        lines = (repo_root / LIB_TEST_INVENTORY).read_text(encoding="utf-8").splitlines()
-    except OSError as error:
-        raise ManifestError(f"cannot read {LIB_TEST_INVENTORY}: {error}") from error
-    return {line for line in lines if line and not line.startswith(("#", "["))}
+        return sources.compiled_lib_tests(repo_root)
+    except (OSError, ValueError) as error:
+        raise ManifestError(f"cannot read the lib test sources: {error}") from error
 
 
 def validate_authority_surface(payload: dict[str, object], repo_root: Path) -> int:
@@ -324,7 +325,7 @@ def validate_authority_surface(payload: dict[str, object], repo_root: Path) -> i
             elif kind == "entry_test":
                 test_ids = lib_test_ids(repo_root) if test_ids is None else test_ids
                 if value not in test_ids:
-                    raise ManifestError(f"authority_surface {path}: entry test {value} is not in {LIB_TEST_INVENTORY}")
+                    raise ManifestError(f"authority_surface {path}: entry test {value} is not a linux lib test")
             elif not re.fullmatch(r"#[1-9][0-9]*", value):
                 raise ManifestError(f"authority_surface {path}: known_gap must cite an issue as #<number>")
 

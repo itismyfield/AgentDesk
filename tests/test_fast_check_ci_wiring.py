@@ -1740,6 +1740,18 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     "must retain exact continue-on-error policy", result.stderr
                 )
 
+    def test_hardening_rejects_a_cargo_test_name_filter_in_main(self) -> None:
+        main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        whole = "cargo test --bins --test '*' -- --skip _pg"
+        self.assertEqual(main.count(whole), 1)
+        result = self.run_hardening_fixture(
+            PR_WORKFLOW.read_text(encoding="utf-8"),
+            {"ci-main.yml": main.replace(whole, "cargo test --bins --test '*' transition -- --skip _pg")},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("carries a name filter ['transition']", result.stderr)
+        self.assertIn("must not carry a name filter", result.stderr)
+
     def test_registered_step_continue_policy_accepts_absent_and_boolean_false(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         step_name = "Archive, list, compare and plan"
@@ -2049,8 +2061,8 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 helper, encoding="utf-8"
             )
             (root / "scripts/ci").mkdir()
-            judge = REPO_ROOT / "scripts/ci/nextest_required.py"
-            (root / "scripts/ci/nextest_required.py").write_bytes(judge.read_bytes())
+            for helper in ("nextest_required.py", "cargo_test_filters.py"):
+                (root / "scripts/ci" / helper).write_bytes((REPO_ROOT / "scripts/ci" / helper).read_bytes())
             # Workflow fixtures isolate wiring; the real checker has its own declaration tests.
             if nested_checker is not None:
                 (root / "scripts/ci/nested_libtest.py").write_text(nested_checker, encoding="utf-8")

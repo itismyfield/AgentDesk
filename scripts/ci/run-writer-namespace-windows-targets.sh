@@ -7,7 +7,6 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # requests, so the long Windows lib-test rustc must not run against the 600s default.
 export SCCACHE_IDLE_TIMEOUT="${SCCACHE_IDLE_TIMEOUT:-0}"
 readonly engine="$root/scripts/exact_rust_test_proof.py"
-readonly manifest="scripts/lib_test_inventory_manifest.txt"
 if command -v python3 >/dev/null 2>&1; then
   interpreter=python3
 elif command -v python >/dev/null 2>&1; then
@@ -22,7 +21,7 @@ readonly interpreter
 # Windows `fsync_parent_dir` contract: one gate per engine run, so one run per owner.
 readonly worker_recovery="src/server/worker_recovery.rs"
 readonly runtime_store="src/services/discord/runtime_store.rs"
-"$interpreter" "$engine" run --repo-root "$root" --manifest "$manifest" \
+"$interpreter" "$engine" run --repo-root "$root" --platform windows \
   --pass-prefix DIR_FSYNC_WINDOWS_TARGET \
   --gate server src/lib.rs server src/server/mod.rs optional \
   --owner worker_recovery server src/server/mod.rs worker_recovery "$worker_recovery" \
@@ -30,7 +29,7 @@ readonly runtime_store="src/services/discord/runtime_store.rs"
   --owner-id worker_recovery \
     server::worker_recovery::windows_contract::tests::first_fatal_exit_persists_ledger_and_exits \
   || exit
-exec "$interpreter" "$engine" run --repo-root "$root" --manifest "$manifest" \
+exec "$interpreter" "$engine" run --repo-root "$root" --platform windows \
   --pass-prefix DIR_FSYNC_WINDOWS_TARGET \
   --gate discord src/services/mod.rs discord src/services/discord/mod.rs optional \
   --owner runtime_store discord src/services/discord/mod.rs runtime_store "$runtime_store" \
