@@ -174,6 +174,7 @@ struct TurnEnd {
 /// How the turn's request is protected.
 enum Request<'a> {
     Legacy,
+    Recovered,
     /// A started attempt whose live reader saw these facts.
     Protected(&'a [Seen]),
     /// A started attempt whose receipt another writer already held.
@@ -279,6 +280,18 @@ async fn bridge_turn_with(
             live.record(*fact);
         }
         assert!(cancel.attach_replay_attempt(Arc::new(live)));
+    }
+    if matches!(request, Request::Recovered) {
+        let attempt = start_attempt(&pool, case).await;
+        started = Some((attempt.receipt_id(), attempt.nonce().to_string()));
+        write::withhold(
+            &pool,
+            &attempt,
+            "held before process loss",
+            &serde_json::json!({"body":"kept"}),
+        )
+        .await
+        .unwrap();
     }
     driver.inflight.channel_id = channel.get();
     driver.inflight.user_msg_id = user.get();
@@ -767,4 +780,19 @@ async fn legacy_and_protected_retries_claim_a_request_once_pg() {
             .any(|item| item.message_id == user);
         assert_eq!(queued, !held, "{case}");
     }
+}
+
+#[tokio::test]
+async fn recovery_bridge_legacy_stale_cannot_bypass_a_canonical_hold_pg() {
+    let case = "p3-recovered-legacy-stale";
+    let _active =
+        crate::services::discord::router::replay_test_activation::activate(case_channel(case));
+    let end = bridge_turn(case, Request::Recovered, vec![error(STALE)]).await;
+    assert_eq!(end.disposition.as_deref(), Some("withheld"), "{end:?}");
+    assert_eq!((end.legacy, end.exact.len()), (0, 0), "{end:?}");
+    assert!(!end.killed, "{end:?}");
+    assert_eq!(
+        end.replay_rows, 1,
+        "the bypass cannot create another receipt"
+    );
 }

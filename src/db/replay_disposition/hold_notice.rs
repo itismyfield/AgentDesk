@@ -46,25 +46,54 @@ pub(super) fn from_preserved(
     Ok(Some(notice))
 }
 
-pub(crate) async fn read(pool: &PgPool, receipt_id: i64) -> Result<Option<HoldNotice>, WriteError> {
-    let row: (Option<serde_json::Value>, Option<String>) = sqlx::query_as(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NoticeRead {
+    Missing,
+    NotNotified,
+    Notified(HoldNotice),
+}
+
+#[derive(Debug)]
+pub(crate) enum NoticeReadError {
+    Storage(sqlx::Error),
+    Malformed,
+}
+
+impl std::fmt::Display for NoticeReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(error) => write!(f, "notice read failed: {error}"),
+            Self::Malformed => f.write_str("malformed replay notice"),
+        }
+    }
+}
+
+pub(crate) async fn read(pool: &PgPool, receipt_id: i64) -> Result<NoticeRead, NoticeReadError> {
+    let row: Option<(Option<serde_json::Value>, Option<String>)> = sqlx::query_as(
         "SELECT replay_preserved, replay_episode_nonce FROM intake_outbox WHERE id = $1",
     )
     .bind(receipt_id)
     .fetch_optional(pool)
     .await
-    .map_err(WriteError::Storage)?
-    .ok_or(WriteError::CasMiss)?;
-    let notice = from_preserved(receipt_id, row.0.as_ref())?;
-    if notice
-        .as_ref()
-        .and_then(|notice| notice.hold_nonce.as_deref())
-        .is_some_and(|nonce| nonce.is_empty() || Some(nonce) != row.1.as_deref())
-    {
-        return Err(WriteError::CasMiss);
+    .map_err(NoticeReadError::Storage)?;
+    let Some((preserved, nonce)) = row else {
+        return Ok(NoticeRead::Missing);
+    };
+    match from_preserved(receipt_id, preserved.as_ref()).map_err(|_| NoticeReadError::Malformed)? {
+        None => Ok(NoticeRead::NotNotified),
+        Some(notice) => {
+            if notice
+                .hold_nonce
+                .as_deref()
+                .is_some_and(|pinned| pinned.is_empty() || Some(pinned) != nonce.as_deref())
+            {
+                return Err(NoticeReadError::Malformed);
+            }
+            Ok(NoticeRead::Notified(notice))
+        }
     }
-    Ok(notice)
 }
 
+#[cfg(test)]
 #[path = "hold_notice_tests.rs"]
 mod tests;

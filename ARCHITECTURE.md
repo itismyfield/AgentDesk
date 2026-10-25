@@ -1628,6 +1628,7 @@ src/
 │   │   │   │   ├── kickoff_identity_tests.rs
 │   │   │   │   ├── output_paths.rs
 │   │   │   │   ├── ready_without_output_tests.rs
+│   │   │   │   ├── replay_decision.rs
 │   │   │   │   ├── replay_hold.rs
 │   │   │   │   └── replay_hold_tests.rs
 │   │   │   ├── terminal_text_idempotency/
@@ -1704,6 +1705,7 @@ src/
 │   │   │   ├── live/
 │   │   │   │   ├── observer_tests.rs
 │   │   │   │   ├── seal.rs
+│   │   │   │   ├── stderr.rs
 │   │   │   │   └── tap.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── live.rs
@@ -2089,6 +2091,8 @@ src/
 │   │   │   │   ├── post_terminal_disposal_tests.rs
 │   │   │   │   ├── types.rs
 │   │   │   │   └── watcher_resume.rs
+│   │   │   ├── pre_emit_guard/
+│   │   │   │   └── replay.rs
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   ├── committed_progress_tests.rs
 │   │   │   │   ├── existing_panel_update.rs
@@ -2394,8 +2398,11 @@ src/
 │   │   │   │   ├── intake_outbox_argument.rs
 │   │   │   │   ├── outcome.rs
 │   │   │   │   └── production_seam_tests.rs
+│   │   │   ├── recovery_text/
+│   │   │   │   └── replay.rs
 │   │   │   ├── retry_state/
-│   │   │   │   └── delivery_rewind.rs
+│   │   │   │   ├── delivery_rewind.rs
+│   │   │   │   └── replay.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── codex_replacement_tests.rs
 │   │   │   │   ├── guarded_save.rs

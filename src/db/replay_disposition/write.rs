@@ -1,9 +1,9 @@
 //! Replay receipt transitions; every acknowledgement is returned only after its commit succeeded.
 
-#[cfg(test)]
 mod hold_notice;
 mod settle;
 mod start;
+pub(crate) use hold_notice::recover_hold_notice;
 #[cfg(test)]
 pub(crate) use hold_notice::withhold_and_notify;
 pub(crate) use start::{

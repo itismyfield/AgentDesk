@@ -761,3 +761,128 @@ async fn p2_first_output_on_either_side_of_terminal_wait_is_held_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn p3_unconsumed_stderr_cannot_stall_terminal_classification_pg() {
+    let host = host();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(4).await;
+    for (label, record, exit) in [
+        (
+            "ordinary-error",
+            json!({"type":"error","message":"boom"}),
+            1,
+        ),
+        ("success", json!({"type":"turn.completed","usage":{}}), 0),
+    ] {
+        let live = live(&pool, "codex", label).await;
+        let tok = token(&live);
+        let state = inflight(&live);
+        let _case = Case::new(
+            &host,
+            json!({"records":[record.to_string()],
+            "stderr":"could not find session with id old", "exit":exit}),
+        );
+        let (tx, rx) = mpsc::channel();
+        invoke(
+            "codex",
+            host.dir.path().to_str().unwrap(),
+            tx,
+            Arc::clone(&tok),
+        )
+        .unwrap();
+        let messages: Vec<_> = rx.try_iter().collect();
+        assert!(!messages.is_empty(), "actual bridge input must exist");
+        assert!(
+            super::super::error_is_ordinary(Some(&pool), &tok, &state, false).await,
+            "stderr absent from the consumed Error cannot defer the decision: {label}"
+        );
+        let stored: String =
+            sqlx::query_scalar("SELECT replay_disposition FROM intake_outbox WHERE id=$1")
+                .bind(state.replay_receipt_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, "classified_normal");
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn p3_file_text_is_activity_not_a_stale_error_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(4).await;
+    let live = live(&pool, "claude", "file-phrase").await;
+    let tok = token(&live);
+    let tap = RawTap::for_file(Some(&tok));
+    tap.file_line("Conversation not found.");
+    tap.finish(true, Seen::StderrDrained);
+    assert!(!live.stale(), "assistant text is not a bridge Error");
+    assert!(!super::super::ordinary_outcome(Some(&pool), &tok, &inflight(&live)).await);
+    assert_eq!(live.verdict(), Some(Verdict::Held));
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_codex_stderr_descendant_is_cancelled_and_joined_pg() {
+    let host = host();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(4).await;
+    let live = live(&pool, "codex", "descendant").await;
+    let tok = token(&live);
+    let case = Case::new(
+        &host,
+        json!({"records":[],"barriers":true,
+        "stderr":"could not find session with id old", "stderr_append":true, "exit":1}),
+    );
+    let (tx, rx) = mpsc::channel();
+    let (done, finished) = mpsc::channel();
+    let cwd = host.dir.path().to_str().unwrap().to_string();
+    let reader_token = Arc::clone(&tok);
+    let reader = std::thread::spawn(move || {
+        done.send(invoke("codex", &cwd, tx, reader_token)).unwrap();
+    });
+    case.wait("ready");
+    assert_eq!(case.starts().len(), 1);
+    let workers = || {
+        std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|task| {
+                std::fs::read_to_string(task.path().join("comm"))
+                    .is_ok_and(|name| name.trim() == "replay-stderr")
+            })
+            .count()
+    };
+    assert_eq!(
+        workers(),
+        1,
+        "fixture must have reached the owned stderr worker"
+    );
+    let started = Instant::now();
+    case.release("stdout_go");
+    case.release("exit_go");
+    finished
+        .recv_timeout(Duration::from_secs(8))
+        .unwrap()
+        .unwrap();
+    reader.join().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(8));
+    assert_eq!(workers(), 0, "timed out pipe reader must be joined");
+    case.release("stderr_go");
+    case.wait("stderr_closed");
+    assert!(
+        case.dir.path().join("stderr_reader_closed").exists(),
+        "descendant append sees the closed read descriptor"
+    );
+    assert!(
+        !rx.try_iter().collect::<Vec<_>>().is_empty(),
+        "bridge Error must be delivered"
+    );
+    assert!(!super::super::error_is_ordinary(Some(&pool), &tok, &inflight(&live), false).await);
+    assert_eq!(live.verdict(), Some(Verdict::Held));
+    pool.close().await;
+    db.drop().await;
+}

@@ -866,6 +866,9 @@ db::replay_disposition::hold_notice::tests::p2_existing_hold_rejects_changed_rea
 db::replay_disposition::hold_notice::tests::p2_missing_receipt_is_not_an_unnotified_row_pg
 db::replay_disposition::hold_notice::tests::p2_notice_payload_pins_the_first_hold_nonce_pg
 db::replay_disposition::hold_notice::tests::p2_notice_routing_normalizes_missing_empty_and_padded_session_pg
+db::replay_disposition::hold_notice::tests::p3_missing_notice_receipt_is_distinct_from_malformed_pg
+db::replay_disposition::hold_notice::tests::recovery_enqueue_failure_keeps_original_tuple_and_delivery_custody_pg
+db::replay_disposition::hold_notice::tests::recovery_hold_notice_serializes_with_the_live_hold_writer_pg
 db::replay_disposition::hold_notice::tests::same_receipt_repeat_and_reopen_keep_one_permanent_notice_pg
 db::replay_disposition::hold_notice::tests::terminal_outbox_gc_never_remints_the_receipt_notice_pg
 db::replay_disposition::hold_notice::tests::withheld_notice_is_non_turn_provenance_only_for_its_exact_source_and_reason
@@ -6645,6 +6648,11 @@ services::discord::recovery_engine::restore_inflight::ready_without_output_tests
 services::discord::recovery_engine::restore_inflight::ready_without_output_tests::ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirror
 services::discord::recovery_engine::restore_inflight::ready_without_output_tests::restart_partial_eof_preserves_unproven_actor_and_retries_ownerless_failures
 services::discord::recovery_engine::restore_inflight::ready_without_output_tests::watcher_offset_at_eof_preserves_unsent_body_on_failed_delivery_then_retries
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::p3_restart_backfills_old_withheld_without_readopting_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::recovery_history_retry_reads_the_canonical_fence_before_and_after_http_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::recovery_malformed_notice_retains_raw_episode_and_has_a_healthy_control_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::recovery_pg_only_restart_paginates_without_an_execution_permit_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::recovery_unprojected_lookup_failure_retains_bytes_until_authority_returns_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_delivers_debt_without_finalizing_or_readopting_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_dormant_rows_keep_existing_missing_host_disposal_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_failed_delivery_retains_the_original_debt_pg
@@ -6936,6 +6944,9 @@ services::discord::replay_policy::live::observer_tests::p2_only_owned_direct_run
 services::discord::replay_policy::live::observer_tests::p2_ordinary_completion_defers_a_stale_error_pg
 services::discord::replay_policy::live::observer_tests::p2_physical_facts_need_one_owned_seal_pg
 services::discord::replay_policy::live::observer_tests::p2_quiet_retry_is_exact_once_and_success_is_one_response_pg
+services::discord::replay_policy::live::observer_tests::p3_file_text_is_activity_not_a_stale_error_pg
+services::discord::replay_policy::live::observer_tests::p3_unconsumed_stderr_cannot_stall_terminal_classification_pg
+services::discord::replay_policy::live::observer_tests::recovery_codex_stderr_descendant_is_cancelled_and_joined_pg
 services::discord::replay_policy::live_tests::decision_wakes_on_a_fact_recorded_after_its_check_pg
 services::discord::replay_policy::live_tests::direct_adapter_completes_the_observation_past_its_done_pg
 services::discord::replay_policy::live_tests::direct_adapter_without_a_live_attempt_is_unchanged_pg
@@ -7708,6 +7719,7 @@ services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_laun
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
 services::discord::runtime_bootstrap::o_writer_host::repost_tests::f6_gateway_hosts_build_a_repost_turn_only_with_a_pool
 services::discord::runtime_bootstrap::orphan_recovery::tests::orphan_recovery_clears_stale_links_and_requeues_pending_dispatches_pg
+services::discord::runtime_bootstrap::orphan_recovery::tests::recovery_orphan_boot_keeps_protected_dispatch_notify_fenced_pg
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_checked_reads_distinguish_absence_from_corruption
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_old_format_backfill_requires_save_ack
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg
@@ -8750,6 +8762,7 @@ services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_ma
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::newer_zero_id_row_survives_old_terminal
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::paused_preserves_markers
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::pending_preserves_markers
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::recovery_watcher_fence_precedes_legacy_reset_and_preserves_the_buffer_pg
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::same_a_suppresses_duplicate
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::late_row_from_another_session_is_never_finished_by_this_watcher
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::synthetic_mailbox_release_tests::newer_late_row_keeps_its_row_and_mailbox
@@ -10665,6 +10678,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::producer_dormant_keeps_legacy_execution_paths_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::quick_empty_resume_after_tool_is_withheld_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::recovered_started_attempt_cannot_bypass_replay_hold_pg
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::recovery_bridge_legacy_stale_cannot_bypass_a_canonical_hold_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::stale_after_text_preserves_body_without_replay_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::stale_no_effect_attempt_retries_only_through_its_exact_permit_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::session_died_recovery_retries_only_a_session_the_host_guard_admits_pg

@@ -101,6 +101,6 @@ pub(super) fn read(
                 session_id: current_thread_id,
             })
             .is_ok();
-    tap.finish_error(delivered, drained, "", &stderr);
+    tap.finish(delivered, drained);
     Ok(())
 }

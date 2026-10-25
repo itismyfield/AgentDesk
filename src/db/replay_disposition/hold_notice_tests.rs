@@ -1,4 +1,5 @@
-use super::{NoticeRouting, read};
+use super::{NoticeRead, NoticeReadError, NoticeRouting, read};
+
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::replay_disposition::write::{
     self, BeginFrom, CanonicalInput, EffectProjection, ExactAttempt,
@@ -80,7 +81,10 @@ async fn same_receipt_repeat_and_reopen_keep_one_permanent_notice_pg() {
         let (url, id, expected): (String, i64, super::HoldNotice) =
             serde_json::from_str(&raw).unwrap();
         let pool = PgPool::connect(&url).await.unwrap();
-        assert_eq!(read(&pool, id).await.unwrap(), Some(expected));
+        assert_eq!(
+            read(&pool, id).await.unwrap(),
+            NoticeRead::Notified(expected)
+        );
         assert_eq!(snapshot(&pool, id).await.2, 1);
         pool.close().await;
         println!("REPLAY_NOTICE_RESTART_READ_OK");
@@ -127,7 +131,7 @@ async fn same_receipt_repeat_and_reopen_keep_one_permanent_notice_pg() {
     let reopened = sqlx::PgPool::connect(&db.database_url).await.unwrap();
     assert_eq!(
         read(&reopened, attempt.receipt_id()).await.unwrap(),
-        Some(first.clone())
+        NoticeRead::Notified(first.clone())
     );
     let after = write::withhold_and_notify(&reopened, &attempt, "activity", &preserved, ROUTING)
         .await
@@ -264,19 +268,25 @@ async fn concurrent_hold_writers_share_one_event_pg() {
 async fn legacy_hold_without_notice_is_readable_and_backfilled_once_pg() {
     let (db, pool) = fixture().await;
     let attempt = start(&pool, "501").await;
-    assert_eq!(read(&pool, attempt.receipt_id()).await.unwrap(), None);
+    assert_eq!(
+        read(&pool, attempt.receipt_id()).await.unwrap(),
+        NoticeRead::NotNotified
+    );
     let preserved =
         serde_json::json!({"partial_body":"legacy captured", "legacy":{"unknown":"kept"}});
     write::withhold(&pool, &attempt, "legacy reason", &preserved)
         .await
         .unwrap();
-    assert_eq!(read(&pool, attempt.receipt_id()).await.unwrap(), None);
+    assert_eq!(
+        read(&pool, attempt.receipt_id()).await.unwrap(),
+        NoticeRead::NotNotified
+    );
     let notice = write::withhold_and_notify(&pool, &attempt, "legacy reason", &preserved, ROUTING)
         .await
         .unwrap();
     assert_eq!(
         read(&pool, attempt.receipt_id()).await.unwrap(),
-        Some(notice)
+        NoticeRead::Notified(notice)
     );
     let (_, stored, count) = snapshot(&pool, attempt.receipt_id()).await;
     assert_eq!(count, 1);
@@ -335,7 +345,7 @@ async fn terminal_outbox_gc_never_remints_the_receipt_notice_pg() {
     assert_eq!(snapshot(&pool, attempt.receipt_id()).await.2, 0);
     assert_eq!(
         read(&pool, attempt.receipt_id()).await.unwrap(),
-        Some(first)
+        NoticeRead::Notified(first)
     );
     pool.close().await;
     db.drop().await;
@@ -376,7 +386,10 @@ async fn dormant_withhold_still_produces_no_notification_pg() {
     .await
     .unwrap();
     assert_eq!(snapshot(&pool, attempt.receipt_id()).await.2, 0);
-    assert_eq!(read(&pool, attempt.receipt_id()).await.unwrap(), None);
+    assert_eq!(
+        read(&pool, attempt.receipt_id()).await.unwrap(),
+        NoticeRead::NotNotified
+    );
     pool.close().await;
     db.drop().await;
 }
@@ -481,11 +494,14 @@ async fn p2_existing_hold_rejects_changed_reason_or_preserved_pg() {
 async fn p2_missing_receipt_is_not_an_unnotified_row_pg() {
     let (db, pool) = fixture().await;
     assert!(matches!(
-        read(&pool, i64::MAX).await,
-        Err(write::WriteError::CasMiss)
+        super::read(&pool, i64::MAX).await,
+        Ok(NoticeRead::Missing)
     ));
     let attempt = start(&pool, "p2-present").await;
-    assert_eq!(read(&pool, attempt.receipt_id()).await.unwrap(), None);
+    assert_eq!(
+        read(&pool, attempt.receipt_id()).await.unwrap(),
+        NoticeRead::NotNotified
+    );
     pool.close().await;
     db.drop().await;
 }
@@ -506,7 +522,7 @@ async fn p2_notice_payload_pins_the_first_hold_nonce_pg() {
     );
     assert_eq!(
         read(&pool, attempt.receipt_id()).await.unwrap(),
-        Some(first)
+        NoticeRead::Notified(first)
     );
     for (label, pinned) in [("old", None), ("wrong", Some("other-nonce"))] {
         let older = start(&pool, &format!("p2-payload-{label}")).await;
@@ -525,11 +541,148 @@ async fn p2_notice_payload_pins_the_first_hold_nonce_pg() {
         .unwrap();
         let readback = read(&pool, older.receipt_id()).await;
         if pinned.is_some() {
-            assert!(matches!(readback, Err(write::WriteError::CasMiss)));
+            assert!(matches!(readback, Err(NoticeReadError::Malformed)));
         } else {
-            assert_eq!(readback.unwrap().unwrap().hold_nonce, None);
+            let NoticeRead::Notified(notice) = readback.unwrap() else {
+                panic!("old payload must remain notified");
+            };
+            assert_eq!(notice.hold_nonce, None);
         }
     }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn p3_missing_notice_receipt_is_distinct_from_malformed_pg() {
+    let (db, pool) = fixture().await;
+    assert_eq!(
+        super::read(&pool, i64::MAX).await.unwrap(),
+        NoticeRead::Missing,
+        "missing receipt is a typed read result"
+    );
+    let attempt = start(&pool, "p3-malformed").await;
+    sqlx::query("UPDATE intake_outbox SET replay_preserved=replay_preserved || '{\"stale_replay_notice\":null}'::jsonb WHERE id=$1")
+        .bind(attempt.receipt_id())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            super::read(&pool, attempt.receipt_id()).await,
+            Err(NoticeReadError::Malformed)
+        ),
+        "malformed is never no notice"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn recovery_hold_notice_serializes_with_the_live_hold_writer_pg() {
+    let (db, pool) = fixture().await;
+    let attempt = start(&pool, "recovery-race").await;
+    let body = serde_json::json!({"partial_body":"captured"});
+    let (recovered, live) = tokio::join!(
+        write::recover_hold_notice(
+            &pool,
+            attempt.receipt_id(),
+            "claude",
+            "123456789",
+            Some(&body),
+            ROUTING
+        ),
+        write::withhold_and_notify(&pool, &attempt, "activity", &body, ROUTING),
+    );
+    let notice = recovered.unwrap();
+    match live {
+        Ok(live) => assert_eq!(notice, live),
+        Err(write::WriteError::CasMiss) => {}
+        Err(error) => panic!("unexpected live writer failure: {error}"),
+    }
+    assert_eq!(
+        read(&pool, attempt.receipt_id()).await.unwrap(),
+        NoticeRead::Notified(notice.clone())
+    );
+    assert_eq!(snapshot(&pool, attempt.receipt_id()).await.2, 1);
+    assert!(matches!(
+        write::recover_hold_notice(
+            &pool,
+            attempt.receipt_id(),
+            "codex",
+            "123456789",
+            None,
+            ROUTING
+        )
+        .await,
+        Err(write::WriteError::CasMiss)
+    ));
+    assert!(matches!(
+        write::recover_hold_notice(&pool, attempt.receipt_id(), "claude", "999", None, ROUTING)
+            .await,
+        Err(write::WriteError::CasMiss)
+    ));
+    let tuple: (String, String) = sqlx::query_as(
+        "SELECT replay_episode_nonce,replay_owner_incarnation FROM intake_outbox WHERE id=$1",
+    )
+    .bind(attempt.receipt_id())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(tuple, (attempt.nonce().into(), "incarnation-a".into()));
+    let again = write::recover_hold_notice(
+        &pool,
+        attempt.receipt_id(),
+        "claude",
+        "123456789",
+        None,
+        ROUTING,
+    )
+    .await
+    .unwrap();
+    assert_eq!(again, notice);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn recovery_enqueue_failure_keeps_original_tuple_and_delivery_custody_pg() {
+    let (db, pool) = fixture().await;
+    let attempt = start(&pool, "recovery-rollback").await;
+    let before = snapshot(&pool, attempt.receipt_id()).await;
+    reject(&pool, "message_outbox").await;
+    assert!(
+        write::recover_hold_notice(
+            &pool,
+            attempt.receipt_id(),
+            "claude",
+            "123456789",
+            None,
+            ROUTING
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(snapshot(&pool, attempt.receipt_id()).await, before);
+    sqlx::raw_sql(AssertSqlSafe(
+        "DROP TRIGGER reject_notice ON message_outbox",
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        write::recover_hold_notice(
+            &pool,
+            attempt.receipt_id(),
+            "claude",
+            "123456789",
+            None,
+            ROUTING
+        )
+        .await
+        .is_ok()
+    );
+    assert_eq!(snapshot(&pool, attempt.receipt_id()).await.2, 1);
     pool.close().await;
     db.drop().await;
 }

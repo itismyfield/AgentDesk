@@ -675,3 +675,419 @@ async fn replay_hold_restore_retains_ambiguous_or_invalid_frozen_debt_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn p3_restart_backfills_old_withheld_without_readopting_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let (db, pool) = fixture().await;
+    let shared = shared_on(&pool).await;
+    let channel = 1_479_671_301_387_171_100;
+    let _active = crate::services::discord::router::replay_test_activation::activate(channel);
+    let mut state = row(channel, "p3-old-held".into());
+    state.full_response.clear();
+    state.response_sent_offset = 0;
+    let id = receipt(&pool, &state, "withheld").await;
+    state.replay_receipt_id = Some(id);
+    inflight::save_inflight_state_create_new(&state).unwrap();
+    let discord = o_cut_recorder::start(channel).await;
+    for _ in 0..2 {
+        restore_inflight_turns(&discord.http, &shared, &ProviderKind::Claude).await;
+    }
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_outbox WHERE reason_code='stale_replay_withheld'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 1,
+        "restart must supplement exactly one durable notice"
+    );
+    assert!(
+        shared.core.lock().await.sessions.is_empty(),
+        "recovery cannot adopt a provider"
+    );
+    let preserved: serde_json::Value =
+        sqlx::query_scalar("SELECT replay_preserved FROM intake_outbox WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        preserved["recovery_snapshot"]["channel_id"], state.channel_id,
+        "local recovery must capture its episode before the PG-only sweep"
+    );
+    assert_eq!(preserved["recovery_snapshot"]["user_text"], state.user_text);
+
+    assert!(
+        !shared.tmux_watchers.contains_key(&ChannelId::new(channel)),
+        "recovery cannot restart the wrapper"
+    );
+    let stored: (String, Option<String>, String) = sqlx::query_as("SELECT replay_disposition,replay_owner_incarnation,user_text FROM intake_outbox WHERE id=$1")
+        .bind(id).fetch_one(&pool).await.unwrap();
+    assert_eq!(stored, ("withheld".into(), None, state.user_text));
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_pg_only_restart_paginates_without_an_execution_permit_pg() {
+    const CHILD: &str = "ADK_REPLAY_RECOVERY_CHILD";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    if let Ok(raw) = std::env::var(CHILD) {
+        let (url, channels): (String, Vec<u64>) = serde_json::from_str(&raw).unwrap();
+        let _active: Vec<_> = channels
+            .iter()
+            .map(|&id| crate::services::discord::router::replay_test_activation::activate(id))
+            .collect();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let probe = tempfile::tempdir().unwrap();
+        let cli = probe.path().join("native-cli");
+        std::fs::write(&cli, "#!/usr/bin/python3\nimport os,sys\nfrom pathlib import Path\nif '--version' in sys.argv or '-v' in sys.argv: print('99.1.0');sys.exit(0)\nwith (Path(os.environ['ADK_RECOVERY_PROBE_CWD'])/'native_starts').open('a') as f: f.write(str(os.getpid())+'\\n')\nsys.stdin.read()\nprint('{\"type\":\"turn.completed\",\"usage\":{}}')\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _cli = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CODEX_PATH",
+            &cli,
+        );
+        let _cwd = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "ADK_RECOVERY_PROBE_CWD",
+            probe.path(),
+        );
+        execution_probe();
+        let starts = || {
+            std::fs::read_to_string(probe.path().join("native_starts"))
+                .unwrap()
+                .lines()
+                .count()
+        };
+        assert_eq!(
+            starts(),
+            1,
+            "positive control must cross the native provider entry"
+        );
+        let shared = shared_on(&pool).await;
+        let discord = o_cut_recorder::start(channels[0]).await;
+        for _ in 0..2 {
+            restore_inflight_turns(&discord.http, &shared, &ProviderKind::Claude).await;
+        }
+        let counts: (i64, i64) = sqlx::query_as("SELECT COUNT(*), COUNT(DISTINCT replay_preserved -> 'stale_replay_notice' ->> 'outbox_id') FROM intake_outbox WHERE replay_disposition='withheld'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(counts, (channels.len() as i64, channels.len() as i64));
+        assert!(shared.core.lock().await.sessions.is_empty());
+        assert!(
+            channels
+                .iter()
+                .all(|&id| !shared.tmux_watchers.contains_key(&ChannelId::new(id)))
+        );
+        assert!(
+            discord.calls().is_empty(),
+            "one durable event, no direct recovery POST"
+        );
+        assert!(inflight::load_inflight_states(&ProviderKind::Claude).is_empty());
+        assert_eq!(
+            starts(),
+            1,
+            "restart supplementation must cause no additional native execution"
+        );
+        println!("RECOVERY_FRESH_NODE_PG_ONLY_OK {}", channels.len());
+        pool.close().await;
+        return;
+    }
+    let (db, pool) = fixture().await;
+    let mut channels = Vec::new();
+    for n in 0..67_u64 {
+        let channel = 1_479_671_301_387_180_000 + n * 10;
+        let mut state = row(channel, "pg-only-no-runtime".into());
+        state.turn_nonce = (n != 0).then(|| format!("old-nonce-{n}"));
+        receipt(
+            &pool,
+            &state,
+            match n {
+                1 => "started_unclassified",
+                2 => "startup_failed_no_effect",
+                _ => "withheld",
+            },
+        )
+        .await;
+        channels.push(channel);
+    }
+    for _ in 0..2 {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                concat!(
+                    module_path!(),
+                    "::recovery_pg_only_restart_paginates_without_an_execution_permit_pg"
+                )
+                .split_once("::")
+                .unwrap()
+                .1,
+                "--nocapture",
+            ])
+            .env(
+                CHILD,
+                serde_json::to_string(&(&db.database_url, &channels)).unwrap(),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "fresh-node child: {} {}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains("RECOVERY_FRESH_NODE_PG_ONLY_OK 67")
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 67,
+        "restarts and pages must neither merge events nor duplicate them"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_malformed_notice_retains_raw_episode_and_has_a_healthy_control_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = fixture().await;
+    let shared = shared_on(&pool).await;
+    let mut guards = Vec::new();
+    let mut damaged = None;
+    for (n, malformed) in [true, false].into_iter().enumerate() {
+        let channel = 1_479_671_301_387_181_000 + n as u64 * 10;
+        guards.push(crate::services::discord::router::replay_test_activation::activate(channel));
+        let mut state = row(channel, "malformed-no-runtime".into());
+        state.full_response.clear();
+        state.response_sent_offset = 0;
+        let id = receipt(
+            &pool,
+            &state,
+            if malformed {
+                "started_unclassified"
+            } else {
+                "withheld"
+            },
+        )
+        .await;
+        if malformed {
+            sqlx::query("UPDATE intake_outbox SET replay_disposition='withheld',replay_preserved='[]'::jsonb WHERE id=$1").bind(id).execute(&pool).await.unwrap();
+        }
+        state.replay_receipt_id = Some(id);
+        inflight::save_inflight_state_create_new(&state).unwrap();
+        if malformed {
+            damaged = Some((
+                state.clone(),
+                std::fs::read(inflight::inflight_state_path(
+                    &inflight::inflight_runtime_root().unwrap(),
+                    &ProviderKind::Claude,
+                    channel,
+                ))
+                .unwrap(),
+            ));
+        }
+    }
+    let discord = o_cut_recorder::start(1_479_671_301_387_181_000).await;
+    restore_inflight_turns(&discord.http, &shared, &ProviderKind::Claude).await;
+    let (state, bytes) = damaged.unwrap();
+    assert_eq!(
+        std::fs::read(inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &ProviderKind::Claude,
+            state.channel_id
+        ))
+        .unwrap(),
+        bytes
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "healthy control must publish; malformed row cannot become no debt"
+    );
+    assert!(matches!(
+        crate::db::replay_disposition::hold_notice::read(&pool, state.replay_receipt_id.unwrap())
+            .await,
+        Err(crate::db::replay_disposition::hold_notice::NoticeReadError::Malformed)
+    ));
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_history_retry_reads_the_canonical_fence_before_and_after_http_pg() {
+    use crate::services::discord::turn_bridge::recovery_text::{
+        auto_retry_with_history, release_retry_pending,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let (db, pool) = fixture().await;
+    let shared = shared_on(&pool).await;
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let hits = Arc::new(AtomicUsize::new(0));
+    let (on_reach, on_release, on_hit) = (reached.clone(), release.clone(), hits.clone());
+    let app = axum::Router::new().fallback(move || {
+        let (r, g, h) = (on_reach.clone(), on_release.clone(), on_hit.clone());
+        async move {
+            h.fetch_add(1, Ordering::SeqCst);
+            r.notify_one();
+            g.notified().await;
+            axum::Json(serde_json::json!([]))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = Arc::new(
+        serenity::HttpBuilder::new("test-token")
+            .proxy(format!("http://{}", listener.local_addr().unwrap()))
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    for (n, when) in ["before", "during", "unprotected"].into_iter().enumerate() {
+        let channel = 1_479_671_301_387_182_000 + n as u64 * 10;
+        let _active = crate::services::discord::router::replay_test_activation::activate(channel);
+        let state = row(channel, "canonical-history-no-runtime".into());
+        if when == "before" {
+            receipt(&pool, &state, "withheld").await;
+        }
+        let task = {
+            let (http, shared) = (http.clone(), shared.clone());
+            let text = state.user_text.clone();
+            tokio::spawn(async move {
+                auto_retry_with_history(
+                    &http,
+                    &shared,
+                    &ProviderKind::Claude,
+                    ChannelId::new(channel),
+                    MessageId::new(channel + 1),
+                    &text,
+                )
+                .await
+            })
+        };
+        if when != "before" {
+            tokio::time::timeout(std::time::Duration::from_secs(10), reached.notified())
+                .await
+                .unwrap();
+            if when == "during" {
+                receipt(&pool, &state, "withheld").await;
+            }
+            release.notify_one();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let mailbox = shared.mailbox(ChannelId::new(channel)).snapshot().await;
+        assert_eq!(
+            mailbox
+                .intervention_queue
+                .iter()
+                .any(|entry| entry.message_id.get() == state.user_msg_id),
+            when == "unprotected",
+            "{when}: canonical fence must win even with an empty memory map"
+        );
+        release_retry_pending(ChannelId::new(channel));
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "blocked-before case does not fetch HTTP; healthy control actually enqueues"
+    );
+    server.abort();
+    pool.close().await;
+    db.drop().await;
+}
+
+// The positive control and the execution mutant cross the same public native provider entry.
+pub(super) fn execution_probe() {
+    let cwd = std::env::var("ADK_RECOVERY_PROBE_CWD").unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    crate::services::codex::execute_command_streaming(
+        "probe",
+        Some("old-native"),
+        &cwd,
+        tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    assert!(
+        rx.try_iter().any(|message| matches!(
+            message,
+            crate::services::agent_protocol::StreamMessage::Done { .. }
+        )),
+        "actual native control must complete"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_unprojected_lookup_failure_retains_bytes_until_authority_returns_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = fixture().await;
+    let channel = 1_479_671_301_387_184_000;
+    let _active = crate::services::discord::router::replay_test_activation::activate(channel);
+    let mut state = row(channel, "read-error-no-runtime".into());
+    state.full_response.clear();
+    state.response_sent_offset = 0;
+    let id = receipt(&pool, &state, "withheld").await;
+    assert_eq!(state.replay_receipt_id, None);
+    inflight::save_inflight_state_create_new(&state).unwrap();
+    let path = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Claude,
+        channel,
+    );
+    let before = std::fs::read(&path).unwrap();
+    let unavailable = sqlx::PgPool::connect(&db.database_url).await.unwrap();
+    unavailable.close().await;
+    let failed = shared_on(&unavailable).await;
+    let discord = o_cut_recorder::start(channel).await;
+    restore_inflight_turns(&discord.http, &failed, &ProviderKind::Claude).await;
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "unverified cannot mean no protected request"
+    );
+    assert!(failed.core.lock().await.sessions.is_empty());
+    let healthy = shared_on(&pool).await;
+    restore_inflight_turns(&discord.http, &healthy, &ProviderKind::Claude).await;
+    assert_eq!(
+        inflight::load_inflight_state(&ProviderKind::Claude, channel)
+            .unwrap()
+            .replay_receipt_id,
+        Some(id)
+    );
+    let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        notices, 1,
+        "a transient failure must recover to one durable event"
+    );
+    pool.close().await;
+    db.drop().await;
+}

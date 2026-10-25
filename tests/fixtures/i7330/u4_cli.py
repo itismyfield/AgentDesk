@@ -98,6 +98,12 @@ if cfg.get('barriers'):
         if file_mode:
             os.close(out_fd)
         wait('stderr_go')
+        if cfg.get('stderr_append'):
+            try:
+                os.write(2, b'late descendant append\n')
+                mark('stderr_append_open')
+            except BrokenPipeError:
+                mark('stderr_reader_closed')
         os.close(2)
         mark('stderr_closed')
         os._exit(0)

@@ -4,9 +4,11 @@ use super::{Activity, LiveAttempt, Seen, lock, seal};
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::provider_hosting::ProviderSessionDriver;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
-type StderrRead = mpsc::Receiver<std::io::Result<String>>;
+#[path = "stderr.rs"]
+mod stderr;
+use stderr::StderrRead;
 
 pub(crate) struct RawTap(Option<Arc<LiveAttempt>>);
 
@@ -79,12 +81,11 @@ impl RawTap {
         }
     }
 
-    pub(crate) fn file_line(&self, line: &str) {
+    pub(crate) fn file_line(&self, _line: &str) {
         if !self.active() {
             return;
         }
         self.see(Seen::Activity(Activity::Unclassified));
-        self.stale(line, "");
     }
 
     pub(crate) fn codex_line(&self, line: &str) {
@@ -106,38 +107,19 @@ impl RawTap {
         if !self.active() {
             return None;
         }
-        child.stderr.take().map(|stderr| {
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(std::io::read_to_string(stderr));
-            });
-            rx
-        })
+        child.stderr.take().map(StderrRead::start)
     }
 
     pub(crate) fn collect_stderr(&self, pending: Option<StderrRead>) -> (String, Seen) {
-        let read = pending
-            .and_then(|rx| rx.recv_timeout(STDERR_SETTLE).ok())
-            .and_then(Result::ok);
-        match read {
-            Some(text) => {
-                self.stale("", &text);
-                (text, Seen::StderrDrained)
-            }
+        match pending.and_then(|reader| reader.collect(STDERR_SETTLE).ok()) {
+            Some(text) => (text, Seen::StderrDrained),
             None => (String::new(), Seen::Broken),
         }
     }
 
     pub(crate) fn read_stderr(&self, stderr: Option<std::process::ChildStderr>) -> (String, Seen) {
         if self.active() {
-            let pending = stderr.map(|stderr| {
-                let (tx, rx) = mpsc::channel();
-                std::thread::spawn(move || {
-                    let _ = tx.send(std::io::read_to_string(stderr));
-                });
-                rx
-            });
-            self.collect_stderr(pending)
+            self.collect_stderr(stderr.map(StderrRead::start))
         } else {
             match stderr.and_then(|stderr| std::io::read_to_string(stderr).ok()) {
                 Some(text) => (text, Seen::StderrDrained),
