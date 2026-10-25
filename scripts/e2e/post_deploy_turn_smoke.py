@@ -7,7 +7,7 @@
 written during that run into one smoke line. Only a fully evidenced clean run
 passes; missing or unreadable evidence is a FAIL, never a PASS.
 
-Exit codes: 0 pass/idle or explicitly classified gap, 1 fail/busy, 2 unevaluable input.
+Exit codes: 0 pass/idle, 1 fail/busy, 2 unreadable input, 3 foreign reset lease, 4 failed reset state.
 """
 
 from __future__ import annotations
@@ -15,11 +15,13 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import re
 import sys
 import urllib.request
+from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import yaml  # type: ignore[import-untyped]
 
@@ -326,7 +328,12 @@ def _load_report(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def cell_reset(*, base_url: str, cell: str, channel_id: str, config_path: Path) -> None:
+class CellResetBusy(RuntimeError):
+    """Another E2E driver owns the cell; reset must yield without HTTP traffic."""
+
+
+def cell_reset(*, base_url: str, cell: str, channel_id: str, config_path: Path,
+               runtime_root: Path | None = None) -> None:
     """Release one captured E2E episode through the server CAS, then acknowledge !clear."""
     target = f"cell={cell} channel={channel_id}"
 
@@ -351,6 +358,20 @@ def cell_reset(*, base_url: str, cell: str, channel_id: str, config_path: Path) 
     if str(channel_id) in {str(key) for key in channels}:
         log("skipped: configured channel is owned by Herdr")
         return
+    with ExitStack() as held:
+        try:
+            held.enter_context(cell_driver.lease.acquire(f"cell-reset-{os.getpid()}", cell=cell))
+        except RuntimeError as error:
+            if str(error).startswith("existing lease at "):
+                raise CellResetBusy(f"skipped: foreign active turn on cell ({error})") from error
+            raise
+        log("cell lease acquired: exclude concurrent E2E drivers through clear ACK")
+        held.callback(log, "cell lease releasing: reset finished or refused")
+        _reset_cell_turn(base_url=base_url, cell=cell, channel_id=channel_id, runtime_root=runtime_root, log=log)
+
+
+def _reset_cell_turn(*, base_url: str, cell: str, channel_id: str, runtime_root: Path | None,
+                     log: Callable[[str], None]) -> None:
     provider = cell_driver.cell_provider(cell)
     path = f"/api/turn-lease/{provider}/{channel_id}"
     _, expected = cell_driver._read_api_json(base_url, path)  # noqa: SLF001
@@ -385,6 +406,9 @@ def cell_reset(*, base_url: str, cell: str, channel_id: str, config_path: Path) 
             raise ValueError("identity changed after release; !clear refused")
     else:
         log("release skipped: inspect proved no active lease")
+        if not preflight_busy_reasons(base_url=base_url, cell=cell, channel_id=channel_id, runtime_root=runtime_root):
+            log("reset not needed: no lease and preflight idle; preserve warm session")
+            return
     log("!clear requested: discard dedicated E2E session")
     sent = client.send(channel_id, "!clear")
     after = str(sent.get("message_id") or sent.get("id") or "")
@@ -404,29 +428,57 @@ def cell_reset(*, base_url: str, cell: str, channel_id: str, config_path: Path) 
 
 
 def _reset_smoke_cells(args: argparse.Namespace) -> int:
-    try:
-        for cell in dict.fromkeys(args.cell):
+    results: dict[str, Any] = {}
+    for cell in dict.fromkeys(args.cell):
+        channel = None
+        try:
             if cell not in {"claude-tui", "codex-tui"}:
                 print(f"cell-reset cell={cell} skipped: not a legacy TUI cell", flush=True)
-                continue
-            try:
+            else:
                 channel = load_channel_id_from_config(Path(args.config), cell)
-            except SmokeConfigError as error:
-                if cell == args.cell[0]:
-                    raise
-                print(f"cell-reset cell={cell} refused: E2E allowlist unavailable ({error})", flush=True)
-                continue
-            cell_reset(base_url=args.base_url, cell=cell, channel_id=channel, config_path=Path(args.config))
+                cell_reset(base_url=args.base_url, cell=cell, channel_id=channel, config_path=Path(args.config),
+                           runtime_root=Path(args.queue_runtime_root) if args.queue_runtime_root else None)
+            results[cell] = {"status": "ready", "channel_id": channel, "reason": "reset complete or unnecessary"}
+        except CellResetBusy as error:
+            results[cell] = {"status": "skipped", "channel_id": channel, "reason": str(error)}
+        except SmokeConfigError as error:
+            results[cell] = {"status": "failed" if cell == args.cell[0] else "skipped",
+                             "channel_id": channel, "reason": f"E2E allowlist unavailable: {error}"}
+        except Exception as error:  # noqa: BLE001 - isolate reset failures to their target cell
+            results[cell] = {"status": "failed", "channel_id": channel, "reason": f"{type(error).__name__}: {error}"}
+        print(f"cell-reset cell={cell} {results[cell]['status']}: {results[cell]['reason']}", flush=True)
+    relay = results[args.cell[0]]
+    try:
         # E-1 must read observations made after !clear, rather than its earlier API probes.
         for output, path in ((args.health_detail_output, "/api/health/detail"), (args.sessions_output, "/api/sessions")):
-            if output:
+            if output and relay["status"] == "ready":
                 _, payload = cell_driver._read_api_json(args.base_url, path)  # noqa: SLF001
                 Path(output).write_text(json.dumps(payload), encoding="utf-8")
                 print(f"cell-reset snapshot refreshed: {path}", flush=True)
-    except Exception as error:  # noqa: BLE001 - uncertain mutations must stop smoke injection
-        print(f"cell-reset refused: {type(error).__name__}: {error}", flush=True)
-        return 2
-    return 0
+    except Exception as error:  # noqa: BLE001 - unreadable relay observations block only the relay cell
+        relay.update(status="failed", reason=f"snapshot refresh failed: {error}")
+        print(f"cell-reset cell={args.cell[0]} failed: {relay['reason']}", flush=True)
+    if args.state_output:
+        try:
+            Path(args.state_output).write_text(json.dumps(results), encoding="utf-8")
+        except OSError as error:
+            print(f"cell-reset failed: state output unavailable: {error}", flush=True)
+            return 2
+    return {"ready": 0, "skipped": 3, "failed": 2}[relay["status"]]
+
+
+def reset_status(path: Path, cell: str, channel_id: str) -> tuple[int, str]:
+    """A failed/foreign reset blocks only its cell, including after a partial cleanup."""
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))[cell]
+        status, reason = record["status"], record["reason"]
+        if status not in {"ready", "skipped", "failed"} or not isinstance(reason, str):
+            raise ValueError("invalid reset outcome")
+        if record["channel_id"] is not None and record["channel_id"] != channel_id:
+            raise ValueError("reset channel changed")
+        return {"ready": 0, "skipped": 1, "failed": 4}[status], f"cell-reset cell={cell} {status}: {reason}"
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return 4, f"cell-reset state unavailable for {cell}: {error}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -438,6 +490,12 @@ def main(argv: list[str] | None = None) -> int:
     reset.add_argument("--cell", required=True, action="append", choices=cell_driver.SUPPORTED_CELLS)
     reset.add_argument("--health-detail-output")
     reset.add_argument("--sessions-output")
+    reset.add_argument("--queue-runtime-root")
+    reset.add_argument("--state-output")
+    status = sub.add_parser("reset-status")
+    status.add_argument("--reset-state", required=True)
+    status.add_argument("--cell", required=True, choices=cell_driver.SUPPORTED_CELLS)
+    status.add_argument("--channel-id", required=True)
     pre = sub.add_parser("preflight")
     pre.add_argument("--base-url", required=True)
     pre.add_argument("--cell", required=True, choices=cell_driver.SUPPORTED_CELLS)
@@ -445,6 +503,7 @@ def main(argv: list[str] | None = None) -> int:
     pre.add_argument("--queue-runtime-root")
     pre.add_argument("--herdr-endpoint")
     pre.add_argument("--herdr-status-bin", default="agentdesk")
+    pre.add_argument("--reset-state")
     jud = sub.add_parser("judge")
     jud.add_argument("--config")
     jud.add_argument("--run-id")
@@ -459,6 +518,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "cell-reset":
         return _reset_smoke_cells(args)
+
+    if args.command == "reset-status" or (args.command == "preflight" and args.reset_state):
+        rc, detail = reset_status(Path(args.reset_state), args.cell, args.channel_id)
+        if rc or args.command == "reset-status":
+            print(detail)
+            return rc
 
     if args.command == "preflight":
         try:

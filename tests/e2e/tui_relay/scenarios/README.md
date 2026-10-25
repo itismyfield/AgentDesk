@@ -140,11 +140,13 @@ unproven/busy target state (`:4166`, `:4213`, `:4297`).
 the relay channel resolved during `E-1`. `_post_deploy_smoke_run_turn_scenario`
 performs a fresh `post_deploy_turn_smoke.py preflight` (`:4397`). These conditions
 mean a successful deployment does not imply that any particular live scenario ran.
+Before E-1, `cell-reset` acquires each configured legacy TUI E2E cell's existing driver lease, preserves idle cells without residue, and only for residue performs inspect, CAS release and `!clear` (inflight without a lease needs only `!clear`).
+A foreign driver lease skips that cell; reset failure blocks only that cell's scenarios and is reported without stopping the other cells.
 
 The `smoke-disposition region` is fail-open after a healthy deploy
 (`deploy-release.sh:4673`); its results need their own evidence.
 [`post_deploy_turn_smoke.py:325`](../../../../scripts/e2e/post_deploy_turn_smoke.py#L325)
-registers `sub.add_parser("preflight")` and `sub.add_parser("judge")`, while the
+registers `cell-reset`, `reset-status`, `preflight` and `judge`, while the
 deploy script invokes the scenario runner. The judge evaluates its report and
 run-scoped dcserver log excerpt; it is not an additional live execution lane.
 

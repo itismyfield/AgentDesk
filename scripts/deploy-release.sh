@@ -4162,8 +4162,7 @@ _post_deploy_smoke_check_relay_round_trip() {
         return 0
     fi
 
-    # Reuse the #3729 wrapper's config resolver: channel ids remain
-    # machine-local agentdesk.yaml data and are never hard-coded here.
+    # Resolve machine-local channel ids through the existing E2E config resolver.
     if channel_id=$(python3 - "$REPO" "$config_path" "$POST_DEPLOY_SMOKE_RELAY_CELL" \
         2>> "$POST_DEPLOY_SMOKE_EVIDENCE" <<'PY'
 import sys
@@ -4197,11 +4196,10 @@ PY
         return 1
     fi
 
-    python3 "$REPO/scripts/e2e/post_deploy_turn_smoke.py" cell-reset --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" --config "$config_path" --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" --cell "$POST_DEPLOY_SMOKE_CODEX_TURNS_CELL" --health-detail-output "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" --sessions-output "$POST_DEPLOY_SMOKE_SESSIONS_BODY" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>&1 || { _post_deploy_smoke_fail "relay E-1: cell-reset refused (see smoke evidence)" || true; return 1; }
     POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID="$channel_id"
+    python3 "$REPO/scripts/e2e/post_deploy_turn_smoke.py" cell-reset --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" --config "$config_path" --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" --cell "$POST_DEPLOY_SMOKE_CODEX_TURNS_CELL" --queue-runtime-root "$ADK_REL/runtime" --state-output "$POST_DEPLOY_SMOKE_TMP_DIR/cell-reset.json" --health-detail-output "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" --sessions-output "$POST_DEPLOY_SMOKE_SESSIONS_BODY" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>&1 || { rc=$?; if [ "$rc" -eq 3 ]; then _post_deploy_smoke_note "relay E-1=skipped: foreign active turn on cell" || return 1; return 0; fi; _post_deploy_smoke_fail "relay E-1: cell-reset refused (see smoke evidence)" || true; return 1; }
 
-    # E-1 is a real live turn, so reuse the E2E driver's mailbox/session busy
-    # predicates against the authenticated core-probe snapshots before sending.
+    # Reuse the E2E driver's mailbox/session busy predicates before sending E-1.
     # An unreadable snapshot skips injection; existing API findings remain the smoke result.
     if cell_busy=$(python3 - "$REPO" "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" \
         "$POST_DEPLOY_SMOKE_SESSIONS_BODY" "$POST_DEPLOY_SMOKE_RELAY_CELL" "$channel_id" \
@@ -4326,6 +4324,7 @@ _post_deploy_smoke_check_durable_record() {
         _post_deploy_smoke_note "durable_record_probe=unevaluable: E-35 channel unavailable; probe did not run" || return 1
         return 0
     fi
+    python3 "$REPO/scripts/e2e/post_deploy_turn_smoke.py" reset-status --reset-state "$POST_DEPLOY_SMOKE_TMP_DIR/cell-reset.json" --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" --channel-id "$POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>&1 || { POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: cell-reset blocked E-35"; _post_deploy_smoke_note "durable_record_probe=skipped: cell-reset blocked E-35" || return 1; return 0; }
     output="$ADK_REL/logs/post-deploy-smoke-durable-${POST_DEPLOY_SMOKE_STAMP}"
     log="$POST_DEPLOY_SMOKE_TMP_DIR/relay-e35.log"
     (
@@ -4370,9 +4369,10 @@ _post_deploy_smoke_run_turn_scenario() {
     local verdict rc=0 judge_rc=0
     local run_id="${POST_DEPLOY_SMOKE_STAMP}-${scenario}-${cell}"
     # Same idle proof as E-1, read fresh: an earlier phase may have left the cell busy.
-    if ! idle=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py preflight \
+    if idle=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py preflight \
         --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" --cell "$cell" \
-        --channel-id "$channel_id" --queue-runtime-root "$ADK_REL/runtime" 2>&1); then
+        --channel-id "$channel_id" --queue-runtime-root "$ADK_REL/runtime" --reset-state "$POST_DEPLOY_SMOKE_TMP_DIR/cell-reset.json" 2>&1); then :; else
+        rc=$?; if [ "$rc" -eq 4 ]; then _post_deploy_smoke_fail "relay ${scenario} cell=${cell} result=FAIL ${idle}" || true; POST_DEPLOY_SMOKE_TURN_COVERAGE+=" ${scenario}=FAIL"; return 1; fi
         _post_deploy_smoke_note "relay ${scenario}=skipped: ${cell} not proven idle (${idle})" || return 1
         POST_DEPLOY_SMOKE_TURN_COVERAGE+=" ${scenario}=skipped"
         return 0

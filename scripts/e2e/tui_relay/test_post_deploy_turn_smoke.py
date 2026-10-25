@@ -538,6 +538,11 @@ class CellResetTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.config = self.root / "cells.yaml"
+        self.lease_dir = self.root / "leases"
+        self.lease_dir.mkdir()
+        self.lease_patch = patch.object(driver.lease, "DEFAULT_LEASE_DIR", self.lease_dir)
+        self.lease_patch.start()
+        self.addCleanup(self.lease_patch.stop)
         self.config.write_text("""agents:
   - id: adk-claude-tui-2-e2e
     channels: {claude: {id: '222'}}
@@ -555,9 +560,12 @@ class CellResetTest(unittest.TestCase):
         self.calls = []
         self.inspects = 0
         self.change_on_inspect = 0
+        self.change_provider = None
         self.change_on_release = False
         self.change_after_release = False
         self.release_response = None
+        self.release_responses = {}
+        self.lock_observations = []
         self.clear_content = "세션을 초기화했어요. 대기 메시지 0건을 비웠어요."
         self.inspect_override = False
         self.inspect_payload = None
@@ -577,8 +585,9 @@ class CellResetTest(unittest.TestCase):
                 fixture.calls.append(("GET", self.path, None))
                 if self.path.startswith("/api/turn-lease/"):
                     provider = self.path.split("/")[3]
-                    fixture.inspects += 1
-                    if fixture.inspects == fixture.change_on_inspect:
+                    if fixture.change_provider in (None, provider):
+                        fixture.inspects += 1
+                    if fixture.inspects == fixture.change_on_inspect and fixture.change_provider in (None, provider):
                         fixture.identities[provider]["turn_nonce"] = "successor"
                     value = fixture.inspect_payload if fixture.inspect_override else fixture.identities[provider]
                     self.reply(value)
@@ -594,6 +603,8 @@ class CellResetTest(unittest.TestCase):
                     self.reply({"sessions": []})
                 elif "/messages?" in self.path:
                     channel = self.path.split("/")[4]
+                    cell = {"222": "claude-tui", "333": "codex-tui", "999": "claude-tui"}[channel]
+                    fixture.lock_observations.append(("ack", driver.lease.lease_path_for(cell).exists()))
                     self.reply([{"id": "501", "channel_id": channel,
                                  "author": {"id": "999", "bot": True},
                                  "content": fixture.clear_content}])
@@ -605,6 +616,7 @@ class CellResetTest(unittest.TestCase):
                 fixture.calls.append(("POST", self.path, body))
                 if self.path == "/api/turn-lease/release":
                     provider = body["expected"]["provider"]
+                    fixture.lock_observations.append(("release", driver.lease.lease_path_for(f"{provider}-tui").exists()))
                     if fixture.change_on_release:
                         fixture.identities[provider]["generation"] += 1
                     if body["expected"] != fixture.identities[provider]:
@@ -614,9 +626,13 @@ class CellResetTest(unittest.TestCase):
                     fixture.inflight[str(body["expected"]["channel_id"])] = False
                     if fixture.change_after_release:
                         fixture.identities[provider] = {**body["expected"], "turn_nonce": "successor"}
-                    self.reply(fixture.release_response or {"released": True, "status": "operator_released"})
+                    self.reply(fixture.release_responses.get(provider) or fixture.release_response
+                               or {"released": True, "status": "operator_released"})
                 elif self.path == "/api/discord/send":
+                    cell = {"222": "claude-tui", "333": "codex-tui", "999": "claude-tui"}[body["channel_id"]]
+                    fixture.lock_observations.append(("clear", driver.lease.lease_path_for(cell).exists()))
                     fixture.cleared.add(body["channel_id"])
+                    fixture.inflight[body["channel_id"]] = False
                     self.reply({"message_id": "500"})
                 else:
                     self.reply({"error": "unexpected fixture POST"}, 404)
@@ -632,7 +648,8 @@ class CellResetTest(unittest.TestCase):
 
     def reset(self, cell="claude-tui", channel="222"):
         with redirect_stdout(self.output):
-            turn_smoke.cell_reset(base_url=self.base_url, cell=cell, channel_id=channel, config_path=self.config)
+            turn_smoke.cell_reset(base_url=self.base_url, cell=cell, channel_id=channel, config_path=self.config,
+                                  runtime_root=self.root)
 
     def preflight(self, cell="claude-tui", channel="222"):
         with redirect_stdout(self.output):
@@ -710,12 +727,57 @@ class CellResetTest(unittest.TestCase):
             self.reset()
         self.assertEqual(self.cleared, set())
 
-    def test_null_lease_skips_release_but_clears_session(self):
+    def test_idle_cell_preserves_warm_session_without_mutations(self):
         self.identities["claude"] = None
         self.inflight["222"] = False
         self.reset()
+        self.assertEqual(self.mutations(), [])
+        self.assertEqual(self.cleared, set())
+        self.assertIn("reset not needed", self.output.getvalue())
+        self.assertEqual(self.preflight(), 0)
+
+    def test_null_lease_with_inflight_residue_only_clears_session(self):
+        self.identities["claude"] = None
+        self.reset()
         self.assertEqual([c[1] for c in self.mutations()], ["/api/discord/send"])
         self.assertEqual(self.preflight(), 0)
+
+    def test_foreign_driver_lease_skips_without_http_or_mutations(self):
+        with driver.lease.acquire("foreign-driver", cell="claude-tui") as path:
+            held = path.read_bytes()
+            with self.assertRaisesRegex(RuntimeError, "skipped: foreign active turn on cell"):
+                self.reset()
+            self.assertEqual(path.read_bytes(), held)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_driver_lease_is_held_through_clear_ack_then_released(self):
+        self.reset()
+        self.assertEqual(self.lock_observations, [("release", True), ("clear", True), ("ack", True)])
+        self.assertFalse(driver.lease.lease_path_for("claude-tui").exists())
+
+    def test_foreign_driver_cli_is_skip_and_retains_its_lease(self):
+        state = self.root / "reset.json"
+        with driver.lease.acquire("foreign-driver", cell="claude-tui") as path:
+            held = path.read_bytes()
+            with redirect_stdout(self.output):
+                rc = turn_smoke.main(["cell-reset", "--base-url", self.base_url, "--config", str(self.config),
+                                      "--cell", "claude-tui", "--state-output", str(state)])
+            self.assertEqual(rc, 3)
+            self.assertEqual(path.read_bytes(), held)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(turn_smoke.reset_status(state, "claude-tui", "222")[0], 1)
+        self.assertIn("skipped: foreign active turn on cell", self.output.getvalue())
+
+    def test_codex_reset_failure_does_not_fail_claude_reset(self):
+        self.change_provider, self.change_on_inspect = "codex", 2
+        with redirect_stdout(self.output):
+            rc = turn_smoke.main(["cell-reset", "--base-url", self.base_url, "--config", str(self.config),
+                                  "--cell", "claude-tui", "--cell", "codex-tui"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.cleared, {"222"})
+        self.assertEqual([c[2]["expected"]["provider"] for c in self.mutations()
+                          if c[1] == "/api/turn-lease/release"], ["claude"])
 
     def test_malformed_or_wrong_target_identity_never_mutates(self):
         for payload in ({}, [], {**self.identities["claude"], "provider": "codex"},
@@ -770,9 +832,12 @@ class CellResetTest(unittest.TestCase):
                 self.assertEqual(rc, 2)
                 self.assertEqual(self.calls, [])
 
-    def deploy_round_trip(self):
+    def deploy_round_trip(self, *, run_all=False):
         deploy = Path(os.environ.get("DEPLOY_SH_OVERRIDE", ROOT / "scripts/deploy-release.sh")).read_text()
-        body = deploy.split("_post_deploy_smoke_check_relay_round_trip() {\n", 1)[1].split("\n}\n", 1)[0]
+        names = ["_post_deploy_smoke_check_relay_round_trip", "_post_deploy_smoke_check_durable_record",
+                 "_post_deploy_smoke_run_turn_scenario", "_post_deploy_smoke_check_turn_scenarios"]
+        functions = "\n".join(name + "() {\n" + deploy.split(name + "() {\n", 1)[1].split("\n}\n", 1)[0]
+                              + "\n}" for name in names)
         release = self.root / "release"
         (release / "config").mkdir(parents=True)
         (release / "config/agentdesk.yaml").write_bytes(self.config.read_bytes())
@@ -782,6 +847,21 @@ class CellResetTest(unittest.TestCase):
         (self.root / "sessions.json").write_text(json.dumps({"sessions": [
             {"provider": "claude", "channel_id": "222", "status": "active"}]}))
         (self.root / "health.json").write_text('{"cluster_standby": false}')
+        (release / "logs").mkdir()
+        (release / "logs/dcserver.stdout.log").write_text("fixture\n")
+        (self.root / "fake_driver.py").write_text('''import argparse, json, sys
+from pathlib import Path
+p = argparse.ArgumentParser()
+for name in ("--filter", "--cell", "--output"):
+    p.add_argument(name)
+a, _ = p.parse_known_args()
+with (Path(__file__).parent / "injected").open("a") as f:
+    f.write(a.filter + "\\n")
+out = Path(a.output)
+out.mkdir(parents=True, exist_ok=True)
+(out / f"report.{a.cell}.json").write_text(json.dumps({"scenarios": [{"id": a.filter,
+    "durable_record_probe": {"status": "evaluated"}}]}))
+''')
         script = """set -euo pipefail
 REPO=$1; fixture=$2; REL_PORT=$3; ADK_DEFAULT_LOOPBACK=127.0.0.1
 ADK_REL=$fixture/release
@@ -792,20 +872,40 @@ POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY=$fixture/detail.json
 POST_DEPLOY_SMOKE_SESSIONS_BODY=$fixture/sessions.json
 POST_DEPLOY_SMOKE_EVIDENCE=$fixture/evidence.log
 POST_DEPLOY_SMOKE_STAMP=fixture; POST_DEPLOY_SMOKE_TMP_DIR=$fixture
+POST_DEPLOY_SMOKE_CLAUDE_TURNS_DEADLINE_S=120; POST_DEPLOY_SMOKE_CODEX_TURNS_DEADLINE_S=150
+POST_DEPLOY_SMOKE_E35_DEADLINE_S=900; POST_DEPLOY_SMOKE_LOG_PATH=$ADK_REL/logs/dcserver.stdout.log
+POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP=4096; POST_DEPLOY_SMOKE_TURN_COVERAGE=''
 _post_deploy_smoke_note() { printf '%s\\n' "$1"; }
 _post_deploy_smoke_fail() { printf 'FAIL: %s\\n' "$1"; }
 _post_deploy_smoke_resolve_cluster_standby() { printf false; }
 _post_deploy_smoke_resolve_health_module() { printf true; }
+_post_deploy_smoke_log_identity_and_size() { printf 'fixture 0\\n'; }
+_post_deploy_smoke_log_head_fingerprint() { printf fixture; }
 python3() {
     if [ "${1:-}" = scripts/e2e/run_tui_relay.py ]; then
-        printf injected > "$fixture/injected"; return 0
+        shift; command python3 "$fixture/fake_driver.py" "$@"; return
     fi
+    case "${1:-}" in
+        scripts/e2e/post_deploy_turn_smoke.py|*/scripts/e2e/post_deploy_turn_smoke.py)
+            shift
+            command python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, str(Path(sys.argv[1]) / "scripts/e2e")); import post_deploy_turn_smoke as smoke; smoke.cell_driver.lease.DEFAULT_LEASE_DIR = Path(sys.argv[2]) / "leases"; a = sys.argv[3:]; print("relay fixture result=pass") if a[0] == "judge" else None; sys.exit(0 if a[0] == "judge" else smoke.main(a))' "$REPO" "$fixture" "$@"
+            return ;;
+    esac
     command python3 "$@"
 }
-_post_deploy_smoke_check_relay_round_trip() {
-""" + body + "\n}\n_post_deploy_smoke_check_relay_round_trip\n"
+""" + functions + """
+rc=0
+_post_deploy_smoke_check_relay_round_trip || rc=1
+if [ "$4" = all ]; then
+    _post_deploy_smoke_check_durable_record || rc=1
+    _post_deploy_smoke_check_turn_scenarios || rc=1
+    printf 'COVERAGE=%s\\n' "$POST_DEPLOY_SMOKE_TURN_COVERAGE"
+fi
+exit "$rc"
+"""
         return subprocess.run(["bash", "-c", script, "fixture", str(ROOT), str(self.root),
-                               str(self.server.server_port)], capture_output=True, text=True, timeout=30)
+                               str(self.server.server_port), "all" if run_all else "e1"],
+                              capture_output=True, text=True, timeout=30)
 
     def test_deploy_resets_both_cells_before_first_idle_guard(self):
         result = self.deploy_round_trip()
@@ -819,7 +919,45 @@ _post_deploy_smoke_check_relay_round_trip() {
         result = self.deploy_round_trip()
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.root / "injected").exists())
-        self.assertEqual(self.mutations(), [])
+        self.assertFalse(any(c[1] == "/api/discord/send" and c[2]["channel_id"] == "222" for c in self.mutations()))
+
+    def test_codex_partial_reset_failure_preserves_all_claude_scenarios(self):
+        self.release_responses["codex"] = {"released": False, "status": "already_released"}
+        result = self.deploy_round_trip(run_all=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual((self.root / "injected").read_text().splitlines(), ["E-1", "E-35", "E-50"])
+        self.assertIn("COVERAGE=E-50=pass E-51=FAIL", result.stdout)
+        self.assertIsNone(self.identities["codex"])
+        self.assertFalse(self.inflight["333"])
+
+    def test_claude_reset_failure_does_not_block_codex_scenario(self):
+        self.change_provider, self.change_on_inspect = "claude", 2
+        result = self.deploy_round_trip(run_all=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual((self.root / "injected").read_text().splitlines(), ["E-51"])
+        self.assertIn("COVERAGE=E-50=FAIL E-51=pass", result.stdout)
+
+    def test_foreign_driver_deploy_logs_existing_skip_without_touching_its_cell(self):
+        with driver.lease.acquire("foreign-driver", cell="claude-tui") as path:
+            held = path.read_bytes()
+            result = self.deploy_round_trip()
+            self.assertEqual(path.read_bytes(), held)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("relay E-1=skipped: foreign active turn on cell", result.stdout)
+        self.assertFalse((self.root / "injected").exists())
+        self.assertFalse(any("/claude/" in c[1] for c in self.calls))
+
+    def test_reset_status_missing_malformed_or_wrong_channel_fails_closed(self):
+        state = self.root / "reset.json"
+        for text in (None, "[", "{}", '{"codex-tui": {"status":"ready","reason":"ok","channel_id":"999"}}'):
+            with self.subTest(state=text):
+                if text is not None:
+                    state.write_text(text)
+                with redirect_stdout(self.output):
+                    rc = turn_smoke.main(["preflight", "--base-url", self.base_url, "--cell", "codex-tui",
+                                          "--channel-id", "333", "--reset-state", str(state)])
+                self.assertEqual(rc, 4)
+                self.assertEqual(self.calls, [])
 
     def test_normal_preflight_never_mutates(self):
         self.assertEqual(self.preflight(), 1)
