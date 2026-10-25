@@ -8,12 +8,18 @@ report row plus a recorded-shape dcserver log feed the production judge.
 from __future__ import annotations
 
 import copy
+import io
+import os
+import subprocess
+import threading
 import json
 import tempfile
 import itertools
 import sys
 import unittest
 from argparse import Namespace
+from contextlib import redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -524,6 +530,470 @@ class ConfiguredHerdrClassification(unittest.TestCase):
             for value in (None, {}, "", 0):
                 with self.subTest(scenario=scenario, assertions=value):
                     self.assertEqual(self.classify({**row, "assertions": value}), "FAIL")
+
+
+class CellResetTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.config = self.root / "cells.yaml"
+        self.lease_dir = self.root / "leases"
+        self.lease_dir.mkdir()
+        self.lease_patch = patch.object(driver.lease, "DEFAULT_LEASE_DIR", self.lease_dir)
+        self.lease_patch.start()
+        self.addCleanup(self.lease_patch.stop)
+        self.config.write_text("""agents:
+  - id: adk-claude-tui-2-e2e
+    channels: {claude: {id: '222'}}
+  - id: adk-codex-tui-e2e
+    channels: {codex: {id: '333'}}
+""", encoding="utf-8")
+        self.identities = {
+            provider: dict(provider=provider, channel_id=channel, generation=7,
+                           runtime="fixture", user_message_id=444,
+                           turn_nonce=f"{provider}-episode", started_at="2026-10-25T19:02:21.431Z")
+            for provider, channel in (("claude", 222), ("codex", 333))
+        }
+        self.inflight = {"222": True, "333": True}
+        self.sessions = []
+        self.cleared = set()
+        self.calls = []
+        self.inspects = 0
+        self.change_on_inspect = 0
+        self.change_provider = None
+        self.change_on_release = False
+        self.change_after_release = False
+        self.release_response = None
+        self.release_responses = {}
+        self.lock_observations = []
+        self.clear_content = "세션을 초기화했어요. 대기 메시지 0건을 비웠어요."
+        self.inspect_override = False
+        self.inspect_payload = None
+        fixture = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def reply(self, payload, status=200):
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode())
+
+            def do_GET(self):
+                fixture.calls.append(("GET", self.path, None))
+                if self.path.startswith("/api/turn-lease/"):
+                    provider = self.path.split("/")[3]
+                    if fixture.change_provider in (None, provider):
+                        fixture.inspects += 1
+                    if fixture.inspects == fixture.change_on_inspect and fixture.change_provider in (None, provider):
+                        fixture.identities[provider]["turn_nonce"] = "successor"
+                    value = fixture.inspect_payload if fixture.inspect_override else fixture.identities[provider]
+                    self.reply(value)
+                elif self.path == "/api/health/detail":
+                    self.reply({"mailboxes": [
+                        {"provider": provider, "channel_id": channel,
+                         "agent_turn_status": "active" if fixture.identities[provider] else "idle",
+                         "has_cancel_token": fixture.identities[provider] is not None,
+                         "inflight_state_present": fixture.inflight[channel], "queue_depth": 0}
+                        for provider, channel in (("claude", "222"), ("codex", "333"))
+                    ]})
+                elif self.path == "/api/sessions":
+                    self.reply({"sessions": fixture.sessions})
+                elif "/messages?" in self.path:
+                    channel = self.path.split("/")[4]
+                    cell = {"222": "claude-tui", "333": "codex-tui", "999": "claude-tui"}[channel]
+                    fixture.lock_observations.append(("ack", driver.lease.lease_path_for(cell).exists()))
+                    self.reply([{"id": "501", "channel_id": channel,
+                                 "author": {"id": "999", "bot": True},
+                                 "content": fixture.clear_content}])
+                else:
+                    self.reply({"error": "unexpected fixture GET"}, 404)
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                fixture.calls.append(("POST", self.path, body))
+                if self.path == "/api/turn-lease/release":
+                    provider = body["expected"]["provider"]
+                    fixture.lock_observations.append(("release", driver.lease.lease_path_for(f"{provider}-tui").exists()))
+                    if fixture.change_on_release:
+                        fixture.identities[provider]["generation"] += 1
+                    if body["expected"] != fixture.identities[provider]:
+                        self.reply({"error": "lease changed; inspect again"}, 409)
+                        return
+                    fixture.identities[provider] = None
+                    fixture.inflight[str(body["expected"]["channel_id"])] = False
+                    if fixture.change_after_release:
+                        fixture.identities[provider] = {**body["expected"], "turn_nonce": "successor"}
+                    self.reply(fixture.release_responses.get(provider) or fixture.release_response
+                               or {"released": True, "status": "operator_released"})
+                elif self.path == "/api/discord/send":
+                    cell = {"222": "claude-tui", "333": "codex-tui", "999": "claude-tui"}[body["channel_id"]]
+                    fixture.lock_observations.append(("clear", driver.lease.lease_path_for(cell).exists()))
+                    fixture.cleared.add(body["channel_id"])
+                    fixture.inflight[body["channel_id"]] = False
+                    fixture.sessions = [s for s in fixture.sessions if str(s.get("channel_id")) != body["channel_id"]]
+                    self.reply({"message_id": "500"})
+                else:
+                    self.reply({"error": "unexpected fixture POST"}, 404)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(thread.join)
+        self.addCleanup(self.server.shutdown)
+        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
+        self.output = io.StringIO()
+
+    def reset(self, cell="claude-tui", channel="222"):
+        with redirect_stdout(self.output):
+            turn_smoke.cell_reset(base_url=self.base_url, cell=cell, channel_id=channel, config_path=self.config,
+                                  runtime_root=self.root)
+
+    def preflight(self, cell="claude-tui", channel="222"):
+        with redirect_stdout(self.output):
+            return turn_smoke.main(["preflight", "--base-url", self.base_url, "--cell", cell,
+                               "--channel-id", channel, "--queue-runtime-root", str(self.root)])
+
+    def mutations(self):
+        return [call for call in self.calls if call[0] == "POST"]
+
+    def test_busy_residue_reset_then_real_preflight_idle_for_both_providers(self):
+        for cell, channel in (("claude-tui", "222"), ("codex-tui", "333")):
+            with self.subTest(cell=cell):
+                expected = copy.deepcopy(self.identities[cell.split("-")[0]])
+                self.assertEqual(self.preflight(cell, channel), 1)
+                self.reset(cell, channel)
+                self.assertEqual(self.preflight(cell, channel), 0)
+                release, clear = self.mutations()[-2:]
+                self.assertEqual(release[2]["expected"], expected)
+                self.assertEqual(clear[2], {"channel_id": channel, "content": "!clear"})
+        self.assertEqual(self.cleared, {"222", "333"})
+        for action in ("allowlist", "inspect", "identity", "release", "!clear", "ack"):
+            self.assertIn(action, self.output.getvalue())
+
+    def test_outside_allowlist_refused_without_any_http(self):
+        self.identities["claude"]["channel_id"] = 999
+        with self.assertRaisesRegex(ValueError, "allowlist"):
+            self.reset(channel="999")
+        self.assertEqual(self.calls, [])
+
+    def test_unreadable_or_missing_allowlist_refused_without_any_http(self):
+        for text in (None, "[", "{}", "agents: []", "agents: [{id: adk-claude-tui-e2e}]"):
+            with self.subTest(config=text):
+                if text is None:
+                    self.config.unlink()
+                else:
+                    self.config.write_text(text, encoding="utf-8")
+                with self.assertRaises(Exception):
+                    self.reset()
+                self.assertEqual(self.calls, [])
+
+    def test_identity_changes_between_inspects_prevent_release_and_clear(self):
+        self.change_on_inspect = 2
+        with self.assertRaisesRegex((ValueError, RuntimeError), "identity changed|lease changed"):
+            self.reset()
+        self.assertEqual(self.mutations(), [])
+
+    def test_every_identity_axis_is_compared_before_release(self):
+        for field, value in (("generation", 8), ("runtime", "other"), ("user_message_id", 445),
+                             ("turn_nonce", "other"), ("started_at", "2026-10-26T00:00:00Z")):
+            with self.subTest(field=field):
+                expected = copy.deepcopy(self.identities["claude"])
+                changed = {**expected, field: value}
+                with patch.object(turn_smoke.cell_driver, "_read_api_json", side_effect=[(200, expected), (200, changed)]):
+                    with self.assertRaisesRegex(ValueError, "identity changed"):
+                        self.reset()
+                self.assertEqual(self.mutations(), [])
+
+    def test_server_cas_refusal_after_second_inspect_preserves_successor(self):
+        self.change_on_release = True
+        with self.assertRaises(Exception):
+            self.reset()
+        self.assertEqual(len(self.mutations()), 1)
+        self.assertEqual(self.cleared, set())
+        self.assertIsNotNone(self.identities["claude"])
+
+    def test_successor_after_release_prevents_clear(self):
+        self.change_after_release = True
+        with self.assertRaisesRegex(ValueError, "identity changed"):
+            self.reset()
+        self.assertEqual(self.cleared, set())
+
+    def test_nonrelease_response_does_not_clear(self):
+        self.release_response = {"released": False, "status": "already_released"}
+        with self.assertRaisesRegex(ValueError, "release"):
+            self.reset()
+        self.assertEqual(self.cleared, set())
+
+    def test_idle_cell_preserves_warm_session_without_mutations(self):
+        self.identities["claude"] = None
+        self.inflight["222"] = False
+        self.reset()
+        self.assertEqual(self.mutations(), [])
+        self.assertEqual(self.cleared, set())
+        self.assertIn("reset not needed", self.output.getvalue())
+        self.assertEqual(self.preflight(), 0)
+
+    def test_null_lease_with_inflight_residue_only_clears_session(self):
+        self.identities["claude"] = None
+        self.reset()
+        self.assertEqual([c[1] for c in self.mutations()], ["/api/discord/send"])
+        self.assertEqual(self.preflight(), 0)
+
+    def test_session_only_residue_triggers_one_clear(self):
+        self.identities["claude"] = None
+        self.inflight["222"] = False
+        self.sessions = [{"channel_id": "222", "status": "turn_active"}]
+        self.reset()
+        self.assertEqual([c[1] for c in self.mutations()], ["/api/discord/send"])
+        self.assertEqual(self.cleared, {"222"})
+        self.assertEqual(self.sessions, [])
+
+    def test_session_busy_predicate_preserves_e1_target_matching(self):
+        workspace = driver.cell_workspace_substring("claude-tui")
+        for payload, expected in (
+            ([{"channel_id": "222", "status": "turn_active"}], True),
+            ({"sessions": [{"channelId": "222", "status": "TURN_BUSY"}]}, True),
+            ([{"channel_id": "999", "session_key": f"claude/host:{workspace}-t999", "status": "active"}], True),
+            ([{"channel_id": "222", "status": "idle"}], False),
+            ([{"channel_id": "999", "status": "turn_active"}, None], False),
+        ):
+            with self.subTest(payload=payload):
+                reasons = turn_smoke.cell_session_busy_reasons(cell="claude-tui", channel_id="222", sessions_payload=payload)
+                self.assertEqual(bool(reasons), expected)
+        for payload in (None, {}, {"sessions": "unreadable"}):
+            with self.subTest(invalid=payload), self.assertRaises(ValueError):
+                turn_smoke.cell_session_busy_reasons(cell="claude-tui", channel_id="222", sessions_payload=payload)
+
+    def test_foreign_driver_lease_skips_without_http_or_mutations(self):
+        with driver.lease.acquire("foreign-driver", cell="claude-tui") as path:
+            held = path.read_bytes()
+            with self.assertRaisesRegex(RuntimeError, "skipped: foreign active turn on cell"):
+                self.reset()
+            self.assertEqual(path.read_bytes(), held)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.mutations(), [])
+
+    def test_driver_lease_is_held_through_clear_ack_then_released(self):
+        self.reset()
+        self.assertEqual(self.lock_observations, [("release", True), ("clear", True), ("ack", True)])
+        self.assertFalse(driver.lease.lease_path_for("claude-tui").exists())
+
+    def test_foreign_driver_cli_is_skip_and_retains_its_lease(self):
+        state = self.root / "reset.json"
+        with driver.lease.acquire("foreign-driver", cell="claude-tui") as path:
+            held = path.read_bytes()
+            with redirect_stdout(self.output):
+                rc = turn_smoke.main(["cell-reset", "--base-url", self.base_url, "--config", str(self.config),
+                                      "--cell", "claude-tui", "--state-output", str(state)])
+            self.assertEqual(rc, 3)
+            self.assertEqual(path.read_bytes(), held)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(turn_smoke.reset_status(state, "claude-tui", "222")[0], 1)
+        self.assertIn("skipped: foreign active turn on cell", self.output.getvalue())
+
+    def test_codex_reset_failure_does_not_fail_claude_reset(self):
+        self.change_provider, self.change_on_inspect = "codex", 2
+        with redirect_stdout(self.output):
+            rc = turn_smoke.main(["cell-reset", "--base-url", self.base_url, "--config", str(self.config),
+                                  "--cell", "claude-tui", "--cell", "codex-tui"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.cleared, {"222"})
+        self.assertEqual([c[2]["expected"]["provider"] for c in self.mutations()
+                          if c[1] == "/api/turn-lease/release"], ["claude"])
+
+    def test_malformed_or_wrong_target_identity_never_mutates(self):
+        for payload in ({}, [], {**self.identities["claude"], "provider": "codex"},
+                        {**self.identities["claude"], "channel_id": 999}):
+            with self.subTest(payload=payload):
+                self.inspect_override, self.inspect_payload = True, payload
+                with self.assertRaises(ValueError):
+                    self.reset()
+                self.assertEqual(self.mutations(), [])
+
+    def test_clear_refusal_is_not_reset_success(self):
+        self.clear_content = "세션을 초기화하지 못했어요: fixture refusal"
+        with self.assertRaisesRegex(ValueError, "clear refused"):
+            self.reset()
+
+    def test_clear_ack_must_follow_this_clear(self):
+        with patch.object(turn_smoke.cell_driver.discord.DiscordClient, "wait_for_message", return_value=(None, [])):
+            with self.assertRaisesRegex(ValueError, "ack unavailable"):
+                self.reset()
+
+    def test_herdr_and_pipe_cells_have_no_reset_effects(self):
+        for cell in ("claude-herdr", "codex-herdr", "claude-pipe", "codex-pipe"):
+            self.reset(cell)
+        self.assertEqual(self.calls, [])
+
+    def test_tui_cell_mapped_to_herdr_has_no_reset_effects(self):
+        with self.config.open("a", encoding="utf-8") as handle:
+            handle.write("session_hosts: {herdr: {channels: {'222': local}}}\n")
+        self.reset()
+        self.assertEqual(self.calls, [])
+
+    def test_cli_resets_cells_once_then_refreshes_preflight_snapshots(self):
+        detail, sessions = self.root / "detail.json", self.root / "sessions.json"
+        with redirect_stdout(self.output):
+            rc = turn_smoke.main(["cell-reset", "--base-url", self.base_url, "--config", str(self.config),
+                             "--cell", "claude-tui", "--cell", "codex-tui", "--cell", "claude-tui",
+                             "--health-detail-output", str(detail), "--sessions-output", str(sessions)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.mutations()), 4)
+        self.assertEqual(json.loads(sessions.read_text()), {"sessions": []})
+        self.assertTrue(all(row["agent_turn_status"] == "idle" for row in json.loads(detail.read_text())["mailboxes"]))
+        self.assertEqual(self.calls[-2][1:], ("/api/health/detail", None))
+        self.assertEqual(self.calls[-1][1:], ("/api/sessions", None))
+
+    def test_cli_unreadable_allowlist_fails_closed(self):
+        for text in ("[", "{}", "agents: []"):
+            with self.subTest(config=text):
+                self.config.write_text(text, encoding="utf-8")
+                with redirect_stdout(self.output):
+                    rc = turn_smoke.main(["cell-reset", "--base-url", self.base_url, "--config", str(self.config),
+                                     "--cell", "claude-tui"])
+                self.assertEqual(rc, 2)
+                self.assertEqual(self.calls, [])
+
+    def deploy_round_trip(self, *, run_all=False):
+        deploy = Path(os.environ.get("DEPLOY_SH_OVERRIDE", ROOT / "scripts/deploy-release.sh")).read_text()
+        names = ["_post_deploy_smoke_check_relay_round_trip", "_post_deploy_smoke_check_durable_record",
+                 "_post_deploy_smoke_run_turn_scenario", "_post_deploy_smoke_check_turn_scenarios"]
+        functions = "\n".join(name + "() {\n" + deploy.split(name + "() {\n", 1)[1].split("\n}\n", 1)[0]
+                              + "\n}" for name in names)
+        release = self.root / "release"
+        (release / "config").mkdir(parents=True)
+        (release / "config/agentdesk.yaml").write_bytes(self.config.read_bytes())
+        (self.root / "detail.json").write_text(json.dumps({"mailboxes": [
+            {"provider": "claude", "channel_id": "222", "has_cancel_token": True,
+             "active_user_message_id": 444, "agent_turn_status": "active"}]}))
+        (self.root / "sessions.json").write_text(json.dumps({"sessions": [
+            {"provider": "claude", "channel_id": "222", "status": "active"}]}))
+        (self.root / "health.json").write_text('{"cluster_standby": false}')
+        (release / "logs").mkdir()
+        (release / "logs/dcserver.stdout.log").write_text("fixture\n")
+        (self.root / "fake_driver.py").write_text('''import argparse, json, sys
+from pathlib import Path
+p = argparse.ArgumentParser()
+for name in ("--filter", "--cell", "--output"):
+    p.add_argument(name)
+a, _ = p.parse_known_args()
+with (Path(__file__).parent / "injected").open("a") as f:
+    f.write(a.filter + "\\n")
+out = Path(a.output)
+out.mkdir(parents=True, exist_ok=True)
+(out / f"report.{a.cell}.json").write_text(json.dumps({"scenarios": [{"id": a.filter,
+    "durable_record_probe": {"status": "evaluated"}}]}))
+''')
+        script = """set -euo pipefail
+REPO=$1; fixture=$2; REL_PORT=$3; ADK_DEFAULT_LOOPBACK=127.0.0.1
+ADK_REL=$fixture/release
+POST_DEPLOY_SMOKE_RELAY_CELL=claude-tui; POST_DEPLOY_SMOKE_CODEX_TURNS_CELL=codex-tui
+POST_DEPLOY_SMOKE_READY=true; POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=''
+POST_DEPLOY_SMOKE_HEALTH_BODY=$fixture/health.json
+POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY=$fixture/detail.json
+POST_DEPLOY_SMOKE_SESSIONS_BODY=$fixture/sessions.json
+POST_DEPLOY_SMOKE_EVIDENCE=$fixture/evidence.log
+POST_DEPLOY_SMOKE_STAMP=fixture; POST_DEPLOY_SMOKE_TMP_DIR=$fixture
+POST_DEPLOY_SMOKE_CLAUDE_TURNS_DEADLINE_S=120; POST_DEPLOY_SMOKE_CODEX_TURNS_DEADLINE_S=150
+POST_DEPLOY_SMOKE_E35_DEADLINE_S=900; POST_DEPLOY_SMOKE_LOG_PATH=$ADK_REL/logs/dcserver.stdout.log
+POST_DEPLOY_SMOKE_LOG_FINGERPRINT_CAP=4096; POST_DEPLOY_SMOKE_TURN_COVERAGE=''
+_post_deploy_smoke_note() { printf '%s\\n' "$1"; }
+_post_deploy_smoke_fail() { printf 'FAIL: %s\\n' "$1"; }
+_post_deploy_smoke_resolve_cluster_standby() { printf false; }
+_post_deploy_smoke_resolve_health_module() { printf true; }
+_post_deploy_smoke_log_identity_and_size() { printf 'fixture 0\\n'; }
+_post_deploy_smoke_log_head_fingerprint() { printf fixture; }
+python3() {
+    if [ "${1:-}" = scripts/e2e/run_tui_relay.py ]; then
+        shift; command python3 "$fixture/fake_driver.py" "$@"; return
+    fi
+    case "${1:-}" in
+        scripts/e2e/post_deploy_turn_smoke.py|*/scripts/e2e/post_deploy_turn_smoke.py)
+            shift
+            command python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, str(Path(sys.argv[1]) / "scripts/e2e")); import post_deploy_turn_smoke as smoke; smoke.cell_driver.lease.DEFAULT_LEASE_DIR = Path(sys.argv[2]) / "leases"; a = sys.argv[3:]; print("relay fixture result=pass") if a[0] == "judge" else None; sys.exit(0 if a[0] == "judge" else smoke.main(a))' "$REPO" "$fixture" "$@"
+            return ;;
+    esac
+    command python3 "$@"
+}
+""" + functions + """
+rc=0
+_post_deploy_smoke_check_relay_round_trip || rc=1
+if [ "$4" = all ]; then
+    _post_deploy_smoke_check_durable_record || rc=1
+    _post_deploy_smoke_check_turn_scenarios || rc=1
+    printf 'COVERAGE=%s\\n' "$POST_DEPLOY_SMOKE_TURN_COVERAGE"
+fi
+exit "$rc"
+"""
+        return subprocess.run(["bash", "-c", script, "fixture", str(ROOT), str(self.root),
+                               str(self.server.server_port), "all" if run_all else "e1"],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_deploy_resets_both_cells_before_first_idle_guard(self):
+        result = self.deploy_round_trip()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.root / "injected").exists(), result.stdout + result.stderr)
+        self.assertEqual(len(self.mutations()), 4)
+        self.assertEqual(self.cleared, {"222", "333"})
+
+    def test_deploy_reset_refusal_stops_injection(self):
+        self.change_on_inspect = 2
+        result = self.deploy_round_trip()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "injected").exists())
+        self.assertFalse(any(c[1] == "/api/discord/send" and c[2]["channel_id"] == "222" for c in self.mutations()))
+
+    def test_codex_partial_reset_failure_preserves_all_claude_scenarios(self):
+        self.release_responses["codex"] = {"released": False, "status": "already_released"}
+        result = self.deploy_round_trip(run_all=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual((self.root / "injected").read_text().splitlines(), ["E-1", "E-35", "E-50"])
+        self.assertIn("COVERAGE=E-50=pass E-51=FAIL", result.stdout)
+        self.assertIsNone(self.identities["codex"])
+        self.assertFalse(self.inflight["333"])
+
+    def test_claude_reset_failure_does_not_block_codex_scenario(self):
+        self.change_provider, self.change_on_inspect = "claude", 2
+        result = self.deploy_round_trip(run_all=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual((self.root / "injected").read_text().splitlines(), ["E-51"])
+        self.assertIn("COVERAGE=E-50=skipped E-51=pass", result.stdout)
+        findings = [line for line in result.stdout.splitlines() if line.startswith("FAIL:")]
+        self.assertEqual(len(findings), 1, result.stdout)
+        self.assertIn("relay E-1: cell-reset refused", findings[0])
+        self.assertIn("relay E-50=skipped: blocked by E-1 FAIL", result.stdout)
+
+    def test_foreign_driver_deploy_logs_existing_skip_without_touching_its_cell(self):
+        with driver.lease.acquire("foreign-driver", cell="claude-tui") as path:
+            held = path.read_bytes()
+            result = self.deploy_round_trip()
+            self.assertEqual(path.read_bytes(), held)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("relay E-1=skipped: foreign active turn on cell", result.stdout)
+        self.assertFalse((self.root / "injected").exists())
+        self.assertFalse(any("/claude/" in c[1] for c in self.calls))
+
+    def test_reset_status_missing_malformed_or_wrong_channel_fails_closed(self):
+        state = self.root / "reset.json"
+        for text in (None, "[", "{}", '{"codex-tui": {"status":"ready","reason":"ok","channel_id":"999"}}'):
+            with self.subTest(state=text):
+                if text is not None:
+                    state.write_text(text)
+                with redirect_stdout(self.output):
+                    rc = turn_smoke.main(["preflight", "--base-url", self.base_url, "--cell", "codex-tui",
+                                          "--channel-id", "333", "--reset-state", str(state)])
+                self.assertEqual(rc, 4)
+                self.assertEqual(self.calls, [])
+
+    def test_normal_preflight_never_mutates(self):
+        self.assertEqual(self.preflight(), 1)
+        self.assertEqual(self.mutations(), [])
+
 
 
 if __name__ == "__main__":
