@@ -310,6 +310,9 @@ src/
 │   └── types.rs
 ├── engine/
 │   ├── ops/
+│   │   ├── db_ops/
+│   │   │   └── tests/
+│   │   │       └── policy_sql_schema_tests.rs
 │   │   ├── exec_ops/
 │   │   │   ├── circuit_evidence_tests.rs
 │   │   │   ├── exec_allowlist_tests.rs
@@ -1668,19 +1671,6 @@ src/
 │   │   │   ├── permit.rs
 │   │   │   ├── permit_tests.rs
 │   │   │   └── policy_tests.rs
-│   │   ├── restart_mode/
-│   │   │   └── protocol_v2/
-│   │   │       ├── fs/
-│   │   │       │   ├── unix.rs
-│   │   │       │   └── unsupported.rs
-│   │   │       ├── phase/
-│   │   │       │   ├── codec.rs
-│   │   │       │   └── reducer.rs
-│   │   │       ├── disposition.rs
-│   │   │       ├── fs.rs
-│   │   │       ├── mod.rs
-│   │   │       ├── phase.rs
-│   │   │       └── values.rs
 │   │   ├── restart_report/
 │   │   │   ├── model/
 │   │   │   │   ├── entry_tests.rs
@@ -2311,6 +2301,7 @@ src/
 │   │   │   ├── rehydration.rs
 │   │   │   ├── rehydration_pending_tests.rs
 │   │   │   ├── relay_ownership.rs
+│   │   │   ├── restore_after_rehydration_tests.rs
 │   │   │   ├── session_rotation_settle.rs
 │   │   │   ├── source_tick.rs
 │   │   │   ├── synthetic_orphan_reclaim.rs
@@ -2664,6 +2655,7 @@ src/
 │   │   │   │   ├── restore_core.rs
 │   │   │   │   ├── restore_legacy_tests.rs
 │   │   │   │   ├── restore_mapping.rs
+│   │   │   │   ├── restore_retry.rs
 │   │   │   │   ├── restore_support.rs
 │   │   │   │   ├── restore_tests.rs
 │   │   │   │   ├── resume_companion_restore_tests.rs

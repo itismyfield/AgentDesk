@@ -814,31 +814,16 @@ test("long turns do not register monitoring or page the deadlock manager", () =>
   assert.equal(state.executions.length, 0);
 });
 
-test("timeouts workspace branch guard module recovers wt branches", () => {
-  const workspace = "/tmp/agentdesk-main";
+test("workspace branch guard stays out of the 5min tick (startup guard owns it)", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
-    dbQuery: createSqlRouter([
-      {
-        match: "SELECT DISTINCT json_extract(metadata, '$.workspace') as ws FROM sessions",
-        result: [{ ws: workspace }]
-      },
-      { match: "SELECT DISTINCT workspace FROM agents WHERE workspace IS NOT NULL AND workspace != ''", result: [] }
-    ]),
-    exec(cmd, args) {
-      assert.equal(cmd, "git");
-      const parsed = JSON.parse(args);
-      if (parsed.includes("branch")) return "wt/feature-1\n";
-      return "";
+    exec(cmd) {
+      assert.fail("5min tick must not shell out to " + cmd);
     }
   });
-
-  policy._section_M();
-
-  assert.deepEqual(
-    state.execCalls.map((call) => JSON.parse(call.args)[2]),
-    ["branch", "stash", "checkout", "pull", "worktree"]
-  );
-  assert.equal(state.deadlockAlerts.length, 1);
+  assert.equal(policy._section_M, undefined);
+  for (const section of ["B", "G", "O"]) policy["_section_" + section] = () => {};
+  policy.onTick5min({});
+  assert.equal(state.execCalls.length, 0);
 });
 
 test("timeouts idle-kill module calls kill-tmux API for expired idle sessions", () => {
