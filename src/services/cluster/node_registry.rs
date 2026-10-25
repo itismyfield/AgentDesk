@@ -318,7 +318,7 @@ fn spawn_heartbeat_loop(
         instance_id.clone(),
         leader_active.clone(),
     );
-    tokio::spawn(async move {
+    crate::services::resident_loops::spawn_resident("cluster_node_heartbeat", async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.tick().await;
         // #3651: throttle for the leader-only stale-GC backpressure yield log.
@@ -437,30 +437,34 @@ fn spawn_stale_claim_owner_reassignment_loop(
     leader_active: Arc<AtomicBool>,
 ) {
     let interval_secs = cluster_config.heartbeat_interval_secs.max(1);
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // #3651: throttle for the backpressure yield log.
-        let mut last_pressure_log = Instant::now() - crate::db::postgres::BACKPRESSURE_LOG_THROTTLE;
-        loop {
-            interval.tick().await;
-            if !leader_active.load(Ordering::Acquire) {
-                continue;
-            }
-            // #3651: this leader-only loop holds the longest-lived background tx
-            // (reassignment + routing CPU), so it yields first under foreground
-            // pool pressure. Skipping is safe — stale claims are reassigned on
-            // the next tick once pressure clears.
-            if crate::db::postgres::background_should_yield(&pool) {
-                if last_pressure_log.elapsed() >= crate::db::postgres::BACKPRESSURE_LOG_THROTTLE {
-                    tracing::warn!(
-                        "[cluster] yielding stale dispatch_outbox claim-owner reassignment to foreground under pool pressure"
-                    );
-                    last_pressure_log = Instant::now();
+    crate::services::resident_loops::spawn_resident(
+        "cluster_stale_claim_owner_reassignment",
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // #3651: throttle for the backpressure yield log.
+            let mut last_pressure_log =
+                Instant::now() - crate::db::postgres::BACKPRESSURE_LOG_THROTTLE;
+            loop {
+                interval.tick().await;
+                if !leader_active.load(Ordering::Acquire) {
+                    continue;
                 }
-                continue;
-            }
-            match crate::services::dispatches::outbox_claiming::reassign_stale_dispatch_outbox_claim_owners_with_cluster_config_pg(
+                // #3651: this leader-only loop holds the longest-lived background tx
+                // (reassignment + routing CPU), so it yields first under foreground
+                // pool pressure. Skipping is safe — stale claims are reassigned on
+                // the next tick once pressure clears.
+                if crate::db::postgres::background_should_yield(&pool) {
+                    if last_pressure_log.elapsed() >= crate::db::postgres::BACKPRESSURE_LOG_THROTTLE
+                    {
+                        tracing::warn!(
+                            "[cluster] yielding stale dispatch_outbox claim-owner reassignment to foreground under pool pressure"
+                        );
+                        last_pressure_log = Instant::now();
+                    }
+                    continue;
+                }
+                match crate::services::dispatches::outbox_claiming::reassign_stale_dispatch_outbox_claim_owners_with_cluster_config_pg(
                 &pool,
                 &cluster_config,
             )
@@ -480,8 +484,9 @@ fn spawn_stale_claim_owner_reassignment_loop(
                     );
                 }
             }
-        }
-    });
+            }
+        },
+    );
 }
 
 async fn mark_stale_worker_nodes_offline(

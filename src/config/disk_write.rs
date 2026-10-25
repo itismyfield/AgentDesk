@@ -1,10 +1,10 @@
 //! Whole-`Config` disk rendering: `Serialize` omits `server.auth_token` and
 //! `discord.bots.*.token`, so writes to the YAML file that holds them put them back.
 
-use super::Config;
+use super::{Config, McpServerConfig};
 use anyhow::{Context, Result, bail};
 use serde_yaml::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Mutable entry for `key` under `parent`, created as null when absent.
 /// A `parent` that is not a mapping is replaced with an empty one.
@@ -148,18 +148,70 @@ fn has_secret(token: &Option<String>) -> bool {
         .is_some_and(|token| !token.trim().is_empty())
 }
 
-/// Refuse to drop a secret the file holds while its owner (the server, or the same
-/// bot name) is still written: that `Config` came from a source that lost it.
-fn check_disk_secrets_kept(path: &Path, config: &Config) -> Result<()> {
+/// The file's own `Config`, before `load` adds runtime defaults; `None` when absent.
+fn read_config_on_disk(path: &Path) -> Result<Option<Config>> {
     let existing = match std::fs::read_to_string(path) {
         Ok(existing) => existing,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| format!("Failed to read config {}", path.display()));
         }
     };
-    let on_disk: Config = serde_yaml::from_str(&existing)
-        .with_context(|| format!("Failed to parse existing config {}", path.display()))?;
+    serde_yaml::from_str(&existing)
+        .map(Some)
+        .with_context(|| format!("Failed to parse existing config {}", path.display()))
+}
+
+/// Drops the MCP server `load` injects when it is unchanged; loading injects it again.
+fn drop_injected_mcp_server(config: &mut Config, injected: Option<(String, McpServerConfig)>) {
+    if let Some((name, server)) = injected
+        && config.mcp_servers.get(&name) == Some(&server)
+    {
+        config.mcp_servers.remove(&name);
+    }
+}
+
+/// `config` without what `load` derived at runtime, so a save writes the file's own form
+/// back and later default changes still apply.
+fn without_runtime_derivations(path: &Path, config: &Config, on_disk: Option<&Config>) -> Config {
+    let mut config = config.clone();
+    drop_injected_mcp_server(&mut config, super::default_memento_mcp_server());
+    let Some(root) = super::runtime_root_for_config_path(path) else {
+        return config;
+    };
+    let file = on_disk.cloned().unwrap_or_default();
+    let resolves_to =
+        |raw: &PathBuf, value: &PathBuf| super::resolve_runtime_path(&root, raw) == *value;
+    for (value, raw) in [
+        (&mut config.policies.dir, &file.policies.dir),
+        (&mut config.data.dir, &file.data.dir),
+        (&mut config.routines.dir, &file.routines.dir),
+    ] {
+        if resolves_to(raw, value) {
+            *value = raw.clone();
+        }
+    }
+    let (raw_dirs, dirs) = (
+        &file.routines.additional_dirs,
+        &config.routines.additional_dirs,
+    );
+    if raw_dirs.len() == dirs.len()
+        && raw_dirs
+            .iter()
+            .zip(dirs)
+            .all(|(raw, value)| resolves_to(raw, value))
+    {
+        config.routines.additional_dirs = raw_dirs.clone();
+    }
+    config
+}
+
+/// Refuse to drop a secret the file holds while its owner (the server, or the same
+/// bot name) is still written: that `Config` came from a source that lost it.
+fn check_disk_secrets_kept(path: &Path, config: &Config, on_disk: Option<&Config>) -> Result<()> {
+    let Some(on_disk) = on_disk else {
+        return Ok(());
+    };
     if has_secret(&on_disk.server.auth_token) && !has_secret(&config.server.auth_token) {
         bail!(
             "config write would drop server.auth_token from {}",
@@ -185,11 +237,13 @@ fn check_disk_secrets_kept(path: &Path, config: &Config) -> Result<()> {
 
 /// YAML text for writing `config` to `path`, checked before anything is written.
 pub(crate) fn render_config_for_path(path: &Path, config: &Config) -> Result<String> {
+    let on_disk = read_config_on_disk(path)?;
+    let config = &without_runtime_derivations(path, config, on_disk.as_ref());
     let rendered = serde_yaml::to_string(&disk_document(config)?)
         .with_context(|| format!("Failed to serialize config for {}", path.display()))?;
     check_reads_back(config, &rendered)
         .map_err(|error| anyhow::anyhow!("Refusing to write config {}: {error}", path.display()))?;
-    check_disk_secrets_kept(path, config)?;
+    check_disk_secrets_kept(path, config, on_disk.as_ref())?;
     Ok(rendered)
 }
 
@@ -199,13 +253,40 @@ pub fn save_to_path(path: &Path, config: &Config) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     if super::config_contains_file_secrets(config) {
-        crate::utils::secret_file::write_secret_file(path, rendered)
+        crate::utils::secret_file::replace_secret_file(path, rendered)
             .with_context(|| format!("Failed to write config {}", path.display()))?;
     } else {
-        std::fs::write(path, rendered)
+        replace_file(path, &rendered)
             .with_context(|| format!("Failed to write config {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Renames a fully written sibling over `path` (through a symlink), keeping its mode,
+/// so a crash leaves the old file or the new one, never a truncated one.
+fn replace_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let dir = target
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temp = tempfile::Builder::new()
+        .prefix(".agentdesk-config-")
+        .tempfile_in(dir)?;
+    match std::fs::metadata(&target) {
+        Ok(existing) => temp.as_file().set_permissions(existing.permissions())?,
+        #[cfg(unix)]
+        Err(_) => {
+            use std::os::unix::fs::PermissionsExt;
+            temp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o644))?;
+        }
+        #[cfg(not(unix))]
+        Err(_) => {}
+    }
+    std::io::Write::write_all(&mut temp, contents.as_bytes())?;
+    temp.as_file().sync_all()?;
+    temp.persist(&target).map(drop).map_err(|error| error.error)
 }
 
 #[cfg(test)]
@@ -302,5 +383,75 @@ mod tests {
         let saved = crate::config::load_from_path(&path).unwrap();
         assert_eq!(saved.server.auth_token.as_deref(), Some(SERVER_TOKEN));
         assert!(saved.discord.bots.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_replaces_the_file_instead_of_rewriting_it_in_place() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        write_secret_config(&path, "");
+        let before = std::fs::metadata(&path).unwrap().ino();
+        let mut config = crate::config::load_from_path(&path).unwrap();
+        config.shared_prompt = Some("/prompts/shared.md".to_string());
+
+        save_to_path(&path, &config).unwrap();
+
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), before);
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["agentdesk.yaml"], "no temp file may be left behind");
+        assert_secrets_on_disk(&path);
+    }
+
+    #[test]
+    fn save_writes_back_the_relative_dirs_the_file_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        write_secret_config(&path, "policies:\n  dir: policies\ndata:\n  dir: data\n");
+        let mut config = crate::config::load_from_path(&path).unwrap();
+        assert!(
+            config.data.dir.is_absolute(),
+            "load resolves the dir against the runtime root"
+        );
+        config.shared_prompt = Some("/prompts/shared.md".to_string());
+
+        save_to_path(&path, &config).unwrap();
+
+        let raw: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["policies"]["dir"].as_str(), Some("policies"));
+        assert_eq!(raw["data"]["dir"].as_str(), Some("data"));
+        assert_eq!(
+            crate::config::load_from_path(&path).unwrap().data.dir,
+            config.data.dir
+        );
+    }
+
+    #[test]
+    fn an_unchanged_injected_mcp_server_is_not_written() {
+        let server = McpServerConfig {
+            url: "https://memento.example/mcp".to_string(),
+            auth: None,
+        };
+        let mut edited = server.clone();
+        edited.url = "https://elsewhere.example/mcp".to_string();
+        let injected = || Some(("memento".to_string(), server.clone()));
+        let mut config = Config::default();
+
+        config
+            .mcp_servers
+            .insert("memento".to_string(), server.clone());
+        drop_injected_mcp_server(&mut config, injected());
+        assert!(config.mcp_servers.is_empty());
+
+        config
+            .mcp_servers
+            .insert("memento".to_string(), edited.clone());
+        drop_injected_mcp_server(&mut config, injected());
+        assert_eq!(config.mcp_servers.get("memento"), Some(&edited));
     }
 }

@@ -247,6 +247,7 @@ async fn assemble(
         }
         json["rate_limit_dispatch_gate"] = gate;
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
+        json["resident_loops"] = crate::services::resident_loops::health_json();
         json["release_source"] = release_source;
         attach_runtime_profile(&mut json, &state.config);
         json["intake_routing"] =
@@ -342,6 +343,7 @@ async fn assemble(
             json["opencode"] = opencode_block;
         }
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
+        json["resident_loops"] = crate::services::resident_loops::health_json();
         json["release_source"] = release_source;
         attach_runtime_profile(&mut json, &state.config);
         json["intake_routing"] =

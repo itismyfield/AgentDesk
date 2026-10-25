@@ -43,6 +43,26 @@ pub(crate) fn write_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> io::
     write_secret_file_after_parent(path, contents)
 }
 
+/// [`write_secret_file`] by renaming a fully written 0600 sibling over `path` (through a
+/// symlink), so readers never see a truncated file.
+pub(crate) fn replace_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    ensure_secret_parent(&target)?;
+    let dir = target
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temp = tempfile::Builder::new()
+        .prefix(".agentdesk-secret-")
+        .tempfile_in(dir)?;
+    #[cfg(unix)]
+    temp.as_file()
+        .set_permissions(fs::Permissions::from_mode(SECRET_FILE_MODE))?;
+    temp.write_all(contents.as_ref())?;
+    temp.as_file().sync_all()?;
+    temp.persist(&target).map(drop).map_err(|error| error.error)
+}
+
 /// Write owner-only secret material without changing the parent directory mode.
 /// Use this for root-level artifacts where hardening the containing runtime
 /// directory would have a broader operational effect than intended.

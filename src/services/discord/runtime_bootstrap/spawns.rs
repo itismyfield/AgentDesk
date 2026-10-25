@@ -54,7 +54,8 @@ pub(super) fn run_bot_spawn_reachability_observation(
 ) {
     let shared = shared_for_tmux.clone();
     let provider = provider_for_setup.clone();
-    tokio::spawn(async move {
+    let name = format!("{}:reachability_observation", provider.as_str());
+    crate::services::resident_loops::spawn_resident(name, async move {
         let cadence = std::time::Duration::from_secs(
             health::reachability::observation::REACHABILITY_OBSERVATION_INTERVAL_SECS,
         );
@@ -214,7 +215,8 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
 ) {
     let shared_for_deferred = shared_for_tmux.clone();
     let provider_for_deferred = provider_for_setup.clone();
-    tokio::spawn(async move {
+    let name = format!("{}:deferred_restart_poller", provider_for_deferred.as_str());
+    crate::services::resident_loops::spawn_resident(name, async move {
         loop {
             tokio::time::sleep(DEFERRED_RESTART_POLL_INTERVAL).await;
             // Quick-exit restart (#2713): dcserver no longer waits
@@ -363,7 +365,8 @@ pub(super) fn run_bot_spawn_skills_hot_reload(
 ) {
     let shared_for_skills = shared_for_tmux.clone();
     let provider_for_skills = provider_for_setup.clone();
-    tokio::spawn(async move {
+    let name = format!("{}:skills_hot_reload", provider_for_skills.as_str());
+    crate::services::resident_loops::spawn_resident(name, async move {
         let mut last_fingerprint: (usize, u64) = (0, 0); // (file_count, max_mtime_epoch)
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
@@ -409,7 +412,7 @@ pub(super) fn run_bot_spawn_skills_hot_reload(
 /// Background: periodic cleanup for stale Discord upload files. No captures;
 /// behavior-preserving extraction.
 pub(super) fn run_bot_spawn_upload_cleanup() {
-    tokio::spawn(async move {
+    crate::services::resident_loops::spawn_resident("discord_upload_cleanup", async move {
         loop {
             tokio::time::sleep(UPLOAD_CLEANUP_INTERVAL).await;
             cleanup_old_uploads(UPLOAD_MAX_AGE);
@@ -462,7 +465,7 @@ pub(super) fn run_bot_spawn_periodic_catch_up(
 /// sessions keep DB ownership. Behavior-preserving extraction.
 pub(super) fn run_bot_spawn_stale_session_gc(shared_clone: &Arc<SharedData>) {
     let shared_for_session_gc = shared_clone.clone();
-    tokio::spawn(async move {
+    crate::services::resident_loops::spawn_resident("discord_stale_session_gc", async move {
         // Run every 10 minutes, initial delay 2 minutes
         tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
         loop {
@@ -476,7 +479,7 @@ pub(super) fn run_bot_spawn_stale_session_gc(shared_clone: &Arc<SharedData>) {
 #[cfg(unix)]
 pub(super) fn run_bot_spawn_dead_tmux_reaper(shared_clone: &Arc<SharedData>) {
     let shared_for_reaper = shared_clone.clone();
-    tokio::spawn(async move {
+    crate::services::resident_loops::spawn_resident("discord_dead_tmux_reaper", async move {
         // Initial delay: let startup recovery finish first
         tokio::time::sleep(tokio::time::Duration::from_secs(90)).await;
         loop {
