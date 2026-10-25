@@ -1584,6 +1584,10 @@ _restart_persistence_proof_class() {
     printf 'legacy-index'
     return 0
   fi
+  # Snapshot only a failed check; diagnostics cannot change proof authority.
+  # shellcheck source=/dev/null
+  ( . "$(dirname "${BASH_SOURCE[0]}")/lib/restart_persistence_diag.sh" \
+    && _restart_persistence_failure_snapshot "$root" "$expected_nonce" ) 2>/dev/null || true
   return 1
 }
 
@@ -1716,6 +1720,8 @@ wait_for_restart_persistence_or_fail() {
   clear_restart_drain_mode "$runtime_root" "$expected_nonce" || true
   echo "✗ [gate] ${scope} restart persistence was not acknowledged within ${max_wait}s" >&2
   echo "  Cleared restart_pending and refused bootout: the in-flight delivery frontier is not durable." >&2
+  printf '  restart persistence marker_root=%q nonce=%s\n%s\n' "$root" "$expected_nonce" \
+    "${proof_class:-  last proof observation: unavailable (no completed check or diagnostic helper failed)}" >&2 || true
   return 1
 }
 

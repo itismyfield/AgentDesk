@@ -459,3 +459,85 @@ async fn restore_waits_on_the_run_token_before_locking_the_run_row_pg() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+async fn seed_sandbox_entry(pool: &PgPool, entry_id: &str, card_id: &str, issue_number: i64) {
+    crate::pipeline::ensure_loaded();
+    let status = crate::pipeline::get().dispatchable_states()[0].to_string();
+    sqlx::query(
+        "INSERT INTO kanban_cards
+            (id, title, status, assigned_agent_id, repo_id, github_issue_number, metadata)
+         VALUES ($1, $1, $3, 'agent-1', 'repo-1', $2,
+                 '{\"sandbox_preflight\":true,\"production_mutation_allowed\":false}'::jsonb)",
+    )
+    .bind(card_id)
+    .bind(issue_number)
+    .bind(status)
+    .execute(pool)
+    .await
+    .expect("seed sandbox card");
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status)
+         VALUES ($1, 'run-1', $2, 'agent-1', 'pending')",
+    )
+    .bind(entry_id)
+    .bind(card_id)
+    .execute(pool)
+    .await
+    .expect("seed pending entry");
+}
+
+/// Contract: restoring a cancelled run reopens only live cards; a card deleted after the
+/// cancel keeps its entry skipped and gets no new dispatch, even on the next activation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_keeps_a_deleted_cards_entry_skipped_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = setup_pool(&pg_db, "active").await;
+    seed_sandbox_entry(&pool, "entry-live", "card-live", 301).await;
+    seed_sandbox_entry(&pool, "entry-gone", "card-gone", 302).await;
+    // An earlier cancelled dispatch makes restore re-dispatch this entry instead of reopening it.
+    sqlx::raw_sql(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+         VALUES ('d-old', 'card-gone', 'agent-1', 'implementation', 'cancelled', 'old');
+         INSERT INTO auto_queue_entry_dispatch_history (entry_id, dispatch_id)
+         VALUES ('entry-gone', 'd-old');",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed dispatch history");
+    let app = test_router(pool.clone());
+    let (status, body) = request(&app, Method::POST, "/queue/cancel?run_id=run-1", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        crate::db::kanban_cards::soft_delete_card_pg(&pool, "card-gone").await,
+        Ok(crate::db::kanban_cards::CardDeleteOutcome::Deleted)
+    );
+
+    let (status, body) = request(&app, Method::POST, "/queue/runs/run-1/restore", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(run_status(&pool).await, "active", "{body}");
+    let next = json!({"run_id": "run-1", "repo": "repo-1", "agent_id": "agent-1"});
+    let (status, body) = request(&app, Method::POST, "/queue/dispatch-next", next).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let entries: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, status FROM auto_queue_entries WHERE run_id = 'run-1' ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read entries");
+    let expected = vec![
+        ("entry-gone".to_string(), "skipped".to_string()),
+        ("entry-live".to_string(), "dispatched".to_string()),
+    ];
+    assert_eq!(entries, expected, "{body}");
+    assert_eq!(
+        scalar_i64(
+            &pool,
+            "SELECT COUNT(*)::BIGINT FROM task_dispatches WHERE kanban_card_id = 'card-gone'",
+        )
+        .await,
+        1
+    );
+    pool.close().await;
+    pg_db.drop().await;
+}

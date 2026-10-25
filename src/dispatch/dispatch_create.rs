@@ -594,7 +594,7 @@ async fn create_dispatch_core_internal(
         sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
             "SELECT status, repo_id, assigned_agent_id
              FROM kanban_cards
-             WHERE id = $1",
+             WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(kanban_card_id)
         .fetch_optional(pg_pool)
