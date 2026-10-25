@@ -1,3 +1,5 @@
+use super::*;
+
 #[tokio::test(flavor = "current_thread")]
 async fn queued_codex_v2_real_entry_uses_permit_adapter_and_native_receipt_pg() {
     use std::os::unix::fs::MetadataExt;

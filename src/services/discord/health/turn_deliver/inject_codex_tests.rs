@@ -467,7 +467,8 @@ pub(super) struct QueuedCodex {
     pub(super) head: crate::services::turn_orchestrator::Intervention,
 }
 
-include!("inject_codex_v2_tests.rs");
+#[path = "inject_codex_v2_tests.rs"]
+mod v2_tests;
 
 impl QueuedCodex {
     pub(super) async fn new(channel: u64) -> Self {

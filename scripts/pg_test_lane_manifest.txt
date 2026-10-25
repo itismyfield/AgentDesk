@@ -171,6 +171,7 @@ src/services/discord/health/turn_deliver/inject/herdr_tests.rs
 src/services/discord/health/turn_deliver/inject/queued_provider/history_pg_tests.rs
 src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs
 src/services/discord/health/turn_deliver/inject_codex_tests.rs
+src/services/discord/health/turn_deliver/inject_codex_v2_tests.rs
 src/services/discord/health/turn_deliver/inject_tests.rs
 src/services/discord/herdr_terminate/http_force_e08_tests.rs
 src/services/discord/herdr_terminate/http_force_forward_tests.rs
@@ -607,6 +608,7 @@ services::discord::health::turn_deliver::inject::first_input::pg_tests
 services::discord::health::turn_deliver::inject::herdr::tests
 services::discord::health::turn_deliver::inject::queued_provider::history_pg_tests
 services::discord::health::turn_deliver::inject_codex_tests
+services::discord::health::turn_deliver::inject_codex_tests::v2_tests
 services::discord::health::turn_deliver::inject_tests
 services::discord::health::turn_deliver::inject_tests::turn_mode_reading
 services::discord::herdr_terminate::exit_tests
@@ -1892,6 +1894,7 @@ services::discord::health::turn_deliver::inject_codex_tests::queued_codex_receip
 services::discord::health::turn_deliver::inject_codex_tests::queued_codex_same_owner_serializes_two_inputs_across_effect_pg
 services::discord::health::turn_deliver::inject_codex_tests::queued_codex_unknown_restart_waits_for_complete_receipt_without_retyping_pg
 services::discord::health::turn_deliver::inject_codex_tests::queued_codex_v2_compat_clear_keeps_original_and_marker_pg
+services::discord::health::turn_deliver::inject_codex_tests::v2_tests::queued_codex_v2_real_entry_uses_permit_adapter_and_native_receipt_pg
 services::discord::health::turn_deliver::inject_tests::a_busy_pane_takes_the_input_whoever_holds_the_channel_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
