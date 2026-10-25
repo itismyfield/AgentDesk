@@ -89,8 +89,10 @@ compile-fail doctests. The nightly macOS and Windows lanes and `CI macOS Trusted
 run `scripts/ci/nextest-native.sh`: native source compare, plan, preflight, run
 record and audit on one worker. Nightly plans the non-PG lib tests that
 `scripts/ci/pg_test_classifier.py` selects; trusted plans the selector union in
-`scripts/ci/macos-trusted-selectors.txt`. Both run the non-lib targets with
-`cargo test` and the non-Postgres skips.
+`scripts/ci/macos-trusted-selectors.txt`. A selector row ending in `| exact <ids file>`
+must pick exactly the runnable ids that file lists, so the macOS-only
+`herdr_loaded_image_macos_` tests fail selection if one goes missing or appears.
+Both run the non-lib targets with `cargo test` and the non-Postgres skips.
 
 A broader sweep was attempted with:
 

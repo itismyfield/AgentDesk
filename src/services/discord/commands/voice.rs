@@ -8,6 +8,7 @@ use crate::voice::barge_in::BargeInSensitivity;
 use crate::voice::commands::{VoiceCommand, parse_voice_command};
 
 mod alert;
+mod sensitivity;
 pub(in crate::services::discord) use alert::notify_voice_alert;
 #[cfg(test)]
 use alert::voice_notify_should_send;
@@ -25,13 +26,6 @@ impl VoiceSensitivityChoice {
         match self {
             Self::Normal => BargeInSensitivity::Normal,
             Self::Conservative => BargeInSensitivity::Conservative,
-        }
-    }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Normal => "normal",
-            Self::Conservative => "conservative",
         }
     }
 }
@@ -56,24 +50,16 @@ pub(in crate::services::discord) async fn cmd_voice(_ctx: Context<'_>) -> Result
     Ok(())
 }
 
-/// /vc_join — Join the caller's current voice channel and start WAV capture.
-#[poise::command(slash_command, rename = "vc_join")]
-pub(in crate::services::discord) async fn cmd_vc_join(ctx: Context<'_>) -> Result<(), Error> {
-    voice_join_impl(ctx).await
-}
-
 /// /voice join — Join the caller's current voice channel and start WAV capture.
 #[poise::command(slash_command, rename = "join")]
 async fn cmd_voice_join(ctx: Context<'_>) -> Result<(), Error> {
-    voice_join_impl(ctx).await
-}
-
-async fn voice_join_impl(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
         return Ok(());
     }
+    // The voice gateway handshake can outlast Discord's 3-second ack window.
+    ctx.defer().await?;
 
     if !ctx.data().voice_config.enabled {
         ctx.say(voice_disabled_guidance()).await?;
@@ -125,19 +111,9 @@ async fn voice_join_impl(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// /vc_leave — Leave the current guild voice channel and flush active WAV capture.
-#[poise::command(slash_command, rename = "vc_leave")]
-pub(in crate::services::discord) async fn cmd_vc_leave(ctx: Context<'_>) -> Result<(), Error> {
-    voice_leave_impl(ctx).await
-}
-
 /// /voice leave — Leave the current guild voice channel and flush active WAV capture.
 #[poise::command(slash_command, rename = "leave")]
 async fn cmd_voice_leave(ctx: Context<'_>) -> Result<(), Error> {
-    voice_leave_impl(ctx).await
-}
-
-async fn voice_leave_impl(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
@@ -255,8 +231,13 @@ async fn cmd_voice_sensitivity(
         .voice_barge_in
         .set_sensitivity(mode.sensitivity())
         .await;
-    ctx.say(format!("Voice barge-in sensitivity: {}.", mode.as_str()))
-        .await?;
+    let barge_in = &ctx.data().voice_config.barge_in;
+    let reply = sensitivity::reply(
+        mode.sensitivity(),
+        barge_in.sensitivity,
+        barge_in.conservative_ttl_secs,
+    );
+    ctx.say(reply).await?;
     Ok(())
 }
 

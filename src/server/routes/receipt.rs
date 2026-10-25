@@ -502,7 +502,6 @@ fn parse_token_analytics_fresh_param(value: Option<&str>) -> bool {
 mod tests {
     use super::*;
     use crate::receipt::{ReceiptData, ReceiptStats, TokenAnalyticsData, TokenAnalyticsSummary};
-    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static TEST_PERIOD_SUFFIX: AtomicUsize = AtomicUsize::new(0);
@@ -519,8 +518,6 @@ mod tests {
             stats: ReceiptStats {
                 total_messages: 0,
                 total_sessions: 0,
-                per_provider: HashMap::new(),
-                per_provider_agents: HashMap::new(),
             },
             providers: Vec::new(),
             agents: Vec::new(),

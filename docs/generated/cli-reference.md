@@ -12,7 +12,7 @@ subcommand starts the server.
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
 - Top-level commands: 56
-- Commands including nested subcommands: 101
+- Commands including nested subcommands: 102
 
 ## Global options
 
@@ -127,6 +127,7 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk herdr status`](#agentdesk-herdr-status) | Each local Herdr row, its pane as read now and the held inputs; changes nothing |  |
 | [`agentdesk herdr retire`](#agentdesk-herdr-retire) | Retire a channel's execution once its pane is gone or only its shell is left |  |
 | [`agentdesk herdr terminate`](#agentdesk-herdr-terminate) | Ask the local server to close one execution's pane and retire it; needs the live switch |  |
+| [`agentdesk herdr probe-user-default`](#agentdesk-herdr-probe-user-default) | Check the execution user's own herdr server once; reads no AgentDesk config or database |  |
 
 ## Commands
 
@@ -889,7 +890,7 @@ Usage: `agentdesk query all`
 
 Phase-gate violation snapshot (issue #2657).
 
-Read-only inspector that flags auto-queue entries dispatched at a higher `batch_phase` than the run's live phase pointer. Mirrors the `/adk-phase` Discord slash command.
+Read-only inspector that flags auto-queue entries dispatched at a higher `batch_phase` than the run's live phase pointer. Same data as `GET /api/queue/phase-gates/violations`.
 
 Usage: `agentdesk phase [COMMAND] [OPTIONS]`
 
@@ -1260,6 +1261,7 @@ Subcommands:
 - `status` — Each local Herdr row, its pane as read now and the held inputs; changes nothing
 - `retire` — Retire a channel's execution once its pane is gone or only its shell is left
 - `terminate` — Ask the local server to close one execution's pane and retire it; needs the live switch
+- `probe-user-default` — Check the execution user's own herdr server once; reads no AgentDesk config or database
 
 ### `agentdesk herdr status`
 
@@ -1288,3 +1290,13 @@ Usage: `agentdesk herdr terminate [OPTIONS]`
 | `--session-key <SESSION_KEY>` (required) | `String` |  | Session key of the execution's row |
 | `--execution-nonce <EXECUTION_NONCE>` (required) | `String` |  | Execution nonce the row must still record |
 | `--reason <REASON>` (required) | `String` |  | Why it is terminated, kept in the server's result log |
+
+### `agentdesk herdr probe-user-default`
+
+Check the execution user's own herdr server once; reads no AgentDesk config or database
+
+Usage: `agentdesk herdr probe-user-default [OPTIONS]`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `--socket <SOCKET>` | `std::path::PathBuf` |  | Absolute socket path; defaults to $HOME/.config/herdr/herdr.sock |

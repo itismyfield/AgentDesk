@@ -568,15 +568,17 @@ def cmd_audit(args):
 
 
 def load_selectors(path):
-    """[(filter, skips)] from `<filter> | <skip> <skip>…` rows, libtest substring semantics."""
+    """[(filter, skips, exact)] from `<filter> | <skip> <skip>… [| exact <ids file>]` rows, libtest substring
+    semantics; an exact row must pick precisely the runnable ids its file lists."""
     rows = []
     for n, line in enumerate(Path(path).read_text().splitlines(), 1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
-        name, sep, skips = (part.strip() for part in line.partition("|"))
-        if not sep or not name or " " in name:
-            raise PlanError(f"{path}:{n}: need `<filter> | <skip substrings>`")
-        rows.append((name, tuple(skips.split())))
+        name, sep, rest = (part.strip() for part in line.partition("|"))
+        skips, pinned, exact = (part.strip() for part in rest.partition("|"))
+        if not sep or not name or " " in name or (pinned and not re.fullmatch(r"exact \S+", exact)):
+            raise PlanError(f"{path}:{n}: need `<filter> | <skip substrings> [| exact <ids file>]`")
+        rows.append((name, tuple(skips.split()), exact.split()[1] if pinned else None))
     if not rows:
         raise PlanError(f"{path} selects nothing")
     return rows
@@ -586,10 +588,17 @@ def cmd_select(args):
     runnable, ignored = load_universe(args.universe)
     names = {t[1] for t in runnable | ignored}
     rows = load_selectors(args.selectors)
-    dead = [f for f, skips in rows if not any(f in n and not any(s in n for s in skips) for n in names)]
+    hits = {f: {n for n in names if f in n and not any(s in n for s in skips)} for f, skips, _ in rows}
+    dead = [f for f, _, _ in rows if not hits[f]]
     if dead:
         raise PlanError(f"selectors match no listed test: {dead}")
-    picked = sorted(n for n in names if any(f in n and not any(s in n for s in skips) for f, skips in rows))
+    for f, _, exact in (row for row in rows if row[2]):
+        want = {line.strip() for line in Path(exact).read_text().splitlines() if line.strip()}
+        unrun = hits[f] & {t[1] for t in ignored}
+        if hits[f] != want or unrun:
+            raise PlanError(f"selector {f!r} must pick exactly the runnable ids of {exact}: missing "
+                            f"{sorted(want - hits[f])}, extra {sorted(hits[f] - want)}, ignored {sorted(unrun)}")
+    picked = sorted(set().union(*hits.values()))
     Path(args.json_out).write_text(json.dumps({"selected": picked}, indent=0) + "\n")
     print(f"selected {len(picked)} of {len(names)} listed tests with {len(rows)} selectors")
     return 0

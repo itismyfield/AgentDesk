@@ -24,7 +24,7 @@ use self::render_prompt::render_prompt_manifest_report;
 use self::render_recovery::render_recovery_report;
 use self::render_session::render_session_report;
 use super::super::formatting::send_long_message_ctx;
-use super::super::{Context, Error};
+use super::super::{Context, Error, check_auth};
 use crate::db::prompt_manifests::fetch_prompt_manifest;
 use crate::services::observability::recovery_audit::fetch_recovery_audit;
 use crate::services::provider::ProviderKind;
@@ -68,6 +68,16 @@ async fn cmd_adk_inspect(
     #[description = "View: last / session / prompt / context / recovery"] view: InspectView,
 ) -> Result<(), Error> {
     let user_name = &ctx.author().name;
+    if !check_auth(
+        ctx.author().id,
+        user_name,
+        &ctx.data().shared,
+        &ctx.data().token,
+    )
+    .await
+    {
+        return Ok(());
+    }
     log_command_received!(
         ctx.channel_id().get(),
         user_name,

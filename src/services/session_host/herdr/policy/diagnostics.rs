@@ -33,11 +33,13 @@ pub(crate) fn checker(socket: &Path, stdout: &[u8], stderr: &[u8]) {
     }
 }
 
+/// Keeps the last observation for health and doctor and returns it, so every surface shows the
+/// same reason and action.
 pub(crate) fn record(
     socket: &Path,
     cache: &ProofCache,
     result: &Result<NextRestartProof, Unverified>,
-) {
+) -> Value {
     let (ready, startup, reason, action, witness) = match result {
         Ok(proof) => {
             let startup = cache.startup_for(proof.witness()).ok().flatten().is_some();
@@ -59,6 +61,20 @@ pub(crate) fn record(
             match reason {
                 Unverified::ResumeEnabled => "next_restart_resumes".into(),
                 Unverified::Ambiguous => "next_restart_policy_ambiguous".into(),
+                #[cfg(target_os = "macos")]
+                Unverified::ImageChangedSinceStart => {
+                    "next_restart_image_changed_since_start".into()
+                }
+                #[cfg(target_os = "macos")]
+                Unverified::ImageTimeAmbiguous => "next_restart_image_time_ambiguous".into(),
+                #[cfg(target_os = "macos")]
+                Unverified::ImageFilesystemUnsupported => {
+                    "next_restart_image_filesystem_unsupported".into()
+                }
+                #[cfg(target_os = "macos")]
+                Unverified::ImageLayoutUnsupported => {
+                    "next_restart_image_layout_unsupported".into()
+                }
                 _ => format!("next_restart_policy_unverified:{reason:?}"),
             },
             match reason {
@@ -68,14 +84,33 @@ pub(crate) fn record(
                 Unverified::Unsupported => {
                     "Use a verified herdr 0.9.3 / protocol 22 server on the execution node, then retry."
                 }
+                Unverified::Identity if !super::peer::SUPPORTED => {
+                    "This platform has no loaded-image adapter, so a user-default server cannot be verified here; keep legacy_dedicated."
+                }
                 Unverified::Identity => {
                     "Verify the execution node's loaded executable identity; this platform may remain Unverified. A pathname stat is insufficient."
+                }
+                #[cfg(target_os = "macos")]
+                Unverified::ImageChangedSinceStart => {
+                    "The herdr executable changed after this server process started (install, upgrade, permission or xattr change). Waiting, consent retry or an AgentDesk restart cannot clear this for the same server; the execution node needs a herdr server started after the executable's last change. AgentDesk never restarts it; held inputs stay preserved."
+                }
+                #[cfg(target_os = "macos")]
+                Unverified::ImageTimeAmbiguous => {
+                    "The herdr executable's change time falls inside the server's start microsecond, so its order is unknown; this is not proof of a later change. A herdr server started after the executable's last change clears it; AgentDesk never restarts it; held inputs stay preserved."
+                }
+                #[cfg(target_os = "macos")]
+                Unverified::ImageFilesystemUnsupported => {
+                    "The herdr executable is on a filesystem other than APFS, whose change times cannot prove it is unchanged since the server started. Install herdr on APFS or keep legacy_dedicated."
+                }
+                #[cfg(target_os = "macos")]
+                Unverified::ImageLayoutUnsupported => {
+                    "The herdr server is not a native arm64 single-architecture image (universal/fat or x86_64 are not supported yet). Use a native arm64 herdr build or keep legacy_dedicated."
                 }
                 Unverified::Ambiguous => {
                     "Normalize HOME/XDG/HERDR_CONFIG_PATH on the execution node so the actual default config and selected socket are unambiguous, then retry."
                 }
                 Unverified::ResumeEnabled => {
-                    "Review the owner consent card or explicitly set session.resume_agents_on_restore=false in the execution user's config, then retry."
+                    "The execution user's herdr resumes agents on restore. Owner consent may offer a card if its preview succeeds, or explicitly set session.resume_agents_on_restore=false in that config, then retry."
                 }
                 _ => {
                     "Read the bounded checker diagnostics, repair the execution user's full config or permissions, then retry. No automatic restart or config fix is performed."
@@ -84,14 +119,25 @@ pub(crate) fn record(
             String::new(),
         ),
     };
+    let value = json!({"next_restart_ready": ready,
+    "startup_proof": startup, "reason": reason, "action": action, "witness": witness,
+    "observation": "last_check_only; a fresh create rechecks at its fence, while existing input mutations compare only the recorded server witness"});
     if let Ok(mut observed) = OBSERVED.get_or_init(Mutex::default).lock() {
-        observed.policy.insert(
-            socket.into(),
-            json!({"next_restart_ready": ready,
-            "startup_proof": startup, "reason": reason, "action": action, "witness": witness,
-            "observation": "last_check_only; revalidated at each mutation/create fence"}),
-        );
+        observed.policy.insert(socket.into(), value.clone());
     }
+    value
+}
+
+/// One next-restart check of `socket` with a fresh cache; it writes no config or file and starts no server.
+#[cfg(unix)]
+pub(crate) async fn probe(socket: &Path) -> Result<Value, String> {
+    let source = super::super::launch_host::probe_source(socket)?;
+    let cache = ProofCache::default();
+    let result = cache.next_restart(source, &super::LocalChecker).await;
+    let mut value = record(socket, &cache, &result);
+    value["socket"] = socket.display().to_string().into();
+    value["observation"] = "probe_once; nothing outlives this process".into();
+    Ok(value)
 }
 
 pub(crate) fn snapshot(socket: &Path) -> Value {

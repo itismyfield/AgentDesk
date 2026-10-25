@@ -738,6 +738,22 @@ class FastCheckCiWiringTests(unittest.TestCase):
         selectors = (REPO_ROOT / "scripts/ci/macos-trusted-selectors.txt").read_text(encoding="utf-8")
         self.assertIn(line, selectors.splitlines())
 
+    def test_trusted_macos_exact_lanes_match_the_macos_source_inventory(self) -> None:
+        # The trusted run is not a PR check, so a stale ids file must already fail here, on Linux.
+        self.assert_trusted_hosted_selector(
+            "herdr_loaded_image_macos_ | | exact scripts/ci/herdr_loaded_image_macos_ids.txt")
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import nextest_ci
+        import rust_test_sources
+        macos = rust_test_sources.compiled_lib_tests(REPO_ROOT, "macos")
+        rows = [row for row in nextest_ci.load_selectors(REPO_ROOT / "scripts/ci/macos-trusted-selectors.txt") if row[2]]
+        self.assertTrue(rows)
+        for name, skips, exact in rows:
+            with self.subTest(selector=name):
+                want = set((REPO_ROOT / exact).read_text(encoding="utf-8").split())
+                self.assertEqual({t for t in macos if name in t and not any(s in t for s in skips)}, want)
+                self.assertFalse(want & rust_test_sources.compiled_lib_tests(REPO_ROOT, "linux"))
+
     def test_trusted_macos_hosted_lane_runs_single_message_panel_tests(self) -> None:
         self.assert_trusted_hosted_selector("single_message_panel::tests | _pg pg_ postgres")
 

@@ -129,6 +129,13 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
         wire::decode_reply(&reply).map_err(HerdrTransportError::AfterWrite)
     }
 
+    /// The peer's exec generation over a connection that carries no request.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn peer_generation(&self) -> Result<provenance::PeerToken, RestoreUnverified> {
+        let dialled = self.dial().map_err(|_| RestoreUnverified::NoPeer)?;
+        provenance::socket_peer_token(&dialled.stream).ok_or(RestoreUnverified::NoPeer)
+    }
+
     fn attempt(&self, call: &HerdrCall) -> (HerdrOutcome, Witnessed) {
         match self.dial() {
             Ok(dialled) => {

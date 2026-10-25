@@ -38,6 +38,19 @@ pub(crate) enum Unverified {
     Timeout,
     Diagnostics,
     Identity,
+    /// The mapped executable's inode changed after this server process started; only the
+    /// macOS adapter judges change time and layout, so these causes exist only there.
+    #[cfg(target_os = "macos")]
+    ImageChangedSinceStart,
+    /// The executable changed within the start microsecond, so its order is unknown.
+    #[cfg(target_os = "macos")]
+    ImageTimeAmbiguous,
+    /// The mapped executable lives on a filesystem whose timestamps are not trusted here.
+    #[cfg(target_os = "macos")]
+    ImageFilesystemUnsupported,
+    /// The process image is not a native arm64 single-architecture mapping.
+    #[cfg(target_os = "macos")]
+    ImageLayoutUnsupported,
     Cache,
 }
 

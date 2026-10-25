@@ -265,7 +265,7 @@ mod launch_env_tests {
 #[cfg(unix)]
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
 
-/// Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var.
+/// Global runtime debug flag — set by COKACDIR_DEBUG=1 at startup or toggled by the `!debug` text command.
 static DEBUG_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Initialize debug flag from environment variable (call once at startup).

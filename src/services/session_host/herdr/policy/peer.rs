@@ -6,14 +6,14 @@ use std::time::SystemTime;
 
 use super::super::contract::{ServerHello, ServerWitness};
 use super::super::model::{HERDR_PROTOCOL, VERIFIED_HERDR_VERSIONS};
-use super::super::provenance::{self, ProcessStart, StartIdentity};
+use super::super::provenance::{self, PeerToken, ProcessStart, StartIdentity};
 use super::PeerSource;
 use super::Unverified;
 use super::file::{self, FileToken};
 
 #[path = "loaded_image.rs"]
 mod loaded_image;
-pub(crate) use loaded_image::LoadedImage;
+pub(crate) use loaded_image::{LoadedImage, SUPPORTED};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PeerEnvironment {
@@ -26,8 +26,9 @@ pub(crate) struct PeerEnvironment {
 pub(crate) struct ExecutableImage {
     pub checker: PathBuf,
     pub checker_token: FileToken,
-    /// This must identify the loaded image, rather than only statting its pathname.
-    pub loaded: Option<LoadedImage>,
+    /// This must identify the loaded image, rather than only statting its pathname; a refusal
+    /// keeps its reason for diagnostics.
+    pub loaded: Result<LoadedImage, Unverified>,
 }
 
 pub(crate) struct PeerObservation {
@@ -95,7 +96,7 @@ pub(crate) fn validate(observed: PeerObservation) -> Result<PeerSnapshot, Unveri
         return Err(Unverified::Ambiguous);
     }
     let image = executable.checker_token;
-    let loaded = executable.loaded.ok_or(Unverified::Identity)?;
+    let loaded = executable.loaded?;
     if !executable.checker.is_absolute()
         || executable.checker.as_path() != image.logical_path()
         || !loaded.matches(&image)
@@ -118,6 +119,8 @@ pub(crate) fn validate(observed: PeerObservation) -> Result<PeerSnapshot, Unveri
 pub(crate) struct SocketPeerSource {
     hello: Box<dyn Fn() -> Result<ServerHello, Unverified> + Send + Sync>,
     witness: Box<dyn Fn() -> Result<ServerWitness, Unverified> + Send + Sync>,
+    /// The peer's exec generation, read before and after the snapshot where the OS offers it.
+    generation: Box<dyn Fn() -> Result<Option<PeerToken>, Unverified> + Send + Sync>,
     expected_socket: PathBuf,
     checker: Mutex<Option<FileToken>>,
 }
@@ -131,8 +134,20 @@ impl SocketPeerSource {
         Self {
             hello: Box::new(hello),
             witness: Box::new(witness),
+            generation: Box::new(|| Ok(None)),
             expected_socket,
             checker: Mutex::new(None),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn with_generation(
+        self,
+        generation: impl Fn() -> Result<PeerToken, Unverified> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            generation: Box::new(move || generation().map(Some)),
+            ..self
         }
     }
 }
@@ -140,6 +155,7 @@ impl SocketPeerSource {
 impl PeerSource for SocketPeerSource {
     fn snapshot(&self) -> Result<PeerSnapshot, Unverified> {
         let (resolved_socket, socket_dir) = socket_directory(&self.expected_socket)?;
+        let before = (self.generation)()?;
         let hello = (self.hello)()?;
         let pid = hello.witness.pid;
         let process = provenance::process_start(pid).map_err(|_| Unverified::Peer)?;
@@ -163,8 +179,14 @@ impl PeerSource for SocketPeerSource {
             }
             cached.as_ref().ok_or(Unverified::Identity)?.clone()
         };
-        let loaded = loaded_image::for_process(pid).ok();
+        let loaded = loaded_image::for_process(pid, &process, before.as_ref());
+        #[cfg(test)]
+        loaded_image::after_image_for_test();
         let current = (self.witness)()?;
+        // An exec of the same pid keeps its pid and start but never its generation.
+        if (self.generation)()? != before {
+            return Err(Unverified::Changed);
+        }
         if (resolved_socket, socket_dir) != socket_directory(&self.expected_socket)? {
             return Err(Unverified::Changed);
         }

@@ -83,6 +83,8 @@ src/
 │   ├── discord_thread_create_lock.rs
 │   ├── doctor.rs
 │   ├── herdr.rs
+│   ├── herdr_probe.rs
+│   ├── herdr_probe_tests.rs
 │   ├── herdr_terminate_tests.rs
 │   ├── herdr_tests.rs
 │   ├── init.rs
@@ -109,14 +111,16 @@ src/
 │   ├── session_hosts/
 │   │   ├── migration/
 │   │   │   ├── consent_holds.rs
-│   │   │   └── consent_holds_tests.rs
+│   │   │   ├── consent_holds_tests.rs
+│   │   │   └── consent_returns_tests.rs
 │   │   ├── approval_store.rs
 │   │   ├── boot_pg_tests.rs
 │   │   ├── migration.rs
 │   │   ├── migration_tests.rs
 │   │   ├── projection.rs
 │   │   ├── user_default.rs
-│   │   └── user_default_tests.rs
+│   │   ├── user_default_tests.rs
+│   │   └── user_default_validator_tests.rs
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── agent_channels.rs
@@ -1047,6 +1051,7 @@ src/
 │   │   │   ├── config/
 │   │   │   │   ├── provider_settings/
 │   │   │   │   │   └── revision_tests.rs
+│   │   │   │   ├── allowall_tests.rs
 │   │   │   │   └── provider_settings.rs
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
@@ -1105,7 +1110,8 @@ src/
 │   │   │   ├── restart/
 │   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
-│   │   │   │   └── autocomplete.rs
+│   │   │   │   ├── autocomplete.rs
+│   │   │   │   └── resume_key_tests.rs
 │   │   │   ├── skill/
 │   │   │   │   └── stop_response_tests.rs
 │   │   │   ├── system_prompt/
@@ -1118,7 +1124,8 @@ src/
 │   │   │   │   ├── clear_refusal_reply_tests.rs
 │   │   │   │   └── native_stop.rs
 │   │   │   ├── voice/
-│   │   │   │   └── alert.rs
+│   │   │   │   ├── alert.rs
+│   │   │   │   └── sensitivity.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── command_policy.rs
 │   │   │   ├── config.rs
@@ -1127,7 +1134,6 @@ src/
 │   │   │   ├── goals.rs
 │   │   │   ├── help.rs
 │   │   │   ├── help_tests.rs
-│   │   │   ├── meeting_cmd.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── model_picker.rs
 │   │   │   ├── model_ui.rs
@@ -1717,9 +1723,12 @@ src/
 │   │   ├── router/
 │   │   │   ├── herdr_consent/
 │   │   │   │   ├── admission.rs
+│   │   │   │   ├── admission_notice_tests.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── custody_tests.rs
+│   │   │   │   ├── return_input.rs
+│   │   │   │   ├── return_input_tests.rs
 │   │   │   │   ├── service_tests.rs
 │   │   │   │   ├── startup.rs
 │   │   │   │   ├── startup_tests.rs
@@ -3192,6 +3201,7 @@ src/
 │   │   │   │   │   ├── engine_tests.rs
 │   │   │   │   │   ├── preview.rs
 │   │   │   │   │   ├── preview_tests.rs
+│   │   │   │   │   ├── return_tests.rs
 │   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   ├── settlement_tests.rs
 │   │   │   │   │   ├── workflow.rs
@@ -3217,6 +3227,7 @@ src/
 │   │   │   │   ├── grant_store.rs
 │   │   │   │   ├── grant_store_tests.rs
 │   │   │   │   ├── loaded_image.rs
+│   │   │   │   ├── loaded_image_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── peer.rs
 │   │   │   │   ├── peer_tests.rs

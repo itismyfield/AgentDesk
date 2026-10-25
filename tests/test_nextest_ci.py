@@ -613,6 +613,32 @@ class NativePlan(Fixture):
         self.assertEqual(rc, 1)
         self.assertIn("selectors match no listed test: ['renamed_module']", err)
 
+    def test_an_exact_selector_picks_precisely_its_ids_file(self):
+        self.write("list.json", nextest_list(["m::lane_a", "m::lane_b", "m::other"], ignored=["m::lane_ign"]))
+        (self.dir / "ids.txt").write_text("m::lane_a\nm::lane_b\n")
+
+        def select(row):
+            self.write("sel.txt", f"other |\n{row}\n")
+            return self.run_cli("select", "--universe", self.dir / "list.json", "--selectors", self.dir / "sel.txt",
+                                "--json-out", self.dir / "out.json")
+        rc, err = select(f"lane_ | _ign | exact {self.dir / 'ids.txt'}")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads((self.dir / "out.json").read_text())["selected"], ["m::lane_a", "m::lane_b", "m::other"])
+        for ids, reason in (("m::lane_a\nm::lane_b\nm::lane_gone\n", "missing ['m::lane_gone']"),
+                            ("m::lane_a\n", "extra ['m::lane_b']")):
+            with self.subTest(reason):
+                (self.dir / "ids.txt").write_text(ids)
+                rc, err = select(f"lane_ | _ign | exact {self.dir / 'ids.txt'}")
+                self.assertEqual(rc, 1)
+                self.assertIn(reason, err)
+        (self.dir / "ids.txt").write_text("m::lane_a\nm::lane_b\nm::lane_ign\n")
+        rc, err = select(f"lane_ | | exact {self.dir / 'ids.txt'}")
+        self.assertEqual(rc, 1)
+        self.assertIn("ignored ['m::lane_ign']", err)
+        for row in ("lane_ | | exact", "lane_ | | ids.txt", "lane_ | | exact a b"):
+            with self.subTest(row=row):
+                self.assertEqual(select(row)[0], 1)
+
     def test_identity_from_copies_scope_and_build(self):
         head = self.plan_ok(["m::a"], workers=1, build={**BUILD, "--features": "default,extra"})
         rc, err = self.run_cli("plan", "--universe", self.dir / "list.json", "--archive", self.archive, "--workers", 1,
@@ -812,6 +838,16 @@ esac
         rc, out, tests = self.native(f"selectors:{self.dir / 'selectors.txt'}", ["m::health_b"])
         self.assertEqual((rc, tests), (1, None), out)
         self.assertIn("static_only 1", out)
+
+    def test_an_exact_selector_off_its_ids_file_fails_before_planning(self):
+        (self.dir / "ids.txt").write_text("m::health_b\n")
+        self.write("selectors.txt", f"health | _pg | exact {self.dir / 'ids.txt'}\n")
+        rc, out, tests = self.native(f"selectors:{self.dir / 'selectors.txt'}", ["m::health_b"])
+        self.assertEqual((rc, tests), (0, ["m::health_b"]), out)
+        (self.dir / "ids.txt").write_text("m::health_b\nm::health_gone\n")
+        rc, out, tests = self.native(f"selectors:{self.dir / 'selectors.txt'}", ["m::health_b"])
+        self.assertEqual((rc, tests), (1, None), out)
+        self.assertIn("missing ['m::health_gone']", out)
 
     def test_a_nonzero_run_exit_fails_even_with_every_test_passing(self):
         rc, out, _ = self.native(f"selectors:{self.dir / 'selectors.txt'}", ["m::health_b"], exit_code=100)
