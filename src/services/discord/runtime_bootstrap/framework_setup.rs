@@ -227,11 +227,7 @@ pub(in crate::services::discord) fn run_bot_build_slash_commands()
         commands::cmd_clear(),
         commands::cmd_stop(),
         commands::cmd_cancel_queued(),
-        commands::cmd_down(),
-        commands::cmd_shell(),
         commands::cmd_skill(),
-        commands::cmd_cc(),
-        commands::cmd_metrics(),
         commands::cmd_model(),
         commands::cmd_node(),
         commands::cmd_sidecar(),
@@ -240,8 +236,6 @@ pub(in crate::services::discord) fn run_bot_build_slash_commands()
         commands::cmd_goals(),
         commands::cmd_effort(),
         commands::cmd_compact(),
-        commands::cmd_cost(),
-        commands::cmd_context(),
         commands::cmd_adk(),
         commands::cmd_voice(),
     ];
@@ -250,17 +244,11 @@ pub(in crate::services::discord) fn run_bot_build_slash_commands()
         commands::cmd_health(),
         commands::cmd_sessions(),
         commands::cmd_deletesession(),
-        commands::cmd_allowedtools(),
-        commands::cmd_allowed(),
-        commands::cmd_debug(),
         commands::cmd_allowall(),
-        commands::cmd_adduser(),
-        commands::cmd_removeuser(),
         commands::cmd_usage(),
         commands::cmd_help(),
         commands::cmd_system_prompt(),
         commands::cmd_restart(),
-        commands::cmd_adk_phase(),
     ]);
     slash_commands
 }

@@ -1052,6 +1052,7 @@ src/
 │   │   │   ├── config/
 │   │   │   │   ├── provider_settings/
 │   │   │   │   │   └── revision_tests.rs
+│   │   │   │   ├── allowall_tests.rs
 │   │   │   │   └── provider_settings.rs
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/

@@ -3771,6 +3771,7 @@ services::discord::commands::command_policy::command_policy_tests::help_formatte
 services::discord::commands::command_policy::command_policy_tests::registered_surface_and_principal_matrix_preserves_exact_ids
 services::discord::commands::command_policy::command_policy_tests::text_registration_and_help_name_the_same_commands
 services::discord::commands::command_policy::command_policy_tests::unknown_selection_is_denied_for_every_principal
+services::discord::commands::config::allowall_tests::allowall_status_reports_without_changing_public_access
 services::discord::commands::config::provider_settings::revision_tests::truthful_active_intake_owner_without_session_is_refused_pg
 services::discord::commands::config::provider_settings::revision_tests::truthful_offline_idle_owner_is_stale_and_does_not_override_local_owner_pg
 services::discord::commands::config::provider_settings::revision_tests::truthful_shared_feature_reset_is_consumed_by_the_first_parent_or_thread_turn

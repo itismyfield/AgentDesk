@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 use poise::serenity_prelude as serenity;
 
-use super::super::formatting::{canonical_tool_name, risk_badge, send_long_message_ctx, tool_info};
 use super::super::model_catalog::{
     SOURCE_DISPATCH_ROLE, SOURCE_PROVIDER_DEFAULT, SOURCE_ROLE_MAP, SOURCE_RUNTIME_OVERRIDE,
     is_default_picker_value,
@@ -539,225 +538,22 @@ pub(in crate::services::discord) fn build_model_picker_components_from_snapshot(
     )
 }
 
-/// /allowedtools — Show currently allowed tools
-#[poise::command(slash_command, rename = "allowedtools")]
-pub(in crate::services::discord) async fn cmd_allowedtools(ctx: Context<'_>) -> Result<(), Error> {
-    let user_id = ctx.author().id;
-    let user_name = &ctx.author().name;
-    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
-        return Ok(());
-    }
-
-    log_command_received!(ctx.channel_id().get(), user_name, "/allowedtools");
-
-    let tools = {
-        let settings = ctx.data().shared.settings.read().await;
-        settings.allowed_tools.clone()
-    };
-
-    let mut msg = String::from("**Allowed Tools**\n\n");
-    for tool in &tools {
-        let (desc, destructive) = tool_info(tool);
-        let badge = risk_badge(destructive);
-        if badge.is_empty() {
-            msg.push_str(&format!("`{}` — {}\n", tool, desc));
-        } else {
-            msg.push_str(&format!("`{}` {} — {}\n", tool, badge, desc));
-        }
-    }
-    msg.push_str(&format!(
-        "\n{} = destructive\nTotal: {}",
-        risk_badge(true),
-        tools.len()
-    ));
-
-    send_long_message_ctx(ctx, &msg).await?;
-    Ok(())
+/// `/allowall` action; `status` reports the setting without changing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, poise::ChoiceParameter)]
+enum AllowAllAction {
+    #[name = "on"]
+    On,
+    #[name = "off"]
+    Off,
+    #[name = "status"]
+    Status,
 }
 
-/// /allowed <+/-tool> — Add or remove a tool
-#[poise::command(slash_command, rename = "allowed")]
-pub(in crate::services::discord) async fn cmd_allowed(
-    ctx: Context<'_>,
-    #[description = "Use +name to add, -name to remove (e.g. +Bash or -Bash)"] action: String,
-) -> Result<(), Error> {
-    let user_id = ctx.author().id;
-    let user_name = &ctx.author().name;
-    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
-        return Ok(());
-    }
-    // Issue #1005: tool-grant tier — owner-only AND default-disabled. The
-    // ability to grant new tools (e.g. `+Bash`) escalates the model's
-    // capability surface and must not be reachable via `allow_all_users`.
-    if !super::enforce_slash_command_policy(&ctx, "/allowed").await? {
-        return Ok(());
-    }
-
-    log_command_received!(ctx.channel_id().get(), user_name, "/allowed", action = %action);
-
-    let arg = action.trim();
-    let (op, raw_name) = if let Some(name) = arg.strip_prefix('+') {
-        ('+', name.trim())
-    } else if let Some(name) = arg.strip_prefix('-') {
-        ('-', name.trim())
-    } else {
-        ctx.say("Use `+toolname` to add or `-toolname` to remove.\nExample: `/allowed +Bash`")
-            .await?;
-        return Ok(());
-    };
-
-    if raw_name.is_empty() {
-        ctx.say("Tool name cannot be empty.").await?;
-        return Ok(());
-    }
-
-    let Some(tool_name) = canonical_tool_name(raw_name).map(str::to_string) else {
-        ctx.say(format!(
-            "Unknown tool `{}`. Use `/allowedtools` to see valid tool names.",
-            raw_name
-        ))
-        .await?;
-        return Ok(());
-    };
-
-    let response_msg = {
-        let mut settings = ctx.data().shared.settings.write().await;
-        match op {
-            '+' => {
-                if settings.allowed_tools.iter().any(|t| t == &tool_name) {
-                    format!("`{}` is already in the list.", tool_name)
-                } else {
-                    settings.allowed_tools.push(tool_name.clone());
-                    save_bot_settings(&ctx.data().token, &settings);
-                    format!("Added `{}`", tool_name)
-                }
-            }
-            '-' => {
-                let before_len = settings.allowed_tools.len();
-                settings.allowed_tools.retain(|t| t != &tool_name);
-                if settings.allowed_tools.len() < before_len {
-                    save_bot_settings(&ctx.data().token, &settings);
-                    format!("Removed `{}`", tool_name)
-                } else {
-                    format!("`{}` is not in the list.", tool_name)
-                }
-            }
-            _ => unreachable!(),
-        }
-    };
-
-    ctx.say(&response_msg).await?;
-    Ok(())
-}
-
-/// /adduser @user — Allow another user to use the bot (owner only)
-#[poise::command(slash_command, rename = "adduser")]
-pub(in crate::services::discord) async fn cmd_adduser(
-    ctx: Context<'_>,
-    #[description = "User to add"] user: serenity::User,
-) -> Result<(), Error> {
-    let author_id = ctx.author().id;
-    let author_name = &ctx.author().name;
-    if !check_auth(
-        author_id,
-        author_name,
-        &ctx.data().shared,
-        &ctx.data().token,
-    )
-    .await
-    {
-        return Ok(());
-    }
-    if !check_owner(author_id, &ctx.data().shared).await {
-        ctx.say("Only the owner can add users.").await?;
-        return Ok(());
-    }
-
-    let target_id = user.id.get();
-    let target_name = &user.name;
-
-    log_command_received!(ctx.channel_id().get(), author_name, "/adduser", target_user = %target_name);
-
-    {
-        let mut settings = ctx.data().shared.settings.write().await;
-        if settings.allowed_user_ids.contains(&target_id) {
-            ctx.say(format!("`{}` is already authorized.", target_name))
-                .await?;
-            return Ok(());
-        }
-        settings.allowed_user_ids.push(target_id);
-        save_bot_settings(&ctx.data().token, &settings);
-    }
-
-    ctx.say(format!("Added `{}` as authorized user.", target_name))
-        .await?;
-    log_info_event!(
-        "discord_user_access_added",
-        channel_id = ctx.channel_id().get(),
-        user_id = target_id,
-        user_name = %target_name,
-        status = "added",
-    );
-    Ok(())
-}
-
-/// /removeuser @user — Remove a user's access (owner only)
-#[poise::command(slash_command, rename = "removeuser")]
-pub(in crate::services::discord) async fn cmd_removeuser(
-    ctx: Context<'_>,
-    #[description = "User to remove"] user: serenity::User,
-) -> Result<(), Error> {
-    let author_id = ctx.author().id;
-    let author_name = &ctx.author().name;
-    if !check_auth(
-        author_id,
-        author_name,
-        &ctx.data().shared,
-        &ctx.data().token,
-    )
-    .await
-    {
-        return Ok(());
-    }
-    if !check_owner(author_id, &ctx.data().shared).await {
-        ctx.say("Only the owner can remove users.").await?;
-        return Ok(());
-    }
-
-    let target_id = user.id.get();
-    let target_name = &user.name;
-
-    log_command_received!(ctx.channel_id().get(), author_name, "/removeuser", target_user = %target_name);
-
-    {
-        let mut settings = ctx.data().shared.settings.write().await;
-        let before_len = settings.allowed_user_ids.len();
-        settings.allowed_user_ids.retain(|&id| id != target_id);
-        if settings.allowed_user_ids.len() == before_len {
-            ctx.say(format!("`{}` is not in the authorized list.", target_name))
-                .await?;
-            return Ok(());
-        }
-        save_bot_settings(&ctx.data().token, &settings);
-    }
-
-    ctx.say(format!("Removed `{}` from authorized users.", target_name))
-        .await?;
-    log_info_event!(
-        "discord_user_access_removed",
-        channel_id = ctx.channel_id().get(),
-        user_id = target_id,
-        user_name = %target_name,
-        status = "removed",
-    );
-    Ok(())
-}
-
-/// /allowall <enabled> — Allow every Discord user to use the bot (owner only)
+/// /allowall <on|off|status> — Allow every Discord user to use this bot (owner only)
 #[poise::command(slash_command, rename = "allowall")]
 pub(in crate::services::discord) async fn cmd_allowall(
     ctx: Context<'_>,
-    #[description = "Enable public access for all Discord users"] enabled: bool,
+    #[description = "on, off, or status (show the current setting)"] action: AllowAllAction,
 ) -> Result<(), Error> {
     let author_id = ctx.author().id;
     let author_name = &ctx.author().name;
@@ -780,59 +576,66 @@ pub(in crate::services::discord) async fn cmd_allowall(
         ctx.channel_id().get(),
         author_name,
         "/allowall",
-        enabled = enabled
+        action = ?action
     );
 
     let response = {
         let mut settings = ctx.data().shared.settings.write().await;
-        settings.allow_all_users = enabled;
-        save_bot_settings(&ctx.data().token, &settings);
-        if enabled {
-            "Public access enabled. Any Discord user can talk to this bot in allowed channels."
-                .to_string()
-        } else {
-            "Public access disabled. Only the owner and authorized users can talk to this bot."
-                .to_string()
+        match action {
+            AllowAllAction::Status if settings.allow_all_users => {
+                "Public access is enabled. Any Discord user can talk to this bot in allowed channels."
+            }
+            AllowAllAction::Status => {
+                "Public access is disabled. Only the owner and authorized users can talk to this bot."
+            }
+            AllowAllAction::On | AllowAllAction::Off => {
+                let enabled = action == AllowAllAction::On;
+                settings.allow_all_users = enabled;
+                save_bot_settings(&ctx.data().token, &settings);
+                if enabled {
+                    "Public access enabled. Any Discord user can talk to this bot in allowed channels."
+                } else {
+                    "Public access disabled. Only the owner and authorized users can talk to this bot."
+                }
+            }
         }
     };
 
-    // Issue #1005: when toggling public access, remind the operator that
-    // high-risk commands (shell / tool grants / runtime control / credential
-    // surface) stay owner-only regardless of the flag. Surfacing the policy
-    // state here makes it clear that opening the chat to all users does NOT
-    // open the operational kill switches.
-    let policy_note = build_allowall_policy_note();
-    let combined = format!("{response}\n\n{policy_note}");
-    ctx.say(&combined).await?;
-    log_info_event!(
-        "discord_public_access_changed",
-        channel_id = ctx.channel_id().get(),
-        status = if enabled { "enabled" } else { "disabled" },
-    );
+    ctx.say(format!("{response}\n\n{}", build_allowall_policy_note()))
+        .await?;
+    if action != AllowAllAction::Status {
+        log_info_event!(
+            "discord_public_access_changed",
+            channel_id = ctx.channel_id().get(),
+            status = if action == AllowAllAction::On {
+                "enabled"
+            } else {
+                "disabled"
+            },
+        );
+    }
     Ok(())
 }
 
-/// Render the risk-policy reminder appended to `/allowall` responses.
-///
-/// Pulled out so it can be unit tested without standing up the slash-command
-/// machinery. Wording references both `!`-text and `/`-slash variants so the
-/// guarantee is unambiguous: enabling `allow_all_users` does not move any
-/// high-risk gate on either surface.
+/// Note appended to `/allowall` and `!allowall` replies: what public access
+/// really grants, and that it covers only this bot on this node.
 pub(in crate::services::discord) fn build_allowall_policy_note() -> String {
-    let high_risk_enabled = super::high_risk_enabled_via_env();
-    let shell_state = if high_risk_enabled {
-        "owner-only, ENABLED"
+    let shell_state = if super::high_risk_enabled_via_env() {
+        "enabled"
     } else {
-        "owner-only, DISABLED (set AGENTDESK_DISCORD_HIGH_RISK_ENABLED=1)"
+        "disabled"
     };
     format!(
-        "**Note (issue #1005):** `allow_all_users` only governs ordinary chat \
-         access. High-risk commands stay owner-only on BOTH the `!` text and \
-         `/` slash surfaces, regardless:\n\
-         • shell/tool-grant (`!shell`/`!allowed`, `/shell`/`/allowed`) — {shell_state}\n\
-         • credential/system (`!allowall`/`!adduser`/`!removeuser`, `/allowall`/`/adduser`/`/removeuser`) — owner-only"
+        "**Note:** this setting applies only to this bot on this node. Agents run with \
+         permission prompts bypassed, so anyone who can chat here can make the agent run \
+         commands on this host. Owner-only commands stay owner-only: `/allowall`, \
+         `!allowall`, `!adduser`, `!removeuser`, and `!shell`/`!allowed` (opt-in, now {shell_state})."
     )
 }
+
+#[cfg(all(test, unix))]
+mod allowall_tests;
+
 #[cfg(test)]
 mod session_override_cluster_characterization_tests {
     //! #3038 S2-0 — characterization tests for the session-override cluster

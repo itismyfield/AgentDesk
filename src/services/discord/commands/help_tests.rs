@@ -98,6 +98,18 @@ fn retired_slash_commands_are_not_registered() {
         "deadlock-recover",
         "machine-flip",
         "stuck-pr-rebase",
+        "down",
+        "shell",
+        "cc",
+        "metrics",
+        "cost",
+        "context",
+        "allowedtools",
+        "allowed",
+        "debug",
+        "adduser",
+        "removeuser",
+        "adk-phase",
     ] {
         assert!(!registered.contains(retired), "/{retired} is registered");
     }

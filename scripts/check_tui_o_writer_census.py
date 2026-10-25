@@ -133,9 +133,9 @@ R_EVID = (
 EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "abandon_request_store.rs": {"edit_outbound_message": 1},
     "admin_host_guard.rs": {".say": 1},
-    "commands/config.rs": {".say": 12, "send_long_message*": 1},
-    "commands/control.rs": {".say": 15, "send_long_message*": 1},
-    "commands/diagnostics/mod.rs": {".say": 9, "send_long_message*": 7},
+    "commands/config.rs": {".say": 2},
+    "commands/control.rs": {".say": 11},
+    "commands/diagnostics/mod.rs": {".say": 8, "send_long_message*": 5},
     "commands/fast_mode.rs": {".say": 2},
     "commands/goals.rs": {".say": 2},
     "commands/help.rs": {".say": 2},

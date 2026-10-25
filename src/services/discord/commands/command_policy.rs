@@ -142,7 +142,7 @@ pub(super) const TEXT_COMMANDS: &[(&str, TextCommandId, &str)] = {
             Start,
             "`!start <path>` — Start session at directory",
         ),
-        ("!down", Down, "`!down <file>` — Download file from server"),
+        ("!down", Down, ""),
         ("!cc", Cc, "`!cc <skill>` — Legacy alias for `!skill`"),
         ("!skill", Skill, "`!skill <skill>` — Run a provider skill"),
         (
@@ -231,11 +231,12 @@ impl TextCommandId {
     pub(super) fn text_surface(self) -> TextCommandSurface {
         use TextCommandId::*;
         match self {
-            Sessions | Receipt | Usage | Model | Fast | Goals | DeleteSession | Restart => {
+            // `!down` would attach any host file for every authorized user.
+            Sessions | Receipt | Usage | Down | Model | Fast | Goals | DeleteSession | Restart => {
                 TextCommandSurface::Unavailable
             }
             Help | Pwd | Health | Status | Inflight | Queue | Metrics | AllowedTools | Start
-            | Down | Cc | Skill | Meeting | Clear | Stop | Debug | Vc | Shell | Allowed
+            | Cc | Skill | Meeting | Clear | Stop | Debug | Vc | Shell | Allowed
             | DeadlockRecover | MachineFlip | StuckPrRebase | AllowAll | AddUser | RemoveUser => {
                 TextCommandSurface::Implemented
             }
@@ -351,17 +352,11 @@ pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
         ("/status", ReadOnly),
         ("/inflight", ReadOnly),
         ("/queue", ReadOnly),
-        ("/metrics", ReadOnly),
-        ("/allowedtools", ReadOnly),
         ("/sessions", ReadOnly),
         ("/usage", ReadOnly),
         ("/adk", ReadOnly),
-        ("/cost", ReadOnly),
-        ("/context", ReadOnly),
         ("/system-prompt", ReadOnly),
         ("/resume", Mutating),
-        ("/down", Mutating),
-        ("/cc", Mutating),
         ("/skill", Mutating),
         ("/model", Mutating),
         ("/node", Mutating),
@@ -375,15 +370,9 @@ pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
         ("/stop", Mutating),
         ("/cancel-queued", Mutating),
         ("/restart", Mutating),
-        ("/debug", Mutating),
         ("/sidecar", Mutating),
         ("/voice", Mutating),
-        ("/adk-phase", Mutating),
-        ("/shell", ShellOrToolGrant),
-        ("/allowed", ShellOrToolGrant),
         ("/allowall", CredentialSystem),
-        ("/adduser", CredentialSystem),
-        ("/removeuser", CredentialSystem),
     ]
 };
 
@@ -396,8 +385,8 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
         .map_or(CommandRisk::Mutating, |(_, risk)| *risk)
 }
 
-/// Short multi-line block for `!help` and `/help`, listing each tier's slash
-/// commands from [`SLASH_COMMAND_RISKS`] and the high-risk enable state.
+/// Short multi-line block for `!help` and `/help`, listing the slash commands of
+/// each tier in [`SLASH_COMMAND_RISKS`]; tiers without one are left out.
 pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled: bool) -> String {
     let shell_state = if high_risk_enabled {
         "owner-only, ENABLED"
@@ -418,9 +407,7 @@ pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled
             "owner-only",
         ),
     ];
-    let mut lines = vec![
-        "**Command Risk Tiers** (a `!` text command shares the tier of its `/` name)".to_string(),
-    ];
+    let mut lines = vec!["**Command Risk Tiers** (slash commands)".to_string()];
     for (risk, label, access) in tiers {
         let names = SLASH_COMMAND_RISKS
             .iter()
@@ -428,6 +415,9 @@ pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled
             .map(|(name, _)| *name)
             .collect::<Vec<_>>()
             .join(" ");
+        if names.is_empty() {
+            continue;
+        }
         lines.push(format!("`{label}` ({access}): {names}"));
     }
     lines.join("\n")
@@ -492,12 +482,12 @@ mod command_policy_tests {
             (
                 Mutating,
                 Implemented,
-                "!start !down !cc !skill !meeting !clear !stop !debug !vc",
+                "!start !cc !skill !meeting !clear !stop !debug !vc",
             ),
             (
                 Mutating,
                 Unavailable,
-                "!model !fast !goals !deletesession !restart",
+                "!down !model !fast !goals !deletesession !restart",
             ),
             (
                 ShellOrToolGrant,
@@ -548,7 +538,7 @@ mod command_policy_tests {
             }
         }
         assert_eq!(ids.len(), 33);
-        assert_eq!(unavailable, 8);
+        assert_eq!(unavailable, 9);
     }
 
     #[test]
@@ -581,7 +571,7 @@ mod command_policy_tests {
                 }
             }
         }
-        assert_eq!(compared, 26);
+        assert_eq!(compared, 17);
     }
 
     #[test]
@@ -613,6 +603,6 @@ mod command_policy_tests {
             }
         }
         assert_eq!(listed, implemented);
-        assert_eq!(implemented.len(), 25);
+        assert_eq!(implemented.len(), 24);
     }
 }
