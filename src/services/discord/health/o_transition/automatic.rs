@@ -22,6 +22,7 @@ use crate::services::tui_o::writer::transition_port::{
 };
 
 pub(crate) mod termination;
+use crate::services::tui_o::writer::actor::codex_retention;
 
 pub(crate) type Decision = (String, Result<ExecutionEnd, &'static str>);
 
@@ -247,7 +248,7 @@ async fn channel_sweep(
         .await
         .ok_or("runtime_unavailable")?;
     if expected == ShadowProvider::Codex {
-        let context = match resolve_codex_context(registry, shared, channel).await {
+        let context = match resolve_codex_context(registry, Arc::clone(&shared), channel).await {
             Ok(context) => context,
             Err(unavailable) => {
                 #[cfg(test)]
@@ -267,7 +268,7 @@ async fn channel_sweep(
                 return Ok(());
             }
         };
-        let request = Request {
+        let mut request = Request {
             channel,
             cutoff: u64::MAX,
             job_id: uuid::Uuid::new_v4().to_string(),
@@ -276,13 +277,120 @@ async fn channel_sweep(
             reason: "read-only Codex execution observation".into(),
             termination: None,
         };
-        let reply = codex_send(ready, channel, &port, Operation::Inspect(request), context).await?;
+        let reply = codex_send(
+            ready,
+            channel,
+            &port,
+            Operation::Inspect(request.clone()),
+            context,
+        )
+        .await?;
         #[cfg(test)]
         test_support::record_codex_reply(reply.clone());
-        if !stats.actor_refused(&reply) {
-            tracing::info!(channel, diagnostics = ?reply.diagnostics, execution = ?reply.execution,
-                "[tui_o] Codex retention observation");
+        if stats.actor_refused(&reply) {
+            return Ok(());
+        }
+        tracing::info!(channel, diagnostics = ?reply.diagnostics, execution = ?reply.execution,
+            "[tui_o] Codex retention observation");
+        #[cfg(test)]
+        if codex_retention::mutant("producer_unwired") {
             stats.skip("codex_inspect_only");
+            return Ok(());
+        }
+        let diagnostics = reply
+            .diagnostics
+            .as_ref()
+            .ok_or("codex_diagnostics_unavailable")?;
+        let Some(crate::services::tui_o::writer::codex_snapshot::Observation::Complete(snapshot)) =
+            &diagnostics.codex
+        else {
+            stats.skip("codex_observation_unknown");
+            return Ok(());
+        };
+        if diagnostics.candidates.is_empty() {
+            stats.skip("codex_inspect_only");
+        }
+        for candidate in &diagnostics.candidates {
+            let Some(seq) = reply
+                .hops
+                .iter()
+                .find(|hop| hop.judged.key == candidate.key)
+                .and_then(|hop| hop.judged.hop_seq)
+            else {
+                stats.skip("codex_retention_hop_unknown");
+                continue;
+            };
+            let Some(pane) = &candidate.pane else {
+                stats.skip("codex_retention_pane_unknown");
+                continue;
+            };
+            let (snapshot, key, source, pane) = (
+                snapshot.clone(),
+                candidate.key.clone(),
+                candidate.source.clone(),
+                pane.clone(),
+            );
+            let evidence = tokio::task::spawn_blocking(move || {
+                codex_retention::for_hop(&snapshot, &key, &source, seq, &pane)
+            })
+            .await
+            .map_err(|_| "codex_retention_worker_failed")?;
+            let evidence = match evidence {
+                Ok(evidence) => evidence,
+                Err(reason) => {
+                    stats.skip(reason);
+                    continue;
+                }
+            };
+            request.job_id = uuid::Uuid::new_v4().to_string();
+            request.cutoff = evidence.hop_seq;
+            request.reason =
+                "non-current source with at least seven days since last dialogue".into();
+            request.termination = Some(Termination::Retention(Box::new(evidence)));
+            let context = resolve_codex_context(registry, Arc::clone(&shared), channel)
+                .await
+                .map_err(|_| "codex_inspect_context_unavailable")?;
+            let inspected = codex_send(
+                ready,
+                channel,
+                &port,
+                Operation::Inspect(request.clone()),
+                context,
+            )
+            .await?;
+            if stats.actor_refused(&inspected) {
+                continue;
+            }
+            let scope = match inspected.scope {
+                Some(Ok(scope)) => scope,
+                Some(Err(reason)) => {
+                    stats.skip(format!("scope_refused:{reason}"));
+                    continue;
+                }
+                None => {
+                    stats.skip("scope_unavailable");
+                    continue;
+                }
+            };
+            let runtime = Arc::clone(&shared);
+            let idle = Idle(Arc::new(move || {
+                let runtime = Arc::clone(&runtime);
+                Box::pin(async move { super::automatic_idle::idle(&runtime, channel).await })
+            }));
+            let context = resolve_codex_context(registry, Arc::clone(&shared), channel)
+                .await
+                .map_err(|_| "codex_apply_context_unavailable")?;
+            let applied = codex_send(
+                ready,
+                channel,
+                &port,
+                Operation::AutomaticApply(request.clone(), scope.digest, idle),
+                context,
+            )
+            .await?;
+            if !stats.actor_refused(&applied) {
+                stats.applied(channel, &candidate.key, &applied);
+            }
         }
         return Ok(());
     }

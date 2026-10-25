@@ -755,13 +755,52 @@ fn formats_ssh_direct_prompt_notification() {
 
 #[test]
 fn formats_ssh_direct_prompt_notification_with_truncation() {
-    let prompt = "x".repeat(2000);
-    let output = format_ssh_direct_prompt_notification("codex", "AgentDesk-codex-a", &prompt);
+    for (raw, escaped, fits) in [
+        ("x", "x", 1994),
+        ("한", "한", 1994),
+        ("😀", "😀", 997),
+        ("*", r"\*", 997),
+        ("@", "@\u{200b}", 997),
+        ("\\", r"\\", 997),
+        ("\n", "\n-# ", 498),
+    ] {
+        let exact = format_ssh_direct_prompt_notification("codex", "s", &raw.repeat(fits));
+        assert_eq!(exact, format!("-# ⌨️ {}", escaped.repeat(fits)));
+        assert!(exact.encode_utf16().count() <= 2000);
 
-    assert!(output.starts_with("-# ⌨️ "));
-    assert!(super::super::session_notice::is_inline(&output));
-    assert!(output.contains("..."));
-    assert!(output.len() < prompt.len() + 120);
+        let output = format_ssh_direct_prompt_notification("codex", "s", &raw.repeat(fits + 1));
+        let (shown, suffix) = output.rsplit_once("… (이하 ").expect("overflow marker");
+        let omitted: usize = suffix.strip_suffix("자)").unwrap().parse().unwrap();
+        assert!(omitted > 0 && omitted <= fits + 1);
+        assert_eq!(
+            shown,
+            format!("-# ⌨️ {}", escaped.repeat(fits + 1 - omitted))
+        );
+        assert!(output.encode_utf16().count() <= 2000, "{raw:?}");
+        let one_more = format!("{shown}{escaped}… (이하 {}자)", omitted - 1);
+        assert!(
+            one_more.encode_utf16().count() > 2000,
+            "maximal prefix: {raw:?}"
+        );
+    }
+}
+
+#[test]
+fn formats_ssh_direct_prompt_notification_preserves_safe_multiline_text() {
+    let prompt = "  **bold** @everyone <@123456789012345678>\r\n\n# heading\u{2028}> quote\u{2029}[link](https://x.y)\n``` @here\n- item\n1. item\n\\_~||\n";
+    let output = format_ssh_direct_prompt_notification("claude", "s", prompt);
+    assert_eq!(
+        output,
+        concat!(
+            "-# ⌨️   \\*\\*bold\\*\\* @\u{200b}everyone ‹@\u{200b}123456789012345678›\n",
+            "-# \n-# \\# heading\n-# › quote\n-# \\[link\\]\\(https://x\\.y\\)\n",
+            "-# \\`\\`\\` @\u{200b}here\n-# \\- item\n-# 1\\. item\n-# \\\\\\_\\~\\|\\|\n-# "
+        )
+    );
+    assert!(!super::super::session_notice::is_inline(&output));
+    let other = super::super::session_notice::subtext("⚠️", "first **bold**\nsecond");
+    assert_eq!(other, r"-# ⚠️ first \*\*bold\*\* (+1줄)");
+    assert!(super::super::session_notice::is_inline(&other));
 }
 
 #[test]
@@ -779,7 +818,7 @@ fn formats_ssh_direct_prompt_notification_strips_terminal_controls() {
         "\u{15}\u{1b}[31mhello\u{1b}[0m\n\tworld",
     );
 
-    assert_eq!(output, "-# ⌨️ hello (+1줄)");
+    assert_eq!(output, "-# ⌨️ hello\n-# \tworld");
     assert!(!output.contains('\u{15}'));
     assert!(!output.contains('\u{1b}'));
 }
@@ -802,7 +841,7 @@ fn notification_strip_drops_bare_control_bytes_but_keeps_whitespace() {
             output
         );
     }
-    assert_eq!(output, "-# ⌨️ ringpagedelc1 (+1줄)");
+    assert_eq!(output, "-# ⌨️ ringpagedelc1\n-# \tkeep");
 }
 
 // #3100: a human typing directly into the TUI is a real active turn.
@@ -1723,8 +1762,9 @@ fn local_command_stdout_negative_cases_stay_human_direct() {
 
     let rendered = format_ssh_direct_prompt_notification("claude", "sess-mid-body", mid_body_tag);
     assert!(
-        rendered == "-# ⌨️ please explain this transcript: (+1줄)",
-        "a later quoted stdout line is counted without expanding the input mirror",
+        rendered
+            == "-# ⌨️ please explain this transcript:\n-# ‹local\\-command\\-stdout›x‹/local\\-command\\-stdout›",
+        "a later quoted stdout line stays visible as literal human input",
     );
 }
 

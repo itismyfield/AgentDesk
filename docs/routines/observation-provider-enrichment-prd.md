@@ -4,7 +4,7 @@ schema_version: "1"
 status: "p0-implemented"
 topic_slug: "agentdesk-observation-provider-enrichment"
 topic_folder: "agentdesk-observation-provider-enrichment"
-linked_spec: "./agentdesk-observation-provider-enrichment-spec.md"
+linked_spec: "./observation-provider-enrichment-spec.md"
 generated_by: "claude"
 created_at: "2026-05-02"
 updated_at: "2026-05-02"
@@ -16,7 +16,7 @@ p0_pr: "https://github.com/itismyfield/AgentDesk/pull/1497"
 # PRD: AgentDesk Observation Provider Enrichment
 
 > status: `p0-implemented` — PR #1497 merged. P1/P2 미착수.
-> linked_spec: [agentdesk-observation-provider-enrichment-spec.md](./agentdesk-observation-provider-enrichment-spec.md)
+> linked_spec: [observation-provider-enrichment-spec.md](./observation-provider-enrichment-spec.md)
 
 ## PRD 업데이트 규칙
 
@@ -78,7 +78,7 @@ p0_pr: "https://github.com/itismyfield/AgentDesk/pull/1497"
   - `ctx.observations` cap은 `src/services/routines/loader.rs:43`의 100개와 `src/services/routines/runtime.rs:78` 호출 경로에서 적용된다.
   - `GET /api/routines/runs/search`는 `q`가 필수라 `status=failed&limit=100`만으로는 log-harvester 요구를 만족하지 못한다: `src/server/routes/routines.rs:160`.
   - `/api/memory/recall`은 현재 memento recall bridge가 TBD이고 local memory fallback을 반환한다: `src/server/routes/memory_api.rs:113`.
-  - prompt source 후보는 `/api/agents/:id/transcripts`가 실제 경로다: `src/server/routes/agents.rs:1720`.
+  - prompt source 후보는 `/api/agents/:id/transcripts`가 실제 경로다: `src/server/routes/agents.rs` (`agent_transcripts`).
 - 아직 확인이 필요한 가정: P0는 Rust provider 보강으로 결정됐다. P1 설계에서 결정해야 할 사항만 남아 있다.
   - `routine_observations` 별도 테이블 신설은 P0에서 불필요한 것으로 결정됐다. `kv_meta routine_observation:*`를 precomputed digest surface로 활용한다.
   - memento source는 real memento bridge와 local fallback 중 무엇을 쓸지 P1 착수 전에 결정해야 한다.
@@ -143,7 +143,7 @@ p0_pr: "https://github.com/itismyfield/AgentDesk/pull/1497"
   - `src/services/routines/loader.rs`
   - `src/server/routes/routines.rs`
   - `src/server/routes/docs.rs`
-  - `src/db/schema.rs` 또는 PostgreSQL migration 위치
+  - PostgreSQL migration 위치(`migrations/postgres/`)
   - `routines/monitoring/*.js` (P1/P2)
 - 제외 범위: recommender scoring rewrite, direct memento write, direct DB/file access from JS, external web harvester는 제외한다.
   - recommender scoring rewrite
@@ -153,7 +153,7 @@ p0_pr: "https://github.com/itismyfield/AgentDesk/pull/1497"
 - 회귀 위험이 있는 기존 동작:
   - `ctx.observations` cap, payload byte cap, existing provider source ordering
   - routine run search API의 `q` 필수 contract
-  - API docs tests under `src/server/routes/routes_tests.rs`
+  - API docs tests under `src/server/routes/routes_tests.rs` (삭제됨)
 
 ## 단계별 TASK
 
@@ -194,7 +194,7 @@ p0_pr: "https://github.com/itismyfield/AgentDesk/pull/1497"
   - idempotency: 동일 `(source, signature)` 재주입 시 중복 row가 늘지 않음
 - 추가하거나 수정할 테스트: provider 단위 테스트, API docs/route 테스트, P1 이후 routine JS policy 테스트를 추가한다.
   - `src/services/routines/store.rs` provider 단위 테스트
-  - `src/server/routes/routes_tests.rs` API docs/route 테스트
+  - `src/server/routes/routes_tests.rs` (삭제됨) API docs/route 테스트
   - P1 이후 `npm run test:policies` 또는 routine JS 테스트
 - 커버해야 하는 핵심 케이스:
   - DB 오류 시 recommender tick이 빈 observations로 계속 진행

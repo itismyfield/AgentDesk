@@ -32,7 +32,7 @@ Needed direction:
 - use as the reference screen for the design system
 - extract reusable section shell, settings row, and helper patterns later
 
-### `dashboard/src/components/PulseView.tsx`
+### `dashboard/src/components/PulseView.tsx` (removed)
 
 Current state:
 
@@ -44,7 +44,7 @@ Needed direction:
 - more consistent metric card grammar
 - stronger attention rail for degraded states
 
-### `dashboard/src/components/ControlCenterView.tsx`
+### `dashboard/src/components/ControlCenterView.tsx` (removed)
 
 Current state:
 
@@ -69,7 +69,7 @@ Needed direction:
 - shorter helper copy
 - stronger primary action focus per step
 
-### `dashboard/src/components/OfficeView.tsx`
+### `dashboard/src/components/OfficeView.tsx` (removed)
 
 Current state:
 
@@ -122,9 +122,9 @@ Exit criteria:
 
 Target files:
 
-- `dashboard/src/components/PulseView.tsx`
-- `dashboard/src/components/ControlCenterView.tsx`
-- `dashboard/src/components/DashboardPageView.tsx`
+- `dashboard/src/components/PulseView.tsx` (removed)
+- `dashboard/src/components/ControlCenterView.tsx` (removed)
+- `dashboard/src/components/DashboardPageView.tsx` (removed)
 
 Tasks:
 
@@ -159,7 +159,7 @@ Exit criteria:
 
 Target files:
 
-- `dashboard/src/components/OfficeView.tsx`
+- `dashboard/src/components/OfficeView.tsx` (removed)
 - `dashboard/src/components/dashboard/ReceiptWidget.tsx`
 - XP and achievement-related surfaces
 
