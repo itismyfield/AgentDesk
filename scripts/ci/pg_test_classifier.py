@@ -31,7 +31,9 @@ EXEMPT = {
         "the lazy pool is never queried; leader workers are rejected and only the DB-free WsBatchFlusher starts",
 }
 # Findings that mean part of the tree was not analysed; omitted scope must not read as non-PG.
-UNANALYZABLE = frozenset({"unresolved-external-test-module", "pg-reach-depth-exhausted", "test-not-in-inventory"})
+UNANALYZABLE = frozenset({
+    "unresolved-external-test-module", "pg-reach-depth-exhausted", "test-not-in-inventory", "unresolved-self-exec",
+})
 
 
 _RAW_STRING_OPEN = re.compile(r'(?:r|br)(#*)"')
@@ -243,6 +245,23 @@ _BARE_REFERENCE = re.compile(
 _USE = re.compile(r"\buse\s+(?P<path>[^;]+);")
 
 
+_CONST = re.compile(r"\b(?:const|static)\s+(?:mut\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:")
+
+
+# A test that re-runs the test binary with `--exact` runs the tests it names there, so their PG need is its own.
+_SELF_EXEC = re.compile(r"\bcurrent_exe\b")
+
+
+_STRING_LITERAL = re.compile(r'"((?:\\.|[^"\\])*)"')
+
+
+_ID_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*")
+
+
+# libtest names each test thread after its test, so a child named by the current thread is the test itself.
+_OWN_THREAD = re.compile(r"\bthread::current\s*\(\s*\)")
+
+
 @lru_cache(maxsize=128)
 def _matching_brace_cached(clean: str, opening: int) -> int:
     depth = 0
@@ -437,7 +456,9 @@ def discover_pg_inventory(
     the form ``<Type as Trait>::method()``. Names resolve through nested ``use …::*``
     globs and ``use`` re-exports, and a path starting at a child module is relative to it.
     Test and helper bodies use the same reference extractor and both mask
-    block-local functions and impls.
+    block-local functions and impls. A test that re-runs the test binary
+    (``current_exe`` with ``--exact``) needs PG when a test named by a string
+    literal it reaches does; naming no resolvable test is an unanalysable finding.
 
     Out of scope are block-local call graphs, method-level dispatch within an
     impl (an impl is conservatively treated as one type-level item), and UFCS
@@ -455,8 +476,10 @@ def discover_pg_inventory(
     inventory = rust_test_sources.lib_inventory(repo_root)
     declared_tests = set(inventory.tests)
     item_bodies: dict[tuple[tuple[str, ...], str, str], str] = {}
+    # Unstripped item text and file, read only for the test IDs a self-exec names.
+    item_raw: dict[tuple[tuple[str, ...], str, str], tuple[str, str]] = {}
     seeded: set[tuple[tuple[str, ...], str, str]] = set()
-    records: list[tuple[str, str, tuple[str, ...], str]] = []
+    records: list[tuple[str, str, tuple[str, ...], str, str, int]] = []
     use_aliases: dict[tuple[str, ...], dict[str, tuple[str, ...]]] = {}
     wildcard_uses: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
     # Every module the walk reaches; a path's first segment naming a child of the current module is relative.
@@ -506,6 +529,7 @@ def discover_pg_inventory(
         clean = strip_rust(source)
         ranges = _module_ranges(source, clean, brace_counter)
         external = path.resolve() in external_tests
+        rel = path.relative_to(repo_root).as_posix()
 
         def logical_at(*tail: str, reached_base=reached_base) -> tuple[str, ...]:
             return (*reached_base, *tail)
@@ -552,6 +576,7 @@ def discover_pg_inventory(
             key = (module, match.group("name"), "fn")
             body = _edge_boundary(clean, opening, brace_counter)
             item_bodies[key] = body
+            item_raw[key] = (source[opening:opening + len(body)], rel)
             if seed_match(body):
                 seeded.add(key)
 
@@ -579,8 +604,21 @@ def discover_pg_inventory(
             module = logical_at(*_scope_at(match.start(), ranges))
             key = (module, match.group(1), "impl")
             item_bodies[key] = body
+            item_raw[key] = (source[opening:opening + len(body)], rel)
             if seed_match(body):
                 seeded.add(key)
+
+        for match in _CONST.finditer(clean):
+            if not _inside_test_region(match.start(), ranges, external):
+                continue
+            if nested(match.start(), all_fn_ranges) or nested(match.start(), impl_ranges):
+                continue
+            end = clean.find(";", clean.find("=", match.end()))
+            if end < 0:
+                continue
+            key = (logical_at(*_scope_at(match.start(), ranges)), match.group("name"), "const")
+            item_bodies[key] = clean[match.start():end + 1]
+            item_raw[key] = (source[match.start():end + 1], rel)
 
         for match in _ATTR_FN.finditer(clean):
             if not _TEST_ATTR.search(match.group("attrs")):
@@ -596,7 +634,8 @@ def discover_pg_inventory(
             # Reaching an external file through a cfg(test) declaration already
             # proves that its direct tests are part of the library test target.
             if name in declared_tests or external:
-                records.append((name, path.relative_to(repo_root).as_posix(), logical[:-1], body))
+                line = clean.count("\n", 0, match.start("name")) + 1
+                records.append((name, rel, logical[:-1], body, source[opening:opening + len(body)], line))
             elif findings is not None:
                 # A recognised test in a file the lib walk reached must be listed, else it would run as non-PG.
                 findings.append(Finding(
@@ -654,7 +693,7 @@ def discover_pg_inventory(
         if alias:
             targets.update(lookup(alias))
         for base in glob_bases(module, local_wildcards):
-            targets.update(by_path.get((base, raw), set()))
+            targets.update(lookup((*base, raw)))
         return targets
 
     def resolve_call(
@@ -717,12 +756,57 @@ def discover_pg_inventory(
             key[0], _mask_nested_items(body, brace_counter)
         )
 
+    def reached_items(referenced) -> set[tuple[tuple[str, ...], str, str]]:
+        seen, frontier = set(), set(referenced)
+        for _depth in range(PG_REACH_MAX_DEPTH):
+            frontier -= seen
+            if not frontier:
+                break
+            seen |= frontier
+            frontier = {target for caller in frontier for target in edges.get(caller, set())}
+        return seen
+
+    files_of: dict[str, set[str]] = {}
+    by_last: dict[str, set[str]] = {}
+    for test_id, sites in inventory.tests.items():
+        files_of[test_id] = {os.path.normpath(site.rpartition(":")[0]) for site, _cfg in sites}
+        by_last.setdefault(test_id.rpartition("::")[2], set()).add(test_id)
+
+    def named_tests(literal: str, files: set[str]) -> set[str]:
+        """Test IDs a string names: the whole ID, the ID under a crate prefix, or its tail in a nearby file."""
+        parts = literal.split("::")
+        for start in range(min(2, len(parts))):
+            candidate = "::".join(parts[start:])
+            if candidate in declared_tests:
+                return {candidate}
+        tail = "::".join(parts[-2:]) if len(parts) > 1 else parts[-1]
+        hits = {test_id for test_id in by_last.get(parts[-1], ()) if test_id == tail or test_id.endswith("::" + tail)}
+        return hits if len(parts) > 1 else {test_id for test_id in hits if files_of.get(test_id, set()) & files}
+
     tests: dict[str, str] = {}
-    for name, path, module, body in records:
+    children: dict[str, set[str]] = {}
+    for name, path, module, body, raw, line in records:
         visible_body = _mask_nested_items(body, brace_counter)
         direct = any(pattern.search(visible_body) for pattern in SEED_PATTERNS)
         referenced = body_references(module, visible_body)
         indirect = _transitive_closure(referenced, seeded, edges)
+        reach = [item_raw[key] for key in reached_items(referenced) if key in item_raw]
+        texts = [(raw, path), *reach]
+        if _SELF_EXEC.search(visible_body) or any(_SELF_EXEC.search(strip_rust(text)) for text, _ in reach):
+            if any('"--exact"' in text for text, _ in texts):
+                files = {file for _, file in texts}
+                named = {test_id for text, _ in texts for literal in _STRING_LITERAL.findall(text)
+                         for token in _ID_PATH.findall(literal) for test_id in named_tests(token, files)}
+                if any(_OWN_THREAD.search(strip_rust(text)) for text, _ in texts):
+                    named.add(name)
+                if named:
+                    children[name] = named - {name}
+                    if findings is not None:
+                        findings.append(Finding("self-exec", f"{path}:{line}", " ".join([name, *sorted(children[name])])))
+                elif findings is not None:
+                    findings.append(Finding(
+                        "unresolved-self-exec", f"{path}:{line}",
+                        f"{name} re-runs the test binary with --exact but names no test ID the classifier can resolve"))
         if direct or indirect:
             tests[name] = path
         elif indirect is None and findings is not None:
@@ -732,6 +816,15 @@ def discover_pg_inventory(
                 f"{path}: helper calls continue past the call-depth limit, so "
                 "whether this test needs PG is undecided",
             ))
+    # A self-exec parent needs PG when a test it runs does; repeat until stable so cycles settle.
+    paths = {name: path for name, path, *_rest in records}
+    changed = True
+    while changed:
+        changed = False
+        for parent, named in children.items():
+            if parent not in tests and named & set(tests):
+                tests[parent] = paths[parent]
+                changed = True
     cache_info = _matching_brace_cached.cache_info()
     if findings is not None:
         findings.append(Finding(

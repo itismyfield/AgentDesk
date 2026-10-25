@@ -1238,6 +1238,69 @@ mod tests {
         self.assertEqual(problems, [])
         self.assertIn("r::tests::via_reexport", pg)
 
+    def test_a_glob_import_of_a_reexport_reaches_the_pg_helper(self):
+        self.tree({"src/lib.rs": "mod db;\nmod support;\nmod g;\n",
+                   "src/g.rs": "mod inner;\n#[cfg(test)]\npub(crate) use inner::helpers::shared_pg;\n"
+                               "#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn via_glob_reexport() { shared_pg(); }\n"
+                               "    #[test]\n    fn pure() {}\n}\n",
+                   "src/g/inner.rs": "#[cfg(test)]\npub(crate) mod helpers {\n"
+                                     "    pub(crate) fn shared_pg() { TestPostgresDb::new(); }\n}\n"})
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertIn("g::tests::via_glob_reexport", pg)
+        self.assertNotIn("g::tests::pure", pg)
+
+    SELF_EXEC = """#[cfg(test)]
+mod tests {
+    use std::process::Command;
+    fn run(test: &str) { Command::new(std::env::current_exe().unwrap()).args(["--exact", test]).output().unwrap(); }
+    #[test]
+    fn parent() {
+        for test in ["s::tests::child_a_pg", "s::tests::child_b_pg"] {
+            let out = Command::new(std::env::current_exe().unwrap()).args(["--exact", test]).output().unwrap();
+            assert!(out.status.success());
+        }
+    }
+    #[test]
+    fn pure_parent() { run("s::tests::child_pure"); }
+    #[test]
+    fn cycle_a() { run("t::tests::cycle_b"); }
+    #[test]
+    fn cycle_b() { run("t::tests::cycle_a"); run("s::tests::child_a_pg"); }
+    #[test]
+    fn reruns_itself() {
+        let name = std::thread::current().name().unwrap().to_owned();
+        Command::new(std::env::current_exe().unwrap()).args(["--exact", &name]).output().unwrap();
+    }
+}
+"""
+
+    def test_a_parent_that_reruns_pg_tests_with_exact_is_pg(self):
+        self.tree({"src/lib.rs": "mod db;\nmod support;\nmod s;\nmod t;\n",
+                   "src/s.rs": "#[cfg(test)]\nmod tests {\n    #[test]\n    fn child_a_pg() { TestPostgresDb::new(); }\n"
+                               "    #[test]\n    fn child_b_pg() { TestPostgresDb::new(); }\n    #[test]\n    fn child_pure() {}\n}\n",
+                   "src/t.rs": self.SELF_EXEC})
+        names = ["t::tests::parent", "t::tests::pure_parent", "t::tests::cycle_a", "t::tests::cycle_b",
+                 "t::tests::reruns_itself", "s::tests::child_pure"]
+        listed = {"rust-suites": {"x": {"binary-id": "x", "kind": "lib", "testcases": {
+            name: {"ignored": False} for name in names}}}}
+        (self.root / "list.json").write_text(json.dumps(listed))
+        rc, err = self.cli("classify", "--json-out", self.root / "out.json", "--list", self.root / "list.json")
+        self.assertEqual(rc, 0, err)
+        out = json.loads((self.root / "out.json").read_text())
+        self.assertLessEqual({"t::tests::parent", "t::tests::cycle_a", "t::tests::cycle_b"}, set(out["pg"]))
+        self.assertEqual(out["non_pg"], ["s::tests::child_pure", "t::tests::pure_parent", "t::tests::reruns_itself"])
+
+    def test_a_self_exec_naming_no_resolvable_test_is_a_problem(self):
+        text = ("#[cfg(test)]\nmod tests {\n    #[test]\n    fn opaque() {\n        let name = pick();\n"
+                "        std::process::Command::new(std::env::current_exe().unwrap()).args([\"--exact\", &name]).output().unwrap();\n"
+                "    }\n}\n")
+        self.tree({"src/lib.rs": "mod db;\nmod support;\nmod u;\n", "src/u.rs": text})
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertNotIn("u::tests::opaque", pg)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("unresolved-self-exec: src/u.rs:4: u::tests::opaque", problems[0])
+
     def cli(self, *argv):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()), \
