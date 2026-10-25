@@ -92,6 +92,7 @@ pub(super) fn prepare_and_create_claude_tui_session(
         };
         let session_files =
             crate::services::claude_tui::session::prepare_claude_tui_launch(&launch_config)?;
+        session_prompt::record(launch_config.system_prompt.as_deref(), resume);
         let launch_script_path = session_files.launch_script_path.clone();
         prepared_session_files = Some(session_files);
         let script = std::fs::read_to_string(&launch_script_path)
@@ -194,6 +195,7 @@ pub(crate) fn prepare_claude_herdr_launch(
         resume: prepared.context.launch_mode == "resume",
     };
     let files = crate::services::claude_tui::session::prepare_claude_tui_launch(&launch_config)?;
+    session_prompt::record(launch_config.system_prompt.as_deref(), launch_config.resume);
     let path = &files.launch_script_path;
     let written = std::fs::read_to_string(path)
         .map_err(|error| format!("read Claude TUI launch script: {error}"))

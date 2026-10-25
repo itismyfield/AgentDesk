@@ -262,6 +262,7 @@ pub(in crate::services::discord) fn run_bot_build_slash_commands()
         commands::cmd_usage(),
         commands::cmd_receipt(),
         commands::cmd_help(),
+        commands::cmd_system_prompt(),
         commands::cmd_meeting(),
         commands::cmd_restart(),
         commands::cmd_deadlock_recover(),

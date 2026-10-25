@@ -227,6 +227,8 @@ src/
 │   │   ├── retention.rs
 │   │   ├── storage_stats.rs
 │   │   └── tests.rs
+│   ├── provider_session_prompts/
+│   │   └── tests.rs
 │   ├── relay_dead_letter/
 │   │   └── migration_tests.rs
 │   ├── replay_disposition/
@@ -284,6 +286,7 @@ src/
 │   ├── o_piece_delivery.rs
 │   ├── o_piece_ledger_tests.rs
 │   ├── postgres.rs
+│   ├── provider_session_prompts.rs
 │   ├── relay_dead_letter.rs
 │   ├── replay_disposition.rs
 │   ├── replay_disposition_tests.rs
@@ -1097,8 +1100,9 @@ src/
 │   │   │   │   ├── render_recovery.rs
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
-│   │   │   ├── session/
-│   │   │   │   └── autocomplete.rs
+│   │   │   ├── system_prompt/
+│   │   │   │   ├── reconstruct.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── text_commands/
 │   │   │   │   ├── command_dispatch_contract_tests/
 │   │   │   │   │   └── source_guard_tests.rs
@@ -1127,6 +1131,7 @@ src/
 │   │   │   ├── sidecar.rs
 │   │   │   ├── skill.rs
 │   │   │   ├── stop.rs
+│   │   │   ├── system_prompt.rs
 │   │   │   ├── text_commands.rs
 │   │   │   ├── tmux_recreate.rs
 │   │   │   ├── tool_call.rs
@@ -1533,6 +1538,8 @@ src/
 │   │   │   ├── retirement_tests.rs
 │   │   │   └── tick.rs
 │   │   ├── prompt_builder/
+│   │   │   ├── system_prompt_audit/
+│   │   │   │   └── tests.rs
 │   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs
 │   │   │   ├── dispatch_contract_tests.rs
@@ -1542,7 +1549,8 @@ src/
 │   │   │   ├── memory_scope_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── section_dedupe.rs
-│   │   │   └── session_anchors.rs
+│   │   │   ├── session_anchors.rs
+│   │   │   └── system_prompt_audit.rs
 │   │   ├── queue_dispatch/
 │   │   │   ├── canary_workspace.rs
 │   │   │   ├── canary_workspace_tests.rs
@@ -1790,6 +1798,7 @@ src/
 │   │   │   │   │   ├── route_queue_tests.rs
 │   │   │   │   │   ├── runtime_transition.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
+│   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
@@ -3045,6 +3054,8 @@ src/
 │   │   │   ├── authority.rs
 │   │   │   ├── executor.rs
 │   │   │   └── target.rs
+│   │   ├── session_prompt/
+│   │   │   └── tests.rs
 │   │   ├── cancel_token_claude_interrupt.rs
 │   │   ├── cancel_token_cleanup.rs
 │   │   ├── cancel_token_codex_owed.rs
@@ -3057,7 +3068,8 @@ src/
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
 │   │   ├── registry.rs
-│   │   └── session_probe.rs
+│   │   ├── session_probe.rs
+│   │   └── session_prompt.rs
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs

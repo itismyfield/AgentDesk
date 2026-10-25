@@ -311,9 +311,28 @@ pub(crate) struct SessionAnchorRequest<'a> {
     pub(crate) fresh: bool,
 }
 
+impl SessionAnchorRequest<'_> {
+    pub(crate) fn peek_prompt(&self) -> Option<(String, usize)> {
+        if self.fresh || self.session_id.is_none() {
+            return None;
+        }
+        let cache = SESSION_ANCHORS.lock().unwrap_or_else(|p| p.into_inner());
+        let entry = cache.get(&(
+            self.provider.as_str().to_owned(),
+            self.channel_id,
+            self.current_path.to_owned(),
+            self.settings.memory_group.clone(),
+        ))?;
+        if entry.session_id.is_some() && entry.session_id.as_deref() != self.session_id {
+            return None;
+        }
+        render_snapshot(&entry.snapshot).map(|text| (text, entry.snapshot.count))
+    }
+}
+
 pub(crate) async fn load_session_anchor_prompt(
     request: SessionAnchorRequest<'_>,
-) -> Option<String> {
+) -> Option<(String, usize)> {
     let SessionAnchorRequest {
         settings,
         provider,
@@ -339,7 +358,7 @@ pub(crate) async fn load_session_anchor_prompt(
         session_id,
         fresh,
     ) {
-        return render_snapshot(&snapshot);
+        return render_snapshot(&snapshot).map(|text| (text, snapshot.count));
     }
     if settings.backend != MemoryBackendKind::Memento {
         if settings.memento_fallback {
@@ -417,7 +436,7 @@ pub(crate) async fn load_session_anchor_prompt(
         );
         snapshot
     };
-    render_snapshot(&snapshot)
+    render_snapshot(&snapshot).map(|text| (text, snapshot.count))
 }
 
 fn warn_anchor_unavailable(
@@ -452,6 +471,56 @@ fn render_snapshot(snapshot: &AnchorSnapshot) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_prompt_inspection_anchor_cache_is_unchanged_on_hit_or_mismatch() {
+        let settings = ResolvedMemorySettings::default();
+        let provider = ProviderKind::Codex;
+        let key = (
+            "codex".to_owned(),
+            7_378_902,
+            "/inspection".to_owned(),
+            None,
+        );
+        let snapshot = extract_anchor_snapshot(&payload("inspection anchor")).unwrap();
+        SESSION_ANCHORS.lock().unwrap().insert(
+            key.clone(),
+            SessionAnchors {
+                session_id: None,
+                snapshot,
+            },
+        );
+        let request = SessionAnchorRequest {
+            settings: &settings,
+            provider: &provider,
+            current_path: "/inspection",
+            channel_id: 7_378_902,
+            memory_scope_channel_id: 7_378_902,
+            role_binding: None,
+            session_id: Some("current-native-id"),
+            fresh: false,
+        };
+        let (text, count) = request.peek_prompt().unwrap();
+        assert!(text.contains("inspection anchor"));
+        assert_eq!(count, 1);
+        {
+            let mut cache = SESSION_ANCHORS.lock().unwrap();
+            let entry = cache.get_mut(&key).unwrap();
+            assert_eq!(
+                entry.session_id, None,
+                "inspection cannot bind the cached snapshot"
+            );
+            entry.session_id = Some("old-native-id".into());
+        }
+        assert!(request.peek_prompt().is_none());
+        let removed = SESSION_ANCHORS.lock().unwrap().remove(&key).unwrap();
+        assert_eq!(
+            removed.session_id.as_deref(),
+            Some("old-native-id"),
+            "inspection cannot evict a mismatched snapshot"
+        );
+        assert!(request.peek_prompt().is_none());
+    }
 
     #[test]
     fn anchor_snapshot_timeout_budget_covers_initialization_and_respects_longer_settings() {
