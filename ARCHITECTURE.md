@@ -1093,6 +1093,8 @@ src/
 │   │   │   │   ├── render_recovery.rs
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── session/
+│   │   │   │   └── autocomplete.rs
 │   │   │   ├── text_commands/
 │   │   │   │   ├── command_dispatch_contract_tests/
 │   │   │   │   │   └── source_guard_tests.rs
@@ -3235,6 +3237,11 @@ src/
 │   │   ├── test_support.rs
 │   │   ├── tmux_host.rs
 │   │   └── traits.rs
+│   ├── session_resume/
+│   │   ├── catalog/
+│   │   │   └── tests.rs
+│   │   ├── catalog.rs
+│   │   └── errors.rs
 │   ├── settings/
 │   │   └── runtime_config_put.rs
 │   ├── slo/
