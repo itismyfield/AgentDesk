@@ -41,11 +41,62 @@ pub(super) async fn run_retention_sweep(runtime: &Arc<ObservabilityRuntime>) {
         prune_table_by_created_at(pool, "observability_events", event_days).await;
     }
     if quality_days > 0 {
-        prune_table_by_created_at(pool, "agent_quality_event", quality_days).await;
+        match prune_quality_events_with_turn_rollup(pool, quality_days).await {
+            Ok(0) => {}
+            Ok(affected) => tracing::info!(
+                "[observability] retention sweep deleted {affected} rows from agent_quality_event (>{quality_days}d)"
+            ),
+            Err(error) => tracing::warn!(
+                "[observability] retention sweep on agent_quality_event failed (days={quality_days}): {error}"
+            ),
+        }
     }
     if snapshot_days > 0 {
         prune_table_by_snapshot_at(pool, "observability_counter_snapshots", snapshot_days).await;
     }
+}
+
+/// Adds aged `turn_*` events to their month in `turn_analytics_monthly_aggregate` and deletes
+/// every aged quality event in the same transaction, so each event is counted exactly once.
+pub(crate) async fn prune_quality_events_with_turn_rollup(
+    pool: &PgPool,
+    days: i64,
+) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    // total_turns counts finished turns (complete + error); start_count counts starts.
+    sqlx::query(
+        "INSERT INTO turn_analytics_monthly_aggregate AS a \
+             (month, total_turns, success_count, error_count, start_count, aggregated_at) \
+         SELECT date_trunc('month', created_at)::DATE, \
+                COUNT(*) FILTER (WHERE event_type IN ('turn_complete', 'turn_error')), \
+                COUNT(*) FILTER (WHERE event_type = 'turn_complete'), \
+                COUNT(*) FILTER (WHERE event_type = 'turn_error'), \
+                COUNT(*) FILTER (WHERE event_type = 'turn_start'), \
+                NOW() \
+         FROM agent_quality_event \
+         WHERE event_type IN ('turn_start', 'turn_complete', 'turn_error') \
+           AND created_at < NOW() - ($1::bigint || ' days')::interval \
+         GROUP BY date_trunc('month', created_at) \
+         ON CONFLICT (month) DO UPDATE \
+         SET total_turns = a.total_turns + EXCLUDED.total_turns, \
+             success_count = a.success_count + EXCLUDED.success_count, \
+             error_count = a.error_count + EXCLUDED.error_count, \
+             start_count = a.start_count + EXCLUDED.start_count, \
+             aggregated_at = EXCLUDED.aggregated_at",
+    )
+    .bind(days)
+    .execute(&mut *tx)
+    .await?;
+    let deleted = sqlx::query(
+        "DELETE FROM agent_quality_event \
+         WHERE created_at < NOW() - ($1::bigint || ' days')::interval",
+    )
+    .bind(days)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    Ok(deleted)
 }
 
 fn env_retention_days(var: &str, default_days: i64) -> i64 {

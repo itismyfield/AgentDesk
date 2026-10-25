@@ -7,6 +7,7 @@
 //! aggregate write runs, so the DB is untouched.
 
 mod image_retention;
+mod queue_and_dispatch;
 use anyhow::Result;
 use serde::Serialize;
 use sqlx::{PgPool, Row};
@@ -93,8 +94,8 @@ pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionR
     // `agent_quality_event` is owned by the hourly observability retention sweep.
     retain_session_transcripts(pool, dry_run, &mut report).await?;
     retain_message_outbox(pool, dry_run, &mut report).await?;
-    retain_auto_queue_entries(pool, dry_run, &mut report).await?;
-    retain_task_dispatches(pool, dry_run, &mut report).await?;
+    queue_and_dispatch::retain_auto_queue_entries(pool, dry_run, &mut report).await?;
+    queue_and_dispatch::retain_task_dispatches(pool, dry_run, &mut report).await?;
     retain_turn_lifecycle_events(pool, dry_run, &mut report).await?;
     retain_skill_usage(pool, dry_run, &mut report).await?;
     retain_turns(pool, dry_run, &mut report).await?;
@@ -213,112 +214,6 @@ async fn retain_message_outbox(
     .await?;
     report.push(TableReport {
         table_name: "message_outbox",
-        action: "delete",
-        rows_affected: del.rows_affected() as i64,
-    });
-    Ok(())
-}
-
-async fn retain_auto_queue_entries(
-    pool: &PgPool,
-    dry_run: bool,
-    report: &mut RetentionReport,
-) -> Result<()> {
-    if dry_run {
-        let would = sqlx::query(
-            "SELECT COUNT(*)::BIGINT AS n FROM auto_queue_entries \
-             WHERE status = 'completed' \
-               AND completed_at IS NOT NULL \
-               AND completed_at < NOW() - ($1::INT || ' days')::INTERVAL",
-        )
-        .bind(AUTO_QUEUE_RETENTION_DAYS)
-        .fetch_one(pool)
-        .await?;
-        let n: i64 = would.try_get("n").unwrap_or(0);
-        report.push(TableReport {
-            table_name: "auto_queue_entries",
-            action: "delete_would",
-            rows_affected: n,
-        });
-        return Ok(());
-    }
-
-    let del = sqlx::query(
-        "DELETE FROM auto_queue_entries \
-         WHERE status = 'completed' \
-           AND completed_at IS NOT NULL \
-           AND completed_at < NOW() - ($1::INT || ' days')::INTERVAL",
-    )
-    .bind(AUTO_QUEUE_RETENTION_DAYS)
-    .execute(pool)
-    .await?;
-    report.push(TableReport {
-        table_name: "auto_queue_entries",
-        action: "delete",
-        rows_affected: del.rows_affected() as i64,
-    });
-    Ok(())
-}
-
-async fn retain_task_dispatches(
-    pool: &PgPool,
-    dry_run: bool,
-    report: &mut RetentionReport,
-) -> Result<()> {
-    if dry_run {
-        let would = sqlx::query(
-            "SELECT COUNT(*)::BIGINT AS n FROM task_dispatches \
-             WHERE status = 'completed' \
-               AND completed_at IS NOT NULL \
-               AND completed_at < NOW() - ($1::INT || ' days')::INTERVAL",
-        )
-        .bind(DISPATCH_RETENTION_DAYS)
-        .fetch_one(pool)
-        .await?;
-        let n: i64 = would.try_get("n").unwrap_or(0);
-        report.push(TableReport {
-            table_name: "task_dispatches",
-            action: "delete_would",
-            rows_affected: n,
-        });
-        return Ok(());
-    }
-
-    let agg = sqlx::query(
-        "INSERT INTO task_dispatches_monthly_aggregate \
-             (month, total_dispatches, completed_count, review_count, aggregated_at) \
-         SELECT date_trunc('month', completed_at)::DATE AS month, \
-                COUNT(*)::BIGINT, \
-                COUNT(*) FILTER (WHERE status = 'completed')::BIGINT, \
-                COUNT(*) FILTER (WHERE dispatch_type = 'review')::BIGINT, \
-                NOW() \
-         FROM task_dispatches \
-         WHERE status = 'completed' \
-           AND completed_at IS NOT NULL \
-           AND completed_at < NOW() - ($1::INT || ' days')::INTERVAL \
-         GROUP BY date_trunc('month', completed_at) \
-         ON CONFLICT (month) DO NOTHING",
-    )
-    .bind(DISPATCH_RETENTION_DAYS)
-    .execute(pool)
-    .await?;
-    report.push(TableReport {
-        table_name: "task_dispatches_monthly_aggregate",
-        action: "insert",
-        rows_affected: agg.rows_affected() as i64,
-    });
-
-    let del = sqlx::query(
-        "DELETE FROM task_dispatches \
-         WHERE status = 'completed' \
-           AND completed_at IS NOT NULL \
-           AND completed_at < NOW() - ($1::INT || ' days')::INTERVAL",
-    )
-    .bind(DISPATCH_RETENTION_DAYS)
-    .execute(pool)
-    .await?;
-    report.push(TableReport {
-        table_name: "task_dispatches",
         action: "delete",
         rows_affected: del.rows_affected() as i64,
     });
@@ -1645,6 +1540,163 @@ mod tests {
         );
         let remaining = count(&pool, "SELECT COUNT(*)::BIGINT AS n FROM intake_outbox").await;
         assert_eq!(remaining, 4);
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    async fn ids(pool: &PgPool, sql: &'static str) -> Vec<String> {
+        sqlx::query_scalar(sql)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_else(|err| panic!("id query `{sql}`: {err}"))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_retention_deletes_aged_terminal_entries_of_finished_runs_only() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_terminal_entries",
+            "db_retention terminal auto-queue entries",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        sqlx::raw_sql(
+            "INSERT INTO kanban_cards (id, title) SELECT 'card-' || n, 'c' FROM generate_series(1, 7) n;
+             INSERT INTO auto_queue_runs (id, status) VALUES ('run-done', 'completed'), ('run-live', 'active');
+             INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, status, completed_at) VALUES
+                 ('e-done', 'run-done', 'card-1', 'done', NOW() - INTERVAL '40 days'),
+                 ('e-failed', 'run-done', 'card-2', 'failed', NOW() - INTERVAL '40 days'),
+                 ('e-skipped', 'run-done', 'card-3', 'skipped', NOW() - INTERVAL '40 days'),
+                 ('e-cancelled', 'run-done', 'card-4', 'user_cancelled', NOW() - INTERVAL '40 days'),
+                 ('e-fresh', 'run-done', 'card-5', 'done', NOW() - INTERVAL '5 days'),
+                 ('e-pending', 'run-done', 'card-6', 'pending', NULL),
+                 ('e-live-run', 'run-live', 'card-7', 'done', NOW() - INTERVAL '40 days');",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed auto-queue entries");
+
+        let dry = db_retention_job(&pool, true).await.expect("dry-run pass");
+        let would = dry.get("auto_queue_entries", "delete_would");
+        assert_eq!(would.map(|t| t.rows_affected), Some(4));
+        let report = db_retention_job(&pool, false)
+            .await
+            .expect("retention pass");
+        let deleted = report.get("auto_queue_entries", "delete");
+        assert_eq!(deleted.map(|t| t.rows_affected), Some(4));
+        assert_eq!(
+            ids(&pool, "SELECT id FROM auto_queue_entries ORDER BY id").await,
+            ["e-fresh", "e-live-run", "e-pending"]
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_retention_dispatch_rollup_accumulates_a_month_across_passes() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_dispatch_rollup",
+            "db_retention cumulative dispatch rollup",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        let seed = |id: &'static str, kind: &'static str, day: i32| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO task_dispatches (id, status, dispatch_type, completed_at)
+                     VALUES ($1, 'completed', $2,
+                             date_trunc('month', NOW() - INTERVAL '200 days') + $3 * INTERVAL '1 day')",
+                )
+                .bind(id)
+                .bind(kind)
+                .bind(day)
+                .execute(&pool)
+                .await
+                .expect("seed completed dispatch");
+            }
+        };
+
+        seed("d-first", "implementation", 1).await;
+        db_retention_job(&pool, false).await.expect("first pass");
+        seed("d-later", "review", 8).await;
+        db_retention_job(&pool, false).await.expect("second pass");
+
+        let row: (i64, i64, i64) = sqlx::query_as(
+            "SELECT total_dispatches, completed_count, review_count
+             FROM task_dispatches_monthly_aggregate",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("one month row");
+        assert_eq!(
+            row,
+            (2, 2, 1),
+            "the second pass must add to the month, not skip it"
+        );
+        let left = count(&pool, "SELECT COUNT(*)::BIGINT AS n FROM task_dispatches").await;
+        assert_eq!(left, 0);
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quality_event_retention_rolls_turn_events_into_the_monthly_aggregate() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_turn_rollup",
+            "observability quality retention turn rollup",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        let seed = |kind: &'static str, aged: bool| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO agent_quality_event (event_type, created_at)
+                     VALUES ($1::agent_quality_event_type,
+                             CASE WHEN $2 THEN date_trunc('month', NOW() - INTERVAL '200 days')
+                                  ELSE NOW() END)",
+                )
+                .bind(kind)
+                .bind(aged)
+                .execute(&pool)
+                .await
+                .expect("seed quality event");
+            }
+        };
+        for (kind, aged) in [
+            ("turn_start", true),
+            ("turn_start", true),
+            ("turn_complete", true),
+            ("turn_error", true),
+            ("review_pass", true),
+            ("turn_complete", false),
+        ] {
+            seed(kind, aged).await;
+        }
+        let prune =
+            crate::services::observability::retention::prune_quality_events_with_turn_rollup;
+
+        assert_eq!(prune(&pool, 90).await.expect("first sweep"), 5);
+        seed("turn_complete", true).await;
+        assert_eq!(prune(&pool, 90).await.expect("second sweep"), 1);
+
+        let row: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT total_turns, success_count, error_count, start_count
+             FROM turn_analytics_monthly_aggregate",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("one month row");
+        assert_eq!(row, (3, 2, 1, 2));
+        let left = count(
+            &pool,
+            "SELECT COUNT(*)::BIGINT AS n FROM agent_quality_event",
+        )
+        .await;
+        assert_eq!(left, 1, "the fresh event must survive");
 
         pool.close().await;
         db.drop().await;

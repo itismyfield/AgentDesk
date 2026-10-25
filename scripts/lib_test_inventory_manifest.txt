@@ -790,7 +790,9 @@ db::postgres::test_db_reclaim::tests::reclaim_execute_stops_on_log_failure
 db::postgres::test_db_reclaim::tests::reclaim_gate_decision
 db::postgres::test_db_reclaim::tests::reclaim_plan_caps_per_process_oldest_first
 db::postgres::test_db_reclaim::tests::reclaim_protected_names_abort_sweep
+db::postgres::tests::a_failed_agent_sync_leaves_no_partial_roster
 db::postgres::tests::agent_roster_sync_gated_to_leader_or_single_node
+db::postgres::tests::agent_sync_keeps_a_removed_agent_that_an_agent_scheduled_message_needs
 db::postgres::tests::background_backpressure_disabled_when_reserve_zero
 db::postgres::tests::background_backpressure_saturating_boundaries
 db::postgres::tests::background_backpressure_yields_only_at_or_past_budget
@@ -11688,6 +11690,8 @@ services::kakao_message::tests::text_template_contains_only_the_configured_publi
 services::kakao_message::tests::validation_rejects_private_or_credentialed_urls
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_pg_reference_gate
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_terminal_reclaim
+services::maintenance::jobs::db_retention::tests::db_retention_deletes_aged_terminal_entries_of_finished_runs_only
+services::maintenance::jobs::db_retention::tests::db_retention_dispatch_rollup_accumulates_a_month_across_passes
 services::maintenance::jobs::db_retention::tests::db_retention_job_reports_intake_outbox_candidates_without_deleting
 services::maintenance::jobs::db_retention::tests::db_retention_keeps_skill_usage_rows_with_null_used_at
 services::maintenance::jobs::db_retention::tests::db_retention_preserves_permanent_outbox_dedupe_sentinels
@@ -11698,6 +11702,7 @@ services::maintenance::jobs::db_retention::tests::intake_outbox_candidate_count_
 services::maintenance::jobs::db_retention::tests::intake_outbox_candidate_count_timeout_is_reported_not_fatal
 services::maintenance::jobs::db_retention::tests::intake_outbox_candidates_exclude_rows_with_live_family_or_children
 services::maintenance::jobs::db_retention::tests::intake_outbox_candidates_use_exact_status_windows_and_allowlist
+services::maintenance::jobs::db_retention::tests::quality_event_retention_rolls_turn_events_into_the_monthly_aggregate
 services::maintenance::jobs::memento_consolidation::receipt_tests::maintenance_invalidates_other_credentials_before_and_after_success_or_lost_reply
 services::maintenance::jobs::memento_consolidation::receipt_tests::maintenance_receipt_failure_stops_before_dispatch
 services::maintenance::jobs::target_sweep::tests::target_walk_runs_off_runtime_and_preserves_report
