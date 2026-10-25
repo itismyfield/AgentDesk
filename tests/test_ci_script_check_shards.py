@@ -176,7 +176,10 @@ class ScriptChecksJudgeAggregation(unittest.TestCase):
     def test_required_context_passes_only_when_every_shard_succeeds(self) -> None:
         jobs = load_jobs()
         job = jobs[JUDGE_JOB]
-        self.assertIn("Script checks", job["strategy"]["matrix"]["context"])
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import nextest_required
+        sys.path.pop(0)
+        self.assertIn("Script checks", nextest_required.matrix_branches(job["strategy"]["matrix"]["context"])[1])
         shard_jobs = sorted(workflow_shards(jobs))
         self.assertLessEqual(set(shard_jobs), set(job["needs"]))
         baseline = {name: "success" for name in job["needs"]}

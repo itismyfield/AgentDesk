@@ -7,6 +7,7 @@ instead of compiling in review and executing nowhere.
 
 from __future__ import annotations
 
+import sys
 import unittest
 from pathlib import Path
 
@@ -70,7 +71,10 @@ class E2eScenarioLaneWiring(unittest.TestCase):
         judge = jobs["required_contexts"]
         self.assertEqual(judge["if"], "${{ !cancelled() }}")
         self.assertLessEqual({"rust_build", "rust_tests", "test_evidence"}, set(judge["needs"]))
-        self.assertIn("relay-authority-contract", judge["strategy"]["matrix"]["context"])
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import nextest_required
+        sys.path.pop(0)
+        self.assertIn("relay-authority-contract", nextest_required.matrix_branches(judge["strategy"]["matrix"]["context"])[1])
 
     def test_commented_wiring_does_not_count(self) -> None:
         fixture = '# "$PYTHON" -m unittest scripts.e2e.tui_relay.test_fixtures'

@@ -1904,7 +1904,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotIn("workflow_dispatch:", pr_workflow)
         self.assertNotRegex(pr_workflow, r"(?m)^  push:")
         judge = yaml.safe_load(pr_workflow)["jobs"]["required_contexts"]
-        self.assertEqual(judge["strategy"]["matrix"]["context"].count("Script checks"), 1)
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import nextest_required
+        self.assertEqual(nextest_required.matrix_branches(judge["strategy"]["matrix"]["context"])[1].count("Script checks"), 1)
         self.assertNotRegex(pr_workflow, r"(?m)^    name: Script checks$")
         self.assertRegex(
             job_block(pr_workflow, "scripts"),
