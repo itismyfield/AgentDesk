@@ -3175,6 +3175,7 @@ src/
 │   │   │   │   ├── grant_store.rs
 │   │   │   │   ├── grant_store_tests.rs
 │   │   │   │   ├── loaded_image.rs
+│   │   │   │   ├── loaded_image_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── peer.rs
 │   │   │   │   ├── peer_tests.rs
