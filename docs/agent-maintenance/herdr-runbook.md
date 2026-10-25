@@ -2,7 +2,7 @@
 
 기준 커밋: `b3006723b4f0cd9d850b9a479f2f1f3a8b582166`.
 
-이 문서의 모든 `경로:줄` 좌표는 위 커밋을 가리킨다. 코드 동작과 운영 정책을 구분한다. `[O-U-n]`은 추가 확인이 필요한 항목이며, §8.2의 방법과 완료 증거를 충족하기 전에는 완료로 기록하지 않는다.
+이 문서의 모든 `경로:줄` 좌표는 위 커밋을 가리킨다. `경로` (`심볼`) 형식 참조와 (삭제됨) 표기는 현재 main 기준이다. 코드 동작과 운영 정책을 구분한다. `[O-U-n]`은 추가 확인이 필요한 항목이며, §8.2의 방법과 완료 증거를 충족하기 전에는 완료로 기록하지 않는다.
 
 문서 작성은 지정 커밋의 정적 검토로만 수행했다. 파일·브랜치를 변경하지 않았고 cargo·시험·네트워크를 사용하지 않았다. `agentdesk.yaml`, `launchd.env`, 런타임 디렉터리의 값도 읽거나 기록하지 않았다. 아래 운영 명령과 검증 절차는 실행하지 않았다.
 
@@ -18,7 +18,7 @@
 
 이 노드는 `execution_node`가 자신의 `cluster.instance_id`와 같은 endpoint만 등록한다. 다른 노드의 endpoint를 지정한 턴은 `endpoint_not_local(...)`로 거절된다. Adapter가 원격 Unix socket에 직접 연결하거나 다른 노드에서 대신 실행한다고 해석하지 않는다.
 
-근거: `src/services/session_host/herdr_registry.rs:143`; `src/services/turn_host.rs:277`.
+근거: `src/services/session_host/herdr_registry.rs:143`; `src/services/turn_host.rs` (`configured_turn`).
 
 채널 매핑 제거와 실행 은퇴는 별개다. 매핑이 없어도 읽힌 hosted record가 Pending·Bound 또는 해석 불가능한 Herdr record이면 기존 실행 경로로 넘기지 않는다. Retired record는 턴 선택에서 tmux 경로를 허용하지만, 관리용 row witness는 Retired도 Herdr로 취급한다.
 
@@ -41,13 +41,13 @@
 | `ADK_HERDR_ADMISSION` | 미설정이면 허용 | 최초 사용 시 읽음. 설정된 값 중 `on`만 허용하며 나머지는 거절 |
 | `<runtime_root>/herdr/admission-off` | 파일이 없으면 허용 | 발견하면 해당 프로세스 종료까지 정지 상태를 유지 |
 
-근거: `src/config/session_hosts.rs:33`, `:252`; `src/config/runtime_settings.rs:121`; `src/services/turn_host.rs:199`, `:287`, `:288`; `src/services/herdr_launch.rs:62`, `:72`; `src/services/tui_o/channel_policy.rs:1`, `:62`; `src/services/codex/tui_session_launch.rs:416`, `:427`, `:433`, `:436`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`; `src/services/discord/herdr_terminate.rs:69`; `src/services/herdr_admission.rs:38`, `:48`, `:70`, `:78`.
+근거: `src/config/session_hosts.rs:33`, `:252`; `src/config/runtime_settings.rs:121`; `src/services/turn_host.rs` (`herdr_turn_switched_on`, `herdr_turn_switched_on_for`, `configured_turn`); `src/services/herdr_launch.rs:62`, `:72`; `src/services/tui_o/channel_policy.rs:1`, `:62`; `src/services/codex/tui_session_launch.rs:416`, `:427`, `:433`, `:436`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`; `src/services/discord/herdr_terminate.rs:69`; `src/services/herdr_admission.rs:38`, `:48`, `:70`, `:78`.
 
 admission 정지는 새 Herdr 작업을 막으며 pane을 종료하지 않는다. 일반 턴 선택과 입력 gate가 모두 admission을 검사하므로 기존 실행의 후속 입력과 시험 입력도 영향을 받는다. 이를 범용 intake pause나 대기 입력의 안전한 동결·이관 기능으로 취급하지 않는다.
 
 admission은 해당 프로세스의 공통 스위치다. 특정 채널만 멈추려는 작업에서는 같은 runtime의 다른 Herdr 채널에 미치는 영향도 확인한다. 취소 키는 입력 admission 예외지만 현재 생산 빌드의 Herdr stop settlement는 hard-false다.
 
-근거: `src/services/herdr_admission.rs:1`, `:76`; `src/services/turn_host.rs:287`; `src/services/session_host/herdr_gate.rs:70`, `:635`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`.
+근거: `src/services/herdr_admission.rs:1`, `:76`; `src/services/turn_host.rs` (`configured_turn`); `src/services/session_host/herdr_gate.rs:70`, `:635`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`.
 
 ## 2. 실행 노드별 준비
 
@@ -94,7 +94,7 @@ E7은 `<herdr_home>/config.toml`의 내용, 서버 프로세스의 `HERDR_CONFIG
 
 O readiness는 해당 노드에서 출력 소유권이 확인되고, writer가 작업을 수락하며, 기존 O store에 대상 채널의 binding checkpoint가 있을 때만 충족된다. checkpoint는 발견한 baseline 또는 적용한 binding이 기록한 것이어야 한다. 빈 store를 만들거나 writer 채널 목록만 선택한 것으로 준비 완료를 선언하지 않는다. writer membership은 부팅 설정이므로 필요한 변경의 적용 범위와 재시작을 따로 계획한다.
 
-근거: `src/services/herdr_launch.rs:62`, `:67`, `:72`; `src/services/turn_host.rs:288`; `src/services/tui_o/channel_policy.rs:1`, `:62`.
+근거: `src/services/herdr_launch.rs:62`, `:67`, `:72`; `src/services/turn_host.rs` (`configured_turn`); `src/services/tui_o/channel_policy.rs:1`, `:62`.
 
 **Codex Herdr cold launch는 다음 조건을 별도로 확인한다.**
 
@@ -145,11 +145,11 @@ Herdr integration installer를 중복 적용하지 않는 것을 운영 정책�
 - 채널 queue API는 pending/dispatched **dispatch 목록**이다. mailbox 입력 목록이 아니다. SQL 실패가 빈 목록으로 축약될 수도 있다.
 - 내부 home drain은 mailbox의 active token·intervention·pending dispatch와 inflight, O의 `owed/prepared/unsealed/uncaptured/binding_pending`, open intake, 진행 중 POST를 별도로 확인한다.
 
-근거: `src/server/routes/turn_lease.rs:15`; `src/services/discord/turn_lease.rs:72`; `src/services/discord/health/snapshot.rs:117`; `src/server/routes/queue_api.rs:20`; `src/services/cluster/channel_home_port.rs:40`, `:62`, `:95`; `src/services/cluster/channel_home_drain.rs:15`, `:145`.
+근거: `src/server/routes/turn_lease.rs:15`; `src/services/discord/turn_lease.rs:72`; `src/services/discord/health/snapshot.rs:117`; `src/server/routes/queue_api.rs:20`; `src/services/cluster/channel_home_port.rs` (삭제됨), `src/services/cluster/channel_home_drain.rs` (삭제됨, channel-home 제거).
 
 **spool 파일을 삭제하거나 비우지 않는다.** 배출은 미완료 책임이 없다는 뜻이다. 보존된 spool 기록 파일이 없어야 한다는 뜻이 아니다. O actor는 spool을 재생하고 owed 조각을 배달한다. 위임 drain도 파일 삭제가 아니라 미완료 카운터를 판정한다.
 
-근거: `src/services/tui_o/writer/actor.rs:1`; `src/services/cluster/channel_home_drain.rs:25`, `:100`.
+근거: `src/services/tui_o/writer/actor.rs:1`; `src/services/cluster/channel_home_drain.rs` (삭제됨, channel-home 제거).
 
 [O-U-4] 일반 채널의 배출 완료를 공개 CLI/API만으로 모두 증명하는 방법은 아직 확정하지 않는다. 확인되지 않은 필드, `null`, 관측 실패, 빈 dispatch 목록을 배출 완료로 처리하지 않는다.
 
@@ -330,7 +330,7 @@ Adapter의 서버 식별은 socket peer PID와 OS 시작 식별을 사용한다.
 
 admission을 닫은 채 시험 입력을 요구하지 않는다. latch된 프로세스에서 stop-file만 제거해도 시험은 계속 거절될 수 있다. 재시작 후 `open`을 확인한 경우와 대조하는 검증을 [O-U-1]에 포함한다.
 
-근거: `src/services/turn_host.rs:287`; `src/services/session_host/herdr_gate.rs:635`; `src/services/herdr_admission.rs:48`, `:53`, `:78`; `scripts/e2e/tui_relay/herdr.py:92`; `src/server/routes/health_api/runtime_profile.rs:15`; `src/services/session_host/herdr/launch_host_real_tests.rs:48`, `:68`, `:92`; `src/services/session_host/herdr/model.rs:15`; `src/services/session_host/herdr/observe.rs:103`.
+근거: `src/services/turn_host.rs` (`configured_turn`); `src/services/session_host/herdr_gate.rs:635`; `src/services/herdr_admission.rs:48`, `:53`, `:78`; `scripts/e2e/tui_relay/herdr.py:92`; `src/server/routes/health_api/runtime_profile.rs:15`; `src/services/session_host/herdr/launch_host_real_tests.rs:48`, `:68`, `:92`; `src/services/session_host/herdr/model.rs:15`; `src/services/session_host/herdr/observe.rs:103`.
 
 [O-U-5] provider 정상 종료, Herdr 서버 완전 종료·재기동 시 provider 프로세스 소멸, 새 Herdr 프로세스에서의 대화 resume은 격리 환경에서 측정한다. experimental live handoff나 실행 중 프로세스 이동을 기본 안전성의 전제로 사용하지 않는다. 이 측정으로 같은 Claude 채널의 legacy 전환 차단을 해소했다고 판정하지 않는다.
 
@@ -599,8 +599,8 @@ Claude와 Codex 실행기는 생산 dispatch에 연결되어 있지만 각각 �
 
 | AgentDesk에 남는 책임 | 근거 |
 |---|---|
-| 실행 노드·endpoint 선택과 잘못된 노드에서의 실행 거절 | `src/services/turn_host.rs:261`, `:277`; `src/services/session_host/herdr_registry.rs:143` |
-| 실행 admission과 O 준비 판정 | `src/services/turn_host.rs:287`, `:288`; `src/services/herdr_launch.rs:62`, `:72` |
+| 실행 노드·endpoint 선택과 잘못된 노드에서의 실행 거절 | `src/services/turn_host.rs` (`configured_turn`); `src/services/session_host/herdr_registry.rs:143` |
+| 실행 admission과 O 준비 판정 | `src/services/turn_host.rs` (`configured_turn`); `src/services/herdr_launch.rs:62`, `:72` |
 | Codex hook·source-mode·daemon isolation 사전조건 | `src/services/codex/herdr_turn.rs:186`; `src/services/codex/tui_session_launch.rs:416`, `:427`, `:436` |
 | 실행 정체성: owner·nonce·노드·endpoint·named session·pane·process stamp·source | `src/db/dispatched_sessions/hosted_execution.rs:33`, `:44`, `:55`, `:64`, `:74`, `:88` |
 | provider transcript/rollout과 실행의 결합 | `src/services/discord/tui_prompt_relay/herdr_source.rs:154`, `:210`, `:274` |
@@ -687,7 +687,7 @@ transport의 재접속과 prompt 재전송을 구분한다. 읽기만 retry하�
 
 실기기 시험은 일반 제출 중단을 유지하고 admission `open`과 준비 조건을 확인한 뒤 승인된 시험 입력으로 수행한다. 닫힌 admission에서 시험 성공을 요구하거나 stop-file 해제만으로 latch가 풀렸다고 가정하지 않는다.
 
-근거: `src/services/turn_host.rs:287`; `src/services/session_host/herdr_gate.rs:635`; `src/services/herdr_admission.rs:53`, `:78`; `scripts/e2e/tui_relay/herdr.py:92`.
+근거: `src/services/turn_host.rs` (`configured_turn`); `src/services/session_host/herdr_gate.rs:635`; `src/services/herdr_admission.rs:53`, `:78`; `scripts/e2e/tui_relay/herdr.py:92`.
 
 ### 9.7 모든 미확인 항목의 담당·방법·완료 증거
 

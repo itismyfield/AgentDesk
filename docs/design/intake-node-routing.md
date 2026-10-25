@@ -100,9 +100,9 @@ Draft v2 incorporates codex round-1 review findings (Appendix A).
 - `serenity::FullEvent` → `intake_gate::handle_event()`
   (`src/services/discord/router/intake_gate.rs:781`)
 - → `handle_text_message()`
-  (`src/services/discord/router/message_handler.rs:1795`)
+  (`src/services/discord/router/message_handler/intake_turn.rs`)
 - → `start_reserved_headless_turn()` (`router/turn_start.rs`)
-- → `spawn_turn_bridge()` (`turn_bridge/mod.rs:1142`)
+- → `spawn_turn_bridge()` (`turn_bridge/mod.rs`, now `spawn_turn_bridge_with_pin`)
 - → provider tmux create — `platform::tmux::create_session()`
   (`platform/tmux.rs:67`)
 
@@ -118,7 +118,8 @@ is held elsewhere
 `cached_serenity_ctx` is only populated after a real gateway client
 starts (`runtime_bootstrap.rs:1137`). But `handle_text_message`
 expects a live `serenity::Context` and later constructs a
-`DiscordGateway` around it (`message_handler.rs:1795,4123`).
+`DiscordGateway` around it (`router/message_handler/intake_turn.rs`,
+`handle_text_message`).
 
 **A "skip routing" flag is therefore not enough** to run the existing
 function on a worker. We need a refactor that separates
@@ -129,13 +130,13 @@ function on a worker. We need a refactor that separates
 | Primitive | Source | Reused for |
 |---|---|---|
 | `worker_nodes` table (labels JSONB, last_heartbeat_at, status) | `migrations/postgres/0029_worker_nodes.sql` | Health + label match |
-| `lease_ttl_secs` staleness (default 180s) | `src/server/cluster.rs:165` | Stale worker exclusion |
+| `lease_ttl_secs` staleness (default 180s) | `src/services/cluster/node_registry.rs` (`list_worker_nodes`) | Stale worker exclusion |
 | `cluster.dispatch_routing` policy shape | `src/config.rs:731-788` | Mirror for `intake_routing` |
 | `RoutingEngine::route()` capability matching | `src/services/dispatches/outbox_claiming.rs:75-99` | Same label scoring fn |
 | `FOR UPDATE SKIP LOCKED` claim pattern | `src/db/dispatches/outbox/claim.rs:38,108` | Same SQL idiom |
 | Adaptive 500ms→5s polling backoff | `src/services/dispatches/outbox_queue.rs:397` | Same loop tempo |
 | `sessions.instance_id` column (already exists) | `migrations/postgres/0040_sessions_instance_id.sql` | Affinity routing |
-| `session_owner_routing_status()` foreign-detection | `src/server/cluster_session_routing.rs:51-115` | Reuse verbatim |
+| `session_owner_routing_status()` foreign-detection | `src/services/cluster/session_routing.rs` (`session_owner_routing_status`) | Reuse verbatim |
 | `serenity::http::Http` REST client | `src/services/discord/gateway.rs:95` | Worker-side response posting |
 | `credential::read_bot_token()` | `src/credential.rs:1-25` | Worker-side token (no IDENTIFY needed for REST) |
 
@@ -1208,12 +1209,14 @@ When a retention job is added (separate PR, post-pilot):
 
 ### Phase 2-pre — Extract REST-safe intake core (codex blocker 1, scoped per round-2 P1 #4)
 
-`handle_text_message` is **2,379 lines** (`message_handler.rs:1795-4173`)
+`handle_text_message` was **2,379 lines** at design time (lines 1795-4173 of
+the then-monolithic `message_handler.rs`; it now lives in
+`router/message_handler/intake_turn.rs`)
 and ownership-overloaded: auto-start, dispatch thread reuse, session
 cwd updates, queue handoff, placeholder ownership, watchdogs,
 inflight persistence, provider spawn, bridge wiring. It also passes
 `LiveDiscordTurnContext { ctx, token, request_owner }` into
-`DiscordGateway` (`message_handler.rs:4123`), and
+`DiscordGateway` (`router/message_handler/intake_turn.rs`), and
 `gateway.rs:495` recursively calls back into `handle_text_message`
 for queued-turn dispatch with that same live context.
 
@@ -1276,7 +1279,7 @@ depend on 2-pre.3 specifically — it can ship in parallel with
   state transitions, advisory lock contention.
 
 ### Phase 3 — Worker polling loop
-- `src/services/intake_outbox/worker_loop.rs` — poll-claim-handle
+- `src/services/intake_outbox/worker_loop.rs` (proposed) — poll-claim-handle
   pattern matching `dispatch_outbox_loop`. Adaptive 500ms→5s backoff.
 - Worker invokes `handle_forwarded_intake()` which builds
   `IntakeDeps` from its local HTTP client and calls
@@ -1345,7 +1348,7 @@ depend on 2-pre.3 specifically — it can ship in parallel with
   intake re-route.
 - Add 📩 reaction on user message when forward executes.
 - Document the kill switch, CLI, and rollback procedure in
-  `docs/runtime/cluster-routing.md`.
+  `docs/runtime/cluster-routing.md` (proposed).
 
 #### Rollback procedure (round-2 P1 #7)
 For incident response when `enforce` mode causes problems:
