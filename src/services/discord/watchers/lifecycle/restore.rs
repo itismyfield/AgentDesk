@@ -2,7 +2,6 @@ use super::*;
 
 use crate::services::discord::inflight::KeyedTeardown;
 use crate::services::discord::tmux_lifecycle::DispatchTmuxProtection;
-use crate::services::session_host::HostLiveness;
 use crate::services::tmux_common::current_tmux_owner_marker;
 
 #[cfg(all(test, unix))]
@@ -12,11 +11,16 @@ mod n3bc_restore_tests;
 #[path = "restore_core.rs"]
 mod restore_core;
 
+#[path = "restore_retry.rs"]
+pub(in crate::services::discord) mod retry;
+use retry::{DeadSessionCleanup, RestoreScope};
+
 /// On startup, scan for surviving tmux sessions (AgentDesk-*) and restore watchers.
 /// This handles the case where AgentDesk was restarted but tmux sessions are still alive.
-pub(in crate::services::discord) async fn restore_tmux_watchers(
+async fn restore_selected_tmux_watchers(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
+    scope: &RestoreScope,
 ) {
     let settings_snapshot = { shared.settings.read().await.clone() };
     let provider = settings_snapshot.provider.clone();
@@ -35,6 +39,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
     let agent_sessions: Vec<&str> = output
         .iter()
         .map(|l| l.trim())
+        .filter(|name| scope.includes(shared, name))
         .filter(|l| {
             parse_provider_and_channel_from_tmux_name(l)
                 .map(|(session_provider, _)| session_provider == provider)
@@ -444,7 +449,12 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             );
         }
 
-        let dead = DeadSessionCleanup::probe(channel_id.get(), &channel_name, session_name).await;
+        let Ok(dead) = scope
+            .probe(channel_id.get(), &channel_name, session_name)
+            .await
+        else {
+            continue;
+        };
         if let Some(dc) = dead {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let observed = dc.observed;
@@ -706,42 +716,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         // pre-migration wrappers) — we only clean the new persistent
         // directory. See issue #892.
         sweep_orphan_session_files().await;
-    }
-}
-
-/// A tmux session found not live at startup, with the pane liveness that found it.
-struct DeadSessionCleanup {
-    channel_id: u64,
-    channel_name: String,
-    session_name: String,
-    observed: HostLiveness,
-}
-
-impl DeadSessionCleanup {
-    /// A cleanup candidate unless the pane is live. A failed probe stays a candidate
-    /// with its answer, so the host guard keeps the session instead of reading it as dead.
-    async fn probe(channel_id: u64, channel_name: &str, session_name: &str) -> Option<Self> {
-        let probe = crate::services::tmux_diagnostics::probe_tmux_session_pane_liveness;
-        let observed = HostLiveness::from(probe(session_name).await);
-
-        let marker = crate::services::tmux_common::session_dead_marker_path(session_name);
-        if observed != HostLiveness::Live {
-            let (channel_name, session_name) = (channel_name.into(), session_name.into());
-            return Some(Self {
-                channel_id,
-                channel_name,
-                session_name,
-                observed,
-            });
-        }
-        if std::path::Path::new(&marker).exists() {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 🧹 clearing stale .pane_dead marker for {session_name} — tmux session is alive"
-            );
-            let _ = std::fs::remove_file(&marker);
-        }
-        None
     }
 }
 

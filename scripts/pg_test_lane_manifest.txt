@@ -307,6 +307,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.r
 src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs
 src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs
+src/services/discord/tui_prompt_relay/restore_after_rehydration_tests.rs
 src/services/discord/tui_prompt_relay/synthetic_start/claim/admitted/transition_tests.rs
 src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs
 src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs
@@ -749,6 +750,7 @@ services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
+services::discord::tui_prompt_relay::source_tick::restore_after_rehydration_tests
 services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests
@@ -2566,6 +2568,12 @@ services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_gu
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_keeps_a_successor_route_published_after_the_release_pg
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_leaves_an_unanchored_thread_turn_alone_pg
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_releases_a_stale_thread_and_keeps_its_queue_pg
+services::discord::tui_prompt_relay::source_tick::restore_after_rehydration_tests::codex_rehydration_existing_watcher_is_not_retried_pg
+services::discord::tui_prompt_relay::source_tick::restore_after_rehydration_tests::codex_rehydration_retry_is_bounded_after_failed_attach_pg
+services::discord::tui_prompt_relay::source_tick::restore_after_rehydration_tests::codex_rehydration_retry_never_cleans_a_now_dead_pane_pg
+services::discord::tui_prompt_relay::source_tick::restore_after_rehydration_tests::codex_rehydration_standby_token_does_not_arm_restore_pg
+services::discord::tui_prompt_relay::source_tick::restore_after_rehydration_tests::codex_rehydration_waits_for_boot_restore_completion_pg
+services::discord::tui_prompt_relay::source_tick::restore_after_rehydration_tests::delayed_codex_rehydration_restores_one_idle_watcher_pg
 services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::admitted_tui_claim_clears_the_recorded_idle_card_pg
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests::transcript_completions_close_their_own_background_children_pg
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_discord_attempt_new_turn_delivers_through_production_ledger_pg

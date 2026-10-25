@@ -3,6 +3,10 @@ use super::*;
 use crate::services::discord::recovery_engine::herdr_row_end::row_end_pass;
 use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
 
+#[cfg(all(test, unix))]
+#[path = "restore_after_rehydration_tests.rs"]
+mod restore_after_rehydration_tests;
+
 pub(super) const CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES: u64 = 65_536;
 
 pub(super) struct ClaudeLegacyBodyCandidate {
@@ -116,6 +120,8 @@ pub(super) async fn codex_source_phase(
     if now >= *next_rehydrate {
         row_end_pass(shared, &ProviderKind::Codex).await;
         let shared_for_rehydrate = shared.clone();
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_for_task = completed.clone();
         super::codex_idle_rollout::codex_discovery_pass(move || {
             #[cfg(test)]
             super::codex_idle_rollout::note_relay_target(
@@ -124,8 +130,12 @@ pub(super) async fn codex_source_phase(
             );
             crate::services::tui_prompt_dedupe::resolve_codex_claims();
             rehydrate_existing_codex_tui_bindings(&shared_for_rehydrate);
+            completed_for_task.store(true, Ordering::Release);
         })
         .await;
+        if completed.load(Ordering::Acquire) {
+            super::super::tmux::restore_retry::after_rehydration(shared).await;
+        }
         *next_rehydrate = now + CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL;
     }
 
