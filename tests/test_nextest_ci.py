@@ -958,15 +958,17 @@ class RustSources(unittest.TestCase):
             self.assertEqual(self.split(os_name)[0], {"imp::same"})
 
     def test_every_workflow_compare_step_runs_as_written(self):
-        """Each compare command ci-pr.yml and ci-nightly.yml run must parse and write its JSON, not only match a pinned string."""
+        """Each compare command the workflows and the native helper run must parse and write its JSON."""
         import shlex
         import shutil
         import subprocess
         import yaml
-        runs = [s["run"] for name in ("ci-pr.yml", "ci-nightly.yml")
+        runs = [s["run"] for name in ("ci-pr.yml", "ci-main.yml", "ci-nightly.yml")
                 for job in yaml.safe_load((ROOT / ".github/workflows" / name).read_text())["jobs"].values()
                 for s in job.get("steps", []) if "rust_test_sources.py compare" in s.get("run", "")]
         self.assertEqual(len(runs), 4)
+        native = (ROOT / "scripts/ci/nextest-native.sh").read_text().replace('"$dir', '"$NEXTEST_DIR')
+        runs += [native.replace('"$platform"', platform) for platform in ("macos", "windows")]
         self.tree({"src/lib.rs": "#[test]\nfn a() {}\n#[cfg(windows)]\n#[test]\nfn w() {}\n"
                                  "#[cfg(unix)]\n#[test]\nfn u() {}\n"})
         (self.root / "scripts/ci").mkdir(parents=True)
