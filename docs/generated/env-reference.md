@@ -37,10 +37,10 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_HERDR_ROW_END_MUTANT` | `src/services/discord/inflight/clear_store/herdr_row_end.rs`, `src/services/discord/recovery_engine/herdr_row_end.rs` | The receipt recheck, which only a test build's mutant turns off. |
 | `ADK_IMSG_OBLIGATIONS` | `src/services/imsg_reply/mod.rs` | Cache the kill switch once so activation requires a process restart. |
 | `ADK_INTAKE_ROUTING_MODE` | `src/services/cluster/intake_routing_config.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` |  |
-| `ADK_OBSERVABILITY_COUNTER_SNAPSHOT_RETENTION_DAYS` | `src/services/observability/retention.rs` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
+| `ADK_OBSERVABILITY_COUNTER_SNAPSHOT_RETENTION_DAYS` | `src/services/observability/retention.rs` |  |
 | `ADK_OBSERVABILITY_EVENTS_PATH` | `src/services/observability/events.rs` | Honors `ADK_OBSERVABILITY_EVENTS_PATH` for tests. |
-| `ADK_OBSERVABILITY_EVENT_RETENTION_DAYS` | `src/services/observability/retention.rs` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
-| `ADK_OBSERVABILITY_QUALITY_RETENTION_DAYS` | `src/services/observability/retention.rs` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
+| `ADK_OBSERVABILITY_EVENT_RETENTION_DAYS` | `src/services/observability/retention.rs` |  |
+| `ADK_OBSERVABILITY_QUALITY_RETENTION_DAYS` | `src/services/observability/retention.rs` |  |
 | `ADK_P10_3_MUTANT` | `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs`, `src/services/provider/cancel_token_claude_interrupt.rs` | Test-only effect mutations run against one binary; production always keeps every fence. |
 | `ADK_QUALITY_ALERT_DRILL_BASE` | `src/services/agent_quality/regression_alerts.rs` | Resolve the drill-down base URL (env override or fallback const). |
 | `ADK_QUEUED_HEAD_INJECT` | `src/services/discord/queue_io/queued_head_inject.rs` | `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off. |
