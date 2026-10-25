@@ -2088,7 +2088,7 @@ mod review_skip_pg_tests {
                  ('impl-1', 'card-1', 'implementation', 'completed'),
                  ('review-1', 'card-1', 'review', 'dispatched');
              INSERT INTO card_review_state (card_id) VALUES ('card-1');
-             INSERT INTO sessions (session_key, status, active_dispatch_id) VALUES ('s-1', 'working', 'review-1');",
+             INSERT INTO sessions (session_key, status, active_dispatch_id) VALUES ('s-1', 'turn_active', 'review-1');",
         )
         .execute(pool)
         .await
