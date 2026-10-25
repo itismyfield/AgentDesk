@@ -42,7 +42,7 @@ def load_selector():
 
 ts = load_selector()
 ts.tools()
-INTEGRITY = sys.modules["check_test_target_integrity"]
+INTEGRITY = importlib.import_module("check_test_target_integrity")
 PGM = ts.tools()[2]
 Site = ts.tools()[3].Site
 
