@@ -135,9 +135,7 @@ pub(super) use control::{cmd_cancel_queued, cmd_clear, cmd_stop};
 pub(in crate::services::discord) use diagnostics::{
     build_health_report, build_inflight_report, build_queue_report, build_status_report,
 };
-pub(super) use diagnostics::{
-    cmd_deletesession, cmd_health, cmd_inflight, cmd_queue, cmd_sessions, cmd_status,
-};
+pub(super) use diagnostics::{cmd_health, cmd_inflight, cmd_queue, cmd_status};
 pub(super) use fast_mode::cmd_fast;
 pub(super) use goals::cmd_goals;
 pub(super) use help::cmd_help;

@@ -351,7 +351,6 @@ interaction tokens or ephemeral visibility.
 | `src/services/discord/commands/mod.rs:93` | shared command reply helper | excluded |
 | `src/services/discord/commands/skill.rs:141, 158, 161, 187, 206, 209, 247, 314, 321, 330` | `/skill` family ACK | excluded |
 | `src/services/discord/commands/control.rs` (`cmd_stop`, `cmd_cancel_queued`, `cmd_clear`) | `/stop`, `/cancel-queued`, `/clear` ACK | excluded |
-| `src/services/discord/commands/diagnostics/mod.rs` (`cmd_sessions`, `cmd_deletesession`) | `/sessions`, `/deletesession` ACK | excluded |
 | `src/services/discord/commands/config.rs` (`cmd_allowall`) | `/allowall` ACK | excluded |
 | `src/services/discord/commands/text_commands.rs:1239` | text-command running banner | excluded |
 | `src/services/discord/commands/model_picker.rs:60, 132` | `/model` picker | excluded |

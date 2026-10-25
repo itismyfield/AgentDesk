@@ -1111,7 +1111,8 @@ src/
 │   │   │   ├── restart/
 │   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
-│   │   │   │   └── autocomplete.rs
+│   │   │   │   ├── autocomplete.rs
+│   │   │   │   └── resume_key_tests.rs
 │   │   │   ├── skill/
 │   │   │   │   └── stop_response_tests.rs
 │   │   │   ├── system_prompt/

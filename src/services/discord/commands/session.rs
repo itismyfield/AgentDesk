@@ -1,8 +1,13 @@
 mod autocomplete;
 use autocomplete::autocomplete_session;
+#[cfg(all(test, unix))]
+mod resume_key_tests;
 
 use super::super::formatting::send_long_message_ctx;
 use super::super::{Context, Error, auto_restore_session, check_auth};
+
+/// The key needs the channel's name: from its live session or its agentdesk.yaml binding.
+const RESUME_SESSION_KEY_UNRESOLVED: &str = "이 채널의 session_key를 만들 수 없어요. agentdesk.yaml 채널 바인딩에 이 채널의 이름이나 별칭이 있는지 확인하거나, 일반 메시지를 한 번 보내 세션을 연 뒤 다시 시도해 주세요.";
 
 /// Rebind this channel to a previous provider session (empty = auto-select).
 #[poise::command(slash_command, rename = "resume")]
@@ -43,10 +48,7 @@ pub(in crate::services::discord) async fn cmd_resume(
     let Some(session_key) =
         super::super::adk_session::build_adk_session_key(shared, channel_id, provider, None).await
     else {
-        ctx.say(
-            "이 채널의 session_key를 확인할 수 없어요. agentdesk.yaml에 workspace를 설정해 주세요.",
-        )
-        .await?;
+        ctx.say(RESUME_SESSION_KEY_UNRESOLVED).await?;
         return Ok(());
     };
 

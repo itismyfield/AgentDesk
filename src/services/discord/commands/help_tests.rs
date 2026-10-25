@@ -110,6 +110,8 @@ fn retired_slash_commands_are_not_registered() {
         "adduser",
         "removeuser",
         "adk-phase",
+        "sessions",
+        "deletesession",
     ] {
         assert!(!registered.contains(retired), "/{retired} is registered");
     }

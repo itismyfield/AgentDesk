@@ -126,6 +126,16 @@ impl ActionTransport {
             frontend,
         }
     }
+
+    /// Text of every followup message the actions sent so far.
+    pub(super) fn followup_contents(&self) -> Vec<String> {
+        let replies = self.replies.lock().expect("slash responses");
+        replies
+            .iter()
+            .filter(|reply| reply["type"] == "followup")
+            .filter_map(|reply| reply["data"]["content"].as_str().map(str::to_string))
+            .collect()
+    }
 }
 
 async fn invoke_real_stop_action(

@@ -242,8 +242,6 @@ pub(in crate::services::discord) fn run_bot_build_slash_commands()
     slash_commands.extend([
         commands::cmd_queue(),
         commands::cmd_health(),
-        commands::cmd_sessions(),
-        commands::cmd_deletesession(),
         commands::cmd_allowall(),
         commands::cmd_usage(),
         commands::cmd_help(),

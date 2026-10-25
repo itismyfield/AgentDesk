@@ -352,7 +352,6 @@ pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
         ("/status", ReadOnly),
         ("/inflight", ReadOnly),
         ("/queue", ReadOnly),
-        ("/sessions", ReadOnly),
         ("/usage", ReadOnly),
         ("/adk", ReadOnly),
         ("/system-prompt", ReadOnly),
@@ -366,7 +365,6 @@ pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
         ("/effort", Mutating),
         ("/compact", Mutating),
         ("/clear", Mutating),
-        ("/deletesession", Mutating),
         ("/stop", Mutating),
         ("/cancel-queued", Mutating),
         ("/restart", Mutating),
@@ -571,7 +569,7 @@ mod command_policy_tests {
                 }
             }
         }
-        assert_eq!(compared, 17);
+        assert_eq!(compared, 15);
     }
 
     #[test]

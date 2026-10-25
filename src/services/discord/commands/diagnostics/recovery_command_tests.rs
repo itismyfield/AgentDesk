@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::discord::DiscordSession;
+use crate::services::provider::ProviderKind;
 use poise::serenity_prelude::ChannelId;
 
 #[test]
