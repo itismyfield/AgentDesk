@@ -310,18 +310,6 @@ pub(in crate::services::discord) async fn build_status_report(
     let active_owner = channel_snapshot.active_request_owner;
     let queued_count = pending_queue_len(&channel_snapshot.intervention_queue);
 
-    let home_prefix = dirs::home_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    let compact_path = |value: String| {
-        if value.starts_with(&home_prefix) {
-            value.replacen(&home_prefix, "~", 1)
-        } else {
-            value
-        }
-    };
-    let session_id_text = session_id.unwrap_or_else(|| "(none)".to_string());
-    let session_id_short = shorten_session_identifier(&session_id_text);
     let tmux_session_name =
         session_channel_name.map(|name| provider.build_tmux_session_name(&name));
     let queue_namespace = format!("{}/{}", provider.as_str(), shared.token_hash);
@@ -335,9 +323,7 @@ pub(in crate::services::discord) async fn build_status_report(
     let session_key_text = session_key.clone().unwrap_or_else(|| "(none)".to_string());
     let raw_provider_session_id =
         fetch_raw_provider_session_id(session_key.as_deref(), provider).await;
-    let raw_provider_session_id_text =
-        raw_provider_session_id.unwrap_or_else(|| "(none)".to_string());
-    let raw_provider_session_id_short = shorten_session_identifier(&raw_provider_session_id_text);
+    let raw_provider_session_id_text = raw_provider_session_id.as_deref().unwrap_or("없음");
     let tmux_alive =
         tmux_state_label(shared, provider, channel_id, tmux_session_name.as_deref()).await;
     let channel_watcher = shared.tmux_watchers.contains_key(&channel_id);
@@ -354,12 +340,22 @@ pub(in crate::services::discord) async fn build_status_report(
     let owner_text = active_owner
         .map(|id| format!("<@{}>", id.get()))
         .unwrap_or_else(|| "(none)".to_string());
-    let path_text = compact_path(session_path.unwrap_or_else(|| "(no session)".to_string()));
-    let inflight_runtime_text = load_inflight_states(provider)
+    let inflight_states = load_inflight_states(provider);
+    let channel_inflight = inflight_states
         .iter()
-        .find(|state| state.channel_id == channel_id.get())
+        .find(|state| state.channel_id == channel_id.get());
+    let inflight_runtime_text = channel_inflight
         .map(inflight_runtime_label)
         .unwrap_or("none");
+    let details = super::session_details::build_session_details(
+        tmux_session_name.as_deref(),
+        tmux_alive == "alive",
+        session_path.as_deref(),
+        session_id.as_deref(),
+        raw_provider_session_id.as_deref(),
+        channel_inflight,
+    )
+    .await;
 
     format!(
         "\
@@ -367,8 +363,7 @@ pub(in crate::services::discord) async fn build_status_report(
 - provider: `{}`
 - namespace: `{}`
 - state: `{}`
-- path: `{}`
-- session_id: `{}`
+{}
 - raw_provider_session_id: `{}`
 - session_key: `{}`
 - tmux: `{}`
@@ -380,9 +375,8 @@ pub(in crate::services::discord) async fn build_status_report(
         provider.as_str(),
         queue_namespace,
         channel_state,
-        path_text,
-        session_id_short,
-        raw_provider_session_id_short,
+        details,
+        raw_provider_session_id_text,
         truncate_str(&session_key_text, 96),
         tmux_alive,
         inflight_runtime_text,
