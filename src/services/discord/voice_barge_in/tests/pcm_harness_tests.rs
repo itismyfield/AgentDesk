@@ -206,9 +206,9 @@ impl VoicePcmHarness {
     async fn feed_pcm_turn(&self, loud: bool) -> (CompletedUtterance, TimingStages) {
         let mut timings = TimingStages::default();
         let frame = if loud {
-            vec![16_384, -16_384, 16_384, -16_384].repeat(480)
+            [16_384, -16_384, 16_384, -16_384].repeat(480)
         } else {
-            vec![9_000, -9_000, 9_000, -9_000].repeat(480)
+            [9_000, -9_000, 9_000, -9_000].repeat(480)
         };
 
         let feed_started = Instant::now();
@@ -699,7 +699,7 @@ async fn run_missing_ffmpeg_negative() -> ScenarioReport {
         .await;
 
     let mut timings = TimingStages::default();
-    let samples = vec![8_000, -8_000, 8_000, -8_000].repeat(480);
+    let samples = [8_000, -8_000, 8_000, -8_000].repeat(480);
     let feed_started = Instant::now();
     receiver
         .register_speaking_for_control_channel(SOURCE_CHANNEL_ID + 90, SSRC + 90, USER_ID)

@@ -154,7 +154,7 @@ pub fn spawn_disk_monitor_tick(probe_path: PathBuf) {
     use std::sync::Arc;
     use tokio::time::{Duration, interval};
 
-    tokio::spawn(async move {
+    crate::services::resident_loops::spawn_resident("disk_monitor", async move {
         let mut iv = interval(Duration::from_secs(30));
         // Skip the immediate first tick: a probe at boot would race startup recovery.
         iv.tick().await;

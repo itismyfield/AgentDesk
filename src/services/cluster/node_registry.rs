@@ -318,7 +318,7 @@ fn spawn_heartbeat_loop(
         instance_id.clone(),
         leader_active.clone(),
     );
-    tokio::spawn(async move {
+    crate::services::resident_loops::spawn_resident("cluster_node_heartbeat", async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.tick().await;
         // #3651: throttle for the leader-only stale-GC backpressure yield log.
@@ -437,7 +437,7 @@ fn spawn_stale_claim_owner_reassignment_loop(
     leader_active: Arc<AtomicBool>,
 ) {
     let interval_secs = cluster_config.heartbeat_interval_secs.max(1);
-    tokio::spawn(async move {
+    crate::services::resident_loops::spawn_resident("cluster_claim_reassignment", async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // #3651: throttle for the backpressure yield log.

@@ -55,6 +55,7 @@ pub(super) fn prepare(
     };
     let session_files =
         crate::services::claude_tui::session::prepare_claude_tui_launch(&launch_config)?;
+    session_prompt::record(launch_config.system_prompt.as_deref(), resume);
     let launch_script_path = session_files.launch_script_path.clone();
     *prepared_session_files = Some(session_files);
     let script = std::fs::read_to_string(&launch_script_path)

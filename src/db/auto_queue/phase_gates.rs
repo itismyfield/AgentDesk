@@ -1008,7 +1008,6 @@ pub async fn repair_phase_gates_for_run_on_pg(
 pub(crate) struct ParsedPhaseGateContext {
     pub run_id: String,
     pub phase: i64,
-    pub pass_verdict: String,
     pub next_phase: Option<i64>,
     pub final_phase: bool,
 }
@@ -1031,11 +1030,6 @@ fn parse_phase_gate_context(context_json: Option<&str>) -> Option<ParsedPhaseGat
     if phase < 0 {
         return None;
     }
-    let pass_verdict = gate
-        .get("pass_verdict")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_default();
     let next_phase = gate.get("next_phase").and_then(numeric_i64);
     let final_phase = gate
         .get("final_phase")
@@ -1044,7 +1038,6 @@ fn parse_phase_gate_context(context_json: Option<&str>) -> Option<ParsedPhaseGat
     Some(ParsedPhaseGateContext {
         run_id,
         phase,
-        pass_verdict,
         next_phase,
         final_phase,
     })
@@ -1834,7 +1827,6 @@ mod reconcile_phase_gate_pg_tests {
         .expect("ctx");
         assert_eq!(ctx.run_id, "r");
         assert_eq!(ctx.phase, 0);
-        assert_eq!(ctx.pass_verdict, "p");
     }
 
     #[test]

@@ -17,6 +17,19 @@ async fn witness_step<T>(label: &str, future: impl Future<Output = T>) -> T {
         .unwrap_or_else(|_| panic!("timed out waiting for {label}"))
 }
 
+fn resume_transcript_home(cwd: &std::path::Path, session_id: &str) -> tempfile::TempDir {
+    let home = tempfile::tempdir().expect("resume Claude home");
+    let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        cwd,
+        session_id,
+        Some(home.path()),
+    )
+    .expect("resume transcript path");
+    std::fs::create_dir_all(transcript.parent().unwrap()).expect("resume project directory");
+    std::fs::write(transcript, b"{}\n").expect("resume transcript");
+    home
+}
+
 fn install_missing_tmux_probe() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
     install_tmux_probe("echo 'no server running on test socket' >&2\nexit 1")
 }
@@ -1026,7 +1039,8 @@ async fn backlog_revert_refuses_a_card_whose_kill_the_runtime_keeps_pg() {
 async fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
     use crate::services::discord::host_teardown_gate::test_support as host;
     use crate::services::session_resume::{
-        ResumePreviousOptions, ResumeRebindError, perform_resume_rebind,
+        ResumePreviousOptions, ResumeRebindError, catalog::scope_claude_home_for_tests,
+        perform_resume_rebind,
     };
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let runtime_root = tempfile::TempDir::new().expect("runtime root");
@@ -1040,6 +1054,7 @@ async fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
     let (shared, registry) = host::runtime(&pool).await;
     let (old_cwd, target_cwd) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let target_sid = "99999999-9999-9999-9999-999999999999";
+    let claude_home = resume_transcript_home(target_cwd.path(), target_sid);
     let opts = ResumePreviousOptions {
         session_id: Some(target_sid.to_string()),
         cwd: Some(target_cwd.path().to_str().unwrap().to_string()),
@@ -1072,7 +1087,8 @@ async fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
                 &name,
                 &opts,
             );
-            let resumed = resume.await;
+            let resumed =
+                scope_claude_home_for_tests(claude_home.path().to_path_buf(), resume).await;
             if taken {
                 resumed.expect("a teardown the runtime admits resumes");
                 let sid = field(&pool, "sessions", &key, "claude_session_id").await;
@@ -1121,7 +1137,7 @@ async fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
         name,
         &opts,
     );
-    let resumed = resume.await;
+    let resumed = scope_claude_home_for_tests(claude_home.path().to_path_buf(), resume).await;
     let after = snapshot(&pool, "sessions", "session_key", &[&key]).await;
     assert_eq!(after, before, "configured: no durable rebind");
     assert!(tmux.alive(name), "configured: tmux survives");
@@ -1370,7 +1386,8 @@ async fn backlog_revert_refuses_a_card_whose_runtime_runs_another_session_pg() {
 async fn resume_refuses_a_session_whose_runtime_runs_another_session_pg() {
     use crate::services::discord::host_teardown_gate::test_support as host;
     use crate::services::session_resume::{
-        ResumePreviousOptions, ResumeRebindError, perform_resume_rebind,
+        ResumePreviousOptions, ResumeRebindError, catalog::scope_claude_home_for_tests,
+        perform_resume_rebind,
     };
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let runtime_root = tempfile::TempDir::new().expect("runtime root");
@@ -1387,6 +1404,8 @@ async fn resume_refuses_a_session_whose_runtime_runs_another_session_pg() {
         session_id: Some("99999999-9999-9999-9999-999999999999".to_string()),
         cwd: Some(target_cwd.path().to_str().unwrap().to_string()),
     };
+    let claude_home =
+        resume_transcript_home(target_cwd.path(), opts.session_id.as_deref().unwrap());
     let host_name = crate::services::platform::hostname_short();
     for (round, condition) in [LiveServer, MissingBinary, NoServerSocket]
         .into_iter()
@@ -1419,7 +1438,8 @@ async fn resume_refuses_a_session_whose_runtime_runs_another_session_pg() {
                 &name,
                 &opts,
             );
-            let resumed = resume.await;
+            let resumed =
+                scope_claude_home_for_tests(claude_home.path().to_path_buf(), resume).await;
             let case = format!("{condition:?} {moved:?}");
             let refused = matches!(&resumed, Err(ResumeRebindError::HostUnsupported(reason))
                 if reason.contains("teardown is kept"));

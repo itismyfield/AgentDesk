@@ -61,7 +61,7 @@ mod tests {
         .build();
         assert_eq!(
             prompt,
-            "first\nsecond\n\ntrigger\n\nreply\n\nknowledge\n\n[User: name (ID: 42)]\none\ntwo"
+            "first\nsecond\n\ntrigger\n\nknowledge\n\nreply\n\n[User: name (ID: 42)]\none\ntwo"
         );
     }
 
@@ -81,5 +81,36 @@ mod tests {
         }
         .build();
         assert_eq!(prompt, "file record\n\n[User: name (ID: 42)]");
+    }
+
+    #[test]
+    fn reply_context_is_last_before_user_input_with_recent_and_knowledge() {
+        let recent = ChannelRecentContextManifestInput {
+            rendered_context: "[이전 대화 복원]\nrecent user and assistant".into(),
+            pair_count: 1,
+            audit_reason: "fresh_session;pairs=1".into(),
+        };
+        let reply = "[Reply context — replied-to message]\nAuthor: bot\nContent: answer\n[End of reply context — the user's reply follows]";
+        let prompt = TurnContext {
+            provider: &ProviderKind::Codex,
+            session_id: None,
+            uploads: &[],
+            trigger: Some("trigger".into()),
+            reply: Some(reply),
+            recent: Some(&recent),
+            knowledge: Some("knowledge"),
+            author_name: "name",
+            author_id: UserId::new(42),
+            user_input: "one\ntwo".into(),
+        }
+        .build();
+        let (_, after_reply) = prompt
+            .split_once("[End of reply context — the user's reply follows]")
+            .unwrap();
+        assert_eq!(after_reply, "\n\n[User: name (ID: 42)]\none\ntwo");
+        assert!(prompt.starts_with(&format!(
+            "trigger\n\n{}\n\nknowledge\n\n{reply}",
+            recent.rendered_context
+        )));
     }
 }

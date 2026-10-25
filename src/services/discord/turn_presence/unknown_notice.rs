@@ -422,10 +422,20 @@ pub(super) fn snapshots() -> Vec<UnknownSnapshot> {
     let now = Instant::now();
     owners
         .into_iter()
+        .filter(|owner| owner.scope.provider != HERDR_CONFIG)
         .filter(|owner| crate::services::tui_o::turn_mode::transcript_turns(owner.scope.channel))
         .filter_map(|owner| owner.snapshot(now))
         .collect()
 }
+
+/// Receipt namespace of herdr managed-config faults, apart from every provider's turn notices.
+const HERDR_CONFIG: &str = "herdr_config";
+
+/// Operator notices: the same owner, receipt and retry rules for causes outside any turn. Only
+/// unix builds have the managed Herdr configs whose causes they report.
+#[cfg(unix)]
+#[path = "operator_notice.rs"]
+pub(super) mod operator;
 
 #[cfg(test)]
 #[path = "unknown_notice_tests.rs"]

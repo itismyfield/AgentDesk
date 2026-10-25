@@ -251,23 +251,57 @@ async fn bb_idle_user_receipt_is_relayed_once_by_o_without_new_inflight_pg() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn bb_modal_and_person_draft_keep_zero_paste_pg() {
+async fn bb_modal_keeps_zero_paste_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    for (channel, modal) in [(7_108_110, false), (7_108_111, true)] {
+    let f = Fixture::new(7_108_111, true).await;
+    f.append(json!({"type":"system","subtype":"turn_duration"}));
+    f.pane.set(
+        "cap.before",
+        &format!(
+            "Allow this tool?\n1. Yes\n2. No\nEnter to confirm\n{BORDER}\n❯ \n{BORDER}\n{FOOTER}"
+        ),
+    );
+    let result = deliver_text(&f.registry, f.channel, "blocked by safety gate").await;
+    assert!(
+        result.starts_with("queued") && result.contains("veto=modal"),
+        "{result}"
+    );
+    f.assert_submissions(0);
+}
+
+/// A person's draft no longer holds input: a listed channel stashes it once, then pastes and
+/// enters; an unlisted one pastes behind it without C-s.
+#[tokio::test(flavor = "current_thread")]
+async fn bb_person_draft_is_stashed_on_a_listed_channel_and_never_holds_input_pg() {
+    use crate::services::claude_tui::busy_inject::StashChannelGuard;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (channel, listed) in [(7_108_110, true), (7_108_113, false)] {
         let f = Fixture::new(channel, true).await;
+        let _listed = listed.then(|| StashChannelGuard::new(channel));
         f.append(json!({"type":"system","subtype":"turn_duration"}));
-        if modal {
-            f.pane.set("cap.before", &format!("Allow this tool?\n1. Yes\n2. No\nEnter to confirm\n{BORDER}\n❯ \n{BORDER}\n{FOOTER}"));
+        f.pane.draft();
+        let result = deliver_text(&f.registry, f.channel, "typed past a draft").await;
+        assert!(result.contains("Injected"), "{result}");
+        let keys: Vec<String> = f
+            .pane
+            .read("keys")
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                let mut words = line.split_whitespace();
+                match words.next() {
+                    Some("paste-buffer") => "paste".to_string(),
+                    _ => words.last().unwrap_or_default().to_string(),
+                }
+            })
+            .collect();
+        let expected: &[&str] = if listed {
+            &["C-s", "paste", "Enter"]
         } else {
-            f.pane.draft();
-        }
-        let result = deliver_text(&f.registry, f.channel, "blocked by safety gate").await;
-        let veto = if modal { "veto=modal" } else { "veto=draft" };
-        assert!(
-            result.starts_with("queued") && result.contains(veto),
-            "{result}"
-        );
-        f.assert_submissions(0);
+            &["paste", "Enter"]
+        };
+        assert_eq!(keys, expected, "listed={listed}");
+        assert!(queue_texts(&f.shared, f.channel).await.is_empty());
     }
 }
 

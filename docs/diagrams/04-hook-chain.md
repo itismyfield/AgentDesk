@@ -294,7 +294,7 @@ group Every 300s (count % 10 == 0)
   Engine -> JS : Call handlers in priority order
   JS -> P100 : timeouts.onTick5min()
   activate P100
-  P100 -> DB : Non-critical reconciliation\n[R][B][F][G][H][M][O],\nidle session cleanup
+  P100 -> DB : Non-critical reconciliation\n[R][B][F][G][H][O],\nidle session cleanup
   P100 --> JS
   deactivate P100
   JS --> Engine
@@ -402,7 +402,7 @@ note right of Engine #FFCCCC
   **tracing::error!**
   policy_name="kanban-rules"
   hook="onCardTerminal"
-  error="DB lock\n  at onCardTerminal (kanban-rules.js:659)"
+  error="DB lock\n  at onCardTerminal (kanban-rules.js)"
 
   Error is caught. Execution **continues**
   to the next policy.

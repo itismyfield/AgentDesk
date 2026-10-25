@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+. "$(dirname "$0")/lib/deploy_allow_degraded.sh"
+_deploy_allow_degraded_validate "$@" || exit 2
+# --strict-prompts: prompt 0건 = inspection unavailable(exit 2); release deploy stops.
 # Under a build-token holder, refuse before detach and the deploy lock: waiting for the lock
 # would deadlock against a deploy that holds it and waits for the token. Only 73 refuses.
 if [ -n "${ADK_BUILD_TOKEN_HOLDER:-}" ]; then
@@ -11,7 +13,6 @@ if [ -n "${ADK_BUILD_TOKEN_HOLDER:-}" ]; then
         exit 73
     fi
 fi
-
 # --- macOS: always run detached (decouple from the invoking shell/session) ---
 # On macOS the deploy restarts the release dcserver mid-run. When invoked from a
 # tmux/agent session's shell, that restart can perturb the caller and, worse,
@@ -137,7 +138,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
 . "$SCRIPT_DIR/_deploy_policy_generation.sh"
-
 ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
 POST_DEPLOY_SMOKE_SCOPE="${AGENTDESK_POST_DEPLOY_SMOKE_SCOPE:-full}"
 case "$POST_DEPLOY_SMOKE_SCOPE" in
@@ -237,8 +237,6 @@ _idx=0
 _args=("$@")
 while [ "$_idx" -lt "${#_args[@]}" ]; do
     case "${_args[$_idx]}" in
-        --skip-review|--skip-health)
-            PARSED_ARGS+=("${_args[$_idx]}") ;;
         --strict-prompts)
             DEPLOY_STRICT_PROMPTS=1
             PARSED_ARGS+=("${_args[$_idx]}") ;;
@@ -1252,7 +1250,7 @@ _rollback_release_binary() {
         echo "⚠ launchd bootstrap failed during rollback — using tmux fallback"
         start_release_tmux_fallback || true
     fi
-    if wait_for_http_service_health "$plist" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1 1; then
+    if (unset AGENTDESK_DEPLOY_ALLOW_DEGRADED; wait_for_http_service_health "$plist" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1 1); then
         echo "✓ Rollback succeeded — release healthy on :${rel_port} with previous binary"
     else
         echo "✗ Rollback restart did not reach healthy state — manual intervention required (logs: ${ADK_REL:-}/logs/)"
@@ -1584,6 +1582,7 @@ _deploy_peer_env_prelude() {
         AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS \
         AGENTDESK_DEPLOY_TARGET_SHA \
         AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT \
+        AGENTDESK_DEPLOY_ALLOW_DEGRADED \
         AGENTDESK_DEPLOY_MAX_LOADAVG \
         AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL \
         AGENTDESK_DEPLOY_HIGH_CPU_PCT \
@@ -2329,6 +2328,7 @@ export AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_
 export AGENTDESK_DEPLOY_TARGET_SHA=$(printf '%q' "${AGENTDESK_DEPLOY_TARGET_SHA:-}")
 export AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS=$(printf '%q' "${AGENTDESK_DEPLOY_ALLOW_SCHEMA_AHEAD_OF_PEERS:-0}")
 export AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=$(printf '%q' "${AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT:-0}")
+$(if [ "${AGENTDESK_DEPLOY_ALLOW_DEGRADED+x}" = x ]; then printf 'export AGENTDESK_DEPLOY_ALLOW_DEGRADED=%q' "$AGENTDESK_DEPLOY_ALLOW_DEGRADED"; fi)
 export AGENTDESK_DEPLOY_MAX_LOADAVG=$(printf '%q' "${AGENTDESK_DEPLOY_MAX_LOADAVG:-}")
 export AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL=$(printf '%q' "${AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL:-}")
 export AGENTDESK_DEPLOY_HIGH_CPU_PCT=$(printf '%q' "${AGENTDESK_DEPLOY_HIGH_CPU_PCT:-}")
@@ -3528,7 +3528,7 @@ REL_HEALTHY=false
 # serving node that is unhealthy SOLELY because no provider runtimes are
 # registered (leader-only / no-agent-session node) as deploy-ready. Runtime
 # /api/health keeps reporting unhealthy for monitoring; only this gate relaxes.
-if wait_for_http_service_health "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1 1; then
+if _deploy_wait_with_allow_degraded "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1 1; then
     REL_HEALTHY=true
 fi
 

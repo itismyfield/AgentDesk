@@ -27,7 +27,7 @@ fn shared_payload_preserves_literal_text_attachment_only_and_author_bytes() {
         let author = wrap_user_prompt_with_author("name", UserId::new(42), raw.into());
         assert_eq!(
             prompt,
-            format!("file one\nfile two\n\ntrigger\n\nraw reply\n\nknowledge\n\n{author}"),
+            format!("file one\nfile two\n\ntrigger\n\nknowledge\n\nraw reply\n\n{author}"),
             "shared helper must preserve existing prompt bytes and order"
         );
         assert_eq!(prompt.matches("[User: name (ID: 42)]").count(), 1);

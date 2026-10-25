@@ -12,11 +12,16 @@ mod n3bc_restore_tests;
 #[path = "restore_core.rs"]
 mod restore_core;
 
+#[path = "restore_retry.rs"]
+pub(in crate::services::discord) mod retry;
+use retry::{DeadSessionCleanup, RestoreScope};
+
 /// On startup, scan for surviving tmux sessions (AgentDesk-*) and restore watchers.
 /// This handles the case where AgentDesk was restarted but tmux sessions are still alive.
-pub(in crate::services::discord) async fn restore_tmux_watchers(
+async fn restore_selected_tmux_watchers(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
+    scope: &RestoreScope,
 ) {
     let settings_snapshot = { shared.settings.read().await.clone() };
     let provider = settings_snapshot.provider.clone();
@@ -35,6 +40,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
     let agent_sessions: Vec<&str> = output
         .iter()
         .map(|l| l.trim())
+        .filter(|name| scope.includes(shared, name))
         .filter(|l| {
             parse_provider_and_channel_from_tmux_name(l)
                 .map(|(session_provider, _)| session_provider == provider)
@@ -320,6 +326,14 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                             session_name,
                             *channel_id,
                         )
+                        .or_else(|| {
+                            codex_restore::rollout_fallback_for_rehydrated_binding(
+                                &provider,
+                                session_name,
+                                *channel_id,
+                                &shared.tmux_watchers,
+                            )
+                        })
                     {
                         let output_path = path.output_path().to_string();
                         codex_direct_resume_fallback = Some(path);
@@ -436,7 +450,12 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             );
         }
 
-        let dead = DeadSessionCleanup::probe(channel_id.get(), &channel_name, session_name).await;
+        let Ok(dead) = scope
+            .probe(channel_id.get(), &channel_name, session_name)
+            .await
+        else {
+            continue;
+        };
         if let Some(dc) = dead {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let observed = dc.observed;
@@ -699,14 +718,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         // directory. See issue #892.
         sweep_orphan_session_files().await;
     }
-}
-
-/// A tmux session found not live at startup, with the pane liveness that found it.
-struct DeadSessionCleanup {
-    channel_id: u64,
-    channel_name: String,
-    session_name: String,
-    observed: HostLiveness,
 }
 
 impl DeadSessionCleanup {

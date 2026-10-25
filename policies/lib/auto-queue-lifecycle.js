@@ -191,7 +191,7 @@ function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardI
   if (activeStates.length > 0) {
     var placeholders = activeStates.map(function() { return "?"; }).join(",");
     var active = agentdesk.db.query(
-      "SELECT id FROM kanban_cards WHERE assigned_agent_id = ? AND status IN (" + placeholders + ") LIMIT 1",
+      "SELECT id FROM kanban_cards WHERE assigned_agent_id = ? AND deleted_at IS NULL AND status IN (" + placeholders + ") LIMIT 1",
       [agentId].concat(activeStates)
     );
     agentBusy = active.length > 0;

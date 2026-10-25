@@ -1391,12 +1391,12 @@ fn parse_raw_db_marker(sql: &str) -> RawDbMarker {
 
 fn compact_sql(sql: &str) -> String {
     const MAX_SQL_CONTEXT_LEN: usize = 120;
-
+    use crate::utils::format::safe_prefix;
     let compact = sql.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.len() <= MAX_SQL_CONTEXT_LEN {
         compact
     } else {
-        format!("{}...", &compact[..MAX_SQL_CONTEXT_LEN])
+        format!("{}...", safe_prefix(&compact, MAX_SQL_CONTEXT_LEN))
     }
 }
 
@@ -1416,6 +1416,8 @@ mod tests {
     use super::*;
     use serde_json::json;
     use sqlx::Row;
+
+    mod policy_sql_schema_tests;
 
     struct TestDatabase {
         admin_url: String,
@@ -1887,5 +1889,60 @@ mod tests {
 
         pool.close().await;
         test_db.drop().await;
+    }
+
+    /// Every policy SQL variant must PREPARE on the migrated schema after the
+    /// runtime translation; the JS harness only substring-matches SQL.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn policy_sql_prepares_against_migrated_schema_pg() {
+        use self::policy_sql_schema_tests::{DYN_MARKER, extract_policy_sql};
+
+        let calls =
+            extract_policy_sql(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("policies"));
+        let test_db = TestDatabase::create().await;
+        let pool = test_db.migrate().await;
+        let mut conn = pool.acquire().await.expect("acquire probe connection");
+        let params = vec![serde_json::Value::Null; 64];
+        let mut prepared = 0usize;
+        let mut failures = Vec::new();
+        for call in &calls {
+            let site = format!("{}:{} ({})", call.file, call.line, call.method);
+            for sql in call.variants.iter().filter(|sql| !sql.contains(DYN_MARKER)) {
+                let translated = match prepare_policy_sql_for_pg(sql, &params) {
+                    Ok(translated) => translated.sql,
+                    Err(error) => {
+                        failures.push(format!("{site}: translate: {error}\n    {sql}"));
+                        continue;
+                    }
+                };
+                let probe = format!("PREPARE adk_policy_sql_probe AS {translated}");
+                match sqlx::raw_sql(AssertSqlSafe(probe))
+                    .execute(&mut *conn)
+                    .await
+                {
+                    Ok(_) => {
+                        prepared += 1;
+                        sqlx::raw_sql("DEALLOCATE adk_policy_sql_probe")
+                            .execute(&mut *conn)
+                            .await
+                            .expect("deallocate policy sql probe");
+                    }
+                    Err(error) => failures.push(format!("{site}: {error}\n    {translated}")),
+                }
+            }
+        }
+        drop(conn);
+        pool.close().await;
+        test_db.drop().await;
+
+        assert!(
+            prepared >= 100,
+            "prepared only {prepared} policy statements"
+        );
+        assert!(
+            failures.is_empty(),
+            "policy SQL that does not PREPARE on the migrated schema:\n{}",
+            failures.join("\n")
+        );
     }
 }

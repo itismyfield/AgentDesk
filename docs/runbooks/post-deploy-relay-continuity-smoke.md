@@ -10,6 +10,8 @@ automatic deployment smoke. See the [scenario execution contract](../../tests/e2
 for manual prerequisites and the conditional automatic post-deploy subset
 (`E-1`, `E-35`, `E-50`, `E-51`). Live YAML files alone do not establish CI coverage.
 
+For a coordinator-approved degraded cause, set `AGENTDESK_DEPLOY_ALLOW_DEGRADED='tui_o:schema_blocked:1479671301387059200'` for that deploy: this nonempty ERE (no commas or line breaks) must match each waived reason in full; it applies to local and peer deploy verdicts, logs the additional waived reasons or `none`, and leaves server, DB, dashboard, unhealthy, and rollback checks unchanged. The obsolete `--skip-health` and `--skip-review` flags are rejected.
+
 ## Offline Checks
 
 These modes are CI-safe and do not require Discord credentials:
@@ -37,7 +39,7 @@ the exact command that will be delegated to the TUI relay driver:
 python3 scripts/e2e/post_deploy_relay_continuity.py \
   --cell claude-tui \
   --dry-run \
-  --deploy-command 'AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 scripts/deploy-release.sh --skip-review'
+  --deploy-command 'AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 scripts/deploy-release.sh'
 ```
 
 The script resolves the cell's worker agent channel id (`claude-tui`:
@@ -63,7 +65,7 @@ Run this only against the dedicated TUI E2E worker channels:
 python3 scripts/e2e/post_deploy_relay_continuity.py \
   --cell claude-tui \
   --confirm-live \
-  --deploy-command 'AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 scripts/deploy-release.sh --skip-review'
+  --deploy-command 'AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 scripts/deploy-release.sh'
 ```
 
 For Codex TUI coverage, change `--cell codex-tui`.

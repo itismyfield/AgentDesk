@@ -26,6 +26,7 @@ pub(super) fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot)
     #[cfg(target_os = "macos")]
     checks.push(check_file_descriptor_headroom());
     checks.extend(check_mailbox_consistency(snapshot));
+    checks.extend(configuration_audit::checks(cfg));
     if let Some(check) = user_default_check(cfg, snapshot) {
         checks.push(check);
     }

@@ -15,14 +15,14 @@ pub(in crate::services::discord) fn render_turn(input: TurnContext<'_>) -> Strin
     if let Some(trigger) = input.trigger {
         chunks.push(trigger);
     }
-    if let Some(reply) = input.reply {
-        chunks.push(reply.to_string());
-    }
     if let Some(recent) = input.recent {
         recent.append_rendered_context_to(&mut chunks);
     }
     if let Some(knowledge) = input.knowledge {
         chunks.push(knowledge.to_string());
+    }
+    if let Some(reply) = input.reply {
+        chunks.push(reply.to_string());
     }
     let user_input =
         wrap_user_prompt_with_author(input.author_name, input.author_id, input.user_input);

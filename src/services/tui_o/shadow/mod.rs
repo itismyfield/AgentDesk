@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_READ_BYTES: u64 = 1024 * 1024;
 /// Raised when unit identity, turn extraction or historical rules change; old samples do not mix.
-pub const IDENTITY_VERSION: u32 = 4;
+pub const IDENTITY_VERSION: u32 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -184,6 +184,7 @@ pub(super) async fn queued_attempt(
                 turn_id: turn_id.clone(),
             });
         if let Some(ticket) = ticket {
+            // Claude tmux is terminal once Enter is sent; a pre-paste menu returns NotSent.
             let outcome = match attempt {
                 InjectAttempt::Injected { .. } => HeadOutcome::Injected,
                 InjectAttempt::NotSent(_) => HeadOutcome::NotSent,

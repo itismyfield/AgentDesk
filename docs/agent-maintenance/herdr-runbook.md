@@ -2,7 +2,7 @@
 
 기준 커밋: `b3006723b4f0cd9d850b9a479f2f1f3a8b582166`.
 
-이 문서의 모든 `경로:줄` 좌표는 위 커밋을 가리킨다. 코드 동작과 운영 정책을 구분한다. `[O-U-n]`은 추가 확인이 필요한 항목이며, §8.2의 방법과 완료 증거를 충족하기 전에는 완료로 기록하지 않는다.
+이 문서의 모든 `경로:줄` 좌표는 위 커밋을 가리킨다. `경로` (`심볼`) 형식 참조와 (삭제됨) 표기는 현재 main 기준이다. 코드 동작과 운영 정책을 구분한다. `[O-U-n]`은 추가 확인이 필요한 항목이며, §8.2의 방법과 완료 증거를 충족하기 전에는 완료로 기록하지 않는다.
 
 문서 작성은 지정 커밋의 정적 검토로만 수행했다. 파일·브랜치를 변경하지 않았고 cargo·시험·네트워크를 사용하지 않았다. `agentdesk.yaml`, `launchd.env`, 런타임 디렉터리의 값도 읽거나 기록하지 않았다. 아래 운영 명령과 검증 절차는 실행하지 않았다.
 
@@ -18,7 +18,7 @@
 
 이 노드는 `execution_node`가 자신의 `cluster.instance_id`와 같은 endpoint만 등록한다. 다른 노드의 endpoint를 지정한 턴은 `endpoint_not_local(...)`로 거절된다. Adapter가 원격 Unix socket에 직접 연결하거나 다른 노드에서 대신 실행한다고 해석하지 않는다.
 
-근거: `src/services/session_host/herdr_registry.rs:143`; `src/services/turn_host.rs:277`.
+근거: `src/services/session_host/herdr_registry.rs:143`; `src/services/turn_host.rs` (`configured_turn`).
 
 채널 매핑 제거와 실행 은퇴는 별개다. 매핑이 없어도 읽힌 hosted record가 Pending·Bound 또는 해석 불가능한 Herdr record이면 기존 실행 경로로 넘기지 않는다. Retired record는 턴 선택에서 tmux 경로를 허용하지만, 관리용 row witness는 Retired도 Herdr로 취급한다.
 
@@ -41,13 +41,13 @@
 | `ADK_HERDR_ADMISSION` | 미설정이면 허용 | 최초 사용 시 읽음. 설정된 값 중 `on`만 허용하며 나머지는 거절 |
 | `<runtime_root>/herdr/admission-off` | 파일이 없으면 허용 | 발견하면 해당 프로세스 종료까지 정지 상태를 유지 |
 
-근거: `src/config/session_hosts.rs:33`, `:252`; `src/config/runtime_settings.rs:121`; `src/services/turn_host.rs:199`, `:287`, `:288`; `src/services/herdr_launch.rs:62`, `:72`; `src/services/tui_o/channel_policy.rs:1`, `:62`; `src/services/codex/tui_session_launch.rs:416`, `:427`, `:433`, `:436`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`; `src/services/discord/herdr_terminate.rs:69`; `src/services/herdr_admission.rs:38`, `:48`, `:70`, `:78`.
+근거: `src/config/session_hosts.rs:33`, `:252`; `src/config/runtime_settings.rs:121`; `src/services/turn_host.rs` (`herdr_turn_switched_on`, `herdr_turn_switched_on_for`, `configured_turn`); `src/services/herdr_launch.rs:62`, `:72`; `src/services/tui_o/channel_policy.rs:1`, `:62`; `src/services/codex/tui_session_launch.rs:416`, `:427`, `:433`, `:436`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`; `src/services/discord/herdr_terminate.rs:69`; `src/services/herdr_admission.rs:38`, `:48`, `:70`, `:78`.
 
 admission 정지는 새 Herdr 작업을 막으며 pane을 종료하지 않는다. 일반 턴 선택과 입력 gate가 모두 admission을 검사하므로 기존 실행의 후속 입력과 시험 입력도 영향을 받는다. 이를 범용 intake pause나 대기 입력의 안전한 동결·이관 기능으로 취급하지 않는다.
 
 admission은 해당 프로세스의 공통 스위치다. 특정 채널만 멈추려는 작업에서는 같은 runtime의 다른 Herdr 채널에 미치는 영향도 확인한다. 취소 키는 입력 admission 예외지만 현재 생산 빌드의 Herdr stop settlement는 hard-false다.
 
-근거: `src/services/herdr_admission.rs:1`, `:76`; `src/services/turn_host.rs:287`; `src/services/session_host/herdr_gate.rs:70`, `:635`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`.
+근거: `src/services/herdr_admission.rs:1`, `:76`; `src/services/turn_host.rs` (`configured_turn`); `src/services/session_host/herdr_gate.rs:70`, `:635`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`.
 
 ## 2. 실행 노드별 준비
 
@@ -59,13 +59,13 @@ admission은 해당 프로세스의 공통 스위치다. 특정 채널만 멈추
 
 - 검증한 서버 바이너리를 버전별 경로에 고정하고 배포물 식별값을 운영 기록에 남긴다.
 - 클라이언트 업데이트와 실행 서버 바이너리 교체를 별도 작업으로 관리한다.
-- 무인 서버 교체·자동 재시작을 허용하지 않는다.
+- 무인 서버 교체·자동 재시작을 허용하지 않는다. 아래 config 자동 보장도 서버를 재시작·정지·reload하지 않는다.
 - 관리 대상 서버를 사용자 개인 Herdr 환경과 분리한다. named session 이름만으로 설정까지 분리된다고 가정하지 않는다.
-- 운영 중 정규 config 수정이나 `reload-config`를 복구 수단으로 사용하지 않는다.
+- 관리 config를 손으로 고치거나 `reload-config`를 복구 수단으로 쓰지 않는다. 관리 config는 아래 자동 보장만 고치며, 고친 내용은 실행 중 서버에 적용되지 않는다.
 
 현재 adapter의 protocol은 22이며 restore 설정 검증인 E7이 허용하는 서버 버전은 **0.9.3 하나**다. 일반 ping handshake는 버전 문자열 일치를 요구하지 않지만 E7은 별도의 검증 버전 목록을 적용한다. 새 버전의 protocol이 같다는 이유만으로 운영 입력 호환성을 승인하지 않는다.
 
-근거: `src/services/session_host/herdr/model.rs:11`, `:15`; `src/services/session_host/herdr/observe.rs:117`, `:153`.
+근거: `src/services/session_host/herdr/model.rs:13`, `:17`; `src/services/session_host/herdr/observe.rs:120`, `:163`.
 
 관리 서버의 canonical config는 다음 바이트열이다. 마지막 줄의 줄바꿈도 포함한다.
 
@@ -74,11 +74,51 @@ admission은 해당 프로세스의 공통 스위치다. 특정 채널만 멈추
 resume_agents_on_restore = false
 ```
 
-E7은 `<herdr_home>/config.toml`의 내용, 서버 프로세스의 `HERDR_CONFIG_PATH`, `XDG_CONFIG_HOME=<herdr_home>/xdg`, 파일 수정 시각과 서버 시작 시각, socket peer의 PID·시작 식별을 함께 확인한다. config는 서버 시작보다 1초 넘게 앞서 작성되어 있어야 한다. 파일을 시작 후 다시 쓰거나 내용을 추가하면 검증을 통과한다고 가정하지 않는다.
+E7은 `<herdr_home>/config.toml`의 내용, 서버 프로세스의 `HERDR_CONFIG_PATH`, `XDG_CONFIG_HOME=<herdr_home>/xdg`, 파일 수정 시각과 서버 시작 시각, socket peer의 PID·시작 식별을 함께 확인한다. config는 서버 시작보다 1초 넘게 앞서 작성되어 있어야 한다. AgentDesk가 config를 고친 경우에는 그 publication 기록 시각도 서버 시작보다 1초 넘게 앞서야 한다. 파일을 시작 후 다시 쓰거나 내용을 추가하면 검증을 통과한다고 가정하지 않는다.
 
-근거: `src/services/session_host/herdr/observe.rs:20`, `:88`, `:103`, `:127`, `:134`.
+근거: `src/services/session_host/herdr/observe.rs:20`, `:125`, `:130`, `:138`.
 
-[O-U-1] 실제 서비스 관리자, 실행 파일 고정 경로, 재시작 정책, socket·디렉터리 소유권과 권한은 배포 환경에서 확인해야 한다. 특정 launchd label과 config mode 0444를 코드가 설치·강제하는 것으로 간주하지 않는다. E7에는 mode 0444 검사가 없다.
+#### 2.1.1 전용(legacy_dedicated) endpoint의 config 자동 보장
+
+AgentDesk가 이 노드의 `legacy_dedicated` endpoint가 선언한 `<herdr_home>/config.toml`을 위 canonical 바이트로 맞춘다. 사람이 파일을 준비할 필요가 없다.
+
+- 시점: dcserver 부팅 때 설치된 BOOT snapshot 기준으로 1회, 이후 process마다 하나인 점검 task가 30초마다, 그리고 `agentdesk doctor --fix`. 세 경로가 같은 writer와 같은 home lock(`.agentdesk-config.lock`)을 쓴다. migration이 거부돼 이전 승인 snapshot으로 부팅하면 그 snapshot의 home만 고친다. live YAML의 새 endpoint는 dcserver 재시작 뒤에 대상이 된다.
+- 이미 canonical이면 아무것도 쓰지 않는다. 바이트·inode·mtime이 그대로이고 lock·기록 파일도 만들지 않는다. 일반 `agentdesk doctor`와 health 조회는 언제나 쓰지 않는다.
+- 내용이 다르면 원본 전체를 `config.toml.bak.<epoch>-<nanos>.<uuid>`(0600)에 남긴 뒤 원자 교체한다. 순서는 `.agentdesk-config-state`에 `v1 preparing` 확정 → 백업 확정 → canonical 교체 → `v1 committed <초> <나노초>` 확정이다. 백업을 자동으로 지우거나 원본을 자동 복원하지 않는다.
+- 다른 writer가 lock을 쥐고 있으면(busy) 다음 30초 tick에 다시 시도한다. busy 자체는 health 사유가 아니다.
+- 쓰기를 거부하는 경우: home이 개인 Herdr 경로(`~/.config/herdr`, `$XDG_CONFIG_HOME/herdr`, `~/.local/bin/herdr`, `/opt/homebrew/bin/herdr`)와 겹치거나 symlink·hardlink를 거치는 경우, 실행 계정 소유가 아니거나 group/other 쓰기 권한이 있는 경우, 같은 home을 서로 다른 socket·경로로 선언한 경우다. dcserver 실행 계정의 `HOME`이나 `XDG_CONFIG_HOME`이 관리 home 안을 가리키면 개인 경계를 확인할 수 없으므로 이 노드의 모든 관리 home 쓰기를 거부한다. 한 endpoint의 거부가 다른 home의 보장을 막지 않는다.
+
+**적용과 재시작.** 실행 중 서버는 config를 다시 읽지 않는다. 고친 config는 다음 서버 시작부터 적용되고, 그전까지 그 서버는 E7 Unverified로 생성·입력이 거부된다(fail-closed). 기다려도 Off로 바뀌지 않는다. 운영자는 기존 서비스 관리자로 서버를 계획 재시작한다.
+
+1. 실행 중인 작업과 대기 입력의 보존·정지 계획을 확인한다.
+2. health `herdr.endpoints.<key>.managed_config.earliest_start_after` 또는 doctor 출력의 "E7 accepts a server started after …" 시각을 확인한다. Committed 기록 뒤 **2.1초 이상** 지나야 한다. Linux는 process 시작 시각이 최대 1초 이르게 읽힌다.
+3. 그 시각 뒤에 서비스 관리자로 서버를 시작한다. KeepAlive가 더 일찍 올린 서버는 Unverified로 남으므로 다시 계획 재시작한다.
+4. health의 `last_e7`이 `off`가 되고 `managed_config.reason`이 사라졌는지 확인한다.
+
+중단된 publication을 이어 끝낸 경우(Recovered)에도 새 Committed 시각이 생기므로 그 뒤에 다시 재시작해야 한다. AgentDesk는 herdr 재시작·정지·reload, job 설치·수정, 바이너리 교체, pane 정리를 하지 않는다. `agentdesk doctor --fix --allow-restart`의 재시작 권한도 dcserver 서비스에만 해당한다.
+
+**health 상세(`/api/health/detail`의 `herdr`).** 로컬 전용 endpoint마다 `managed_config`(`config`, `backup`, `reason`, `observed_at`, `earliest_start_after`)와 마지막 E7(`last_e7`)을 보이고, `managed_config_reasons`에 고정 사유를 모은다. 이 사유는 아직 top-level `status`·`degraded_reasons`와 Discord 알림에 연결하지 않았다(공통 경고 owner 연결 대기).
+
+| 사유 | 의미와 조치 |
+|---|---|
+| `herdr_config_restart_required` | config는 canonical이지만 실행 중 서버가 그보다 먼저 시작했다. 위 재시작 절차 |
+| `herdr_config_fix_failed` | 백업·쓰기·fsync가 실패했다. 디스크·권한을 확인한 뒤 다음 tick이나 `doctor --fix` 결과를 본다 |
+| `herdr_managed_home_unsafe` | 위 거부 조건에 걸렸다. 전용 디렉터리·소유자·권한·dcserver 환경을 고친다. 고치기 전에는 아무것도 쓰지 않는다 |
+| `herdr_config_record_unreadable` | `.agentdesk-config-state`가 손상됐거나 v1 형식이 아니다. 자동으로 지우지 않는다. 수동: 서버를 정지하고 config.toml이 canonical인지 확인한 뒤 기록을 다른 곳으로 옮기고 `agentdesk doctor --fix`를 실행한 다음 2.1초 이상 지나 서버를 시작한다 |
+| `herdr_job_env_mismatch` | 실행 중 서버의 `HERDR_CONFIG_PATH`·`XDG_CONFIG_HOME`이 선언한 home과 다르다. job 정의를 고치고 계획 재시작한다 |
+| `herdr_config_observation_stale` | 점검 기록이 90초 넘게 갱신되지 않았다. dcserver 로그의 점검 task를 확인한다 |
+
+health의 기존 `herdr.restart_required`는 BOOT와 live `session_hosts` 차이(dcserver 재시작 필요)이며 위 사유와 다른 의미다.
+
+**launchd job 점검.** macOS의 `agentdesk doctor`는 `~/Library/LaunchAgents/com.agentdesk.herdr.plist`의 `Label`과 `EnvironmentVariables`의 `HERDR_CONFIG_PATH`·`XDG_CONFIG_HOME`이 `<herdr_home>/config.toml`·`<herdr_home>/xdg`를 가리키는지 읽기만 하고 불일치·누락·읽기 실패·여러 전용 home의 대응 불명을 보고한다. 이 결과는 다음 시작 정의일 뿐이며 실행 중 서버의 판정은 E7이 한다. doctor는 job을 설치·수정·load·재시작하지 않는다.
+
+근거: `src/services/session_host/herdr/managed_config.rs`, `managed_config/path.rs`, `managed_config/maintenance.rs`, `src/cli/doctor/orchestrator/managed_herdr_config.rs`, `src/server/routes/health_api/runtime_profile/managed_herdr.rs`.
+
+[O-U-1] 실제 서비스 관리자, 실행 파일 고정 경로, socket·디렉터리 소유권과 권한은 배포 환경에서 확인해야 한다. 코드는 launchd job을 설치·강제하지 않는다. E7에는 config mode 0444 검사가 없고, writer는 canonical인 기존 파일의 mode를 바꾸지 않는다.
+
+#### 2.1.2 사용자 기본(user_default) endpoint
+
+사용자 개인 Herdr 서버의 config는 위 자동 보장의 대상이 아니다. 자동 writer는 개인 Herdr 설정을 바꾸지 않는다. 개인 설정 변경은 owner 동의 흐름으로만 하고, 적용 시점은 다음 서버 시작이다. 절차는 [herdr-user-default.md](herdr-user-default.md)를 따른다. doctor의 launchd job 점검도 전용 endpoint만 본다.
 
 ### 2.2 AgentDesk·O·프로젝트·provider 환경
 
@@ -94,7 +134,7 @@ E7은 `<herdr_home>/config.toml`의 내용, 서버 프로세스의 `HERDR_CONFIG
 
 O readiness는 해당 노드에서 출력 소유권이 확인되고, writer가 작업을 수락하며, 기존 O store에 대상 채널의 binding checkpoint가 있을 때만 충족된다. checkpoint는 발견한 baseline 또는 적용한 binding이 기록한 것이어야 한다. 빈 store를 만들거나 writer 채널 목록만 선택한 것으로 준비 완료를 선언하지 않는다. writer membership은 부팅 설정이므로 필요한 변경의 적용 범위와 재시작을 따로 계획한다.
 
-근거: `src/services/herdr_launch.rs:62`, `:67`, `:72`; `src/services/turn_host.rs:288`; `src/services/tui_o/channel_policy.rs:1`, `:62`.
+근거: `src/services/herdr_launch.rs:62`, `:67`, `:72`; `src/services/turn_host.rs` (`configured_turn`); `src/services/tui_o/channel_policy.rs:1`, `:62`.
 
 **Codex Herdr cold launch는 다음 조건을 별도로 확인한다.**
 
@@ -145,11 +185,11 @@ Herdr integration installer를 중복 적용하지 않는 것을 운영 정책�
 - 채널 queue API는 pending/dispatched **dispatch 목록**이다. mailbox 입력 목록이 아니다. SQL 실패가 빈 목록으로 축약될 수도 있다.
 - 내부 home drain은 mailbox의 active token·intervention·pending dispatch와 inflight, O의 `owed/prepared/unsealed/uncaptured/binding_pending`, open intake, 진행 중 POST를 별도로 확인한다.
 
-근거: `src/server/routes/turn_lease.rs:15`; `src/services/discord/turn_lease.rs:72`; `src/services/discord/health/snapshot.rs:117`; `src/server/routes/queue_api.rs:20`; `src/services/cluster/channel_home_port.rs:40`, `:62`, `:95`; `src/services/cluster/channel_home_drain.rs:15`, `:145`.
+근거: `src/server/routes/turn_lease.rs:15`; `src/services/discord/turn_lease.rs:72`; `src/services/discord/health/snapshot.rs:117`; `src/server/routes/queue_api.rs:20`; `src/services/cluster/channel_home_port.rs` (삭제됨), `src/services/cluster/channel_home_drain.rs` (삭제됨, channel-home 제거).
 
 **spool 파일을 삭제하거나 비우지 않는다.** 배출은 미완료 책임이 없다는 뜻이다. 보존된 spool 기록 파일이 없어야 한다는 뜻이 아니다. O actor는 spool을 재생하고 owed 조각을 배달한다. 위임 drain도 파일 삭제가 아니라 미완료 카운터를 판정한다.
 
-근거: `src/services/tui_o/writer/actor.rs:1`; `src/services/cluster/channel_home_drain.rs:25`, `:100`.
+근거: `src/services/tui_o/writer/actor.rs:1`; `src/services/cluster/channel_home_drain.rs` (삭제됨, channel-home 제거).
 
 [O-U-4] 일반 채널의 배출 완료를 공개 CLI/API만으로 모두 증명하는 방법은 아직 확정하지 않는다. 확인되지 않은 필드, `null`, 관측 실패, 빈 dispatch 목록을 배출 완료로 처리하지 않는다.
 
@@ -330,7 +370,7 @@ Adapter의 서버 식별은 socket peer PID와 OS 시작 식별을 사용한다.
 
 admission을 닫은 채 시험 입력을 요구하지 않는다. latch된 프로세스에서 stop-file만 제거해도 시험은 계속 거절될 수 있다. 재시작 후 `open`을 확인한 경우와 대조하는 검증을 [O-U-1]에 포함한다.
 
-근거: `src/services/turn_host.rs:287`; `src/services/session_host/herdr_gate.rs:635`; `src/services/herdr_admission.rs:48`, `:53`, `:78`; `scripts/e2e/tui_relay/herdr.py:92`; `src/server/routes/health_api/runtime_profile.rs:15`; `src/services/session_host/herdr/launch_host_real_tests.rs:48`, `:68`, `:92`; `src/services/session_host/herdr/model.rs:15`; `src/services/session_host/herdr/observe.rs:103`.
+근거: `src/services/turn_host.rs` (`configured_turn`); `src/services/session_host/herdr_gate.rs:635`; `src/services/herdr_admission.rs:48`, `:53`, `:78`; `scripts/e2e/tui_relay/herdr.py:92`; `src/server/routes/health_api/runtime_profile.rs:15`; `src/services/session_host/herdr/launch_host_real_tests.rs:48`, `:68`, `:92`; `src/services/session_host/herdr/model.rs:15`; `src/services/session_host/herdr/observe.rs:103`.
 
 [O-U-5] provider 정상 종료, Herdr 서버 완전 종료·재기동 시 provider 프로세스 소멸, 새 Herdr 프로세스에서의 대화 resume은 격리 환경에서 측정한다. experimental live handoff나 실행 중 프로세스 이동을 기본 안전성의 전제로 사용하지 않는다. 이 측정으로 같은 Claude 채널의 legacy 전환 차단을 해소했다고 판정하지 않는다.
 
@@ -599,8 +639,8 @@ Claude와 Codex 실행기는 생산 dispatch에 연결되어 있지만 각각 �
 
 | AgentDesk에 남는 책임 | 근거 |
 |---|---|
-| 실행 노드·endpoint 선택과 잘못된 노드에서의 실행 거절 | `src/services/turn_host.rs:261`, `:277`; `src/services/session_host/herdr_registry.rs:143` |
-| 실행 admission과 O 준비 판정 | `src/services/turn_host.rs:287`, `:288`; `src/services/herdr_launch.rs:62`, `:72` |
+| 실행 노드·endpoint 선택과 잘못된 노드에서의 실행 거절 | `src/services/turn_host.rs` (`configured_turn`); `src/services/session_host/herdr_registry.rs:143` |
+| 실행 admission과 O 준비 판정 | `src/services/turn_host.rs` (`configured_turn`); `src/services/herdr_launch.rs:62`, `:72` |
 | Codex hook·source-mode·daemon isolation 사전조건 | `src/services/codex/herdr_turn.rs:186`; `src/services/codex/tui_session_launch.rs:416`, `:427`, `:436` |
 | 실행 정체성: owner·nonce·노드·endpoint·named session·pane·process stamp·source | `src/db/dispatched_sessions/hosted_execution.rs:33`, `:44`, `:55`, `:64`, `:74`, `:88` |
 | provider transcript/rollout과 실행의 결합 | `src/services/discord/tui_prompt_relay/herdr_source.rs:154`, `:210`, `:274` |
@@ -687,7 +727,7 @@ transport의 재접속과 prompt 재전송을 구분한다. 읽기만 retry하�
 
 실기기 시험은 일반 제출 중단을 유지하고 admission `open`과 준비 조건을 확인한 뒤 승인된 시험 입력으로 수행한다. 닫힌 admission에서 시험 성공을 요구하거나 stop-file 해제만으로 latch가 풀렸다고 가정하지 않는다.
 
-근거: `src/services/turn_host.rs:287`; `src/services/session_host/herdr_gate.rs:635`; `src/services/herdr_admission.rs:53`, `:78`; `scripts/e2e/tui_relay/herdr.py:92`.
+근거: `src/services/turn_host.rs` (`configured_turn`); `src/services/session_host/herdr_gate.rs:635`; `src/services/herdr_admission.rs:53`, `:78`; `scripts/e2e/tui_relay/herdr.py:92`.
 
 ### 9.7 모든 미확인 항목의 담당·방법·완료 증거
 

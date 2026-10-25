@@ -440,7 +440,7 @@ pub async fn block_active_card_for_agent_pg(
     let card_id: Option<String> = sqlx::query_scalar(
         "SELECT id
          FROM kanban_cards
-         WHERE assigned_agent_id = $1 AND status = 'in_progress'
+         WHERE assigned_agent_id = $1 AND status = 'in_progress' AND deleted_at IS NULL
          ORDER BY updated_at DESC
          LIMIT 1",
     )
@@ -450,7 +450,8 @@ pub async fn block_active_card_for_agent_pg(
 
     if let Some(card_id) = card_id.as_deref() {
         sqlx::query(
-            "UPDATE kanban_cards SET blocked_reason = $1, updated_at = NOW() WHERE id = $2",
+            "UPDATE kanban_cards SET blocked_reason = $1, updated_at = NOW()
+             WHERE id = $2 AND deleted_at IS NULL",
         )
         .bind(reason)
         .bind(card_id)
@@ -544,5 +545,51 @@ mod tests {
         let events = build_agent_timeline_json(Vec::new());
 
         assert!(events.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod blocked_signal_pg_tests {
+    use super::block_active_card_for_agent_pg;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::db::kanban_cards::{CardDeleteOutcome, soft_delete_card_pg};
+
+    /// Contract: the blocked signal lands on the agent's live card, never on a deleted one.
+    #[tokio::test]
+    async fn blocked_signal_skips_a_deleted_in_progress_card_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::raw_sql(
+            "INSERT INTO agents (id, name, provider, discord_channel_id) VALUES ('agent-1', 'Agent 1', 'claude', '123');
+             INSERT INTO kanban_cards (id, title, status, assigned_agent_id, updated_at) VALUES
+                 ('card-a', 'a', 'in_progress', 'agent-1', NOW() - INTERVAL '2 hours'),
+                 ('card-b', 'b', 'in_progress', 'agent-1', NOW() - INTERVAL '1 hour');",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed in-progress cards");
+        // The delete stamps updated_at, so the deleted card becomes the newest in-progress row.
+        assert_eq!(
+            soft_delete_card_pg(&pool, "card-a").await,
+            Ok(CardDeleteOutcome::Deleted)
+        );
+
+        let blocked = block_active_card_for_agent_pg(&pool, "agent-1", "waiting on review")
+            .await
+            .expect("block active card");
+
+        assert_eq!(blocked.as_deref(), Some("card-b"));
+        let reasons: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, blocked_reason FROM kanban_cards ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .expect("read blocked reasons");
+        let expected = vec![
+            ("card-a".to_string(), None),
+            ("card-b".to_string(), Some("waiting on review".to_string())),
+        ];
+        assert_eq!(reasons, expected);
+        pool.close().await;
+        pg_db.drop().await;
     }
 }

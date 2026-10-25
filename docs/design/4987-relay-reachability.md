@@ -1,5 +1,8 @@
 # 릴레이 도달(reachability) 기반 판정 모델 재설계
 
+<!-- doc-path-refs: removed scripts/relay_watchdog.py -->
+<!-- doc-path-refs: proposed src/services/discord/health/reachability/reconfirm.rs -->
+
 > 2026-10-04 운영자 결정으로 out-of-band 감시와 외부 verdict 인테이크는
 > 제거되었다. 아래 watchdog/Tier B/§5/S6 및 Python 동등성 요구는 설계 당시의
 > 역사적 기록이며 현행 설치·알림·health 계약이 아니다. 현재 health는 외부
@@ -112,7 +115,7 @@ R2의 두 번째 지적 — *"assistant 블록이 있다"와 "라이브 턴이 �
 `born_generation`(=50)은 `.generation` 파일의 **내용**(=49)과 비교 대상이 아니다.
 `born_generation`은 **dcserver 재시작 세대**다 — `shared.restart.current_generation`이
 대입되고 [확인 `tmux_reaper.rs:1117,1245,1343`] 같은 값과 비교된다
-[확인 `tui_direct_pending_start.rs:736-743`]. 서로 다른 카운터가 우연히 인접한 정수였다.
+[확인 `tui_direct_pending_start/state.rs` `inflight_generation_precedes_current`]. 서로 다른 카운터가 우연히 인접한 정수였다.
 **따라서 "50 vs 49 불일치"는 그 자체로 이상 증거가 아니다.**
 그럼에도 단서의 결론(*행과 독립인 generation 권위가 디스크에 실재한다*)은 **참이다** —
 다만 근거는 파일 **내용**이 아니라 파일 **mtime**이고, 그 mtime은 이미 영수증 좌표다.
@@ -315,7 +318,7 @@ authority가 아니므로 장점이 아니라 **범위 한정 사실**이다.
 | §A7 (의무 0은 정확한 동작) | **철회** → §-1.4 말미 (화신 생존 양성 증거 요구) |
 - 대상: `#4974` / `#4986 형상1` / `#4986 형상2`
 - 성격: **판정 모델 구조 변경**. 증상 조건 추가가 아니다.
-- 권위 문서: [`docs/relay-state-contract.md`](../docs/relay-state-contract.md) — 본 설계는 이 계약을 **개정**한다(§8).
+- 권위 문서: [`docs/relay-state-contract.md`](../relay-state-contract.md) — 본 설계는 이 계약을 **개정**한다(§8).
 
 ---
 

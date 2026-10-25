@@ -1322,7 +1322,7 @@ fn codex_6903_discovery_keeps_live_input_out_of_bootstrap_history() {
 }
 
 #[test]
-fn notify_inline_prompt_entrypoints_use_the_channel_provider_and_single_line() {
+fn notify_prompt_entrypoints_use_the_channel_provider_and_preserve_direct_text() {
     run(|root| {
         Box::pin(async move {
             let channel = 7_228_800_101;
@@ -1341,13 +1341,13 @@ fn notify_inline_prompt_entrypoints_use_the_channel_provider_and_single_line() {
                     "first **bold**\nsecond\nthird",
                     false,
                     "-# ⌨️ ",
-                    Some(r"-# ⌨️ first \*\*bold\*\* (+2줄)"),
+                    Some("-# ⌨️ first \\*\\*bold\\*\\*\n-# second\n-# third"),
                 ),
                 (
                     "steer `now`\nmore",
                     true,
                     "-# ⌨️ ",
-                    Some(r"-# ⌨️ steer \`now\` (+1줄)"),
+                    Some("-# ⌨️ steer \\`now\\`\n-# more"),
                 ),
                 ("/loop 5m inspect\nnext", false, "-# 🔁 ", None),
                 ("/compact", false, "-# 🧹 ", None),
@@ -1382,10 +1382,14 @@ fn notify_inline_prompt_entrypoints_use_the_channel_provider_and_single_line() {
                     content.starts_with(prefix),
                     "old prompt header returned: {content:?}"
                 );
-                assert!(
-                    crate::services::discord::session_notice::is_inline(content),
-                    "raw multiline notice: {content:?}"
-                );
+                if prefix == "-# ⌨️ " {
+                    assert!(content.lines().all(|line| line.starts_with("-# ")));
+                    assert!(!crate::services::discord::session_notice::is_inline(
+                        content
+                    ));
+                } else {
+                    assert!(crate::services::discord::session_notice::is_inline(content));
+                }
                 if let Some(expected) = expected {
                     assert_eq!(content, expected);
                 }

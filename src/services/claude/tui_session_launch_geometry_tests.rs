@@ -10,10 +10,8 @@ use std::time::{Duration, Instant};
 const TEST: u64 = 61;
 const OTHER: u64 = 62;
 const HERDR: u64 = 63;
-const HELD: &str = "160x40 1 manual";
 
-/// Real tmux on private `-L` sockets behind a shim that records AgentDesk's calls and fails a
-/// verb on request; drop kills only these servers.
+/// Real tmux on private `-L` sockets behind a call-recording shim; drop kills only these servers.
 struct Lab {
     root: tempfile::TempDir,
     real: PathBuf,
@@ -45,7 +43,6 @@ impl Lab {
             &format!(
                 "#!/bin/bash\n[ \"$1\" = -u ] || {real_call}\n\
                  printf '%s\\n' \"$*\" >> \"$AGENTDESK_ROOT_DIR/tmux.calls\"\n\
-                 if [ -e \"$AGENTDESK_ROOT_DIR/fail-$2\" ]; then echo \"injected $2 failure\" >&2; exit 1; fi\n\
                  {real_call}\n"
             ),
         );
@@ -102,11 +99,6 @@ impl Lab {
 
     fn real(&self, args: &[&str]) -> Output {
         self.real_on(&self.socket, args)
-    }
-
-    fn alive(&self, name: &str) -> bool {
-        let target = format!("={name}:");
-        self.real(&["has-session", "-t", &target]).status.success()
     }
 
     /// Pane size, pane count and size mode, as read straight from the server.
@@ -167,10 +159,9 @@ impl Drop for Lab {
     }
 }
 
-// Only an allowlisted channel opens sized and held; another channel and `None` make the same
-// create call as before, and a Herdr channel reaches no tmux at all.
+// Guarded and other channels use the regular tmux launch; Herdr selection still refuses tmux.
 #[test]
-fn claude_launch_sizes_only_the_allowlisted_channel_and_keeps_the_rest_unchanged() {
+fn claude_launch_guarded_and_other_channels_use_regular_sessions() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let lab = Lab::new();
@@ -187,12 +178,31 @@ fn claude_launch_sizes_only_the_allowlisted_channel_and_keeps_the_rest_unchanged
     );
     assert!(lab.take_calls().is_empty(), "Herdr reaches no tmux");
 
+    assert!(crate::config::session_hosts::claude_guarded(Some(TEST)));
+    assert!(!crate::config::session_hosts::claude_guarded(Some(OTHER)));
+    assert!(!crate::config::session_hosts::claude_guarded(None));
+
     for (name, channel) in [
+        ("claude-launch-guarded", Some(TEST)),
         ("AgentDesk-cga-other", Some(OTHER)),
         ("AgentDesk-cga-none", None),
     ] {
         lab.launch(name, channel).unwrap();
         let launched = lab.take_calls();
+        let geometry = lab.geometry(name);
+        for evidence in [
+            tc::tmux_owner_path(name),
+            tc::session_temp_path(name, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT),
+            tc::session_temp_path(name, tc::CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT),
+            tc::session_temp_path(name, tc::TMUX_RUNTIME_KIND_TEMP_EXT),
+            tc::session_temp_path(name, "host_kind"),
+        ] {
+            assert!(std::path::Path::new(&evidence).is_file(), "{evidence}");
+        }
+        if channel == Some(TEST) {
+            lab.attach_small_client(name);
+            assert_eq!(lab.geometry(name), "80x23 1 latest");
+        }
         assert!(
             lab.real(&["kill-session", "-t", &format!("={name}")])
                 .status
@@ -214,171 +224,6 @@ fn claude_launch_sizes_only_the_allowlisted_channel_and_keeps_the_rest_unchanged
         };
         assert_eq!(verbs(&launched), verbs(&direct), "{name}: {launched:?}");
         assert!(!launched.iter().any(|call| call.contains("resize-window")));
-        assert_ne!(lab.geometry(name), HELD, "{name} keeps the default size");
-    }
-
-    let name = "AgentDesk-cga-test";
-    lab.launch(name, Some(TEST)).unwrap();
-    let calls = lab.take_calls();
-    assert!(
-        calls[0].starts_with("-u new-session -d -P -F ")
-            && calls[0].contains(&format!(" -s {name} -x 160 -y 40 -c ")),
-        "{calls:?}"
-    );
-    assert!(
-        calls[1].starts_with("-u resize-window -t @") && calls[1].ends_with(" -x 160 -y 40"),
-        "{calls:?}"
-    );
-    assert_eq!(lab.geometry(name), HELD);
-    lab.attach_small_client(name);
-    assert_eq!(
-        lab.geometry(name),
-        HELD,
-        "an 80x24 client must not shrink the pane"
-    );
-}
-
-// A resize or geometry-query failure after create removes exactly that session and its launch
-// files, leaves another session alone, and the next launch of the channel succeeds.
-#[test]
-fn guarded_launch_failure_after_create_leaves_nothing_and_the_next_launch_succeeds() {
-    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let lab = Lab::new();
-    let _hosts = crate::config::session_hosts::force_with_claude_guard_for_test(None, &[], &[TEST]);
-    // Leftovers of both fault kinds are reported together, so each kind's result is visible.
-    let mut leftovers = Vec::new();
-    for (verb, bystander) in [("resize-window", false), ("display-message", true)] {
-        let name = format!("AgentDesk-cga-fail-{verb}");
-        let other = "AgentDesk-cga-bystander";
-        if bystander {
-            assert!(
-                lab.real(&["new-session", "-d", "-s", other, "sleep 600"])
-                    .status
-                    .success()
-            );
-        }
-        let fault = lab.root.path().join(format!("fail-{verb}"));
-        std::fs::write(&fault, "").unwrap();
-        let error = lab.launch(&name, Some(TEST)).unwrap_err();
-        assert!(
-            error.contains(&format!("injected {verb} failure")),
-            "{error}"
-        );
-        assert!(
-            error.contains("removed") && !error.contains("unconfirmed"),
-            "{error}"
-        );
-        assert!(!lab.alive(&name), "{verb}: the created session is gone");
-        assert_eq!(
-            lab.alive(other),
-            bystander,
-            "{verb}: other sessions are untouched"
-        );
-        for leftover in [
-            tc::tmux_owner_path(&name),
-            tc::session_temp_path(&name, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT),
-            tc::session_dead_marker_path(&name),
-            tc::session_temp_path(&name, tc::TMUX_RUNTIME_KIND_TEMP_EXT),
-            tc::session_temp_path(&name, "host_kind"),
-        ] {
-            if std::path::Path::new(&leftover).exists() {
-                leftovers.push(format!("{verb}: {leftover}"));
-            }
-        }
-
-        std::fs::remove_file(&fault).unwrap();
-        lab.take_calls();
-        lab.launch(&name, Some(TEST))
-            .expect("the next launch succeeds");
-        assert_eq!(lab.geometry(&name), HELD);
-    }
-    assert!(leftovers.is_empty(), "{leftovers:#?}");
-}
-
-// An unconfirmed removal fails the launch and keeps all evidence; a retry relaunches only once tmux
-// confirms the session gone (failed probe), never over a live one (failed kill).
-#[test]
-fn guarded_launch_with_unconfirmed_cleanup_fails_and_keeps_the_ownership_evidence() {
-    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let lab = Lab::new();
-    let _hosts = crate::config::session_hosts::force_with_claude_guard_for_test(None, &[], &[TEST]);
-    let keeper = "AgentDesk-cga-keeper";
-    assert!(
-        lab.real(&["new-session", "-d", "-s", keeper, "sleep 600"])
-            .status
-            .success()
-    );
-    for (cleanup_fault, survives) in [("if-shell", true), ("has-session", false)] {
-        let name = format!("AgentDesk-cga-unconfirmed-{cleanup_fault}");
-        let faults = ["display-message", cleanup_fault]
-            .map(|verb| lab.root.path().join(format!("fail-{verb}")));
-        for fault in &faults {
-            std::fs::write(fault, "").unwrap();
-        }
-        let error = lab.launch(&name, Some(TEST)).unwrap_err();
-        assert!(
-            error.contains("cleanup unconfirmed"),
-            "{cleanup_fault}: {error}"
-        );
-        assert_eq!(lab.alive(&name), survives, "{cleanup_fault}: {error}");
-        let evidence = [
-            tc::tmux_owner_path(&name),
-            tc::session_temp_path(&name, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT),
-            tc::session_temp_path(&name, tc::CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT),
-            tc::session_temp_path(&name, tc::TMUX_RUNTIME_KIND_TEMP_EXT),
-            tc::session_temp_path(&name, "host_kind"),
-        ];
-        let read = || {
-            evidence
-                .iter()
-                .map(|path| std::fs::read(path).ok())
-                .collect::<Vec<_>>()
-        };
-        let kept = read();
-        for (path, bytes) in evidence.iter().zip(&kept) {
-            assert!(bytes.is_some(), "{cleanup_fault}: {path} must be kept");
-        }
-        for fault in &faults {
-            std::fs::remove_file(fault).unwrap();
-        }
-        lab.take_calls();
-
-        // The retry runs with the faults cleared and no manual kill.
-        let session_id = |name: &str| {
-            let shown = lab.real(&[
-                "display-message",
-                "-p",
-                "-t",
-                &format!("={name}:"),
-                "#{session_id}",
-            ]);
-            String::from_utf8_lossy(&shown.stdout).trim().to_string()
-        };
-        if survives {
-            let before = session_id(&name);
-            let refused = lab.launch(&name, Some(TEST)).unwrap_err();
-            assert!(refused.contains("keeps its launch evidence"), "{refused}");
-            let calls = lab.take_calls();
-            assert!(
-                !calls.iter().any(|call| call.contains("new-session")),
-                "{calls:?}"
-            );
-            assert_eq!(
-                session_id(&name),
-                before,
-                "the live session is the same one"
-            );
-            assert_eq!(read(), kept, "the retry leaves the evidence byte-identical");
-            assert!(
-                lab.real(&["kill-session", "-t", &format!("={name}")])
-                    .status
-                    .success()
-            );
-        }
-        lab.launch(&name, Some(TEST))
-            .expect("the launch after the session is gone succeeds");
-        assert_eq!(lab.geometry(&name), HELD);
+        assert_eq!(geometry, lab.geometry(name), "{name}: default geometry");
     }
 }

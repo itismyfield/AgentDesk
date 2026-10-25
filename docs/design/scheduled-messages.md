@@ -495,7 +495,7 @@ API 응답에 반환하지 않고 count-only summary만 반환한다. 반복 정
 | `src/server/routes/docs/inventory/endpoints/part_09.rs` | API docs 인벤토리 항목 (coverage 가드 필수) |
 | `src/services/scheduled_messages.rs`, `src/services/scheduled_messages/{evidence,timing,push_handoff,provider_targets,external_delivery}.rs` | scheduler + 원자적 fan-out + provider payload/worker + 완료 evidence/timing |
 | `src/server/worker_registry.rs` | 워커 등록 항목 추가 (`ScheduledMessages`, leader-only) |
-| `src/server/outbox_gc.rs`, `src/services/maintenance/jobs/db_retention.rs` | 영구 slot dedupe sentinel을 GC/retention에서 보존 |
+| `src/services/message_outbox.rs` (`gc_stale_outbox_rows`), `src/services/maintenance/jobs/db_retention.rs` | 영구 slot dedupe sentinel을 GC/retention에서 보존 |
 | `src/services/scheduling.rs` | routines와 scheduled messages 양쪽이 의존하는 공용 스케줄 문법 + slot-anchor 계산 |
 | `src/services/discord/outbound/source_registry.rs` | `scheduled_message`를 LoopbackInternal source로 등록 |
 

@@ -32,6 +32,7 @@ use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
 use crate::services::process::{kill_child_tree, shell_escape};
+use crate::services::provider::session_prompt;
 use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
     cancel_token_claude_interrupt::{
@@ -857,8 +858,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     sender,
                     cancel_token,
                     tmux_name,
-                    compact_percent,
-                    compact_lower_bound_tokens,
+                    (compact_percent, compact_lower_bound_tokens),
                 );
             }
         }
@@ -874,8 +874,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 sender,
                 cancel_token,
                 tmux_name,
-                compact_percent,
-                compact_lower_bound_tokens,
+                (compact_percent, compact_lower_bound_tokens),
             );
         }
     }
@@ -906,9 +905,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
             debug_log(&format!("  arg[{}]: {}", i, arg));
         }
     }
-    debug_log("Env: CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000");
-    debug_log("Env: BASH_DEFAULT_TIMEOUT_MS=86400000");
-    debug_log("Env: BASH_MAX_TIMEOUT_MS=86400000");
 
     let spawn_start = std::time::Instant::now();
     // Use one resolved launch environment for the compact window and gateway guard.
@@ -965,6 +961,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         child.id()
     ));
 
+    session_prompt::claude_args(&args);
     register_child_pid(cancel_token.as_deref(), child.id());
     let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "claude-direct-stream");
 
@@ -2695,6 +2692,7 @@ fn execute_streaming_local_tmux(
         ));
     }
 
+    session_prompt::claude_args(args);
     emit_fresh_session_watcher_handoff(&sender, output_path, input_fifo_path, tmux_session_name);
     log_producer_exit(
         "fresh_session_watcher_owned_handoff",

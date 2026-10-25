@@ -7,6 +7,9 @@ use serde_json::json;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 
+#[path = "codex_retention_e2e_tests.rs"]
+mod retention_e2e;
+
 const CHANNEL: u64 = 7;
 const ID: &str = "019e660d-4859-7522-9cee-8ba7c4e7c743";
 pub(crate) struct Fixture {
@@ -430,12 +433,22 @@ fn legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed() {
     .unwrap();
     let mut pending = fixture.context.clone();
     pending.execution_nonce = "b".repeat(32);
-    pending.created_at = chrono::Utc::now();
+    pending.created_at = fixture.context.created_at + chrono::TimeDelta::seconds(1);
     let pending = PreparedIncarnation::create(pending).unwrap();
     assert!(
         fixture.observe(&prepared).is_err(),
         "new prepared context changes census"
     );
+    let unavailable = runtime
+        .block_on(prepare(
+            &HealthRegistry::new(),
+            fixture.shared(None),
+            CHANNEL,
+        ))
+        .err()
+        .expect("pane_census: prepared or unaccounted launch context");
+    assert_eq!(unavailable.component.as_str(), "pane_census");
+    assert_eq!(unavailable.reason, "prepared or unaccounted launch context");
     std::fs::remove_file(pending.path).unwrap();
     std::fs::write(
         fixture.bin.path().join("tmux"),
@@ -445,14 +458,92 @@ fn legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed() {
         ),
     )
     .unwrap();
-    assert!(
-        runtime
-            .block_on(prepare(
-                &HealthRegistry::new(),
-                fixture.shared(None),
-                CHANNEL
-            ))
-            .is_err()
+    let unavailable = runtime
+        .block_on(prepare(
+            &HealthRegistry::new(),
+            fixture.shared(None),
+            CHANNEL,
+        ))
+        .err()
+        .expect("extra unassigned pane must refuse the complete census");
+    assert_eq!(unavailable.component.as_str(), "pane_census");
+    assert_eq!(unavailable.reason, "unassigned managed live pane");
+}
+
+#[test]
+fn codex_fixture_restores_all_environment_before_root_unlock() {
+    crate::config::test_env::teardown_probe::assert_restores_after_return(
+        concat!(
+            module_path!(),
+            "::codex_fixture_restores_all_environment_before_root_unlock"
+        ),
+        false,
+        || {
+            let keys = [
+                "AGENTDESK_CONFIG",
+                "AGENTDESK_INSTANCE_ID",
+                "AGENTDESK_TEST_CODEX_BINDING_ROOT",
+                "PATH",
+            ];
+            let baseline = keys.map(std::env::var_os);
+            let restored = std::rc::Rc::new(std::cell::Cell::new(false));
+            let observed = restored.clone();
+            let _hook = crate::config::test_env::teardown_probe::on_before_restore(move || {
+                assert!(
+                    keys.into_iter()
+                        .zip(baseline)
+                        .all(|(key, expected)| std::env::var_os(key) == expected),
+                    "fixture must restore identity/config/P5/PATH before the root unlocks"
+                );
+                observed.set(true);
+            });
+            drop(Fixture::new(false));
+            assert!(restored.get(), "root teardown hook must run");
+        },
+    );
+}
+
+#[test]
+fn codex_refresh_rechecks_host_inventory_and_final_publication() {
+    let fixture = Fixture::new(false);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let prepared = runtime
+        .block_on(prepare(
+            &HealthRegistry::new(),
+            fixture.shared(None),
+            CHANNEL,
+        ))
+        .unwrap();
+    let refreshed = runtime.block_on(prepared.observer.refresh()).unwrap();
+    let refreshed = Prepared {
+        tmux: prepared.tmux.clone(),
+        nonce: prepared.nonce.clone(),
+        observer: refreshed,
+    };
+    assert_eq!(fixture.observe(&refreshed).unwrap().current, fixture.source);
+    std::fs::write(
+        fixture.bin.path().join("tmux"),
+        format!(
+            "#!/bin/sh\necho {}\necho AgentDesk-codex-extra\n",
+            prepared.tmux
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.observe(&refreshed).err().as_deref(),
+        Some("Codex host inventory changed after preparation")
+    );
+    std::fs::write(
+        tc::session_temp_path(&prepared.tmux, "spawn_nonce"),
+        "b".repeat(32),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.observe(&refreshed).err().as_deref(),
+        Some("current Codex publication/context changed")
     );
 }
 

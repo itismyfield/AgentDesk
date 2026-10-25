@@ -36,7 +36,7 @@ use crate::services::turn_orchestrator::{
     ActiveTurnKind, ChannelMailboxSnapshot, ExpectedClaim, HANDBACK_NOT_WRITTEN, HeadOutcome,
     HeadSettle, InjectionSettlement, Intervention, QueueIdentity, QueuedHeadClaim, ReserveOutcome,
 };
-use names::{codex_unconfirmed_name, codex_veto_name, unconfirmed_name, veto_name};
+use names::{codex_unconfirmed_name, codex_veto_name, veto_name};
 use queued_support::{HEAD_UNKNOWN, queued_target_matches};
 use tokio::sync::OwnedMutexGuard;
 
@@ -773,7 +773,11 @@ fn run(
                 turn_id: turn_id.clone(),
             }
         }
-        Ok(Outcome::Unconfirmed(detail)) => alert(unconfirmed_name(detail)),
+        Ok(Outcome::Failed(detail)) => alert(match detail {
+            busy_inject::WriteFailure::Stash => "stash_failed",
+            busy_inject::WriteFailure::Paste => "paste_failed",
+            busy_inject::WriteFailure::Enter => "enter_failed",
+        }),
         Err(_) => alert("executor_failed"),
     };
     result

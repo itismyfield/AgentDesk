@@ -149,7 +149,21 @@ impl submission_fence::SubmissionFence for Scope {
         })
     }
     fn idle_stash_admits(&self, target: &str) -> bool {
-        self.target["owner"] == target && epoch().is_some()
+        if self.target["owner"] != target {
+            return false;
+        }
+        #[cfg(unix)]
+        if epoch().is_none() {
+            let Some(pin) =
+                crate::services::tui_input::submission_tmux::guarded::PaneIdentity::observe(target)
+            else {
+                return false;
+            };
+            if observe_pin(target, &pin).is_err() {
+                return false;
+            }
+        }
+        epoch().is_some()
     }
     fn claim_idle_stash(
         &self,

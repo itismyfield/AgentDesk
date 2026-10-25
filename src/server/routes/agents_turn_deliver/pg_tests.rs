@@ -98,7 +98,7 @@ async fn the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg(
     let agents = [
         ("inject-on", 6_245_121_u64, "external"),
         ("inject-off", 6_245_122, "off"),
-        ("inject-attached", 6_245_123, "external"),
+        ("inject-menu", 6_245_123, "external"),
         ("inject-unconfirmed", 6_245_124, "external"),
     ];
     let channels = agents.map(|(_, channel, _)| channel);
@@ -108,14 +108,14 @@ async fn the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg(
     }
     let registry = Arc::new(HealthRegistry::new());
     let shared = register_inject_runtime(&registry, &channels, Some(pool.clone())).await;
-    let [on, off, attached, unconfirmed] = agents.map(|(_, ch, mode)| InjectPane::new(ch, mode));
-    attached.set("attach", "1");
+    let [on, off, menu, unconfirmed] = agents.map(|(_, ch, mode)| InjectPane::new(ch, mode));
+    menu.menu();
     unconfirmed.set("fail_paste", "");
     let app = router(Some(pool), Some(registry));
 
     let input = json!({"text": "status?", "author_discord_user_id": "200", "source": "imessage"});
     let mut observed = Vec::new();
-    for ((agent, channel, _), pane) in agents.iter().zip([&on, &off, &attached, &unconfirmed]) {
+    for ((agent, channel, _), pane) in agents.iter().zip([&on, &off, &menu, &unconfirmed]) {
         let (status, body) = deliver(&app, agent, &input.to_string()).await;
         let field = |name: &str| match body.get(name) {
             None => "-".to_string(),
@@ -146,7 +146,7 @@ async fn the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg(
         [
             "inject-on: 200 injected turn=null reason=null veto=- detail=- keys=[\"paste-buffer\", \"send-keys\"] tmux=true queued=0",
             "inject-off: 200 queued turn=discord:6245122:* reason=external_turn_active veto=- detail=- keys=[] tmux=false queued=1",
-            "inject-attached: 200 queued turn=discord:6245123:* reason=handed_back veto=human_attached detail=- keys=[] tmux=true queued=1",
+            "inject-menu: 200 queued turn=discord:6245123:* reason=handed_back veto=modal detail=- keys=[] tmux=true queued=1",
             "inject-unconfirmed: 200 unconfirmed turn=null reason=inject_unconfirmed veto=- detail=paste_failed keys=[] tmux=true queued=0",
         ]
     );
@@ -160,7 +160,8 @@ async fn the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg(
     assert_eq!(channels.map(alerted), [false, false, false, true]);
 }
 
-/// The HTTP entry carries the resolved channel into the same stash transaction as Discord.
+/// The HTTP entry carries the resolved channel into the same stash transaction as Discord: only
+/// a listed channel parks the draft with C-s, an unlisted one pastes behind it without holding.
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn the_route_stashes_an_attached_persons_draft_only_on_the_allowlisted_channel_pg() {
@@ -216,99 +217,13 @@ async fn the_route_stashes_an_attached_persons_draft_only_on_the_allowlisted_cha
 
     let (status, body) = deliver(&app, agents[1].0, &input).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["delivery"], "queued", "{body}");
-    assert_eq!(body["reason"], "handed_back", "{body}");
-    assert_eq!(body["inject_veto"], "human_attached", "{body}");
-    assert_eq!(queue_texts(&shared, agents[1].1).await, ["status?"]);
-    assert!(outside.applied().is_empty());
-    assert!(outside.records().is_empty());
-    assert_eq!(outside.read("composer").as_deref(), Some(draft));
-    assert!(outside.read("stash").is_none());
-}
-
-/// Same-generation human typing cannot turn a contaminated submit into confirmed delivery.
-#[cfg(unix)]
-#[tokio::test(flavor = "current_thread")]
-async fn the_route_reports_contaminated_submit_and_protects_a_mixed_direct_draft_pg() {
-    use crate::services::discord::health::{InjectPane, queue_texts, register_inject_runtime};
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let pg_db = TestPostgresDb::create().await;
-    let pool = pg_db.connect_and_migrate().await;
-    let agents = [
-        ("stash-contaminated", 6_845_651_u64),
-        ("direct-mixed", 6_845_652),
-    ];
-    for (agent, channel) in agents {
-        crate::db::agents::insert_agent_channels_for_tests(
-            &pool,
-            agent,
-            Some(&channel.to_string()),
-            None,
-        )
-        .await;
-    }
-    let registry = Arc::new(HealthRegistry::new());
-    let shared = register_inject_runtime(
-        &registry,
-        &agents.map(|(_, channel)| channel),
-        Some(pool.clone()),
-    )
-    .await;
-    let draft = "  첫째 줄 사람 초안\n\n  마지막 줄";
-    let mut contaminated = InjectPane::new(agents[0].1, "external");
-    contaminated.stash(draft, true);
-    // Own capture returns before a person types X and puts the caret back at its old location.
-    contaminated.set("human.3", "x=$(cat \"$d/cursor_x\"); y=$(cat \"$d/cursor_y\"); type_text X; echo \"$x\" > \"$d/cursor_x\"; echo \"$y\" > \"$d/cursor_y\"");
-    let mut direct = InjectPane::new(agents[1].1, "external");
-    direct.stash("", true);
-    direct.set("human.1", "type_text 'person typed '");
-    let app = router(Some(pool), Some(registry));
-    let input = json!({
-        "text": "status?", "author_discord_user_id": "200",
-        "source": "imessage", "origin_id": "contaminated-submit-http",
-    })
-    .to_string();
-    let (status, body) = deliver(&app, agents[0].0, &input).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["delivery"], "unconfirmed", "{body}");
-    assert_eq!(body["detail"], "contaminated_submit", "{body}");
-    assert_eq!(contaminated.applied(), ["C-s", "paste", "Enter"]);
-    assert_eq!(
-        contaminated.records(),
-        [format!("{}X", contaminated.read("buffer").unwrap())]
-    );
-    assert_eq!(contaminated.read("composer").as_deref(), Some(draft));
-    assert!(contaminated.read("stash").is_none());
-    assert_eq!(contaminated.read("attached").as_deref(), Some("4"));
-    assert_eq!(contaminated.read("last").as_deref(), Some("100"));
-    assert_eq!(contaminated.alarm_count("busy_inject_unconfirmed"), 1);
-    assert!(queue_texts(&shared, agents[0].1).await.is_empty());
-
-    let (status, body) = deliver(&app, agents[1].0, &input).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["delivery"], "unconfirmed", "{body}");
-    assert_eq!(direct.applied(), ["paste"]);
-    assert!(direct.records().is_empty());
-    assert!(
-        direct
-            .read("composer")
-            .unwrap()
-            .starts_with("person typed ")
-    );
-    assert_eq!(direct.alarm_count("busy_inject_draft_unrecovered"), 1);
+    assert_eq!(body["delivery"], "injected", "{body}");
     assert!(queue_texts(&shared, agents[1].1).await.is_empty());
-    assert_eq!(
-        crate::services::claude_tui::composer_lock::composer_admission(&direct.session(), || None),
-        crate::services::claude_tui::composer_lock::ComposerAdmission::Held,
-    );
-    let applied = direct.applied();
-    let (status, body) = deliver(&app, agents[1].0, &input).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["delivery"], "queued", "{body}");
-    assert_eq!(body["inject_veto"], "draft", "{body}");
-    assert_eq!(direct.applied(), applied);
-    assert!(direct.records().is_empty());
-    assert_eq!(queue_texts(&shared, agents[1].1).await, ["status?"]);
+    assert_eq!(outside.applied(), ["paste", "Enter"]);
+    let records = outside.records();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].ends_with(&outside.read("buffer").unwrap()));
+    assert!(outside.read("stash").is_none());
 }
 
 /// With the switch off the route answers as it did before injection existed: a start claims
@@ -1028,7 +943,7 @@ mod s1a {
         f.assert_calls(1);
 
         let pane = InjectPane::new(f.channel, "external");
-        pane.set("attach", "1");
+        pane.menu();
         inject_hook::fault_handback(f.channel, inject_hook::HandbackFault::AnswerLost);
         let uncertain = input(
             Some("uncertain-refusal"),
@@ -1509,7 +1424,10 @@ mod s1a {
                 episode: Some(episode.clone()),
                 contract: Some(contract(&f, guid)),
             };
-            assert_eq!(inject_hook::starts_seen(f.channel), [seen.clone()]);
+            assert_eq!(
+                inject_hook::starts_seen(f.channel),
+                std::slice::from_ref(&seen)
+            );
             assert_eq!(f.row(guid).await.episode_key, Some(episode));
             end_turn(&f.shared, f.channel).await;
             let off = f
@@ -1592,21 +1510,17 @@ mod s1a {
             assert_eq!(off.applied(), ["C-s", "paste", "Enter"]);
             assert_eq!(off.read("composer").as_deref(), Some(draft));
             assert_eq!(f.counts().await, (0, 0));
-            // A tab has unmeasured geometry; the ON path must retain it without typing.
+            // A tab needs no render prediction: the ON path stashes and sends it like any text.
             let on_channel = f.channel + 100;
             f.add_agent("s1b-on-stash", on_channel).await;
             let mut on = InjectPane::new(on_channel, "external");
-            let unsupported = "status?\tunmeasured";
             on.stash(draft, true);
-            let body = input(Some(guid), unsupported, 200);
+            let body = input(Some(guid), "status?\tunmeasured", 200);
             let answer = call(&f.app, "s1b-on-stash", true, f.probe(), body).await;
-            assert_eq!(
-                (&answer.1["reason"], &answer.1["inject_veto"]),
-                (&json!("handed_back"), &json!("draft"))
-            );
-            assert!(on.applied().is_empty());
+            assert_eq!(answer.1["delivery"], "injected", "{}", answer.1);
+            assert_eq!(on.applied(), ["C-s", "paste", "Enter"]);
             assert_eq!(on.read("composer").as_deref(), Some(draft));
-            assert_eq!(queue_texts(&f.shared, on_channel).await, [unsupported]);
+            assert!(queue_texts(&f.shared, on_channel).await.is_empty());
             drop((off, on));
             f.close().await;
             let f = Fixture::create(8_624_549).await;
@@ -1668,7 +1582,7 @@ mod s1a {
             let answer = f.call(true, input(Some(joined), "status?", 200)).await;
             assert_eq!(answer.1["delivery"], "injected", "{}", answer.1);
             let e0 = f.row(joined).await.episode_key.unwrap();
-            pane.set("attach", "1");
+            pane.menu();
             let guid = "p:0/HANDED";
             let answer = f.call(true, input(Some(guid), "status?", 200)).await;
             assert_eq!(answer.1["reason"], "handed_back", "{}", answer.1);

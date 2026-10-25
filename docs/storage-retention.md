@@ -20,8 +20,9 @@ Prerequisite context:
 - [#1093 / 909-4] DB retention job wired: `db_retention`.
 - Cross-reference: [`docs/ci/sccache-setup.md`](ci/sccache-setup.md) — why
   `target/` bloats and how sccache dampens rebuild cost post-sweep.
-- Cross-reference: [`docs/ops/codex-campaign-prompt-2026-04-24-r4.md`](ops/codex-campaign-prompt-2026-04-24-r4.md) —
-  campaign runbook that called 909-5 out as the closing deliverable.
+- Cross-reference: `codex-campaign-prompt-2026-04-24-r4.md` (operator-local; the
+  ops playbook directory is gitignored) — campaign runbook that called 909-5
+  out as the closing deliverable.
 
 ---
 
@@ -57,10 +58,10 @@ Each row is a (vector × action × job) tuple. If a vector is not in this table,
 | `~/.adk/release/worktrees/<id>/`          | Until the owning dispatch is no longer `pending`/`dispatched` | `git worktree remove --force` + `rm -rf` on orphans           | `storage.worktree_orphan_sweep`   | Hourly   |
 | `logs/adk-hang-*.txt` (hang diagnostics)  | 14 days                                     | Delete files older than the window                           | `storage.hang_dump_cleanup`       | Weekly   |
 | PG `message_outbox` (status='sent')       | 7 days                                      | `DELETE`                                                     | `storage.db_retention`            | Weekly   |
-| PG `auto_queue_entries` (status='completed') | 30 days                                  | `DELETE`                                                     | `storage.db_retention`            | Weekly   |
-| PG `agent_quality_event`                  | 90 days                                     | Monthly aggregate insert into summary table, then `DELETE`   | `storage.db_retention`            | Weekly   |
+| PG `auto_queue_entries` (`done`/`skipped`/`failed`/`user_cancelled`, run `completed`/`cancelled`) | 30 days (on `completed_at`) | `DELETE`                       | `storage.db_retention`            | Weekly   |
+| PG `agent_quality_event`                  | 90 days                                     | `DELETE`, adding the deleted `turn_*` events to `turn_analytics_monthly_aggregate` in the same statement | observability retention sweep | Hourly   |
 | PG `session_transcripts`                  | 90 days                                     | Copy to archive table, then `DELETE`                         | `storage.db_retention`            | Weekly   |
-| PG `task_dispatches`                      | 90 days                                     | Monthly aggregate insert, then `DELETE`                      | `storage.db_retention`            | Weekly   |
+| PG `task_dispatches` (status='completed') | 90 days                                     | `DELETE`, adding the deleted rows to `task_dispatches_monthly_aggregate` in the same statement | `storage.db_retention` | Weekly   |
 | PG `turn_lifecycle_events`                | 30 days                                     | `DELETE` (on `created_at`)                                   | `storage.db_retention`            | Weekly   |
 | PG `skill_usage`                          | 90 days                                     | `DELETE` (on `used_at`)                                      | `storage.db_retention`            | Weekly   |
 | PG `turns`                                | 90 days                                     | Copy to `turns_archive` table, then `DELETE` (on `finished_at`) | `storage.db_retention`            | Weekly   |
@@ -337,8 +338,8 @@ gets a new row.
 
 - [`docs/ci/sccache-setup.md`](ci/sccache-setup.md) — sccache config that keeps
   post-sweep rebuild cost predictable.
-- [`docs/ops/codex-campaign-prompt-2026-04-24-r4.md`](ops/codex-campaign-prompt-2026-04-24-r4.md) —
-  campaign 909 runbook (909-5 = this doc).
+- `codex-campaign-prompt-2026-04-24-r4.md` (operator-local; the ops playbook
+  directory is gitignored) — campaign 909 runbook (909-5 = this doc).
 - [`docs/source-of-truth.md`](source-of-truth.md) — §retention for the
   long-form rationale behind the 7/30/90-day horizons.
 - [`docs/reports/cost-efficiency-908.md`](reports/cost-efficiency-908.md) —

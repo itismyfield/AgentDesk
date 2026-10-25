@@ -7,7 +7,7 @@ use crate::services::process::stream_child::{EXIT_POLL, StreamChild, finish_read
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use crate::services::agent_protocol::StreamMessage;
@@ -308,7 +308,7 @@ mod tests {
             unset_env: vec![],
             codec: Box::new(Codec(0)),
         };
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = std::sync::mpsc::channel();
         let start = Instant::now();
         let mut ticks = 0;
         let result = run_prepared_with_clock(prepared, tx, Duration::ZERO, None, || {
@@ -418,7 +418,7 @@ mod child_exit_tests {
         for &mode in cases {
             let fixture = ProviderFixture::new("grok", mode);
             let normal = matches!(mode, "normal" | "quiet" | "delayed_normal");
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = std::sync::mpsc::channel();
             let prepared = PreparedCommand {
                 executable: fixture.cli.clone(),
                 resolution: fixture.resolution(),
@@ -460,7 +460,7 @@ mod child_exit_tests {
         let fixture = ProviderFixture::new("grok", "cancel");
         let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
         let cancel = fixture.cancel_after_accept(token.clone());
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = std::sync::mpsc::channel();
         let prepared = PreparedCommand {
             executable: fixture.cli.clone(),
             resolution: fixture.resolution(),

@@ -18,13 +18,13 @@ use super::{health, mailbox};
 
 mod api_exposure;
 mod config_dir_checks;
+mod configuration_audit;
 use crate::cli::dcserver;
 use crate::config;
 use crate::services::operator_connectors as connectors;
 use crate::services::provider::{ProviderKind, ProviderRuntimeProbe};
 use serde::Serialize;
 use serde_json::{Value, json};
-
 #[derive(Clone, Debug)]
 pub(crate) struct DoctorOptions {
     pub(crate) fix: bool,
@@ -1945,10 +1945,10 @@ fn apply_service_fix(snapshot: &HealthSnapshot, options: &DoctorOptions) -> Vec<
     Vec::new()
 }
 
+mod dispatch_outbox;
+mod managed_herdr_config;
 mod repair_response;
 mod report_display;
-
-mod dispatch_outbox;
 use dispatch_outbox::check_dispatch_outbox;
 mod observation_checks;
 use observation_checks::check_mailbox_consistency;
@@ -3748,14 +3748,14 @@ pub(crate) fn run_doctor_report(options: DoctorOptions) -> Result<DoctorReport, 
     let cfg = config::load_graceful();
     let mut actions = Vec::new();
     if options.fix {
-        actions = apply_safe_fixes(&cfg, &options);
+        actions = managed_herdr_config::fixed(&cfg, apply_safe_fixes(&cfg, &options));
         let pre_fix_snapshot = fetch_health_snapshot(&options);
         actions.extend(apply_service_fix(&pre_fix_snapshot, &options));
         actions.extend(apply_stale_mailbox_fixes(&pre_fix_snapshot, &options));
     }
 
     let snapshot = fetch_health_snapshot(&options);
-    let mut checks = build_all_checks(&cfg, &snapshot);
+    let mut checks = managed_herdr_config::checked(&cfg, build_all_checks(&cfg, &snapshot));
     if let Some(profile) = options.profile {
         checks.retain(|check| doctor_profile_includes_check(profile, check));
     }

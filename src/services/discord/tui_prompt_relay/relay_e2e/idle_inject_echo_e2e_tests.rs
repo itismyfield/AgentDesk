@@ -117,7 +117,7 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
     let rt = &busy.rt;
     let _confirmed = TestConfirmation::new(CHANNEL_ID);
     let tx = observer(rt);
-    busy.pane.draft();
+    busy.pane.set("cap.before", "Run this tool? allow / deny");
     let session = busy.pane.session();
     let transcript = busy.pane.path(InjectPane::TRANSCRIPT);
     let request = busy_inject::Request {
@@ -133,7 +133,7 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
     let report = busy_inject::inject_report_any_turn(&pane, &request, None, &busy_inject::TIMING);
     assert!(matches!(
         report.outcome,
-        busy_inject::Outcome::NotSent(busy_inject::Veto::Draft)
+        busy_inject::Outcome::NotSent(busy_inject::Veto::Modal)
     ));
     assert!(busy.pane.keys().is_empty());
     let frame = crate::services::tui_input::human_frame::inject(
@@ -165,7 +165,10 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
     let notice = matching[0];
     assert_eq!(notice, &expected);
     assert!(notice.starts_with("-# ⌨️ "), "{notice}");
-    assert_eq!(notice.lines().count(), 1, "{notice}");
-    assert!(notice.ends_with(" (+1줄)"), "{notice}");
-    assert!(!notice.contains(request.text), "{notice}");
+    assert_eq!(notice.lines().count(), 2, "{notice}");
+    assert!(
+        notice.lines().all(|line| line.starts_with("-# ")),
+        "{notice}"
+    );
+    assert!(notice.ends_with(request.text), "{notice}");
 }

@@ -38,6 +38,16 @@ pub(super) struct DirectResumeFallback {
     output_path: String,
     #[cfg(unix)]
     binding: TuiRuntimeBinding,
+    #[cfg(unix)]
+    origin: FallbackOrigin,
+}
+
+/// Which proof found the rollout; commit re-derives it from the same proof.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+enum FallbackOrigin {
+    DirectResume,
+    RehydratedBinding,
 }
 
 impl DirectResumeFallback {
@@ -102,8 +112,74 @@ pub(super) fn rollout_fallback_for_live_direct_resume(
         Some(DirectResumeFallback {
             output_path: rollout.display().to_string(),
             binding,
+            origin: FallbackOrigin::DirectResume,
         })
     }
+}
+
+/// Idle fresh Codex panes leave no inflight row and no `codex resume` argv, so restore
+/// adopts the rollout boot rehydration already published for this exact owner channel.
+pub(super) fn rollout_fallback_for_rehydrated_binding(
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    watchers: &crate::services::discord::TmuxWatcherRegistry,
+) -> Option<DirectResumeFallback> {
+    #[cfg(not(unix))]
+    {
+        let _ = (provider, tmux_session_name, channel_id, watchers);
+        return None;
+    }
+
+    #[cfg(unix)]
+    {
+        if *provider != ProviderKind::Codex
+            || watchers.owner_channel_for_tmux_session(tmux_session_name) != Some(channel_id)
+        {
+            return None;
+        }
+        let fallback = rehydrated_binding_fallback(
+            tmux_session_name,
+            dedupe::runtime_binding_for_tmux_session(tmux_session_name),
+        )?;
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ↻ watcher restore for {} — codex rehydrated binding fallback {}",
+            tmux_session_name,
+            fallback.output_path
+        );
+        Some(fallback)
+    }
+}
+
+/// The published binding counts only when this pane's rollout marker names the same
+/// rollout and session; a missing marker is no proof.
+#[cfg(unix)]
+fn rehydrated_binding_fallback(
+    tmux_session_name: &str,
+    binding: Option<TuiRuntimeBinding>,
+) -> Option<DirectResumeFallback> {
+    let binding = binding.filter(|binding| {
+        binding.runtime_kind == RuntimeHandoffKind::CodexTui
+            && !binding.output_path.trim().is_empty()
+            && std::path::Path::new(&binding.output_path).is_file()
+    })?;
+    let marker =
+        crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux_session_name)?;
+    let same_session = marker
+        .session_id
+        .as_deref()
+        .is_none_or(|session| binding.session_id.as_deref().map(str::trim) == Some(session.trim()));
+    (same_session
+        && crate::services::codex_tui::session::codex_tui_rollout_paths_same(
+            std::path::Path::new(&binding.output_path),
+            &marker.rollout_path,
+        ))
+    .then(|| DirectResumeFallback {
+        output_path: binding.output_path.clone(),
+        binding,
+        origin: FallbackOrigin::RehydratedBinding,
+    })
 }
 
 pub(super) fn commit_live_direct_resume_fallback(
@@ -181,11 +257,18 @@ pub(super) fn commit_live_direct_resume_fallback(
             ) {
                 return false;
             }
-            let Some(current) = rollout_fallback_for_live_direct_resume(
-                &ProviderKind::Codex,
-                tmux_session_name,
-                channel_id,
-            ) else {
+            let current = match fallback.origin {
+                FallbackOrigin::DirectResume => rollout_fallback_for_live_direct_resume(
+                    &ProviderKind::Codex,
+                    tmux_session_name,
+                    channel_id,
+                ),
+                FallbackOrigin::RehydratedBinding => rehydrated_binding_fallback(
+                    tmux_session_name,
+                    dedupe::runtime_binding_for_tmux_session_under_source_authority(authority),
+                ),
+            };
+            let Some(current) = current else {
                 return false;
             };
             if !codex_bindings_same_source(&fallback.binding, &current.binding) {
