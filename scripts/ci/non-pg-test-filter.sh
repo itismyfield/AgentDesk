@@ -576,27 +576,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::relay_recovery::circuit_breaker::tests::zero_originating_message_reserves_with_a_distinct_mailbox_anchor
   services::discord::relay_recovery::circuit_breaker::tests::zero_originating_message_still_rejects_episode_identity_mismatches
   services::discord::replay_policy::permit_tests::effect_permits_cannot_be_cloned_or_serialised
-  services::discord::restart_mode::protocol_v2::disposition::high_risk_recovery::every_disposition_owns_exact_original_bytes
-  services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::absolute_and_relative_root_traversal_record_exact_pairs_and_identity
-  services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::directory_mutation_records_sync_facts_and_owned_fds_outlive_parents
-  services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::regular_open_rejects_special_nodes_and_bounded_reads_stay_bounded
-  services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::root_traversal_and_path_replacement_keep_the_pinned_inode
-  services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::sealed_stage_link_records_identity_and_cleanup_stays_maintenance_only
-  services::discord::restart_mode::protocol_v2::fs::unsupported::high_risk_recovery::unsupported_precedes_validation_for_every_facade_operation
-  services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::all_phase_kinds_round_trip_to_golden_canonical_wire
-  services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::malformed_and_unknown_versions_classify_without_panicking_or_losing_raw
-  services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::provider_and_channel_require_canonical_lower_utf8_hex
-  services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::unknown_fields_invalid_values_and_reencoding_preserve_exact_raw
-  services::discord::restart_mode::protocol_v2::phase::reducer::high_risk_recovery::nonaccepted_dispositions_propagate_exactly_and_reducer_is_total
-  services::discord::restart_mode::protocol_v2::phase::reducer::high_risk_recovery::phase_order_repeats_and_post_receipt_conflict_without_over_suppression
-  services::discord::restart_mode::protocol_v2::phase::reducer::high_risk_recovery::positive_prefixes_reach_all_four_states_and_keep_last_original_raw
-  services::discord::restart_mode::protocol_v2::phase::reducer::high_risk_recovery::sequence_hash_and_identity_conflicts_keep_the_first_offending_raw
-  services::discord::restart_mode::protocol_v2::values::high_risk_recovery::canonical_uuid_forms_only
-  services::discord::restart_mode::protocol_v2::values::high_risk_recovery::identities_preserve_exact_unicode_and_reject_empty_or_nul
-  services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_accepts_nested_portable_components
-  services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_each_unsafe_class
-  services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_superscript_reserved_basenames
-  services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_windows_forbidden_characters
   services::discord::router::herdr_consent::admission::tests::already_held_requires_every_original_source_and_exact_generation
   services::discord::router::herdr_consent::admission::tests::consent_actual_queued_readmission_restores_same_head_lease_uploads_and_origin
   services::discord::router::herdr_consent::admission::tests::consent_live_custody_keeps_expanded_prompt_sources_upload_and_voice_fifo
