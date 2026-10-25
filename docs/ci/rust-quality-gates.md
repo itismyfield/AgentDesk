@@ -37,10 +37,10 @@ the gate, never producing a valid zero. Main uploads the observation. The count
 is compiler-emitted diagnostics, not source occurrences or a deduplicated
 cross-target debt estimate.
 
-The warning-total gate uses `scripts/clippy_warning_baseline.json`: **952**
+The warning-total gate uses `scripts/clippy_warning_baseline.json`: **379**
 diagnostics, measured by Ubuntu main CI at
-`1e9603a630ff9ec6d654ad69945a4229d4ae9ee0` and reproduced in the two preceding
-main observations. The file records the run URL, artifact ID and diagnostics
+`f3724fb6366599a9041bcc63d267be668991c799` after the first warning-debt
+reduction (down from 952). The file records the run URL, artifact ID and diagnostics
 digest. The environment is Rust 1.94.1, x86_64 Linux and the staged argv above;
 local Mac totals cannot substitute for it. Both workflows reject warning growth
 and invalid or mismatched observations. The existing required `Lint` mirror

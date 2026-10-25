@@ -247,14 +247,14 @@ async fn pane_veto_hands_back_one_normal_busy_queue_payload_with_uploads_pg() {
     live.has_reply_boundary = true;
     let normal = super::super::busy_queue::spec(&live).into_intervention();
     assert_eq!(normal.pending_uploads, uploads);
-    pane.draft();
+    pane.menu();
     let before = crate::services::discord::mailbox_snapshot(&shared, live.channel_id).await;
     assert_eq!(before.intervention_queue.len(), 0);
     let result = attempt(&shared, &ProviderKind::Claude, &live).await;
     assert!(
         matches!(
             result,
-            Some(InjectAttempt::HandedBack { veto: "draft", .. })
+            Some(InjectAttempt::HandedBack { veto: "modal", .. })
         ),
         "{result:?}"
     );
