@@ -304,6 +304,13 @@ checks inside scenarios that never ran. Dry runs contribute no executed passes.
 The matrix forwards these totals and reports partial coverage when either dormant
 scenarios or skipped assertions remain, even if all executed scenarios passed.
 
+Every prompt send appends a `prompt_sends` row (`send_state: attempted`) before it
+leaves and fills `message_id` with `send_state: acknowledged` when the response
+returns; provider contact is claimed only after that acknowledgement. When the
+phase deadline expires, including inside a failure handler's teardown or inside
+one of E-18's Herdr text-stop subcases, the report row still carries those rows
+and the contact fact.
+
 Post-deploy relay continuity uses a narrower operational wrapper around the
 same driver:
 

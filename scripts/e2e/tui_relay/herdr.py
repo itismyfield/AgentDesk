@@ -261,11 +261,31 @@ def omissions(scenario):
     return items
 
 
+def merge_cases(driver, scenario, args, result, cases):
+    result["subcases"] = cases
+    for key in ("not_applicable", "known_gaps", "herdr_observations", "assertions", "prompt_sends"):
+        result[key] = [item for case in cases for item in case.get(key, [])]
+    result["real_provider_contacted"] = any(case.get("real_provider_contacted") for case in cases)
+    driver._refresh_agent_mode_record(result, scenario=scenario, declared_agent_mode=result["agent_mode"], dry_run=args.dry_run)
+    driver._refresh_coverage_class_record(result, scenario=scenario, declared_coverage_class=result["coverage_class"], dry_run=args.dry_run)
+
+
 def run(driver, scenario, args, client, run_id, result):
     if not scenario.get("herdr_text_stop"):
         return _run(driver, scenario, args, client, run_id, result)
+    cases = []
+    try:
+        return _run_text_stop(driver, scenario, args, client, run_id, result, cases)
+    except driver.PhaseDeadlineExpired:
+        # The phase handler reads only this dict, so carry the subcases' evidence up.
+        merge_cases(driver, scenario, args, result, cases)
+        raise
+
+
+def _run_text_stop(driver, scenario, args, client, run_id, result, cases):
     # Distinct setup windows and issue scopes: HTTP HostOwned is NOT the P10-3 command path.
-    http = _run(driver, scenario, args, client, run_id, copy.deepcopy(result))
+    cases.append(copy.deepcopy(result))
+    http = cases[-1] = _run(driver, scenario, args, client, run_id, cases[-1])
     if http["status"] in {"fail", "skipped"}:
         return http
     if not args.dry_run and http["status"] == "known_gap":
@@ -279,19 +299,14 @@ def run(driver, scenario, args, client, run_id, result):
             "assertions": [{"marker_absent": {"marker": "[E2E:E18S:LATE]", "surface": "relay"}},
                            {"no_duplicate_marker": "[E2E:E18S:OK]"}, {"no_duplicate_marker": "[E2E:E18S:NEXT]"},
                            {"text_present": "[E2E:E18S:NEXT]"}, {"no_duplicate_content": True}]}
-    text_result = copy.deepcopy(result)
-    text_result["id"] = text["id"]
-    stop = _run(driver, text, args, client, run_id, text_result)
-    result["subcases"] = [http, stop]
-    for key in ("not_applicable", "known_gaps", "herdr_observations", "assertions"):
-        result[key] = [item for case in (http, stop) for item in case.get(key, [])]
-    result["real_provider_contacted"] = http["real_provider_contacted"] or stop["real_provider_contacted"]
+    cases.append(copy.deepcopy(result))
+    cases[-1]["id"] = text["id"]
+    stop = cases[-1] = _run(driver, text, args, client, run_id, cases[-1])
+    merge_cases(driver, scenario, args, result, cases)
     result["herdr_readiness_waiver"] = waiver_summary(args, result["herdr_observations"])
     result["status"] = next((s for s in ("fail", "unexpected_pass", "known_gap", "not_applicable", "dry_run")
                              if s in {http["status"], stop["status"]}), "pass")
     result["reason"] = "; ".join(f"{c['id']}: {c['status']} {c.get('reason') or ''}" for c in (http, stop))
-    driver._refresh_agent_mode_record(result, scenario=scenario, declared_agent_mode=result["agent_mode"], dry_run=args.dry_run)
-    driver._refresh_coverage_class_record(result, scenario=scenario, declared_coverage_class=result["coverage_class"], dry_run=args.dry_run)
     return result
 
 
@@ -439,10 +454,12 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                     open_gap(step_index, marker.replace("{run_id}", run_id) if marker else None)
                 window.mark_prompt_sent()
                 prompt_count += 1
-                result["real_provider_contacted"] = True
-                result["agent_mode_actual"] = "real_live"
+                entry = driver._record_send(result, next(k for k in ("send_prompt", "send_discord_prompt", "send_provider_hold_prompt") if k in step))
                 try:
                     sent = client.send(args.channel_id, prompt)
+                    driver._ack_send(entry, sent)
+                    result["real_provider_contacted"] = True
+                    result["agent_mode_actual"] = "real_live"
                     driver.post_send_sleep(step)
                 except Exception:
                     # Transport/auth errors are never an expected product gap.
@@ -491,7 +508,8 @@ def _run_checked(driver, scenario, args, client, run_id, result):
             elif "send_text_stop" in step:
                 if not first_response:
                     raise assertions.AssertionError("text stop requires running hold witness")
-                client.send(args.channel_id, "!stop")  # The same normal Discord transport as prompts.
+                entry = driver._record_send(result, "send_text_stop")
+                driver._ack_send(entry, client.send(args.channel_id, "!stop"))  # The same normal Discord transport as prompts.
                 driver.post_send_sleep(step)
                 open_gap(step_index)
                 ack = "중지하고 있어요..."

@@ -4034,6 +4034,30 @@ class PhasePartialEvidenceContract(_OutcomeFixture, unittest.TestCase):
                 self.assertEqual(len(row["assertions"]), len({json.dumps(x, sort_keys=True) for x in row["assertions"]}))
                 if failure == "step": self.assertEqual(len(row["assertions"]), 1)
 
+    def test_nested_handler_deadline_keeps_plain_send_id_and_contact(self):
+        # Not E-35: a plain prompt whose deadline lands in the assertion handler's teardown.
+        for step in ("send_prompt", "send_discord_prompt"):
+            with self.subTest(step=step):
+                self.args.phase_deadline_s = 1
+                self.client.send_control.side_effect = lambda channel, text: {"id": "100"} if "SETUP" in text else (_ for _ in ()).throw(driver.PhaseDeadlineExpired("phase"))
+                self.client.fetch_messages.side_effect = [[], assertions.AssertionError("valid assertion")]
+                rc, report, _ = self.main_result(self.scenario(steps=[{step: "probe"}]))
+                row = report["scenarios"][0]
+                self.assertEqual(rc, 1)
+                self.assert_unevaluable(row)
+                self.assertIn("prior: assertion: valid assertion", row["reason"])
+                self.assertEqual(row["prompt_sends"], [{"step": step, "send_state": "acknowledged", "message_id": "111"}])
+                self.assertTrue(row["real_provider_contacted"])
+                self.assertEqual(row["agent_mode_actual"], "real_live")
+
+    def test_deadline_before_plain_ack_reports_attempt_without_contact(self):
+        self.client.send_prompt.side_effect = driver.PhaseDeadlineExpired("pre-ack")
+        rc, report, _ = self.main_result(self.scenario())
+        row = report["scenarios"][0]
+        self.assertEqual(rc, 1)
+        self.assertEqual(row["prompt_sends"], [{"step": "send_prompt", "send_state": "attempted"}])
+        self.assertFalse(row["real_provider_contacted"])
+
     def test_deadline_inside_handler_refresh_preserves_ack(self):
         self.client.fetch_messages.side_effect = [[], assertions.AssertionError("already failed")]
         original = driver._refresh_agent_mode_record

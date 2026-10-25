@@ -176,6 +176,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "durable_record_probe",
     "dirty_active_residue",
     "restart_incarnations",
+    "prompt_sends",
 )
 
 
@@ -819,6 +820,21 @@ def _failure_attribution(
             if classifications:
                 attribution["provider_hold_classifications"] = classifications
     return attribution
+
+
+def _record_send(record: dict[str, Any], step: str) -> dict[str, Any]:
+    """Log a prompt before it leaves, so a deadline still reports it as attempted."""
+    entry: dict[str, Any] = {"step": step, "send_state": "attempted"}
+    record.setdefault("prompt_sends", []).append(entry)
+    return entry
+
+
+def _ack_send(entry: dict[str, Any], response: Any) -> None:
+    fields = response if isinstance(response, dict) else {}
+    message_id = fields.get("message_id") or fields.get("id")
+    entry.update(send_state="acknowledged", message_id=str(message_id) if message_id else None)
+    if fields.get("turn_id"):
+        entry["turn_id"] = str(fields["turn_id"])
 
 
 def _mark_real_provider_contacted(
@@ -3748,7 +3764,9 @@ def run_one_cell(
                     return record
             window.mark_prompt_sent()
             last_sent_prompt = str(step["send_discord_prompt"]).replace("{run_id}", run_id)
+            sent = _record_send(record, "send_discord_prompt")
             response = client.send(channel_id, last_sent_prompt)
+            _ack_send(sent, response)
             if scenario_id == "E-50" and last_sent_prompt.startswith("!clear "):
                 clear_after = str(response.get("message_id") or response.get("id") or "")
             if scenario.get("durable_delivery_probe"):
@@ -3761,11 +3779,13 @@ def run_one_cell(
             _prepare_first_prompt_window()
             window.mark_prompt_sent()
             last_sent_prompt = str(step["send_prompt"])
+            sent = _record_send(record, "send_prompt")
             response = client.send_prompt(
                 channel_id,
                 last_sent_prompt,
                 channel_kind=cell_channel_kind(cell),
             )
+            _ack_send(sent, response)
             _mark_real_provider_contacted(
                 record,
                 declared_agent_mode=declared_agent_mode,
@@ -3789,11 +3809,13 @@ def run_one_cell(
             )
             window.mark_prompt_sent()
             last_sent_prompt = prompt
+            sent = _record_send(record, "send_timed_response_prompt" if timed_response else "send_provider_hold_prompt")
             response = client.send_prompt(
                 channel_id,
                 prompt,
                 channel_kind=cell_channel_kind(cell),
             )
+            _ack_send(sent, response)
             _mark_real_provider_contacted(
                 record,
                 declared_agent_mode=declared_agent_mode,
