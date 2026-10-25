@@ -725,12 +725,10 @@ src/
 │   │   └── tui_session_launch_geometry_tests.rs
 │   ├── claude_tui/
 │   │   ├── busy_inject/
+│   │   │   ├── fixtures/
 │   │   │   ├── screen/
 │   │   │   │   └── paste_footer.rs
 │   │   │   ├── stash_tests/
-│   │   │   │   ├── a1_stash_tests.rs
-│   │   │   │   ├── hold_tests.rs
-│   │   │   │   └── paste_footer_tests.rs
 │   │   │   ├── ownership.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_interleave_tests.rs
@@ -768,8 +766,7 @@ src/
 │   │   ├── host_input/
 │   │   │   ├── guarded_submission/
 │   │   │   │   ├── idle_stash/
-│   │   │   │   │   ├── idle_stash_tests.rs
-│   │   │   │   │   └── receipt.rs
+│   │   │   │   │   └── idle_stash_tests.rs
 │   │   │   │   ├── executor_tests.rs
 │   │   │   │   └── idle_stash.rs
 │   │   │   └── guarded_submission.rs
