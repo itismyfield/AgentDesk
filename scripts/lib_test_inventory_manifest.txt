@@ -2111,6 +2111,7 @@ services::claude_tui::busy_inject::screen_tests::captured_46_column_boxes_ignore
 services::claude_tui::busy_inject::screen_tests::empty_requires_a_complete_box_and_an_exact_blank_or_measured_hint
 services::claude_tui::busy_inject::screen_tests::menus_and_permission_cards_are_vetoed_but_literal_draft_words_are_not
 services::claude_tui::busy_inject::screen_tests::pre_paste_box_does_not_depend_on_footer_or_status
+services::claude_tui::busy_inject::stash_tests::a_shown_stash_is_never_overwritten_by_parking_a_new_draft
 services::claude_tui::busy_inject::stash_tests::an_unlisted_channel_sends_without_stashing_a_visible_draft
 services::claude_tui::busy_inject::stash_tests::empty_never_toggles_an_old_stash_back_before_pasting
 services::claude_tui::busy_inject::stash_tests::environment_tests::production_environment_initialization_selects_only_the_listed_channel
@@ -2393,6 +2394,7 @@ services::claude_tui::host_input::guarded_submission::executor_tests::cg_d1_real
 services::claude_tui::host_input::guarded_submission::executor_tests::cg_d1_runtime_env_change_does_not_change_the_selected_attempt
 services::claude_tui::host_input::guarded_submission::executor_tests::cg_d1_selected_input_boundaries_and_other_legacy_use_actual_tmux
 services::claude_tui::host_input::guarded_submission::executor_tests::cg_d1_selected_unknown_mismatch_and_host_conflict_never_downgrade
+services::claude_tui::host_input::guarded_submission::idle_stash::tests::fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::idle_fence_and_revoked_authority_precede_every_key
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::idle_menu_blocks_every_key_and_empty_or_unread_never_stashes
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::idle_sends_the_same_sequence_without_receipt_or_restore_verdicts
@@ -4605,8 +4607,9 @@ services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_con
 services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_idle_user_receipt_is_relayed_once_by_o_without_new_inflight_pg
 services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_large_single_record_keeps_injection_pg
 services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_live_rollover_bypasses_legacy_unknown_pg
-services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_modal_and_person_draft_keep_zero_paste_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_modal_keeps_zero_paste_pg
 services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_non_turn_mode_preserves_legacy_nonbusy_veto_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_person_draft_is_stashed_on_a_listed_channel_and_never_holds_input_pg
 services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_queued_rollover_bypasses_legacy_idle_pg
 services::discord::health::turn_deliver::tests::an_external_turn_row_queues_without_a_start_and_keeps_mailbox_reasons
 services::discord::health::turn_deliver::tests::each_mailbox_state_reaches_exactly_one_commit_point
@@ -4832,7 +4835,7 @@ services::discord::inflight::host_recovery_guard::tests::inflight_row_host_evide
 services::discord::inflight::managed_submission::tests::a2_fresh_launch_receipt_survives_stale_binding_until_real_handoff
 services::discord::inflight::managed_submission::tests::a2_resolved_fresh_sid_survives_nested_receipt_recapture
 services::discord::inflight::managed_submission::tests::a2_transient_admission_hold_clears_only_at_an_accepted_payload_fence
-services::discord::inflight::managed_submission::tests::a_composer_change_after_readiness_fails_before_the_fence
+services::discord::inflight::managed_submission::tests::a_menu_at_the_pre_read_fails_before_the_fence
 services::discord::inflight::managed_submission::tests::a_refused_fence_write_holds_every_payload_and_late_input
 services::discord::inflight::managed_submission::tests::cg_b2c_guarded_owner_rearms_pending_after_an_applied_input
 services::discord::inflight::managed_submission::tests::cg_d1_off_restart_keeps_durable_may_have_submitted_and_refuses_resend
@@ -6159,7 +6162,7 @@ services::discord::queue_io::queued_head_inject::tests::auto::s3_an_enqueue_alon
 services::discord::queue_io::queued_head_inject::tests::auto::s3_an_unreadable_thread_parent_keeps_the_backlog_watched_until_it_reads_pg
 services::discord::queue_io::queued_head_inject::tests::auto::s3_an_untypable_first_ready_input_is_neither_pasted_nor_passed_pg
 services::discord::queue_io::queued_head_inject::tests::auto::s3_time_spent_queued_never_keeps_a_ready_input_from_the_busy_pane_pg
-services::discord::queue_io::queued_head_inject::tests::menu_keeps_the_queued_head_and_unread_idle_input_consumes_it_without_notice_pg
+services::discord::queue_io::queued_head_inject::tests::menu_keeps_the_queued_head_without_any_key_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_a_definite_not_sent_releases_the_head_even_if_the_row_changes_after_the_effect_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_a_head_whose_author_is_not_named_stays_queued_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_input_with_a_failed_consume_commit_keeps_unknown_pg
@@ -6167,10 +6170,10 @@ services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_owner_k
 services::discord::queue_io::queued_head_inject::tests::s2b_actor_rechecks_both_gates_and_the_admitted_channel_before_reserving_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_its_identity_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_keeps_each_gate_independently_off_pg
-services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_keeps_unknown_for_any_other_receipt_under_the_nonce_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_not_sent_preserves_the_original_head_without_handback_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_settles_a_head_claude_recorded_in_a_paste_block_pg
+services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_settles_the_head_at_enter_whatever_receipt_follows_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_unconfirmed_preserves_head_and_tail_across_restart_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_an_acknowledged_paste_can_settle_after_the_transcript_becomes_idle_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_cancelled_kickoff_caller_leaves_the_reserved_owner_to_finish_pg
@@ -6178,6 +6181,7 @@ services::discord::queue_io::queued_head_inject::tests::s2b_may_have_sent_save_f
 services::discord::queue_io::queued_head_inject::tests::s2b_reserved_and_may_have_sent_owners_recheck_the_row_before_pane_io_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_reserved_and_may_owners_detect_same_path_binding_replacement_before_pane_io_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_reserved_owner_panic_keeps_unknown_and_never_retries_the_executor_pg
+services::discord::queue_io::queued_head_inject::tests::unread_idle_composer_consumes_the_queued_head_without_notice_pg
 services::discord::queue_io::transport::tests::rest_queue_rejected_by_changed_policy_keeps_durable_head_and_lease_free
 services::discord::queue_io::transport::tests::rest_queue_routing_preserves_thread_parent_and_dm_policy
 services::discord::queue_io::transport::tests::rest_worker_queue_transport_requires_credentials_but_not_gateway
@@ -9359,7 +9363,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::turn_mode::bb_l
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::active_q_reinsert_and_real_kick_leave_one_provider_input_and_answer
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::autoheal::periodic_orphan_token_refusal_preserves_q_then_cancel_backstop_runs_it_once
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::bang_stop_with_dead_bridge_parks_then_owner_runs_q_once
-services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cancelled_anchor_recovery_keeps_a_person_draft_and_q_until_lift_pg
+services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cancelled_anchor_recovery_types_q_once_behind_a_person_draft_pg
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_legacy_result_without_native_turn_runs_q_once
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_stale_terminal_preserves_same_message_new_nonce
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cold_start_incident::cold_start_stale_terminal_preserves_successor

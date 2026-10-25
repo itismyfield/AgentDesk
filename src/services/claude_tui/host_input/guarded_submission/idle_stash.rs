@@ -39,8 +39,8 @@ fn run(
             return Some(InputRun::Cancelled { confirmed: 0 });
         }
         let pane = busy_inject::Pane::with_program(session, "tmux".into());
-        let composer = match busy_inject::before_paste(&pane) {
-            Ok(composer) => composer,
+        let parkable = match busy_inject::before_paste(&pane) {
+            Ok(parkable) => parkable,
             Err(_) => return Some(refused(Refusal::NotReady)),
         };
         if authority.claim(session).is_err() {
@@ -57,7 +57,7 @@ fn run(
             &busy_inject::fresh_nonce(),
             &text,
             request.timing,
-            stash_allowed && matches!(composer, screen::Composer::Text(_)),
+            stash_allowed && parkable,
         );
         let result = match outcome {
             Outcome::Injected => InputRun::Applied,

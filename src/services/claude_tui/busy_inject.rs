@@ -427,8 +427,9 @@ fn modal(capture: &str) -> bool {
     screen::modal(capture)
 }
 
-/// Read once before any key. An unread composer deliberately proceeds without C-s.
-pub(in crate::services::claude_tui) fn before_paste(pane: &Pane) -> Result<screen::Composer, Veto> {
+/// Read once before any key: whether a visible draft may be parked with C-s. An unread composer
+/// deliberately proceeds without C-s.
+pub(in crate::services::claude_tui) fn before_paste(pane: &Pane) -> Result<bool, Veto> {
     if pane
         .ok(&["display-message", "-p", "-t", pane.target(), "#{pane_id}"])
         .is_none()
@@ -436,12 +437,12 @@ pub(in crate::services::claude_tui) fn before_paste(pane: &Pane) -> Result<scree
         return Err(Veto::PaneUnavailable);
     }
     let Some(capture) = pane.capture() else {
-        return Ok(screen::Composer::Unknown);
+        return Ok(false);
     };
     if modal(&capture) {
         return Err(Veto::Modal);
     }
-    Ok(screen::input_box(&capture))
+    Ok(screen::parkable(&capture))
 }
 
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.
@@ -502,8 +503,8 @@ fn inject_locked(
     stash: bool,
     turn_gate: TurnGate,
 ) -> Report {
-    let composer = match before_paste(pane) {
-        Ok(composer) => composer,
+    let parkable = match before_paste(pane) {
+        Ok(parkable) => parkable,
         Err(veto) => return Report::not_sent(veto),
     };
     if matches!(turn_gate, TurnGate::BusyOnly)
@@ -525,13 +526,7 @@ fn inject_locked(
         return Report::not_sent(Veto::LoadFailed);
     }
     let report = Report {
-        outcome: stash::submit(
-            pane,
-            request.nonce,
-            text,
-            timing,
-            stash && matches!(composer, screen::Composer::Text(_)),
-        ),
+        outcome: stash::submit(pane, request.nonce, text, timing, stash && parkable),
     };
     if report.outcome == Outcome::Injected {
         let request = (

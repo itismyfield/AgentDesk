@@ -43,6 +43,86 @@ pub(crate) fn wait(phase: &str, mut ready: impl FnMut() -> bool) {
     eprintln!("fixture phase={phase} reached");
 }
 
+/// A scripted `tmux` first on PATH for the managed idle path. Every capture shows `screen`;
+/// each payload write (load, paste, key) is recorded with the durable managed phase it met.
+pub(crate) struct ScriptedTmux {
+    dir: tempfile::TempDir,
+    _path: crate::config::TestEnvVarGuard,
+}
+
+impl ScriptedTmux {
+    /// The caller holds the shared env lock, as a `TestRuntimeRootGuard` does.
+    pub(crate) fn new(screen: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = r#"#!/bin/sh
+d='@D@'
+case "$2" in
+display-message) echo 1 ;;
+capture-pane) cat "$d/screen" ;;
+load-buffer|paste-buffer|send-keys)
+  n=$(cat "$d/sent" 2>/dev/null || echo 0); echo $((n + 1)) > "$d/sent"
+  for last do :; done
+  case "$2" in load-buffer) key=load; cp "$last" "$d/body" ;; paste-buffer) key=paste ;; *) key=$last ;; esac
+  echo "$key" >> "$d/sends"
+  if [ -f "$d/row" ]; then
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["managed_submission"]["phase"])' "$(cat "$d/row")" >> "$d/phases"
+  fi
+  [ "$(cat "$d/fail" 2>/dev/null)" != "$n" ] || exit 1
+  if [ "$key" = Enter ] && [ -f "$d/on_enter" ]; then cat "$d/on_enter" >> "$(cat "$d/on_enter_target")"; fi ;;
+esac
+exit 0
+"#
+        .replace("@D@", &dir.path().display().to_string());
+        let program = dir.path().join("tmux");
+        fs::write(&program, script).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let path =
+            crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(dir.path());
+        let tmux = Self { dir, _path: path };
+        tmux.show(screen);
+        tmux
+    }
+
+    pub(crate) fn show(&self, screen: &str) {
+        fs::write(self.dir.path().join("screen"), screen).unwrap();
+    }
+
+    /// Fails the `n`-th payload write, counted from 0.
+    pub(crate) fn fail_send(&self, n: usize) {
+        fs::write(self.dir.path().join("fail"), n.to_string()).unwrap();
+    }
+
+    /// Notes the managed phase of the row file `row` at every payload write.
+    pub(crate) fn witness(&self, row: &Path) {
+        fs::write(self.dir.path().join("row"), row.display().to_string()).unwrap();
+    }
+
+    /// Appends `line` to `file` when Enter arrives, as Claude records the submitted prompt.
+    pub(crate) fn on_enter(&self, file: &Path, line: &str) {
+        fs::write(self.dir.path().join("on_enter"), format!("{line}\n")).unwrap();
+        let target = self.dir.path().join("on_enter_target");
+        fs::write(target, file.display().to_string()).unwrap();
+    }
+
+    pub(crate) fn sends(&self) -> Vec<String> {
+        events_in(&self.dir.path().join("sends"))
+    }
+
+    pub(crate) fn phases(&self) -> Vec<String> {
+        events_in(&self.dir.path().join("phases"))
+    }
+
+    pub(crate) fn body(&self) -> Option<String> {
+        fs::read_to_string(self.dir.path().join("body")).ok()
+    }
+}
+
+fn events_in(file: &Path) -> Vec<String> {
+    let text = fs::read_to_string(file).unwrap_or_default();
+    text.lines().map(str::to_string).collect()
+}
+
 struct Authority {
     admitted: Cell<bool>,
 }
@@ -173,6 +253,152 @@ pub(crate) fn events(root: &Path) -> Vec<String> {
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+/// A fresh pane gets no key, and no attempt is claimed, before its input box is drawn; then the
+/// managed attempt pastes and enters once, whether or not the channel may stash.
+#[test]
+fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::claude_tui::busy_inject::StashChannelGuard;
+    use crate::services::claude_tui::submission_fence::IdleStashContext;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Attempt {
+        session: String,
+        channel: u64,
+        root: PathBuf,
+        claimed: AtomicUsize,
+        outcomes: Mutex<Vec<InputRun>>,
+    }
+    impl SubmissionFence for Attempt {
+        fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
+            panic!("the managed attempt claims through its idle fence")
+        }
+        fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
+            None
+        }
+        fn idle_stash_context(&self) -> Option<IdleStashContext> {
+            Some(IdleStashContext {
+                channel: self.channel,
+                target: self.session.clone(),
+                available: true,
+            })
+        }
+        fn idle_stash_admits(&self, target: &str) -> bool {
+            target == self.session
+        }
+        fn claim_idle_stash(&self, _: &str) -> Result<(), PreSubmitPersistenceRefused> {
+            assert!(
+                self.root.join("composer-ready").exists(),
+                "payload preceded readiness"
+            );
+            self.claimed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    impl guarded_outcome::Owner for Attempt {
+        fn started(&self) {}
+        fn finished(&self, run: &InputRun) {
+            self.outcomes.lock().unwrap().push(run.clone());
+        }
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    let shim = f.root.path().join("tmux");
+    let original = fs::read_to_string(&shim).unwrap();
+    for listed in [true, false] {
+        for (i, fault) in ["unpainted", "partial", "banner"].into_iter().enumerate() {
+            let channel = 6_899_950 + i as u64 + if listed { 0 } else { 10 };
+            let _listed = StashChannelGuard::new(if listed { channel } else { channel + 100 });
+            let name = format!("fresh-{listed}-{fault}");
+            let before = match fault {
+                "partial" => "❯ \n",
+                "banner" => "Ready for input (type message + Enter)\n",
+                _ => "Claude is starting…\n",
+            };
+            let root = renderer_with(
+                &f,
+                &name,
+                "fresh",
+                before.into(),
+                "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+                PROMPT,
+            );
+            // The first plain capture, a readiness probe, lets the renderer draw its input box.
+            let hook = format!(
+                "capture=0; escapes=0\nfor arg in \"$@\"; do\n case \"$arg\" in capture-pane) capture=1;; -e) escapes=1;; esac\ndone\n\
+                 if [ \"$capture\" = 1 ] && [ \"$escapes\" = 0 ] && [ ! -f {release} ]; then\n\
+                  {real} -L {socket} -f /dev/null \"$@\"\n touch {release}\n\
+                  polls=0\n while [ ! -f {ready} ]; do\n\
+                   polls=$((polls + 1))\n [ \"$polls\" -lt 400 ] || exit 1\n sleep 0.01\n done\n exit 0\nfi\n",
+                release = quote(&root.join("release")),
+                ready = quote(&root.join("composer-ready")),
+                real = quote(&f.real),
+                socket = f.socket,
+            );
+            fs::write(
+                &shim,
+                original.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{hook}"), 1),
+            )
+            .unwrap();
+            let transcript = root.join("transcript");
+            let attempt = Arc::new(Attempt {
+                session: name.clone(),
+                channel,
+                root: root.clone(),
+                claimed: AtomicUsize::new(0),
+                outcomes: Mutex::new(Vec::new()),
+            });
+            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                &name,
+                crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    output_path: transcript.display().to_string(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: None,
+                    last_offset: 0,
+                    relay_last_offset: None,
+                },
+            );
+            let token = Arc::new(CancelToken::new());
+            let (stop, stopped) = std::sync::mpsc::channel();
+            let timer_token = token.clone();
+            let timer = std::thread::spawn(move || {
+                if stopped.recv_timeout(Duration::from_secs(4)).is_err() {
+                    timer_token
+                        .cancelled
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+            let result = guarded_outcome::with_owner(Some(attempt.clone()), || {
+                with_scope(Some(attempt.clone()), || {
+                    input::send_prompt_with_readiness(
+                        &name,
+                        PROMPT,
+                        input::PromptReadinessKind::FreshTurn,
+                        Some(&token),
+                    )
+                })
+            });
+            let _ = stop.send(());
+            timer.join().unwrap();
+            eprintln!(
+                "fresh entry listed={listed} fault={fault} effects={:?} result={result:?}",
+                events(&root)
+            );
+            assert!(result.is_ok(), "listed={listed}, fault={fault}: {result:?}");
+            assert_eq!(*attempt.outcomes.lock().unwrap(), [InputRun::Applied]);
+            assert_eq!(attempt.claimed.load(Ordering::SeqCst), 1);
+            wait("fresh-submit", || {
+                events(&root).contains(&"Enter".to_string())
+            });
+            assert_eq!(events(&root), ["paste", "Enter"], "{name}");
+            assert_eq!(fs::read_to_string(root.join("body")).unwrap(), PROMPT);
+            fs::write(&shim, &original).unwrap();
+        }
+    }
 }
 
 #[test]

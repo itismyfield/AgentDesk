@@ -130,6 +130,19 @@ fn box_bounds(rows: &[Row]) -> Option<(usize, usize)> {
     (border(bottom) == Some(width)).then_some((prompt, bottom))
 }
 
+/// A typed draft C-s may park: not while `› stashed` above the box shows a stash C-s would replace.
+pub(in crate::services::claude_tui) fn parkable(capture: &str) -> bool {
+    let rows: Vec<Row> = capture.lines().map(row).collect();
+    let Some((prompt, bottom)) = box_bounds(&rows) else {
+        return false;
+    };
+    let width = rows[prompt - 1].plain.trim_end().chars().count();
+    let stashed = prompt
+        .checked_sub(2)
+        .is_some_and(|status| stash(&rows[status].plain, width) == Stash::Present);
+    !stashed && matches!(composer(&rows[prompt..bottom]), Composer::Text(_))
+}
+
 /// Unknown never triggers C-s: a faint or incomplete field may hide an old stash toggle.
 pub(in crate::services::claude_tui) fn input_box(capture: &str) -> Composer {
     let rows: Vec<Row> = capture.lines().map(row).collect();

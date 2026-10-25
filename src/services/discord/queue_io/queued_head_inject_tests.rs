@@ -393,6 +393,15 @@ impl Fixture {
         serde_json::from_slice(&self.bytes()).unwrap()
     }
 
+    /// Waiting notices queued for the channel's outbox by input preparation.
+    async fn preparation_notices(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE target=$1 AND reason_code='claude.input.preparation_hold'")
+            .bind(format!("channel:{}", self.channel))
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+    }
+
     async fn kick(&self) {
         let deps = router::IntakeDeps {
             http: &self.http,
@@ -762,13 +771,13 @@ async fn s2b_actual_router_kickoff_not_sent_preserves_the_original_head_without_
     let _root = crate::config::TestRuntimeRootGuard::new();
     let fixture = Fixture::new(6_813_404, "all").await;
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
-    fixture.pane.set("attach", "1");
+    fixture.pane.menu();
     let before_queue = format!("{:?}", fixture.queue().await);
     let before_disk = payloads(items(fixture.disk()));
     fixture.kick().await;
     assert!(
         fixture.pane.tmux_calls() > 0,
-        "the actual executor must classify the attached pane"
+        "the actual executor must read the menu before any key"
     );
     assert!(fixture.pane.keys().is_empty());
     assert_eq!(format!("{:?}", fixture.queue().await), before_queue);
@@ -870,56 +879,51 @@ async fn s2b_actual_router_kickoff_settles_a_head_claude_recorded_in_a_paste_blo
     fixture.assert_holder_kept().await;
 }
 
+/// Enter settles the head whatever the transcript records after it, so no receipt can hold it
+/// for a resend; the next kick types the tail.
 #[tokio::test(flavor = "current_thread")]
-async fn s2b_actual_router_kickoff_keeps_unknown_for_any_other_receipt_under_the_nonce_pg() {
+async fn s2b_actual_router_kickoff_settles_the_head_at_enter_whatever_receipt_follows_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let block = |inner: &str| paste_block("b0ac", inner, "b0ac");
     let quoted = block("@BODY@");
     let cases = [
         ("suffix inside", enqueue_receipt(json!(block("@BODY@\nX")))),
-        ("changed body", enqueue_receipt(json!(block("@HEAD@\nstatus!")))),
-        ("text after", enqueue_receipt(json!(format!("{quoted}\nX")))),
-        ("trailing newline", enqueue_receipt(json!(format!("{quoted}\n")))),
-        ("leading space", enqueue_receipt(json!(format!(" {quoted}")))),
-        ("other close id", enqueue_receipt(json!(paste_block("b0ac", "@BODY@", "c1d2")))),
-        ("uppercase id", enqueue_receipt(json!(paste_block("B0AC", "@BODY@", "B0AC")))),
         (
-            "extra attribute",
-            enqueue_receipt(json!(quoted.replacen("\">", "\" source=\"x\">", 1))),
-        ),
-        ("nested", enqueue_receipt(json!(paste_block("c1d2", &quoted, "c1d2")))),
-        (
-            "nontext",
-            enqueue_receipt(json!([{"type": "text", "text": quoted},
-                {"type": "image", "source": {"type": "base64", "data": "AA=="}}])),
+            "changed body",
+            enqueue_receipt(json!(block("@HEAD@\nstatus!"))),
         ),
         (
             "assistant quote",
             json!({"type": "assistant", "message": {"content": quoted}}).to_string(),
-        ),
-        (
-            "tool result",
-            json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": quoted}]}})
-                .to_string(),
-        ),
-        (
-            "meta",
-            json!({"type": "user", "isMeta": true, "message": {"content": quoted}}).to_string(),
         ),
     ];
     for (offset, (case, receipt)) in cases.into_iter().enumerate() {
         let fixture = Fixture::new(6_813_431 + offset as u64, "all").await;
         let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
         fixture.pane.set("receipt", &receipt);
-        let before = payloads(items(fixture.disk()));
+        let before = fixture.queue().await;
         fixture.kick().await;
         assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"], "{case}");
+        let disk = fixture.disk();
+        assert!(disk["head_injection"].is_null(), "{case}: {disk}");
+        let terminal = disk["terminal_identities"].as_array().unwrap();
+        assert_eq!(terminal.len(), 1, "{case}");
+        assert_eq!(terminal[0]["primary"], before[0].message_id.get(), "{case}");
+        let after = fixture.queue().await;
         assert_eq!(
-            fixture.disk()["head_injection"]["phase"],
-            "unknown",
+            format!("{after:?}"),
+            format!("{:?}", &before[1..]),
             "{case}"
         );
-        fixture.assert_unknown_barrier(before).await;
+        std::fs::remove_file(fixture.pane.path("pasted")).unwrap();
+        fixture.kick().await;
+        let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+        assert_eq!(
+            buffer,
+            format!("[User: {AUTHOR_NAME} (ID: 200)] distinct tail B"),
+            "{case}: the settled head is never typed again"
+        );
+        assert!(fixture.queue().await.is_empty(), "{case}");
         fixture.assert_holder_kept().await;
     }
 }
@@ -1302,7 +1306,7 @@ async fn s2b_a_definite_not_sent_releases_the_head_even_if_the_row_changes_after
     let _root = crate::config::TestRuntimeRootGuard::new();
     let fixture = Fixture::new(6_813_426, "all").await;
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
-    fixture.pane.set("attach", "1");
+    fixture.pane.menu();
     let before = payloads(items(fixture.disk()));
     let before_queue = format!("{:?}", fixture.queue().await);
     let (after_effect, resume) = inject_hook::park_queued(fixture.channel.get(), "after_effect");
@@ -1445,8 +1449,10 @@ async fn a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_
     assert_eq!(fixture.pane.tmux_calls(), 0);
 }
 
+/// A menu over a busy pane keeps the queued head and types nothing, however often it is kicked;
+/// the person is told once.
 #[tokio::test(flavor = "current_thread")]
-async fn menu_keeps_the_queued_head_and_unread_idle_input_consumes_it_without_notice_pg() {
+async fn menu_keeps_the_queued_head_without_any_key_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let fixture = Fixture::new(7_314_201, "all").await;
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
@@ -1478,11 +1484,33 @@ async fn menu_keeps_the_queued_head_and_unread_idle_input_consumes_it_without_no
         assert_eq!(fixture.queue().await[0].message_id, before[0].message_id);
         assert_eq!(fixture.queue().await.len(), before.len());
     }
+    assert_eq!(fixture.preparation_notices().await, 1);
+    assert!(!crate::services::claude_tui::composer_lock::draft_guarded(
+        &fixture.pane.session()
+    ));
+}
+
+/// On a transcript-turn channel an idle pane whose composer cannot be read still takes the
+/// queued head: paste and Enter, the head leaves the queue, and nobody is told to wait.
+#[tokio::test(flavor = "current_thread")]
+async fn unread_idle_composer_consumes_the_queued_head_without_notice_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = Fixture::new(7_314_202, "all").await;
+    let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+    let _turns = crate::services::tui_o::turn_mode::TestConfirmation::new(fixture.channel.get());
     fixture.pane.set("cap.before", "unrecognized composer");
     fixture.pane.set(
         InjectPane::TRANSCRIPT,
         "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
     );
+    let before = fixture.queue().await;
+    let deps = router::IntakeDeps {
+        http: &fixture.http,
+        cache: None,
+        ctx_for_chained_dispatch: None,
+        shared: &fixture.shared,
+        token: "s2b-test-token",
+    };
     assert!(
         super::try_busy(
             &deps,
@@ -1494,13 +1522,9 @@ async fn menu_keeps_the_queued_head_and_unread_idle_input_consumes_it_without_no
         .await
     );
     assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
-    assert_eq!(fixture.queue().await.len(), before.len() - 1);
-    let notices_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE target=$1 AND reason_code='claude.input.preparation_hold'")
-        .bind(format!("channel:{}", fixture.channel)).fetch_one(&fixture.pool).await.unwrap();
-    assert_eq!(
-        notices_before, 1,
-        "only the pre-paste menu may emit a waiting notice"
-    );
+    let after = fixture.queue().await;
+    assert_eq!(format!("{after:?}"), format!("{:?}", &before[1..]));
+    assert_eq!(fixture.preparation_notices().await, 0);
     assert!(!crate::services::claude_tui::composer_lock::draft_guarded(
         &fixture.pane.session()
     ));

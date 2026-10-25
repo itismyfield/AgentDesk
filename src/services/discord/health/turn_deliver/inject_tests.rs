@@ -1285,14 +1285,21 @@ async fn an_effect_that_dies_outside_its_guard_is_still_reported_once_pg() {
 }
 
 impl InjectPane {
-    /// A composer holding a half-typed draft, so the pane vetoes the paste as `draft`.
+    /// A composer holding a half-typed draft, which the injection stashes on a listed channel.
     pub(crate) fn draft(&self) {
         let pane =
             format!("⏺ Working on it.\n\n{SPINNER}\n\n{BORDER}\n❯ half typed\n{BORDER}\n{FOOTER}");
         self.set("cap.before", &pane);
     }
 
-    /// A pane whose turn has ended, so the paste is vetoed as `not_busy`.
+    /// A menu above the composer, so the paste is vetoed as `modal` before any key.
+    pub(crate) fn menu(&self) {
+        let menu = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel";
+        let pane = format!("{menu}\n{BORDER}\n❯\u{00a0}\n{BORDER}\n{FOOTER}");
+        self.set("cap.before", &pane);
+    }
+
+    /// A pane whose turn has ended; with an ended transcript the paste is vetoed as `not_busy`.
     pub(crate) fn idle(&self) {
         let pane = format!("⏺ Done.\n\n{BORDER}\n❯\u{00a0}\n{BORDER}\n{FOOTER}");
         self.set("cap.before", &pane);
@@ -1344,7 +1351,7 @@ async fn a_vetoed_paste_hands_the_input_back_ahead_of_input_sent_after_its_reser
     let registry = Arc::new(HealthRegistry::new());
     let shared = register_inject_runtime(&registry, &[ch], Some(pool)).await;
     let pane = InjectPane::new(ch, "all");
-    pane.draft();
+    pane.menu();
     let request = deliver_parked(&registry, &pane).await;
     send_meanwhile(&shared, ch, ch + 10, "earlier input").await;
     let support = crate::services::turn_orchestrator::test_support::fail_queue_saves;
@@ -1357,7 +1364,7 @@ async fn a_vetoed_paste_hands_the_input_back_ahead_of_input_sent_after_its_reser
     let keys = pane.keys().len();
     assert_eq!(
         format!("{outcome} [{queue}] keys={keys} faults_left={left}"),
-        "queued handed_back veto=draft [status?,earlier input] keys=0 faults_left=0"
+        "queued handed_back veto=modal [status?,earlier input] keys=0 faults_left=0"
     );
 }
 
@@ -1373,7 +1380,7 @@ async fn a_handback_that_never_lands_refuses_the_delivery_and_keeps_no_place_pg(
     let registry = Arc::new(HealthRegistry::new());
     let shared = register_inject_runtime(&registry, &[ch], Some(pool)).await;
     let pane = InjectPane::new(ch, "all");
-    pane.draft();
+    pane.menu();
     let request = deliver_parked(&registry, &pane).await;
     send_meanwhile(&shared, ch, ch + 10, "earlier input").await;
     let support = crate::services::turn_orchestrator::test_support::fail_queue_saves;
@@ -1430,6 +1437,10 @@ async fn a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg() {
     request.abort();
     assert!(request.await.unwrap_err().is_cancelled());
     pane.idle();
+    pane.set(
+        InjectPane::TRANSCRIPT,
+        &format!("{BUSY_TURN}{{\"type\":\"result\",\"subtype\":\"success\"}}\n"),
+    );
     pane.set("go", "");
     let kicked = async {
         while kicks.lock().unwrap().is_empty() {
@@ -1461,7 +1472,7 @@ async fn a_handback_onto_a_full_queue_records_its_one_overflow_pg() {
     let registry = Arc::new(HealthRegistry::new());
     let shared = register_inject_runtime(&registry, &[ch], Some(pool.clone())).await;
     let pane = InjectPane::new(ch, "all");
-    pane.draft();
+    pane.menu();
     let request = deliver_parked(&registry, &pane).await;
     let cap = crate::services::turn_orchestrator::MAX_INTERVENTIONS_PER_CHANNEL as u64;
     for n in 1..=cap {
@@ -1500,7 +1511,7 @@ async fn a_handback_onto_a_full_queue_records_its_one_overflow_pg() {
             queue[queue.len() - 1]
         ),
         format!(
-            "queued handed_back veto=draft evicted=[Some(\"{}\")] more=0 len={cap} first=status? last=sent {}",
+            "queued handed_back veto=modal evicted=[Some(\"{}\")] more=0 len={cap} first=status? last=sent {}",
             ch + 100 + cap,
             cap - 1
         )

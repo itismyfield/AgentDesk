@@ -500,7 +500,7 @@ async fn catch_up_reused_head_veto_keeps_one_original_queue_entry_pg() {
         register_inject_runtime(&HealthRegistry::new(), &[channel.get()], Some(pool)).await;
     claim_kinded(&shared, channel.get(), ActiveTurnKind::Background).await;
     let pane = InjectPane::new(channel.get(), "all");
-    pane.draft();
+    pane.menu();
     test_hook::set_queued_head(channel.get(), true);
     let head = queued(message, generation);
     let enqueue = crate::services::discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
@@ -536,7 +536,7 @@ async fn catch_up_reused_head_veto_keeps_one_original_queue_entry_pg() {
     };
     let outcome = attempt(&shared, &request, origin).await;
     assert!(
-        matches!(outcome, InjectAttempt::HandedBack { veto: "draft", .. }),
+        matches!(outcome, InjectAttempt::HandedBack { veto: "modal", .. }),
         "{outcome:?}"
     );
     assert!(pane.keys().is_empty());

@@ -1,10 +1,8 @@
 #![cfg(unix)]
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use super::fault::{FenceWriteFault, arm};
 use super::*;
+use crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::ScriptedTmux;
 use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
 use crate::services::claude_tui::input::{
     send_followup_prompt_or_idle_transcript, send_fresh_prompt,
@@ -108,11 +106,45 @@ fn submit(
 
 struct Run {
     result: Result<(), String>,
-    /// Each pane write with the durable phase read just before it.
-    sends: Vec<(String, Option<SubmissionPhase>)>,
+    /// Each pane write with the durable managed phase it met.
+    sends: Vec<(String, String)>,
 }
 
-/// Drives the real input entry through the host spy inside `submission`'s scope.
+/// Drives the real input entry inside `submission`'s scope: readiness reads the host spy, and
+/// the managed attempt types into a scripted `tmux` showing `screen`.
+fn run_on(
+    entry: Entry,
+    channel: u64,
+    prompt: &str,
+    submission: &ManagedSubmission,
+    fail_send: Option<usize>,
+    screen: &str,
+) -> Run {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("session.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"result\"}\n").unwrap();
+    let spy = SpyGuard::install(SpyState {
+        captures: std::iter::repeat_n(Some(ready_pane()), 24).collect(),
+        ..SpyState::default()
+    });
+    let tmux = ScriptedTmux::new(screen);
+    let root = super::super::inflight_runtime_root().unwrap();
+    tmux.witness(&inflight_state_path(&root, &ProviderKind::Claude, channel));
+    if let Some(n) = fail_send {
+        tmux.fail_send(n);
+    }
+    let result = submission_fence::with_scope(Some(submission.fence()), || {
+        submit(entry, channel, prompt, &transcript)
+    });
+    assert!(
+        !spy.calls().iter().any(|call| is_payload_or_enter(call)),
+        "the managed attempt types only after its one pre-read: {:?}",
+        spy.calls()
+    );
+    let sends = tmux.sends().into_iter().zip(tmux.phases()).collect();
+    Run { result, sends }
+}
+
 fn run(
     entry: Entry,
     channel: u64,
@@ -120,25 +152,7 @@ fn run(
     submission: &ManagedSubmission,
     fail_send: Option<usize>,
 ) -> Run {
-    let dir = tempfile::tempdir().unwrap();
-    let transcript = dir.path().join("session.jsonl");
-    std::fs::write(&transcript, "{\"type\":\"result\"}\n").unwrap();
-    let sends = Rc::new(RefCell::new(Vec::new()));
-    let seen = sends.clone();
-    let _spy = SpyGuard::install(SpyState {
-        captures: std::iter::repeat_n(Some(ready_pane()), 24).collect(),
-        fail_send: fail_send.map(|at| (at, Err("cut: provider process lost".to_string()))),
-        on_send: Some(Box::new(move |call: &str| {
-            seen.borrow_mut()
-                .push((call.to_string(), durable_phase(channel)));
-        })),
-        ..SpyState::default()
-    });
-    let result = submission_fence::with_scope(Some(submission.fence()), || {
-        submit(entry, channel, prompt, &transcript)
-    });
-    let sends = sends.borrow().clone();
-    Run { result, sends }
+    run_on(entry, channel, prompt, submission, fail_send, &ready_pane())
 }
 
 fn is_payload_or_enter(call: &str) -> bool {
@@ -156,16 +170,16 @@ fn the_first_host_payload_already_sees_may_have_submitted_at_every_cut() {
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let chunked = "x".repeat(2_000);
-    // (label, prompt, index of Enter among the sends)
     let plans = [
-        ("literal", "single line prompt".to_string(), 1),
-        ("chunked literal", chunked, 2),
-        ("paste", "first line\nsecond line".to_string(), 2),
+        ("single line", "single line prompt".to_string()),
+        ("long line", chunked),
+        ("multiline", "first line\nsecond line".to_string()),
     ];
     let mut channel = 6_801_000;
     for entry in [Entry::Fresh, Entry::Warm] {
-        for (label, prompt, enter_at) in &plans {
-            for cut in [Some(0), Some(1), Some(*enter_at), None] {
+        for (label, prompt) in &plans {
+            // The writes are load, paste and Enter; a cut fails one of them.
+            for cut in [Some(0), Some(1), Some(2), None] {
                 channel += 1;
                 let (_, submission) = managed_row(channel);
                 assert_eq!(durable_phase(channel), Some(SubmissionPhase::Waiting));
@@ -173,17 +187,11 @@ fn the_first_host_payload_already_sees_may_have_submitted_at_every_cut() {
                 let case = format!("{entry:?} {label} cut={cut:?}");
                 let first = run
                     .sends
-                    .iter()
-                    .find(|(call, _)| is_payload_or_enter(call))
+                    .first()
                     .unwrap_or_else(|| panic!("{case}: no payload reached the host"));
-                assert!(
-                    first.0.starts_with("literal:") || first.0.starts_with("load:"),
-                    "{case}: first host write {:?}",
-                    first.0
-                );
+                assert_eq!(first.0, "load", "{case}: first host write");
                 assert_eq!(
-                    first.1,
-                    Some(SubmissionPhase::MayHaveSubmitted),
+                    first.1, "may_have_submitted",
                     "{case}: the fence must be durable before the first payload"
                 );
                 assert_eq!(
@@ -217,7 +225,8 @@ fn a_refused_fence_write_holds_every_payload_and_late_input() {
             let (_, control) = managed_row(channel);
             let ran = run(entry, channel, prompt, &control, None);
             assert_eq!(ran.result, Ok(()), "{entry:?} control");
-            assert!(ran.sends.iter().any(|(call, _)| is_payload_or_enter(call)));
+            let keys: Vec<&str> = ran.sends.iter().map(|(key, _)| key.as_str()).collect();
+            assert_eq!(keys, ["load", "paste", "Enter"], "{entry:?} control");
             assert!(matches!(
                 control.classify_failure(),
                 SubmissionFailure::SubmissionIndeterminate
@@ -230,7 +239,7 @@ fn a_refused_fence_write_holds_every_payload_and_late_input() {
                 arm(channel, fault);
                 let refused = run(entry, channel, prompt, &submission, None);
                 let error = refused.result.expect_err(&case);
-                assert!(error.contains("held before submit"), "{case}: {error}");
+                assert!(error.contains("SubmissionFence"), "{case}: {error}");
                 assert!(
                     refused.sends.is_empty(),
                     "{case}: no load, paste, literal or Enter may reach the pane: {:?}",
@@ -386,39 +395,24 @@ fn legacy_and_unmanaged_routes_stay_unknown() {
     }
 }
 
-/// A composer that stops being ready between the readiness wait and the mutation fails before
-/// the fence, so the row stays Waiting: Waiting keeps meaning "no payload was allowed".
+/// A menu at the one pre-read refuses before the fence, so the row stays Waiting: Waiting keeps
+/// meaning "no payload was allowed".
 #[test]
-fn a_composer_change_after_readiness_fails_before_the_fence() {
+fn a_menu_at_the_pre_read_fails_before_the_fence() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    let draft = format!(
-        "\n\n{RULE}\n\u{276f} [User: ann (ID: 7)] 남은 초안 한글\n{RULE}\n  ⏵⏵ bypass permissions on"
+    let menu = format!(
+        "Do you want to proceed?\n\u{276f} 1. Yes\n  2. No\nEnter to select · Esc to cancel\n{}",
+        ready_pane()
     );
     for (index, entry) in [Entry::Fresh, Entry::Warm].into_iter().enumerate() {
         let channel = 6_805_001 + index as u64;
         let (_, submission) = managed_row(channel);
-        let dir = tempfile::tempdir().unwrap();
-        let transcript = dir.path().join("session.jsonl");
-        std::fs::write(&transcript, "{\"type\":\"result\"}\n").unwrap();
-        let spy = SpyGuard::install(SpyState {
-            captures: [Some(ready_pane()), Some(ready_pane())]
-                .into_iter()
-                .chain(std::iter::repeat_n(Some(draft.clone()), 8))
-                .collect(),
-            ..SpyState::default()
-        });
-        let result = submission_fence::with_scope(Some(submission.fence()), || {
-            submit(entry, channel, "hello", &transcript)
-        });
-        assert!(result.is_err(), "{entry:?}: {result:?}");
-        assert!(
-            !spy.calls().iter().any(|call| is_payload_or_enter(call)),
-            "{entry:?}: {:?}",
-            spy.calls()
-        );
+        let ran = run_on(entry, channel, "hello", &submission, None, &menu);
+        assert!(ran.result.is_err(), "{entry:?}: {:?}", ran.result);
+        assert!(ran.sends.is_empty(), "{entry:?}: {:?}", ran.sends);
         assert_eq!(
             durable_phase(channel),
             Some(SubmissionPhase::Waiting),
@@ -456,8 +450,12 @@ fn cg_d1_off_restart_keeps_durable_may_have_submitted_and_refuses_resend() {
     }));
     let session = row.tmux_session_name.as_deref().unwrap();
     assert!(crate::services::claude_tui::guarded_outcome::held(session).is_none());
-    let result = run(Entry::Fresh, channel, "managed prompt", &restarted, None);
-    assert!(result.result.unwrap_err().contains("held before submit"));
+    // The row already left Waiting, so the restarted attempt is never admitted to type.
+    let result = crate::services::claude_tui::guarded_outcome::with_owner(
+        Some(restarted.observer()),
+        || run(Entry::Fresh, channel, "managed prompt", &restarted, None),
+    );
+    assert!(result.result.unwrap_err().contains("IdentityMismatch"));
     assert!(
         result.sends.is_empty(),
         "the durable fence prevents OFF from resending"
@@ -468,7 +466,9 @@ fn cg_d1_off_restart_keeps_durable_may_have_submitted_and_refuses_resend() {
     );
     assert!(matches!(
         restarted.classify_failure(),
-        SubmissionFailure::PreSubmitPersistenceRefused(_)
+        SubmissionFailure::GuardedStopped(
+            crate::services::claude_tui::host_input::InputRun::Refused(_)
+        )
     ));
     assert_eq!(
         InflightEpisodePin::from_state(

@@ -335,6 +335,17 @@ fn empty_never_toggles_an_old_stash_back_before_pasting() {
 }
 
 #[test]
+fn a_shown_stash_is_never_overwritten_by_parking_a_new_draft() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let tui = Tui::new("B");
+    tui.put("stash", "A");
+    assert_eq!(tui.run().outcome, Outcome::Injected);
+    assert_eq!(tui.applied(), ["paste", "Enter"]);
+    assert_eq!(tui.records(), [format!("B{}", tui.get("buffer").unwrap())]);
+    assert_eq!(tui.drafts(), ("A".into(), None));
+}
+
+#[test]
 fn unread_box_sends_without_stashing_and_never_holds_the_next_input() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("person draft");

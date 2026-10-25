@@ -1894,8 +1894,9 @@ services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_con
 services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_idle_user_receipt_is_relayed_once_by_o_without_new_inflight_pg
 services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_large_single_record_keeps_injection_pg
 services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_live_rollover_bypasses_legacy_unknown_pg
-services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_modal_and_person_draft_keep_zero_paste_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_modal_keeps_zero_paste_pg
 services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_non_turn_mode_preserves_legacy_nonbusy_veto_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_person_draft_is_stashed_on_a_listed_channel_and_never_holds_input_pg
 services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_queued_rollover_bypasses_legacy_idle_pg
 services::discord::herdr_terminate::exit_tests::act_terminate_process_exit_after_close_recovers_pg
 services::discord::herdr_terminate::exit_tests::clear_root_replaced_retires_without_close_pg
@@ -2007,7 +2008,7 @@ services::discord::queue_io::queued_head_inject::tests::auto::s3_an_enqueue_alon
 services::discord::queue_io::queued_head_inject::tests::auto::s3_an_unreadable_thread_parent_keeps_the_backlog_watched_until_it_reads_pg
 services::discord::queue_io::queued_head_inject::tests::auto::s3_an_untypable_first_ready_input_is_neither_pasted_nor_passed_pg
 services::discord::queue_io::queued_head_inject::tests::auto::s3_time_spent_queued_never_keeps_a_ready_input_from_the_busy_pane_pg
-services::discord::queue_io::queued_head_inject::tests::menu_keeps_the_queued_head_and_unread_idle_input_consumes_it_without_notice_pg
+services::discord::queue_io::queued_head_inject::tests::menu_keeps_the_queued_head_without_any_key_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_a_definite_not_sent_releases_the_head_even_if_the_row_changes_after_the_effect_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_a_head_whose_author_is_not_named_stays_queued_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_input_with_a_failed_consume_commit_keeps_unknown_pg
@@ -2015,10 +2016,10 @@ services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_owner_k
 services::discord::queue_io::queued_head_inject::tests::s2b_actor_rechecks_both_gates_and_the_admitted_channel_before_reserving_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_its_identity_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_keeps_each_gate_independently_off_pg
-services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_keeps_unknown_for_any_other_receipt_under_the_nonce_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_not_sent_preserves_the_original_head_without_handback_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_settles_a_head_claude_recorded_in_a_paste_block_pg
+services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_settles_the_head_at_enter_whatever_receipt_follows_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_unconfirmed_preserves_head_and_tail_across_restart_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_an_acknowledged_paste_can_settle_after_the_transcript_becomes_idle_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_cancelled_kickoff_caller_leaves_the_reserved_owner_to_finish_pg
@@ -2026,6 +2027,7 @@ services::discord::queue_io::queued_head_inject::tests::s2b_may_have_sent_save_f
 services::discord::queue_io::queued_head_inject::tests::s2b_reserved_and_may_have_sent_owners_recheck_the_row_before_pane_io_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_reserved_and_may_owners_detect_same_path_binding_replacement_before_pane_io_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_reserved_owner_panic_keeps_unknown_and_never_retries_the_executor_pg
+services::discord::queue_io::queued_head_inject::tests::unread_idle_composer_consumes_the_queued_head_without_notice_pg
 services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_all_raw_receipt_precedes_rebind_pg
 services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_all_receipt_precedes_replay_debt_pg
 services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_receipt_off_stays_held_no_effect_pg
@@ -2538,7 +2540,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_threa
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_arrival_of_an_injected_message_never_runs_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_takes_a_message_whose_parent_owner_died_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::turn_mode::bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg
-services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cancelled_anchor_recovery_keeps_a_person_draft_and_q_until_lift_pg
+services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cancelled_anchor_recovery_types_q_once_behind_a_person_draft_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_stop_activation_e2e::an_activated_stop_settles_through_the_bridge_and_starts_the_queued_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_stop_activation_http_e2e::an_http_cancel_settles_through_the_bridge_and_starts_the_queued_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::a_refused_herdr_kickoff_keeps_its_queued_input_for_the_switch_pg
