@@ -52,25 +52,42 @@ impl AnchorFailure {
 }
 
 fn anchor_suffix_len(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 16
-        || !bytes.starts_with(b" (")
-        || bytes[2..12].iter().enumerate().any(|(i, byte)| {
-            if matches!(i, 4 | 7) {
-                *byte != b'-'
-            } else {
-                !byte.is_ascii_digit()
-            }
-        })
-        || &bytes[12..14] != b", "
-    {
-        return None;
+    let rest = text.strip_prefix(" (")?;
+    let end = rest.find(')')?;
+    let mut max_parts = 2;
+    for (index, part) in rest[..end].split(", ").enumerate() {
+        let date = index == 0
+            && part.len() == 10
+            && part.bytes().enumerate().all(|(i, byte)| {
+                if matches!(i, 4 | 7) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_digit()
+                }
+            });
+        if date {
+            max_parts = 3;
+        } else if part.is_empty()
+            || !part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        {
+            return None;
+        }
+        if index >= max_parts {
+            return None;
+        }
     }
-    let status_len = bytes[14..]
-        .iter()
-        .take_while(|byte| byte.is_ascii_lowercase() || **byte == b'_')
+    Some(end + 3)
+}
+
+fn anchor_principal_len(text: &str) -> Option<usize> {
+    let rest = text.strip_prefix('[')?;
+    let len = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b':')
         .count();
-    (status_len > 0 && bytes.get(14 + status_len) == Some(&b')')).then_some(15 + status_len)
+    (len > 0 && rest[len..].starts_with("] ")).then_some(len + 3)
 }
 
 fn anchor_injection_end(injection: &str, contents: &[&str]) -> Result<usize, AnchorFailure> {
@@ -81,9 +98,16 @@ fn anchor_injection_end(injection: &str, contents: &[&str]) -> Result<usize, Anc
     let mut cursor = HEADER.len();
     for (index, content) in contents.iter().enumerate() {
         let mismatch = |offset| AnchorFailure::injection_mismatch(Some(index + 1), offset, true);
-        // Match the entire record before interpreting suffixes or item separators.
-        for token in ["- ", *content] {
-            let remaining = &injection[cursor..];
+        // Prefer literal content so legacy records starting with a principal-like label survive.
+        for (token_index, token) in ["- ", *content].into_iter().enumerate() {
+            let mut remaining = &injection[cursor..];
+            if token_index == 1
+                && !remaining.starts_with(token)
+                && let Some(len) = anchor_principal_len(remaining)
+            {
+                cursor += len;
+                remaining = &injection[cursor..];
+            }
             if !remaining.starts_with(token) {
                 let matched = remaining
                     .bytes()
@@ -203,9 +227,14 @@ fn extract_anchor_snapshot(payload: &Value) -> Result<AnchorSnapshot, AnchorFail
     let end = anchor_injection_end(injection, &contents)?;
     let next = injection[end..].trim_start();
     if !next.is_empty()
-        && !["[CORE MEMORY]", "[LEARNING MEMORY]", "[WORKING MEMORY]"]
-            .iter()
-            .any(|header| next.starts_with(header))
+        && ![
+            "[CORE MEMORY]",
+            "[LEARNING MEMORY]",
+            "[WORKING MEMORY]",
+            "[SYSTEM HINT]",
+        ]
+        .iter()
+        .any(|header| next.starts_with(header))
     {
         return Err(AnchorFailure {
             reason: "unexpected_anchor_boundary",
@@ -485,7 +514,7 @@ mod tests {
         let (value, expected) = line_payload([
             " (2026-09-18, observed)",
             " (2026-09-10, verified)",
-            " (2026-10-25, not_verified)",
+            " (2026-10-25, inferred)",
         ]);
         let snapshot = extract_anchor_snapshot(&value).unwrap();
         assert_eq!(snapshot.text, expected);
@@ -500,6 +529,55 @@ mod tests {
     fn anchor_snapshot_accepts_legacy_lines_verbatim() {
         let (value, expected) = line_payload(["", "", ""]);
         assert_eq!(extract_anchor_snapshot(&value).unwrap().text, expected);
+    }
+
+    #[test]
+    fn anchor_snapshot_accepts_server_annotation_variants() {
+        for (principal, suffix) in [
+            ("", " (2026-09-18)"),
+            ("", " (2026-09-18, observed, user_stated)"),
+            ("", " (2026-09-18, consolidation)"),
+            ("", " (rejected)"),
+            ("", " (import)"),
+            ("", " (verified, tool_output)"),
+            ("[k:ab12] ", " (2026-09-18, observed)"),
+            ("[master] ", ""),
+        ] {
+            let mut value = payload("합성 content\n- literal line");
+            let text =
+                format!("[ANCHOR MEMORY]\n- {principal}합성 content\n- literal line{suffix}");
+            value["injectionText"] = json!(format!("{text}\n\n[CORE MEMORY]\n- recall"));
+            assert_eq!(extract_anchor_snapshot(&value).unwrap().text, text);
+        }
+    }
+
+    #[test]
+    fn anchor_snapshot_prefers_literal_principal_shaped_content() {
+        for content in ["[k:ab12] legacy content", "[master] legacy content"] {
+            for principal in ["", "[k:cd34] "] {
+                let mut value = payload(content);
+                let text = format!("[ANCHOR MEMORY]\n- {principal}{content} (2026-09-18)");
+                value["injectionText"] = json!(text);
+                assert_eq!(extract_anchor_snapshot(&value).unwrap().text, text);
+            }
+        }
+    }
+
+    #[test]
+    fn anchor_snapshot_rejects_malformed_principals() {
+        for principal in [
+            "[k:ab12]",
+            "[] ",
+            "[K:ab12] ",
+            "[k:ab_12] ",
+            "[k:ab-12] ",
+            "[k:ab\n12] ",
+            "[k:ab12 ",
+        ] {
+            let mut value = payload("content");
+            value["injectionText"] = json!(format!("[ANCHOR MEMORY]\n- {principal}content"));
+            assert!(extract_anchor_snapshot(&value).is_err());
+        }
     }
 
     #[test]
@@ -525,6 +603,15 @@ mod tests {
             " (2026-09-18, Observed)",
             " (２０２６-09-18, observed)",
             " (2026-09-18, observed) (2026-09-18, verified)",
+            " (2026-09-18, observed, user_stated, import)",
+            " (observed, user_stated, import)",
+            " (, observed)",
+            " (2026-09-18,, observed)",
+            " ()",
+            " (2026-09-18, observed\n)",
+            " (2026-09-18, observed\r)",
+            " (2026-09-18, observed, user_stated\n)",
+            " (observed, 2026-09-18)",
         ] {
             for index in 0..3 {
                 let mut suffixes = [" (2026-09-18, observed)"; 3];
@@ -573,9 +660,12 @@ mod tests {
             "\n\n[CORE MEMORY]\n- recall",
             "\n\n[LEARNING MEMORY]\n- recall",
             "\n\n[WORKING MEMORY]\n- recall",
+            "\n\n[SYSTEM HINT]\n- hint",
         ] {
             value["injectionText"] = json!(format!("{expected}{tail}"));
-            assert_eq!(extract_anchor_snapshot(&value).unwrap().text, expected);
+            let snapshot = extract_anchor_snapshot(&value).unwrap();
+            assert_eq!(snapshot.text, expected);
+            assert!(!snapshot.text.contains("hint"));
         }
         for tail in [
             "\n\n[UNKNOWN MEMORY]\n- recall",
