@@ -750,6 +750,21 @@
       "path": "migrations/postgres/0147_message_outbox_session_notice.sql",
       "sha256": "b2512e0365293562433b7f3c130a10bc9b1df899f225f358b02121f86d0c5a1c",
       "version": 147
+    },
+    {
+      "path": "migrations/postgres/0148_provider_session_system_prompts.sql",
+      "sha256": "143deece3657628cd6e5ae5450b306af7a963775cabfd582aac6b893acbd0a12",
+      "version": 148
+    },
+    {
+      "path": "migrations/postgres/0149_intake_outbox_replay_fence_update_when.sql",
+      "sha256": "42e5f1c8bb122c4f3b959bb58db1239b774ed22115ebe1ea440ea31580d67ef2",
+      "version": 149
+    },
+    {
+      "path": "migrations/postgres/0150_kanban_cards_soft_delete.sql",
+      "sha256": "0dd2f3c5f177d8b820a70e3141b7eca219e7fa280fde09144907b9a27fb59c09",
+      "version": 150
     }
   ],
   "version": 1

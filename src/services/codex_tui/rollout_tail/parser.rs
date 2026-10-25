@@ -797,12 +797,6 @@ fn compact_json_or_string(value: &Value) -> String {
         .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
 }
 
-/// Replay a captured range through the same native Codex event parser, without
-/// a tmux actor or a live stream sender. Malformed bytes remain unresolved.
-pub(super) fn replay_captured_lines(bytes: &[u8]) -> Result<RolloutParseState, String> {
-    replay_captured_reader(bytes)
-}
-
 fn replay_captured_reader(reader: impl std::io::BufRead) -> Result<RolloutParseState, String> {
     let mut state = RolloutParseState::default();
     for line in reader.lines() {

@@ -377,6 +377,7 @@ pub async fn list_backlog_cards_pg(
                 kc.assigned_agent_id
          FROM kanban_cards kc
          WHERE kc.status = 'backlog'
+           AND kc.deleted_at IS NULL
            AND ($1::TEXT IS NULL OR kc.repo_id = $1)
            AND ($2::TEXT IS NULL OR kc.assigned_agent_id = $2)
            AND ($3::BIGINT[] IS NULL OR kc.github_issue_number::BIGINT = ANY($3::BIGINT[]))",
@@ -419,6 +420,7 @@ pub async fn list_generate_candidates_pg(
                 kc.github_issue_number::BIGINT AS github_issue_number
          FROM kanban_cards kc
          WHERE kc.status = ANY($1::TEXT[])
+           AND kc.deleted_at IS NULL
            AND ($2::TEXT IS NULL OR kc.repo_id = $2)
            AND ($3::TEXT IS NULL OR kc.assigned_agent_id = $3)
            AND ($4::BIGINT[] IS NULL OR kc.github_issue_number::BIGINT = ANY($4::BIGINT[]))

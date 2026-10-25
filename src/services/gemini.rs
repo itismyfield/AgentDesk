@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
@@ -1384,7 +1384,7 @@ mod accepted_turn_tests {
     use super::*;
 
     fn accepted_state() -> (GeminiAttemptState, Sender<StreamMessage>) {
-        let (sender, _receiver) = mpsc::channel();
+        let (sender, _receiver) = std::sync::mpsc::channel();
         let mut state = GeminiAttemptState::default();
         process_gemini_stream_line(
             r#"{"type":"message","role":"assistant","content":"working"}"#,
@@ -1478,7 +1478,7 @@ mod child_exit_tests {
         for &mode in cases {
             let fixture = ProviderFixture::new("gemini", mode);
             let normal = matches!(mode, "normal" | "quiet" | "delayed_normal");
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = std::sync::mpsc::channel();
             execute_gemini_streaming_attempt(
                 fixture.cli.to_str().unwrap(),
                 &fixture.resolution(),
@@ -1517,7 +1517,7 @@ mod child_exit_tests {
         let fixture = ProviderFixture::new("gemini", "cancel");
         let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
         let cancel = fixture.cancel_after_accept(token.clone());
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = std::sync::mpsc::channel();
         let result = execute_gemini_streaming_attempt(
             fixture.cli.to_str().unwrap(),
             &fixture.resolution(),

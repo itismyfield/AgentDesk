@@ -175,6 +175,8 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "autonomous_background_turn",
     "durable_record_probe",
     "dirty_active_residue",
+    "restart_incarnations",
+    "prompt_sends",
 )
 
 
@@ -820,6 +822,21 @@ def _failure_attribution(
     return attribution
 
 
+def _record_send(record: dict[str, Any], step: str) -> dict[str, Any]:
+    """Log a prompt before it leaves, so a deadline still reports it as attempted."""
+    entry: dict[str, Any] = {"step": step, "send_state": "attempted"}
+    record.setdefault("prompt_sends", []).append(entry)
+    return entry
+
+
+def _ack_send(entry: dict[str, Any], response: Any) -> None:
+    fields = response if isinstance(response, dict) else {}
+    message_id = fields.get("message_id") or fields.get("id")
+    entry.update(send_state="acknowledged", message_id=str(message_id) if message_id else None)
+    if fields.get("turn_id"):
+        entry["turn_id"] = str(fields["turn_id"])
+
+
 def _mark_real_provider_contacted(
     record: dict[str, Any],
     *,
@@ -1036,6 +1053,7 @@ ASSERTION_OPTIONS = {
     "no_duplicate_marker_with_known_gap": {"marker", "known_gap"},
     "deliver_result": {"delivery", "inject_veto"}, "completion_per_turn": {"exact", "marker"},
     "turn_summary_after_body": {"body_marker", "header", "before_marker", "tool_label", "output_owner"}, "autonomous_background_turn": {"armed_marker", "auto_marker"},
+    "utf16_chunk_integrity": {"max_units", "min_chunks"},
 }
 
 
@@ -1057,12 +1075,12 @@ def validate_scenario_schema(scenario):
                 metadata.add("timeout_s")
             if action == "wait_for_discord_text":
                 metadata.add("relay_author")
-                if entry.get("relay_author", "provider") != "provider":
-                    raise ValueError("relay_author supports only provider")
             if action in {"send_prompt", "send_discord_prompt", "deliver_prompt", "send_provider_hold_prompt", "send_timed_response_prompt"}:
                 metadata.add("post_send_sleep_s")
             if action == "send_discord_prompt" and scenario.get("e36_normal_intake"):
-                metadata.update({"request_key", "body_marker", "hold_marker"})
+                metadata.update({"request_key", "body_marker", "hold_marker", "relay_author"})
+            if "relay_author" in metadata and entry.get("relay_author", "provider") != "provider":
+                raise ValueError("relay_author supports only provider")
             if set(entry) - {action} - metadata:
                 raise ValueError(f"unsupported {kind} sibling options: {entry!r}")
             value, allowed = entry[action], schema[action]
@@ -3254,6 +3272,12 @@ def run_scenario(
                 scenario_id=scenario_id,
             )
         return result
+    try:
+        restart_guard.validate_binding(scenario, args)
+    except ValueError as error:
+        result.update(status="fail", reason=str(error))
+        result["failure_attribution"] = _failure_attribution("config", str(error))
+        return result
 
     durable_probe = bool(scenario.get("durable_delivery_probe"))
     if durable_probe and not args.dry_run:
@@ -3747,7 +3771,9 @@ def run_one_cell(
                     return record
             window.mark_prompt_sent()
             last_sent_prompt = str(step["send_discord_prompt"]).replace("{run_id}", run_id)
+            sent = _record_send(record, "send_discord_prompt")
             response = client.send(channel_id, last_sent_prompt)
+            _ack_send(sent, response)
             if scenario_id == "E-50" and last_sent_prompt.startswith("!clear "):
                 clear_after = str(response.get("message_id") or response.get("id") or "")
             if scenario.get("durable_delivery_probe"):
@@ -3760,11 +3786,13 @@ def run_one_cell(
             _prepare_first_prompt_window()
             window.mark_prompt_sent()
             last_sent_prompt = str(step["send_prompt"])
+            sent = _record_send(record, "send_prompt")
             response = client.send_prompt(
                 channel_id,
                 last_sent_prompt,
                 channel_kind=cell_channel_kind(cell),
             )
+            _ack_send(sent, response)
             _mark_real_provider_contacted(
                 record,
                 declared_agent_mode=declared_agent_mode,
@@ -3788,11 +3816,13 @@ def run_one_cell(
             )
             window.mark_prompt_sent()
             last_sent_prompt = prompt
+            sent = _record_send(record, "send_timed_response_prompt" if timed_response else "send_provider_hold_prompt")
             response = client.send_prompt(
                 channel_id,
                 prompt,
                 channel_kind=cell_channel_kind(cell),
             )
+            _ack_send(sent, response)
             _mark_real_provider_contacted(
                 record,
                 declared_agent_mode=declared_agent_mode,
@@ -4018,8 +4048,8 @@ def run_one_cell(
                 raise ScenarioStepAssertionError(str(error), record=record) from error
         elif "restart_dcserver" in step:
             restart_options = step["restart_dcserver"] or {}
-            target = args.restart_target_override or restart_options.get("target", "release")
-            restart_dcserver_for_e2e(
+            target = restart_guard.target(restart_options, args)
+            record.setdefault("restart_incarnations", []).append(restart_dcserver_for_e2e(
                 target=target,
                 args=args,
                 base_url=client.base_url,
@@ -4031,7 +4061,7 @@ def run_one_cell(
                 allowed_degraded_reasons=_as_string_tuple(
                     restart_options.get("allowed_degraded_reasons")
                 ),
-            )
+            ))
         elif "poison_claude_tui_relay_offset" in step:
             record.setdefault("poisoned_offsets", []).append(
                 poison_claude_tui_relay_offset(
@@ -4585,6 +4615,17 @@ def _guard_no_foreign_active_turns(
         )
 
 
+def _boot_incarnation(base_url: str) -> str:
+    """Per-process id from detail health; restart proof needs one before and after."""
+    status, payload = _read_api_json(base_url, "/api/health/detail", timeout=5)
+    value = payload.get("boot_incarnation") if isinstance(payload, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        raise HarnessEvidenceError(
+            f"/api/health/detail HTTP {status} has no boot_incarnation; a restart cannot be proven"
+        )
+    return value
+
+
 def restart_dcserver_for_e2e(
     *,
     target: str,
@@ -4594,10 +4635,11 @@ def restart_dcserver_for_e2e(
     channel_id: str,
     require_status: tuple[str, ...] = ("healthy",),
     allowed_degraded_reasons: tuple[str, ...] = (),
-) -> None:
+) -> dict[str, str]:
     if target not in ("dev", "release"):
         raise assertions.AssertionError(f"unsupported restart target: {target!r}")
     _guard_no_foreign_active_turns(base_url, channel_id, cell)
+    before = _boot_incarnation(base_url)
 
     if args.restart_script:
         script = Path(args.restart_script).expanduser()
@@ -4632,13 +4674,24 @@ def restart_dcserver_for_e2e(
                 f"stderr:\n{proc.stderr[-4000:]}"
             )
     # Same status/reason semantics as assert_health; the default stays healthy-only.
-    wait_for_health(
-        base_url,
-        timeout_s=90,
-        allowed_statuses=require_status,
-        allowed_degraded_reasons=allowed_degraded_reasons,
-        target_channel=channel_id,
-    )
+    deadline = time.monotonic() + 90
+    while True:
+        wait_for_health(
+            base_url,
+            timeout_s=max(deadline - time.monotonic(), 1.0),
+            allowed_statuses=require_status,
+            allowed_degraded_reasons=allowed_degraded_reasons,
+            target_channel=channel_id,
+        )
+        after = _boot_incarnation(base_url)
+        if after != before:
+            return {"target": target, "before": before, "after": after}
+        # The old process can still answer health until the kill lands.
+        if time.monotonic() >= deadline:
+            raise assertions.AssertionError(
+                f"dcserver boot_incarnation stayed {before} after the {target} restart; restart not observed"
+            )
+        time.sleep(2.0)
 
 
 def _assert_provider_hold_marker_seen(
@@ -4786,6 +4839,10 @@ def run_assertion(
         record["autonomous_background_turn"] = {"binding": binding, **evidence}
     elif spec.get("no_duplicate_content"):
         assertions.no_duplicate_content(window)
+    elif "utf16_chunk_integrity" in spec:
+        params = spec["utf16_chunk_integrity"]
+        assertions.utf16_chunk_integrity(window, max_units=int(params.get("max_units", 2000)),
+                                         min_chunks=int(params.get("min_chunks", 2)))
     elif "text_present" in spec:
         assertions.text_present(window, needle=expand_marker(spec["text_present"]))
     elif "provider_text_present" in spec:

@@ -16,30 +16,10 @@ enum EffortLevel {
     Xhigh,
     #[name = "max"]
     Max,
-    #[name = "ultracode"]
-    Ultracode,
 }
 
-/// The *physical* stops Claude Code's `/effort` horizontal slider presents, in
-/// left-to-right order. This MUST include `ultracode` even though passthrough
-/// never targets it: the live slider still has `ultracode` as its rightmost
-/// stop, so the deterministic Left-home move (`total_items - 1` Left presses)
-/// must account for the full physical width. If the slider is currently parked
-/// on `ultracode` and we undercounted, the home move would stop short and apply
-/// the wrong level (e.g. `/effort max` confirming `ultracode`).
-///
-/// `ultracode` is guarded off the passthrough path elsewhere (see
-/// `ultracode_notice` / `provider_preflight_notice`), so it is never a
-/// navigable *target*; `selector_index` simply maps each targetable level to
-/// its physical stop position within this list.
-const EFFORT_SLIDER_STOPS: [EffortLevel; 6] = [
-    EffortLevel::Low,
-    EffortLevel::Medium,
-    EffortLevel::High,
-    EffortLevel::Xhigh,
-    EffortLevel::Max,
-    EffortLevel::Ultracode,
-];
+// Physical stops include an unsupported target so Left reaches home from every stop.
+const EFFORT_SLIDER_STOPS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultracode"];
 
 impl EffortLevel {
     const fn as_str(self) -> &'static str {
@@ -49,7 +29,6 @@ impl EffortLevel {
             Self::High => "high",
             Self::Xhigh => "xhigh",
             Self::Max => "max",
-            Self::Ultracode => "ultracode",
         }
     }
 
@@ -61,7 +40,6 @@ impl EffortLevel {
             Self::High => 2,
             Self::Xhigh => 3,
             Self::Max => 4,
-            Self::Ultracode => 5,
         }
     }
 }
@@ -100,11 +78,7 @@ impl ClaudeSlashPassthrough {
     /// plain-prompt path.
     fn selector_navigation(self) -> Option<SelectorNavigation> {
         match self {
-            // `ultracode` is guarded off the passthrough path before this point
-            // (see `provider_preflight_notice`), so it never reaches the send
-            // step. The `total_items` here is the full physical slider width
-            // (including the ultracode stop) so the Left-home move is
-            // deterministic regardless of the slider's current position.
+            // Include every physical stop when homing, even unsupported targets.
             Self::Effort(level) => Some(SelectorNavigation {
                 slash_command: "/effort",
                 total_items: EFFORT_SLIDER_STOPS.len(),
@@ -128,6 +102,7 @@ impl ClaudeSlashPassthrough {
 /// (e.g. anything `/loop`-shaped) MUST stay off this list or its turn loses its
 /// `⏳`→`✅` lifecycle. The `local_only_whitelist_matches_passthrough_command_set`
 /// anti-drift test pins this against the [`ClaudeSlashPassthrough`] variant set.
+#[cfg(test)]
 pub(in crate::services::discord) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
     crate::services::tui_prompt_control::LOCAL_ONLY_SLASH_COMMANDS;
 
@@ -142,6 +117,7 @@ pub(in crate::services::discord) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
 /// pass-through handler), so they live here rather than in `LOCAL_ONLY_SLASH_COMMANDS`
 /// (which the `local_only_whitelist_matches_passthrough_command_set` anti-drift test
 /// pins to that variant set).
+#[cfg(test)]
 pub(in crate::services::discord) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 1] =
     crate::services::tui_prompt_control::OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS;
 
@@ -154,10 +130,11 @@ pub(in crate::services::discord) fn is_local_only_slash_command_kind(kind: &str)
     crate::services::tui_prompt_control::is_local_only_slash_command_kind(kind)
 }
 
-fn ultracode_notice() -> &'static str {
-    "`/effort ultracode`는 live Claude 세션에 안전하게 passthrough하지 않습니다. \
-현재 범위에서는 세션 재시작/별도 설정 연동 없이 보장되는 경로만 열었고, 안정 경로는 \
-`/effort max`까지입니다."
+fn effort_sent_notice(level: EffortLevel, session: &str) -> String {
+    format!(
+        "`/effort {}` 입력을 live Claude session `{session}`에 전달했습니다. selector는 닫혔지만 실제 레벨은 검증하지 못했습니다. TUI에서 설정을 확인하세요.",
+        level.as_str()
+    )
 }
 
 fn codex_effort_notice() -> &'static str {
@@ -188,6 +165,18 @@ async fn passthrough_block(
     tmux_name: &str,
     command: ClaudeSlashPassthrough,
 ) -> Option<String> {
+    if let Err(error) = shared
+        .check_settings_owner(
+            provider,
+            poise::serenity_prelude::ChannelId::new(channel_id),
+        )
+        .await
+    {
+        return Some(format!(
+            "{}를 전달하지 않았어요: {error}",
+            command.slash_name()
+        ));
+    }
     let refusal = super::super::admin_host_guard::channel_refusal;
     if let Some(reason) = refusal(shared, provider, channel_id, tmux_name).await {
         return Some(format!(
@@ -212,9 +201,6 @@ fn provider_preflight_notice(
 ) -> Option<String> {
     if !matches!(provider, ProviderKind::Claude) {
         return Some(unsupported_notice(provider, command));
-    }
-    if let ClaudeSlashPassthrough::Effort(EffortLevel::Ultracode) = command {
-        return Some(ultracode_notice().to_string());
     }
     None
 }
@@ -303,12 +289,7 @@ async fn run_claude_passthrough(
     match send_result {
         Ok(()) => match command {
             ClaudeSlashPassthrough::Effort(level) => {
-                ctx.say(format!(
-                    "`/effort {}`를 live Claude session `{}`에 적용했습니다. selector가 닫힌 것을 확인했습니다.",
-                    level.as_str(),
-                    tmux_name,
-                ))
-                .await?;
+                ctx.say(effort_sent_notice(level, &tmux_name)).await?;
             }
             _ => {
                 ctx.say(format!(
@@ -353,7 +334,7 @@ async fn run_claude_passthrough(
 #[poise::command(slash_command, rename = "effort")]
 pub(in crate::services::discord) async fn cmd_effort(
     ctx: Context<'_>,
-    #[description = "Level: low / medium / high / xhigh / max / ultracode"] level: EffortLevel,
+    #[description = "Level: low / medium / high / xhigh / max"] level: EffortLevel,
 ) -> Result<(), Error> {
     run_claude_passthrough(ctx, ClaudeSlashPassthrough::Effort(level)).await
 }
@@ -380,6 +361,26 @@ pub(in crate::services::discord) async fn cmd_context(ctx: Context<'_>) -> Resul
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn truthful_effort_choices_exclude_rejected_ultracode() {
+        use poise::ChoiceParameter;
+        let choices = EffortLevel::list();
+        let names: Vec<&str> = choices.iter().map(|choice| choice.name.as_ref()).collect();
+        assert_eq!(names, ["low", "medium", "high", "xhigh", "max"]);
+        let nav = ClaudeSlashPassthrough::Effort(EffortLevel::Max)
+            .selector_navigation()
+            .unwrap();
+        assert_eq!(EFFORT_SLIDER_STOPS[nav.target_index], "max");
+        assert_eq!(EFFORT_SLIDER_STOPS.last(), Some(&"ultracode"));
+    }
+
+    #[test]
+    fn truthful_effort_overlay_close_is_never_reported_as_verified_level() {
+        let notice = effort_sent_notice(EffortLevel::High, "fake-session");
+        assert!(notice.contains("실제 레벨은 검증하지 못했습니다"));
+        assert!(!notice.contains("적용했습니다"));
+    }
 
     /// Every `ClaudeSlashPassthrough` variant in this file is a LOCAL-completing
     /// command (none of them start a model turn), so the relay's lifecycle-skip
@@ -444,6 +445,14 @@ mod host_guard_tests {
     #[tokio::test]
     async fn passthrough_is_refused_before_probing_a_kept_session_pg() {
         let _root = crate::config::TestRuntimeRootGuard::new();
+        let local =
+            crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+        let _hosts = crate::config::session_hosts::force_for_test(Some(&local), &[]);
+        let scratch = tempfile::tempdir().unwrap();
+        let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+            &scratch.path().join("missing.yaml"),
+        );
         let tmux = ScriptedTmux::install();
         let (db, pool) = postgres().await;
         let shared = shared_on(&pool).await;
@@ -453,6 +462,12 @@ mod host_guard_tests {
             let name = provider.build_tmux_session_name(&format!("p4c2-passthrough-{n}"));
             case.seed(&pool, &channel_key(&shared, &name), &name, channel)
                 .await;
+            sqlx::query("UPDATE sessions SET instance_id = $1 WHERE channel_id = $2")
+                .bind(&local)
+                .bind(channel.to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
             tmux.take_calls();
             let command = ClaudeSlashPassthrough::Cost;
             let block = passthrough_block(&shared, &provider, channel, &name, command).await;
@@ -470,6 +485,24 @@ mod host_guard_tests {
                 assert_eq!(probes, Vec::<String>::new(), "{case:?}: no tmux probe");
             }
         }
+        let remote_channel = 1_479_671_302_387_063_999;
+        let _remote = crate::config::session_hosts::force_for_test(
+            Some(&local),
+            &[(remote_channel, "remote-node")],
+        );
+        tmux.take_calls();
+        let notice = passthrough_block(
+            &shared,
+            &provider,
+            remote_channel,
+            "foreign-pane",
+            ClaudeSlashPassthrough::Cost,
+        )
+        .await
+        .unwrap();
+        assert!(notice.starts_with("/cost를 전달하지 않았어요"), "{notice}");
+        assert!(notice.contains("노드 `remote-node` 소유"), "{notice}");
+        assert!(tmux.take_calls().is_empty());
         db.drop().await;
     }
 }

@@ -5,6 +5,9 @@ use axum::{
 };
 use serde_json::json;
 
+mod card_delete;
+pub use card_delete::delete_card;
+
 use super::AppState;
 use crate::api_caller_observability::{
     RequestPrincipal, log_identity_consumption, manager_channel_check_relied_on_claimed_header,
@@ -570,29 +573,6 @@ pub async fn assign_card(
                 ))
             }
             Ok(None) => Err(database_error("failed to read card after assign")),
-            Err(error) => Err(database_error(error)),
-        };
-    }
-
-    Err(pg_pool_required_error())
-}
-
-/// DELETE /api/kanban-cards/:id
-pub async fn delete_card(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    if let Some(pool) = state.pg_pool_ref() {
-        return match kanban_db::delete_card_pg(pool, &id).await {
-            Ok(false) => Err(AppError::not_found("card not found")),
-            Ok(true) => {
-                crate::server::ws::emit_event(
-                    &state.broadcast_tx,
-                    "kanban_card_deleted",
-                    json!({"id": id}),
-                );
-                Ok((StatusCode::OK, Json(json!({"ok": true}))))
-            }
             Err(error) => Err(database_error(error)),
         };
     }

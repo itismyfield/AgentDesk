@@ -850,6 +850,25 @@ def no_control_chars(window: Window) -> None:
             raise AssertionError(f"control byte leaked into Discord message: {sorted(leaked)!r}")
 
 
+def utf16_chunk_integrity(window: Window, *, max_units: int = 2000, min_chunks: int = 2) -> None:
+    """Every bot post fits the UTF-16 budget with no split surrogate, and the multi-unit
+    text really crossed a chunk boundary (supplementary characters in >= min_chunks bodies)."""
+    carrying = 0
+    for message in _raw_assertion_messages(window):
+        content = message.get("content") or ""
+        units = len(content.encode("utf-16-le", "surrogatepass")) // 2
+        broken = [hex(ord(ch)) for ch in content if ch == "\ufffd" or 0xD800 <= ord(ch) <= 0xDFFF]
+        if units > max_units or broken:
+            raise AssertionError(
+                f"message {message.get('id')} breaks the UTF-16 chunk contract: units={units} (max {max_units}), "
+                f"replacement/lone surrogates={broken[:3]}"
+            )
+        body = relay_body(message) if str(message.get("id") or "") not in window.deleted_ids else None
+        carrying += any(ord(ch) > 0xFFFF for ch in body or "")
+    if carrying < min_chunks:
+        raise AssertionError(f"supplementary characters reached {carrying} relay bodies, expected >= {min_chunks}")
+
+
 # #2718 chrome chunks the Claude CLI emits when the auto-resume prompt
 # (PY6) gets injected at the start of a turn. They must not appear in the
 # relay window — `text_present` substring matching alone would happily pass

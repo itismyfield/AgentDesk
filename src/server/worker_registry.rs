@@ -1,7 +1,9 @@
 use anyhow::{Result, anyhow};
 use std::future::Future;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::config::Config;

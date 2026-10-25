@@ -394,8 +394,11 @@ pub(crate) mod tests;
 pub(crate) mod verified_reset_tests;
 
 #[cfg(test)]
+type VerifiedClearRecheckHook = (u64, Box<dyn FnOnce()>);
+
+#[cfg(test)]
 thread_local! {
-    static BEFORE_VERIFIED_CLEAR_RECHECK: std::cell::RefCell<Option<(u64, Box<dyn FnOnce()>)>> =
+    static BEFORE_VERIFIED_CLEAR_RECHECK: std::cell::RefCell<Option<VerifiedClearRecheckHook>> =
         Default::default();
 }
 

@@ -204,11 +204,13 @@ pub(super) async fn load_restore_entries_pg(
     run_id: &str,
 ) -> Result<Vec<RestoreEntryRecord>, String> {
     let rows = sqlx::query(
-        "SELECT id, kanban_card_id, agent_id, COALESCE(thread_group, 0)::BIGINT AS thread_group
-         FROM auto_queue_entries
-         WHERE run_id = $1
-           AND status = 'skipped'
-         ORDER BY priority_rank ASC, created_at ASC, id ASC",
+        "SELECT e.id, e.kanban_card_id, e.agent_id,
+                COALESCE(e.thread_group, 0)::BIGINT AS thread_group
+         FROM auto_queue_entries e
+         JOIN kanban_cards kc ON kc.id = e.kanban_card_id AND kc.deleted_at IS NULL
+         WHERE e.run_id = $1
+           AND e.status = 'skipped'
+         ORDER BY e.priority_rank ASC, e.created_at ASC, e.id ASC",
     )
     .bind(run_id)
     .fetch_all(&mut **tx)

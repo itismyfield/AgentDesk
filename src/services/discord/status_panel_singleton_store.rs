@@ -165,6 +165,7 @@ fn current_durable_singleton(
         .ok_or_else(|| "completed status panel is not the current singleton".to_string())
 }
 
+#[cfg(test)]
 fn clear_if_current_in_root(
     root: &Path,
     provider: &ProviderKind,
@@ -300,24 +301,6 @@ pub(in crate::services::discord) fn load(
 ) -> Option<StatusPanelSingletonBinding> {
     let root = runtime_store::discord_status_panel_singletons_root()?;
     load_in_root(&root, provider, token_hash, channel_id)
-}
-
-pub(in crate::services::discord) fn clear_if_current(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-    panel_message_id: u64,
-) -> bool {
-    let Some(root) = runtime_store::discord_status_panel_singletons_root() else {
-        return false;
-    };
-    clear_if_current_in_root(
-        root.as_path(),
-        provider,
-        token_hash,
-        channel_id,
-        panel_message_id,
-    )
 }
 
 #[cfg(test)]

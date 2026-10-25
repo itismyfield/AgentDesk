@@ -23,4 +23,7 @@ assertions:
       max_seconds: 300
   - no_duplicate_content: true
   - text_present: "[E2E:E6:AFTER]"
-  - raw_text_absent: "Recap:"
+  # Claude Code's /compact summary (the memory recap) opens with these lines, the same openings
+  # injected_prompt_policy.rs classifies as system continuation; no bot post may quote them.
+  - raw_text_absent: "This session is being continued from a previous conversation"
+  - raw_text_absent: "Please continue the conversation from where we left it off"

@@ -457,6 +457,21 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     Ok(())
 }
 
+// Dispatch aliases through the real slash action so owner checks and replies stay shared.
+pub(super) async fn run_stop(ctx: Context<'_>) -> Result<(), Error> {
+    let poise::Context::Application(app) = ctx else {
+        return Err("Stop aliases require a slash interaction.".into());
+    };
+    let action = cmd_stop()
+        .slash_action
+        .ok_or("Stop slash action is unavailable.")?;
+    match action(app).await {
+        Ok(()) => Ok(()),
+        Err(poise::FrameworkError::Command { error, .. }) => Err(error),
+        Err(_) => Err("Stop slash action could not be dispatched.".into()),
+    }
+}
+
 pub(super) fn parse_queued_message_id(raw: &str) -> Option<MessageId> {
     raw.trim()
         .parse::<u64>()
@@ -514,9 +529,11 @@ pub(in crate::services::discord) async fn cmd_cancel_queued(
 /// /clear — Clear AI conversation history
 #[poise::command(slash_command, rename = "clear")]
 pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer().await?;
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        ctx.say("권한이 없어 세션을 초기화하지 않았어요.").await?;
         return Ok(());
     }
     // Issue #1005: runtime-control tier — owner-only.
@@ -528,14 +545,23 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         log_command_received!(ctx.channel_id().get(), user_name, "/clear");
 
         let http = ctx.serenity_context().http.clone();
-        let report = clear_channel_session_state(
+        let report = match clear_channel_session_state(
             &http,
             &ctx.data().shared,
             &ctx.data().provider,
             ctx.channel_id(),
             "/clear",
         )
-        .await?;
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::error!(channel_id = ctx.channel_id().get(), %error, "clear failed");
+                ctx.say(format!("세션 초기화에 실패했어요: {error}"))
+                    .await?;
+                return Ok(());
+            }
+        };
 
         ctx.say(report.reply()).await?;
         log_info_event!(

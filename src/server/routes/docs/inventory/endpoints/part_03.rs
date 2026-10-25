@@ -513,12 +513,17 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "DELETE",
             "/api/kanban-cards/{id}",
             "kanban",
-            "Delete card",
+            "Delete card. The row is kept with deleted_at set, so lists, lookups, auto-queue and new dispatches skip it, and its issue number is cleared so the issue can get a fresh card; refused with 409 while a pending or dispatched dispatch works on the card.",
         )
         .with_params([("id", path_param("Kanban card ID"))])
         .with_example(
             json!({"path": {"id": "card-1"}}),
             json!({"ok": true}),
+        )
+        .with_error_example(
+            409,
+            json!({"path": {"id": "card-1"}}),
+            json!({"error": "card has live dispatch dispatch-1; cancel it before deleting the card"}),
         ),
         ep(
             "POST",

@@ -591,7 +591,7 @@ fn refused(run: EffectOutcome) {
 }
 
 #[test]
-fn cg_b2a_single_live_manual_160x40_enter_once() {
+fn cg_b2a_single_live_pane_enter_once() {
     let f = Fixture::new();
     f.session("positive");
     let pinned = SubmissionTmux.pin_guarded("positive").unwrap();
@@ -642,7 +642,7 @@ fn cg_b2a_pin_rejects_missing_small_nonmanual_split_and_dead() {
 }
 
 #[test]
-fn cg_b2a_snapshot_resize_manual_and_split_false_branch_enter_zero() {
+fn cg_b2a_snapshot_resize_and_split_hold_but_size_mode_change_enters() {
     let f = Fixture::new();
     f.control();
     for mode in ["resize", "grow", "manual", "split"] {
@@ -675,8 +675,13 @@ fn cg_b2a_snapshot_resize_manual_and_split_false_branch_enter_zero() {
             }
         }
         assert!(!pinned.geometry_matches(), "snapshot change: {mode}");
-        refused(pinned.enter());
-        f.assert_enter(mode, 0);
+        if mode == "manual" {
+            assert_eq!(pinned.enter(), EffectOutcome::Applied);
+            f.assert_enter(mode, 1);
+        } else {
+            refused(pinned.enter());
+            f.assert_enter(mode, 0);
+        }
     }
     assert_eq!(f.calls(), 5);
 }

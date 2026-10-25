@@ -36,7 +36,7 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
       var eReworkTarget = agentdesk.pipeline.nextGatedTargetWithGate(eReview, "review_rework", eCfg) || eInProgress;
       var staleSuggestions = agentdesk.db.query(
         "SELECT id, assigned_agent_id, title FROM kanban_cards " +
-        "WHERE status = ? AND review_status = 'suggestion_pending' " +
+        "WHERE status = ? AND review_status = 'suggestion_pending' AND deleted_at IS NULL " +
         "AND suggestion_pending_at IS NOT NULL AND suggestion_pending_at < datetime('now', '-15 minutes') " +
         "AND assigned_agent_id IS NOT NULL " +
         "ORDER BY suggestion_pending_at ASC LIMIT 50",
@@ -66,7 +66,8 @@ module.exports = function attachReviewAutoAccept(timeouts, helpers) {
               var rs = reviewState[0];
               // Get finding categories from last completed review dispatch
               var lastReview = agentdesk.db.query(
-                "SELECT result FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'review' AND status = 'completed' ORDER BY rowid DESC LIMIT 1",
+                "SELECT result FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'review' AND status = 'completed' " +
+                "ORDER BY COALESCE(completed_at, updated_at, created_at) DESC, created_at DESC, id DESC LIMIT 1",
                 [sc.id]
               );
               var findingCats = null;

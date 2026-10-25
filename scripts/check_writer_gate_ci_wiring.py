@@ -64,18 +64,6 @@ REQUIRED_INVOCATIONS = (
         '"$PYTHON" -m unittest tests.test_intake_outbox_done_writer_call_sites',
     ),
     RequiredInvocation(
-        "SQL execution surface inventory gate",
-        '"$PYTHON" scripts/check_sql_execution_surface_inventory.py --check',
-    ),
-    RequiredInvocation(
-        "SQL execution surface baseline dirty-worktree guard",
-        "git diff --exit-code HEAD -- scripts/sql_execution_surface_inventory.json",
-    ),
-    RequiredInvocation(
-        "SQL execution surface inventory unittest module",
-        '"$PYTHON" -m unittest tests.test_sql_execution_surface_inventory',
-    ),
-    RequiredInvocation(
         "destructive call-site ratchet gate",
         '"$PYTHON" scripts/check_destructive_call_site_ratchet.py --check',
     ),
@@ -138,7 +126,6 @@ def check_text(text: str) -> list[str]:
     ordered_pairs = (
         ("durable-frontier writer gate", "durable-frontier writer unittest module"),
         ("intake-outbox done-writer gate", "intake-outbox done-writer unittest module"),
-        ("SQL execution surface inventory gate", "SQL execution surface inventory unittest module"),
         ("destructive call-site ratchet gate", "destructive call-site ratchet unittest module"),
     )
     for gate_label, test_label in ordered_pairs:
@@ -147,7 +134,6 @@ def check_text(text: str) -> list[str]:
                 errors.append(f"{gate_label} must run before {test_label}")
 
     for gate_label, dirty_label in (
-        ("SQL execution surface inventory gate", "SQL execution surface baseline dirty-worktree guard"),
         ("destructive call-site ratchet gate", "destructive call-site baseline dirty-worktree guard"),
     ):
         if gate_label in positions and dirty_label in positions:

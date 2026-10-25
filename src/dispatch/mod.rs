@@ -54,8 +54,6 @@ pub use dispatch_create::{
     create_dispatch_with_options_pg_only,
 };
 pub(crate) use dispatch_query::query_dispatch_row_pg;
-#[allow(unused_imports)]
-pub(crate) use dispatch_status::set_dispatch_status_without_queue_sync_with_backends;
 pub(crate) use dispatch_status::{
     VALID_DISPATCH_STATUSES, emit_dispatch_quality_event, is_valid_dispatch_status,
     set_dispatch_status_on_pg_tx_async,

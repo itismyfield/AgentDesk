@@ -358,6 +358,7 @@ pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
         ("/adk", ReadOnly),
         ("/cost", ReadOnly),
         ("/context", ReadOnly),
+        ("/system-prompt", ReadOnly),
         ("/resume", Mutating),
         ("/down", Mutating),
         ("/cc", Mutating),

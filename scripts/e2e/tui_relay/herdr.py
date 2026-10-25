@@ -10,9 +10,8 @@ import re
 import subprocess
 import time
 import urllib.error
-import urllib.parse
 
-from . import assertions, health_readiness, http_auth, known_gap
+from . import assertions, health_readiness, http_auth, known_gap, restart_guard
 
 TMUX_STEPS = {
     "kill_pane", "capture_session_identity", "assert_session_preserved",
@@ -179,7 +178,7 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
         evidence["readiness"].update({k: payload[k] for k in
                                       ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload})
         evidence["server_values"] = {k: payload[k] for k in
-                                     ("uptime_secs", "started_at", "process_started_at_unix", "incarnation", "boot_id") if k in payload}
+                                     ("uptime_secs", "started_at", "process_started_at_unix", "boot_incarnation") if k in payload}
         ignored = detail_ready(driver, status, payload, allowed=allowed, channel=args.channel_id)
         if ignored:
             evidence["readiness"].update(degraded_reason_waiver="applied", ignored_degraded_reasons=list(ignored),
@@ -227,20 +226,11 @@ def expected_cancel_refusal(error):
 
 
 def validate_restart_binding(scenario, args):
-    port = urllib.parse.urlparse(getattr(args, "base_url", "")).port
-    expected = {8797: "dev", 8791: "release"}.get(port)
-    for step in scenario.get("steps", []):
-        if "restart_dcserver" in step:
-            target = getattr(args, "restart_target_override", None) or (step["restart_dcserver"] or {}).get("target", "release")
-            if target not in ("dev", "release") or (expected and target != expected):
-                raise ValueError(f"restart target {target!r} does not match base URL {args.base_url}")
+    restart_guard.validate_binding(scenario, args)
 
 
 def omissions(scenario):
     items = []
-    if any("restart_dcserver" in step for step in scenario.get("steps", [])):
-        items.append({"check": "server_incarnation_changed", "status": "not_applicable",
-                      "reason": "public health exposes no per-restart incarnation; nonce continuity does not prove dcserver restarted"})
     for step in scenario.get("steps", []):
         for key in TMUX_STEPS.intersection(step):
             items.append({"check": key, "status": "not_applicable", "reason": "tmux-only step; Herdr has no tmux session"})
@@ -264,11 +254,31 @@ def omissions(scenario):
     return items
 
 
+def merge_cases(driver, scenario, args, result, cases):
+    result["subcases"] = cases
+    for key in ("not_applicable", "known_gaps", "herdr_observations", "assertions", "prompt_sends"):
+        result[key] = [item for case in cases for item in case.get(key, [])]
+    result["real_provider_contacted"] = any(case.get("real_provider_contacted") for case in cases)
+    driver._refresh_agent_mode_record(result, scenario=scenario, declared_agent_mode=result["agent_mode"], dry_run=args.dry_run)
+    driver._refresh_coverage_class_record(result, scenario=scenario, declared_coverage_class=result["coverage_class"], dry_run=args.dry_run)
+
+
 def run(driver, scenario, args, client, run_id, result):
     if not scenario.get("herdr_text_stop"):
         return _run(driver, scenario, args, client, run_id, result)
+    cases = []
+    try:
+        return _run_text_stop(driver, scenario, args, client, run_id, result, cases)
+    except driver.PhaseDeadlineExpired:
+        # The phase handler reads only this dict, so carry the subcases' evidence up.
+        merge_cases(driver, scenario, args, result, cases)
+        raise
+
+
+def _run_text_stop(driver, scenario, args, client, run_id, result, cases):
     # Distinct setup windows and issue scopes: HTTP HostOwned is NOT the P10-3 command path.
-    http = _run(driver, scenario, args, client, run_id, copy.deepcopy(result))
+    cases.append(copy.deepcopy(result))
+    http = cases[-1] = _run(driver, scenario, args, client, run_id, cases[-1])
     if http["status"] in {"fail", "skipped"}:
         return http
     if not args.dry_run and http["status"] == "known_gap":
@@ -282,19 +292,14 @@ def run(driver, scenario, args, client, run_id, result):
             "assertions": [{"marker_absent": {"marker": "[E2E:E18S:LATE]", "surface": "relay"}},
                            {"no_duplicate_marker": "[E2E:E18S:OK]"}, {"no_duplicate_marker": "[E2E:E18S:NEXT]"},
                            {"text_present": "[E2E:E18S:NEXT]"}, {"no_duplicate_content": True}]}
-    text_result = copy.deepcopy(result)
-    text_result["id"] = text["id"]
-    stop = _run(driver, text, args, client, run_id, text_result)
-    result["subcases"] = [http, stop]
-    for key in ("not_applicable", "known_gaps", "herdr_observations", "assertions"):
-        result[key] = [item for case in (http, stop) for item in case.get(key, [])]
-    result["real_provider_contacted"] = http["real_provider_contacted"] or stop["real_provider_contacted"]
+    cases.append(copy.deepcopy(result))
+    cases[-1]["id"] = text["id"]
+    stop = cases[-1] = _run(driver, text, args, client, run_id, cases[-1])
+    merge_cases(driver, scenario, args, result, cases)
     result["herdr_readiness_waiver"] = waiver_summary(args, result["herdr_observations"])
     result["status"] = next((s for s in ("fail", "unexpected_pass", "known_gap", "not_applicable", "dry_run")
                              if s in {http["status"], stop["status"]}), "pass")
     result["reason"] = "; ".join(f"{c['id']}: {c['status']} {c.get('reason') or ''}" for c in (http, stop))
-    driver._refresh_agent_mode_record(result, scenario=scenario, declared_agent_mode=result["agent_mode"], dry_run=args.dry_run)
-    driver._refresh_coverage_class_record(result, scenario=scenario, declared_coverage_class=result["coverage_class"], dry_run=args.dry_run)
     return result
 
 
@@ -337,7 +342,7 @@ def _run_checked(driver, scenario, args, client, run_id, result):
         if scenario["id"] == "E-18":
             print("[dry-run] Herdr override: HTTP cancel force=false (HostOwned follow-up, not P10-3); P11 force=true is E-12")
         if any("restart_dcserver" in step for step in scenario.get("steps", [])):
-            print("[dry-run] restart: isolated-server attestation; read-only status before/after; same nonce; all rows published")
+            print("[dry-run] restart: isolated-server attestation; boot_incarnation before != after; same nonce; all rows published")
         result.update(status="dry_run", reason="plan only; no observed passes")
         return result
     if args.hard_reset_session_each:
@@ -382,11 +387,14 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 window.add(row)
             window.reconcile_snapshot(rows, after_id=after_id)
 
-        def wait(marker, timeout, *, raw=False):
+        def wait(marker, timeout, *, raw=False, author=None):
             nonlocal first_response, gap_failure, gap_token
+            def body(row):
+                if raw and (row.get("author") or {}).get("bot"):
+                    return row.get("content", "")
+                return assertions.relay_body(row) if author is None else assertions.author_relay_body(row, author)
             found, rows = client.wait_for_message(
-                args.channel_id, predicate=lambda row: marker in ((row.get("content", "") if raw and (row.get("author") or {}).get("bot") else assertions.relay_body(row)) or ""),
-                after_id=after_id, timeout_s=timeout)
+                args.channel_id, predicate=lambda row: marker in (body(row) or ""), after_id=after_id, timeout_s=timeout)
             ingest(rows)
             if not found:
                 gap_failure = bool(gap_token and gap_token["marker"] == marker and scenario["id"] != "E-18")
@@ -395,6 +403,9 @@ def _run_checked(driver, scenario, args, client, run_id, result):
             if gap_token and gap_token["marker"] == marker:
                 gap_token = None
             return found
+
+        def provider_author(step):
+            return assertions.provider_bot_id(driver.cell_provider(args.cell)) if step.get("relay_author") == "provider" else None
 
         def open_gap(index, marker=None):
             nonlocal gap_token
@@ -442,10 +453,12 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                     open_gap(step_index, marker.replace("{run_id}", run_id) if marker else None)
                 window.mark_prompt_sent()
                 prompt_count += 1
-                result["real_provider_contacted"] = True
-                result["agent_mode_actual"] = "real_live"
+                entry = driver._record_send(result, next(k for k in ("send_prompt", "send_discord_prompt", "send_provider_hold_prompt") if k in step))
                 try:
                     sent = client.send(args.channel_id, prompt)
+                    driver._ack_send(entry, sent)
+                    result["real_provider_contacted"] = True
+                    result["agent_mode_actual"] = "real_live"
                     driver.post_send_sleep(step)
                 except Exception:
                     # Transport/auth errors are never an expected product gap.
@@ -459,16 +472,17 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                         raise assertions.AssertionError(f"text !clear send returned no message id; its replies cannot be attributed: {sent!r}")
                 if scenario.get("e36_normal_intake"):
                     marker = step.get("hold_marker") if step.get("request_key") == "QA" else step["body_marker"]
-                    wait(marker.replace("{run_id}", run_id), 240)
+                    wait(marker.replace("{run_id}", run_id), 240, author=provider_author(step))
                     if step.get("request_key") == "QA":
                         driver.run_assertion({"marker_absent": {"marker": step["body_marker"].replace("{run_id}", run_id), "surface": "relay"}}, window=window, record=result)
                     if step.get("request_key") == "QB":
                         qa = next(s for s in scenario["steps"] if s.get("request_key") == "QA")
-                        wait(qa["body_marker"].replace("{run_id}", run_id), 240)
+                        wait(qa["body_marker"].replace("{run_id}", run_id), 240, author=provider_author(qa))
                     result["herdr_observations"].append(observe(driver, args))
             elif "wait_for_discord_text" in step:
                 wait(str(step["wait_for_discord_text"]).replace("{run_id}", run_id), float(step.get("timeout_s", 240)),
-                     raw=scenario["id"] == "E-12" and step["wait_for_discord_text"] == "session ended")
+                     raw=scenario["id"] == "E-12" and step["wait_for_discord_text"] == "session ended",
+                     author=provider_author(step))
             elif "wait_for_raw_discord_text" in step:
                 marker = step["wait_for_raw_discord_text"]
                 deadline = time.monotonic() + float(step.get("timeout_s", 30))
@@ -494,7 +508,8 @@ def _run_checked(driver, scenario, args, client, run_id, result):
             elif "send_text_stop" in step:
                 if not first_response:
                     raise assertions.AssertionError("text stop requires running hold witness")
-                client.send(args.channel_id, "!stop")  # The same normal Discord transport as prompts.
+                entry = driver._record_send(result, "send_text_stop")
+                driver._ack_send(entry, client.send(args.channel_id, "!stop"))  # The same normal Discord transport as prompts.
                 driver.post_send_sleep(step)
                 open_gap(step_index)
                 ack = "중지하고 있어요..."
@@ -538,9 +553,8 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 before = [r for r in executions if r.get("provider") == driver.cell_provider(args.cell) and r.get("state") == "bound"]
                 if len(before) != 1 or not before[0].get("nonce") or before[0].get("pane") != "provider_running":
                     raise assertions.AssertionError("restart requires one running target row")
-                target = args.restart_target_override or (step["restart_dcserver"] or {}).get("target", "release")
-                if target not in ("dev", "release"):
-                    raise ValueError("invalid dcserver restart target")
+                target = restart_guard.target(step["restart_dcserver"], args)
+                incarnation = driver._boot_incarnation(args.base_url)
                 subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.agentdesk.{target}"], check=True, timeout=90)
                 deadline = time.monotonic() + 90
                 while True:
@@ -548,6 +562,11 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                         evidence = observe(driver, args, reconnected=True, waivable=False)
                         if evidence["row"]["nonce"] != before[0]["nonce"]:
                             raise assertions.AssertionError("Herdr restart replaced execution nonce")
+                        after = evidence["server_values"].get("boot_incarnation")
+                        if not isinstance(after, str) or not after or after == incarnation:
+                            raise assertions.AssertionError("dcserver boot_incarnation unchanged; restart not observed")
+                        result.setdefault("restart_incarnations", []).append(
+                            {"target": target, "before": incarnation, "after": after})
                         break
                     except (assertions.AssertionError, OSError, ValueError, subprocess.SubprocessError):
                         if time.monotonic() >= deadline:
@@ -574,7 +593,8 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 if spec.get("requires_feature") and spec["requires_feature"] not in enabled:
                     result["assertions"].append({"spec": spec, "status": "skipped", "reason": "feature not enabled"})
                     continue
-                driver.run_assertion(spec, window=window, record=result, enabled_features=enabled, run_id=run_id)
+                driver.run_assertion(spec, window=window, record=result, enabled_features=enabled, run_id=run_id,
+                                     provider=driver.cell_provider(args.cell))
             except assertions.AssertionError:
                 gap_failure = bool(result.get("text_stop_ack")) and "marker_absent" in spec and scenario["id"] == "E-18-stop"
                 raise

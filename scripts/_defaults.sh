@@ -725,7 +725,6 @@ _health_json_degraded_reasons_all_match() {
   done
   return 0
 }
-
 _health_json_deploy_nonblocking_ere() {
   # $1 allow_reconcile_degraded, $2 deploy verdict, $3 cluster_standby proven,
   # $4 providers whose TUI gateway restriction the body verifies (alternation).
@@ -749,9 +748,10 @@ _health_json_deploy_nonblocking_ere() {
   [ "${2:-0}" = "1" ] && [[ "${6:-}" =~ $ids_re ]] && ere="$ere|tui_o:boundary_pending:(${6})"
   [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:gateway_standby"
   [ -n "${4:-}" ] && ere="$ere|provider:(${4}):tui_output_requires_gateway"
-  printf '%s)$' "$ere"
+  [ "${2:-0}:${AGENTDESK_DEPLOY_ALLOW_DEGRADED+x}" = '1:x' ] || { printf '%s)$' "$ere"; return; }
+  . "$(dirname "${BASH_SOURCE[0]}")/lib/deploy_allow_degraded.sh" || return 2
+  _deploy_allow_degraded_ere "${2:-0}" "$ere)$" "${7:-}"
 }
-
 _health_json_deploy_nonblocking_ere_for_body() {
   # Structural proof comes from this body; deploy-release supplies the smoke
   # channels and the local reader alarms observed before restart.
@@ -765,7 +765,7 @@ _health_json_deploy_nonblocking_ere_for_body() {
   done
   [[ "${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-}" =~ $ids_re ]] && smoke_ids="$DEPLOY_E2E_SMOKE_CHANNEL_IDS"
   _health_json_deploy_nonblocking_ere "${2:-0}" "${3:-0}" "$standby" "$tui" \
-    "$reader_ids" "$smoke_ids"
+    "$reader_ids" "$smoke_ids" "$health_json"
 }
 
 _deploy_e2e_smoke_channel_ids() {
@@ -974,7 +974,7 @@ health_json_is_ready() {
     # Membership decides: every reason must be one a deploy cannot clear. An
     # unrecognised reason is not in that set, so a newly added one fails closed.
     nonblocking_ere=$(_health_json_deploy_nonblocking_ere_for_body \
-      "$health_json" "$allow_reconcile_degraded" "$allow_deploy_nonblocking")
+      "$health_json" "$allow_reconcile_degraded" "$allow_deploy_nonblocking") || return 1
     if _health_json_degraded_reasons_all_match "$health_json" "$nonblocking_ere"; then
       echo "  ▸ degraded only for causes a deploy cannot clear ($(_health_json_reasons "$health_json")) — deploy proceeds; health still reports degraded"
       return 0
@@ -995,7 +995,7 @@ health_json_is_ready() {
   fi
 
   nonblocking_ere=$(_health_json_deploy_nonblocking_ere_for_body \
-    "$health_json" "$allow_reconcile_degraded" "$allow_deploy_nonblocking")
+    "$health_json" "$allow_reconcile_degraded" "$allow_deploy_nonblocking") || return 1
   _health_json_degraded_reasons_all_match "$health_json" "$nonblocking_ere"
 }
 
@@ -1584,6 +1584,10 @@ _restart_persistence_proof_class() {
     printf 'legacy-index'
     return 0
   fi
+  # Snapshot only a failed check; diagnostics cannot change proof authority.
+  # shellcheck source=/dev/null
+  ( . "$(dirname "${BASH_SOURCE[0]}")/lib/restart_persistence_diag.sh" \
+    && _restart_persistence_failure_snapshot "$root" "$expected_nonce" ) 2>/dev/null || true
   return 1
 }
 
@@ -1716,6 +1720,8 @@ wait_for_restart_persistence_or_fail() {
   clear_restart_drain_mode "$runtime_root" "$expected_nonce" || true
   echo "✗ [gate] ${scope} restart persistence was not acknowledged within ${max_wait}s" >&2
   echo "  Cleared restart_pending and refused bootout: the in-flight delivery frontier is not durable." >&2
+  printf '  restart persistence marker_root=%q nonce=%s\n%s\n' "$root" "$expected_nonce" \
+    "${proof_class:-  last proof observation: unavailable (no completed check or diagnostic helper failed)}" >&2 || true
   return 1
 }
 

@@ -5,6 +5,9 @@ use sqlx::{PgPool, Row};
 use super::dispatch_query::query_dispatch_row_pg;
 use crate::{db::auto_queue::phase_gate_verdict, engine::PolicyEngine};
 
+mod review_skip;
+use review_skip::restore_auto_queue_mainline_after_review_skip_on_pg;
+
 pub(crate) const VALID_DISPATCH_STATUSES: &[&str] =
     &["pending", "dispatched", "completed", "cancelled", "failed"];
 
@@ -173,70 +176,6 @@ pub(super) async fn auto_queue_review_disabled_for_dispatch_pg(
     .map_err(|error| {
         anyhow::anyhow!("load auto-queue review_mode for dispatch {dispatch_id}: {error}")
     })
-}
-
-async fn restore_auto_queue_mainline_after_review_skip_on_pg(
-    pool: &PgPool,
-    card_id: &str,
-    dispatch_id: &str,
-) -> Result<()> {
-    let row = sqlx::query(
-        "SELECT repo_id, assigned_agent_id
-         FROM kanban_cards
-         WHERE id = $1",
-    )
-    .bind(card_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| anyhow::anyhow!("load card scope for {card_id}: {error}"))?;
-    let repo_id: Option<String> = row
-        .try_get("repo_id")
-        .map_err(|error| anyhow::anyhow!("decode repo_id for {card_id}: {error}"))?;
-    let agent_id: Option<String> = row
-        .try_get("assigned_agent_id")
-        .map_err(|error| anyhow::anyhow!("decode assigned_agent_id for {card_id}: {error}"))?;
-    let effective =
-        crate::pipeline::resolve_for_card_pg(pool, repo_id.as_deref(), agent_id.as_deref()).await;
-    let target_status = effective
-        .kickoff_for(effective.initial_state())
-        .filter(|status| status != "review")
-        .unwrap_or_else(|| "in_progress".to_string());
-
-    sqlx::query(
-        "DELETE FROM task_dispatches
-         WHERE kanban_card_id = $1
-           AND dispatch_type IN ('review', 'review-decision')
-           AND status IN ('pending', 'dispatched')",
-    )
-    .bind(card_id)
-    .execute(pool)
-    .await
-    .map_err(|error| anyhow::anyhow!("delete skipped review dispatches for {card_id}: {error}"))?;
-    let _ = sqlx::query("DELETE FROM card_review_state WHERE card_id = $1")
-        .bind(card_id)
-        .execute(pool)
-        .await;
-    sqlx::query(
-        "UPDATE kanban_cards
-         SET status = $1,
-             latest_dispatch_id = $2,
-             review_status = NULL,
-             review_round = NULL,
-             review_entered_at = NULL,
-             awaiting_dod_at = NULL,
-             blocked_reason = NULL,
-             suggestion_pending_at = NULL,
-             deferred_dod_json = NULL,
-             updated_at = NOW()
-         WHERE id = $3",
-    )
-    .bind(&target_status)
-    .bind(dispatch_id)
-    .bind(card_id)
-    .execute(pool)
-    .await
-    .map_err(|error| anyhow::anyhow!("restore mainline card state for {card_id}: {error}"))?;
-    Ok(())
 }
 
 fn should_skip_auto_queue_terminal_sync(
@@ -1264,27 +1203,6 @@ fn set_dispatch_status_with_backends_and_sync(
     })
 }
 
-pub(crate) fn set_dispatch_status_without_queue_sync_with_backends(
-    pg_pool: Option<&PgPool>,
-    dispatch_id: &str,
-    to_status: &str,
-    result: Option<&serde_json::Value>,
-    transition_source: &str,
-    allowed_from: Option<&[&str]>,
-    touch_completed_at: bool,
-) -> Result<usize> {
-    set_dispatch_status_with_backends_and_sync(
-        pg_pool,
-        dispatch_id,
-        to_status,
-        result,
-        transition_source,
-        allowed_from,
-        touch_completed_at,
-        false,
-    )
-}
-
 pub fn load_dispatch_row_with_backends(
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
@@ -2133,5 +2051,87 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
             infer_phase_gate_verdict("dsp-explicit", &gate(), &result),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod review_skip_pg_tests {
+    use super::restore_auto_queue_mainline_after_review_skip_on_pg;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use sqlx::PgPool;
+
+    async fn seed_card_in_review(pool: &PgPool) {
+        crate::pipeline::ensure_loaded();
+        sqlx::raw_sql(
+            "INSERT INTO kanban_cards (id, title, status, review_status) VALUES ('card-1', 'c', 'review', 'reviewing');
+             INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status) VALUES
+                 ('impl-1', 'card-1', 'implementation', 'completed'),
+                 ('review-1', 'card-1', 'review', 'dispatched');
+             INSERT INTO card_review_state (card_id) VALUES ('card-1');
+             INSERT INTO sessions (session_key, status, active_dispatch_id) VALUES ('s-1', 'turn_active', 'review-1');",
+        )
+        .execute(pool)
+        .await
+        .expect("seed card in review");
+    }
+
+    async fn state(pool: &PgPool) -> (Option<String>, i64, Option<String>, String) {
+        sqlx::query_as(
+            "SELECT (SELECT status FROM task_dispatches WHERE id = 'review-1'),
+                    (SELECT COUNT(*) FROM card_review_state WHERE card_id = 'card-1'),
+                    (SELECT active_dispatch_id FROM sessions WHERE session_key = 's-1'),
+                    (SELECT status FROM kanban_cards WHERE id = 'card-1')",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("read review-skip state")
+    }
+
+    #[tokio::test]
+    async fn a_skipped_review_dispatch_is_cancelled_not_deleted() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_card_in_review(&pool).await;
+
+        restore_auto_queue_mainline_after_review_skip_on_pg(&pool, "card-1", "impl-1")
+            .await
+            .expect("restore mainline");
+
+        let (review, review_state_rows, session_dispatch, card_status) = state(&pool).await;
+        assert_eq!(review.as_deref(), Some("cancelled"));
+        assert_eq!((review_state_rows, session_dispatch), (0, None));
+        assert_ne!(card_status, "review");
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_review_skip_changes_nothing() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_card_in_review(&pool).await;
+        sqlx::raw_sql("CREATE FUNCTION refuse_card_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected card update fault'; END $$; CREATE TRIGGER refuse_card_update BEFORE UPDATE ON kanban_cards FOR EACH ROW EXECUTE FUNCTION refuse_card_update()")
+            .execute(&pool)
+            .await
+            .expect("install card update fault");
+
+        let error = restore_auto_queue_mainline_after_review_skip_on_pg(&pool, "card-1", "impl-1")
+            .await
+            .expect_err("the injected card fault must fail the restore");
+
+        assert!(
+            error.to_string().contains("injected card update fault"),
+            "{error}"
+        );
+        let expected = (
+            Some("dispatched".to_string()),
+            1,
+            Some("review-1".to_string()),
+        );
+        let (review, review_state_rows, session_dispatch, card_status) = state(&pool).await;
+        assert_eq!((review, review_state_rows, session_dispatch), expected);
+        assert_eq!(card_status, "review");
+        pool.close().await;
+        pg_db.drop().await;
     }
 }

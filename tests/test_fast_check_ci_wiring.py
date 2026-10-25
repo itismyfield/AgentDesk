@@ -2746,8 +2746,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "Install Opus on macOS",
                 "Cache Cargo dependencies",
                 "cargo check",
-                "H2 tmux boundary measurement (macos, inert)",
-                "H2 module map (macos, inert)",
                 "cargo test (non-PG, targeted subset)",
                 "Fresh user portable smoke",
             },

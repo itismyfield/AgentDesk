@@ -55,6 +55,7 @@ pub(super) enum RestartSeedStatus {
     Started,
     Busy,
     Failed(String),
+    RetryFailed(String),
 }
 
 fn provider_supports_resume(provider: &ProviderKind) -> bool {
@@ -90,14 +91,15 @@ fn restart_tmux_note(tmux_name: Option<&str>) -> String {
 
 fn restart_seed_note(status: &RestartSeedStatus) -> String {
     match status {
-        // Successful seed turn needs no narration — the agent's own greeting
-        // turn follows immediately and speaks for itself.
-        RestartSeedStatus::Started => String::new(),
+        RestartSeedStatus::Started => "인사말 turn이 시작됐습니다.".to_string(),
         RestartSeedStatus::Busy => {
-            "기존 턴 정리가 아직 끝나지 않아 인사말 turn은 시작하지 못했습니다.".to_string()
+            "1회 재시도 후에도 Busy 상태라 인사말 turn은 시작하지 못했습니다.".to_string()
         }
         RestartSeedStatus::Failed(error) => {
             format!("인사말 turn 시작 실패: {error}")
+        }
+        RestartSeedStatus::RetryFailed(error) => {
+            format!("인사말 turn 1회 재시도 후 실패: {error}")
         }
     }
 }
@@ -108,14 +110,15 @@ fn build_restart_response(
     tmux_name: Option<&str>,
     seed_status: &RestartSeedStatus,
 ) -> String {
-    let header = format!(
-        "♻ 세션 재시작됨 (provider={}). 현재 인증된 MCP/설정이 부착됐습니다.",
-        provider.as_str()
-    );
+    let header = format!("♻ 세션 재시작 요청 결과 (provider={}).", provider.as_str());
     let parts = [
         header,
         restart_tmux_note(tmux_name),
-        restart_resume_note(provider, action),
+        if *seed_status == RestartSeedStatus::Started {
+            restart_resume_note(provider, action)
+        } else {
+            String::new()
+        },
         restart_seed_note(seed_status),
     ];
     parts
@@ -127,9 +130,6 @@ fn build_restart_response(
 }
 
 async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
-    const MAX_ATTEMPTS: usize = 30;
-    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
-
     let channel_id = ctx.channel_id();
     let channel_name_hint = {
         let data = ctx.data().shared.core.lock().await;
@@ -142,8 +142,8 @@ async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
         "provider": ctx.data().provider.as_str(),
     });
 
-    for attempt in 0..MAX_ATTEMPTS {
-        match super::super::router::start_headless_turn(
+    retry_restart_seed(|| async {
+        super::super::router::start_headless_turn(
             (
                 ctx.serenity_context(),
                 &ctx.data().shared,
@@ -157,7 +157,22 @@ async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
             channel_name_hint.clone(),
         )
         .await
-        {
+        .map(|_| ())
+    })
+    .await
+}
+
+async fn retry_restart_seed<Start, Fut>(mut start: Start) -> RestartSeedStatus
+where
+    Start: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), super::super::router::HeadlessTurnStartError>>,
+{
+    const MAX_ATTEMPTS: usize = 2;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+    // Conflict is a pre-spawn rejection; an accepted seed is never submitted again.
+    for attempt in 0..MAX_ATTEMPTS {
+        match start().await {
             Ok(_) => return RestartSeedStatus::Started,
             Err(super::super::router::HeadlessTurnStartError::Conflict(_))
                 if attempt + 1 < MAX_ATTEMPTS =>
@@ -171,7 +186,11 @@ async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
                 super::super::router::HeadlessTurnStartError::Internal(error)
                 | super::super::router::HeadlessTurnStartError::InvalidTarget(error),
             ) => {
-                return RestartSeedStatus::Failed(error);
+                return if attempt == 0 {
+                    RestartSeedStatus::Failed(error)
+                } else {
+                    RestartSeedStatus::RetryFailed(error)
+                };
             }
         }
     }
@@ -403,3 +422,6 @@ mod host_guard_tests {
         db.drop().await;
     }
 }
+
+#[cfg(test)]
+mod seed_tests;

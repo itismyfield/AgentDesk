@@ -21,7 +21,6 @@ pub enum DetectorSignal {
         claimed_turn: bool,
     },
     TurnRateLimit,
-    RateLimitCacheDanger,
     WatchdogUnresponsive,
     TmuxSessionDead,
 }
@@ -53,9 +52,7 @@ pub fn classify_trigger(
             }
             TriggerKind::MailboxStall
         }
-        DetectorSignal::TurnRateLimit | DetectorSignal::RateLimitCacheDanger => {
-            TriggerKind::RateLimit
-        }
+        DetectorSignal::TurnRateLimit => TriggerKind::RateLimit,
         DetectorSignal::WatchdogUnresponsive | DetectorSignal::TmuxSessionDead => {
             TriggerKind::ProcessDeath
         }

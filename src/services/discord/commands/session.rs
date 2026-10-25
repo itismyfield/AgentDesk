@@ -1,3 +1,6 @@
+mod autocomplete;
+use autocomplete::autocomplete_session;
+
 use super::super::formatting::send_long_message_ctx;
 use super::super::{Context, Error, auto_restore_session, check_auth};
 
@@ -6,8 +9,9 @@ use super::super::{Context, Error, auto_restore_session, check_auth};
 pub(in crate::services::discord) async fn cmd_resume(
     ctx: Context<'_>,
     #[description = "Provider session id to resume (empty = auto-select previous)"]
+    #[autocomplete = "autocomplete_session"]
     session_id: Option<String>,
-    #[description = "Worktree path for the resumed session (defaults to current)"] cwd: Option<
+    #[description = "Worktree path (empty = locate the selected session transcript)"] cwd: Option<
         String,
     >,
 ) -> Result<(), Error> {

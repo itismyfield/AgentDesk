@@ -11,7 +11,6 @@ db:
     tables:
       - card_review_state
       - kanban_cards
-      - kanban_reviews
       - pipeline_stages
       - pr_tracking
       - task_dispatches
@@ -27,7 +26,7 @@ db:
     rationale: broad legacy review lifecycle DB access pinned by no-silent-growth baseline
     no_silent_growth:
       callsites: 33
-      fingerprint: sha256:791339abbaaa87274034b5cc17557987d0f7da9e8aef902169751c978a15163d
+      fingerprint: sha256:7d640e024b7a7d651bba61d9b4f2e3c74fe5343aa352d77f98373b09fabc0c06
 exec:
   allow:
     - gh
