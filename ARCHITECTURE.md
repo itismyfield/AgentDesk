@@ -215,6 +215,7 @@ src/
 │   │   ├── listing.rs
 │   │   ├── metadata.rs
 │   │   ├── mod.rs
+│   │   ├── soft_delete.rs
 │   │   └── transitions.rs
 │   ├── postgres/
 │   │   ├── advisory_lock.rs
@@ -306,6 +307,7 @@ src/
 │   ├── dispatch_status/
 │   │   ├── auto_queue_terminal_sync_policy_tests/
 │   │   │   └── migration_value_pg_tests.rs
+│   │   ├── review_skip.rs
 │   │   └── terminal_timestamp_tests.rs
 │   ├── completion_hooks.rs
 │   ├── dispatch_cancel.rs
@@ -496,6 +498,8 @@ src/
 │   │   │   ├── session_repair.rs
 │   │   │   ├── tui_output_readiness_tests.rs
 │   │   │   └── unread_tail_attribution_tests.rs
+│   │   ├── kanban/
+│   │   │   └── card_delete.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
@@ -1093,7 +1097,9 @@ src/
 │   │   │   │   └── provider_reset.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
-│   │   │   │   └── reports.rs
+│   │   │   │   ├── recovery_command_tests.rs
+│   │   │   │   ├── reports.rs
+│   │   │   │   └── session_details.rs
 │   │   │   ├── inspect/
 │   │   │   │   ├── formatting.rs
 │   │   │   │   ├── mod.rs
@@ -1105,8 +1111,12 @@ src/
 │   │   │   │   ├── render_recovery.rs
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── restart/
+│   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
 │   │   │   │   └── autocomplete.rs
+│   │   │   ├── skill/
+│   │   │   │   └── stop_response_tests.rs
 │   │   │   ├── system_prompt/
 │   │   │   │   ├── reconstruct.rs
 │   │   │   │   └── tests.rs
@@ -1509,6 +1519,8 @@ src/
 │   │   │   ├── status_panel/
 │   │   │   │   ├── completed_kind.rs
 │   │   │   │   └── derived_status.rs
+│   │   │   ├── tool_summary/
+│   │   │   │   └── code_mode.rs
 │   │   │   ├── background_task_events.rs
 │   │   │   ├── channel_visibility.rs
 │   │   │   ├── clock_tests.rs
@@ -1533,8 +1545,10 @@ src/
 │   │   │   ├── task_panel.rs
 │   │   │   ├── tests.rs
 │   │   │   ├── tool_activity.rs
+│   │   │   ├── tool_activity_accuracy_tests.rs
 │   │   │   ├── tool_activity_tests.rs
 │   │   │   ├── tool_summary.rs
+│   │   │   ├── tool_summary_accuracy_tests.rs
 │   │   │   ├── tool_summary_label_tests.rs
 │   │   │   ├── tool_summary_tests.rs
 │   │   │   ├── turn_anchor.rs
@@ -3565,6 +3579,7 @@ src/
 │   │   │   ├── suspension.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── tool_card_accuracy_tests.rs
 │   │   │   ├── tool_card_actor_replay_tests.rs
 │   │   │   ├── tool_card_actor_tests.rs
 │   │   │   ├── tool_card_codex_result_tests.rs

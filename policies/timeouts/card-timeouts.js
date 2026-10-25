@@ -93,7 +93,7 @@ module.exports = function attachCardTimeouts(timeouts, helpers) {
       var staleInProgress = agentdesk.db.query(
         "SELECT kc.id FROM kanban_cards kc " +
         "LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id " +
-        "WHERE kc.status = ? AND COALESCE(kc.blocked_reason, '') = '' AND " +
+        "WHERE kc.status = ? AND kc.deleted_at IS NULL AND COALESCE(kc.blocked_reason, '') = '' AND " +
         latestCardActivityExpr("kc", "td") + " < datetime('now', '" + inProgressInterval + "')",
         [bInProgress]
       );
