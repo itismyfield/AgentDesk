@@ -1375,7 +1375,6 @@ server::routes::agents_turn_deliver::pg_tests::s1a::s1b::s1b_started_identity_be
 server::routes::agents_turn_deliver::pg_tests::s1a::s1b::s1b_unidentified_busy_episode_queues_safely
 server::routes::agents_turn_deliver::pg_tests::target_and_author_gates_run_at_the_route_boundary_pg
 server::routes::agents_turn_deliver::pg_tests::the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg
-server::routes::agents_turn_deliver::pg_tests::the_route_reports_contaminated_submit_and_protects_a_mixed_direct_draft_pg
 server::routes::agents_turn_deliver::pg_tests::the_route_stashes_an_attached_persons_draft_only_on_the_allowlisted_channel_pg
 server::routes::agents_turn_deliver::pg_tests::the_switch_off_keeps_every_route_answer_field_for_field_pg
 server::routes::agents_turn_deliver::tests::each_delivery_carries_only_its_documented_fields

@@ -19,7 +19,8 @@ const NAME: &str = "adk-t05-claude-fresh-fail";
 const MESSAGE: u64 = 77_501;
 
 /// A tmux in front of `FakeTmux` that reports a version and makes a new session present
-/// without running it, plus a Claude CLI that resolves.
+/// without running it, plus a Claude CLI that resolves. With a `screen` file it also answers the
+/// managed pre-read with that screen and fails the paste after the fence, recording `sends`.
 fn launchable_tmux() -> (tempfile::TempDir, Vec<crate::config::TestEnvVarGuard>) {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -32,10 +33,16 @@ fn launchable_tmux() -> (tempfile::TempDir, Vec<crate::config::TestEnvVarGuard>)
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
         file
     };
+    let own = dir.path().display().to_string();
     write(
         "tmux",
         format!(
-            "#!/bin/sh\n[ \"$1\" = -u ] && shift\nfor a do case \"$a\" in -V) echo 'tmux 3.5a'; exit 0 ;; \
+            "#!/bin/sh\n[ \"$1\" = -u ] && shift\nd='{own}'\nif [ -f \"$d/screen\" ]; then \
+             case \"$1\" in display-message) for a do last=\"$a\"; done; \
+             [ \"$last\" = '#{{pane_id}}' ] && {{ echo %1; exit 0; }} ;; \
+             capture-pane) cat \"$d/screen\"; exit 0 ;; load-buffer|delete-buffer) exit 0 ;; \
+             paste-buffer|send-keys) echo \"$1\" >> \"$d/sends\"; [ \"$1\" = send-keys ]; exit $? ;; \
+             esac; fi\nfor a do case \"$a\" in -V) echo 'tmux 3.5a'; exit 0 ;; \
              new-session) echo \"$*\" >> '{fake}/calls'; rm -f '{fake}/missing'; exit 0 ;; \
              esac; done\nexec '{fake}/tmux' \"$@\"\n"
         ),
@@ -52,6 +59,14 @@ fn launchable_tmux() -> (tempfile::TempDir, Vec<crate::config::TestEnvVarGuard>)
     (dir, env)
 }
 
+/// The ready, empty composer a fresh Claude TUI draws.
+fn ready_screen() -> String {
+    let rule = "─".repeat(80);
+    format!(
+        "Claude Code v2.1.289\n\n{rule}\n\u{276f} \n{rule}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+    )
+}
+
 /// An uncertain first send, or a successful submit followed by a confirmed dead pane.
 fn fail_fresh_turn(
     channel: u64,
@@ -60,10 +75,7 @@ fn fail_fresh_turn(
     workspace: String,
     uncertain: bool,
 ) -> Result<(), String> {
-    let rule = "─".repeat(80);
-    let ready = format!(
-        "Claude Code v2.1.289\n\n{rule}\n\u{276f} \n{rule}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
-    );
+    let ready = ready_screen();
     if !uncertain {
         let fake = std::env::split_paths(&std::env::var_os("PATH").unwrap())
             .nth(1)
@@ -225,7 +237,10 @@ async fn run_case(
 ) -> (Arc<CancelToken>, Outcome) {
     let tmux = FakeTmux::install(NAME);
     tmux.mark_missing();
-    let (_launch, _launch_env) = launchable_tmux();
+    let (launch, _launch_env) = launchable_tmux();
+    if uncertain {
+        std::fs::write(launch.path().join("screen"), ready_screen()).unwrap();
+    }
     let _probe = FreshTmuxProbe::new();
     let workspace = tempfile::tempdir().unwrap();
 
@@ -324,6 +339,11 @@ async fn run_case(
         assert!(
             held.as_ref().is_some_and(|hold| !hold.may_requeue()),
             "send ACK remains a typed uncertain hold: {error} {held:?}"
+        );
+        let sends = std::fs::read_to_string(launch.path().join("sends")).unwrap_or_default();
+        assert_eq!(
+            sends, "paste-buffer\n",
+            "the managed paste failed after the fence"
         );
         let retained = crate::services::discord::inflight::load_inflight_state_read_only(
             &provider,
