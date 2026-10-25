@@ -725,7 +725,6 @@ src/
 │   │   └── tui_session_launch_geometry_tests.rs
 │   ├── claude_tui/
 │   │   ├── busy_inject/
-│   │   │   ├── fixtures/
 │   │   │   ├── screen/
 │   │   │   │   └── paste_footer.rs
 │   │   │   ├── stash_tests/
