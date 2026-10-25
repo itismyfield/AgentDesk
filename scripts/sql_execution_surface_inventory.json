@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "cef1c773ca122747a8c75f82fb9356b9fd3150dd",
+  "measured_at_sha": "6ab264fd5b78184955ef0eaf2739a270faf234b3",
   "records": [
     {
       "root": "migrations/postgres",
@@ -43038,6 +43038,24 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:17bd80c866acea42211f035c778462894ac1fae4eaea142897a04f6d19a214bc"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_resume.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3ed28f1ace27837d7289a7da065b3744577b16d9a8901a6bf0e5b08b4a7c6877"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_resume.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:5a2f25a0e1a095563aacd0c34e7d4ebc50143b36b020c5b5382570597b113eed"
     },
     {
@@ -43062,10 +43080,46 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/services/session_resume.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d02b3b4e7488af4604dd9fb78255d3a822f8453795297deb5fdffae84aac05a2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_resume.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:262368e0f4226f8f38be8d862de60597cd67ba03096fa3d69145d64b1e9eb0cd"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_resume.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c48b8b386ce502855bede6996b012c8ba7affce102988d6f0cbb70a039851ad6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_resume.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:e1ae3191b5cde22fcdfb4f0a5595813f2c3568556f6373bb46e1971cc1156b51"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/session_resume.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:45dbd7e2177af53938180f891f8d3e2117bb064f4dd1318aaf461cb1f01a7dca"
     },
     {
       "root": "src",
