@@ -34,7 +34,7 @@ module.exports = function attachReviewTimeouts(timeouts, helpers) {
         "SELECT kc.id as card_id " +
         "FROM kanban_cards kc " +
         "JOIN task_dispatches td ON td.kanban_card_id = kc.id " +
-        "WHERE kc.status = ? AND COALESCE(kc.review_status, 'reviewing') = 'reviewing' " +
+        "WHERE kc.status = ? AND kc.deleted_at IS NULL AND COALESCE(kc.review_status, 'reviewing') = 'reviewing' " +
         "AND td.dispatch_type = 'review' AND td.status IN ('completed', 'failed') " +
         "AND kc.review_entered_at IS NOT NULL AND kc.review_entered_at < datetime('now', '-30 minutes') " +
         "AND NOT EXISTS (SELECT 1 FROM task_dispatches td2 WHERE td2.kanban_card_id = kc.id " +
@@ -58,7 +58,7 @@ module.exports = function attachReviewTimeouts(timeouts, helpers) {
       var orphanReviews = agentdesk.db.query(
         "SELECT kc.id, kc.title, kc.github_issue_number, kc.assigned_agent_id " +
         "FROM kanban_cards kc " +
-        "WHERE kc.status = ? " +
+        "WHERE kc.status = ? AND kc.deleted_at IS NULL " +
         "AND COALESCE(kc.review_status, 'reviewing') = 'reviewing' " +
         "AND kc.review_entered_at IS NOT NULL " +
         "AND kc.review_entered_at < datetime('now', '-5 minutes') " +
