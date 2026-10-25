@@ -755,6 +755,11 @@
       "path": "migrations/postgres/0148_intake_outbox_replay_fence_update_when.sql",
       "sha256": "42e5f1c8bb122c4f3b959bb58db1239b774ed22115ebe1ea440ea31580d67ef2",
       "version": 148
+    },
+    {
+      "path": "migrations/postgres/0149_kanban_cards_soft_delete.sql",
+      "sha256": "e933f154f847cf13f7df9d1458b526bb16c0b479e57c5a5b933d66d7decef3fc",
+      "version": 149
     }
   ],
   "version": 1

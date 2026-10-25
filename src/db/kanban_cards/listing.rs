@@ -18,7 +18,7 @@ pub async fn list_cards_pg(
     filter: &ListCardsFilter,
     registered_repo_ids: &[String],
 ) -> Result<Vec<KanbanCardRecord>, String> {
-    let mut query = QueryBuilder::new(format!("{CARD_SELECT_SQL_PG} WHERE 1=1"));
+    let mut query = QueryBuilder::new(format!("{CARD_SELECT_SQL_PG} WHERE kc.deleted_at IS NULL"));
 
     if let Some(status) = filter.status.as_deref() {
         query.push(" AND kc.status = ");
@@ -231,7 +231,7 @@ pub async fn load_card_json_pg(
             kc.review_entered_at::text AS review_entered_at
          FROM kanban_cards kc
          LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id
-         WHERE kc.id = $1",
+         WHERE kc.id = $1 AND kc.deleted_at IS NULL",
     )
     .bind(card_id)
     .fetch_optional(pool)

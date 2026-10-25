@@ -2289,3 +2289,207 @@ mod dispatch_terminal_sync_pg_tests {
         pg_db.drop().await;
     }
 }
+
+#[cfg(test)]
+mod card_soft_delete_pg_tests {
+    use super::{GenerateCardFilter, list_backlog_cards_pg, list_generate_candidates_pg};
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::db::kanban_cards::{
+        CardDeleteOutcome, IssueCardUpsert, ListCardsFilter, card_status_pg, list_cards_pg,
+        load_card_json_pg, soft_delete_card_pg, upsert_card_from_issue_pg,
+    };
+    use sqlx::PgPool;
+
+    async fn setup(pg_db: &TestPostgresDb) -> PgPool {
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-1', 'Agent 1', 'claude', '123')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed agent");
+        pool
+    }
+
+    async fn seed_card(pool: &PgPool, id: &str, status: &str, issue: Option<i64>) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, repo_id, github_issue_number, assigned_agent_id)
+             VALUES ($1, $1, $2, 'owner/repo', $3, 'agent-1')",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(issue)
+        .execute(pool)
+        .await
+        .expect("seed card");
+    }
+
+    async fn seed_dispatch(pool: &PgPool, id: &str, card_id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+             VALUES ($1, $2, 'agent-1', 'implementation', $3, $1)",
+        )
+        .bind(id)
+        .bind(card_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("seed dispatch");
+    }
+
+    fn issue(number: i64) -> IssueCardUpsert {
+        IssueCardUpsert {
+            repo_id: "owner/repo".to_string(),
+            issue_number: number,
+            issue_url: None,
+            title: "again".to_string(),
+            description: None,
+            priority: None,
+            assigned_agent_id: None,
+            metadata_json: None,
+            status_on_create: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_card_with_dispatch_history_is_hidden_instead_of_deleted_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup(&pg_db).await;
+        seed_card(&pool, "card-hist", "ready", Some(7)).await;
+        seed_dispatch(&pool, "d-done", "card-hist", "completed").await;
+
+        let outcome = soft_delete_card_pg(&pool, "card-hist").await;
+        assert_eq!(outcome, Ok(CardDeleteOutcome::Deleted));
+
+        let (stamped, dispatches): (bool, i64) = sqlx::query_as(
+            "SELECT kc.deleted_at IS NOT NULL,
+                    (SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = kc.id)
+             FROM kanban_cards kc WHERE kc.id = 'card-hist'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("card row is kept");
+        assert_eq!((stamped, dispatches), (true, 1));
+        assert_eq!(card_status_pg(&pool, "card-hist").await, Ok(None));
+        assert_eq!(load_card_json_pg(&pool, "card-hist").await, Ok(None));
+        let listed = list_cards_pg(&pool, &ListCardsFilter::default(), &[])
+            .await
+            .expect("list cards");
+        assert!(listed.iter().all(|card| card.id != "card-hist"));
+        assert_eq!(
+            soft_delete_card_pg(&pool, "card-hist").await,
+            Ok(CardDeleteOutcome::NotFound)
+        );
+
+        let again = upsert_card_from_issue_pg(&pool, issue(7))
+            .await
+            .expect("register the issue again");
+        assert!(again.created, "a deleted card's issue gets a fresh card");
+        assert_ne!(again.card_id, "card-hist");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn a_card_is_not_deleted_while_a_dispatch_works_on_it_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup(&pg_db).await;
+        seed_card(&pool, "card-live", "in_progress", None).await;
+        seed_dispatch(&pool, "d-live", "card-live", "dispatched").await;
+
+        assert_eq!(
+            soft_delete_card_pg(&pool, "card-live").await,
+            Ok(CardDeleteOutcome::LiveDispatch("d-live".to_string()))
+        );
+        assert_eq!(
+            card_status_pg(&pool, "card-live").await,
+            Ok(Some("in_progress".to_string()))
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn deleting_a_card_skips_its_pending_auto_queue_entry_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-1', 'owner/repo', 'agent-1', 'active')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed run");
+        seed_card(&pool, "card-queued", "ready", None).await;
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status)
+             VALUES ('entry-1', 'run-1', 'card-queued', 'agent-1', 'pending')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed entry");
+
+        assert_eq!(
+            soft_delete_card_pg(&pool, "card-queued").await,
+            Ok(CardDeleteOutcome::Deleted)
+        );
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = 'entry-1'")
+                .fetch_one(&pool)
+                .await
+                .expect("entry status");
+        assert_eq!(status, "skipped");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn deleted_cards_get_no_queue_slot_and_no_new_dispatch_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup(&pg_db).await;
+        seed_card(&pool, "gone-ready", "ready", None).await;
+        seed_card(&pool, "gone-backlog", "backlog", None).await;
+        seed_card(&pool, "kept-ready", "ready", None).await;
+        sqlx::query("UPDATE kanban_cards SET deleted_at = NOW() WHERE id LIKE 'gone-%'")
+            .execute(&pool)
+            .await
+            .expect("delete two cards");
+
+        let filter = GenerateCardFilter::default();
+        let candidates = list_generate_candidates_pg(&pool, &filter, &["ready".to_string()])
+            .await
+            .expect("generate candidates");
+        let ids: Vec<_> = candidates.iter().map(|c| c.card_id.as_str()).collect();
+        assert_eq!(ids, ["kept-ready"]);
+        let backlog = list_backlog_cards_pg(&pool, &filter)
+            .await
+            .expect("backlog cards");
+        assert!(backlog.is_empty(), "{backlog:?}");
+
+        let created = crate::dispatch::create_dispatch_core(
+            &pool,
+            "gone-ready",
+            "agent-1",
+            "implementation",
+            "work",
+            &serde_json::json!({}),
+        )
+        .await;
+        let error = created
+            .expect_err("a deleted card gets no dispatch")
+            .to_string();
+        assert!(error.contains("Card not found"), "{error}");
+        let dispatches: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_dispatches")
+            .fetch_one(&pool)
+            .await
+            .expect("count dispatches");
+        assert_eq!(dispatches, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
