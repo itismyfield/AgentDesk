@@ -29,9 +29,9 @@ class ReleaseTokenWiringTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix="release-wiring-input-")
         self.addCleanup(temp.cleanup)
         self.repo = Path(temp.name)
-        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts/lib").mkdir(parents=True)
         for name in ("build-release.sh", "deploy-release.sh", "_deploy_policy_generation.sh",
-                     "build_token.py"):
+                     "build_token.py", "lib/deploy_allow_degraded.sh"):
             shutil.copy2(REPO / "scripts" / name, self.repo / "scripts" / name)
 
     def inject(self, script, command):

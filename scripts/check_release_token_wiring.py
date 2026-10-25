@@ -41,14 +41,14 @@ def prepare(root: Path, repo: Path, script: str) -> dict[str, str]:
         if source.count(DEPLOY_END) != 1:
             raise ValueError("dry boundary: expected one deploy cleanup completion")
         source = source.split(DEPLOY_END)[0] + DEPLOY_END
-    for name in ("bin", "home", "tmp", "repo/scripts", "repo/skills", "repo/policies",
+    for name in ("bin", "home", "tmp", "repo/scripts/lib", "repo/skills", "repo/policies",
                  "repo/dashboard/dist", "release/bin", "target"):
         (root / name).mkdir(parents=True)
     scripts = root / "repo/scripts"
     (scripts / script).write_text(source + '\nprintf complete > "$DRY_ROOT/completed"\n')
     (scripts / "_defaults.sh").write_text(DEFAULTS)
-    helper = "_deploy_policy_generation.sh"
-    (scripts / helper).write_text((repo / "scripts" / helper).read_text())
+    for helper in ("_deploy_policy_generation.sh", "lib/deploy_allow_degraded.sh"):
+        (scripts / helper).write_text((repo / "scripts" / helper).read_text())
     (root / "shell-env").write_text(SHELL_ENV)
     (root / "repo/dashboard/dist/index.html").write_text("dry dashboard")
     token_source = (repo / "scripts/build_token.py").read_text()

@@ -116,9 +116,10 @@ ssh() {
 # peer HOME of the running case.
 write_peer_checkout() {
     local dir="$1"
-    mkdir -p "$dir/scripts"
+    mkdir -p "$dir/scripts/lib"
     # The resolution block sources the deploy helpers next to the script.
     cp "$REPO_ROOT"/scripts/_*.sh "$dir/scripts/"
+    cp "$REPO_ROOT/scripts/lib/deploy_allow_degraded.sh" "$dir/scripts/lib/"
     {
         printf '#!/usr/bin/env bash\nset -euo pipefail\n'
         printf '%s\n' "$resolution_block"

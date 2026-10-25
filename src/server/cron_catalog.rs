@@ -23,7 +23,7 @@ const TIER_DEFINITIONS: &[(&str, &str, i64, &str)] = &[
     ),
     (
         "tick:5min",
-        "onTick5min — [R][B][F][G][H][M][O] non-critical reconciliation + idle session cleanup",
+        "onTick5min — [R][B][F][G][H][O] non-critical reconciliation + idle session cleanup",
         300_000,
         "5min",
     ),

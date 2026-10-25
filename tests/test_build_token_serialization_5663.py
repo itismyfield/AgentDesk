@@ -24,6 +24,7 @@ import functools
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -973,6 +974,8 @@ class NestedHolderTests(TokenTestCase):
             "deploy.lock", "a.started", "a.go", "a.waiting", "a.reached", "b.built"))
         lock.touch()
         scenario = self.tmp / "deploy-release.sh"  # beside the isolated build_token.py
+        (scenario.parent / "lib").mkdir(exist_ok=True)
+        shutil.copy2(SCRIPTS / "lib/deploy_allow_degraded.sh", scenario.parent / "lib")
         scenario.write_text(
             self.deploy_head('touch "$A_STARTED"\nuntil [ -e "$A_GO" ]; do sleep 0.05; done\n')
             + '"$TEST_PY" -c "$LOCK_WAIT" "$DEPLOY_LOCK" 20 "$A_WAITING" "$A_REACHED"\n')
@@ -1014,6 +1017,8 @@ class NestedHolderTests(TokenTestCase):
         guard_dir.mkdir()
         invoked, passed = guard_dir / "invoked", guard_dir / "passed"
         script = guard_dir / "deploy-release.sh"
+        (script.parent / "lib").mkdir()
+        shutil.copy2(SCRIPTS / "lib/deploy_allow_degraded.sh", script.parent / "lib")
         script.write_text(self.deploy_head() + f'touch "{passed}"\n')
         self.assertEqual(bt.EXIT_NESTED, NESTED_STATUS, "the guard below matches the literal")
         for verdict, marked, want in ((73, True, 73), (1, True, 0), (0, True, 0), (73, False, 0)):

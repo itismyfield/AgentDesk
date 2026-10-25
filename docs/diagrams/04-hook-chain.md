@@ -294,7 +294,7 @@ group Every 300s (count % 10 == 0)
   Engine -> JS : Call handlers in priority order
   JS -> P100 : timeouts.onTick5min()
   activate P100
-  P100 -> DB : Non-critical reconciliation\n[R][B][F][G][H][M][O],\nidle session cleanup
+  P100 -> DB : Non-critical reconciliation\n[R][B][F][G][H][O],\nidle session cleanup
   P100 --> JS
   deactivate P100
   JS --> Engine
