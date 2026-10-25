@@ -21,17 +21,17 @@ Every entry uses the common §8 schema: `feature`, `canonical_modules`,
 - canonical_modules: PG pool via `state.pg_pool_ref()` and per-domain PG
   query modules.
 - legacy_modules: removed per-route shim functions historically named
-  `legacy_db`:
-  - `src/server/routes/onboarding.rs:17`
-  - `src/server/routes/kanban.rs:16`
-  - `src/server/routes/review_verdict/verdict_route.rs:8`
-  - `src/services/review_decision/repo_card.rs:38` (the
+  `legacy_db` (all gone; the files below no longer define them):
+  - `src/server/routes/onboarding.rs`
+  - `src/server/routes/kanban.rs`
+  - `src/server/routes/review_verdict/verdict_route.rs`
+  - `src/services/review_decision/repo_card.rs` (the
     `review_state_db` stub — always `None` since #1384; relocated from the
     former `decision_route.rs` monolith in the #3038 slice-1 split and S1
     service relocation)
-  - Plus the engine-side definition `src/engine/mod.rs:436`:
+  - Plus the engine-side definition in `src/engine/mod.rs`:
     `pub(crate) fn legacy_db(&self) -> Option<&Db>`.
-  - Server-side reads at `src/server/mod.rs:158`, `:365`, `:376`.
+  - Server-side reads in `src/server/mod.rs`.
 - do_not_edit_without_migration_plan: do not add a new retired DB shim. New
   routes use `state.pg_pool_ref()`.
 - active_callsite_coverage: tracked historically by #1238/#1239 and completed
@@ -39,7 +39,9 @@ Every entry uses the common §8 schema: `feature`, `canonical_modules`,
 - invariants: route handlers preserve the response shape captured during the
   migration window while using PostgreSQL as the only live backend.
 - allowed_changes: historical note updates only.
-- tests: PG-only test suite under `src/integration_tests/postgres_only/*`.
+- tests: historical — the PG-only suite under
+  `src/integration_tests/postgres_only/` (removed) went away with
+  `src/integration_tests/` (removed).
 - related_issues: #843, #1237, #1238, #1239.
 
 ## Retired SQLite Fallback Branches in Routes
@@ -64,13 +66,18 @@ Every entry uses the common §8 schema: `feature`, `canonical_modules`,
 
 - feature: `tmux_watcher / orphan_recovery`
 - canonical_modules:
-  - Route: `src/server/routes/health_api.rs:684`.
-  - Body parsing and handler: `src/services/discord/health.rs:2449`,
-    `:2509`.
-  - Inflight state writer: `src/services/discord/inflight.rs:415`,
-    constants and gates at `:107`, `:952`, `:964`.
-  - Tmux-side adoption notes: `src/services/discord/tmux.rs:5059`,
-    `:5456`, `:5458`.
+  - Route: `src/server/routes/health_api.rs` (`rebind_inflight_handler`),
+    registered in `src/server/routes/domains/runtime.rs`.
+  - Body parsing and handler: `src/services/discord/health/rebind_request.rs`
+    (`parse_rebind_body`) and `src/services/discord/health.rs`
+    (`rebind_inflight`).
+  - Inflight state writer and adoption gates:
+    `src/services/discord/recovery_engine/manual_rebind/live_bridge_guard.rs`
+    (`rebind_inflight_for_channel`) and
+    `src/services/discord/recovery_engine/manual_rebind/adoption.rs`
+    (`ensure_synthetic_rebind_allowed`, `rebind_initial_offset_with_floor`).
+  - Synthetic-row reaping: `src/services/discord/inflight/rebind_reap.rs`
+    (`reap_abandoned_rebind_origin_locked`).
 - legacy_modules: none — this route is the canonical orphan-recovery entry
   point per #896.
 - do_not_edit_without_migration_plan: it is NOT legacy. It is listed here

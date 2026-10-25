@@ -23,15 +23,14 @@ use crate::services::tui_o::writer::transition_cleanup::{
     Judged, Request, Termination, Unclear, Verdict, judge,
 };
 use crate::services::tui_o::writer::transition_port::{
-    Context, Envelope, Hold, Hop, Kind, Operation, Outcome, Receiver, Refused, Reply, Wall,
+    Context, Envelope, Hold, Hop, INSPECT_DEADLINE as DEADLINE, Kind, Operation, Outcome, Receiver,
+    Refused, Reply, Wall,
 };
 
 /// Candidates one inspection probes; automatic jobs inspect every pending source.
 const CANDIDATES: usize = 64;
 /// Sources one worker probes before the actor takes its results.
 const BATCH: usize = 4;
-/// Inspections hold every source not probed twice by this deadline.
-const DEADLINE: Duration = Duration::from_secs(60);
 /// Prefix bytes one inspection may hash: two probes of every candidate at 32 MiB each.
 const HASH_BUDGET: u64 = 2 * CANDIDATES as u64 * (32 << 20);
 
@@ -45,8 +44,17 @@ pub(super) struct Transitions {
 }
 
 impl Transitions {
+    #[cfg(all(test, unix))]
     pub(super) fn has_job(&self) -> bool {
         self.job.is_some()
+    }
+
+    pub(super) fn has_apply_job(&self) -> bool {
+        #[cfg(test)]
+        if super::super::deliver::bo_mutant("inspect_rescope") {
+            return self.job.is_some();
+        }
+        self.job.as_ref().is_some_and(|job| job.apply)
     }
     pub(super) fn new(receiver: Option<Receiver>, stop: watch::Receiver<bool>) -> Self {
         let job = None;
@@ -79,7 +87,7 @@ pub(super) struct Job {
     apply: bool,
     pub(super) automatic: Option<super::super::transition_port::Idle>,
     /// The scope an Apply was admitted for, never replaced while it runs.
-    scope: Option<ScopeApproval>,
+    pub(super) scope: Option<ScopeApproval>,
     /// The host's stop, read with the actor's before each retirement write.
     stopping: watch::Receiver<bool>,
     context: Context,
@@ -130,6 +138,7 @@ impl Job {
 fn conflicts<'a>(mut cursors: impl Iterator<Item = &'a Cursor>, request: &Request) -> bool {
     let ended = match &request.termination {
         Some(Termination::Confirmed(end)) => Some(end),
+        Some(Termination::Retention(claim)) => Some(&claim.end),
         _ => None,
     };
     cursors.any(|cursor| {
@@ -138,7 +147,12 @@ fn conflicts<'a>(mut cursors: impl Iterator<Item = &'a Cursor>, request: &Reques
                 && (done.operator != request.operator
                     || done.reason != request.reason
                     || done.cutoff != request.cutoff
-                    || Some(&done.ended) != ended)
+                    || Some(&done.ended) != ended
+                    || done.retention.as_ref().map(|evidence| &evidence.claim)
+                        != match &request.termination {
+                            Some(Termination::Retention(claim)) => Some(claim.as_ref()),
+                            _ => None,
+                        })
         })
     })
 }
@@ -169,6 +183,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let suspended = suspended
             && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-poll-transition");
         if suspended {
+            let discard = true;
+            #[cfg(test)]
+            let discard = discard && !super::super::deliver::bo_mutant("inspect_job_cleanup");
+            if discard && let Some(job) = self.transitions.job.take() {
+                debug_assert!(!job.apply);
+                let _ = job
+                    .reply
+                    .send(Reply::refused(&job.request.job_id, Refused::CodexDeferred));
+            }
             if let Some(receiver) = &mut self.transitions.receiver
                 && let Ok(Some(envelope)) = receiver.try_next()
             {
@@ -242,7 +265,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 Some(Refused::JobConflict)
             }
             Some(_) => Some(Refused::Busy),
-            None if self.sources.transition_provider() == ShadowProvider::Codex => {
+            None if apply
+                && self.sources.transition_provider() == ShadowProvider::Codex
+                && (automatic.is_none()
+                    || !matches!(request.termination, Some(Termination::Retention(_)))) =>
+            {
                 Some(Refused::CodexDeferred)
             }
             None if conflicts(self.writer.store().cursors(), &request) => {
@@ -458,12 +485,21 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let (send, worker) = mpsc::channel();
         let wall = Arc::clone(&job.wall);
         let automatic = job.automatic.is_some();
+        let provider = self.sources.transition_provider();
+        let root = match job.common.codex() {
+            Some(super::super::codex_snapshot::Observation::Complete(snapshot)) => {
+                snapshot.context.provider_root.clone()
+            }
+            _ => None,
+        };
         #[cfg(test)]
         let done = test_hooks::worker_started();
         tokio::task::spawn_blocking(move || {
             let seen = batch.into_iter().map(|(key, cursor)| {
                 let age = automatic
-                    .then(|| super::automatic_age::last_dialogue(&cursor))
+                    .then(|| {
+                        super::automatic_age::last_dialogue_for(&cursor, provider, root.as_deref())
+                    })
                     .flatten();
                 (key, observe(&cursor, wall()), age)
             });
@@ -483,18 +519,67 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         if let Err(reason) = super::automatic::ready(job, key).await {
             return Outcome::Held(Hold::Policy(reason));
         }
+        let fresh = if self.sources.transition_provider() == ShadowProvider::Codex {
+            let Some(observer) = &job.context.codex else {
+                return Outcome::Held(Hold::InspectScopeChanged);
+            };
+            #[cfg(not(test))]
+            let skip = false;
+            #[cfg(test)]
+            let skip = super::codex_retention::mutant("skip_refresh");
+            let refreshed = if skip {
+                Ok(Arc::clone(observer))
+            } else {
+                observer.refresh().await
+            };
+            let Ok(observer) = refreshed else {
+                return Outcome::Held(Hold::InspectScopeChanged);
+            };
+            Some(Context {
+                tmux: job.context.tmux.clone(),
+                nonce: job.context.nonce.clone(),
+                lock: Arc::clone(&job.context.lock),
+                codex: Some(observer),
+            })
+        } else {
+            None
+        };
+        let legacy = fresh
+            .as_ref()
+            .map(|_| self.sources.legacy_candidates(&mut self.writer));
         let tmux = job.context.tmux.clone();
-        let admitted =
-            try_with_tmux_source_authority(&tmux, |_| self.retire_admitted(job, key, unsettled));
+        let admitted = try_with_tmux_source_authority(&tmux, |authority| {
+            self.retire_admitted(
+                job,
+                key,
+                unsettled,
+                authority,
+                fresh.as_ref().unwrap_or(&job.context),
+                legacy,
+            )
+        });
         admitted.unwrap_or(Outcome::Held(Hold::SourceBusy))
     }
 
-    fn retire_admitted(&mut self, job: &Job, key: &str, unsettled: &Unsettled) -> Outcome {
+    fn retire_admitted(
+        &mut self,
+        job: &Job,
+        key: &str,
+        unsettled: &Unsettled,
+        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+        context: &Context,
+        prepared_legacy: Option<super::transition_snapshot::LegacyHops>,
+    ) -> Outcome {
         let Some(probe) = job.probes.get(key) else {
             return Outcome::Unchanged;
         };
-        let Ok((snapshot, common)) = self.build_snapshot(&job.context, &job.gate, &job.probes)
-        else {
+        let Ok((snapshot, common)) = self.build_snapshot_under(
+            context,
+            &job.gate,
+            &job.probes,
+            Some(authority),
+            prepared_legacy,
+        ) else {
             return Outcome::Held(Hold::Stale);
         };
         let approved = |scope: &ScopeApproval| {
@@ -512,12 +597,19 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return Outcome::Held(Hold::Stale);
         }
         let mut judged = judge(&snapshot, &job.request).hops.into_iter();
-        let audit = match judged.find(|hop| hop.key == key).map(|hop| hop.verdict) {
+        let mut audit = match judged.find(|hop| hop.key == key).map(|hop| hop.verdict) {
             Some(Verdict::AlreadyDone) => return Outcome::AlreadyDone,
             Some(Verdict::Eligible(audit)) if cursor.transition_cleanup.is_none() => *audit,
             Some(Verdict::Eligible(_)) => return Outcome::Held(Hold::PriorCleanup),
             _ => return Outcome::Unchanged,
         };
+        if snapshot.provider == ShadowProvider::Codex {
+            let Some(retention) = super::automatic::codex_evidence(job, key, &snapshot, cursor)
+            else {
+                return Outcome::Held(Hold::InspectScopeChanged);
+            };
+            audit.retention = Some(retention);
+        }
         // A stop raised while this poll awaited delivery is read again here, before the write; the
         // host's is read too, as its own stop may not have reached the actor yet.
         if *self.transitions.stop.borrow() || *job.stopping.borrow() {
@@ -526,7 +618,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         #[cfg(test)]
         test_hooks::at_retire();
         unsettled.send_replace(None);
-        match self.writer.store().retire_transition(cursor, audit) {
+        match self
+            .writer
+            .store()
+            .retire_transition(cursor, audit, snapshot.provider)
+        {
             Ok(()) => {}
             Err(StoreError::Rejected(_)) => return Outcome::Held(Hold::Stale),
             Err(error) => {
@@ -611,6 +707,24 @@ pub(crate) mod test_hooks {
     //! Lets a test wait for the probe workers, count the snapshots, and look in just before a
     //! retirement is written.
     use std::cell::{Cell, RefCell};
+    thread_local! {
+        static SNAPSHOT_AUTHORITY: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn snapshot_authority_held() -> bool {
+        SNAPSHOT_AUTHORITY.with(Cell::get)
+    }
+
+    pub(crate) fn snapshot_authority_scope(held: bool) -> impl Drop {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                SNAPSHOT_AUTHORITY.with(|slot| slot.set(self.0));
+            }
+        }
+        Restore(SNAPSHOT_AUTHORITY.with(|slot| slot.replace(slot.get() || held)))
+    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;

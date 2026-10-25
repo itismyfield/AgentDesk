@@ -465,6 +465,8 @@ pub(crate) enum Commands {
     },
     /// Build + deploy dev + promote to release
     Deploy,
+    /// Print this binary's build switches as JSON (read by deploy scripts)
+    BuildInfo,
     /// List agents and their status
     Agents,
     /// Show turn/session diagnostics for an agent ID or Discord channel ID
@@ -1127,6 +1129,7 @@ mod tests {
             "query",
             "phase",
             "deploy",
+            "build-info",
             "agents",
             "diag",
             "config",

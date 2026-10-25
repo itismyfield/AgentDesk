@@ -18,13 +18,13 @@ use super::{health, mailbox};
 
 mod api_exposure;
 mod config_dir_checks;
+mod configuration_audit;
 use crate::cli::dcserver;
 use crate::config;
 use crate::services::operator_connectors as connectors;
 use crate::services::provider::{ProviderKind, ProviderRuntimeProbe};
 use serde::Serialize;
 use serde_json::{Value, json};
-
 #[derive(Clone, Debug)]
 pub(crate) struct DoctorOptions {
     pub(crate) fix: bool,

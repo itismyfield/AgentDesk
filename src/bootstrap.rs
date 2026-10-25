@@ -137,6 +137,7 @@ pub(crate) async fn prepare_dcserver_boot(config: &crate::config::Config, pool: 
         eprintln!("  ✖ Failed to install boot snapshots: {error:#}");
         std::process::exit(1);
     }
+    crate::cli::dcserver::startup::spawn_skill_manifest_audit(config, pool);
 }
 
 #[cfg(all(test, unix))]

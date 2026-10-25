@@ -178,8 +178,20 @@ async fn o_delegated_single_message_footer_completion_sends_no_body() {
 
 /// A footer with no assistant body to show (no target, empty or chrome-only text, or a clean mirror
 /// body needing no edit) leaves a pending adoption; the one that shows the body ends it first.
-#[tokio::test(flavor = "current_thread")]
-async fn only_a_footer_that_rewrites_a_body_ends_a_pending_adoption() {
+#[test]
+fn only_a_footer_that_rewrites_a_body_ends_a_pending_adoption() {
+    // Keep concurrent fixture resets from erasing the binding while the async body runs.
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(pending_adoption_footer_case());
+}
+
+async fn pending_adoption_footer_case() {
     use super::single_message_footer::WatcherCompletionFooterTerminalTarget;
     use crate::services::discord::recovery_engine::o_cut_recorder::start_watching;
     use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};

@@ -18,8 +18,8 @@ use serenity::{ChannelId, MessageId, UserId};
 use tokio::sync::Notify;
 
 pub(in crate::services::discord) const CHANNEL_ID: u64 = 940_487_400_000_001;
-pub(super) const USER_ID: u64 = 940_487_400_000_002;
-pub(super) const BOT_ID: u64 = 940_487_400_000_003;
+pub(in crate::services::discord) const USER_ID: u64 = 940_487_400_000_002;
+pub(in crate::services::discord) const BOT_ID: u64 = 940_487_400_000_003;
 const FIRST_RESPONSE_MESSAGE_ID: u64 = 940_487_400_000_021;
 
 /// Minted message id to `(reply_to, latest content)`.
@@ -75,6 +75,10 @@ pub(in crate::services::discord) struct DiscordMockState {
     /// Every message the mock minted, in id order, as `(reply_to, latest content)`.
     pub(super) messages: Arc<Mutex<MintedMessages>>,
     pub(super) channel_posts: Arc<Mutex<Vec<(u64, String)>>>,
+    /// Every message id a `DELETE` named, in order.
+    deleted: Arc<Mutex<Vec<u64>>>,
+    /// Messages a single-message `GET` answers until deleted; any other id stays unhandled.
+    seeded: Arc<Mutex<std::collections::HashMap<u64, String>>>,
     extra_channels: Arc<Mutex<std::collections::HashSet<u64>>>,
     /// Guild threads the mock answers for, by thread id, with their parent channel.
     threads: Arc<Mutex<std::collections::HashMap<u64, u64>>>,
@@ -106,6 +110,8 @@ impl DiscordMockState {
             release_held_history: Arc::new(Notify::new()),
             messages: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             channel_posts: Arc::new(Mutex::new(Vec::new())),
+            deleted: Arc::new(Mutex::new(Vec::new())),
+            seeded: Arc::new(Mutex::new(std::collections::HashMap::new())),
             extra_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
             threads: Arc::new(Mutex::new(std::collections::HashMap::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
@@ -122,6 +128,17 @@ impl DiscordMockState {
             .map(|(_, text)| text)
             .chain(minted.into_values().map(|(_, text)| text))
             .collect()
+    }
+
+    /// A message the bot posted before, as a single-message `GET` answers it.
+    pub(in crate::services::discord) fn seed_message(&self, id: u64, content: &str) {
+        let mut seeded = self.seeded.lock().expect("seeded");
+        seeded.insert(id, content.to_string());
+    }
+
+    /// Every message id a `DELETE` named, in order.
+    pub(in crate::services::discord) fn deleted(&self) -> Vec<u64> {
+        self.deleted.lock().expect("deleted").clone()
     }
 
     pub(in crate::services::discord) fn allow_channel(&self, channel_id: u64) {
@@ -157,7 +174,7 @@ pub(in crate::services::discord::tui_prompt_relay) struct HistoryQuery {
     pub(in crate::services::discord::tui_prompt_relay) after: Option<u64>,
 }
 
-fn discord_user_json(id: u64, name: &str, bot: bool) -> Value {
+pub(in crate::services::discord) fn discord_user_json(id: u64, name: &str, bot: bool) -> Value {
     json!({
         "id": id.to_string(),
         "username": name,
@@ -244,7 +261,11 @@ pub(super) fn discord_message_json(id: u64, content: &str) -> Value {
 
 /// A history entry as `catch_up` phase 2 sees it: bot posts anchor the "last
 /// answered" boundary, user posts are the unanswered candidates ahead of it.
-pub(super) fn history_message_json(id: u64, content: &str, bot: bool) -> Value {
+pub(in crate::services::discord) fn history_message_json(
+    id: u64,
+    content: &str,
+    bot: bool,
+) -> Value {
     let mut message = discord_message_json(id, content);
     if !bot {
         message["author"] = discord_user_json(USER_ID, "queue-user", false);
@@ -531,8 +552,28 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
     {
         return StatusCode::NO_CONTENT.into_response();
     }
+    let message_id = path
+        .rsplit('/')
+        .next()
+        .and_then(|id| id.parse::<u64>().ok());
     if method == Method::DELETE && channel_allowed && path.contains("/messages/") {
+        state.deleted.lock().expect("deleted").extend(message_id);
         return StatusCode::NO_CONTENT.into_response();
+    }
+    // A seeded message reads back until it is deleted.
+    let seeded = message_id.and_then(|id| state.seeded.lock().expect("seeded").get(&id).cloned());
+    if method == Method::GET
+        && channel_allowed
+        && path.contains("/messages/")
+        && let (Some(id), Some(content)) = (message_id, seeded)
+    {
+        if !state.deleted.lock().expect("deleted").contains(&id) {
+            let mut message = discord_message_json(id, &content);
+            message["channel_id"] = json!(route_channel.unwrap_or(CHANNEL_ID).to_string());
+            return Json(message).into_response();
+        }
+        let missing = json!({"message": "Unknown Message", "code": 10008});
+        return (StatusCode::NOT_FOUND, Json(missing)).into_response();
     }
     // `catch_up` resolves the bot identity here and skips every candidate whose
     // author matches it, so `/users/@me` must not answer with the human.
@@ -647,6 +688,14 @@ pub(in crate::services::discord) async fn serenity_context(
             .ratelimiter_disabled(true)
             .build(),
     );
+    serenity_context_over(http, gateway_url).await
+}
+
+/// A real context whose REST calls go through `http` and whose shard dials `gateway_url`.
+pub(in crate::services::discord) async fn serenity_context_over(
+    http: Arc<serenity::Http>,
+    gateway_url: String,
+) -> serenity::Context {
     let cache = Arc::new(Cache::new());
     let mut ready: serenity::ReadyEvent = serde_json::from_value(json!({
         "v": 10,

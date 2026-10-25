@@ -1294,7 +1294,9 @@ pub(crate) async fn resolve_card_worktree(
         return Ok(None);
     };
     Ok(
-        crate::services::platform::find_worktree_for_issue(&repo_dir, issue_number)
+        crate::services::git::find_worktree_for_issue_async(repo_dir, issue_number)
+            .await
+            .map_err(anyhow::Error::msg)?
             .map(|wt| (wt.path, wt.branch, wt.commit)),
     )
 }
@@ -1316,11 +1318,9 @@ pub(crate) async fn ensure_card_worktree(
     else {
         return Ok(None);
     };
-    let ensured =
-        crate::services::platform::shell::ensure_worktree_for_issue(&repo_dir, issue_number)
-            .map_err(|error| {
-                anyhow::anyhow!("Cannot create worktree for card {card_id}: {error}")
-            })?;
+    let ensured = crate::services::git::ensure_worktree_for_issue_async(repo_dir, issue_number)
+        .await
+        .map_err(|error| anyhow::anyhow!("Cannot create worktree for card {card_id}: {error}"))?;
     Ok(Some((
         ensured.path,
         ensured.branch,

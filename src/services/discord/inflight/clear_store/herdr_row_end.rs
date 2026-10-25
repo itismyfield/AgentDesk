@@ -4,11 +4,13 @@ use super::*;
 
 impl InflightTurnState {
     /// Clears this row only while the locked fresh row is still this episode from a prior process,
-    /// path-less and without kind or receipt; a planned drain restart does not keep it.
+    /// path-less and without kind or receipt; a planned drain restart does not keep it. A `silent`
+    /// clear, with no notice sent, also needs O to still own the output under the row's lock.
     pub(in crate::services::discord) fn clear_restarted_herdr_row(
         &self,
         provider: &ProviderKind,
         current_generation: u64,
+        silent: bool,
     ) -> GuardedClearOutcome {
         let Some(root) = inflight_runtime_root() else {
             return GuardedClearOutcome::Missing;
@@ -45,6 +47,9 @@ impl InflightTurnState {
         {
             return GuardedClearOutcome::UserMsgMismatch;
         }
+        if silent && !o_still_owns(&fresh) {
+            return GuardedClearOutcome::UserMsgMismatch;
+        }
         // Pending circuit evidence outlives the row, as the plain clear keeps it.
         if handoff_before_discard_locked(&lock).is_err() {
             return GuardedClearOutcome::IoError;
@@ -58,6 +63,12 @@ impl InflightTurnState {
         );
         super::remove_row(&path).unwrap_or(GuardedClearOutcome::IoError)
     }
+}
+
+/// A silent clear never falls back to a notice: an O owner that changed or does not read keeps it.
+fn o_still_owns(fresh: &InflightTurnState) -> bool {
+    let peek = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel;
+    peek(fresh.channel_id, fresh.runtime_kind) == Ok(true)
 }
 
 /// The receipt recheck, which only a test build's mutant turns off.

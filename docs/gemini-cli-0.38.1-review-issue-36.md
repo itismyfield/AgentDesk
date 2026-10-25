@@ -35,7 +35,7 @@ Evidence:
 
 AgentDesk's Gemini path is intentionally conservative:
 
-- `src/services/discord/router/message_handler.rs:1511` through `src/services/discord/router/message_handler.rs:1524` call `gemini::execute_command_streaming(...)` with a model override only.
+- `src/services/discord/router/message_handler/provider_dispatch.rs` (`execute`) calls `gemini::execute_command_streaming(...)` with a model override only.
 - `src/services/gemini.rs:363` through `src/services/gemini.rs:365` explicitly reject remote-profile execution.
 - `src/services/gemini.rs:367` through `src/services/gemini.rs:382` normalize and log the runtime resume selector before execution.
 - `src/services/gemini.rs:1081` through `src/services/gemini.rs:1120` coerce UUID-like session identifiers to `latest` instead of passing them through as exact resume selectors.

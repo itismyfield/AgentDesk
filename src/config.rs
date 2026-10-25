@@ -2145,18 +2145,17 @@ pub fn loopback() -> String {
     ServerConfig::loopback()
 }
 
-/// Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release
+mod runtime_root_guard;
+
+/// Canonical runtime root; tests default to a process-local temporary directory.
 /// All code that needs the AgentDesk root directory MUST call this function
 /// instead of reimplementing the resolution logic.
 pub fn runtime_root() -> Option<std::path::PathBuf> {
-    if let Ok(override_root) = std::env::var("AGENTDESK_ROOT_DIR") {
-        let trimmed = override_root.trim();
-        if !trimmed.is_empty() {
-            return Some(std::path::PathBuf::from(trimmed));
-        }
-    }
-    dirs::home_dir().map(|h| h.join(".adk").join("release"))
+    runtime_root_guard::resolve(dirs::home_dir)
 }
+
+#[cfg(test)]
+mod runtime_root_tests;
 
 impl Default for PoliciesConfig {
     fn default() -> Self {
@@ -3000,11 +2999,9 @@ pub fn load_graceful() -> Config {
 /// the number of independent cascades that are possible.
 ///
 /// The convention here is that every acquisition site recovers the guard
-/// rather than propagating the `PoisonError`. Of the 290 direct
-/// `shared_test_env_lock().lock()` sites, 288 spell it
-/// `unwrap_or_else(|poison| poison.into_inner())` literally; the remaining two
-/// recover identically in a different syntax -- `placeholder_live_events`
-/// matches on `Err(poisoned) => poisoned.into_inner()`, and
+/// rather than propagating the `PoisonError`; direct `shared_test_env_lock().lock()`
+/// sites pass an `into_inner` recovery to `unwrap_or_else`, except that
+/// `placeholder_live_events` matches on `Err(poisoned) => poisoned.into_inner()`, and
 /// `turn_orchestrator::SharedEnvLock::lock` is a forwarding shim whose single
 /// caller `lock_test_env()` applies the `unwrap_or_else`. The canonical
 /// `test_env_lock::acquire_shared_test_env_lock` path recovers too.

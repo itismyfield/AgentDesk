@@ -70,6 +70,7 @@ mod environment_tests {
         }
     }
 }
+mod a1_stash_tests;
 mod hold_tests;
 mod paste_footer_tests;
 
@@ -138,12 +139,22 @@ pub(crate) const FAKE_TUI: &str = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
 cursor() {
-  tail -n 1 "$d/composer" | wc -m | tr -d ' ' > "$d/cursor_x"
-  wc -l < "$d/composer" | tr -d ' ' > "$d/cursor_y"
+  if [ -f "$d/chip" ]; then
+    wc -m < "$d/chip" | tr -d ' ' > "$d/cursor_x"; echo 0 > "$d/cursor_y"
+  else
+    tail -n 1 "$d/composer" | wc -m | tr -d ' ' > "$d/cursor_x"
+    wc -l < "$d/composer" | tr -d ' ' > "$d/cursor_y"
+  fi
+}
+restore() {
+  mv "$d/stash" "$d/composer"
+  if [ -f "$d/stash-chip" ]; then mv "$d/stash-chip" "$d/chip"; else rm -f "$d/chip"; fi
 }
 cs() {
-  if [ -s "$d/composer" ]; then mv "$d/composer" "$d/stash"; : > "$d/composer"
-  elif [ -f "$d/stash" ]; then mv "$d/stash" "$d/composer"; fi
+  if [ -s "$d/composer" ]; then
+    mv "$d/composer" "$d/stash"; : > "$d/composer"
+    if [ -f "$d/chip" ]; then mv "$d/chip" "$d/stash-chip"; else rm -f "$d/stash-chip"; fi
+  elif [ -f "$d/stash" ]; then restore; fi
 }
 enter() {
   [ -s "$d/composer" ] || return 0
@@ -151,12 +162,17 @@ enter() {
   awk 'BEGIN { printf "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\"" }
     { gsub(/"/, "\\\""); printf "%s%s", (NR > 1 ? "\\n" : ""), $0 } END { print "\"}" }' "$d/composer" >> '@T@'
   : > "$d/composer"
+  rm -f "$d/chip"
   [ -f "$d/stash" ] || return 0
-  if [ -f "$d/restore_after" ]; then cp "$d/restore_after" "$d/restore_in"; else mv "$d/stash" "$d/composer"; fi
+  if [ -f "$d/restore_after" ]; then cp "$d/restore_after" "$d/restore_in"; else restore; fi
 }
 paste() {
-  if [ -f "$d/fold" ]; then printf '[Pasted text #1 +%s lines]' "$(wc -l < "$d/buffer" | tr -d ' ')" >> "$d/composer"
-  else cat "$d/buffer" >> "$d/composer"; fi
+  cat "$d/buffer" >> "$d/composer"
+  if [ -f "$d/fold" ]; then
+    lines=$(wc -l < "$d/buffer" | tr -d ' ')
+    if [ "$lines" = 0 ]; then printf '[Pasted text #1]' > "$d/chip"
+    else printf '[Pasted text #1 +%s lines]' "$lines" > "$d/chip"; fi
+  fi
 }
 apply() {
   [ "$1" != Enter ] || [ ! -f "$d/human.before-Enter" ] || . "$d/human.before-Enter"
@@ -170,12 +186,16 @@ apply() {
 }
 attach() { echo 1 > "$d/attached"; echo "$1" > "$d/last"; }
 detach() { echo 0 > "$d/attached"; }
-type_text() { printf '%s' "$1" >> "$d/composer"; cursor; }
+type_text() { printf '%s' "$1" >> "$d/composer"; [ ! -f "$d/chip" ] || printf '%s' "$1" >> "$d/chip"; cursor; }
 render() {
   cat "$d/head"
-  if [ -f "$d/status" ]; then cat "$d/status"; elif [ -f "$d/stash" ]; then cat "$d/stashrow"; else echo; fi
+  if [ -f "$d/status" ]; then cat "$d/status"
+  elif [ -f "$d/stash" ]; then cat "$d/stashrow"
+  elif [ -f "$d/effortrow" ]; then cat "$d/effortrow"; else echo; fi
   cat "$d/border"
-  if [ -s "$d/composer" ]; then awk -v p="$(cat "$d/prompt")" 'NR==1{print p $0; next} {print ($0 == "" ? "" : "  " $0)}' "$d/composer"
+  if [ -s "$d/composer" ]; then
+    if [ -f "$d/chip" ]; then printf '%s%s\n' "$(cat "$d/prompt")" "$(cat "$d/chip")"
+    else awk -v p="$(cat "$d/prompt")" 'NR==1{print p $0; next} {print ($0 == "" ? "" : "  " $0)}' "$d/composer"; fi
   elif [ -s "$d/placeholder" ] && ! grep -q 'esc to interrupt' "$d/head"; then
     printf '%s\033[2m%s\033[0m\n' "$(cat "$d/prompt")" "$(cat "$d/placeholder")"
   else cat "$d/prompt"; echo; fi
@@ -193,7 +213,7 @@ capture-pane)
   fi
   if [ -f "$d/restore_in" ]; then
     k=$(cat "$d/restore_in")
-    if [ "$k" = 0 ]; then mv "$d/stash" "$d/composer"; rm "$d/restore_in"
+    if [ "$k" = 0 ]; then restore; rm "$d/restore_in"
     elif [ "$k" != never ]; then echo $((k-1)) > "$d/restore_in"; fi
   fi
   case " $* " in *" -e "*) render ;; *) render | sed "s/$(printf '\033')\[[0-9;]*m//g" ;; esac
@@ -894,16 +914,18 @@ fn a_second_input_waits_out_the_whole_stash_transaction() {
     assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
 }
 
-/// Only a frame Claude shows unfolded and unwrapped may displace a draft.
 #[test]
-fn a_frame_that_would_fold_or_wrap_leaves_the_draft_alone() {
+fn a_frame_that_folds_or_wraps_stashes_and_restores_the_draft() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     type Setup = fn(&Tui);
     let cases: [(&str, &str, Setup); 3] = [
-        ("three more lines", "one\ntwo\nthree", |_| {}),
+        ("three more lines", "one\ntwo\nthree", |tui| {
+            tui.put("fold", "")
+        }),
         ("wraps in a narrow pane", TEXT, |tui| tui.put("width", "30")),
         ("folds in a short pane", "one\ntwo", |tui| {
-            tui.put("height", "11")
+            tui.put("height", "11");
+            tui.put("fold", "");
         }),
     ];
     for (name, text, setup) in cases {
@@ -912,20 +934,21 @@ fn a_frame_that_would_fold_or_wrap_leaves_the_draft_alone() {
         let got = tui.run_text(text, &FAST);
         assert_eq!(
             got,
-            report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged),
+            report(Outcome::Injected, DraftState::RestoredObserved),
             "{name}"
         );
-        assert!(tui.applied().is_empty(), "{name}");
+        assert_eq!(tui.applied(), ["C-s", "paste", "Enter"], "{name}");
         assert_eq!(tui.drafts(), ("human draft A".to_string(), None), "{name}");
+        assert!(tui.taken(), "{name}");
     }
-    // Claude folds after all: a placeholder of the right shape is not proof, so no Enter.
+    // A zero-LF Rows plan cannot own a chip even when it was pasted in this attempt.
     let tui = Tui::new("human draft A");
     tui.put("fold", "");
     let unowned = Outcome::Unconfirmed(Unconfirmed::DraftNotOwned);
     assert_eq!(tui.run(), report(unowned, DraftState::Unknown));
     assert_eq!(tui.applied(), ["C-s", "paste"]);
-    let folded = format!("[Pasted text #1 +{} lines]", framed().matches('\n').count());
-    assert_eq!(tui.drafts(), (folded, Some("human draft A".to_string())));
+    assert_eq!(tui.drafts(), (framed(), Some("human draft A".to_string())));
+    assert_eq!(tui.get("chip").as_deref(), Some("[Pasted text #1]"));
 }
 
 #[test]

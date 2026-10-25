@@ -17,6 +17,18 @@ use std::time::Duration;
 
 const STALE: &str = "stale-resume";
 
+fn assert_retry_context_eq(actual: Option<&str>, expected: Option<&str>) {
+    use crate::services::discord::router::response_format::retry_prompt_context::RetryPromptContext;
+    let actual = RetryPromptContext::restore(actual.map(str::to_owned));
+    let expected = RetryPromptContext::restore(expected.map(str::to_owned));
+    assert_eq!(actual.raw, expected.raw, "original reply custody");
+    assert_eq!(
+        actual.selected, expected.selected,
+        "selected prelude custody"
+    );
+    assert_eq!(actual.may_select(), expected.may_select());
+}
+
 mod kickoff_tests {
     //! Exercises late start, durable handback and queue views through actual kickoff.
 
@@ -252,7 +264,10 @@ mod kickoff_tests {
             actual.text, original.text,
             "whole original request, including second line"
         );
-        assert_eq!(actual.reply_context, original.reply_context);
+        assert_retry_context_eq(
+            actual.reply_context.as_deref(),
+            original.reply_context.as_deref(),
+        );
         assert_eq!(actual.has_reply_boundary, original.has_reply_boundary);
         assert_eq!(actual.merge_consecutive, original.merge_consecutive);
         assert_eq!(
@@ -320,7 +335,7 @@ mod kickoff_tests {
         sources.sort();
         assert_eq!(stored.0, original.text);
         assert_eq!(stored.1, sources);
-        assert_eq!(stored.2, original.reply_context);
+        assert_retry_context_eq(stored.2.as_deref(), original.reply_context.as_deref());
         assert_eq!(
             stored.3,
             serde_json::json!(
@@ -878,7 +893,7 @@ mod kickoff_tests {
                     .collect();
                 sources.sort();
                 assert_eq!(stored.4, sources);
-                assert_eq!(stored.5, original.reply_context);
+                assert_retry_context_eq(stored.5.as_deref(), original.reply_context.as_deref());
                 assert_eq!(
                     stored.6,
                     serde_json::json!(
@@ -2008,7 +2023,7 @@ async fn started(
         owner_id: "7".into(),
         agent_id: String::new(),
         attachments: serde_json::json!([]),
-        reply_context: None,
+        reply_context: crate::services::discord::router::response_format::retry_prompt_context::RetryPromptContext::raw(None).requeue(),
         provenance: "new_input",
     };
     let receipt = write::register_or_reuse(&host.pool, &input, "node-a")

@@ -4,7 +4,7 @@
 
 Source issues: #1782 epic, #1783 mapping proposal.
 
-The former `src/db/auto_queue/core.rs` production monolith has been split behind
+The former `src/db/auto_queue/core.rs` (removed) production monolith has been split behind
 the `src/db/auto_queue/mod.rs` facade. Public `crate::db::auto_queue::*` imports
 remain stable while production slices now live in `queries`, `phase_gates`,
 `slots`, `claim`, `runs`, `entries`, and `consultation`. The remaining large

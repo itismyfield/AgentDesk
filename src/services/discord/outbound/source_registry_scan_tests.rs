@@ -16,6 +16,7 @@ const FORWARDED: &[(&str, &str)] = &[
 
 #[test]
 fn every_outbox_producer_source_is_registered() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     collect_rs_files(&root, &mut files);

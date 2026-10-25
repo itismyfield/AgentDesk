@@ -232,6 +232,80 @@ impl HerdrRegistry {
         self.endpoints.is_empty()
     }
 
+    /// Reads whole registered endpoints. A changed server or exceeded budget is not a census.
+    pub(crate) fn read_pane_census(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, Vec<String>)>, String> {
+        use super::herdr::model::{HERDR_PROTOCOL, HerdrRequest, HerdrResult};
+        let mut census = Vec::new();
+        let mut count = self.endpoints.len();
+        for registered in &self.endpoints {
+            if count > limit {
+                return Err("Herdr census budget exceeded".into());
+            }
+            let before = registered
+                .transport
+                .server_witness()
+                .map_err(|e| format!("{e:?}"))?;
+            if before.socket != registered.endpoint.socket_path() {
+                return Err("Herdr census socket witness mismatch".into());
+            }
+            let call = HerdrCall {
+                id: uuid::Uuid::new_v4().to_string(),
+                request: HerdrRequest::SessionSnapshot {},
+            };
+            let (outcome, answered) = registered.transport.call(&call);
+            if answered.as_ref() != Ok(&before)
+                || registered.transport.server_witness().as_ref() != Ok(&before)
+            {
+                return Err("Herdr census server changed".into());
+            }
+            let reply = outcome.map_err(|e| format!("{e:?}"))?;
+            if reply.id != call.id {
+                return Err("Herdr census reply mismatch".into());
+            }
+            let HerdrResult::SessionSnapshot { snapshot } =
+                reply.body.map_err(|e| format!("{e:?}"))?
+            else {
+                return Err("Herdr census snapshot unavailable".into());
+            };
+            if snapshot.protocol != HERDR_PROTOCOL {
+                return Err("Herdr census protocol mismatch".into());
+            }
+            count = count.saturating_add(snapshot.panes.len());
+            let mut panes: Vec<_> = snapshot
+                .panes
+                .into_iter()
+                .map(|pane| pane.pane_id)
+                .collect();
+            panes.sort();
+            if panes.iter().any(|pane| pane.is_empty())
+                || panes.windows(2).any(|pair| pair[0] == pair[1])
+            {
+                return Err("Herdr census invalid pane identity".into());
+            }
+            if count > limit {
+                #[cfg(test)]
+                if std::env::var("ADK_CODEX_OBSERVATION_MUTANT").as_deref() == Ok("herdr_budget") {
+                    panes.truncate(limit.saturating_sub(self.endpoints.len()));
+                    census.push((
+                        format!("{}:{before:?}", registered.endpoint.config_key()),
+                        panes,
+                    ));
+                    return Ok(census);
+                }
+                return Err("Herdr census budget exceeded".into());
+            }
+            census.push((
+                format!("{}:{before:?}", registered.endpoint.config_key()),
+                panes,
+            ));
+        }
+        census.sort();
+        Ok(census)
+    }
+
     /// The one local endpoint's read-only host; none, or several, give no host.
     pub(crate) fn sole_host(&self) -> Option<&dyn InteractiveSessionHost> {
         match self.endpoints.as_slice() {
@@ -373,3 +447,7 @@ impl Drop for ForcedRegistry {
         FORCED.with(|forced| forced.set(self.0.take()));
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "herdr_registry_census_tests.rs"]
+mod census_tests;

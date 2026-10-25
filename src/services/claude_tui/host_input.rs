@@ -1134,8 +1134,7 @@ mod tests {
     use super::spy::{Spy, SpyGuard, SpyState, exit};
     use super::*;
     use crate::services::claude_tui::input::{
-        CompactSubmitOutcome, claude_prompt_draft_backspace_budget_from_tail,
-        inject_steering_prompt, send_compact_while_busy,
+        CompactSubmitOutcome, inject_steering_prompt, send_compact_while_busy,
     };
     use crate::services::session_host::{SessionTargetInput, TargetSource, UnknownHost};
 
@@ -1148,10 +1147,6 @@ mod tests {
             captures: captures.iter().map(|c| c.map(str::to_string)).collect(),
             ..SpyState::default()
         }
-    }
-
-    fn keys(names: &[&str]) -> Vec<String> {
-        names.iter().map(|name| format!("keys:{name}")).collect()
     }
 
     fn run(spy: &mut Spy, gate: &dyn MutationGate, actions: &[TuiInputAction]) -> InputRun {
@@ -1208,8 +1203,7 @@ mod tests {
         assert_eq!(guard.calls(), submitted);
         drop(guard);
 
-        // A failed paste keeps the legacy draft cleanup and never sends Enter.
-        let budget = claude_prompt_draft_backspace_budget_from_tail(DRAFT).unwrap();
+        // An uncertain paste preserves the composer and never sends Enter or cleanup keys.
         let mut failing = state(&[Some(EMPTY_COMPOSER), Some(DRAFT)]);
         failing.fail_send = Some((1, Ok(exit(1, "no buffer\n"))));
         let guard = SpyGuard::install(failing);
@@ -1217,20 +1211,17 @@ mod tests {
             inject_steering_prompt(name, &prompt),
             Err("tmux send paste-buffer failed: no buffer".to_string())
         );
-        let mut expected = vec![
+        let expected = vec![
             "capture".to_string(),
             "alive".to_string(),
             format!("load:{prompt}"),
             "paste:delete=true".to_string(),
-            "capture".to_string(),
-            "alive".to_string(),
         ];
-        expected.extend(keys(&["C-u", "Escape", "C-u"]));
-        expected.extend(keys(&[&vec!["BSpace"; budget].join("+")]));
         assert_eq!(guard.calls(), expected);
         drop(guard);
 
         // A long single line goes as 1800-char literal chunks, then Enter.
+        let name = "p6a1-spy-steering-long";
         let line = "가".repeat(2000);
         let guard = SpyGuard::install(state(&[Some(EMPTY_COMPOSER), Some(BUSY)]));
         assert_eq!(inject_steering_prompt(name, &line), Ok(()));

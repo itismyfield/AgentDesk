@@ -15,6 +15,7 @@ pub(crate) mod inflight_create_log;
 mod placeholder_handoff;
 pub(super) mod race_loss;
 mod replay_start;
+mod retry_prompt;
 mod runtime_transition;
 mod stale_dispatch_guard;
 mod voice_intake;
@@ -45,6 +46,7 @@ mod intake_outbox_state_builder_tests {
                 (bool, Option<adk_thread::Route>),
                 crate::services::cluster::attachment_transfer::uploads::PendingUploads,
                 Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+                bool,
             ) -> F,
         ) -> usize {
             std::mem::size_of::<F>()
@@ -157,6 +159,7 @@ pub(super) async fn handle_text_message(
     (_queued_drain, queued): (bool, Option<adk_thread::Route>),
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    durable_reply_context: bool,
 ) -> Result<IntakeExecution, Error> {
     // Keep the intake body on the heap so worker and local caller frames stay small.
     Box::pin(async move {
@@ -186,6 +189,8 @@ pub(super) async fn handle_text_message(
             turn_kind,
             preserve_on_cancel: _,
         } = request;
+        let retry_prompt_context = retry_prompt::ingress(reply_context, _queued_drain, durable_reply_context);
+        let reply_context = retry_prompt_context.requeue();
         let request_owner_name = request_owner_name_owned.as_str();
         let user_text = user_text_owned.as_str();
         let original_channel_id = channel_id;
@@ -1449,20 +1454,11 @@ pub(super) async fn handle_text_message(
                 }
             }
         };
-        let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
-        let retry_reply_context = session_retry_context
-            .as_ref()
-            .map(|c| c.formatted_context.clone());
-        let reply_context = merge_reply_contexts(reply_context, retry_reply_context);
-        // #4307 PR-B: fold the voluntary tool_feedback reminder stashed last turn
-        // into `reply_context`; the owned reminder is kept for the refusal put-back.
-        let (feedback_reminder, reply_context) =
-            take_and_merge_feedback_reminder(shared, &provider, channel_id, reply_context);
-        // #4196: fold the turn-end WIP warning stashed last turn into `reply_context`
-        // so the agent is reminded to commit/stash its uncommitted changes; the owned
-        // warning is kept for the refusal put-back (same lifecycle as the reminder).
-        let (wip_warning, reply_context) =
-            take_and_merge_wip_warning(shared, &provider, channel_id, reply_context);
+        let prepared_prompt = retry_prompt::prepare(shared, &provider, channel_id, retry_prompt_context).await;
+        let session_retry_context = prepared_prompt.recovery.clone();
+        let feedback_reminder: Option<String> = None;
+        let wip_warning: Option<String> = None;
+        let reply_context = prepared_prompt.rendered.clone();
 
         // #3813 Phase 1a: the intake placeholder POST returned a live id.
         intake_latency.mark_placeholder_posted();
@@ -1916,7 +1912,7 @@ pub(super) async fn handle_text_message(
                 user_msg_id,
                 user_text,
                 preserve_on_cancel,
-                reply_context.clone(),
+                prepared_prompt.context.requeue(),
                 has_reply_boundary,
                 merge_consecutive,
                 pending_uploads.clone(),
@@ -1937,7 +1933,7 @@ pub(super) async fn handle_text_message(
                     user_msg_id,
                     placeholder_msg_id,
                     turn_start_attempt: _turn_start_attempt,
-                    session_retry_context: session_retry_context.as_ref(),
+                    session_retry_context: None,
                     feedback_reminder: feedback_reminder.as_deref(),
                     wip_warning: wip_warning.as_deref(),
                 },
@@ -2101,7 +2097,7 @@ pub(super) async fn handle_text_message(
         // (`mailbox_requeue_inflight_for_followup_retry`) can rebuild the retry
         // Intervention without losing reply context / attachments / voice metadata.
         inflight_state.set_followup_requeue_context(
-            reply_context.clone(),
+            prepared_prompt.snapshot(&context_prompt),
             has_reply_boundary,
             merge_consecutive,
             pending_uploads.clone(),
@@ -2116,11 +2112,12 @@ pub(super) async fn handle_text_message(
         }
         inflight_state.session_key = adk_session_key.clone();
         inflight_state.dispatch_id = dispatch_id.clone();
+        let replay_reply_context = prepared_prompt.context.requeue();
         let replay_request = replay_start::StartRequest {
             provider: &provider,
             channel_id,
             agent_id: role_binding.as_ref().map(|binding| binding.role_id.as_str()),
-            reply_context: reply_context.as_deref(),
+            reply_context: replay_reply_context.as_deref(),
             uploads: &pending_uploads,
             session_key: adk_session_key.as_deref(),
             prompt: &context_prompt,
