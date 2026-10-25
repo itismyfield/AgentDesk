@@ -1,4 +1,5 @@
-//! The probe against an in-process socket fixture that answers pings like an unsupported herdr.
+//! The probe against an in-process socket fixture whose pong speaks an older protocol, so the
+//! check refuses before it reads or hashes any file.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
@@ -46,7 +47,7 @@ impl Fixture {
                     continue;
                 };
                 let pong = json!({"id": request["id"], "result":
-                    {"type": "pong", "version": "0.0.0-fixture", "protocol": 22}});
+                    {"type": "pong", "version": "0.9.3", "protocol": 21}});
                 let _ = writer.write_all(format!("{pong}\n").as_bytes());
                 seen.lock().unwrap().push(request);
             }
@@ -148,7 +149,7 @@ fn probe_user_default_reports_the_reason_without_config_database_or_writes() {
         ),
         (
             &json!(false),
-            &json!("next_restart_policy_unverified:Unsupported"),
+            &json!("next_restart_policy_unverified:Peer"),
             &json!(socket_arg)
         ),
         "probe_default_socket_reports_the_policy_reason_contract: {report}"
@@ -156,7 +157,7 @@ fn probe_user_default_reports_the_reason_without_config_database_or_writes() {
     assert!(
         report["action"]
             .as_str()
-            .is_some_and(|action| action.contains("0.9.3")),
+            .is_some_and(|action| action.contains("start bare herdr")),
         "probe_reports_the_same_action_as_health_contract: {report}"
     );
 

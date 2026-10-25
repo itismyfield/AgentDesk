@@ -172,6 +172,7 @@ cli::doctor::startup::herdr_checker_tests::protected_doctor_response_includes_cu
 cli::doctor::startup::herdr_checker_tests::startup_health_strips_raw_checker_evidence_without_changing_the_doctor_artifact
 cli::doctor::startup::tests::only_the_no_provider_skip_is_replaceable
 cli::doctor::startup::tests::skipped_startup_doctor_writes_current_boot_artifact
+cli::herdr::probe::tests::probe_user_default_reports_the_reason_without_config_database_or_writes
 cli::herdr::terminate_tests::act_cli_terminate_never_follows_redirect
 cli::herdr::terminate_tests::act_cli_terminate_never_opens_postgres
 cli::herdr::terminate_tests::act_cli_terminate_refuses_remote_api_url
@@ -6912,6 +6913,7 @@ services::discord::restart_report::tests::production_path_preserves_attempt_and_
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_preserves_fresh_bootstrap_without_worktree_hint
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_reused_thread_still_updates_divergent_fallback
 services::discord::router::dispatch_trigger::tests::dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches
+services::discord::router::herdr_consent::admission::notice_tests::consent_unverified_hold_notices_once_per_source_and_cause_and_keeps_custody
 services::discord::router::herdr_consent::admission::tests::actual_fifo_receipt_release_readmits_once_then_uses_one_start_and_followup_pg
 services::discord::router::herdr_consent::admission::tests::actual_live_checkpoint_waits_for_second_check_failed_custody_pg
 services::discord::router::herdr_consent::admission::tests::actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg
