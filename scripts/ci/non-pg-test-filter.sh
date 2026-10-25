@@ -149,6 +149,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::replay_policy::live_tests
   --skip services::discord::replay_policy::permit_tests
   --skip services::discord::replay_policy::policy_tests
+  --skip services::discord::router::herdr_consent::admission::notice_tests
   --skip services::discord::router::herdr_consent::admission::tests
   --skip services::discord::router::herdr_consent::custody::tests
   --skip services::discord::router::intake_dispatch::home_order_tests
@@ -591,13 +592,14 @@ NON_PG_FILTER_REPLAY=(
   services::discord::relay_recovery::circuit_breaker::tests::zero_originating_message_reserves_with_a_distinct_mailbox_anchor
   services::discord::relay_recovery::circuit_breaker::tests::zero_originating_message_still_rejects_episode_identity_mismatches
   services::discord::replay_policy::permit_tests::effect_permits_cannot_be_cloned_or_serialised
+  services::discord::router::herdr_consent::admission::notice_tests::consent_store_refusal_reaches_discord_as_a_stable_code_without_runtime_paths
+  services::discord::router::herdr_consent::admission::notice_tests::consent_unverified_hold_notices_once_per_source_and_cause_and_keeps_custody
   services::discord::router::herdr_consent::admission::tests::already_held_requires_every_original_source_and_exact_generation
   services::discord::router::herdr_consent::admission::tests::consent_actual_queued_readmission_restores_same_head_lease_uploads_and_origin
   services::discord::router::herdr_consent::admission::tests::consent_live_custody_keeps_expanded_prompt_sources_upload_and_voice_fifo
   services::discord::router::herdr_consent::admission::tests::consent_persistence_failure_retains_live_payload_without_success_or_card
   services::discord::router::herdr_consent::admission::tests::consent_unprepared_attachment_and_missing_durable_source_never_succeed_as_text
   services::discord::router::herdr_consent::admission::tests::expired_consent_backstop_restores_head_without_store_or_card_effects
-  services::discord::router::herdr_consent::admission::tests::full_binding_validator_keeps_user_default_unreachable
   services::discord::router::herdr_consent::admission::tests::legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_consent_io
   services::discord::router::herdr_consent::admission::tests::legacy_actual_queued_entry_retains_local_admission_without_consent_io
   services::discord::router::herdr_consent::admission::tests::legacy_actual_skill_dispatch_preserves_base_enforce_refusal_without_consent_io

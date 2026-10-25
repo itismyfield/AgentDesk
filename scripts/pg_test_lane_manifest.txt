@@ -219,6 +219,7 @@ src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/replay_policy/live_tests.rs
 src/services/discord/replay_policy/permit_tests.rs
 src/services/discord/replay_policy/policy_tests.rs
+src/services/discord/router/herdr_consent/admission_notice_tests.rs
 src/services/discord/router/herdr_consent/admission_tests.rs
 src/services/discord/router/herdr_consent/custody_tests.rs
 src/services/discord/router/intake_dispatch/home_order_tests.rs
@@ -661,6 +662,7 @@ services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::replay_policy::live_tests
 services::discord::replay_policy::permit_tests
 services::discord::replay_policy::policy_tests
+services::discord::router::herdr_consent::admission::notice_tests
 services::discord::router::herdr_consent::admission::tests
 services::discord::router::herdr_consent::custody::tests
 services::discord::router::intake_dispatch::home_order_tests
@@ -2123,6 +2125,7 @@ services::discord::replay_policy::live_tests::direct_adapter_without_a_live_atte
 services::discord::replay_policy::permit_tests::start_permit_runs_one_effect_only_on_its_own_target_pg
 services::discord::replay_policy::policy_tests::stale_attempt_retries_only_on_committed_no_effect_evidence_pg
 services::discord::replay_policy::policy_tests::stale_decision_failures_hold_without_a_permit_pg
+services::discord::router::herdr_consent::admission::notice_tests::consent_hold_notice_keeps_its_own_observation_after_another_request_records_pg
 services::discord::router::herdr_consent::admission::tests::actual_fifo_receipt_release_readmits_once_then_uses_one_start_and_followup_pg
 services::discord::router::herdr_consent::admission::tests::actual_live_checkpoint_waits_for_second_check_failed_custody_pg
 services::discord::router::herdr_consent::admission::tests::actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg

@@ -326,7 +326,8 @@ config::session_hosts::tests::guard_and_herdr_checks_read_provider_keys_as_the_i
 config::session_hosts::tests::session_hosts_boot_loader_takes_tui_channels_on_complete_endpoints_and_refuses_the_rest
 config::session_hosts::user_default::tests::legacy_and_explicit_user_sockets_do_not_read_home
 config::session_hosts::user_default::tests::user_default_resolves_only_the_execution_users_socket
-config::session_hosts::user_default_validator_tests::user_default_validator_stays_dormant_while_its_approval_projection_decodes
+config::session_hosts::user_default_validator_tests::user_default_validator_admits_endpoints_where_this_platform_has_a_loaded_image_adapter
+config::session_hosts::user_default_validator_tests::user_default_without_an_adapter_is_refused_unless_its_node_is_known_to_be_remote
 config::shared_test_env_lock_tests::acquire_shared_test_env_lock_panics_on_same_thread_reentry_before_deadlock
 config::tool_activity_display::tests::omitted_tool_activity_detail_defaults_to_summary
 config::tool_activity_display::tests::tool_activity_modes_round_trip_without_accepting_unknown_detail
@@ -6980,6 +6981,8 @@ services::discord::restart_report::tests::production_path_preserves_attempt_and_
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_preserves_fresh_bootstrap_without_worktree_hint
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_reused_thread_still_updates_divergent_fallback
 services::discord::router::dispatch_trigger::tests::dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches
+services::discord::router::herdr_consent::admission::notice_tests::consent_hold_notice_keeps_its_own_observation_after_another_request_records_pg
+services::discord::router::herdr_consent::admission::notice_tests::consent_store_refusal_reaches_discord_as_a_stable_code_without_runtime_paths
 services::discord::router::herdr_consent::admission::notice_tests::consent_unverified_hold_notices_once_per_source_and_cause_and_keeps_custody
 services::discord::router::herdr_consent::admission::tests::actual_fifo_receipt_release_readmits_once_then_uses_one_start_and_followup_pg
 services::discord::router::herdr_consent::admission::tests::actual_live_checkpoint_waits_for_second_check_failed_custody_pg
@@ -6993,7 +6996,6 @@ services::discord::router::herdr_consent::admission::tests::consent_live_custody
 services::discord::router::herdr_consent::admission::tests::consent_persistence_failure_retains_live_payload_without_success_or_card
 services::discord::router::herdr_consent::admission::tests::consent_unprepared_attachment_and_missing_durable_source_never_succeed_as_text
 services::discord::router::herdr_consent::admission::tests::expired_consent_backstop_restores_head_without_store_or_card_effects
-services::discord::router::herdr_consent::admission::tests::full_binding_validator_keeps_user_default_unreachable
 services::discord::router::herdr_consent::admission::tests::legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_consent_io
 services::discord::router::herdr_consent::admission::tests::legacy_actual_queued_entry_retains_local_admission_without_consent_io
 services::discord::router::herdr_consent::admission::tests::legacy_actual_skill_dispatch_preserves_base_enforce_refusal_without_consent_io

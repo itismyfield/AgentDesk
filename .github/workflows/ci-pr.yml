@@ -431,6 +431,7 @@ jobs:
               - 'src/services/discord/replay_policy/live_tests.rs'
               - 'src/services/discord/replay_policy/permit_tests.rs'
               - 'src/services/discord/replay_policy/policy_tests.rs'
+              - 'src/services/discord/router/herdr_consent/admission_notice_tests.rs'
               - 'src/services/discord/router/herdr_consent/admission_tests.rs'
               - 'src/services/discord/router/herdr_consent/custody_tests.rs'
               - 'src/services/discord/router/intake_dispatch/home_order_tests.rs'
