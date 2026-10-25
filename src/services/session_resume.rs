@@ -1,24 +1,5 @@
-//! `/resume` — rebind a Discord channel (or any session row) to a *previous*
-//! provider session so the next turn resumes that conversation from the target
-//! worktree.
-//!
-//! Two entry points share one core (`perform_resume_rebind`):
-//!   * the HTTP route `POST /api/sessions/{session_key}/resume-previous`
-//!     ([`resume_previous_session`]), used by the orchestrator for recovery, and
-//!   * the Discord `/resume [session_id]` slash command (see
-//!     `services::discord::commands::session`).
-//!
-//! The rebind is durable-first: it UPDATEs `sessions.cwd` +
-//! `sessions.claude_session_id` (via [`rebind_session_provider_by_id_pg`]) so the
-//! change survives a restart, then mirrors the same target into the in-memory
-//! `DiscordSession` (via `health::rebind_channel_provider_session`) so it takes
-//! effect on the very next turn without a restart. A DB-only rebind would be
-//! shadowed by a stale in-memory `current_path` (auto-restore early-returns when
-//! `current_path` is already set), which is why the in-memory mirror is not
-//! optional when a runtime owns the channel.
-//!
-//! Teardown of the channel's current tmux/turn reuses the force-kill lifecycle path
-//! `/force-kill` uses, on the host verdict taken before the durable rebind.
+//! Shared HTTP/Discord resume: verify the Claude transcript's worktree before any mutation.
+//! Commit the binding before teardown, then mirror it into the channel runtime.
 
 use axum::{
     Json,
@@ -45,6 +26,13 @@ use crate::services::turn_lifecycle::{
     ForceKillRow, TurnLifecycleTarget, force_kill_turn_with_verdict, force_kill_verdict,
 };
 use poise::serenity_prelude::ChannelId;
+
+pub(crate) mod catalog;
+mod errors;
+
+use catalog::discover_previous_claude_session_off_runtime;
+#[cfg(test)]
+use catalog::{discover_previous_claude_session_scoped, worktree_lineage_stem};
 
 const RESUME_CRITICAL_SECTION_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -89,7 +77,7 @@ pub struct ResumePreviousOptions {
     #[serde(default)]
     pub session_id: Option<String>,
     /// Target working directory (worktree) the resumed session lives in. When
-    /// omitted with an explicit `session_id`, the row's current `cwd` is kept.
+    /// omitted with an explicit Claude `session_id`, the transcript's worktree is used.
     #[serde(default)]
     pub cwd: Option<String>,
 }
@@ -151,6 +139,8 @@ pub(crate) enum ResumeRebindError {
     /// Explicit `session_id` given but no `cwd` is known (row has no `cwd` and
     /// none was supplied).
     MissingCwd,
+    /// The requested Claude transcript cannot be located at the target cwd.
+    TargetTranscriptMissing(String),
     /// Target `cwd` does not exist on disk.
     TargetCwdMissing(String),
     /// Auto-selection is only wired for Claude transcripts.
@@ -159,66 +149,6 @@ pub(crate) enum ResumeRebindError {
     HostUnsupported(String),
     Database(String),
     Filesystem(String),
-}
-
-impl ResumeRebindError {
-    pub(crate) fn into_response(self) -> (StatusCode, Json<serde_json::Value>) {
-        match self {
-            ResumeRebindError::SessionNotFound => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "session not found"})),
-            ),
-            ResumeRebindError::ActiveTurn => (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": "channel has an active turn or dispatch; stop it before resuming a previous session"
-                })),
-            ),
-            ResumeRebindError::TransitionBusy => (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": format!(
-                        "채널 세션 전환이 {}초 동안 계속 사용 중입니다. 잠시 후 /resume을 다시 시도해 주세요.",
-                        crate::services::discord::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT.as_secs()
-                    )
-                })),
-            ),
-            ResumeRebindError::NoPreviousSession => (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": "no previous provider session found to resume; pass an explicit session_id"
-                })),
-            ),
-            ResumeRebindError::MissingCwd => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({
-                    "error": "target cwd is unknown; supply cwd alongside session_id"
-                })),
-            ),
-            ResumeRebindError::TargetCwdMissing(path) => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({"error": format!("target cwd does not exist: {path}")})),
-            ),
-            ResumeRebindError::AutoUnsupportedProvider(provider) => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({
-                    "error": format!(
-                        "auto previous-session selection is only supported for Claude; provider={provider}. Pass an explicit session_id."
-                    )
-                })),
-            ),
-            ResumeRebindError::HostUnsupported(reason) => (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": format!("/resume is not supported for this session host: {reason}")
-                })),
-            ),
-            ResumeRebindError::Database(error) | ResumeRebindError::Filesystem(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
-        }
-    }
 }
 
 impl ResumeRebindOutcome {
@@ -462,12 +392,19 @@ pub(crate) async fn perform_resume_rebind(
     // Resolve the rebind target.
     let (target_session_id, target_cwd, auto_selected) = match opts.session_id.as_deref() {
         Some(session_id) if !session_id.trim().is_empty() => {
-            let cwd = opts
-                .cwd
-                .as_deref()
-                .map(str::to_string)
-                .or_else(|| current_cwd.clone())
-                .ok_or(ResumeRebindError::MissingCwd)?;
+            let cwd = if matches!(provider, Some(ProviderKind::Claude)) {
+                catalog::resolve_cwd_off_runtime(
+                    current_cwd.clone(),
+                    opts.cwd.clone(),
+                    session_id.trim().to_string(),
+                )
+                .await?
+            } else {
+                opts.cwd
+                    .clone()
+                    .or_else(|| current_cwd.clone())
+                    .ok_or(ResumeRebindError::MissingCwd)?
+            };
             (session_id.trim().to_string(), cwd, false)
         }
         _ => {
@@ -493,7 +430,7 @@ pub(crate) async fn perform_resume_rebind(
                 current_cwd.clone(),
                 current_session_id.clone(),
                 live_bound,
-                None,
+                catalog::claude_home(),
             )
             .await?
             .ok_or(ResumeRebindError::NoPreviousSession)?;
@@ -658,150 +595,41 @@ pub(crate) struct PreviousSessionCandidate {
     pub(crate) session_id: String,
 }
 
-/// Derive the *lineage stem* of a managed-worktree directory name: the name
-/// with a trailing `-YYYYMMDD-HHMMSS` timestamp removed (the suffix
-/// `create_git_worktree` appends as `{provider}-{safe_name}-{ts}`). Two
-/// worktrees belong to the same channel lineage iff their stems are equal, so
-/// `claude-adk-cc-20260723-054531` and `claude-adk-cc-20260723-050333` share the
-/// stem `claude-adk-cc`, while the sibling agent `claude-adk-dash-cc` (stem
-/// `claude-adk-dash-cc`) does not. Names without the timestamp suffix are their
-/// own stem (only same-name worktrees match — effectively same-worktree scope).
-fn worktree_lineage_stem(dir_name: &str) -> &str {
-    let bytes = dir_name.as_bytes();
-    // Match a trailing `-\d{8}-\d{6}` (date-time) and, if present, cut it off.
-    // 15 trailing chars: `-DDDDDDDD-DDDDDD` → prefix length = len - 16.
-    if bytes.len() > 16 {
-        let tail = &dir_name[dir_name.len() - 16..];
-        let tb = tail.as_bytes();
-        let shaped = tb[0] == b'-'
-            && tb[9] == b'-'
-            && tb[1..9].iter().all(u8::is_ascii_digit)
-            && tb[10..16].iter().all(u8::is_ascii_digit);
-        if shaped {
-            return &dir_name[..dir_name.len() - 16];
-        }
-    }
-    dir_name
-}
-
-/// Auto-select the most recent prior Claude session for a channel.
-///
-/// Scope (B1 — channel attribution): candidate worktrees are the current cwd
-/// plus only those sibling directories that share the current worktree's
-/// *lineage stem* ([`worktree_lineage_stem`]). This prevents auto-select from
-/// crossing into an unrelated agent's / channel's worktree that merely lives in
-/// the same `worktrees/` parent. Within those worktrees, each Claude transcript
-/// (`~/.claude/projects/<slug>/<uuid>.jsonl`, stem = provider session id) is a
-/// candidate; the newest mtime wins.
-///
-/// Exclusions: the channel's own current binding (`current_session_id`) and any
-/// session id in `live_bound` (currently bound to *some* channel's session row)
-/// are skipped, so auto-select never adopts a session another live channel is
-/// using — restoring the #2843 live-binding protection an empty exclude bypassed.
-///
-/// `claude_home` is injectable for tests; production passes `None`.
-///
-/// Returns `None` when no distinct, unbound prior transcript exists in-lineage.
-async fn discover_previous_claude_session_off_runtime(
-    current_cwd: Option<String>,
-    current_session_id: Option<String>,
-    live_bound: std::collections::HashSet<String>,
-    claude_home: Option<std::path::PathBuf>,
-) -> Result<Option<PreviousSessionCandidate>, ResumeRebindError> {
-    tokio::task::spawn_blocking(move || {
-        discover_previous_claude_session_scoped(
-            current_cwd.as_deref(),
-            current_session_id.as_deref(),
-            &live_bound,
-            claude_home.as_deref(),
-        )
-    })
-    .await
-    .map_err(|error| {
-        ResumeRebindError::Filesystem(format!("previous-session discovery task failed: {error}"))
-    })
-}
-
-pub(crate) fn discover_previous_claude_session_scoped(
-    current_cwd: Option<&str>,
-    current_session_id: Option<&str>,
-    live_bound: &std::collections::HashSet<String>,
-    claude_home: Option<&std::path::Path>,
-) -> Option<PreviousSessionCandidate> {
-    let current_cwd = current_cwd?;
-    let current_path = std::path::Path::new(current_cwd);
-    let parent = current_path.parent()?;
-    let lineage = current_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(worktree_lineage_stem)?;
-
-    // Candidate worktrees: current cwd + siblings sharing the lineage stem.
-    let mut worktrees: Vec<std::path::PathBuf> = vec![current_path.to_path_buf()];
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() || path == current_path {
-                continue;
-            }
-            let same_lineage = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(worktree_lineage_stem)
-                == Some(lineage);
-            if same_lineage {
-                worktrees.push(path);
-            }
-        }
-    }
-
-    let empty_exclude = std::collections::HashSet::new();
-    let mut best: Option<(std::time::SystemTime, PreviousSessionCandidate)> = None;
-
-    for worktree in worktrees {
-        let transcripts =
-            crate::services::claude_tui::transcript_tail::claude_transcripts_for_cwd_since(
-                &worktree,
-                std::time::UNIX_EPOCH,
-                claude_home,
-                &empty_exclude,
-            );
-        for transcript in transcripts {
-            let Some(session_id) = transcript
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_string)
-            else {
-                continue;
-            };
-            // Skip the channel's own current binding and any live-bound session.
-            if Some(session_id.as_str()) == current_session_id || live_bound.contains(&session_id) {
-                continue;
-            }
-            let Ok(modified) = std::fs::metadata(&transcript).and_then(|meta| meta.modified())
-            else {
-                continue;
-            };
-            let candidate = PreviousSessionCandidate {
-                cwd: worktree.to_string_lossy().to_string(),
-                session_id,
-            };
-            match &best {
-                Some((best_mtime, _)) if *best_mtime >= modified => {}
-                _ => best = Some((modified, candidate)),
-            }
-        }
-    }
-
-    best.map(|(_, candidate)| candidate)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use super::*;
     use filetime::{FileTime, set_file_mtime};
+
+    async fn perform_resume_rebind(
+        pool: &PgPool,
+        registry: Option<&HealthRegistry>,
+        session_key: &str,
+        provider: Option<ProviderKind>,
+        channel_id: Option<ChannelId>,
+        tmux_name: &str,
+        opts: &ResumePreviousOptions,
+    ) -> Result<ResumeRebindOutcome, ResumeRebindError> {
+        let home = tempfile::tempdir().unwrap();
+        if let (Some(cwd), Some(id)) = (&opts.cwd, &opts.session_id) {
+            write_transcript(home.path(), std::path::Path::new(cwd), id, 1);
+        }
+        catalog::TEST_HOME
+            .scope(
+                home.path().to_path_buf(),
+                super::perform_resume_rebind(
+                    pool,
+                    registry,
+                    session_key,
+                    provider,
+                    channel_id,
+                    tmux_name,
+                    opts,
+                ),
+            )
+            .await
+    }
 
     #[test]
     fn transition_busy_response_exposes_retryable_korean_contract() {
@@ -1392,6 +1220,10 @@ mod tests {
         );
         // No datetime suffix — the whole name is the stem.
         assert_eq!(worktree_lineage_stem("issue-123-fix"), "issue-123-fix");
+        assert_eq!(
+            worktree_lineage_stem("한글작업디렉터리"),
+            "한글작업디렉터리"
+        );
     }
 
     #[test]
@@ -1658,6 +1490,155 @@ mod tests {
             Some("99999999-9999-9999-9999-999999999999")
         );
         assert_eq!(durable.2, before.2, "the hosted record is untouched");
+        pool.close().await;
+        db.drop().await;
+    }
+    #[tokio::test]
+    async fn selected_sibling_rebinds_durable_cwd_wrong_cwd_refuses_and_auto_still_works_pg() {
+        use catalog::tests::Fixture;
+        let f = Fixture::new();
+        f.transcript(
+            &f.sibling,
+            "22222222-2222-2222-2222-222222222222",
+            "{\"type\":\"ai-title\",\"aiTitle\":\"선택한 작업\"}\n",
+            2000,
+        );
+        let choices = f.choices(None, &std::collections::HashSet::new(), "선택");
+        let id = choices[0].session_id.clone();
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let key = "i6483-selected-sibling";
+        sqlx::query("INSERT INTO sessions (session_key, provider, status, cwd, claude_session_id) VALUES ($1, 'claude', 'idle', $2, 'old')")
+            .bind(key).bind(f.current.to_str().unwrap()).execute(&pool).await.unwrap();
+        let wrong = ResumePreviousOptions {
+            session_id: Some(id.clone()),
+            cwd: Some(f.current.to_string_lossy().into_owned()),
+        };
+        let result = catalog::TEST_HOME
+            .scope(
+                f.home.clone(),
+                super::perform_resume_rebind(
+                    &pool,
+                    None,
+                    key,
+                    Some(ProviderKind::Claude),
+                    None,
+                    "i6483-no-runtime",
+                    &wrong,
+                ),
+            )
+            .await
+            .unwrap_err();
+        let (status, axum::Json(body)) = result.into_response();
+        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains(f.sibling.to_str().unwrap())
+        );
+        let before: (String, String) =
+            sqlx::query_as("SELECT cwd, claude_session_id FROM sessions WHERE session_key=$1")
+                .bind(key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            before,
+            (f.current.to_string_lossy().into_owned(), "old".to_string())
+        );
+        let selected = ResumePreviousOptions {
+            session_id: Some(id),
+            cwd: None,
+        };
+        let result = catalog::TEST_HOME
+            .scope(
+                f.home.clone(),
+                super::perform_resume_rebind(
+                    &pool,
+                    None,
+                    key,
+                    Some(ProviderKind::Claude),
+                    None,
+                    "i6483-no-runtime",
+                    &selected,
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.target_cwd, f.sibling.to_string_lossy());
+        assert!(!result.auto_selected);
+        let durable: (String, String, String) = sqlx::query_as(
+            "SELECT cwd, claude_session_id, raw_provider_session_id FROM sessions WHERE session_key=$1",
+        )
+        .bind(key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            durable,
+            (
+                f.sibling.to_string_lossy().into_owned(),
+                "22222222-2222-2222-2222-222222222222".to_string(),
+                "22222222-2222-2222-2222-222222222222".to_string()
+            )
+        );
+        sqlx::query("UPDATE sessions SET cwd=$2, claude_session_id='old', raw_provider_session_id='old' WHERE session_key=$1")
+            .bind(key).bind(f.current.to_str().unwrap()).execute(&pool).await.unwrap();
+        let result = catalog::TEST_HOME
+            .scope(
+                f.home.clone(),
+                super::perform_resume_rebind(
+                    &pool,
+                    None,
+                    key,
+                    Some(ProviderKind::Claude),
+                    None,
+                    "i6483-no-runtime",
+                    &ResumePreviousOptions::default(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(result.auto_selected);
+        assert_eq!(result.target_cwd, f.sibling.to_string_lossy());
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn missing_transcript_refuses_rebind_before_mutation_pg() {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let cwd = tempfile::tempdir().unwrap();
+        let key = "i6483-missing-transcript";
+        sqlx::query("INSERT INTO sessions (session_key, provider, status, cwd, claude_session_id) VALUES ($1, 'claude', 'idle', $2, 'old')")
+            .bind(key).bind(cwd.path().to_str().unwrap()).execute(&pool).await.unwrap();
+        let result = super::perform_resume_rebind(
+            &pool,
+            None,
+            key,
+            Some(ProviderKind::Claude),
+            None,
+            "i6483-no-runtime",
+            &ResumePreviousOptions {
+                session_id: Some(uuid::Uuid::new_v4().to_string()),
+                cwd: Some(cwd.path().to_string_lossy().into_owned()),
+            },
+        )
+        .await;
+        let (status, axum::Json(body)) = result
+            .expect_err("an existing cwd without a transcript must fail")
+            .into_response();
+        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["error"].as_str().unwrap().contains("transcript"));
+        let binding: String =
+            sqlx::query_scalar("SELECT claude_session_id FROM sessions WHERE session_key=$1")
+                .bind(key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(binding, "old");
         pool.close().await;
         db.drop().await;
     }
