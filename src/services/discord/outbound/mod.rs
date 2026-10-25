@@ -19,10 +19,8 @@ pub(crate) mod o_writer_io;
 pub(in crate::services::discord) mod o_writer_legacy;
 pub(crate) mod policy;
 pub(in crate::services::discord) mod reaction_control;
-// #5071 T4-B3: read-only projection over `delivery_record`'s durable evidence.
-// Unix-gated because its intended consumer, the reachability observation in
-// `crate::services::discord::health`, is itself `#[cfg(unix)]`; nothing
-// constructs the index yet, so it carries no verdict authority.
+// Read-only projection over `delivery_record`'s evidence, without verdict authority.
+// Unix-gated because its reader, `health::reachability::composite`, is unix-only.
 #[cfg(unix)]
 pub(in crate::services::discord) mod receipt_index;
 pub(crate) mod result;

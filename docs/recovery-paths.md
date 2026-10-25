@@ -8,7 +8,7 @@ and absorbs issue #917.
 paths. The restart scan body lives in
 `src/services/discord/recovery_engine/restore_inflight.rs`; runtime and manual
 rebind bodies live in `recovery_engine/runtime.rs` and
-`recovery_engine/manual_rebind.rs`. This document is the contract for those
+`recovery_engine/manual_rebind/mod.rs`. This document is the contract for those
 paths and their shared helpers.
 
 ## Path Inventory
@@ -24,7 +24,7 @@ Current split layout:
 - `recovery_engine/restore_inflight.rs` — restart scan, watcher reattach, and
   session-died retry handoff.
 - `recovery_engine/runtime.rs` — runtime rediscovery / active turn re-register.
-- `recovery_engine/manual_rebind.rs` — operator-driven rebind/adoption path.
+- `recovery_engine/manual_rebind/` — operator-driven rebind/adoption path.
 - `recovery_paths/restart.rs` and `recovery_paths/shared.rs` — restart-path
   subroutines and shared relay-outcome helpers already consumed by the facade.
 
