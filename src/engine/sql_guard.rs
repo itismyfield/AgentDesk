@@ -134,7 +134,8 @@ fn sql_snippet(sql: &str) -> String {
     if compact.len() <= 120 {
         compact
     } else {
-        format!("{}...", &compact[..117])
+        let end = crate::utils::format::floor_char_boundary(&compact, 117);
+        format!("{}...", &compact[..end])
     }
 }
 

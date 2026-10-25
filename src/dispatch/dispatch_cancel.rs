@@ -375,7 +375,9 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
     .await
     .map_err(|error| format!("clear postgres session dispatch link {dispatch_id}: {error}"))?;
 
-    let _ = sqlx::query(
+    // A failed statement aborts the PG transaction, so these must not be
+    // discarded: the next query would fail with a misleading "aborted" error.
+    sqlx::query(
         "INSERT INTO dispatch_events (
             dispatch_id,
             kanban_card_id,
@@ -392,9 +394,10 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
     .bind(&current_status)
     .bind(cancel_payload.clone())
     .execute(&mut **tx)
-    .await;
+    .await
+    .map_err(|error| format!("record postgres cancel event {dispatch_id}: {error}"))?;
 
-    let _ = sqlx::query(
+    sqlx::query(
         "INSERT INTO dispatch_outbox (dispatch_id, action)
          SELECT $1, 'status_reaction'
          WHERE NOT EXISTS (
@@ -407,7 +410,8 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
     )
     .bind(dispatch_id)
     .execute(&mut **tx)
-    .await;
+    .await
+    .map_err(|error| format!("enqueue postgres cancel status reaction {dispatch_id}: {error}"))?;
 
     if reset_linked_entries {
         let entry_rows = sqlx::query(
