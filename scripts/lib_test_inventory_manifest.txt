@@ -3879,6 +3879,11 @@ services::discord::commands::control::codex_verified_clear_tests::legacy_codex_a
 services::discord::commands::control::soft_clear_notify_tests::blank_explicit_session_key_falls_back_to_recomputed_key
 services::discord::commands::control::soft_clear_notify_tests::explicit_session_key_wins_over_recomputed_channel_key
 services::discord::commands::control::soft_clear_notify_tests::queued_cancel_parser_accepts_exact_nonzero_ids_only
+services::discord::commands::diagnostics::recovery_command_tests::clear_acknowledges_before_auth_and_cleanup
+services::discord::commands::diagnostics::recovery_command_tests::skill_stop_delegates_to_the_same_stop_response
+services::discord::commands::diagnostics::recovery_command_tests::status_shows_complete_session_cwd_and_missing_transcript
+services::discord::commands::diagnostics::recovery_command_tests::status_transcript_probe_checks_metadata_for_large_missing_and_directory_paths
+services::discord::commands::diagnostics::recovery_command_tests::status_uses_the_bound_runtime_session_and_transcript
 services::discord::commands::diagnostics::reports::queue_report_tests::queue_report_exposes_all_primary_ids_as_cancel_queued_inputs
 services::discord::commands::diagnostics::reports::runtime_label_tests::inflight_runtime_label_reports_direct_tui_kind
 services::discord::commands::help::tests::help_advertises_explicit_queue_cancellation_not_reaction_removal
@@ -3909,6 +3914,12 @@ services::discord::commands::response_wording_tests::bare_shell_command_error_us
 services::discord::commands::response_wording_tests::owner_error_detail_is_folded_and_markdown_safe
 services::discord::commands::response_wording_tests::shared_command_states_use_korean_responses
 services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_and_process_of_a_refused_session_pg
+services::discord::commands::restart::seed_tests::accepted_seed_is_never_submitted_again
+services::discord::commands::restart::seed_tests::busy_seed_can_start_on_its_only_retry
+services::discord::commands::restart::seed_tests::busy_seed_retries_once_then_reports_busy
+services::discord::commands::restart::seed_tests::non_busy_failures_are_not_retried
+services::discord::commands::restart::seed_tests::retry_failure_is_reported_without_a_third_submission
+services::discord::commands::skill::stop_response_tests::stop_alias_matches_the_stop_owner_failure_reply
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unconfirmed_tmux_host_runs_and_ends_the_session_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unsettled_herdr_channel_runs_and_warns_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_that_runs_answers_only_the_cleared_notice_pg
