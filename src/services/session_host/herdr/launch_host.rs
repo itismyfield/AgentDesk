@@ -133,11 +133,21 @@ impl SocketHerdrLaunchHost {
             .map(|(endpoint, transport)| {
                 let hello = transport.clone();
                 let witness = transport.clone();
-                Arc::new(SocketPeerSource::new(
+                let source = SocketPeerSource::new(
                     endpoint.socket_path().into(),
                     move || hello.hello().map_err(|_| Unverified::Peer),
                     move || witness.server_witness().map_err(|_| Unverified::Peer),
-                )) as Arc<dyn PeerSource>
+                );
+                #[cfg(target_os = "macos")]
+                let source = {
+                    let generation = transport.clone();
+                    source.with_generation(move || {
+                        generation
+                            .peer_generation()
+                            .map_err(|_| Unverified::Changed)
+                    })
+                };
+                Arc::new(source) as Arc<dyn PeerSource>
             })
             .collect();
         let grants = GrantCache::restored(super::policy::boot_grants::prepared());

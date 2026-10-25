@@ -24,7 +24,7 @@ session_hosts:
 
 socket을 생략하면 **실행 노드**의 실행 사용자 HOME에서 `.config/herdr/herdr.sock`을 선택한다. gateway의 HOME으로 원격 경로를 채우지 않는다. 원격 endpoint의 생략된 경로는 실행 노드가 해석한다. 기본 selector는 `default`다. named/비표준 socket은 `socket_path` 절대경로와 `herdr_session`을 명시한다. `~`나 `$HOME` 문자열을 직접 넣지 않는다. `herdr_home`은 dedicated 모드의 필드이며 UserDefault config를 대신 지정하지 않는다.
 
-config는 socket peer의 실제 HOME/XDG/config 환경과 실행 파일 identity를 확인한 뒤 선택한다. 기본 config와 다른 override, 미검증 버전, 불명확한 peer는 거부한다. 최초 지원은 herdr0.9.3/protocol22다. **현재 macOS loaded-image identity adapter는 Unverified이므로 UserDefault fresh/apply가 준비되지 않는다.** 설치 경로의 stat이나 버전 문자열로 이 판정을 풀지 않는다.
+config는 socket peer의 실제 HOME/XDG/config 환경과 실행 파일 identity를 확인한 뒤 선택한다. 기본 config와 다른 override, 미검증 버전, 불명확한 peer는 거부한다. 최초 지원은 herdr0.9.3/protocol22다. macOS loaded-image identity adapter는 native arm64 단일 아키텍처·기본 pagezero 레이아웃·APFS의 실행 파일만 판정한다. 근거는 매핑 vnode `(dev, ino)`, 한 관측 안의 같은 exec 세대, 실행 파일 ctime(ns) ≤ 서버 시작(µs)이다. 그 밖의 레이아웃·파일시스템, 서버 시작 뒤 실행 파일 변경, 시작 µs 안의 순서 불명은 원인별 `reason`으로 거부한다. **UserDefault 설정은 아직 validator가 고정 거부하므로 fresh/apply가 준비되지 않는다.** 설치 경로의 stat이나 버전 문자열로 이 판정을 풀지 않는다.
 
 ## 동의와 진단
 
@@ -37,7 +37,7 @@ config는 socket peer의 실제 HOME/XDG/config 환경과 실행 파일 identity
 ## 카나리 순서
 
 1. 코디네이터가 실행 노드·사용자·시험 채널·rollback 설정을 별도 승인한다. 이 문서는 운영 설정 변경을 승인하지 않는다.
-2. 실행 노드의 사용자 서버 존재,0.9.3/protocol22, 실제 socket peer와 loaded-image identity, 경로/권한을 확인한다. pathname/version만 있는 관측은 준비 완료가 아니다. macOS에서는 위 identity 제한을 먼저 해소해야 한다.
+2. 실행 노드의 사용자 서버 존재,0.9.3/protocol22, 실제 socket peer와 loaded-image identity, 경로/권한을 확인한다. pathname/version만 있는 관측은 준비 완료가 아니다. macOS에서는 `reason`이 위 지원 범위 밖 거부가 아닌지 먼저 확인한다.
 3. 새 설정을 배포하기 전 live row와 unresolved consent hold가 이동 대상에 없는지 확인한다. migration 거부와 restart_required를 구별하고 old applied mapping이 유지되는지 확인한다.
 4. owner가 동의 카드의 경로·preview를 확인한 뒤 예를 선택한다. 원본 backup과 false 전체 config 검증을 확인한다. 첫 입력과 다음 FIFO 입력을 확인하고 draft/modal/busy 상태에서 paste/Enter가 없는지 확인한다.
    실제 Claude cold start 한 번에서 SessionStart hook 수신부터 빈 ready composer marker 관측까지의 지연을 기록한다.

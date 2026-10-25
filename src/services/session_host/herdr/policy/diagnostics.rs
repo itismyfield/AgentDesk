@@ -59,6 +59,20 @@ pub(crate) fn record(
             match reason {
                 Unverified::ResumeEnabled => "next_restart_resumes".into(),
                 Unverified::Ambiguous => "next_restart_policy_ambiguous".into(),
+                #[cfg(target_os = "macos")]
+                Unverified::ImageChangedSinceStart => {
+                    "next_restart_image_changed_since_start".into()
+                }
+                #[cfg(target_os = "macos")]
+                Unverified::ImageTimeAmbiguous => "next_restart_image_time_ambiguous".into(),
+                #[cfg(target_os = "macos")]
+                Unverified::ImageFilesystemUnsupported => {
+                    "next_restart_image_filesystem_unsupported".into()
+                }
+                #[cfg(target_os = "macos")]
+                Unverified::ImageLayoutUnsupported => {
+                    "next_restart_image_layout_unsupported".into()
+                }
                 _ => format!("next_restart_policy_unverified:{reason:?}"),
             },
             match reason {
@@ -68,8 +82,27 @@ pub(crate) fn record(
                 Unverified::Unsupported => {
                     "Use a verified herdr 0.9.3 / protocol 22 server on the execution node, then retry."
                 }
+                Unverified::Identity if !super::peer::SUPPORTED => {
+                    "This platform has no loaded-image adapter, so a user-default server cannot be verified here; keep legacy_dedicated."
+                }
                 Unverified::Identity => {
                     "Verify the execution node's loaded executable identity; this platform may remain Unverified. A pathname stat is insufficient."
+                }
+                #[cfg(target_os = "macos")]
+                Unverified::ImageChangedSinceStart => {
+                    "The herdr executable changed after this server process started (install, upgrade, permission or xattr change). Waiting, consent retry or an AgentDesk restart cannot clear this for the same server; the execution node needs a herdr server started after the executable's last change. AgentDesk never restarts it; held inputs stay preserved."
+                }
+                #[cfg(target_os = "macos")]
+                Unverified::ImageTimeAmbiguous => {
+                    "The herdr executable's change time falls inside the server's start microsecond, so its order is unknown; this is not proof of a later change. A herdr server started after the executable's last change clears it; AgentDesk never restarts it; held inputs stay preserved."
+                }
+                #[cfg(target_os = "macos")]
+                Unverified::ImageFilesystemUnsupported => {
+                    "The herdr executable is on a filesystem other than APFS, whose change times cannot prove it is unchanged since the server started. Install herdr on APFS or keep legacy_dedicated."
+                }
+                #[cfg(target_os = "macos")]
+                Unverified::ImageLayoutUnsupported => {
+                    "The herdr server is not a native arm64 single-architecture image (universal/fat or x86_64 are not supported yet). Use a native arm64 herdr build or keep legacy_dedicated."
                 }
                 Unverified::Ambiguous => {
                     "Normalize HOME/XDG/HERDR_CONFIG_PATH on the execution node so the actual default config and selected socket are unambiguous, then retry."
