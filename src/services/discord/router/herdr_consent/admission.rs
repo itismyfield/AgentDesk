@@ -348,10 +348,54 @@ pub(in crate::services::discord::router) fn hold_live<'a, 'b: 'a>(
                 "herdr consent durable custody unavailable; checkpoint remains unread".into(),
             );
         }
-        register_mailbox(deps, &provider, &request, hold?, explicit)
+        let hold = match hold {
+            Ok(hold) => hold,
+            Err(error) if explicit => {
+                notify_unverified(deps, &request, &error).await;
+                return Err(error.into());
+            }
+            Err(error) => {
+                tracing::warn!(%error, "queued consent input remains held");
+                return Err(error.into());
+            }
+        };
+        register_mailbox(deps, &provider, &request, hold, explicit)
             .await
             .map_err(Into::into)
     })
+}
+
+/// A held input with no consent card names its cause once per original source and cause.
+async fn notify_unverified(deps: &IntakeDeps<'_>, request: &IntakeRequest, error: &str) {
+    let (channel, source) = (request.channel_id, request.user_msg_id);
+    let socket = endpoint(channel.get()).map_or_else(String::new, |e| e.socket_addr);
+    let observed =
+        crate::services::session_host::policy::diagnostics::snapshot(std::path::Path::new(&socket));
+    let reason = observed["reason"].as_str().unwrap_or("not_observed");
+    let action = observed["action"].as_str().unwrap_or("");
+    let detail: String = error.chars().take(300).collect();
+    let notice = format!(
+        "herdr 사용자 서버를 검증하지 못해 이 입력을 보류했습니다. 원 입력은 보존됨(대기열에 남아 있음).\n원인: {reason}\n조치: {action}\n세부: {detail}"
+    );
+    // The hold error joins the reason so a different refusal behind the same reason is still shown.
+    if let Err(notice_error) =
+        crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
+            deps.http.clone(),
+            deps.shared.clone(),
+            channel,
+            source,
+            &notice,
+            format!(
+                "herdr-consent-unverified:{}:{}",
+                channel.get(),
+                source.get()
+            ),
+            format!("{reason}|{error}"),
+        )
+        .await
+    {
+        tracing::warn!(%notice_error, %error, "unverified consent hold notice failed");
+    }
 }
 
 pub(in crate::services::discord::router) async fn worker(
@@ -449,3 +493,7 @@ impl std::error::Error for QueuedHold {}
 #[cfg(test)]
 #[path = "admission_tests.rs"]
 pub(in crate::services::discord::router) mod tests;
+
+#[cfg(test)]
+#[path = "admission_notice_tests.rs"]
+mod notice_tests;

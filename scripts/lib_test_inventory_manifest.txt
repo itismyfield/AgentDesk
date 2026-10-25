@@ -190,6 +190,7 @@ cli::herdr::tests::m2t_u9_manual_retire_inside_the_terminate_cas_window_pg
 cli::herdr::tests::retire_root_replaced_both_absent_pg
 cli::herdr::tests::status_shows_rows_panes_and_holds_without_paths_pg
 cli::herdr::tests::t_r3_retire_needs_a_read_that_shows_the_execution_ended_pg
+cli::herdr::user_probe::tests::probe_user_default_reports_the_reason_without_config_database_or_writes
 cli::init::launchd_plist_tests::clamp_launchd_nofile_soft_limit_never_exceeds_host_hard_limit
 cli::init::launchd_plist_tests::generate_launchd_plist_release_sets_clamped_soft_number_of_files_limit
 cli::init::launchd_plist_tests::generate_launchd_plist_uses_requested_fresh_home_and_root_only
@@ -6944,6 +6945,7 @@ services::discord::restart_report::tests::production_path_preserves_attempt_and_
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_preserves_fresh_bootstrap_without_worktree_hint
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_reused_thread_still_updates_divergent_fallback
 services::discord::router::dispatch_trigger::tests::dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches
+services::discord::router::herdr_consent::admission::notice_tests::consent_unverified_hold_notices_once_per_source_and_cause_and_keeps_custody
 services::discord::router::herdr_consent::admission::tests::actual_fifo_receipt_release_readmits_once_then_uses_one_start_and_followup_pg
 services::discord::router::herdr_consent::admission::tests::actual_live_checkpoint_waits_for_second_check_failed_custody_pg
 services::discord::router::herdr_consent::admission::tests::actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg

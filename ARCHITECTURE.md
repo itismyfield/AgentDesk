@@ -83,6 +83,8 @@ src/
 │   ├── discord_thread_create_lock.rs
 │   ├── doctor.rs
 │   ├── herdr.rs
+│   ├── herdr_probe.rs
+│   ├── herdr_probe_tests.rs
 │   ├── herdr_terminate_tests.rs
 │   ├── herdr_tests.rs
 │   ├── init.rs
@@ -1710,6 +1712,7 @@ src/
 │   │   ├── router/
 │   │   │   ├── herdr_consent/
 │   │   │   │   ├── admission.rs
+│   │   │   │   ├── admission_notice_tests.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── custody_tests.rs

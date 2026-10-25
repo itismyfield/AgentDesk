@@ -33,11 +33,13 @@ pub(crate) fn checker(socket: &Path, stdout: &[u8], stderr: &[u8]) {
     }
 }
 
+/// Keeps the last observation for health and doctor and returns it, so every surface shows the
+/// same reason and action.
 pub(crate) fn record(
     socket: &Path,
     cache: &ProofCache,
     result: &Result<NextRestartProof, Unverified>,
-) {
+) -> Value {
     let (ready, startup, reason, action, witness) = match result {
         Ok(proof) => {
             let startup = cache.startup_for(proof.witness()).ok().flatten().is_some();
@@ -108,7 +110,7 @@ pub(crate) fn record(
                     "Normalize HOME/XDG/HERDR_CONFIG_PATH on the execution node so the actual default config and selected socket are unambiguous, then retry."
                 }
                 Unverified::ResumeEnabled => {
-                    "Review the owner consent card or explicitly set session.resume_agents_on_restore=false in the execution user's config, then retry."
+                    "The execution user's herdr resumes agents on restore. Owner consent may offer a card if its preview succeeds, or explicitly set session.resume_agents_on_restore=false in that config, then retry."
                 }
                 _ => {
                     "Read the bounded checker diagnostics, repair the execution user's full config or permissions, then retry. No automatic restart or config fix is performed."
@@ -117,14 +119,25 @@ pub(crate) fn record(
             String::new(),
         ),
     };
+    let value = json!({"next_restart_ready": ready,
+    "startup_proof": startup, "reason": reason, "action": action, "witness": witness,
+    "observation": "last_check_only; a fresh create rechecks at its fence, while existing input mutations compare only the recorded server witness"});
     if let Ok(mut observed) = OBSERVED.get_or_init(Mutex::default).lock() {
-        observed.policy.insert(
-            socket.into(),
-            json!({"next_restart_ready": ready,
-            "startup_proof": startup, "reason": reason, "action": action, "witness": witness,
-            "observation": "last_check_only; revalidated at each mutation/create fence"}),
-        );
+        observed.policy.insert(socket.into(), value.clone());
     }
+    value
+}
+
+/// One next-restart check of `socket` with a fresh cache; it writes no config or file and starts no server.
+#[cfg(unix)]
+pub(crate) async fn probe(socket: &Path) -> Result<Value, String> {
+    let source = super::super::launch_host::probe_source(socket)?;
+    let cache = ProofCache::default();
+    let result = cache.next_restart(source, &super::LocalChecker).await;
+    let mut value = record(socket, &cache, &result);
+    value["socket"] = socket.display().to_string().into();
+    value["observation"] = "probe_once; nothing outlives this process".into();
+    Ok(value)
 }
 
 pub(crate) fn snapshot(socket: &Path) -> Value {
