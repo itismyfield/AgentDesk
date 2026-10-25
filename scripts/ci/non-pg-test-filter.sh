@@ -204,6 +204,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
+  --skip services::discord::tui_prompt_relay::source_tick::restore_after_rehydration_tests
   --skip services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests
   --skip services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
@@ -353,6 +354,11 @@ NON_PG_FILTER_REPLAY=(
   engine::ops::config_ops::tests::config_get_raw_queries_runtime_blob_only_for_allowlisted_scalar_misses
   engine::ops::config_ops::tests::config_get_raw_runtime_blob_fallback_is_allowlisted_and_fail_closed
   engine::ops::db_ops::tests::policy_sql_param_wire_text_preserves_json_scalar_and_container_values
+  engine::ops::db_ops::tests::policy_sql_schema_tests::every_policy_db_call_expands_to_concrete_sql
+  engine::ops::db_ops::tests::policy_sql_schema_tests::expands_concatenation_ternaries_templates_and_placeholder_joins
+  engine::ops::db_ops::tests::policy_sql_schema_tests::follows_appends_and_cross_module_helpers
+  engine::ops::db_ops::tests::policy_sql_schema_tests::parameters_shadow_same_named_variables_of_other_functions
+  engine::ops::db_ops::tests::policy_sql_schema_tests::reports_dynamic_pieces_and_unsupported_access
   engine::ops::db_ops::tests::prepare_policy_sql_for_pg_errors_when_parameter_is_missing
   engine::ops::db_ops::tests::prepare_policy_sql_for_pg_ignores_comment_quotes_while_rewriting_rowid
   engine::ops::db_ops::tests::prepare_policy_sql_for_pg_leaves_question_marks_inside_comments
