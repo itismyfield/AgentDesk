@@ -4201,73 +4201,7 @@ PY
 
     # Reuse the E2E driver's mailbox/session busy predicates before sending E-1.
     # An unreadable snapshot skips injection; existing API findings remain the smoke result.
-    if cell_busy=$(python3 - "$REPO" "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" \
-        "$POST_DEPLOY_SMOKE_SESSIONS_BODY" "$POST_DEPLOY_SMOKE_RELAY_CELL" "$channel_id" \
-        2>> "$POST_DEPLOY_SMOKE_EVIDENCE" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-repo, health_path, sessions_path, cell, channel_id = sys.argv[1:]
-sys.path.insert(0, str(Path(repo) / "scripts" / "e2e"))
-import run_tui_relay as cell_driver
-
-try:
-    with Path(health_path).open(encoding="utf-8") as handle:
-        detail = json.load(handle)
-    with Path(sessions_path).open(encoding="utf-8") as handle:
-        sessions_payload = json.load(handle)
-    mailboxes = detail.get("mailboxes") if isinstance(detail, dict) else None
-    if not isinstance(mailboxes, list):
-        raise ValueError("health/detail mailboxes is not a list")
-    sessions = (
-        sessions_payload.get("sessions")
-        if isinstance(sessions_payload, dict)
-        else sessions_payload
-    )
-    if not isinstance(sessions, list):
-        raise ValueError("sessions payload is not a list")
-
-    provider = cell_driver.cell_provider(cell)
-    busy = []
-    for mailbox in mailboxes:
-        if not isinstance(mailbox, dict):
-            continue
-        if cell_driver._mailbox_channel_id(mailbox) != str(channel_id):
-            continue
-        if cell_driver._mailbox_provider(mailbox) != provider:
-            continue
-        reasons = cell_driver._mailbox_busy_reasons(mailbox)
-        if reasons:
-            busy.append(
-                f"mailbox {provider}:{channel_id} [{', '.join(reasons)}]"
-            )
-
-    workspace_substring = cell_driver.cell_workspace_substring(cell)
-    for session in sessions:
-        if not isinstance(session, dict):
-            continue
-        status = str(session.get("status") or "").lower()
-        if status not in {"turn_active", "turn_busy", "active"}:
-            continue
-        session_key = str(session.get("session_key") or "")
-        session_channel = str(
-            session.get("channel_id") or session.get("channelId") or ""
-        )
-        if session_channel == str(channel_id) or workspace_substring in session_key:
-            busy.append(
-                f"session {session_key or session_channel or '<unknown>'} status={status}"
-            )
-except Exception as error:
-    print(f"{type(error).__name__}: {error}", file=sys.stderr)
-    raise SystemExit(2) from error
-
-if busy:
-    print("; ".join(busy))
-    raise SystemExit(0)
-raise SystemExit(1)
-PY
-    ); then
+    if cell_busy=$(python3 "$REPO/scripts/e2e/post_deploy_turn_smoke.py" cell-guard --health-detail "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" --sessions "$POST_DEPLOY_SMOKE_SESSIONS_BODY" --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" --channel-id "$channel_id" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
         _post_deploy_smoke_note "relay E-1=skipped: foreign active turn on cell" || return 1
         _post_deploy_smoke_note "relay E-1 cell-busy evidence=${cell_busy}" || return 1
         return 0
@@ -4373,7 +4307,11 @@ _post_deploy_smoke_run_turn_scenario() {
         --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" --cell "$cell" \
         --channel-id "$channel_id" --queue-runtime-root "$ADK_REL/runtime" --reset-state "$POST_DEPLOY_SMOKE_TMP_DIR/cell-reset.json" 2>&1); then :; else
         rc=$?; if [ "$rc" -eq 4 ]; then _post_deploy_smoke_fail "relay ${scenario} cell=${cell} result=FAIL ${idle}" || true; POST_DEPLOY_SMOKE_TURN_COVERAGE+=" ${scenario}=FAIL"; return 1; fi
-        _post_deploy_smoke_note "relay ${scenario}=skipped: ${cell} not proven idle (${idle})" || return 1
+        if [[ "$idle" == "skipped: blocked by E-1 FAIL"* ]]; then
+            _post_deploy_smoke_note "relay ${scenario}=${idle}" || return 1
+        else
+            _post_deploy_smoke_note "relay ${scenario}=skipped: ${cell} not proven idle (${idle})" || return 1
+        fi
         POST_DEPLOY_SMOKE_TURN_COVERAGE+=" ${scenario}=skipped"
         return 0
     fi

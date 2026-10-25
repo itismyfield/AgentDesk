@@ -556,6 +556,7 @@ class CellResetTest(unittest.TestCase):
             for provider, channel in (("claude", 222), ("codex", 333))
         }
         self.inflight = {"222": True, "333": True}
+        self.sessions = []
         self.cleared = set()
         self.calls = []
         self.inspects = 0
@@ -600,7 +601,7 @@ class CellResetTest(unittest.TestCase):
                         for provider, channel in (("claude", "222"), ("codex", "333"))
                     ]})
                 elif self.path == "/api/sessions":
-                    self.reply({"sessions": []})
+                    self.reply({"sessions": fixture.sessions})
                 elif "/messages?" in self.path:
                     channel = self.path.split("/")[4]
                     cell = {"222": "claude-tui", "333": "codex-tui", "999": "claude-tui"}[channel]
@@ -633,6 +634,7 @@ class CellResetTest(unittest.TestCase):
                     fixture.lock_observations.append(("clear", driver.lease.lease_path_for(cell).exists()))
                     fixture.cleared.add(body["channel_id"])
                     fixture.inflight[body["channel_id"]] = False
+                    fixture.sessions = [s for s in fixture.sessions if str(s.get("channel_id")) != body["channel_id"]]
                     self.reply({"message_id": "500"})
                 else:
                     self.reply({"error": "unexpected fixture POST"}, 404)
@@ -741,6 +743,31 @@ class CellResetTest(unittest.TestCase):
         self.reset()
         self.assertEqual([c[1] for c in self.mutations()], ["/api/discord/send"])
         self.assertEqual(self.preflight(), 0)
+
+    def test_session_only_residue_triggers_one_clear(self):
+        self.identities["claude"] = None
+        self.inflight["222"] = False
+        self.sessions = [{"channel_id": "222", "status": "turn_active"}]
+        self.reset()
+        self.assertEqual([c[1] for c in self.mutations()], ["/api/discord/send"])
+        self.assertEqual(self.cleared, {"222"})
+        self.assertEqual(self.sessions, [])
+
+    def test_session_busy_predicate_preserves_e1_target_matching(self):
+        workspace = driver.cell_workspace_substring("claude-tui")
+        for payload, expected in (
+            ([{"channel_id": "222", "status": "turn_active"}], True),
+            ({"sessions": [{"channelId": "222", "status": "TURN_BUSY"}]}, True),
+            ([{"channel_id": "999", "session_key": f"claude/host:{workspace}-t999", "status": "active"}], True),
+            ([{"channel_id": "222", "status": "idle"}], False),
+            ([{"channel_id": "999", "status": "turn_active"}, None], False),
+        ):
+            with self.subTest(payload=payload):
+                reasons = turn_smoke.cell_session_busy_reasons(cell="claude-tui", channel_id="222", sessions_payload=payload)
+                self.assertEqual(bool(reasons), expected)
+        for payload in (None, {}, {"sessions": "unreadable"}):
+            with self.subTest(invalid=payload), self.assertRaises(ValueError):
+                turn_smoke.cell_session_busy_reasons(cell="claude-tui", channel_id="222", sessions_payload=payload)
 
     def test_foreign_driver_lease_skips_without_http_or_mutations(self):
         with driver.lease.acquire("foreign-driver", cell="claude-tui") as path:
@@ -935,7 +962,11 @@ exit "$rc"
         result = self.deploy_round_trip(run_all=True)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual((self.root / "injected").read_text().splitlines(), ["E-51"])
-        self.assertIn("COVERAGE=E-50=FAIL E-51=pass", result.stdout)
+        self.assertIn("COVERAGE=E-50=skipped E-51=pass", result.stdout)
+        findings = [line for line in result.stdout.splitlines() if line.startswith("FAIL:")]
+        self.assertEqual(len(findings), 1, result.stdout)
+        self.assertIn("relay E-1: cell-reset refused", findings[0])
+        self.assertIn("relay E-50=skipped: blocked by E-1 FAIL", result.stdout)
 
     def test_foreign_driver_deploy_logs_existing_skip_without_touching_its_cell(self):
         with driver.lease.acquire("foreign-driver", cell="claude-tui") as path:

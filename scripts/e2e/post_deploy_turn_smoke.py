@@ -287,6 +287,50 @@ def classify(
         return {"classification": "FAIL", "observed_reason": "configuration or evidence unreadable", "known_gaps": []}
 
 
+def cell_session_busy_reasons(*, cell: str, channel_id: str, sessions_payload: Any) -> list[str]:
+    """Use E-1's session status and channel/workspace matching for both idle checks."""
+    sessions = sessions_payload.get("sessions") if isinstance(sessions_payload, dict) else sessions_payload
+    if not isinstance(sessions, list):
+        raise ValueError("sessions payload is not a list")
+    workspace = cell_driver.cell_workspace_substring(cell)
+    busy = []
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        status = str(session.get("status") or "").lower()
+        if status not in {"turn_active", "turn_busy", "active"}:
+            continue
+        key = str(session.get("session_key") or "")
+        channel = str(session.get("channel_id") or session.get("channelId") or "")
+        if channel == str(channel_id) or workspace in key:
+            busy.append(f"session {key or channel or '<unknown>'} status={status}")
+    return busy
+
+
+def _cell_guard(args: argparse.Namespace) -> int:
+    """Preserve E-1's snapshot guard exit codes: 0 busy, 1 idle, 2 unreadable."""
+    try:
+        detail = json.loads(Path(args.health_detail).read_text(encoding="utf-8"))
+        sessions = json.loads(Path(args.sessions).read_text(encoding="utf-8"))
+        mailboxes = detail.get("mailboxes") if isinstance(detail, dict) else None
+        if not isinstance(mailboxes, list):
+            raise ValueError("health/detail mailboxes is not a list")
+        provider = cell_driver.cell_provider(args.cell)
+        busy = [f"mailbox {provider}:{args.channel_id} [{', '.join(reasons)}]"
+                for box in mailboxes if isinstance(box, dict)
+                and cell_driver._mailbox_channel_id(box) == str(args.channel_id)  # noqa: SLF001
+                and cell_driver._mailbox_provider(box) == provider  # noqa: SLF001
+                if (reasons := cell_driver._mailbox_busy_reasons(box))]  # noqa: SLF001
+        busy.extend(cell_session_busy_reasons(cell=args.cell, channel_id=args.channel_id, sessions_payload=sessions))
+    except Exception as error:  # noqa: BLE001 - unreadable snapshots never prove idle
+        print(f"{type(error).__name__}: {error}", file=sys.stderr)
+        return 2
+    if busy:
+        print("; ".join(busy))
+        return 0
+    return 1
+
+
 def preflight_busy_reasons(
     *, base_url: str, cell: str, channel_id: str, runtime_root: Path | None = None,
     herdr_endpoint: str | None = None, herdr_status_bin: str = "agentdesk",
@@ -406,7 +450,9 @@ def _reset_cell_turn(*, base_url: str, cell: str, channel_id: str, runtime_root:
             raise ValueError("identity changed after release; !clear refused")
     else:
         log("release skipped: inspect proved no active lease")
-        if not preflight_busy_reasons(base_url=base_url, cell=cell, channel_id=channel_id, runtime_root=runtime_root):
+        if not (preflight_busy_reasons(base_url=base_url, cell=cell, channel_id=channel_id, runtime_root=runtime_root)
+                or cell_session_busy_reasons(cell=cell, channel_id=channel_id,
+                                             sessions_payload=cell_driver._read_api_json(base_url, "/api/sessions")[1])):  # noqa: SLF001
             log("reset not needed: no lease and preflight idle; preserve warm session")
             return
     log("!clear requested: discard dedicated E2E session")
@@ -446,6 +492,7 @@ def _reset_smoke_cells(args: argparse.Namespace) -> int:
                              "channel_id": channel, "reason": f"E2E allowlist unavailable: {error}"}
         except Exception as error:  # noqa: BLE001 - isolate reset failures to their target cell
             results[cell] = {"status": "failed", "channel_id": channel, "reason": f"{type(error).__name__}: {error}"}
+        results[cell]["relay"] = cell == args.cell[0]
         print(f"cell-reset cell={cell} {results[cell]['status']}: {results[cell]['reason']}", flush=True)
     relay = results[args.cell[0]]
     try:
@@ -476,6 +523,8 @@ def reset_status(path: Path, cell: str, channel_id: str) -> tuple[int, str]:
             raise ValueError("invalid reset outcome")
         if record["channel_id"] is not None and record["channel_id"] != channel_id:
             raise ValueError("reset channel changed")
+        if status == "failed" and record.get("relay") is True:
+            return 1, f"skipped: blocked by E-1 FAIL ({reason})"
         return {"ready": 0, "skipped": 1, "failed": 4}[status], f"cell-reset cell={cell} {status}: {reason}"
     except (OSError, ValueError, KeyError, TypeError) as error:
         return 4, f"cell-reset state unavailable for {cell}: {error}"
@@ -484,6 +533,11 @@ def reset_status(path: Path, cell: str, channel_id: str) -> tuple[int, str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
+    guard = sub.add_parser("cell-guard")
+    guard.add_argument("--health-detail", required=True)
+    guard.add_argument("--sessions", required=True)
+    guard.add_argument("--cell", required=True, choices=cell_driver.SUPPORTED_CELLS)
+    guard.add_argument("--channel-id", required=True)
     reset = sub.add_parser("cell-reset")
     reset.add_argument("--base-url", required=True)
     reset.add_argument("--config", required=True)
@@ -515,6 +569,9 @@ def main(argv: list[str] | None = None) -> int:
     jud.add_argument("--log-excerpt", default="")
     jud.add_argument("--driver-rc", type=int, required=True)
     args = parser.parse_args(argv)
+
+    if args.command == "cell-guard":
+        return _cell_guard(args)
 
     if args.command == "cell-reset":
         return _reset_smoke_cells(args)
