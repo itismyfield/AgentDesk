@@ -52,8 +52,17 @@ pub(crate) struct Inputs {
     pub coverage: Coverage,
 }
 
+pub(crate) type Refresh<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<std::sync::Arc<dyn Observer>, String>> + Send + 'a>,
+>;
+
 pub(crate) trait Observer: Send + Sync {
     fn observe(&self, authority: &TmuxSourceAuthority<'_>) -> Result<Inputs, String>;
+
+    /// Refresh slow discovery outside source authority; failure cannot authorize retirement.
+    fn refresh(&self) -> Refresh<'_> {
+        Box::pin(async { Err("Codex observer cannot refresh".into()) })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
