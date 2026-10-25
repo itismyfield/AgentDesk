@@ -65,8 +65,8 @@ fn system_prompt_masks_keys_and_token_shapes_and_counts_values_once() {
         "sk-proj-Sensitive123",
         "ghp_sensitive123",
         "xoxb-123-sensitive",
-        &"a".repeat(32),
-        &"Ab9+/Z".repeat(12),
+        &"a9".repeat(16),
+        &"Ab9+Z0".repeat(12),
     ];
     let text = format!(
         "--key {}\n--key=\"{}\"\n--key '{}'\n{}\n{}\n{}\n{}\n{}",
@@ -109,4 +109,45 @@ fn system_prompt_header_distinguishes_origins_and_anchors() {
     assert!(rebuilt[0].contains("앵커 없음"));
     assert!(rebuilt[0].ends_with("재구성"));
     assert_eq!(joined(&rebuilt[1..]), "safe\nbody");
+}
+
+#[test]
+fn system_prompt_preserves_paths_urls_and_nonsecret_words() {
+    let opaque = "Ab9Z".repeat(12);
+    for text in [
+        "/Users/itismyfield/ObsidianVault/RemoteVault/99_Skills/agentdesk-issue-pipeline/SKILL.md"
+            .to_owned(),
+        "/home/adk/Project1234567890/agentdeskSkills42/knowledge_notes".to_owned(),
+        "https://github.com/itismyfield/AgentDesk/issues/7378/comments".to_owned(),
+        format!("/home/{opaque}/notes"),
+        format!("prefix.{opaque}"),
+        format!("{opaque}.md"),
+        "a".repeat(64),
+        "the sk-learn library and task-specific ask-user guidance".to_owned(),
+    ] {
+        assert_eq!(redact(&text), (text.clone(), 0), "nonsecret text changed");
+    }
+}
+
+#[test]
+fn system_prompt_masks_bounded_opaque_keys_and_labeled_values() {
+    for text in [
+        "Ab9+Z0".repeat(10),
+        format!("sk-{}", "Ab9X".repeat(4)),
+        "ghp_sensitive123".into(),
+    ] {
+        assert_eq!(
+            redact(&format!("before ({text}) after")),
+            ("before (***) after".into(), 1)
+        );
+    }
+    let text =
+        "token: short-value\napi_key='spaced value'\nsecret=bare\npassword: \"quoted value\"";
+    assert_eq!(
+        redact(text),
+        (
+            "token: ***\napi_key=***\nsecret=***\npassword: ***".into(),
+            4
+        )
+    );
 }

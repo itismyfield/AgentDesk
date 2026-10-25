@@ -36,6 +36,7 @@ pub(super) struct BuiltSystemPrompt {
     pub(super) system_prompt: String,
     pub(super) manifest: Option<PromptManifest>,
     pub(super) anchor_count: usize,
+    inspection: bool,
 }
 
 struct PromptManifestLayerHash<'a> {
@@ -126,15 +127,27 @@ impl SharedPromptProfile {
 pub(crate) struct PromptProfiles {
     dispatch: DispatchProfile,
     shared: SharedPromptProfile,
+    inspection: bool,
 }
 
 impl PromptProfiles {
     const fn new(dispatch: DispatchProfile, shared: SharedPromptProfile) -> Self {
-        Self { dispatch, shared }
+        Self {
+            dispatch,
+            shared,
+            inspection: false,
+        }
     }
 
     pub(super) const fn foreground(dispatch: DispatchProfile) -> Self {
         Self::new(dispatch, SharedPromptProfile::for_dispatch(dispatch))
+    }
+
+    pub(super) const fn inspection(dispatch: DispatchProfile) -> Self {
+        Self {
+            inspection: true,
+            ..Self::foreground(dispatch)
+        }
     }
 
     pub(super) const fn headless(dispatch: DispatchProfile) -> Self {
@@ -212,6 +225,7 @@ pub(super) fn build_system_prompt_with_manifest(
     let PromptProfiles {
         dispatch: profile,
         shared: shared_prompt_profile,
+        inspection,
     } = profiles;
     let mut prompt_manifest_layers = Vec::new();
     // Issue #2659: track per-build appendages so identical large content
@@ -257,9 +271,11 @@ pub(super) fn build_system_prompt_with_manifest(
         system_prompt_owned.push_str("\n\n");
         system_prompt_owned.push_str(&prefix);
     }
-    if let Some(packet) =
+    if let Some(packet) = if inspection {
+        crate::services::agent_recovery::peek_restore_packet(&channel_id.get().to_string())
+    } else {
         crate::services::agent_recovery::take_restore_packet(&channel_id.get().to_string())
-    {
+    } {
         system_prompt_owned.push_str("\n\n");
         system_prompt_owned.push_str(&packet);
     }
@@ -402,7 +418,11 @@ pub(super) fn build_system_prompt_with_manifest(
         }
 
         if profile != DispatchProfile::Lite {
-            match load_role_prompt(binding) {
+            match if inspection {
+                binding.inspection_prompt()
+            } else {
+                load_role_prompt(binding)
+            } {
                 Some(role_prompt) => {
                     prompt_manifest_layers.push(role_prompt_manifest_layer(
                         binding,
@@ -498,7 +518,11 @@ pub(super) fn build_system_prompt_with_manifest(
             }
 
             if binding.peer_agents_enabled {
-                if let Some(peer_guidance) = render_peer_agent_guidance(&binding.role_id) {
+                if let Some(peer_guidance) = if inspection {
+                    binding.inspection_peer_guidance()
+                } else {
+                    render_peer_agent_guidance(&binding.role_id)
+                } {
                     system_prompt_owned.push_str("\n\n");
                     system_prompt_owned.push_str(&peer_guidance);
                     prompt_manifest_layers.push(prompt_manifest_layer(
@@ -556,7 +580,7 @@ pub(super) fn build_system_prompt_with_manifest(
             api_friction_guidance.trim_start_matches("\n\n"),
         ));
     }
-    if let Some(performance_section) = agent_performance_prompt_section(role_binding, profile) {
+    if let Some(performance_section) = agent_performance_prompt_section(role_binding, profiles) {
         system_prompt_owned.push_str("\n\n");
         system_prompt_owned.push_str(&performance_section);
         prompt_manifest_layers.push(prompt_manifest_layer(
@@ -687,6 +711,7 @@ pub(super) fn build_system_prompt_with_manifest(
         system_prompt: system_prompt_owned,
         manifest,
         anchor_count: 0,
+        inspection,
     }
 }
 

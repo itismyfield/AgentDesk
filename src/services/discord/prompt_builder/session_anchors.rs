@@ -33,7 +33,12 @@ impl BuiltSystemPrompt {
         mut self,
         request: SessionAnchorRequest<'_>,
     ) -> Self {
-        if let Some((anchors, count)) = load_session_anchor_prompt(request).await {
+        let anchors = if self.inspection {
+            request.peek_prompt()
+        } else {
+            load_session_anchor_prompt(request).await
+        };
+        if let Some((anchors, count)) = anchors {
             self.anchor_count = count;
             self.append_anchor_layer(&anchors);
         }
@@ -75,6 +80,7 @@ mod tests {
             system_prompt: "existing instructions".into(),
             manifest: None,
             anchor_count: 0,
+            inspection: false,
         };
         built.append_anchor_layer("[ANCHOR MEMORY]\n- persistent preference");
         let instructions = crate::services::codex::compose_codex_developer_instructions(

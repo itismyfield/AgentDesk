@@ -555,3 +555,17 @@ pub use durable::{
 
 #[cfg(test)]
 mod tests;
+
+pub fn peek_restore_packet(channel: &str) -> Option<String> {
+    durable::lock(&durable::coordinator().runtime)
+        .pending_restore
+        .get(channel)
+        .cloned()
+}
+
+#[cfg(test)]
+pub(crate) fn stage_restore_packet_for_test(channel: &str, packet: &str) {
+    durable::lock(&durable::coordinator().runtime)
+        .pending_restore
+        .insert(channel.into(), packet.into());
+}

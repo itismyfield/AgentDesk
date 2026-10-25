@@ -19,6 +19,7 @@ pub(super) async fn build(
     };
     let path = super::super::current_working_dir(shared, channel)
         .await
+        .or_else(|| settings::resolve_workspace(channel, name.as_deref()))
         .ok_or("현재 세션의 작업 디렉터리가 없어요.")?;
     let role_channel = shared
         .dispatch
@@ -34,7 +35,10 @@ pub(super) async fn build(
     );
     let shared_knowledge =
         if profile == DispatchProfile::Full && matches!(provider, ProviderKind::Claude) {
-            super::super::super::shared_memory::load_shared_knowledge()
+            super::super::super::runtime_store::shared_agent_knowledge_path()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| format!("[Shared Agent Knowledge]\n{}", text.trim()))
         } else {
             None
         };
@@ -56,7 +60,7 @@ pub(super) async fn build(
         &ctx.data().token,
         role.as_ref(),
         false,
-        PromptProfiles::foreground(profile),
+        PromptProfiles::inspection(profile),
         None,
         None,
         shared_knowledge.as_deref(),

@@ -211,8 +211,18 @@ where
 
 pub(super) fn agent_performance_prompt_section(
     role_binding: Option<&RoleBinding>,
-    profile: DispatchProfile,
+    profiles: super::PromptProfiles,
 ) -> Option<String> {
+    let profile = profiles.dispatch;
+    if profiles.inspection {
+        let binding = role_binding
+            .filter(|b| profile == DispatchProfile::Full && b.quality_feedback_injection_enabled)?;
+        return crate::services::discord::internal_api::get_agent_quality_prompt_section(
+            &binding.role_id,
+        )
+        .ok()
+        .flatten();
+    }
     agent_performance_prompt_section_with_loader(
         role_binding,
         profile,

@@ -6121,6 +6121,7 @@ services::discord::prompt_builder::dispatch_contract_tests::role_prompt_layer_re
 services::discord::prompt_builder::dispatch_contract_tests::scope_assessment_contract_requires_scope_depth_and_patch_completion
 services::discord::prompt_builder::dispatch_contract_tests::shared_prompt_gate_off_preserves_compact_rules_byte_for_byte
 services::discord::prompt_builder::dispatch_contract_tests::shared_prompt_gate_on_selects_full_review_lite_and_headless_profiles
+services::discord::prompt_builder::dispatch_contract_tests::system_prompt_inspection_preserves_pending_restore_for_the_next_turn
 services::discord::prompt_builder::layer_rendering::bucket_cadence_tests::bucket_rollover_causes_miss_then_refill
 services::discord::prompt_builder::layer_rendering::bucket_cadence_tests::day_bucket_increments_at_utc_midnight_only
 services::discord::prompt_builder::layer_rendering::bucket_cadence_tests::metrics_counters_track_hits_and_misses
@@ -6149,7 +6150,9 @@ services::discord::prompt_builder::session_anchors::tests::session_anchors_use_n
 services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_fences_cannot_close_the_wrapper
 services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_header_distinguishes_origins_and_anchors
 services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_lines_and_emoji_keep_every_character
+services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_masks_bounded_opaque_keys_and_labeled_values
 services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_masks_keys_and_token_shapes_and_counts_values_once
+services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_preserves_paths_urls_and_nonsecret_words
 services::discord::prompt_builder::system_prompt_audit::tests::system_prompt_utf16_boundaries_and_roundtrip
 services::discord::queue_dispatch::canary_workspace::tests::canary_without_core_session_and_unresolved_workspace_parks_original_pg
 services::discord::queue_dispatch::canary_workspace::tests::workspace_hold_stays_on_the_sessionless_codex_canary_pg
@@ -7973,6 +7976,7 @@ services::discord::session_transition::tests::inactive_channel_locks_are_pruned_
 services::discord::session_transition::tests::transition_acquisition_times_out_after_contract_window
 services::discord::session_transition::tests::transition_lease_excludes_a_second_claim_until_it_is_dropped
 services::discord::settings::content::role_prompt_cache_tests::role_prompt_cache_invalidates_when_file_changes
+services::discord::settings::content::role_prompt_cache_tests::system_prompt_inspection_does_not_populate_role_or_peer_caches
 services::discord::settings::content::shared_prompt_profile_tests::character_limit_keeps_only_complete_profile_sections
 services::discord::settings::content::shared_prompt_profile_tests::compaction_collapses_two_or_more_blank_lines_to_one
 services::discord::settings::content::shared_prompt_profile_tests::nested_close_restores_outer_profile_state
@@ -11793,6 +11797,7 @@ services::memory::memento::anchor::tests::anchor_snapshot_survives_followup_and_
 services::memory::memento::anchor::tests::anchor_snapshot_timeout_and_mcp_failure_have_distinct_safe_reasons
 services::memory::memento::anchor::tests::anchor_snapshot_timeout_budget_covers_initialization_and_respects_longer_settings
 services::memory::memento::anchor::tests::anchor_snapshot_workspace_follows_git_common_dir_for_worktrees
+services::memory::memento::anchor::tests::system_prompt_inspection_anchor_cache_is_unchanged_on_hit_or_mismatch
 services::memory::memento::scope::workspace_scope_tests::memento_workspace_from_channel_workspace_uses_path_basename
 services::memory::memento::scope::workspace_scope_tests::unbound_memento_workspace_falls_back_to_channel_scope
 services::memory::memento::scope_tests::memory_group_absent_anchor_preserves_git_workspace_and_cache

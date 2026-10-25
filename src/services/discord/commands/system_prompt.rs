@@ -1,5 +1,5 @@
 use super::super::prompt_builder::system_prompt_audit;
-use super::super::{Context, Error, auto_restore_session, check_auth};
+use super::super::{Context, Error, check_auth};
 use crate::db::provider_session_prompts;
 use crate::services::provider::ProviderKind;
 
@@ -93,7 +93,6 @@ pub(in crate::services::discord) async fn cmd_system_prompt(ctx: Context<'_>) ->
     let provider =
         super::config::effective_provider_for_channel(&data.shared, channel, &data.provider, None)
             .await;
-    auto_restore_session(&data.shared, channel, ctx.serenity_context()).await;
     let mailbox = super::super::mailbox_snapshot(&data.shared, channel).await;
     let persisted = data
         .shared
