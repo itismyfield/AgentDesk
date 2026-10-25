@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "605ce34fd6205ad936af6b41dee01870883565e3",
+  "measured_at_sha": "4c04c22b8fca2757e9bdee1cb25993dfa459136f",
   "records": [
     {
       "root": "migrations/postgres",
@@ -31221,7 +31221,52 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:a70682ac5b5349c67f9022fd6f1db763b571e9cd20af41a45b07343523d23d54"
+      "fingerprint": "sha256:d82951fa4960341b3a6b105f37fc3e3c019cc9d6fcf3b0f9678f55f8401000c0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/config/provider_settings/revision_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0765c8ed3deb22a697018729b8064f74ae44716408fd66f1413e03eb44b5888f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/config/provider_settings/revision_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:25ea74592be761076932fd84fef6e455e74538e60567051db292d33b91a2ac8a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/config/provider_settings/revision_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:41ce8e8250e3ac0c36b9db3a13c7e1bfb71b6d5e2381d9a2061aa174c6129f26"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/config/provider_settings/revision_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:84dca84e4293b9ea51a4470bc3655d5b9f11a2310823ca5ccb111989e3b8786a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/config/provider_settings/revision_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2c8ab862262ad17ed94fb3e704da1c18808d693db91775f1ae0d3b3dfe59e839"
     },
     {
       "root": "src",
@@ -31429,6 +31474,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:579f1d5cbd8bfb1d16bf7a5fa44e41ec64df02be815ca9a502a982327798b511"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/tui_passthrough.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b9db00f18085dec7cd783defd56fa1e8f3e293d99ae5b1a1f8276a80364686f1"
     },
     {
       "root": "src",
