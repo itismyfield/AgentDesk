@@ -725,8 +725,6 @@ _health_json_degraded_reasons_all_match() {
   done
   return 0
 }
-
-. "$(dirname "${BASH_SOURCE[0]}")/lib/deploy_allow_degraded.sh"
 _health_json_deploy_nonblocking_ere() {
   # $1 allow_reconcile_degraded, $2 deploy verdict, $3 cluster_standby proven,
   # $4 providers whose TUI gateway restriction the body verifies (alternation).
@@ -750,6 +748,8 @@ _health_json_deploy_nonblocking_ere() {
   [ "${2:-0}" = "1" ] && [[ "${6:-}" =~ $ids_re ]] && ere="$ere|tui_o:boundary_pending:(${6})"
   [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:gateway_standby"
   [ -n "${4:-}" ] && ere="$ere|provider:(${4}):tui_output_requires_gateway"
+  [ "${2:-0}:${AGENTDESK_DEPLOY_ALLOW_DEGRADED+x}" = '1:x' ] || { printf '%s)$' "$ere"; return; }
+  . "$(dirname "${BASH_SOURCE[0]}")/lib/deploy_allow_degraded.sh" || return 2
   _deploy_allow_degraded_ere "${2:-0}" "$ere)$" "${7:-}"
 }
 _health_json_deploy_nonblocking_ere_for_body() {

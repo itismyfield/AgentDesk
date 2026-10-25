@@ -4,6 +4,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/_defaults.sh"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/lib/deploy_allow_degraded.sh"
 unset AGENTDESK_DEPLOY_ALLOW_DEGRADED
 export DEPLOY_E2E_SMOKE_CHANNEL_IDS=""
 export DEPLOY_PREEXISTING_READER_CHANNEL_IDS=""
@@ -110,6 +112,20 @@ unset AGENTDESK_DEPLOY_ALLOW_DEGRADED
 equal "unset environment preserves exact baseline pattern bytes" \
     "$(_health_json_deploy_nonblocking_ere_for_body "$INCIDENT" 1 1)" "$BASE"
 expect_blocked "unset environment keeps the incident blocked" "$INCIDENT"
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-defaults-bundle.XXXXXX")
+trap 'python3 -c "import shutil, sys; shutil.rmtree(sys.argv[1])" "$TMP_ROOT"' EXIT
+cp "$REPO_ROOT/scripts/_defaults.sh" "$TMP_ROOT/_defaults.sh"
+equal "bundled defaults without the helper preserve an unset deploy pattern" \
+    "$(/bin/bash -euc '. "$1"; _health_json_deploy_nonblocking_ere 1 1' fixture "$TMP_ROOT/_defaults.sh")" "$BASE"
+equal "bundled defaults ignore an invalid override for non-deploy callers" \
+    "$(AGENTDESK_DEPLOY_ALLOW_DEGRADED='[' /bin/bash -euc '. "$1"; _health_json_deploy_nonblocking_ere 1 0' fixture "$TMP_ROOT/_defaults.sh")" \
+    "$(_health_json_deploy_nonblocking_ere 1 0)"
+if AGENTDESK_DEPLOY_ALLOW_DEGRADED='.*' /bin/bash -euc \
+    '. "$1"; _health_json_deploy_nonblocking_ere 1 1' fixture "$TMP_ROOT/_defaults.sh" >/dev/null 2>&1; then
+    fail "a missing helper allowed a requested deploy waiver"
+else
+    pass "a missing helper fails closed only when a deploy requests a waiver"
+fi
 
 extract_function() {
     awk -v start="^${1}[(][)] [{]$" '
