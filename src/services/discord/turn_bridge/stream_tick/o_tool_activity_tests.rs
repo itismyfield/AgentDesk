@@ -39,6 +39,15 @@ fn o_status_only_frame_uses_the_same_summary_and_class_renderer() {
             assert!(expected.contains("▶ Bash  cargo test"), "{expected}");
         } else {
             assert!(expected.contains("마지막 도구 ([Bash])") && !expected.contains("cargo test"));
+            assert_eq!(
+                tool_label(&expected),
+                Some("마지막 도구 ([Bash])"),
+                "{expected:?}"
+            );
+            assert_eq!(
+                tool_label("-# 🔧 마지막 도구 ([Bash])"),
+                Some("마지막 도구 ([Bash])")
+            );
         }
     }
 }

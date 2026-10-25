@@ -30,11 +30,20 @@ pub(super) fn status_frame(
 
 /// The frame's last-tool label without its spinner; None before the turn's first tool.
 fn tool_label(frame: &str) -> Option<&str> {
-    let start = frame
-        .find("마지막 도구 (")
-        .or_else(|| frame.find("도구 "))?;
-    let label = frame[start..].lines().next()?;
-    (label != "마지막 도구 (아직 없음)").then_some(label)
+    frame.lines().find_map(|line| {
+        let line = line.trim().strip_prefix("-# ").unwrap_or(line.trim());
+        let generated = line.strip_prefix("🔧 ").or_else(|| {
+            let (marker, label) = line.split_once(' ')?;
+            crate::services::discord::single_message_panel::SINGLE_MESSAGE_PANEL_SPINNER_FRAMES
+                .contains(&marker)
+                .then_some(label)
+        });
+        let label = generated.unwrap_or(line);
+        if label.starts_with("마지막 도구 (") {
+            return (label != "마지막 도구 (아직 없음)").then_some(label);
+        }
+        generated.filter(|label| label.starts_with("도구 "))
+    })
 }
 
 /// Edits the bound panel in place when due; true when the edit was written.
@@ -73,3 +82,28 @@ pub(super) async fn refresh_o_status_panel(
 #[cfg(test)]
 #[path = "o_tool_activity_tests.rs"]
 mod tool_activity_tests;
+
+#[cfg(test)]
+mod label_tests {
+    use super::tool_label;
+
+    #[test]
+    fn accuracy_tool_label_only_matches_generated_line_prefixes() {
+        for frame in [
+            "Plan\n- [ ] 도구 설정 확인",
+            "-# ▶ Task  마지막 도구 (가짜)",
+            "설명: 도구 설정",
+            "-# 마지막 도구 (아직 없음)",
+        ] {
+            assert!(tool_label(frame).is_none(), "{frame}");
+        }
+        assert_eq!(
+            tool_label("⠋ 처리 중\n-# 🔧 도구 2 · 실행 1 · 실패 0"),
+            Some("도구 2 · 실행 1 · 실패 0")
+        );
+        assert_eq!(
+            tool_label("-# 마지막 도구 ([Bash])"),
+            Some("마지막 도구 ([Bash])")
+        );
+    }
+}
