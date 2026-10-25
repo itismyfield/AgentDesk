@@ -1089,7 +1089,9 @@ src/
 │   │   │   │   └── provider_reset.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
-│   │   │   │   └── reports.rs
+│   │   │   │   ├── recovery_command_tests.rs
+│   │   │   │   ├── reports.rs
+│   │   │   │   └── session_details.rs
 │   │   │   ├── inspect/
 │   │   │   │   ├── formatting.rs
 │   │   │   │   ├── mod.rs
@@ -1101,8 +1103,12 @@ src/
 │   │   │   │   ├── render_recovery.rs
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── restart/
+│   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
 │   │   │   │   └── autocomplete.rs
+│   │   │   ├── skill/
+│   │   │   │   └── stop_response_tests.rs
 │   │   │   ├── system_prompt/
 │   │   │   │   ├── reconstruct.rs
 │   │   │   │   └── tests.rs
