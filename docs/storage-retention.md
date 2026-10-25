@@ -20,8 +20,9 @@ Prerequisite context:
 - [#1093 / 909-4] DB retention job wired: `db_retention`.
 - Cross-reference: [`docs/ci/sccache-setup.md`](ci/sccache-setup.md) — why
   `target/` bloats and how sccache dampens rebuild cost post-sweep.
-- Cross-reference: [`docs/ops/codex-campaign-prompt-2026-04-24-r4.md`](ops/codex-campaign-prompt-2026-04-24-r4.md) —
-  campaign runbook that called 909-5 out as the closing deliverable.
+- Cross-reference: `codex-campaign-prompt-2026-04-24-r4.md` (operator-local; the
+  ops playbook directory is gitignored) — campaign runbook that called 909-5
+  out as the closing deliverable.
 
 ---
 
@@ -337,8 +338,8 @@ gets a new row.
 
 - [`docs/ci/sccache-setup.md`](ci/sccache-setup.md) — sccache config that keeps
   post-sweep rebuild cost predictable.
-- [`docs/ops/codex-campaign-prompt-2026-04-24-r4.md`](ops/codex-campaign-prompt-2026-04-24-r4.md) —
-  campaign 909 runbook (909-5 = this doc).
+- `codex-campaign-prompt-2026-04-24-r4.md` (operator-local; the ops playbook
+  directory is gitignored) — campaign 909 runbook (909-5 = this doc).
 - [`docs/source-of-truth.md`](source-of-truth.md) — §retention for the
   long-form rationale behind the 7/30/90-day horizons.
 - [`docs/reports/cost-efficiency-908.md`](reports/cost-efficiency-908.md) —

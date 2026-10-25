@@ -34,7 +34,7 @@ Evidence:
 
 AgentDesk's Claude execution path is still centered on model selection, system prompt composition, and streamed tool usage:
 
-- `src/services/discord/router/message_handler.rs:1481` calls `claude::execute_command_streaming(...)` per turn.
+- `src/services/discord/router/message_handler/provider_dispatch.rs` (`execute`) calls `claude::execute_command_streaming(...)` per turn.
 - `src/services/claude.rs:501` through `src/services/claude.rs:505` only wire a `--model` override into the Claude CLI arguments.
 - `src/services/discord/model_picker_interaction.rs:211` through `src/services/discord/model_picker_interaction.rs:243` only validate and persist model-picker choices, not reasoning-effort controls.
 
