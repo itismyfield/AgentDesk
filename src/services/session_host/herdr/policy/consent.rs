@@ -155,8 +155,10 @@ pub(crate) struct Consent {
 
 impl Consent {
     fn stamp(&mut self) {
-        let returned =
-            (self.settlements.iter()).any(|settled| settled.resolution.returned_to().is_some());
+        let returned = self
+            .settlements
+            .iter()
+            .any(|settled| settled.resolution.returned_to().is_some());
         self.schema = if returned { SCHEMA } else { PRE_RETURN_SCHEMA };
     }
 }
