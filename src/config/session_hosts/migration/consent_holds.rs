@@ -115,3 +115,7 @@ impl HoldSource for ConsentHolds {
 #[cfg(all(test, unix))]
 #[path = "consent_holds_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "consent_returns_tests.rs"]
+mod returns_tests;

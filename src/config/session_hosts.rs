@@ -503,3 +503,7 @@ impl Drop for ForcedSessionHosts {
 #[cfg(test)]
 #[path = "session_hosts_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_hosts/user_default_validator_tests.rs"]
+mod user_default_validator_tests;

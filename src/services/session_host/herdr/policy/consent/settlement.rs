@@ -291,3 +291,7 @@ pub(crate) async fn release(
 #[cfg(test)]
 #[path = "settlement_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "return_tests.rs"]
+mod return_tests;

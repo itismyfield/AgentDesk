@@ -109,14 +109,16 @@ src/
 │   ├── session_hosts/
 │   │   ├── migration/
 │   │   │   ├── consent_holds.rs
-│   │   │   └── consent_holds_tests.rs
+│   │   │   ├── consent_holds_tests.rs
+│   │   │   └── consent_returns_tests.rs
 │   │   ├── approval_store.rs
 │   │   ├── boot_pg_tests.rs
 │   │   ├── migration.rs
 │   │   ├── migration_tests.rs
 │   │   ├── projection.rs
 │   │   ├── user_default.rs
-│   │   └── user_default_tests.rs
+│   │   ├── user_default_tests.rs
+│   │   └── user_default_validator_tests.rs
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── agent_channels.rs
@@ -1711,6 +1713,8 @@ src/
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── custody_tests.rs
+│   │   │   │   ├── return_input.rs
+│   │   │   │   ├── return_input_tests.rs
 │   │   │   │   ├── service_tests.rs
 │   │   │   │   ├── startup.rs
 │   │   │   │   ├── startup_tests.rs
@@ -3183,6 +3187,7 @@ src/
 │   │   │   │   │   ├── engine_tests.rs
 │   │   │   │   │   ├── preview.rs
 │   │   │   │   │   ├── preview_tests.rs
+│   │   │   │   │   ├── return_tests.rs
 │   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   ├── settlement_tests.rs
 │   │   │   │   │   ├── workflow.rs
