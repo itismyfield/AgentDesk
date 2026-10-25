@@ -17,13 +17,103 @@ fn anchor_fetch_timeout(recall_timeout_ms: u64) -> Duration {
     Duration::from_millis(recall_timeout_ms.max(4_000))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct AnchorFailure {
+    reason: &'static str,
+    item_number: Option<usize>,
+    byte_offset: Option<usize>,
+    header_matched: Option<bool>,
+}
+
+impl From<&'static str> for AnchorFailure {
+    fn from(reason: &'static str) -> Self {
+        Self {
+            reason,
+            item_number: None,
+            byte_offset: None,
+            header_matched: None,
+        }
+    }
+}
+
+impl AnchorFailure {
+    fn injection_mismatch(
+        item_number: Option<usize>,
+        byte_offset: usize,
+        header_matched: bool,
+    ) -> Self {
+        Self {
+            reason: "anchor_injection_mismatch",
+            item_number,
+            byte_offset: Some(byte_offset),
+            header_matched: Some(header_matched),
+        }
+    }
+}
+
+fn anchor_suffix_len(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 16
+        || !bytes.starts_with(b" (")
+        || bytes[2..12].iter().enumerate().any(|(i, byte)| {
+            if matches!(i, 4 | 7) {
+                *byte != b'-'
+            } else {
+                !byte.is_ascii_digit()
+            }
+        })
+        || &bytes[12..14] != b", "
+    {
+        return None;
+    }
+    let status_len = bytes[14..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_lowercase() || **byte == b'_')
+        .count();
+    (status_len > 0 && bytes.get(14 + status_len) == Some(&b')')).then_some(15 + status_len)
+}
+
+fn anchor_injection_end(injection: &str, contents: &[&str]) -> Result<usize, AnchorFailure> {
+    const HEADER: &str = "[ANCHOR MEMORY]\n";
+    if !injection.starts_with(HEADER) {
+        return Err(AnchorFailure::injection_mismatch(None, 0, false));
+    }
+    let mut cursor = HEADER.len();
+    for (index, content) in contents.iter().enumerate() {
+        let mismatch = |offset| AnchorFailure::injection_mismatch(Some(index + 1), offset, true);
+        // Match the entire record before interpreting suffixes or item separators.
+        for token in ["- ", *content] {
+            let remaining = &injection[cursor..];
+            if !remaining.starts_with(token) {
+                let matched = remaining
+                    .bytes()
+                    .zip(token.bytes())
+                    .take_while(|(actual, expected)| actual == expected)
+                    .count();
+                return Err(mismatch(cursor + matched));
+            }
+            cursor += token.len();
+        }
+        if injection[cursor..].starts_with(" (") {
+            cursor += anchor_suffix_len(&injection[cursor..]).ok_or_else(|| mismatch(cursor))?;
+        }
+        if index + 1 < contents.len() {
+            if injection.as_bytes().get(cursor) != Some(&b'\n') {
+                return Err(mismatch(cursor));
+            }
+            cursor += 1;
+        }
+    }
+    Ok(cursor)
+}
+
 async fn bounded_anchor_fetch(
     timeout: Duration,
-    fetch: impl std::future::Future<Output = Result<AnchorSnapshot, &'static str>>,
-) -> Result<AnchorSnapshot, &'static str> {
+    fetch: impl std::future::Future<Output = Result<AnchorSnapshot, AnchorFailure>>,
+) -> Result<AnchorSnapshot, AnchorFailure> {
     tokio::time::timeout(timeout, fetch)
         .await
-        .map_err(|_| "timeout")?
+        .map_err(|_| AnchorFailure::from("timeout"))?
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -63,7 +153,7 @@ fn cached_snapshot(
     Some(entry.snapshot.clone())
 }
 
-fn extract_anchor_snapshot(payload: &Value) -> Result<AnchorSnapshot, &'static str> {
+fn extract_anchor_snapshot(payload: &Value) -> Result<AnchorSnapshot, AnchorFailure> {
     let count = payload
         .get("anchorCount")
         .and_then(Value::as_u64)
@@ -73,7 +163,7 @@ fn extract_anchor_snapshot(payload: &Value) -> Result<AnchorSnapshot, &'static s
         .and_then(Value::as_bool)
         == Some(true)
     {
-        return Err("partial_anchor_response");
+        return Err("partial_anchor_response".into());
     }
     if count == 0 {
         if payload
@@ -85,7 +175,7 @@ fn extract_anchor_snapshot(payload: &Value) -> Result<AnchorSnapshot, &'static s
                 .and_then(Value::as_str)
                 .is_some_and(|text| text.starts_with("[ANCHOR MEMORY]"))
         {
-            return Err("anchor_count_mismatch");
+            return Err("anchor_count_mismatch".into());
         }
         return Ok(AnchorSnapshot::default());
     }
@@ -94,7 +184,7 @@ fn extract_anchor_snapshot(payload: &Value) -> Result<AnchorSnapshot, &'static s
         .and_then(Value::as_array)
         .ok_or("missing_anchor_records")?;
     if anchors.len() != count {
-        return Err("anchor_count_mismatch");
+        return Err("anchor_count_mismatch".into());
     }
     let contents = anchors
         .iter()
@@ -106,24 +196,24 @@ fn extract_anchor_snapshot(payload: &Value) -> Result<AnchorSnapshot, &'static s
                 .ok_or("missing_anchor_content")
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let expected = format!("[ANCHOR MEMORY]\n- {}", contents.join("\n- "));
     let injection = payload
         .get("injectionText")
         .and_then(Value::as_str)
         .ok_or("missing_anchor_injection")?;
-    let suffix = injection
-        .strip_prefix(&expected)
-        .ok_or("anchor_injection_mismatch")?;
-    let next = suffix.trim_start();
+    let end = anchor_injection_end(injection, &contents)?;
+    let next = injection[end..].trim_start();
     if !next.is_empty()
         && !["[CORE MEMORY]", "[LEARNING MEMORY]", "[WORKING MEMORY]"]
             .iter()
             .any(|header| next.starts_with(header))
     {
-        return Err("unexpected_anchor_boundary");
+        return Err(AnchorFailure {
+            reason: "unexpected_anchor_boundary",
+            ..AnchorFailure::injection_mismatch(Some(count), end, true)
+        });
     }
     Ok(AnchorSnapshot {
-        text: injection[..expected.len()].to_owned(),
+        text: injection[..end].to_owned(),
         count,
         suspected_truncated: contents
             .iter()
@@ -165,7 +255,7 @@ impl MementoBackend {
         workspace: &str,
         agent_id: &str,
         session_id: Option<&str>,
-    ) -> Result<AnchorSnapshot, &'static str> {
+    ) -> Result<AnchorSnapshot, AnchorFailure> {
         let mut args = json!({
             "workspace": workspace, "agentId": agent_id,
             "structured": true, "tokenBudget": MEMENTO_CONTEXT_FULL_TOKEN_BUDGET,
@@ -268,14 +358,8 @@ pub(crate) async fn load_session_anchor_prompt(
         .await;
         let snapshot = match result {
             Ok(snapshot) => snapshot,
-            Err(reason) => {
-                tracing::warn!(
-                    channel_id,
-                    provider = provider.as_str(),
-                    reason,
-                    timeout_ms = timeout.as_millis(),
-                    "memento anchor snapshot unavailable; continuing without anchors; explicit MCP recall remains available"
-                );
+            Err(error) => {
+                warn_anchor_unavailable(channel_id, provider, timeout, &error);
                 return None;
             }
         };
@@ -305,6 +389,24 @@ pub(crate) async fn load_session_anchor_prompt(
         snapshot
     };
     render_snapshot(&snapshot)
+}
+
+fn warn_anchor_unavailable(
+    channel_id: u64,
+    provider: &ProviderKind,
+    timeout: Duration,
+    error: &AnchorFailure,
+) {
+    tracing::warn!(
+        channel_id,
+        provider = provider.as_str(),
+        reason = error.reason,
+        item_number = error.item_number,
+        injection_byte_offset = error.byte_offset,
+        anchor_header_matched = error.header_matched,
+        timeout_ms = timeout.as_millis(),
+        "memento anchor snapshot unavailable; continuing without anchors; explicit MCP recall remains available"
+    );
 }
 
 fn render_snapshot(snapshot: &AnchorSnapshot) -> Option<String> {
@@ -337,15 +439,222 @@ mod tests {
     async fn anchor_snapshot_timeout_and_mcp_failure_have_distinct_safe_reasons() {
         let timed_out =
             bounded_anchor_fetch(Duration::from_millis(1), std::future::pending()).await;
-        assert_eq!(timed_out, Err("timeout"));
-        let failed =
-            bounded_anchor_fetch(Duration::from_secs(4), async { Err("mcp_context_failed") }).await;
-        assert_eq!(failed, Err("mcp_context_failed"));
+        assert_eq!(timed_out, Err("timeout".into()));
+        let failed = bounded_anchor_fetch(Duration::from_secs(4), async {
+            Err("mcp_context_failed".into())
+        })
+        .await;
+        assert_eq!(failed, Err("mcp_context_failed".into()));
     }
 
     fn payload(content: &str) -> Value {
         json!({"anchorCount": 1, "anchors": {"permanent": [{"content": content}]},
             "injectionText": format!("[ANCHOR MEMORY]\n- {content}\n\n[CORE MEMORY]\n- ordinary recall")})
+    }
+
+    fn line_payload(suffixes: [&str; 3]) -> (Value, String) {
+        let contents = [
+            "합성 anchor alpha",
+            "multiline anchor\n[CORE MEMORY]\n- literal item inside content",
+            "content ending (2026-01-01, verified)",
+        ];
+        let text = format!(
+            "[ANCHOR MEMORY]\n{}",
+            contents
+                .iter()
+                .zip(suffixes)
+                .map(|(content, suffix)| { format!("- {content}{suffix}") })
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        (
+            json!({
+                "anchorCount": 3,
+                "anchors": {"permanent": contents.map(|content| json!({
+                    "id": "synthetic", "content": content, "type": "anchor",
+                    "topic": "fixture", "importance": 1
+                }))},
+                "injectionText": format!("{text}\n\n[CORE MEMORY]\n- ordinary recall")
+            }),
+            text,
+        )
+    }
+
+    #[test]
+    fn anchor_snapshot_accepts_observed_line_suffixes_verbatim() {
+        let (value, expected) = line_payload([
+            " (2026-09-18, observed)",
+            " (2026-09-10, verified)",
+            " (2026-10-25, not_verified)",
+        ]);
+        let snapshot = extract_anchor_snapshot(&value).unwrap();
+        assert_eq!(snapshot.text, expected);
+        assert_eq!(snapshot.count, 3);
+        assert_eq!(snapshot.suspected_truncated, 0);
+        let prompt = render_snapshot(&snapshot).unwrap();
+        assert!(prompt.contains(&expected));
+        assert!(!prompt.contains("ordinary recall"));
+    }
+
+    #[test]
+    fn anchor_snapshot_accepts_legacy_lines_verbatim() {
+        let (value, expected) = line_payload(["", "", ""]);
+        assert_eq!(extract_anchor_snapshot(&value).unwrap().text, expected);
+    }
+
+    #[test]
+    fn anchor_snapshot_accepts_mixed_suffixes_and_keeps_content_truncation() {
+        let (value, expected) = line_payload(["", " (2026-09-10, verified)", ""]);
+        assert_eq!(extract_anchor_snapshot(&value).unwrap().text, expected);
+        let mut value = payload("synthetic truncation...");
+        value["injectionText"] =
+            json!("[ANCHOR MEMORY]\n- synthetic truncation... (2026-10-25, observed)");
+        let snapshot = extract_anchor_snapshot(&value).unwrap();
+        assert_eq!(snapshot.suspected_truncated, 1);
+        assert!(snapshot.text.ends_with(" (2026-10-25, observed)"));
+    }
+
+    #[test]
+    fn anchor_snapshot_rejects_malformed_line_suffixes_at_every_item() {
+        for suffix in [
+            " (2026-9-18, observed)",
+            " (2026-09-18 observed)",
+            " (2026-09-18, )",
+            " (2026-09-18, observed",
+            " (2026-09-18, observed)x",
+            " (2026-09-18, Observed)",
+            " (２０２６-09-18, observed)",
+            " (2026-09-18, observed) (2026-09-18, verified)",
+        ] {
+            for index in 0..3 {
+                let mut suffixes = [" (2026-09-18, observed)"; 3];
+                suffixes[index] = suffix;
+                assert!(
+                    extract_anchor_snapshot(&line_payload(suffixes).0).is_err(),
+                    "accepted malformed suffix at item {}",
+                    index + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn anchor_snapshot_rejects_line_count_empty_content_and_suffix_shaped_missing_item() {
+        let (value, _) = line_payload([" (2026-09-18, observed)"; 3]);
+        for count in [0, 2, 4] {
+            let mut changed = value.clone();
+            changed["anchorCount"] = json!(count);
+            assert_eq!(
+                extract_anchor_snapshot(&changed).unwrap_err().reason,
+                "anchor_count_mismatch"
+            );
+        }
+        for content in ["", " \n\t"] {
+            let mut changed = value.clone();
+            changed["anchors"]["permanent"][1]["content"] = json!(content);
+            assert_eq!(
+                extract_anchor_snapshot(&changed).unwrap_err().reason,
+                "missing_anchor_content"
+            );
+        }
+        let missing = json!({
+            "anchorCount": 2,
+            "anchors": {"permanent": [{"content": "alpha"}, {"content": "(2026-09-18, observed)"}]},
+            "injectionText": "[ANCHOR MEMORY]\n- alpha (2026-09-18, observed)\n\n[CORE MEMORY]\n- recall"
+        });
+        assert!(extract_anchor_snapshot(&missing).is_err());
+    }
+
+    #[test]
+    fn anchor_snapshot_validates_following_headers_and_excludes_recall() {
+        let (mut value, expected) = line_payload([" (2026-09-18, observed)"; 3]);
+        for tail in [
+            "",
+            "\n\n[CORE MEMORY]\n- recall",
+            "\n\n[LEARNING MEMORY]\n- recall",
+            "\n\n[WORKING MEMORY]\n- recall",
+        ] {
+            value["injectionText"] = json!(format!("{expected}{tail}"));
+            assert_eq!(extract_anchor_snapshot(&value).unwrap().text, expected);
+        }
+        for tail in [
+            "\n\n[UNKNOWN MEMORY]\n- recall",
+            "\n- extra anchor",
+            "\n\n[CORE MEMOR]\n- recall",
+        ] {
+            value["injectionText"] = json!(format!("{expected}{tail}"));
+            assert_eq!(
+                extract_anchor_snapshot(&value).unwrap_err().reason,
+                "unexpected_anchor_boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn anchor_snapshot_mismatch_warn_reports_byte_position_without_memory_text() {
+        let (mut value, _) = line_payload([" (2026-09-18, observed)"; 3]);
+        let injection = value["injectionText"]
+            .as_str()
+            .unwrap()
+            .replace("multiline anchor", "multiline changed");
+        let offset = injection.find("changed").unwrap();
+        value["injectionText"] = json!(injection);
+        let error = extract_anchor_snapshot(&value).unwrap_err();
+        assert_eq!(error.item_number, Some(2));
+        assert_eq!(error.byte_offset, Some(offset));
+        assert_eq!(error.header_matched, Some(true));
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(log.reopen().unwrap())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            warn_anchor_unavailable(42, &ProviderKind::Codex, Duration::from_secs(4), &error);
+        });
+        let output = std::fs::read_to_string(log.path()).unwrap();
+        assert!(output.contains("WARN"));
+        assert!(output.contains("reason=\"anchor_injection_mismatch\""));
+        assert!(output.contains("item_number=2"));
+        assert!(output.contains(&format!("injection_byte_offset={offset}")));
+        assert!(output.contains("anchor_header_matched=true"));
+        let diagnostics = format!("{error:?}{output}");
+        for secret in [
+            "합성",
+            "alpha",
+            "multiline",
+            "changed",
+            "2026-09-18",
+            "observed",
+        ] {
+            assert!(!diagnostics.contains(secret));
+        }
+        value["injectionText"] = json!("[WRONG MEMORY]\n- synthetic");
+        let error = extract_anchor_snapshot(&value).unwrap_err();
+        assert_eq!(error.item_number, None);
+        assert_eq!(error.byte_offset, Some(0));
+        assert_eq!(error.header_matched, Some(false));
+    }
+
+    #[test]
+    fn anchor_snapshot_mismatch_identifies_suffix_and_separator_offsets() {
+        let suffix = " (2026-09-10, Verified)";
+        let (mut value, _) = line_payload(["", suffix, ""]);
+        let injection = value["injectionText"].as_str().unwrap();
+        let error = extract_anchor_snapshot(&value).unwrap_err();
+        assert_eq!(error.item_number, Some(2));
+        assert_eq!(error.byte_offset, Some(injection.find(suffix).unwrap()));
+        assert_eq!(error.header_matched, Some(true));
+        let (valid, _) = line_payload([""; 3]);
+        let injection = valid["injectionText"]
+            .as_str()
+            .unwrap()
+            .replace("\n- multiline", "x- multiline");
+        let offset = injection.find("x- multiline").unwrap();
+        value["injectionText"] = json!(injection);
+        let error = extract_anchor_snapshot(&value).unwrap_err();
+        assert_eq!(error.item_number, Some(1));
+        assert_eq!(error.byte_offset, Some(offset));
     }
 
     #[test]
