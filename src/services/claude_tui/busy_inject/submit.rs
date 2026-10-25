@@ -108,7 +108,7 @@ fn inject_gated_with(
         return Report::not_sent(Veto::InvalidInput);
     }
     let started = Instant::now();
-    // The whole transaction, restore watch included, runs under the lock: one stash at a time.
+    // The short key sequence runs under the lock: one stash at a time.
     let locked = at_offsets(
         timing.lock_retries,
         || started.elapsed(),
@@ -121,10 +121,7 @@ fn inject_gated_with(
                 if own {
                     dedupe::record_discord_originated_prompt("claude", request.session, &text);
                 }
-                let report =
-                    ownership::with_chip_witness(request.session, request.nonce, &text, || {
-                        inject_locked(pane, request, &text, timing, stash, turn_gate)
-                    });
+                let report = inject_locked(pane, request, &text, timing, stash, turn_gate);
                 if own && matches!(&report.outcome, Outcome::NotSent(_)) {
                     dedupe::remove_discord_originated_prompt("claude", request.session, &text);
                 }
