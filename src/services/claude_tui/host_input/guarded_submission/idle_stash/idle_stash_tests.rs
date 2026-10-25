@@ -63,7 +63,7 @@ capture-pane) cat "$d/screen" ;;
 load-buffer|paste-buffer|send-keys)
   n=$(cat "$d/sent" 2>/dev/null || echo 0); echo $((n + 1)) > "$d/sent"
   for last do :; done
-  case "$2" in load-buffer) key=load; cp "$last" "$d/body" ;; paste-buffer) key=paste ;; *) key=$last ;; esac
+  case "$2" in load-buffer) key=load ;; paste-buffer) key=paste ;; *) key=$last ;; esac
   echo "$key" >> "$d/sends"
   if [ -f "$d/row" ]; then
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["managed_submission"]["phase"])' "$(cat "$d/row")" >> "$d/phases"
@@ -111,10 +111,6 @@ exit 0
 
     pub(crate) fn phases(&self) -> Vec<String> {
         events_in(&self.dir.path().join("phases"))
-    }
-
-    pub(crate) fn body(&self) -> Option<String> {
-        fs::read_to_string(self.dir.path().join("body")).ok()
     }
 }
 
