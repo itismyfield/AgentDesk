@@ -95,24 +95,29 @@ jobs:
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         run: python3 scripts/ci/h2_modmap.py --lane macos --inert
 
-      - name: cargo test (non-PG, targeted subset)
+      - name: Install cargo-nextest
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.149
+
+      # The selector union keeps its scope; it now runs through the PR worker path with audit.
+      - name: cargo nextest (non-PG, targeted lib selectors)
+        if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
+        timeout-minutes: 60
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/ci/nextest-native.sh macos macos-trusted selectors:scripts/ci/macos-trusted-selectors.txt
+
+      - name: cargo test (non-PG, targeted non-lib selectors)
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
-          cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
-          cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
-          cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
-          cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres
-          env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres
-          env -u AGENTDESK_ROOT_DIR cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres
-          # Health must precede relay_recovery so fail-fast reports both surfaces.
-          python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
-          env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
-          cargo test --all-targets routines -- --skip _pg --skip pg_ --skip postgres
-          env -u AGENTDESK_ROOT_DIR cargo test --lib _4888 -- --test-threads=1
-          cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+          for filter in transition auto_queue cancel review_decision stall_recovery routines invariant; do
+            cargo test --bins --examples --benches --test '*' "$filter" -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+          done
 
       - name: Fresh user portable smoke
         if: steps.rust_filter.outcome != 'success' || steps.rust_filter.outputs.run != 'false'

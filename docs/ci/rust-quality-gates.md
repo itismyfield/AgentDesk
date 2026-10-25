@@ -73,19 +73,21 @@ production-only, test-aware, or repo-wide before adding hard gates.
 ## Non-Postgres Test Scope
 
 `just test-non-pg` keeps a targeted non-Postgres subset for local `just check`.
-CI no longer runs it: on `main` push and dispatch, and on PRs whose `rust_tests`
-filter is on, `rust_build` archives the lib tests and plans every listed test
+CI no longer runs it: on `main` push and dispatch, every nightly, and on PRs whose
+`rust_tests` filter is on, `rust_build` archives the lib tests and plans every listed test
 over six `rust_tests` workers, each with its own PostgreSQL service, and
-`test_evidence` audits that every planned test ran. Main and PR keep the same
+`test_evidence` audits that every planned test ran. PR, main and nightly keep the same
 three jobs; `scripts/check-ci-runner-hardening.sh` allows them to differ only in
 `needs`, `if`, the PR base comparison and the main `nextest-baseline` upload.
 
 The `lint` job runs fmt, clippy, the policy JS tests, the non-lib side of the
 recipe's `--all-targets` lines (`--bins --test '*'`), and the `ClaudeBinary`
-compile-fail doctests. The nightly macOS and Windows lanes compare their native
-nextest lists with the sources, run the non-PG lib tests that
-`scripts/ci/pg_test_classifier.py` selects as exact IDs, and run the non-lib
-targets with the non-Postgres skip filter.
+compile-fail doctests. The nightly macOS and Windows lanes and `CI macOS Trusted`
+run `scripts/ci/nextest-native.sh`: native source compare, plan, preflight, run
+record and audit on one worker. Nightly plans the non-PG lib tests that
+`scripts/ci/pg_test_classifier.py` selects; trusted plans the selector union in
+`scripts/ci/macos-trusted-selectors.txt`. Both run the non-lib targets with
+`cargo test` and the non-Postgres skips.
 
 A broader sweep was attempted with:
 

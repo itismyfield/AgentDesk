@@ -39,9 +39,7 @@ EXPECTED_SWAP_JOBS = {
         "scripts",
     },
     ".github/workflows/ci-nightly.yml": {
-        "postgres_full",
-        "multinode_regression",
-        "high_risk_recovery_full",
+        "rust_build",
         "relay_authority_mutations_full",
     },
 }

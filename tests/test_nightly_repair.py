@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import importlib.util
-import re
 import sys
 import tempfile
 import unittest
@@ -12,15 +11,11 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 NIGHTLY = ROOT / ".github/workflows/ci-nightly.yml"
-DEBUG_JOBS = ("full_macos", "full_windows", "postgres_full",
-              "multinode_regression", "high_risk_recovery_full",
+DEBUG_JOBS = ("full_macos", "full_windows", "rust_build", "postgres_full",
               "relay_authority_mutations_full")
 DEBUG_KEYS = ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG")
-PG_STEP = "cargo test (PostgreSQL bootstrap and routes)"
-WINDOWS_STEP = "Discord thread-create cross-process lock"
-WINDOWS_COMMAND = "cargo test --lib discord_thread_create -- --test-threads=1"
-PG_CARGO = ('cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" '
-            "--nocapture --test-threads=1")
+PG_STEP = "cargo test (e2e smoke against PostgreSQL)"
+PG_CARGO = "cargo test --test e2e -- --test-threads=1"
 NON_PG_CARGO = 'cargo test --bins --examples --benches --test \'*\' -- "${NON_PG_SKIP_ARGS[@]}"'
 NATIVE_LIB_STEP = "Compare and run non-PG lib tests"
 FILTER_SOURCE = "source scripts/ci/non-pg-test-filter.sh"
@@ -34,8 +29,6 @@ def load_module(name: str, path: Path):
     return module
 
 
-MEMBERSHIP = load_module("check_pg_test_lane_membership",
-                         ROOT / "scripts/check_pg_test_lane_membership.py")
 INTEGRITY = load_module("check_test_target_integrity",
                         ROOT / "scripts/check_test_target_integrity.py")
 
@@ -79,16 +72,6 @@ def nightly_contract_problems(text: str) -> list[str]:
                 value = (step.get("env") or {}).get(key)
                 need(value in (None, "0"), f"{name}/{step.get('name')!r} overrides {key}")
 
-    windows = step_of(jobs, "full_windows", WINDOWS_STEP) or {}
-    env = windows.get("env") or {}
-    need(windows, "full_windows lost its focused Discord step")
-    need(env.get("BASH_ENV") == "/dev/null", "the Discord step lost its BASH_ENV")
-    need(all(env.get(key) == "0" for key in DEBUG_KEYS),
-         "the Discord step lost its explicit debug env")
-    need(windows.get("run", "").strip() == WINDOWS_COMMAND,
-         "the Discord step changed its exact command")
-    need(not windows.get("continue-on-error"), "the Discord step became advisory")
-
     opus = statements((step_of(jobs, "full_macos", "Install Opus on macOS") or {}).get("run", ""))
     need(any(line.startswith("brew install ") and "tmux" in line.split() for line in opus),
          "full_macos does not actually brew install tmux")
@@ -98,21 +81,17 @@ def nightly_contract_problems(text: str) -> list[str]:
         run = (step_of(jobs, name, "cargo test (non-PG, non-lib targets)") or {}).get("run", "")
         need(FILTER_SOURCE in run and NON_PG_CARGO in run,
              f"{name} changed its canonical non-PG non-lib sweep")
-        lib = (step_of(jobs, name, NATIVE_LIB_STEP) or {}).get("run", "")
-        need(f"rust_test_sources.py compare --platform {platform} " in lib,
-             f"{name} stopped comparing its native nextest list with the sources")
-        need('--only "$NEXTEST_DIR/pg.json"' in lib and "pg_test_classifier.py classify --list" in lib,
-             f"{name} stopped selecting its lib tests through the PG classifier")
+        lib = step_of(jobs, name, NATIVE_LIB_STEP) or {}
+        need(lib.get("run", "").strip() == f"bash scripts/ci/nextest-native.sh {platform} {platform}-lib pg-classifier",
+             f"{name} stopped running its lib tests through the audited native nextest path")
+        need("if" not in lib and not lib.get("continue-on-error"), f"{name} made its native lib run conditional")
 
     pg = step_of(jobs, "postgres_full", PG_STEP) or {}
     lines = [line.strip() for line in pg.get("run", "").splitlines()]
-    env = pg.get("env") or {}
-    need(pg.get("timeout-minutes") == 45, "the PG cargo step lost its measured-runtime headroom")
     job_budget = jobs.get("postgres_full", {}).get("timeout-minutes", 0)
     step_budgets = sum(step.get("timeout-minutes", 0) for step in jobs.get("postgres_full", {}).get("steps", []))
     need(job_budget > step_budgets, "the PG job cannot fit its bounded steps plus setup and cleanup")
-    need(lines.count(PG_CARGO) == 1, "the PG cargo statement is not one direct line")
-    need(FILTER_SOURCE in lines, "the PG step stopped sourcing the canonical filter")
+    need(lines.count(PG_CARGO) == 1, "the e2e cargo statement is not one direct line")
     return problems
 
 
@@ -124,12 +103,6 @@ def integrity_commands(text: str) -> list[str]:
         return [rendered for _, _, rendered in INTEGRITY.extract_commands(path)]
     finally:
         path.unlink()
-
-
-def membership_commands(text: str) -> list[str]:
-    job = re.search(r"(?ms)^  postgres_full:\n.*?(?=^  [A-Za-z0-9_-]+:\n)", text)
-    return MEMBERSHIP._cargo_commands(
-        job.group(0), MEMBERSHIP.load_non_pg_skip_args(ROOT))
 
 
 def override_pg_profile(text):
@@ -154,21 +127,17 @@ STRUCTURAL_MUTANTS = (
                          "brew install opus pkg-config\n          # tmux")),
     ("removes the tmux version evidence",
      lambda t: t.replace("          tmux -V\n", "")),
-    ("drops the focused Discord debug env",
-     lambda t: t.replace('          CARGO_PROFILE_DEV_DEBUG: "0"\n'
-                         '          CARGO_PROFILE_TEST_DEBUG: "0"\n'
-                         "        run: cargo test --lib discord_thread_create",
-                         "        run: cargo test --lib discord_thread_create")),
-    ("builds every target beside the PostgreSQL lib test",
-     lambda t: t.replace(PG_CARGO, PG_CARGO.replace("--lib", "--all-targets"))),
-    ("shortens the PostgreSQL step budget",
-     lambda t: t.replace("        timeout-minutes: 45", "        timeout-minutes: 30", 1)),
-    ("leaves no PostgreSQL job budget for E2E and cleanup",
-     lambda t: t.replace("    timeout-minutes: 90", "    timeout-minutes: 45", 1)),
-    ("drops the native PG classification",
-     lambda t: t.replace(' --only "$NEXTEST_DIR/pg.json"', "", 1)),
-    ("drops the native source comparison",
-     lambda t: t.replace("rust_test_sources.py compare --platform windows ", "rust_test_sources.py check ", 1)),
+    ("leaves no PostgreSQL job budget for cleanup",
+     lambda t: t.replace("  postgres_full:\n    name: PostgreSQL full tests\n    runs-on: ubuntu-latest\n    timeout-minutes: 90",
+                         "  postgres_full:\n    name: PostgreSQL full tests\n    runs-on: ubuntu-latest\n    timeout-minutes: 30", 1)),
+    ("replaces the native audited run",
+     lambda t: t.replace("bash scripts/ci/nextest-native.sh windows windows-lib pg-classifier",
+                         "cargo nextest run --lib", 1)),
+    ("narrows the native run to a filter",
+     lambda t: t.replace("macos macos-lib pg-classifier", "macos macos-lib selectors:scripts/ci/macos-trusted-selectors.txt", 1)),
+    ("skips the native run",
+     lambda t: t.replace("        run: bash scripts/ci/nextest-native.sh macos",
+                         "        if: false\n        run: bash scripts/ci/nextest-native.sh macos", 1)),
 )
 
 WRAPPER_MUTANTS = (
@@ -194,27 +163,15 @@ class NightlyRepairWiringTests(unittest.TestCase):
                 self.assertIsInstance(yaml.safe_load(mutated), dict)
                 self.assertNotEqual(nightly_contract_problems(mutated), [])
 
-    def test_both_extractors_still_see_the_direct_cargo_command(self) -> None:
-        rendered = "cargo test --lib -- ${PG_INCLUDE_ARGS[@]} --nocapture --test-threads=1"
-        self.assertIn(rendered, integrity_commands(self.text))
-        includes = MEMBERSHIP.load_non_pg_skip_args(ROOT)[1::2]
-        self.assertIn(
-            " ".join(("cargo test --lib --", *includes,
-                      "--nocapture --test-threads=1")),
-            membership_commands(self.text))
+    def test_target_integrity_still_sees_the_direct_cargo_command(self) -> None:
+        self.assertIn(PG_CARGO, integrity_commands(self.text))
 
     def test_wrapping_cargo_silently_loses_target_integrity_coverage(self) -> None:
-        rendered = "cargo test --lib -- ${PG_INCLUDE_ARGS[@]} --nocapture --test-threads=1"
         for name, mutate in WRAPPER_MUTANTS:
             with self.subTest(mutant=name):
                 mutated = mutate(self.text)
                 self.assertNotEqual(mutated, self.text)
-                # The target-integrity inventory loses the command entirely, and
-                # membership refuses it rather than read a lane past the wrapper.
-                self.assertNotIn(rendered, integrity_commands(mutated))
-                with self.assertRaisesRegex(ValueError, "cargo-command-unparsed"):
-                    membership_commands(mutated)
-
+                self.assertNotIn(PG_CARGO, integrity_commands(mutated))
 
     def test_each_job_profile_entry_is_required(self) -> None:
         for job in DEBUG_JOBS:

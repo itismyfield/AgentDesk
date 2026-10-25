@@ -2267,7 +2267,7 @@ class PgDbCiWiring(unittest.TestCase):
         consumers = {
             "ci-pr.yml": ("rust_tests",),
             "ci-main.yml": ("rust_tests",),
-            "ci-nightly.yml": ("full_macos", "full_windows", "postgres_full"),
+            "ci-nightly.yml": ("full_macos", "full_windows", "rust_tests"),
         }
         for workflow, jobs in consumers.items():
             shipped = yaml.safe_load((self.PR_WORKFLOW.parent / workflow).read_text("utf-8"))
@@ -2287,7 +2287,8 @@ class PgDbCiWiring(unittest.TestCase):
                              if "cargo test" in step.get("run", "")
                              or "just test-postgres" in step.get("run", "")
                              or "test-selection.py run" in step.get("run", "")
-                             or "cargo nextest run" in step.get("run", "")]
+                             or "cargo nextest run" in step.get("run", "")
+                             or "nextest-native.sh" in step.get("run", "")]
                     self.assertTrue(tests, "the consumer must still execute its test suite")
                     self.assertLess(min(installs), min(preflights))
                     self.assertLess(min(preflights), min(tests))

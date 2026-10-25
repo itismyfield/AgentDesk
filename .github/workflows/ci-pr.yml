@@ -74,42 +74,13 @@ jobs:
               - 'scripts/verify-dashboard.sh'
             high_risk_recovery:
               - '.github/workflows/**'
-              # #5147: this lane owns the self-watchdog's kill-time forensics,
-              # and one of those tests asserts on `[profile.release]` -- it is
-              # what stops `strip = true` (which erased the Mach-O symbol table
-              # and stalled #4756/#4770/#5147) from coming back. A guard whose
-              # own subject cannot trigger it is the #5185 defect, so the files
-              # under guard are listed here alongside the tests.
-              #
-              # The `'!src/services/discord/placeholder_live_events/**'` line
-              # that used to sit below `src/services/discord/**` is GONE, and
-              # with it the accident that made this filter always true.
-              # dorny/paths-filter@v3 is NOT GitHub's native `paths:` -- it
-              # compiles every pattern into its own picomatch matcher
-              # (`{dot: true}`) and ORs them (`matchers.some(...)`; no
-              # `predicate-quantifier` is set here, so the default `some`
-              # applies), so a leading `!` was just another POSITIVE matcher
-              # for "anything that is not this" and matched nearly every
-              # changed file. Nothing below subtracts, so this list IS the
-              # whole selection rule: a path no pattern matches silently skips
-              # the lane; it is deliberately a superset of what the lane runs.
-              #
-              # STOPPED selecting when the `!` went: docs, `dashboard/**`,
-              # `tests/**`, src this lane never executes. ADDED below, because
-              # dropping the `!` would otherwise drop a real input:
-              # `migrations/**` (these tests call
-              # `connect_test_pool_and_migrate`; `build.rs` already has
-              # `rerun-if-changed` over `migrations/postgres`); `policies/**`
-              # replacing three named `.js` files, because
-              # `test_engine_with_pg` aims `config.policies.dir` here while
-              # `engine/loader.rs` loads EVERY root-level `*.js`,
-              # `check_policy_tree_trust` walks subdirectories and
-              # `pipeline::ensure_loaded` reads `default-pipeline.yaml`; and
-              # the two scripts this job's own steps run. `Cargo.toml` stays --
-              # `hang_forensics.rs` `include_str!`s it for the
-              # `[profile.release]` assertion above.
-              # `tests/test_high_risk_recovery_path_filter.py` pins the result
-              # and fails if any pattern here starts with `!` again.
+              # #5147: the self-watchdog's kill-time forensics and the `[profile.release]` guard
+              # against `strip = true` live in this lane, so their sources are listed beside the tests.
+              # dorny/paths-filter@v3 ORs one picomatch matcher per pattern, so a leading `!` is just
+              # another positive matcher; nothing here subtracts and this list is the whole rule, a
+              # deliberate superset. `migrations/**`, `policies/**` and `Cargo.toml` (read by
+              # `hang_forensics.rs` through `include_str!`) are real inputs of these tests.
+              # `tests/test_high_risk_recovery_path_filter.py` pins the result and rejects any `!`.
               - 'Cargo.toml'
               - 'migrations/**'
               - 'policies/**'
@@ -170,11 +141,7 @@ jobs:
               - 'src/services/health_diagnostics.rs'
               - 'src/services/message_outbox.rs'
               - 'src/services/message_outbox/**'
-              # #5232 R3: these five, and `outbound/source_registry.rs` above
-              # (already covered by `src/services/discord/**`), match no target
-              # among this job's 21 `cargo test --lib` invocations. They stay as
-              # part of the deliberate superset -- not, as previously claimed,
-              # because a ci-pr-only target shadows them.
+              # #5232 R3: part of the deliberate superset rather than a test target of their own.
               - 'src/services/message_outbox_recovery.rs'
               - 'src/services/message_outbox_recovery_support.rs'
               - 'src/services/message_outbox_recovery_tests.rs'
@@ -192,14 +159,8 @@ jobs:
               - 'src/services/observability/**'
               - 'Cargo.lock'
               - '.cargo/**'
-              # #5232 R3: 1-hop imports of the lane's OTHER two SUTs. The list
-              # above only ever tracked `src/high_risk_recovery.rs`, but this
-              # job also runs `services::hang_forensics::tests` and
-              # `services::health_diagnostics::tests`, and the latter reaches
-              # all four of these from its production path
-              # (`health_diagnostics.rs:65,311,448,469`). `platform/mod.rs` is
-              # the re-export `high_risk_recovery.rs:992` goes through, and its
-              # own comment declares itself temporary.
+              # #5232 R3: 1-hop imports that `services::hang_forensics::tests` and
+              # `services::health_diagnostics::tests` reach from their production path.
               - 'src/config_live_reload.rs'
               - 'src/services/dispatch_gate.rs'
               - 'src/services/platform/mod.rs'
@@ -569,12 +530,9 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Keep Windows inline and default-feature-only instead of `just check`.
-      # This PR lane provides broad compile signal; the bounded writer namespace
-      # owner runs in `check_fast_cross_os_targets`, and main-push and
-      # nightly retain the Windows runtime and non-PG test coverage outside the
-      # PR critical path (#4747 option 2). Ubuntu fmt/staged clippy and full
-      # workspace checks remain authoritative in the jobs above.
+      # Keep Windows inline and default-feature-only instead of `just check`. This PR lane gives
+      # broad compile signal; the writer namespace owner runs in `check_fast_cross_os_targets`
+      # and nightly keeps the Windows runtime and non-PG tests off the PR critical path (#4747).
       - name: cargo check
         shell: bash
         env:
@@ -693,7 +651,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}
     runs-on: ubuntu-latest
-    # The base comparison may rebuild the base plan when CI Main left no comparable baseline.
+    # The base comparison may rebuild the base plan when CI Main left no baseline.
     timeout-minutes: 100
     permissions:
       actions: read
@@ -704,7 +662,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The merge ref's parents give the comparison base.
           fetch-depth: 2
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -939,7 +896,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 432795141303ad5cb2fb8ce22166e387169402459baab831f17d60632035a27f
-          pin scripts/check-ci-runner-hardening.sh b7e7a68f83f09a4690e908c9edc577088fb43ac6b5e53836d6ee3198fdd39cef
+          pin scripts/check-ci-runner-hardening.sh d4ff2f006b399dacf06929806954578711798a1235093b54c82e0ac1cc80a088
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required context

@@ -970,6 +970,7 @@ RUBY
 trusted_workflow=".github/workflows/ci-macos-trusted.yml"
 pr_workflow=".github/workflows/ci-pr.yml"
 main_workflow=".github/workflows/ci-main.yml"
+nightly_workflow=".github/workflows/ci-nightly.yml"
 validate_main_script_check_shards() {
   if ! ruby - "$main_workflow" <<'RUBY'
 require "yaml"
@@ -1041,13 +1042,14 @@ RUBY
 validate_main_script_check_shards
 
 validate_main_lint_and_nextest() {
-  if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
+  if ! ruby - "$main_workflow" "$pr_workflow" "$nightly_workflow" <<'RUBY'
 require "yaml"
 require "json"
 require "digest"
-main_path, pr_path = ARGV
+main_path, pr_path, nightly_path = ARGV
 main_jobs = YAML.load_file(main_path).fetch("jobs", {})
 pr_jobs = YAML.load_file(pr_path).fetch("jobs", {})
+nightly_jobs = YAML.load_file(nightly_path).fetch("jobs", {})
 errors = []
 lint_tests_name = "Non-lib tests and doctests"
 cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
@@ -1095,7 +1097,7 @@ if lint.is_a?(Hash)
     errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"
   end
 end
-# PR N == main N: the nextest jobs differ only in needs, the PR base comparison and the main baseline upload.
+# PR N == main N == nightly N: the jobs differ only in needs, the PR base comparison and the main baseline upload.
 built_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
 baseline_upload = {"name" => "Upload nextest baseline", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-baseline", "path" => "${{ runner.temp }}/nextest/plan/plan.json", "if-no-files-found" => "error", "retention-days" => 14}}
 role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key) }.merge("steps" => Array(job["steps"]).reject { |step| step.is_a?(Hash) && step["name"] == role_step }) }
@@ -1107,15 +1109,19 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
   end
   errors << "main #{job_id} must keep needs #{needs.inspect} and if #{gate.inspect}" unless main_job["needs"] == needs && main_job["if"] == gate
   errors << "main #{job_id} must equal the PR job apart from needs, if and the role step" unless role_free.(main_job, "Upload nextest baseline") == role_free.(pr_job, "Compare tests with the comparison base")
+  nightly_job = nightly_jobs[job_id]
+  errors << "nightly #{job_id} must equal the main job apart from the baseline upload" unless nightly_job.is_a?(Hash) && nightly_job == role_free.(main_job, "Upload nextest baseline").merge(main_job.slice("needs", "if"))
 end
 main_baseline = Array(main_jobs.dig("rust_build", "steps")).select { |step| step.is_a?(Hash) && step["name"] == "Upload nextest baseline" }
 errors << "main rust_build must upload the plan as nextest-baseline for 14 days, exactly once" unless main_baseline == [baseline_upload]
 errors << "only rust_build, rust_tests and test_evidence may run the main lib tests" unless main_jobs.none? { |job_id, job| !%w[rust_build rust_tests test_evidence].include?(job_id) && Array(job.is_a?(Hash) && job["steps"]).any? { |step| step.is_a?(Hash) && step["run"].to_s.match?(/cargo nextest|test-selection\.py|test-postgres|cargo test --lib(?! --no-run)/) } }
+lib_run = /cargo nextest|test-selection\.py|test-postgres|cargo test --lib(?! --no-run)/
+errors << "nightly lib tests run only in rust_build, rust_tests, test_evidence and the native nextest-native.sh steps" unless nightly_jobs.none? { |job_id, job| !%w[rust_build rust_tests test_evidence].include?(job_id) && Array(job.is_a?(Hash) && job["steps"]).any? { |step| step.is_a?(Hash) && step["run"].to_s.match?(lib_run) } }
 errors.each { |message| warn "#{main_path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY
   then
-    error "$main_workflow must keep its lint contract and run the same nextest jobs as $pr_workflow"
+    error "$main_workflow and $nightly_workflow must keep their lint contract and run the same nextest jobs as $pr_workflow"
   fi
 }
 validate_main_lint_and_nextest

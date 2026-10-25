@@ -4,7 +4,8 @@
   inventory  walk src/lib.rs through `mod`, `#[path]` and `include!`, keeping each test's cfg chain
   check      fail on test files no crate root reaches, missing module/include files and unreadable cfg
   compare    compare the source inventory for one platform with an unfiltered nextest list
-  removed    per platform, tests a base checkout compiles that this tree no longer compiles
+  removed    per platform, tests a base checkout compiles that this tree no longer compiles, and tests
+             runnable there that `#[ignore]` (plain or cfg_attr) now skips here
 
 A compiled list cannot see a test file that no `mod` connects, so the orphan check stays source based.
 Nothing here runs cargo.
@@ -155,6 +156,8 @@ class Inventory:
     modules: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
     unreadable: list = field(default_factory=list)
+    # Declaration site -> its ignore conditions: () for a plain #[ignore], else a cfg_attr predicate.
+    ignores: dict = field(default_factory=dict)
 
 
 def _include_target(tokens, index, source, repo_root):
@@ -184,7 +187,7 @@ def walk(root, repo_root, inventory=None):
         tokens = rust_tokens(source.read_text("utf-8"))
         rel = source.relative_to(repo_root)
         scopes, cfg_stack = [], [(0, file_cfgs)]
-        depth, pending_path, pending_test, pending_cfgs = 0, None, False, ()
+        depth, pending_path, pending_test, pending_cfgs, pending_ignore = 0, None, False, (), ()
         index = 0
         while index < len(tokens):
             token = tokens[index]
@@ -210,15 +213,25 @@ def walk(root, repo_root, inventory=None):
                         pending_cfgs += (predicate,)
                     else:
                         cfg_stack[-1] = (cfg_stack[-1][0], cfg_stack[-1][1] + (predicate,))
+                elif attr_path == ("ignore",) and outer_attr:
+                    pending_ignore += ((),)
                 elif attr_path == ("cfg_attr",) and GATING_CFG_ATTR & cfg_attr_payload(attr[path_end:]):
                     inv.unreadable.append(f"{site} cfg_attr can change compilation or test status")
+                elif attr_path == ("cfg_attr",) and "ignore" in cfg_attr_payload(attr[path_end:]):
+                    predicate = _cfg_attr_predicate(attr[path_end:])
+                    if predicate is None:
+                        inv.unreadable.append(f"{site} cfg_attr ignore with an unreadable predicate")
+                    else:
+                        pending_ignore += (predicate,)
                 index = end
                 continue
             if token.kind == "ident" and token.value == "fn" and index + 1 < len(tokens):
                 if pending_test and tokens[index + 1].kind == "ident":
                     test_id = "::".join(names + (tokens[index + 1].value,))
                     inv.tests.setdefault(test_id, []).append((site, cfgs + pending_cfgs))
-                pending_path, pending_test, pending_cfgs = None, False, ()
+                    if pending_ignore:
+                        inv.ignores[site] = pending_ignore
+                pending_path, pending_test, pending_cfgs, pending_ignore = None, False, (), ()
             elif token.kind == "ident" and token.value == "mod" and index + 2 < len(tokens) \
                     and tokens[index + 1].kind == "ident":
                 name = tokens[index + 1].value
@@ -267,9 +280,25 @@ def walk(root, repo_root, inventory=None):
                 while len(cfg_stack) > 1 and cfg_stack[-1][0] > depth:
                     cfg_stack.pop()
             elif token.kind == "punct" and token.value == ";":
-                pending_path, pending_test, pending_cfgs = None, False, ()
+                pending_path, pending_test, pending_cfgs, pending_ignore = None, False, (), ()
             index += 1
     return inv
+
+
+def _cfg_attr_predicate(tokens):
+    """`(PRED)` of `cfg_attr(PRED, ignore)` in cfg_holds form; None for a nested cfg_attr."""
+    values = [t.value for t in tokens]
+    if len(values) < 4 or _paren(tokens[0]) != 1 or "cfg_attr" in values[2:]:
+        return None
+    end = 2
+    if _paren(tokens[2]) == 1:
+        depth, end = 1, 3
+        while end < len(values) and depth:
+            depth += _paren(tokens[end])
+            end += 1
+    elif values[2] == "=":
+        end = 4
+    return ("(", *values[1:end], ")")
 
 
 def crate_roots(repo_root):
@@ -386,21 +415,53 @@ def listed_lib_tests(path):
     return set(libs[0]["testcases"])
 
 
-def compare(inventory, listed, target_os, features):
+def listed_lib_ignored(path):
+    """Tests the lib suite of a nextest list marks ignored."""
+    doc = json.loads(Path(path).read_text())
+    libs = [s for s in doc["rust-suites"].values() if isinstance(s, dict) and s.get("kind") == "lib"]
+    return {name for name, case in libs[0]["testcases"].items() if case.get("ignored") is True}
+
+
+def compare(inventory, listed, target_os, features, listed_ignored=frozenset()):
     compiled, _, unknown = platform_split(inventory, target_os, features)
+    ignored = {t for t in compiled & listed if _source_ignored(inventory, t, target_os, features)}
     return {"static_only": sorted(compiled - listed), "cargo_only": sorted(listed - set(inventory.tests)),
-            "unknown_cfg": sorted(set(unknown) - listed)}
+            "unknown_cfg": sorted(set(unknown) - listed),
+            "ignore_mismatch": sorted(ignored ^ (listed_ignored & compiled))}
+
+
+def _source_ignored(inv, test_id, target_os, features):
+    states = [_ignored_on(inv.ignores.get(site, ()), target_os, features) for site, chain in inv.tests[test_id]
+              if all(cfg_holds(p, target_os, features) is True for p in chain)]
+    return bool(states) and all(s is not False for s in states)
 
 
 def platform_tests(repo_root):
-    """{platform: compiled test IDs} for one tree; unknown cfg fails because it cannot prove a removal."""
+    """{platform: (compiled, ignored) test IDs} for one tree; anything unreadable fails, since it cannot prove a loss."""
     inv, features, found = lib_inventory(repo_root), default_features(repo_root), {}
+    if inv.unreadable:
+        raise ValueError(f"{repo_root}: unreadable attributes ({inv.unreadable[0]}); run `check` there")
     for platform, target_os in PLATFORMS.items():
         compiled, _, unknown = platform_split(inv, target_os, features)
         if unknown or inv.errors:
             raise ValueError(f"{repo_root}: cfg unknown or sources missing on {platform}; run `check` there")
-        found[platform] = compiled
+        ignored = set()
+        for test_id in compiled:
+            # Ignored only when every declaration that compiles here is ignored here.
+            states = [_ignored_on(inv.ignores.get(site, ()), target_os, features)
+                      for site, chain in inv.tests[test_id]
+                      if all(cfg_holds(p, target_os, features) is True for p in chain)]
+            if None in states:
+                raise ValueError(f"{repo_root}: cfg_attr ignore of {test_id} is unknown on {platform}")
+            if all(states):
+                ignored.add(test_id)
+        found[platform] = (compiled, ignored)
     return found
+
+
+def _ignored_on(conditions, target_os, features):
+    verdicts = [True if not c else cfg_holds(c, target_os, features) for c in conditions]
+    return True if True in verdicts else (None if None in verdicts else False)
 
 
 def check_findings(repo_root):
@@ -438,9 +499,11 @@ def main(argv=None):
         except (OSError, ValueError) as exc:
             print(f"ERROR {exc}", file=sys.stderr)
             return 1
-        lost = {platform: sorted(base[platform] - head[platform]) for platform in PLATFORMS}
+        lost = {"removed": {p: sorted(base[p][0] - head[p][0]) for p in PLATFORMS},
+                "runnable_to_ignored": {p: sorted((base[p][0] - base[p][1]) & head[p][1]) for p in PLATFORMS}}
         Path(args.json_out).write_text(json.dumps(lost, indent=1, sort_keys=True) + "\n")
-        print(" · ".join(f"{platform} -{len(names)}" for platform, names in lost.items()))
+        print(" · ".join(f"{p} -{len(lost['removed'][p])} ignored+{len(lost['runnable_to_ignored'][p])}"
+                         for p in PLATFORMS))
         return 0
     if args.command == "check":
         inv, found = check_findings(root)
@@ -456,14 +519,14 @@ def main(argv=None):
         print(f"{len(ids)} tests")
         return 0
     try:
-        listed = listed_lib_tests(args.list)
+        listed, listed_ignored = listed_lib_tests(args.list), listed_lib_ignored(args.list)
     except (OSError, ValueError) as exc:
         print(f"ERROR {exc}", file=sys.stderr)
         return 1
-    result = compare(inv, listed, PLATFORMS[args.platform], features)
+    result = compare(inv, listed, PLATFORMS[args.platform], features, listed_ignored)
     Path(args.json_out).write_text(json.dumps(result, indent=1, sort_keys=True) + "\n")
     print(" · ".join(f"{k} {len(v)}" for k, v in sorted(result.items())))
-    return 1 if result["static_only"] or result["unknown_cfg"] else 0
+    return 1 if result["static_only"] or result["unknown_cfg"] or result["ignore_mismatch"] else 0
 
 
 if __name__ == "__main__":

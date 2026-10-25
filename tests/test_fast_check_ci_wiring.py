@@ -483,6 +483,21 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(workflow, extra_workflows={"ci-main.yml": main.replace(original, changed, 1)})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(reason, result.stderr)
+        # Nightly runs the same N, and no other nightly job may run lib tests outside it.
+        nightly = NIGHTLY_WORKFLOW.read_text(encoding="utf-8")
+        nightly_mutants = (
+            ("rust_tests", "worker: [0, 1, 2, 3, 4, 5]", "worker: [0, 1]", "nightly rust_tests must equal the main job"),
+            ("postgres_full", "cargo test --test e2e -- --test-threads=1", "cargo test --lib high_risk_recovery:: -- --test-threads=1",
+             "nightly lib tests run only in"),
+        )
+        for job_id, old, new, reason in nightly_mutants:
+            with self.subTest(nightly_job=job_id, mutation=old):
+                original = job_block(nightly, job_id)
+                changed = original.replace(old, new, 1)
+                self.assertNotEqual(changed, original)
+                result = self.run_hardening_fixture(workflow, extra_workflows={"ci-nightly.yml": nightly.replace(original, changed, 1)})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reason, result.stderr)
 
     def test_retired_targeted_lane_regressions_stay_in_the_audited_selectors(self) -> None:
         # The old test_fast and high-risk steps ran these by name; the selector audit now fails the run if one stops matching.
@@ -877,25 +892,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for job_name in ("full_macos", "full_windows"):
             with self.subTest(job=job_name):
                 job = job_block(nightly, job_name)
-                # Lib tests run as the classifier's exact non-PG set; the other targets keep the skip filter.
-                self.assertIn('--only "$NEXTEST_DIR/pg.json"', job)
-                self.assertIn('--config-file "$NEXTEST_DIR/plan/worker-0.toml" --profile ci --no-tests fail', job)
+                # Lib tests run through the audited native path; the other targets keep the skip filter.
+                self.assertIn("pg-classifier", job)
                 self.assertIn("source scripts/ci/non-pg-test-filter.sh", job)
                 self.assertIn(
                     'cargo test --bins --examples --benches --test \'*\' -- "${NON_PG_SKIP_ARGS[@]}"', job
                 )
-        self.assertIn(
-            "cargo test --lib discord_thread_create -- --test-threads=1",
-            job_block(nightly, "full_windows"),
-        )
-        postgres = job_block(nightly, "postgres_full")
-        self.assertIn("source scripts/ci/non-pg-test-filter.sh", postgres)
-        self.assertIn(
-            'cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" '
-            "--nocapture --test-threads=1",
-            postgres,
-        )
-        self.assertIn("run: cargo test --test e2e -- --test-threads=1", postgres)
+        self.assertIn("cargo test --test e2e -- --test-threads=1", job_block(nightly, "postgres_full"))
 
     def test_relay_authority_contract_job_uses_pinned_recipe(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -2026,6 +2029,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 trusted, encoding="utf-8"
             )
             (workflows / "ci-main.yml").write_text(MAIN_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
+            (workflows / "ci-nightly.yml").write_text(NIGHTLY_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
             for name, content in (extra_workflows or {}).items():
                 (workflows / name).write_text(content, encoding="utf-8")
             for name, target in (workflow_symlinks or {}).items():

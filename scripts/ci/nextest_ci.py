@@ -6,6 +6,7 @@
   audit           per-worker artifacts -> verdict JSON and Markdown summary; any gap is red
   base-diff       compare a plan with the plan of a fixed comparison base SHA; every lost test needs a
                   matching scripts/ci/test-removal-justifications.txt row and every row a matching loss
+  select          lib test names a `cargo test FILTER -- --skip S…` selector file picks, as a plan --only input
   required-context, comparison-base, classify-worker   see nextest_required.py
 
 Every input format carries a version and is rejected when it does not match; a missing or
@@ -306,10 +307,10 @@ def adopt_identity(args):
     args.cargo_profile, args.nextest_profile = build["cargo_profile"], build["nextest_profile"]
 
 
-def only_listed(universe, ignored, path):
-    """Keep the lib tests a pg_test_classifier.py report names under non_pg (native runs without PG)."""
+def only_listed(universe, ignored, path, key="non_pg"):
+    """Keep the lib tests a selection JSON names under key (classifier non_pg, or select's selected)."""
     try:
-        names = set(json.loads(Path(path).read_text())["non_pg"])
+        names = set(json.loads(Path(path).read_text())[key])
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise PlanError(f"cannot read non_pg names from {path}: {exc}") from exc
     keep = {t for t in universe if t[1] in names}
@@ -326,7 +327,7 @@ def cmd_plan(args):
     build = build_identity(args)
     universe, ignored = load_universe(args.universe)
     if args.only:
-        universe, ignored = only_listed(universe, ignored, args.only)
+        universe, ignored = only_listed(universe, ignored, args.only, args.only_key)
     timings, invalid = load_timings(args.timings or [])
     weights, timing = weights_for(universe, timings)
     timing["invalid_records"] = invalid
@@ -566,6 +567,34 @@ def cmd_audit(args):
     return 0 if verdict["verdict"] == "pass" else 1
 
 
+def load_selectors(path):
+    """[(filter, skips)] from `<filter> | <skip> <skip>…` rows, libtest substring semantics."""
+    rows = []
+    for n, line in enumerate(Path(path).read_text().splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        name, sep, skips = (part.strip() for part in line.partition("|"))
+        if not sep or not name or " " in name:
+            raise PlanError(f"{path}:{n}: need `<filter> | <skip substrings>`")
+        rows.append((name, tuple(skips.split())))
+    if not rows:
+        raise PlanError(f"{path} selects nothing")
+    return rows
+
+
+def cmd_select(args):
+    runnable, ignored = load_universe(args.universe)
+    names = {t[1] for t in runnable | ignored}
+    rows = load_selectors(args.selectors)
+    dead = [f for f, skips in rows if not any(f in n and not any(s in n for s in skips) for n in names)]
+    if dead:
+        raise PlanError(f"selectors match no listed test: {dead}")
+    picked = sorted(n for n in names if any(f in n and not any(s in n for s in skips) for f, skips in rows))
+    Path(args.json_out).write_text(json.dumps({"selected": picked}, indent=0) + "\n")
+    print(f"selected {len(picked)} of {len(names)} listed tests with {len(rows)} selectors")
+    return 0
+
+
 REMOVAL_KINDS = ("removed", "runnable->ignored")
 
 
@@ -585,17 +614,18 @@ def load_justifications(path):
     return rows
 
 
-def platform_removals(path, binary_id):
-    """{ID text: platforms} for tests the macOS/Windows source inventory lost; Linux is the plan's job."""
+def platform_losses(path, binary_id):
+    """{(ID text, kind): platforms} the macOS/Windows sources lost or newly ignore; Linux is the plan's job."""
     try:
         doc = json.loads(Path(path).read_text())
-        lost = {p: doc[p] for p in ("macos", "windows")}
+        lost = {(kind, p): doc[key][p] for kind, key in (("removed", "removed"), ("runnable->ignored", "runnable_to_ignored"))
+                for p in ("macos", "windows")}
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise PlanError(f"cannot read source removals {path}: {exc}") from exc
+        raise PlanError(f"cannot read source losses {path}: {exc}") from exc
     found = {}
-    for platform, names in lost.items():
+    for (kind, platform), names in lost.items():
         for name in names:
-            found.setdefault(_id_text(_check_id(binary_id, name)), []).append(platform)
+            found.setdefault((_id_text(_check_id(binary_id, name)), kind), []).append(platform)
     return found
 
 
@@ -625,20 +655,20 @@ def cmd_base_diff(args):
     binaries = {t[0] for t in run | ign}
     if len(binaries) != 1:
         raise PlanError(f"source removals need one lib binary in the plan, found {sorted(binaries)}")
-    platform_lost = platform_removals(args.source_removed, binaries.pop())
+    platform_lost = platform_losses(args.source_removed, binaries.pop())
     diff = {"comparison_base_sha": args.comparison_base_sha, "scope": plan["identity"]["scope"],
             "removed": sorted(_id_text(t) for t in (base_run | base_ign) - (run | ign)),
             "runnable_to_ignored": sorted(_id_text(t) for t in base_run & ign),
             "ignored_to_runnable": sorted(_id_text(t) for t in base_ign & run),
             "added": sorted(_id_text(t) for t in (run | ign) - (base_run | base_ign)),
-            "platform_removed": dict(sorted(platform_lost.items()))}
-    lost = {(t, "removed") for t in diff["removed"] + list(platform_lost)}
+            "platform_losses": {f"{t} | {kind}": p for (t, kind), p in sorted(platform_lost.items())}}
+    lost = {(t, "removed") for t in diff["removed"]} | set(platform_lost)
     lost |= {(t, "runnable->ignored") for t in diff["runnable_to_ignored"]}
     diff["unjustified"] = sorted(f"{t} | {kind}" for t, kind in lost - set(justified))
     diff["stale_justifications"] = sorted(f"{t} | {kind}" for t, kind in set(justified) - lost)
     Path(args.json_out).write_text(json.dumps(diff, indent=1, sort_keys=True) + "\n")
     print(f"removed {len(diff['removed'])} · runnable->ignored {len(diff['runnable_to_ignored'])} · "
-          f"platform-removed {len(platform_lost)} · ignored->runnable {len(diff['ignored_to_runnable'])} · "
+          f"platform losses {len(platform_lost)} · ignored->runnable {len(diff['ignored_to_runnable'])} · "
           f"added {len(diff['added'])} · justified {len(lost) - len(diff['unjustified'])}")
     for row in diff["unjustified"]:
         print(f"ERROR lost without a justification row: {row}", file=sys.stderr)
@@ -674,7 +704,8 @@ def main(argv=None):
     p.add_argument("--retry-policy", default="scripts/ci/nextest-retry-policy.toml")
     p.add_argument("--today", help="YYYY-MM-DD for policy expiry (default: UTC today)")
     p.add_argument("--identity-from", help="plan.json whose scope and build flags this plan takes")
-    p.add_argument("--only", help="pg_test_classifier.py JSON; plan only its non_pg tests")
+    p.add_argument("--only", help="selection JSON; plan only the tests it names under --only-key")
+    p.add_argument("--only-key", default="non_pg", help="non_pg (pg_test_classifier.py) or selected (select)")
     p.add_argument("--output", required=True)
     v = sub.add_parser("verify-archive")
     v.add_argument("--plan", required=True)
@@ -697,10 +728,14 @@ def main(argv=None):
     b.add_argument("--justifications", required=True, help="scripts/ci/test-removal-justifications.txt")
     b.add_argument("--source-removed", required=True, help="rust_test_sources.py removed JSON")
     b.add_argument("--json-out", required=True)
+    c = sub.add_parser("select")
+    c.add_argument("--universe", required=True)
+    c.add_argument("--selectors", required=True, help="e.g. scripts/ci/macos-trusted-selectors.txt")
+    c.add_argument("--json-out", required=True)
     delegated = nextest_required.register(sub)
     args = parser.parse_args(argv)
     handler = {"plan": cmd_plan, "verify-archive": cmd_verify_archive,
-               "audit": cmd_audit, "base-diff": cmd_base_diff}.get(args.command)
+               "audit": cmd_audit, "base-diff": cmd_base_diff, "select": cmd_select}.get(args.command)
     try:
         return handler(args) if handler else delegated[args.command](_SELF, args)
     except PlanError as exc:

@@ -488,10 +488,16 @@ class VerifyArchive(Fixture):
         self.assertIn("NEXTEST_RETRIES is set", err)
 
 
+def source_losses(removed=None, ignored=None):
+    """rust_test_sources.py removed JSON: per-platform removed and runnable->ignored names."""
+    empty = {"linux": [], "macos": [], "windows": []}
+    return {"removed": {**empty, **(removed or {})}, "runnable_to_ignored": {**empty, **(ignored or {})}}
+
+
 class BaseDiff(Fixture):
     def diff(self, base_sha, baseline="base/plan.json", rows="", source=None):
         self.write("justify.txt", rows)
-        self.write("source-removed.json", source or {"linux": [], "macos": [], "windows": []})
+        self.write("source-removed.json", source or source_losses())
         return self.run_cli("base-diff", "--plan", self.dir / "plan/plan.json", "--baseline", self.dir / baseline,
                             "--comparison-base-sha", base_sha, "--justifications", self.dir / "justify.txt",
                             "--source-removed", self.dir / "source-removed.json", "--json-out", self.dir / "diff.json")
@@ -550,13 +556,31 @@ class BaseDiff(Fixture):
     def test_tests_only_macos_or_windows_compiled_need_rows_too(self):
         self.plan_ok(["m::a"], workers=1, out="base")
         self.plan_ok(["m::a"], workers=1)
-        source = {"linux": [], "macos": ["m::mac"], "windows": ["m::win", "m::mac"]}
+        source = source_losses(removed={"macos": ["m::mac"], "windows": ["m::win", "m::mac"]})
         rc, err = self.diff(SHA, source=source)
         self.assertEqual(rc, 1)
-        self.assertEqual(json.loads((self.dir / "diff.json").read_text())["platform_removed"],
-                         {f"{BIN} m::mac": ["macos", "windows"], f"{BIN} m::win": ["windows"]})
+        self.assertEqual(json.loads((self.dir / "diff.json").read_text())["platform_losses"],
+                         {f"{BIN} m::mac | removed": ["macos", "windows"], f"{BIN} m::win | removed": ["windows"]})
         rows = f"{BIN} m::mac | removed | macOS API retired\n{BIN} m::win | removed | Win32 path retired\n"
         self.assertEqual(self.diff(SHA, rows=rows, source=source), (0, ""))
+
+    def test_native_only_tests_newly_ignored_need_a_runnable_to_ignored_row(self):
+        self.plan_ok(["m::a"], workers=1, out="base")
+        self.plan_ok(["m::a"], workers=1)
+        source = source_losses(ignored={"windows": ["m::win"], "macos": ["m::mac"]})
+        rc, err = self.diff(SHA, source=source)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"lost without a justification row: {BIN} m::win | runnable->ignored", err)
+        exact = f"{BIN} m::win | runnable->ignored | flaky on hosted Windows\n{BIN} m::mac | runnable->ignored | x\n"
+        self.assertEqual(self.diff(SHA, rows=exact, source=source), (0, ""))
+        wrong_kind = exact.replace("m::win | runnable->ignored", "m::win | removed")
+        rc, err = self.diff(SHA, rows=wrong_kind, source=source)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"{BIN} m::win | runnable->ignored", err)
+        self.assertIn(f"matches no loss against {SHA}: {BIN} m::win | removed", err)
+        rc, err = self.diff(SHA, rows=exact, source=source_losses())
+        self.assertEqual(rc, 1)
+        self.assertIn(f"matches no loss against {SHA}: {BIN} m::win | runnable->ignored", err)
 
     def test_pure_addition_passes(self):
         self.plan_ok(["m::a"], workers=1, out="base")
@@ -576,6 +600,19 @@ class NativePlan(Fixture):
         self.assertIn("outside the listed universe", self.plan(["m::a"], workers=1,
                                                               build={**BUILD, "--only": self.dir / "pg.json"})[1])
 
+    def test_select_takes_the_libtest_union_and_rejects_a_dead_selector(self):
+        self.write("list.json", nextest_list(["m::health_a", "m::health_pg", "x::_4888_pg"]))
+        self.write("sel.txt", "health | _pg pg_ postgres\n_4888 |\n")
+        rc, err = self.run_cli("select", "--universe", self.dir / "list.json", "--selectors", self.dir / "sel.txt",
+                               "--json-out", self.dir / "out.json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads((self.dir / "out.json").read_text())["selected"], ["m::health_a", "x::_4888_pg"])
+        self.write("sel.txt", "health | _pg pg_ postgres\nrenamed_module |\n")
+        rc, err = self.run_cli("select", "--universe", self.dir / "list.json", "--selectors", self.dir / "sel.txt",
+                               "--json-out", self.dir / "out.json")
+        self.assertEqual(rc, 1)
+        self.assertIn("selectors match no listed test: ['renamed_module']", err)
+
     def test_identity_from_copies_scope_and_build(self):
         head = self.plan_ok(["m::a"], workers=1, build={**BUILD, "--features": "default,extra"})
         rc, err = self.run_cli("plan", "--universe", self.dir / "list.json", "--archive", self.archive, "--workers", 1,
@@ -589,8 +626,8 @@ class NativePlan(Fixture):
                          {k: v for k, v in head["identity"].items() if k not in drop})
 
 
-class BaseDiffScript(Fixture):
-    """scripts/ci/nextest-base-diff.sh in a git checkout with gh and cargo stubbed: CI Main's baseline or a rebuild."""
+class ScriptRepo(Fixture):
+    """A git checkout holding the CI scripts, with gh and cargo stubbed by the subclass texts."""
 
     LIB = "#[test]\nfn a() {}\n#[cfg(windows)]\n#[test]\nfn w() {}\n"
     GH = """#!/bin/sh
@@ -616,7 +653,8 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
         self.sp = subprocess
         self.repo = self.dir / "repo"
         for rel in ("scripts/ci/nextest_ci.py", "scripts/ci/nextest_required.py", "scripts/ci/rust_test_sources.py",
-                    "scripts/ci/nextest-base-diff.sh", "scripts/ci/test-removal-justifications.txt", ".config/nextest.toml"):
+                    "scripts/ci/nextest-base-diff.sh", "scripts/ci/test-removal-justifications.txt", ".config/nextest.toml",
+                    "scripts/ci/nextest-native.sh", "scripts/ci/pg_test_classifier.py", "scripts/ci/nextest-retry-policy.toml"):
             (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / rel, self.repo / rel)
         (self.repo / "Cargo.toml").write_text('[package]\nname = "agentdesk"\n')
@@ -663,6 +701,11 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
         cargo = (self.dir / "cargo.log").read_text() if (self.dir / "cargo.log").exists() else ""
         return done.returncode, done.stdout + done.stderr, summary.read_text(), cargo
 
+
+
+class BaseDiffScript(ScriptRepo):
+    """scripts/ci/nextest-base-diff.sh: CI Main's baseline for the exact base SHA, or a rebuild."""
+
     def test_main_baseline_is_used_when_it_matches(self):
         head = self.head_plan(["m::a", "m::b"])
         rc, out, summary, cargo = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=str(self.baseline(["m::a"])))
@@ -702,6 +745,77 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
         rc, out, _, _ = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=str(self.baseline(["m::a"])))
         self.assertEqual(rc, 1)
         self.assertIn(f"lost without a justification row: {BIN} w | removed", out)
+
+    def test_windows_only_test_gaining_ignore_needs_its_exact_row(self):
+        head = self.head_plan(["m::a"], lib=self.LIB.replace("fn w()", "#[ignore = \"temporarily disabled\"]\nfn w()"))
+        baseline = str(self.baseline(["m::a"]))
+        rc, out, _, _ = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=baseline)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"lost without a justification row: {BIN} w | runnable->ignored", out)
+        rows = self.repo / "scripts/ci/test-removal-justifications.txt"
+        rows.write_text(f"{BIN} w | runnable->ignored | Win32 lock flaky on hosted runners\n")
+        self.sp.run(["rm", "-rf", str(self.dir / "nextest/base")], check=True)
+        self.git("worktree", "prune")
+        rc, out, _, _ = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=baseline)
+        self.assertEqual(rc, 0, out)
+
+
+class NativeScript(ScriptRepo):
+    """scripts/ci/nextest-native.sh with cargo stubbed: the plan, run record and audit decide, not the exit code."""
+
+    LIB = "mod m {\n#[test]\nfn a() {}\n#[test]\nfn health_b() {}\n#[test]\nfn health_pg_c() {}\n}\n"
+    CARGO = """#!/bin/sh
+case "$2" in
+  --version) echo "cargo-nextest 0.9.149" ;;
+  archive) while [ "$1" != --archive-file ]; do shift; done; echo bytes > "$2" ;;
+  list) cat "$NATIVE_LIST" ;;
+  run) while [ "$1" != --extract-to ]; do shift; done; mkdir -p "$2/target/nextest/ci"
+       cp "$NATIVE_JUNIT" "$2/target/nextest/ci/junit.xml"; exit "${NATIVE_EXIT:-0}" ;;
+esac
+"""
+
+    def setUp(self):
+        super().setUp()
+        (self.bin / "rustc").write_text("#!/bin/sh\necho 'host: aarch64-apple-darwin'\n")
+        (self.bin / "rustc").chmod(0o755)
+        self.write("native-list.json", nextest_list(["m::a", "m::health_b", "m::health_pg_c"]))
+        self.write("selectors.txt", "health | _pg pg_ postgres\n")
+
+    def native(self, selection, ran, exit_code=0):
+        self.write("junit.xml", junit([(n, "", 0.1) for n in ran]))
+        temp = self.dir / "runner"
+        self.sp.run(["rm", "-rf", str(temp)], check=True)
+        temp.mkdir()
+        env = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(temp),
+               "GITHUB_WORKSPACE": str(self.repo), "GITHUB_STEP_SUMMARY": str(self.dir / "summary.md"),
+               "NATIVE_LIST": str(self.dir / "native-list.json"), "NATIVE_JUNIT": str(self.dir / "junit.xml"),
+               "NATIVE_EXIT": str(exit_code), "GITHUB_RUN_ID": "9"}
+        done = self.sp.run(["bash", "scripts/ci/nextest-native.sh", "macos", "macos-trusted", selection],
+                           cwd=self.repo, env=env, capture_output=True, text=True)
+        plan = temp / "nextest/plan/plan.json"
+        tests = [t[1] for t in json.loads(plan.read_text())["workers"][0]["tests"]] if plan.exists() else None
+        return done.returncode, done.stdout + done.stderr, tests
+
+    def test_selectors_scope_runs_their_union_and_passes_only_when_all_ran(self):
+        selection = f"selectors:{self.dir / 'selectors.txt'}"
+        rc, out, tests = self.native(selection, ["m::health_b"])
+        self.assertEqual((rc, tests), (0, ["m::health_b"]), out)
+        self.assertIn("## nextest macos-trusted: PASS", (self.dir / "summary.md").read_text())
+
+    def test_a_planned_test_missing_from_the_run_fails_despite_exit_zero(self):
+        rc, out, tests = self.native(f"selectors:{self.dir / 'selectors.txt'}", [])
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(tests, ["m::health_b"])
+
+    def test_pg_classifier_scope_plans_every_non_pg_test(self):
+        # The real exemptions name repository tests; this tree has none of them.
+        classifier = self.repo / "scripts/ci/pg_test_classifier.py"
+        text = classifier.read_text()
+        start = text.index("EXEMPT = {")
+        classifier.write_text(text[:start] + "EXEMPT = {}\n_UNUSED_EXEMPT = {" + text[start + len("EXEMPT = {"):])
+        rc, out, tests = self.native("pg-classifier", ["m::a", "m::health_b", "m::health_pg_c"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(tests, ["m::a", "m::health_b", "m::health_pg_c"])
 
 
 class RustSources(unittest.TestCase):
@@ -890,10 +1004,35 @@ class RustSources(unittest.TestCase):
                    .replace("#[test]\nfn gated()", "#[cfg(unix)]\n#[test]\nfn gated()") + "#[test]\nfn new() {}\n"})
         rc, err = self.cli("removed", "--base-root", base, "--json-out", self.root / "removed.json")
         self.assertEqual(rc, 0, err)
-        self.assertEqual(json.loads((self.root / "removed.json").read_text()),
+        self.assertEqual(json.loads((self.root / "removed.json").read_text())["removed"],
                          {"linux": [], "macos": [], "windows": ["gated", "w"]})
         (base / "src/lib.rs").write_text("#[cfg(feature = \"unknown\" || x)]\n#[test]\nfn odd() {}\n")
         self.assertEqual(self.cli("removed", "--base-root", base, "--json-out", self.root / "removed.json")[0], 1)
+
+    def test_removed_reports_tests_each_platform_newly_ignores(self):
+        lib = ("#[cfg(windows)]\n#[test]\nfn w() {}\n#[cfg(target_os = \"macos\")]\n#[test]\nfn m() {}\n"
+               "#[test]\nfn all() {}\n#[test]\n#[ignore]\nfn was_ignored() {}\n")
+        base = self.root / "base"
+        (base / "src").mkdir(parents=True)
+        (base / "Cargo.toml").write_text((self.root / "Cargo.toml").read_text())
+        (base / "src/lib.rs").write_text(lib)
+        self.tree({"src/lib.rs": lib.replace("fn w()", "#[ignore = \"temporarily disabled\"]\nfn w()")
+                   .replace("fn m()", "#[cfg_attr(target_os = \"macos\", ignore)]\nfn m()")
+                   .replace("fn all()", "#[cfg_attr(windows, ignore)]\nfn all()")
+                   .replace("#[ignore]\nfn was_ignored", "fn was_ignored")})
+        rc, err = self.cli("removed", "--base-root", base, "--json-out", self.root / "removed.json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads((self.root / "removed.json").read_text())["runnable_to_ignored"],
+                         {"linux": [], "macos": ["m"], "windows": ["all", "w"]})
+        self.tree({"src/lib.rs": lib.replace("fn w()", "#[cfg_attr(cfg_attr(windows, x), ignore)]\nfn w()")})
+        self.assertEqual(self.cli("removed", "--base-root", base, "--json-out", self.root / "removed.json")[0], 1)
+
+    def test_compare_fails_when_source_and_list_disagree_on_ignore(self):
+        self.tree({"src/lib.rs": "#[test]\n#[ignore]\nfn a() {}\n#[test]\n#[cfg_attr(unix, ignore)]\nfn b() {}\n"})
+        suite = {"binary-id": "x", "kind": "lib", "testcases": {"a": {"ignored": True}, "b": {"ignored": True}}}
+        self.assertEqual(self.compare({"rust-suites": {"x": suite}}), (0, ""))
+        self.assertEqual(self.compare({"rust-suites": {"x": suite}}, platform="windows")[0], 1)
+        self.assertEqual(json.loads((self.root / "cmp.json").read_text())["ignore_mismatch"], ["b"])
 
     def compare(self, doc, platform="linux"):
         listed = self.root / "list.json"
