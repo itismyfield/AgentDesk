@@ -532,6 +532,71 @@ async fn empty_retired_set_keeps_the_legacy_reattach_outcome() {
     fixture.clear();
 }
 
+// Durable baseline persistence requires a Linux or macOS boot identity.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn redrive_baseline_writer_waits_for_observer_runtime_root() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().expect("observer runtime root");
+    let env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let before = redrive_tree(root.path(), "baseline-observer");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (seeded_tx, seeded_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        super::tests::refused_redrive_with_seeded_baseline(|| {
+            let baseline = crate::services::discord::runtime_store::runtime_root()
+                .expect("writer runtime root")
+                .join("discord_redrive_baselines/codex/5943016.json");
+            let bytes = std::fs::read(&baseline).expect("real writer seeded baseline");
+            seeded_tx.send((baseline, bytes)).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        });
+    });
+    let started = started_rx.recv_timeout(Duration::from_secs(10));
+    let premature_seed = seeded_rx.recv_timeout(Duration::from_secs(1)).ok();
+    let during = redrive_tree(root.path(), "baseline-observer");
+    drop(env);
+    drop(lock);
+    let seeded = premature_seed.clone().or_else(|| seeded_rx.recv().ok());
+    let _ = resume_tx.send(());
+    let joined = writer.join();
+
+    started.expect("writer thread started");
+    joined.expect("writer completed and cleaned up before the next fixture");
+    let (baseline, bytes) = seeded.expect("actual baseline persistence was exercised");
+    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("baseline JSON");
+    assert_eq!(value["offset"], 0);
+    assert!(
+        value["identity"]["tmux_session_name"]
+            .as_str()
+            .unwrap()
+            .ends_with("refusal-propagates")
+    );
+    eprintln!(
+        "real writer baseline={} seeded_while_observer_locked={}",
+        baseline.display(),
+        premature_seed.is_some()
+    );
+    assert_eq!(
+        before, during,
+        "the baseline writer must not enter the observer root"
+    );
+    assert!(
+        premature_seed.is_none(),
+        "writer bypassed the environment mutex"
+    );
+    assert!(!baseline.starts_with(root.path()));
+    assert!(!baseline.exists(), "writer fixture removed its baseline");
+}
+
 #[test]
 fn redrive_tree_ignores_only_foreign_death_markers() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
