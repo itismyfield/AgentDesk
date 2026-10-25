@@ -290,6 +290,7 @@ config::secret_bearing_config_file_tests::load_from_path_ignores_retired_escalat
 config::secret_bearing_config_file_tests::load_from_path_preserves_retired_shadow_disabled_settings
 config::secret_bearing_config_file_tests::load_from_path_preserves_retired_shadow_enabled_settings
 config::secret_bearing_config_file_tests::save_and_load_harden_secret_bearing_config_file
+config::session_hosts::migration::consent_holds::returns_tests::migration_returned_rollback_passes_only_its_binding_and_adopts_after_durable_approval
 config::session_hosts::migration::consent_holds::tests::hold_selection_checks_old_and_new_user_default_bindings_only
 config::session_hosts::migration::consent_holds::tests::migration_real_hold_source_is_mode_first_and_unchanged_is_read_free
 config::session_hosts::migration::consent_holds::tests::real_consent_holds_distinguish_missing_unresolved_and_unreadable
@@ -316,7 +317,6 @@ config::session_hosts::migration::tests::migration_unavailable_pending_marker_re
 config::session_hosts::migration::tests::migration_unchanged_diagnostic_keeps_candidate_shape_on_every_return
 config::session_hosts::migration::tests::migration_unchanged_projection_does_not_query_rows_holds_or_save
 config::session_hosts::migration::tests::migration_unreadable_snapshots_keep_candidate_channels_and_stop_admission
-config::session_hosts::migration::tests::migration_user_default_validator_reports_key_and_supported_action
 config::session_hosts::tests::boot_selection_logs_once_per_value_even_with_concurrent_readers
 config::session_hosts::tests::cg_d1_boot_env_replaces_yaml_empty_disables_and_invalid_fails_whole_list
 config::session_hosts::tests::claude_guard_channel_runtime_follows_the_hosting_resolver_fallback
@@ -325,6 +325,7 @@ config::session_hosts::tests::guard_and_herdr_checks_read_provider_keys_as_the_i
 config::session_hosts::tests::session_hosts_boot_loader_takes_tui_channels_on_complete_endpoints_and_refuses_the_rest
 config::session_hosts::user_default::tests::legacy_and_explicit_user_sockets_do_not_read_home
 config::session_hosts::user_default::tests::user_default_resolves_only_the_execution_users_socket
+config::session_hosts::user_default_validator_tests::user_default_validator_stays_dormant_while_its_approval_projection_decodes
 config::shared_test_env_lock_tests::acquire_shared_test_env_lock_panics_on_same_thread_reentry_before_deadlock
 config::tool_activity_display::tests::omitted_tool_activity_detail_defaults_to_summary
 config::tool_activity_display::tests::tool_activity_modes_round_trip_without_accepting_unknown_detail
@@ -6966,6 +6967,11 @@ services::discord::router::herdr_consent::custody::tests::live_mailbox_crash_at_
 services::discord::router::herdr_consent::custody::tests::live_mailbox_custody_sink_passes_shared_durable_conformance
 services::discord::router::herdr_consent::custody::tests::live_mailbox_drained_head_releases_and_wakes_from_its_dispatch_marker
 services::discord::router::herdr_consent::custody::tests::live_outbox_custody_sink_passes_shared_durable_conformance_pg
+services::discord::router::herdr_consent::return_input::tests::applied_boot_replay_never_runs_a_returned_input
+services::discord::router::herdr_consent::return_input::tests::applied_retry_replays_its_receipt_without_preview_and_reconsents_only_new_input
+services::discord::router::herdr_consent::return_input::tests::recordless_retry_reruns_admission_once_and_continues_to_one_card
+services::discord::router::herdr_consent::return_input::tests::return_refuses_and_writes_nothing_until_every_precondition_holds
+services::discord::router::herdr_consent::return_input::tests::returned_inputs_roll_back_twice_and_each_original_runs_once_in_fifo
 services::discord::router::herdr_consent::service_tests::actual_applied_startup_keeps_failed_consent_retryable_and_releases_later_once
 services::discord::router::herdr_consent::service_tests::actual_component_owner_guard_precedes_store_for_allowed_allowall_and_missing_owner
 services::discord::router::herdr_consent::service_tests::actual_component_rejects_stale_nonce_and_wrong_message_before_peer_or_apply
@@ -12856,6 +12862,9 @@ services::session_host::herdr::policy::consent::preview::tests::consent_peer_fac
 services::session_host::herdr::policy::consent::preview::tests::consent_preview_binds_existing_missing_and_symlink_cas
 services::session_host::herdr::policy::consent::preview::tests::consent_preview_checks_whole_candidate_without_publication
 services::session_host::herdr::policy::consent::preview::tests::consent_preview_rechecks_original_and_candidate_after_checker
+services::session_host::herdr::policy::consent::settlement::return_tests::applied_retry_reconsents_only_awaiting_input_on_another_preview
+services::session_host::herdr::policy::consent::settlement::return_tests::clear_discards_an_open_return_and_release_cannot
+services::session_host::herdr::policy::consent::settlement::return_tests::returned_input_stays_held_never_releases_and_closes_only_after_adoption
 services::session_host::herdr::policy::consent::settlement::tests::consent_bulk_inventory_distinguishes_absence_unknown_newer_and_corruption
 services::session_host::herdr::policy::consent::settlement::tests::consent_bulk_waits_for_live_publication_but_not_an_abandoned_marker
 services::session_host::herdr::policy::consent::settlement::tests::consent_legacy_schema_defaults_to_unresolved_and_duplicate_scopes_are_separate
