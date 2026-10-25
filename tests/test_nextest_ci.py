@@ -807,6 +807,17 @@ esac
         self.assertEqual(rc, 1, out)
         self.assertEqual(tests, ["m::health_b"])
 
+    def test_a_source_test_missing_from_the_native_list_fails_before_running(self):
+        self.write("native-list.json", nextest_list(["m::a", "m::health_b"]))
+        rc, out, tests = self.native(f"selectors:{self.dir / 'selectors.txt'}", ["m::health_b"])
+        self.assertEqual((rc, tests), (1, None), out)
+        self.assertIn("static_only 1", out)
+
+    def test_a_nonzero_run_exit_fails_even_with_every_test_passing(self):
+        rc, out, _ = self.native(f"selectors:{self.dir / 'selectors.txt'}", ["m::health_b"], exit_code=100)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("nextest exited 100", out)
+
     def test_pg_classifier_scope_plans_every_non_pg_test(self):
         # The real exemptions name repository tests; this tree has none of them.
         classifier = self.repo / "scripts/ci/pg_test_classifier.py"
@@ -988,6 +999,7 @@ class RustSources(unittest.TestCase):
             (self.root / argv[argv.index("--list") + 1]).write_text(json.dumps(
                 {"rust-suites": {"x": {"binary-id": "x", "kind": "lib", "testcases": names}}}))
             with self.subTest(platform=platform):
+                (self.root / argv[argv.index("--json-out") + 1]).unlink(missing_ok=True)
                 done = subprocess.run(["bash", "-c", line], cwd=self.root, env=env, capture_output=True, text=True)
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
                 self.assertIn("--json-out", argv)
