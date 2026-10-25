@@ -665,7 +665,8 @@ class HerdrScopedGapRepairs(unittest.TestCase):
                 return {'ok': True, 'message_id': '102'}
         def wait(channel, **kwargs):
             for marker in ('[E2E:E51:run:T1]', '[E2E:E51:run:T2]'):
-                row = {'id': '101' if marker.endswith('T1]') else '103', 'content': marker, 'author': {'bot': True}}
+                row = {'id': '101' if marker.endswith('T1]') else '103', 'content': marker,
+                       'author': {'id': assertions.provider_bot_id('codex'), 'bot': True}}
                 if kwargs['predicate'](row):
                     rows.append(row); return row, rows
             return None, rows

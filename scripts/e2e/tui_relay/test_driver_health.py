@@ -27,6 +27,9 @@ import run_tui_relay as driver  # noqa: E402
 from tui_relay import assertions, normal_intake_evidence as e36  # noqa: E402
 from tui_relay.tests.restart_guard_cases import RestartObservationGuard  # noqa: E402, F401
 
+PROVIDER = assertions.provider_bot_id("claude")
+NOTIFY = "1481522187197218816"
+
 
 class E36DriverContract(unittest.TestCase):
     def run_e36(self, *, fault=None, mutate=None):
@@ -117,17 +120,17 @@ class E36DriverContract(unittest.TestCase):
                     trace.append(("body", key))
                 if not (fault == "deleted" and state["qb_done"] and key == "S01"):
                     rows.append({"id": str(mid + 1), "content": f"{hold}\n{marker}" if hold else marker,
-                                 "author": {"id": "999", "bot": True}})
+                                 "author": {"id": NOTIFY if fault == "notify_author" else PROVIDER, "bot": True}})
                 if fault == "page_duplicate" and key == "S01":
                     seen = state.get("page_dup_fetches", 0)
                     state["page_dup_fetches"] = seen + 1
                     rows.append({"id": str(mid + 9), "content": marker if seen == 0 else "edited away",
-                                 "author": {"id": "999", "bot": True}})
+                                 "author": {"id": PROVIDER, "bot": True}})
                 if clock[0] >= first[key] + 6:
-                    rows.append({"id": str(mid + 2), "content": "✅ 응답 완료", "author": {"id": "999", "bot": True}})
+                    rows.append({"id": str(mid + 2), "content": "✅ 응답 완료", "author": {"id": PROVIDER, "bot": True}})
             if fault == "idle_publication_replay" and state.get("idle_returned"):
                 marker = scenario["steps"][0]["body_marker"].replace("{run_id}", "offline")
-                rows.append({"id": "9999", "content": "late header\n" + marker, "author": {"id": "999", "bot": True}})
+                rows.append({"id": "9999", "content": "late header\n" + marker, "author": {"id": PROVIDER, "bot": True}})
             if client.body_observations is not None:
                 for row in rows:
                     if (body := assertions.relay_body(row)) is not None:
@@ -211,6 +214,15 @@ class E36DriverContract(unittest.TestCase):
                 self.assertEqual(result["failure_attribution"]["source"], "assertion")
                 self.assertIn(reason, result["reason"])
                 self.assertNotEqual(result["e36_acceptance"]["queued_followup"], "pass")
+
+    def test_notify_bot_body_never_completes_an_e36_request(self):
+        with patch.object(driver, "_raise_if_tui_prompt_stuck_while_idle"):
+            result, trace, sent, _ = self.run_e36(fault="notify_author")
+        self.assertEqual(result["status"], "fail", result)
+        self.assertEqual(result["failure_attribution"]["source"], "assertion")
+        self.assertIn("E36 response missing", result["reason"])
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn(("join", "S01"), trace)
 
     def test_swapped_join_order_is_real_driver_zero_refetch_red(self):
         result, _, sent, _ = self.run_e36(fault="join_before_completion")

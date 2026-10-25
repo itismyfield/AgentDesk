@@ -560,7 +560,7 @@ class HerdrCells(unittest.TestCase):
                 self.assertNotIn('restart_incarnations', result)
                 self.assertEqual(sum(c.args[0][0] == 'launchctl' for c in run.call_args_list), 1)
 
-    def test_e36_executes_twelve_normal_discord_prompts_without_legacy_evidence(self):
+    def run_herdr_e36(self, author):
         from unittest.mock import Mock, patch
         from argparse import Namespace
         scenario = next(s for s in driver.load_scenarios(ROOT / 'tests/e2e/tui_relay/scenarios', cell='claude-herdr') if s['id'] == 'E-36')
@@ -571,7 +571,8 @@ class HerdrCells(unittest.TestCase):
         client = Mock()
         client.send_control.return_value = {'id': '100'}
         def add(marker):
-            row = {'id': str(102 + len(rows)), 'content': marker.replace('{run_id}', 'phase'), 'author': {'id': '42', 'bot': True}}
+            row = {'id': str(102 + len(rows)), 'content': marker.replace('{run_id}', 'phase'),
+                   'author': {'id': author, 'bot': True}}
             rows.append(row)
         def send(channel, prompt):
             step = scenario['steps'][len(sent)]
@@ -586,6 +587,16 @@ class HerdrCells(unittest.TestCase):
         with patch.object(driver, 'tmux', None), patch.object(driver.herdr, 'observe', return_value={'herdr': {}}), \
              patch.object(driver.normal_intake_evidence, 'validate', side_effect=AssertionError('legacy intake')):
             result = driver.run_scenario(scenario, args=args, client=client, run_id='phase')
+        return result, client
+
+    def test_e36_notify_bot_body_never_completes_a_herdr_request(self):
+        result, client = self.run_herdr_e36('1481522187197218816')
+        self.assertEqual(result['status'], 'fail', result)
+        self.assertIn('Herdr Discord marker timeout: [E2E:E36:phase:S01]', result['reason'])
+        self.assertEqual(client.send.call_count, 1)
+
+    def test_e36_executes_twelve_normal_discord_prompts_without_legacy_evidence(self):
+        result, client = self.run_herdr_e36(driver.assertions.provider_bot_id('claude'))
         self.assertEqual(result['status'], 'not_applicable', result)
         self.assertEqual(client.send.call_count, 12)
         client.send_prompt.assert_not_called()

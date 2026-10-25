@@ -76,6 +76,13 @@ instead of silently downgrading. Machine-readable reports include
 `coverage_class`, `coverage_class_actual`, `run_id`, and `failure_attribution`
 on each scenario.
 
+A `wait_for_discord_text` step (or an `E-36` request) with `relay_author: provider`
+matches only bodies posted by the cell's provider bot, and `provider_text_present`
+applies the same author check to the final presence assertion. Notify and
+announce bot posts that quote a marker therefore never count as delivery.
+`E-4` scopes its direct-input body; `E-1`, `E-2`, `E-36`, `E-50` and `E-51` scope
+every turn marker, on legacy and Herdr cells.
+
 Provider-specific scenarios (`E-6` claude `/compact`, `E-7` codex `/compact`)
 narrow the list. TUI-keystroke-only scenarios (`E-4`, `E-10`, `E-12`) include
 only the two `*-tui` cells. `E-13` covers the Claude Code pipe/headless

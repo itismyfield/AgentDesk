@@ -1074,12 +1074,12 @@ def validate_scenario_schema(scenario):
                 metadata.add("timeout_s")
             if action == "wait_for_discord_text":
                 metadata.add("relay_author")
-                if entry.get("relay_author", "provider") != "provider":
-                    raise ValueError("relay_author supports only provider")
             if action in {"send_prompt", "send_discord_prompt", "deliver_prompt", "send_provider_hold_prompt", "send_timed_response_prompt"}:
                 metadata.add("post_send_sleep_s")
             if action == "send_discord_prompt" and scenario.get("e36_normal_intake"):
-                metadata.update({"request_key", "body_marker", "hold_marker"})
+                metadata.update({"request_key", "body_marker", "hold_marker", "relay_author"})
+            if "relay_author" in metadata and entry.get("relay_author", "provider") != "provider":
+                raise ValueError("relay_author supports only provider")
             if set(entry) - {action} - metadata:
                 raise ValueError(f"unsupported {kind} sibling options: {entry!r}")
             value, allowed = entry[action], schema[action]

@@ -548,6 +548,59 @@ class E4ProviderBodyWait(unittest.TestCase):
             driver.validate_scenario_schema(scenario)
 
 
+class ProviderAuthorScenarios(unittest.TestCase):
+    """E-1/E-2/E-36/E-50/E-51 accept a turn body only from the cell's provider bot."""
+
+    NOTIFY_BOT = E4ProviderBodyWait.NOTICE_BOT
+    SCENARIOS = {"E-1": "claude", "E-2": "claude", "E-36": "claude", "E-50": "claude", "E-51": "codex"}
+
+    @staticmethod
+    def load(scenario_id):
+        path = next((ROOT / "tests/e2e/tui_relay/scenarios").glob(f"{scenario_id}-*.yaml"))
+        scenario = driver.yaml.safe_load(path.read_text())
+        driver.validate_scenario_schema(scenario)
+        return scenario
+
+    def test_every_turn_wait_and_e36_request_is_provider_scoped(self):
+        for scenario_id in self.SCENARIOS:
+            scenario = self.load(scenario_id)
+            waits = [step for step in scenario["steps"] if "wait_for_discord_text" in step or "body_marker" in step]
+            with self.subTest(scenario=scenario_id):
+                self.assertTrue(waits)
+                self.assertEqual({step.get("relay_author") for step in waits}, {"provider"})
+                self.assertFalse([spec for spec in scenario["assertions"] if "text_present" in spec])
+
+    def test_marker_presence_rejects_notify_and_announce_bodies(self):
+        for scenario_id, provider in self.SCENARIOS.items():
+            if scenario_id == "E-36":
+                continue  # E-36 judges bodies through its request windows, not presence specs.
+            scenario = self.load(scenario_id)
+            for marker in (step["wait_for_discord_text"] for step in scenario["steps"] if "wait_for_discord_text" in step):
+                specs = [spec for spec in scenario["assertions"]
+                         if marker in (spec.get("text_present"), spec.get("provider_text_present"))]
+                with self.subTest(scenario=scenario_id, marker=marker):
+                    self.assertTrue(specs, f"{scenario_id} has no presence assertion for {marker}")
+                    for author, accepted in ((assertions.provider_bot_id(provider), True),
+                                             (self.NOTIFY_BOT, False), (assertions.OUR_BOT_ID, False)):
+                        window = _window({"id": "101", "content": marker.replace("{run_id}", "run"),
+                                          "author": {"id": author, "bot": True}, "type": 0})
+                        run = [lambda spec=spec: driver.run_assertion(spec, window=window, run_id="run", provider=provider)
+                               for spec in specs]
+                        if accepted:
+                            for check in run:
+                                check()
+                        else:
+                            for check in run:
+                                with self.assertRaises(assertions.AssertionError, msg=f"{author} accepted"):
+                                    check()
+
+    def test_e36_schema_keeps_relay_author_provider_only(self):
+        scenario = self.load("E-36")
+        scenario["steps"][0]["relay_author"] = "notify"
+        with self.assertRaisesRegex(ValueError, "relay_author"):
+            driver.validate_scenario_schema(scenario)
+
+
 class NoDuplicateMarker(unittest.TestCase):
     def test_single_marker_passes(self):
         window = _window(_relay_msg(1, "the answer [E2E:T1]"))

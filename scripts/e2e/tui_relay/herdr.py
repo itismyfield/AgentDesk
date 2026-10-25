@@ -394,11 +394,14 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 window.add(row)
             window.reconcile_snapshot(rows, after_id=after_id)
 
-        def wait(marker, timeout, *, raw=False):
+        def wait(marker, timeout, *, raw=False, author=None):
             nonlocal first_response, gap_failure, gap_token
+            def body(row):
+                if raw and (row.get("author") or {}).get("bot"):
+                    return row.get("content", "")
+                return assertions.relay_body(row) if author is None else assertions.author_relay_body(row, author)
             found, rows = client.wait_for_message(
-                args.channel_id, predicate=lambda row: marker in ((row.get("content", "") if raw and (row.get("author") or {}).get("bot") else assertions.relay_body(row)) or ""),
-                after_id=after_id, timeout_s=timeout)
+                args.channel_id, predicate=lambda row: marker in (body(row) or ""), after_id=after_id, timeout_s=timeout)
             ingest(rows)
             if not found:
                 gap_failure = bool(gap_token and gap_token["marker"] == marker and scenario["id"] != "E-18")
@@ -407,6 +410,9 @@ def _run_checked(driver, scenario, args, client, run_id, result):
             if gap_token and gap_token["marker"] == marker:
                 gap_token = None
             return found
+
+        def provider_author(step):
+            return assertions.provider_bot_id(driver.cell_provider(args.cell)) if step.get("relay_author") == "provider" else None
 
         def open_gap(index, marker=None):
             nonlocal gap_token
@@ -473,16 +479,17 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                         raise assertions.AssertionError(f"text !clear send returned no message id; its replies cannot be attributed: {sent!r}")
                 if scenario.get("e36_normal_intake"):
                     marker = step.get("hold_marker") if step.get("request_key") == "QA" else step["body_marker"]
-                    wait(marker.replace("{run_id}", run_id), 240)
+                    wait(marker.replace("{run_id}", run_id), 240, author=provider_author(step))
                     if step.get("request_key") == "QA":
                         driver.run_assertion({"marker_absent": {"marker": step["body_marker"].replace("{run_id}", run_id), "surface": "relay"}}, window=window, record=result)
                     if step.get("request_key") == "QB":
                         qa = next(s for s in scenario["steps"] if s.get("request_key") == "QA")
-                        wait(qa["body_marker"].replace("{run_id}", run_id), 240)
+                        wait(qa["body_marker"].replace("{run_id}", run_id), 240, author=provider_author(qa))
                     result["herdr_observations"].append(observe(driver, args))
             elif "wait_for_discord_text" in step:
                 wait(str(step["wait_for_discord_text"]).replace("{run_id}", run_id), float(step.get("timeout_s", 240)),
-                     raw=scenario["id"] == "E-12" and step["wait_for_discord_text"] == "session ended")
+                     raw=scenario["id"] == "E-12" and step["wait_for_discord_text"] == "session ended",
+                     author=provider_author(step))
             elif "wait_for_raw_discord_text" in step:
                 marker = step["wait_for_raw_discord_text"]
                 deadline = time.monotonic() + float(step.get("timeout_s", 30))
@@ -595,7 +602,8 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 if spec.get("requires_feature") and spec["requires_feature"] not in enabled:
                     result["assertions"].append({"spec": spec, "status": "skipped", "reason": "feature not enabled"})
                     continue
-                driver.run_assertion(spec, window=window, record=result, enabled_features=enabled, run_id=run_id)
+                driver.run_assertion(spec, window=window, record=result, enabled_features=enabled, run_id=run_id,
+                                     provider=driver.cell_provider(args.cell))
             except assertions.AssertionError:
                 gap_failure = bool(result.get("text_stop_ack")) and "marker_absent" in spec and scenario["id"] == "E-18-stop"
                 raise
