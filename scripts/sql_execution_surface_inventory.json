@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "677ffde86b5b7fd0cb8c5117a62d093df0a7aa0f",
+  "measured_at_sha": "403cb4fe7b9f609241b587dba1d2b89d03b4b4f0",
   "records": [
     {
       "root": "migrations/postgres",
@@ -31442,6 +31442,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/health/o_transition/codex_retention_e2e_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:279c614e1365c4b4b3e64ca44a10788c265a86b489c32dccc626a95a1cb0f9ff"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/health/recovery.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",
@@ -38394,7 +38403,43 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
+      "fingerprint": "sha256:d7d88d828e901c195a46b531ca62710695475461d27708abacad7d0433c2568d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/dispatches/outbox_claiming.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
       "fingerprint": "sha256:fcb8afd607f6cbb8ba7353d6e0f37e6f82642c8110cbece3a56736ba16f314f2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/dispatches/outbox_claiming.rs",
+      "api": "sqlx::raw_sql",
+      "symbol": "raw_sql",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8c221fda02307f061c8ba9d7f2ab19f37358872de15ffa02737ef3fdd2ed5b63"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/dispatches/outbox_claiming.rs",
+      "api": "sqlx::raw_sql",
+      "symbol": "raw_sql",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b402c41e94f183133eeac0c8510dcd43ab70678170bfd2ebf2c505d3ce0789b0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/dispatches/outbox_claiming.rs",
+      "api": "sqlx::raw_sql",
+      "symbol": "raw_sql",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:44bd14fbac5b86f9579f29233c99428126f62eb2aaa7cb197f045cc88d31135b"
     },
     {
       "root": "src",

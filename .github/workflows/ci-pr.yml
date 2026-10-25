@@ -371,6 +371,7 @@ jobs:
               - 'src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs'
               - 'src/services/discord/commands/tui_passthrough.rs'
               - 'src/services/discord/health/o_transition/codex_context_tests.rs'
+              - 'src/services/discord/health/o_transition/codex_retention_e2e_tests.rs'
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
               - 'src/services/discord/health/recovery/self_watchdog/tests/health_response.rs'

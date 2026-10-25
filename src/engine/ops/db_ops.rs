@@ -1391,12 +1391,12 @@ fn parse_raw_db_marker(sql: &str) -> RawDbMarker {
 
 fn compact_sql(sql: &str) -> String {
     const MAX_SQL_CONTEXT_LEN: usize = 120;
-
+    use crate::utils::format::safe_prefix;
     let compact = sql.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.len() <= MAX_SQL_CONTEXT_LEN {
         compact
     } else {
-        format!("{}...", &compact[..MAX_SQL_CONTEXT_LEN])
+        format!("{}...", safe_prefix(&compact, MAX_SQL_CONTEXT_LEN))
     }
 }
 

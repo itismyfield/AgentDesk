@@ -159,6 +159,7 @@ src/services/discord/commands/text_commands/clear_http_overlap_tests.rs
 src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs
 src/services/discord/commands/tui_passthrough.rs
 src/services/discord/health/o_transition/codex_context_tests.rs
+src/services/discord/health/o_transition/codex_retention_e2e_tests.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/live_agent_recovery.rs
 src/services/discord/health/recovery/self_watchdog/tests/health_response.rs
@@ -590,6 +591,7 @@ services::discord::commands::text_commands::clear_refusal_reply_tests
 services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap
 services::discord::commands::tui_passthrough::host_guard_tests
 services::discord::health::o_transition::codex_context::tests
+services::discord::health::o_transition::codex_context::tests::retention_e2e
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
 services::discord::health::recovery::self_watchdog::tests::health_response
 services::discord::health::recovery::stall_alert::tests
@@ -1844,6 +1846,7 @@ services::discord::commands::text_commands::clear_refusal_reply_tests::http_over
 services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap::force_root_replaced_text_clear_overlap_pg
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
 services::discord::health::o_transition::codex_context::tests::pg_configured_herdr_production_prepare_is_complete_and_extra_pane_is_unknown
+services::discord::health::o_transition::codex_context::tests::retention_e2e::pg_codex_native_configured_herdr_sweep_retires_aged_backlog
 services::discord::health::recovery::live_agent_recovery::host_guard_tests::recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg
 services::discord::health::recovery::self_watchdog::tests::health_response::db_slow_http_response_resets_watchdog_streak
 services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_alerts_and_dedupes_without_synthetic_owner_mentions
@@ -2484,6 +2487,8 @@ services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::restored_dispatch_rebinds_valid_dispatch_with_cas
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::watcher_recovery_cwd_does_not_cross_channels
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::watcher_recovery_cwd_legacy_null_channel_id_not_reused
+services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::rehydrated_idle_codex_restore_binds_watcher_and_settles_idle
+services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::rehydrated_idle_codex_restore_refuses_other_owner_channel
 services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::resume_companion_attached_confirmed_turn_mode_drains_once
 services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::resume_companion_cold_proof_without_candidate_does_not_claim
 services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::resume_companion_durable_proof_boot_restore_claims_once
@@ -2779,6 +2784,7 @@ services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests:
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests::finalize_delivery_guard_shadow_updates_failed_event_without_notified_marker
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests::finalize_delivery_guard_shadow_updates_sent_event_and_kv_meta
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests::kv_meta_markers_remain_authoritative_when_typed_shadow_missing
+services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::a_failed_statement_in_the_claim_batch_hands_out_no_claims
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::outbox_claim_verdicts_are_unchanged_by_skip_reason_diagnostics
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::outbox_skip_reason_reports_offline_claim_owner_beside_route_preference
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches

@@ -836,7 +836,7 @@ pub fn handle_restart_dcserver(
     Ok(())
 }
 
-mod startup;
+pub(crate) mod startup;
 use startup::raise_fd_soft_limit;
 
 #[cfg(unix)]

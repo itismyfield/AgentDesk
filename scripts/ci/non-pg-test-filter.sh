@@ -454,12 +454,15 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_keeps_unrelated_error_on_first_observation
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_rechecks_one_transient_before_stable_hold
   services::discord::health::o_transition::codex_context::tests::codex_fixture_pins_identity_when_inherited_host_source_is_missing
+  services::discord::health::o_transition::codex_context::tests::codex_fixture_restores_all_environment_before_root_unlock
   services::discord::health::o_transition::codex_context::tests::codex_prepare_unknown_preserves_nonce_component_in_stats_and_log
   services::discord::health::o_transition::codex_context::tests::codex_prepare_without_explicit_identity_refuses_host_identity
+  services::discord::health::o_transition::codex_context::tests::codex_refresh_rechecks_host_inventory_and_final_publication
   services::discord::health::o_transition::codex_context::tests::codex_sweep_classifies_existing_and_inflight_suspension
   services::discord::health::o_transition::codex_context::tests::codex_sweep_timeout_keeps_later_observations_running
   services::discord::health::o_transition::codex_context::tests::existing_codex_sweep_reaches_the_actual_actor_with_complete_legacy_evidence
   services::discord::health::o_transition::codex_context::tests::legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed
+  services::discord::health::o_transition::codex_context::tests::retention_e2e::codex_native_legacy_sweep_retires_only_aged_backlog_and_records_atomic_audit
   services::discord::health::o_transition::codex_context::tests::same_source_resume_keeps_p5_bytes_and_reaches_actual_codex_sweep
   services::discord::health::o_transition::codex_context::tests::verified_fresh_durable_claim_and_marker_reach_actual_codex_sweep
   services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions
@@ -726,6 +729,11 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rowless_turn_with_a_mid_stream_resume_baseline
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::soft_terminal_read_ending_in_a_split_scalar_baseline
   services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
+  services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::rehydrated_fallback_commit_refuses_a_marker_lost_after_scan
+  services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::rehydrated_idle_codex_boot_kickoff_submits_queued_head_once_and_drains
+  services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::rehydrated_idle_legacy_codex_restore_requires_marker_for_bound_rollout
+  services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::restart_gap_message_catch_up_first_is_submitted_once_and_drains
+  services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::restart_gap_message_gateway_first_is_submitted_once_and_drains
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::active_q_reinsert_and_real_kick_leave_one_provider_input_and_answer
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::autoheal::periodic_orphan_token_refusal_preserves_q_then_cancel_backstop_runs_it_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::bang_stop_with_dead_bridge_parks_then_owner_runs_q_once

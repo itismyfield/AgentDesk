@@ -27,6 +27,7 @@ use crate::services::tui_prompt_dedupe::binding_events;
 
 /// The pane's pinned source and its history in the request's execution.
 pub(super) type Execution = Result<(Option<SourceId>, SourceHistory), String>;
+pub(super) type LegacyHops = Result<BTreeMap<String, Vec<(u64, String)>>, String>;
 
 /// What the probes of every source assumed; a change discards all of them.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +55,10 @@ pub(super) struct Probe {
 }
 
 impl Common {
+    pub(super) fn codex(&self) -> Option<&CodexObservation> {
+        self.codex.as_ref()
+    }
+
     /// The execution `snapshot` was judged against, read with `nonce`, never read again.
     pub(super) fn diagnostics(&self, snapshot: &Snapshot, nonce: &str) -> Diagnostics {
         let history = (self.execution.as_ref()).map(|(pinned, history)| HistoryView {
@@ -149,6 +154,20 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         gate: &OwnershipGate,
         probes: &BTreeMap<String, Probe>,
     ) -> Result<(Snapshot, Common), String> {
+        self.build_snapshot_under(context, gate, probes, None, None)
+    }
+
+    pub(super) fn build_snapshot_under(
+        &mut self,
+        context: &Context,
+        gate: &OwnershipGate,
+        probes: &BTreeMap<String, Probe>,
+        authority: Option<&crate::services::tmux_common::TmuxSourceAuthority<'_>>,
+        prepared_legacy: Option<LegacyHops>,
+    ) -> Result<(Snapshot, Common), String> {
+        #[cfg(test)]
+        let _authority_scope =
+            super::transition::test_hooks::snapshot_authority_scope(authority.is_some());
         #[cfg(test)]
         super::transition::test_hooks::snapshot_built();
         let channel = self.writer.channel();
@@ -169,7 +188,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return Err("the stored binding checkpoint is not the readers'".into());
         }
         let codex = (self.sources.transition_provider() == ShadowProvider::Codex)
-            .then(|| codex_read(channel, context));
+            .then(|| codex_read(channel, context, authority));
         let execution = if codex.is_some() {
             Err("Codex has typed observation diagnostics".into())
         } else {
@@ -208,7 +227,17 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             };
             sources.insert(key, facts);
         }
-        let legacy_hops = self.sources.legacy_candidates(&mut self.writer);
+        // Permission-aware P5 conversion takes source authority itself. Its prepared mapping is
+        // accepted only with the final full-tail identity and scoped hop comparison below.
+        let legacy_hops = if authority.is_some() && codex.is_some() {
+            #[cfg(test)]
+            if super::codex_retention::mutant("legacy_reentry") {
+                let _ = self.sources.legacy_candidates(&mut self.writer);
+            }
+            prepared_legacy.ok_or("Codex legacy history was not prepared outside authority")?
+        } else {
+            self.sources.legacy_candidates(&mut self.writer)
+        };
         let snapshot = Snapshot {
             channel,
             provider: self.sources.transition_provider(),
@@ -342,13 +371,20 @@ pub(crate) fn force_execution_for_tests(read: Execution) -> impl Drop {
     Restore(FORCED_EXECUTION.with(|forced| forced.borrow_mut().replace(read)))
 }
 
-fn codex_read(channel: u64, context: &Context) -> CodexObservation {
+fn codex_read(
+    channel: u64,
+    context: &Context,
+    authority: Option<&crate::services::tmux_common::TmuxSourceAuthority<'_>>,
+) -> CodexObservation {
     let read = || {
         let observer = context
             .codex
             .as_ref()
             .ok_or("Codex context observer unavailable")?;
-        crate::services::tmux_common::try_with_tmux_source_authority(&context.tmux, |authority| {
+        let observe = |authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>| {
+            if authority.session() != context.tmux {
+                return Err("Codex source authority belongs to another pane".to_owned());
+            }
             let input = observer.observe(authority)?;
             if input.target.channel != channel
                 || input.target.tmux != context.tmux
@@ -357,8 +393,14 @@ fn codex_read(channel: u64, context: &Context) -> CodexObservation {
                 return Err("Codex observer target differs from actor request".to_owned());
             }
             Ok(codex_history::assess(input))
-        })
-        .ok_or("Codex source authority busy")?
+        };
+        match authority {
+            Some(authority) => observe(authority),
+            None => {
+                crate::services::tmux_common::try_with_tmux_source_authority(&context.tmux, observe)
+                    .ok_or("Codex source authority busy")?
+            }
+        }
     };
     read().unwrap_or_else(CodexObservation::Unknown)
 }
