@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Post-deploy smoke verdicts for the ``!clear`` transition + continuous-turn scenarios.
 
-``preflight`` proves the E2E cell idle before the deploy smoke posts anything.
+``cell-reset`` clears configured TUI cells once, before the smoke's first preflight.
+``preflight`` proves the E2E cell idle before the deploy smoke posts prompts.
 ``judge`` folds one ``run_tui_relay.py`` report and the dcserver log bytes
 written during that run into one smoke line. Only a fully evidenced clean run
 passes; missing or unreadable evidence is a FAIL, never a PASS.
@@ -16,6 +17,7 @@ import copy
 import json
 import re
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -24,7 +26,9 @@ import yaml  # type: ignore[import-untyped]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_tui_relay as cell_driver  # noqa: E402
-from post_deploy_relay_continuity import channel_is_herdr  # noqa: E402
+from post_deploy_relay_continuity import (  # noqa: E402
+    SmokeConfigError, _channel_id_from_config, channel_is_herdr, load_channel_id_from_config,
+)
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 # platform/tmux.rs log_kill_request; the session token ends at the first space.
@@ -322,9 +326,118 @@ def _load_report(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def cell_reset(*, base_url: str, cell: str, channel_id: str, config_path: Path) -> None:
+    """Release one captured E2E episode through the server CAS, then acknowledge !clear."""
+    target = f"cell={cell} channel={channel_id}"
+
+    def log(action: str) -> None:
+        print(f"cell-reset {target} {action}", flush=True)
+
+    if cell not in {"claude-tui", "codex-tui"}:
+        log("skipped: reset only supports legacy TUI smoke cells")
+        return
+    # The smoke resolver binds these fixed E2E agent IDs, never a caller-selected agent.
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if _channel_id_from_config(config, cell, config_path) != str(channel_id):
+        raise ValueError("channel outside configured E2E allowlist")
+    if not channel_id.isdecimal() or int(channel_id) <= 0:
+        raise ValueError("invalid channel in E2E allowlist")
+    log("allowlist accepted: configured E2E cell channel")
+    hosts = config.get("session_hosts", {})
+    herdr = hosts.get("herdr", {}) if isinstance(hosts, dict) else None
+    channels = herdr.get("channels", {}) if isinstance(herdr, dict) else None
+    if not isinstance(channels, dict):
+        raise ValueError("Herdr channels mapping unreadable")
+    if str(channel_id) in {str(key) for key in channels}:
+        log("skipped: configured channel is owned by Herdr")
+        return
+    provider = cell_driver.cell_provider(cell)
+    path = f"/api/turn-lease/{provider}/{channel_id}"
+    _, expected = cell_driver._read_api_json(base_url, path)  # noqa: SLF001
+    log("inspect: " + json.dumps(expected, sort_keys=True))
+    if expected is not None:
+        fields = {"provider", "channel_id", "generation", "runtime", "user_message_id", "turn_nonce", "started_at"}
+        if (not isinstance(expected, dict) or set(expected) != fields
+                or expected["provider"] != provider or expected["channel_id"] != int(channel_id)
+                or any(type(expected[key]) is not int for key in ("channel_id", "generation", "user_message_id"))
+                or any(not isinstance(expected[key], str) or not expected[key]
+                       for key in ("runtime", "turn_nonce", "started_at"))):
+            raise ValueError("inspect returned malformed or wrong-target identity")
+    _, current = cell_driver._read_api_json(base_url, path)  # noqa: SLF001
+    if json.dumps(current, sort_keys=True) != json.dumps(expected, sort_keys=True):
+        raise ValueError("identity changed after inspect; no release or !clear attempted")
+    log("identity matched: exact inspect snapshot")
+    client = cell_driver.discord.DiscordClient(base_url=base_url)
+    if expected is not None:
+        request = urllib.request.Request(
+            f"{base_url.rstrip('/')}/api/turn-lease/release",
+            data=json.dumps({"expected": expected, "reason": "post-deploy smoke: reset dedicated E2E cell"}).encode(),
+            headers=cell_driver.http_auth.request_headers(base_url, {"Content-Type": "application/json"}),
+            method="POST",
+        )
+        log("release requested: CAS with original inspect JSON")
+        result = client._read_json(request, operation="cell-reset release")  # noqa: SLF001
+        if result.get("released") is not True:
+            raise ValueError("release not confirmed; !clear refused")
+        log("release confirmed: captured episode and inflight cleanup settled")
+        _, current = cell_driver._read_api_json(base_url, path)  # noqa: SLF001
+        if current is not None:
+            raise ValueError("identity changed after release; !clear refused")
+    else:
+        log("release skipped: inspect proved no active lease")
+    log("!clear requested: discard dedicated E2E session")
+    sent = client.send(channel_id, "!clear")
+    after = str(sent.get("message_id") or sent.get("id") or "")
+    if not after.isdecimal() or int(after) <= 0:
+        raise ValueError("!clear send identity unavailable")
+    prefixes = ("세션을 초기화했어요", *cell_driver.herdr.CLEAR_REFUSAL_PREFIXES)
+    reply, _ = client.wait_for_message(
+        channel_id, after_id=after, timeout_s=30, poll_interval_s=1,
+        predicate=lambda row: (not cell_driver.assertions.is_our_send(row)
+                               and cell_driver.herdr.clear_reply(row, prefixes, after=int(after), channel=channel_id)),
+    )
+    if reply is None:
+        raise ValueError("!clear ack unavailable; reset unconfirmed")
+    if cell_driver.herdr.clear_refusal([reply], after=int(after), channel=channel_id):
+        raise ValueError("!clear refused; reset unconfirmed")
+    log("!clear ack confirmed: session reset completed")
+
+
+def _reset_smoke_cells(args: argparse.Namespace) -> int:
+    try:
+        for cell in dict.fromkeys(args.cell):
+            if cell not in {"claude-tui", "codex-tui"}:
+                print(f"cell-reset cell={cell} skipped: not a legacy TUI cell", flush=True)
+                continue
+            try:
+                channel = load_channel_id_from_config(Path(args.config), cell)
+            except SmokeConfigError as error:
+                if cell == args.cell[0]:
+                    raise
+                print(f"cell-reset cell={cell} refused: E2E allowlist unavailable ({error})", flush=True)
+                continue
+            cell_reset(base_url=args.base_url, cell=cell, channel_id=channel, config_path=Path(args.config))
+        # E-1 must read observations made after !clear, rather than its earlier API probes.
+        for output, path in ((args.health_detail_output, "/api/health/detail"), (args.sessions_output, "/api/sessions")):
+            if output:
+                _, payload = cell_driver._read_api_json(args.base_url, path)  # noqa: SLF001
+                Path(output).write_text(json.dumps(payload), encoding="utf-8")
+                print(f"cell-reset snapshot refreshed: {path}", flush=True)
+    except Exception as error:  # noqa: BLE001 - uncertain mutations must stop smoke injection
+        print(f"cell-reset refused: {type(error).__name__}: {error}", flush=True)
+        return 2
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
+    reset = sub.add_parser("cell-reset")
+    reset.add_argument("--base-url", required=True)
+    reset.add_argument("--config", required=True)
+    reset.add_argument("--cell", required=True, action="append", choices=cell_driver.SUPPORTED_CELLS)
+    reset.add_argument("--health-detail-output")
+    reset.add_argument("--sessions-output")
     pre = sub.add_parser("preflight")
     pre.add_argument("--base-url", required=True)
     pre.add_argument("--cell", required=True, choices=cell_driver.SUPPORTED_CELLS)
@@ -343,6 +456,9 @@ def main(argv: list[str] | None = None) -> int:
     jud.add_argument("--log-excerpt", default="")
     jud.add_argument("--driver-rc", type=int, required=True)
     args = parser.parse_args(argv)
+
+    if args.command == "cell-reset":
+        return _reset_smoke_cells(args)
 
     if args.command == "preflight":
         try:

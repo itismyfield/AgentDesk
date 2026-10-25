@@ -8,12 +8,18 @@ report row plus a recorded-shape dcserver log feed the production judge.
 from __future__ import annotations
 
 import copy
+import io
+import os
+import subprocess
+import threading
 import json
 import tempfile
 import itertools
 import sys
 import unittest
 from argparse import Namespace
+from contextlib import redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -524,6 +530,301 @@ class ConfiguredHerdrClassification(unittest.TestCase):
             for value in (None, {}, "", 0):
                 with self.subTest(scenario=scenario, assertions=value):
                     self.assertEqual(self.classify({**row, "assertions": value}), "FAIL")
+
+
+class CellResetTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.config = self.root / "cells.yaml"
+        self.config.write_text("""agents:
+  - id: adk-claude-tui-2-e2e
+    channels: {claude: {id: '222'}}
+  - id: adk-codex-tui-e2e
+    channels: {codex: {id: '333'}}
+""", encoding="utf-8")
+        self.identities = {
+            provider: dict(provider=provider, channel_id=channel, generation=7,
+                           runtime="fixture", user_message_id=444,
+                           turn_nonce=f"{provider}-episode", started_at="2026-10-25T19:02:21.431Z")
+            for provider, channel in (("claude", 222), ("codex", 333))
+        }
+        self.inflight = {"222": True, "333": True}
+        self.cleared = set()
+        self.calls = []
+        self.inspects = 0
+        self.change_on_inspect = 0
+        self.change_on_release = False
+        self.change_after_release = False
+        self.release_response = None
+        self.clear_content = "세션을 초기화했어요. 대기 메시지 0건을 비웠어요."
+        self.inspect_override = False
+        self.inspect_payload = None
+        fixture = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def reply(self, payload, status=200):
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode())
+
+            def do_GET(self):
+                fixture.calls.append(("GET", self.path, None))
+                if self.path.startswith("/api/turn-lease/"):
+                    provider = self.path.split("/")[3]
+                    fixture.inspects += 1
+                    if fixture.inspects == fixture.change_on_inspect:
+                        fixture.identities[provider]["turn_nonce"] = "successor"
+                    value = fixture.inspect_payload if fixture.inspect_override else fixture.identities[provider]
+                    self.reply(value)
+                elif self.path == "/api/health/detail":
+                    self.reply({"mailboxes": [
+                        {"provider": provider, "channel_id": channel,
+                         "agent_turn_status": "active" if fixture.identities[provider] else "idle",
+                         "has_cancel_token": fixture.identities[provider] is not None,
+                         "inflight_state_present": fixture.inflight[channel], "queue_depth": 0}
+                        for provider, channel in (("claude", "222"), ("codex", "333"))
+                    ]})
+                elif self.path == "/api/sessions":
+                    self.reply({"sessions": []})
+                elif "/messages?" in self.path:
+                    channel = self.path.split("/")[4]
+                    self.reply([{"id": "501", "channel_id": channel,
+                                 "author": {"id": "999", "bot": True},
+                                 "content": fixture.clear_content}])
+                else:
+                    self.reply({"error": "unexpected fixture GET"}, 404)
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                fixture.calls.append(("POST", self.path, body))
+                if self.path == "/api/turn-lease/release":
+                    provider = body["expected"]["provider"]
+                    if fixture.change_on_release:
+                        fixture.identities[provider]["generation"] += 1
+                    if body["expected"] != fixture.identities[provider]:
+                        self.reply({"error": "lease changed; inspect again"}, 409)
+                        return
+                    fixture.identities[provider] = None
+                    fixture.inflight[str(body["expected"]["channel_id"])] = False
+                    if fixture.change_after_release:
+                        fixture.identities[provider] = {**body["expected"], "turn_nonce": "successor"}
+                    self.reply(fixture.release_response or {"released": True, "status": "operator_released"})
+                elif self.path == "/api/discord/send":
+                    fixture.cleared.add(body["channel_id"])
+                    self.reply({"message_id": "500"})
+                else:
+                    self.reply({"error": "unexpected fixture POST"}, 404)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(thread.join)
+        self.addCleanup(self.server.shutdown)
+        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
+        self.output = io.StringIO()
+
+    def reset(self, cell="claude-tui", channel="222"):
+        with redirect_stdout(self.output):
+            turn_smoke.cell_reset(base_url=self.base_url, cell=cell, channel_id=channel, config_path=self.config)
+
+    def preflight(self, cell="claude-tui", channel="222"):
+        with redirect_stdout(self.output):
+            return turn_smoke.main(["preflight", "--base-url", self.base_url, "--cell", cell,
+                               "--channel-id", channel, "--queue-runtime-root", str(self.root)])
+
+    def mutations(self):
+        return [call for call in self.calls if call[0] == "POST"]
+
+    def test_busy_residue_reset_then_real_preflight_idle_for_both_providers(self):
+        for cell, channel in (("claude-tui", "222"), ("codex-tui", "333")):
+            with self.subTest(cell=cell):
+                expected = copy.deepcopy(self.identities[cell.split("-")[0]])
+                self.assertEqual(self.preflight(cell, channel), 1)
+                self.reset(cell, channel)
+                self.assertEqual(self.preflight(cell, channel), 0)
+                release, clear = self.mutations()[-2:]
+                self.assertEqual(release[2]["expected"], expected)
+                self.assertEqual(clear[2], {"channel_id": channel, "content": "!clear"})
+        self.assertEqual(self.cleared, {"222", "333"})
+        for action in ("allowlist", "inspect", "identity", "release", "!clear", "ack"):
+            self.assertIn(action, self.output.getvalue())
+
+    def test_outside_allowlist_refused_without_any_http(self):
+        self.identities["claude"]["channel_id"] = 999
+        with self.assertRaisesRegex(ValueError, "allowlist"):
+            self.reset(channel="999")
+        self.assertEqual(self.calls, [])
+
+    def test_unreadable_or_missing_allowlist_refused_without_any_http(self):
+        for text in (None, "[", "{}", "agents: []", "agents: [{id: adk-claude-tui-e2e}]"):
+            with self.subTest(config=text):
+                if text is None:
+                    self.config.unlink()
+                else:
+                    self.config.write_text(text, encoding="utf-8")
+                with self.assertRaises(Exception):
+                    self.reset()
+                self.assertEqual(self.calls, [])
+
+    def test_identity_changes_between_inspects_prevent_release_and_clear(self):
+        self.change_on_inspect = 2
+        with self.assertRaisesRegex((ValueError, RuntimeError), "identity changed|lease changed"):
+            self.reset()
+        self.assertEqual(self.mutations(), [])
+
+    def test_every_identity_axis_is_compared_before_release(self):
+        for field, value in (("generation", 8), ("runtime", "other"), ("user_message_id", 445),
+                             ("turn_nonce", "other"), ("started_at", "2026-10-26T00:00:00Z")):
+            with self.subTest(field=field):
+                expected = copy.deepcopy(self.identities["claude"])
+                changed = {**expected, field: value}
+                with patch.object(turn_smoke.cell_driver, "_read_api_json", side_effect=[(200, expected), (200, changed)]):
+                    with self.assertRaisesRegex(ValueError, "identity changed"):
+                        self.reset()
+                self.assertEqual(self.mutations(), [])
+
+    def test_server_cas_refusal_after_second_inspect_preserves_successor(self):
+        self.change_on_release = True
+        with self.assertRaises(Exception):
+            self.reset()
+        self.assertEqual(len(self.mutations()), 1)
+        self.assertEqual(self.cleared, set())
+        self.assertIsNotNone(self.identities["claude"])
+
+    def test_successor_after_release_prevents_clear(self):
+        self.change_after_release = True
+        with self.assertRaisesRegex(ValueError, "identity changed"):
+            self.reset()
+        self.assertEqual(self.cleared, set())
+
+    def test_nonrelease_response_does_not_clear(self):
+        self.release_response = {"released": False, "status": "already_released"}
+        with self.assertRaisesRegex(ValueError, "release"):
+            self.reset()
+        self.assertEqual(self.cleared, set())
+
+    def test_null_lease_skips_release_but_clears_session(self):
+        self.identities["claude"] = None
+        self.inflight["222"] = False
+        self.reset()
+        self.assertEqual([c[1] for c in self.mutations()], ["/api/discord/send"])
+        self.assertEqual(self.preflight(), 0)
+
+    def test_malformed_or_wrong_target_identity_never_mutates(self):
+        for payload in ({}, [], {**self.identities["claude"], "provider": "codex"},
+                        {**self.identities["claude"], "channel_id": 999}):
+            with self.subTest(payload=payload):
+                self.inspect_override, self.inspect_payload = True, payload
+                with self.assertRaises(ValueError):
+                    self.reset()
+                self.assertEqual(self.mutations(), [])
+
+    def test_clear_refusal_is_not_reset_success(self):
+        self.clear_content = "세션을 초기화하지 못했어요: fixture refusal"
+        with self.assertRaisesRegex(ValueError, "clear refused"):
+            self.reset()
+
+    def test_clear_ack_must_follow_this_clear(self):
+        with patch.object(turn_smoke.cell_driver.discord.DiscordClient, "wait_for_message", return_value=(None, [])):
+            with self.assertRaisesRegex(ValueError, "ack unavailable"):
+                self.reset()
+
+    def test_herdr_and_pipe_cells_have_no_reset_effects(self):
+        for cell in ("claude-herdr", "codex-herdr", "claude-pipe", "codex-pipe"):
+            self.reset(cell)
+        self.assertEqual(self.calls, [])
+
+    def test_tui_cell_mapped_to_herdr_has_no_reset_effects(self):
+        with self.config.open("a", encoding="utf-8") as handle:
+            handle.write("session_hosts: {herdr: {channels: {'222': local}}}\n")
+        self.reset()
+        self.assertEqual(self.calls, [])
+
+    def test_cli_resets_cells_once_then_refreshes_preflight_snapshots(self):
+        detail, sessions = self.root / "detail.json", self.root / "sessions.json"
+        with redirect_stdout(self.output):
+            rc = turn_smoke.main(["cell-reset", "--base-url", self.base_url, "--config", str(self.config),
+                             "--cell", "claude-tui", "--cell", "codex-tui", "--cell", "claude-tui",
+                             "--health-detail-output", str(detail), "--sessions-output", str(sessions)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.mutations()), 4)
+        self.assertEqual(json.loads(sessions.read_text()), {"sessions": []})
+        self.assertTrue(all(row["agent_turn_status"] == "idle" for row in json.loads(detail.read_text())["mailboxes"]))
+        self.assertEqual(self.calls[-2][1:], ("/api/health/detail", None))
+        self.assertEqual(self.calls[-1][1:], ("/api/sessions", None))
+
+    def test_cli_unreadable_allowlist_fails_closed(self):
+        for text in ("[", "{}", "agents: []"):
+            with self.subTest(config=text):
+                self.config.write_text(text, encoding="utf-8")
+                with redirect_stdout(self.output):
+                    rc = turn_smoke.main(["cell-reset", "--base-url", self.base_url, "--config", str(self.config),
+                                     "--cell", "claude-tui"])
+                self.assertEqual(rc, 2)
+                self.assertEqual(self.calls, [])
+
+    def deploy_round_trip(self):
+        deploy = Path(os.environ.get("DEPLOY_SH_OVERRIDE", ROOT / "scripts/deploy-release.sh")).read_text()
+        body = deploy.split("_post_deploy_smoke_check_relay_round_trip() {\n", 1)[1].split("\n}\n", 1)[0]
+        release = self.root / "release"
+        (release / "config").mkdir(parents=True)
+        (release / "config/agentdesk.yaml").write_bytes(self.config.read_bytes())
+        (self.root / "detail.json").write_text(json.dumps({"mailboxes": [
+            {"provider": "claude", "channel_id": "222", "has_cancel_token": True,
+             "active_user_message_id": 444, "agent_turn_status": "active"}]}))
+        (self.root / "sessions.json").write_text(json.dumps({"sessions": [
+            {"provider": "claude", "channel_id": "222", "status": "active"}]}))
+        (self.root / "health.json").write_text('{"cluster_standby": false}')
+        script = """set -euo pipefail
+REPO=$1; fixture=$2; REL_PORT=$3; ADK_DEFAULT_LOOPBACK=127.0.0.1
+ADK_REL=$fixture/release
+POST_DEPLOY_SMOKE_RELAY_CELL=claude-tui; POST_DEPLOY_SMOKE_CODEX_TURNS_CELL=codex-tui
+POST_DEPLOY_SMOKE_READY=true; POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=''
+POST_DEPLOY_SMOKE_HEALTH_BODY=$fixture/health.json
+POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY=$fixture/detail.json
+POST_DEPLOY_SMOKE_SESSIONS_BODY=$fixture/sessions.json
+POST_DEPLOY_SMOKE_EVIDENCE=$fixture/evidence.log
+POST_DEPLOY_SMOKE_STAMP=fixture; POST_DEPLOY_SMOKE_TMP_DIR=$fixture
+_post_deploy_smoke_note() { printf '%s\\n' "$1"; }
+_post_deploy_smoke_fail() { printf 'FAIL: %s\\n' "$1"; }
+_post_deploy_smoke_resolve_cluster_standby() { printf false; }
+_post_deploy_smoke_resolve_health_module() { printf true; }
+python3() {
+    if [ "${1:-}" = scripts/e2e/run_tui_relay.py ]; then
+        printf injected > "$fixture/injected"; return 0
+    fi
+    command python3 "$@"
+}
+_post_deploy_smoke_check_relay_round_trip() {
+""" + body + "\n}\n_post_deploy_smoke_check_relay_round_trip\n"
+        return subprocess.run(["bash", "-c", script, "fixture", str(ROOT), str(self.root),
+                               str(self.server.server_port)], capture_output=True, text=True, timeout=30)
+
+    def test_deploy_resets_both_cells_before_first_idle_guard(self):
+        result = self.deploy_round_trip()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.root / "injected").exists(), result.stdout + result.stderr)
+        self.assertEqual(len(self.mutations()), 4)
+        self.assertEqual(self.cleared, {"222", "333"})
+
+    def test_deploy_reset_refusal_stops_injection(self):
+        self.change_on_inspect = 2
+        result = self.deploy_round_trip()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "injected").exists())
+        self.assertEqual(self.mutations(), [])
+
+    def test_normal_preflight_never_mutates(self):
+        self.assertEqual(self.preflight(), 1)
+        self.assertEqual(self.mutations(), [])
+
 
 
 if __name__ == "__main__":

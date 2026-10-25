@@ -4197,13 +4197,12 @@ PY
         return 1
     fi
 
+    python3 "$REPO/scripts/e2e/post_deploy_turn_smoke.py" cell-reset --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" --config "$config_path" --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" --cell "$POST_DEPLOY_SMOKE_CODEX_TURNS_CELL" --health-detail-output "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" --sessions-output "$POST_DEPLOY_SMOKE_SESSIONS_BODY" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>&1 || { _post_deploy_smoke_fail "relay E-1: cell-reset refused (see smoke evidence)" || true; return 1; }
     POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID="$channel_id"
 
     # E-1 is a real live turn, so reuse the E2E driver's mailbox/session busy
     # predicates against the authenticated core-probe snapshots before sending.
-    # An unreadable snapshot skips the injection fail-open: safety requires
-    # proving the target cell idle, while the already-recorded API finding (if
-    # any) remains the smoke result.
+    # An unreadable snapshot skips injection; existing API findings remain the smoke result.
     if cell_busy=$(python3 - "$REPO" "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" \
         "$POST_DEPLOY_SMOKE_SESSIONS_BODY" "$POST_DEPLOY_SMOKE_RELAY_CELL" "$channel_id" \
         2>> "$POST_DEPLOY_SMOKE_EVIDENCE" <<'PY'
