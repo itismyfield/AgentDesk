@@ -2,6 +2,7 @@
 
 pub(super) mod admission;
 pub(super) mod custody;
+mod return_input;
 pub(in crate::services::discord) mod startup;
 mod transport;
 
@@ -42,10 +43,13 @@ pub(in crate::services::discord) fn endpoint(channel: u64) -> Option<HerdrLaunch
 }
 
 fn require_local(endpoint: &HerdrLaunchEndpoint) -> Result<(), String> {
-    if session_hosts::local_node().as_deref() != Some(endpoint.execution_node.as_str()) {
+    local_gateway(&endpoint.execution_node, "retry")
+}
+
+fn local_gateway(execution_node: &str, command: &str) -> Result<(), String> {
+    if session_hosts::local_node().as_deref() != Some(execution_node) {
         return Err(format!(
-            "실행 노드 {}의 gateway에서 !herdr consent retry를 실행하세요. 현재 gateway는 원격 apply와 입력 해제를 전달하지 않습니다.",
-            endpoint.execution_node
+            "실행 노드 {execution_node}의 gateway에서 !herdr consent {command}를 실행하세요. 현재 gateway는 원격 apply와 입력 해제를 전달하지 않습니다."
         ));
     }
     Ok(())
@@ -198,6 +202,7 @@ pub(super) async fn component(
     Ok(true)
 }
 
+/// Owner consent commands; `return` also closes returns in the legacy channel it moved to.
 pub(in crate::services::discord) async fn retry(
     ctx: &serenity::Context,
     msg: &serenity::Message,
@@ -205,6 +210,9 @@ pub(in crate::services::discord) async fn retry(
     channel: serenity::ChannelId,
     text: &str,
 ) -> Result<bool, Error> {
+    if text.split_whitespace().eq(["!herdr", "consent", "return"]) {
+        return return_input::handle(ctx, msg, data, channel).await;
+    }
     let Some(configured) = endpoint(channel.get()) else {
         return Ok(false);
     };
@@ -225,21 +233,45 @@ pub(in crate::services::discord) async fn retry(
         )
         .await
         .map_err(|_| "consent retry provider/channel binding changed".to_string())?;
-        let matching: Vec<_> = records()
-            .await?
-            .into_iter()
-            .filter(|record| {
-                record.provider == data.provider.as_str()
-                    && record
-                        .intents
-                        .iter()
-                        .any(|intent| intent.channel == channel.get())
-            })
-            .collect();
+        let load = || async {
+            Ok::<Vec<_>, String>(
+                records()
+                    .await?
+                    .into_iter()
+                    .filter(|record| {
+                        record.provider == data.provider.as_str()
+                            && record
+                                .intents
+                                .iter()
+                                .any(|intent| intent.channel == channel.get())
+                    })
+                    .collect(),
+            )
+        };
+        let mut matching = load().await?;
         if matching.is_empty() {
-            return Err(
-                "보류한 herdr 동의가 없습니다. 입력을 새로 만들거나 실행하지 않았습니다.".into(),
-            );
+            if data
+                .shared
+                .mailbox(channel)
+                .snapshot()
+                .await
+                .intervention_queue
+                .is_empty()
+            {
+                return Err(
+                    "보류한 herdr 동의가 없습니다. 입력을 새로 만들거나 실행하지 않았습니다."
+                        .into(),
+                );
+            }
+            // Admission held these without a record; the drain re-checks the same head first.
+            crate::services::discord::queue_io::kick_idle_queue_channel_if_context_available(
+                &data.shared,
+                &data.provider,
+                channel,
+                "herdr_consent_retry",
+            )
+            .await;
+            matching = load().await?;
         }
         for consent in matching {
             crate::services::discord::validate_live_channel_routing(
@@ -251,15 +283,14 @@ pub(in crate::services::discord) async fn retry(
             .await
             .map_err(|_| "consent card provider/channel binding changed".to_string())?;
             let peer = source(&consent)?;
-            let prepared = preview::prepare(
-                peer,
-                consent
-                    .preview
-                    .revision
-                    .checked_add(1)
-                    .ok_or("consent revision exhausted")?,
-            )
-            .await?;
+            // Replaying an Applied receipt needs no fresh evidence; a new generation's card does.
+            let prepared = if consent.state != State::Applied || consent.needs_new_generation() {
+                let revision = consent.preview.revision.checked_add(1);
+                let revision = revision.ok_or("consent revision exhausted")?;
+                Some(preview::prepare(peer, revision).await?)
+            } else {
+                None
+            };
             let intent = consent
                 .unresolved_intents()
                 .into_iter()
@@ -285,7 +316,10 @@ pub(in crate::services::discord) async fn retry(
             }
             let question = consent::Question {
                 key: consent.key.clone(),
-                preview: prepared.token.clone(),
+                preview: prepared.as_ref().map_or_else(
+                    || consent.preview.clone(),
+                    |prepared| prepared.token.clone(),
+                ),
                 owner: owner.ok_or("owner is not configured")?,
                 bot,
                 provider: data.provider.as_str().into(),
@@ -306,7 +340,7 @@ pub(in crate::services::discord) async fn retry(
                 &data.provider,
                 consent,
                 event,
-                Some(prepared),
+                prepared,
             )
             .await?;
         }
