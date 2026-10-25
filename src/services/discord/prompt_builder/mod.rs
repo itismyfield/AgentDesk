@@ -580,7 +580,20 @@ pub(super) fn build_system_prompt_with_manifest(
             api_friction_guidance.trim_start_matches("\n\n"),
         ));
     }
-    if let Some(performance_section) = agent_performance_prompt_section(role_binding, profiles) {
+    let performance_section = if inspection {
+        role_binding
+            .filter(|binding| {
+                profile == DispatchProfile::Full && binding.quality_feedback_injection_enabled
+            })
+            .and_then(|binding| {
+                super::internal_api::get_agent_quality_prompt_section(&binding.role_id)
+                    .ok()
+                    .flatten()
+            })
+    } else {
+        agent_performance_prompt_section(role_binding, profile)
+    };
+    if let Some(performance_section) = performance_section {
         system_prompt_owned.push_str("\n\n");
         system_prompt_owned.push_str(&performance_section);
         prompt_manifest_layers.push(prompt_manifest_layer(
