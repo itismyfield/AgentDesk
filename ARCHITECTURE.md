@@ -477,6 +477,9 @@ src/
 │   │   │   │   ├── amplification_records_tests.rs
 │   │   │   │   ├── amplification_verdict_tests.rs
 │   │   │   │   └── resource_regression_tests.rs
+│   │   │   ├── runtime_profile/
+│   │   │   │   ├── managed_herdr.rs
+│   │   │   │   └── managed_herdr_tests.rs
 │   │   │   ├── boot_incarnation_tests.rs
 │   │   │   ├── db_collection.rs
 │   │   │   ├── db_deadline_tests.rs
@@ -1098,6 +1101,8 @@ src/
 │   │   │   │   ├── render_recovery.rs
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── session/
+│   │   │   │   └── autocomplete.rs
 │   │   │   ├── system_prompt/
 │   │   │   │   ├── reconstruct.rs
 │   │   │   │   └── tests.rs
