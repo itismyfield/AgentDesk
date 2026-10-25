@@ -64,8 +64,8 @@ test-non-pg:
     cargo test --lib formatting -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib delivery_record -- --skip _pg --skip pg_ --skip postgres
     # #5071 T4-B3 (4987 S2): the read-only projection over the same store. The
-    # `delivery_record` filter above does not reach this module, so this line
-    # runs its tests in this lane.
+    # `delivery_record` filter above does not reach this module, and nothing in
+    # production constructs the index yet, so this line is its only execution.
     # It pins the two operands of the 4987 section 3.2 subtraction: the receipt
     # union (adjacent and overlapping ranges fold) and the durable frontier
     # prefix (which answers alone when the receipt vector is empty).
