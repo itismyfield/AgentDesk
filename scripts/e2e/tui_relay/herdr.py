@@ -179,7 +179,7 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
         evidence["readiness"].update({k: payload[k] for k in
                                       ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload})
         evidence["server_values"] = {k: payload[k] for k in
-                                     ("uptime_secs", "started_at", "process_started_at_unix", "incarnation", "boot_id") if k in payload}
+                                     ("uptime_secs", "started_at", "process_started_at_unix", "boot_incarnation") if k in payload}
         ignored = detail_ready(driver, status, payload, allowed=allowed, channel=args.channel_id)
         if ignored:
             evidence["readiness"].update(degraded_reason_waiver="applied", ignored_degraded_reasons=list(ignored),
@@ -238,9 +238,6 @@ def validate_restart_binding(scenario, args):
 
 def omissions(scenario):
     items = []
-    if any("restart_dcserver" in step for step in scenario.get("steps", [])):
-        items.append({"check": "server_incarnation_changed", "status": "not_applicable",
-                      "reason": "public health exposes no per-restart incarnation; nonce continuity does not prove dcserver restarted"})
     for step in scenario.get("steps", []):
         for key in TMUX_STEPS.intersection(step):
             items.append({"check": key, "status": "not_applicable", "reason": "tmux-only step; Herdr has no tmux session"})
@@ -337,7 +334,7 @@ def _run_checked(driver, scenario, args, client, run_id, result):
         if scenario["id"] == "E-18":
             print("[dry-run] Herdr override: HTTP cancel force=false (HostOwned follow-up, not P10-3); P11 force=true is E-12")
         if any("restart_dcserver" in step for step in scenario.get("steps", [])):
-            print("[dry-run] restart: isolated-server attestation; read-only status before/after; same nonce; all rows published")
+            print("[dry-run] restart: isolated-server attestation; boot_incarnation before != after; same nonce; all rows published")
         result.update(status="dry_run", reason="plan only; no observed passes")
         return result
     if args.hard_reset_session_each:
@@ -541,6 +538,7 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 target = args.restart_target_override or (step["restart_dcserver"] or {}).get("target", "release")
                 if target not in ("dev", "release"):
                     raise ValueError("invalid dcserver restart target")
+                incarnation = driver._boot_incarnation(args.base_url)
                 subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.agentdesk.{target}"], check=True, timeout=90)
                 deadline = time.monotonic() + 90
                 while True:
@@ -548,6 +546,11 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                         evidence = observe(driver, args, reconnected=True, waivable=False)
                         if evidence["row"]["nonce"] != before[0]["nonce"]:
                             raise assertions.AssertionError("Herdr restart replaced execution nonce")
+                        after = evidence["server_values"].get("boot_incarnation")
+                        if not isinstance(after, str) or not after or after == incarnation:
+                            raise assertions.AssertionError("dcserver boot_incarnation unchanged; restart not observed")
+                        result.setdefault("restart_incarnations", []).append(
+                            {"target": target, "before": incarnation, "after": after})
                         break
                     except (assertions.AssertionError, OSError, ValueError, subprocess.SubprocessError):
                         if time.monotonic() >= deadline:

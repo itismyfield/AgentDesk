@@ -2224,7 +2224,7 @@ class HerdrReviewRepairs(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'restart target'):
                 herdr.validate_restart_binding(scenario, Namespace(base_url=url, restart_target_override=target))
         checks = {r['check'] for r in herdr.omissions(scenario)}
-        self.assertIn('server_incarnation_changed', checks)
+        self.assertNotIn('server_incarnation_changed', checks)
 
     def test_matrix_rejects_cross_provider_actual_channel_alias(self):
         with self.assertRaisesRegex(ValueError, 'same actual channel'):

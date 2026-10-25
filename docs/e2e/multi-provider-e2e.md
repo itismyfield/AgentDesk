@@ -350,6 +350,14 @@ only the status and the `ok`/`degraded` flags, never `fully_recovered` or an
 unlisted degraded reason. A failed `launchctl kickstart` fails the step. Other
 bodies keep polling until timeout and then fail with the last health summary.
 
+`/api/health/detail.boot_incarnation` is a random id generated once per dcserver
+process (the public body does not carry it). A restart step reads it before the
+kickstart and passes only when health returns with a different value; an
+unchanged value fails the step as `restart not observed`, and a missing value is
+unevaluable before any kickstart. Herdr restarts and the observe-only `verify`
+use the same comparison; `verify` falls back to the uptime inference only when
+either side lacks the field.
+
 Unknown channels, including other cells, still fail default strict readiness.
 Public health probes request `/api/health/detail` for an Unknown waiver only
 when a `turn_presence_unknown` reason actually matches an explicit allowlist.

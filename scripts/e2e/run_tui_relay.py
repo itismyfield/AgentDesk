@@ -175,6 +175,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "autonomous_background_turn",
     "durable_record_probe",
     "dirty_active_residue",
+    "restart_incarnations",
 )
 
 
@@ -4019,7 +4020,7 @@ def run_one_cell(
         elif "restart_dcserver" in step:
             restart_options = step["restart_dcserver"] or {}
             target = args.restart_target_override or restart_options.get("target", "release")
-            restart_dcserver_for_e2e(
+            record.setdefault("restart_incarnations", []).append(restart_dcserver_for_e2e(
                 target=target,
                 args=args,
                 base_url=client.base_url,
@@ -4031,7 +4032,7 @@ def run_one_cell(
                 allowed_degraded_reasons=_as_string_tuple(
                     restart_options.get("allowed_degraded_reasons")
                 ),
-            )
+            ))
         elif "poison_claude_tui_relay_offset" in step:
             record.setdefault("poisoned_offsets", []).append(
                 poison_claude_tui_relay_offset(
@@ -4585,6 +4586,17 @@ def _guard_no_foreign_active_turns(
         )
 
 
+def _boot_incarnation(base_url: str) -> str:
+    """Per-process id from detail health; restart proof needs one before and after."""
+    status, payload = _read_api_json(base_url, "/api/health/detail", timeout=5)
+    value = payload.get("boot_incarnation") if isinstance(payload, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        raise HarnessEvidenceError(
+            f"/api/health/detail HTTP {status} has no boot_incarnation; a restart cannot be proven"
+        )
+    return value
+
+
 def restart_dcserver_for_e2e(
     *,
     target: str,
@@ -4594,10 +4606,11 @@ def restart_dcserver_for_e2e(
     channel_id: str,
     require_status: tuple[str, ...] = ("healthy",),
     allowed_degraded_reasons: tuple[str, ...] = (),
-) -> None:
+) -> dict[str, str]:
     if target not in ("dev", "release"):
         raise assertions.AssertionError(f"unsupported restart target: {target!r}")
     _guard_no_foreign_active_turns(base_url, channel_id, cell)
+    before = _boot_incarnation(base_url)
 
     if args.restart_script:
         script = Path(args.restart_script).expanduser()
@@ -4632,13 +4645,24 @@ def restart_dcserver_for_e2e(
                 f"stderr:\n{proc.stderr[-4000:]}"
             )
     # Same status/reason semantics as assert_health; the default stays healthy-only.
-    wait_for_health(
-        base_url,
-        timeout_s=90,
-        allowed_statuses=require_status,
-        allowed_degraded_reasons=allowed_degraded_reasons,
-        target_channel=channel_id,
-    )
+    deadline = time.monotonic() + 90
+    while True:
+        wait_for_health(
+            base_url,
+            timeout_s=max(deadline - time.monotonic(), 1.0),
+            allowed_statuses=require_status,
+            allowed_degraded_reasons=allowed_degraded_reasons,
+            target_channel=channel_id,
+        )
+        after = _boot_incarnation(base_url)
+        if after != before:
+            return {"target": target, "before": before, "after": after}
+        # The old process can still answer health until the kill lands.
+        if time.monotonic() >= deadline:
+            raise assertions.AssertionError(
+                f"dcserver boot_incarnation stayed {before} after the {target} restart; restart not observed"
+            )
+        time.sleep(2.0)
 
 
 def _assert_provider_hold_marker_seen(

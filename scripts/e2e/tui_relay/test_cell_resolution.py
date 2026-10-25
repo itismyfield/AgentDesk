@@ -500,7 +500,7 @@ class HerdrCells(unittest.TestCase):
                 self.assertIn('planned', output.getvalue())
                 self.assertFalse(any(a.get('passed') for a in result['assertions']))
 
-    def test_restart_uses_readonly_row_nonce_without_tmux(self):
+    def run_herdr_restart(self, after_incarnation):
         from unittest.mock import Mock, patch
         from argparse import Namespace
         import json
@@ -514,7 +514,7 @@ class HerdrCells(unittest.TestCase):
                          hard_reset_session_each=False, reset_before_each=False, allow_destructive=True,
                          restart_script=None, restart_target_override='dev', herdr_isolated_server=True,
                          herdr_endpoint='test', herdr_status_bin='/test/agentdesk', final_refetches=1)
-        rows = []
+        rows, kicked = [], []
         client = Mock()
         client.send_control.return_value = {'id': '100'}
         def wait(channel, **kwargs):
@@ -522,20 +522,43 @@ class HerdrCells(unittest.TestCase):
             row = {'id': str(102 + len(rows)), 'content': marker, 'author': {'id': '42', 'bot': True}}
             rows.append(row)
             return row, list(rows)
+        def process(command, **kwargs):
+            kicked.extend(command[:1] if command[0] == 'launchctl' else [])
+            return Namespace(stdout=json.dumps({'executions': [before], 'other_input_holds': []}))
+        def read(base, path, **kwargs):
+            return 200, {**health, 'boot_incarnation': after_incarnation if kicked else 'boot-before'}
         client.wait_for_message.side_effect = wait
         client.fetch_messages.side_effect = lambda *a, **k: list(rows)
-        with patch.object(driver, 'tmux', None), patch.object(driver, '_read_api_json', return_value=(200, health)) as get, \
-             patch.object(driver.herdr.subprocess, 'run', return_value=Namespace(stdout=json.dumps({'executions': [before], 'other_input_holds': []}))) as run, \
+        clock = iter(range(0, 10_000, 30))
+        with patch.object(driver, 'tmux', None), patch.object(driver, '_read_api_json', side_effect=read) as get, \
+             patch.object(driver.herdr.subprocess, 'run', side_effect=process) as run, \
+             patch.object(driver.herdr.time, 'monotonic', side_effect=lambda: next(clock)), \
              patch.object(driver.herdr.time, 'sleep'), patch.dict('os.environ', {'AGENTDESK_E2E_ALLOW_DESTRUCTIVE': '1'}):
             result = driver.run_scenario(scenario, args=args, client=client, run_id='restart')
+        return result, run, get
+
+    def test_restart_uses_readonly_row_nonce_without_tmux(self):
+        result, run, get = self.run_herdr_restart('boot-after')
         self.assertEqual(result['status'], 'not_applicable', result)
         self.assertEqual([c.args[0][:2] for c in run.call_args_list],
                          [['/test/agentdesk', 'herdr'], ['/test/agentdesk', 'herdr'], ['launchctl', 'kickstart'],
                           ['/test/agentdesk', 'herdr'], ['/test/agentdesk', 'herdr'], ['/test/agentdesk', 'herdr']])
         self.assertEqual([c.args[1] for c in get.call_args_list],
-                         ['/api/health/detail', '/api/health', '/api/health/detail',
+                         ['/api/health/detail', '/api/health', '/api/health/detail', '/api/health/detail',
                           '/api/health/detail', '/api/health/detail'])
         self.assertEqual(result['herdr_observations'][1]['row']['nonce'], 'same')
+        self.assertEqual(result['restart_incarnations'],
+                         [{'target': 'dev', 'before': 'boot-before', 'after': 'boot-after'}])
+        self.assertNotIn('server_incarnation_changed', {item['check'] for item in result['not_applicable']})
+
+    def test_herdr_restart_fails_when_boot_incarnation_does_not_change(self):
+        for after in ('boot-before', None):
+            with self.subTest(after=after):
+                result, run, _ = self.run_herdr_restart(after)
+                self.assertEqual(result['status'], 'fail', result)
+                self.assertIn('boot_incarnation unchanged; restart not observed', result['reason'])
+                self.assertNotIn('restart_incarnations', result)
+                self.assertEqual(sum(c.args[0][0] == 'launchctl' for c in run.call_args_list), 1)
 
     def test_e36_executes_twelve_normal_discord_prompts_without_legacy_evidence(self):
         from unittest.mock import Mock, patch

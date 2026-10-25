@@ -3595,7 +3595,7 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
         self.assertEqual(outcome["required_feature"], "two_message_panel")
 
     def test_e9_e15_require_summary_and_reject_retired_panels_without_feature_gates(self):
-        self.stub(driver, "restart_dcserver_for_e2e")
+        self.stub(driver, "restart_dcserver_for_e2e", return_value={"before": "a", "after": "b"})
         self.stub(driver, "assert_health", return_value={"status": "healthy"})
         for scenario_id in ("E-9", "E-15"):
             for terminal in ("-# ⏱️ 1분", "absent", "✅ 응답 완료"):
@@ -3802,12 +3802,15 @@ class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
         return {**self.HEALTHY, "status": "degraded", "ok": False, "degraded": True,
                 "degraded_reasons": reasons, "fully_recovered": recovered}
 
-    def health_steps_result(self, name, steps, after, *, kickstart_rc=0):
+    def health_steps_result(self, name, steps, after, *, kickstart_rc=0, incarnations=("boot-before", "boot-after")):
         # /api/health stays healthy until launchctl ran, then serves `after` in order; the clock advances on sleep.
         kicked, reads, clock = [], [], [0.0]
         has_restart = any("restart_dcserver" in step for step in steps)
 
         def health(base, path, **k):
+            if path == "/api/health/detail":
+                incarnation = incarnations[1] if kicked else incarnations[0]
+                return 200, {} if incarnation is None else {"boot_incarnation": incarnation}
             if path != "/api/health":
                 return 200, {"sessions": []}
             if has_restart and not kicked:
@@ -3824,8 +3827,31 @@ class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
         with patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
                 patch.object(driver.subprocess, "run", side_effect=kickstart):
             _, report, _ = self.main_result(self.scenario(name, steps + [{"send_prompt": "after health"}]))
-        self.assertEqual(kicked, [["launchctl", "kickstart", "-k"]] if has_restart else [])
+        self.assertEqual(kicked, [["launchctl", "kickstart", "-k"]] if has_restart and incarnations[0] else [])
         return report["scenarios"][0]
+
+    def test_restart_records_changed_boot_incarnation(self):
+        row = self.health_steps_result("E-X", [{"restart_dcserver": {"target": "release"}}], [self.HEALTHY])
+        self.assertEqual(row["status"], "pass", row.get("reason"))
+        self.assertEqual(row["restart_incarnations"], [{"target": "release", "before": "boot-before", "after": "boot-after"}])
+
+    def test_restart_fails_when_boot_incarnation_does_not_change(self):
+        # kickstart rc=0 and healthy health are not proof: the same process may still be answering.
+        row = self.health_steps_result("E-X", [{"restart_dcserver": {"target": "release"}}], [self.HEALTHY],
+                                       incarnations=("boot-same", "boot-same"))
+        self.assertEqual(row["status"], "fail")
+        self.assertEqual(row["failure_attribution"]["source"], "assertion")
+        self.assertIn("boot_incarnation stayed boot-same", row["reason"])
+        self.assertIn("restart not observed", row["reason"])
+        self.client.send_prompt.assert_not_called()
+
+    def test_restart_without_boot_incarnation_is_unevaluable_and_never_kicks(self):
+        for incarnations in ((None, None), ("boot-before", None)):
+            with self.subTest(incarnations=incarnations):
+                row = self.health_steps_result("E-X", [{"restart_dcserver": {"target": "release"}}], [self.HEALTHY],
+                                               incarnations=incarnations)
+                self.assert_unevaluable(row)
+                self.assertIn("has no boot_incarnation", row["reason"])
 
     def test_restart_health_wait_takes_assert_health_allowlist(self):
         # A fully recovered restart can keep only the bulk baseline degraded reasons.
