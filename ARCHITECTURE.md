@@ -213,6 +213,7 @@ src/
 │   ├── postgres/
 │   │   ├── advisory_lock.rs
 │   │   ├── advisory_lock_tests.rs
+│   │   ├── agent_sync.rs
 │   │   ├── shared_config.rs
 │   │   └── test_db_reclaim.rs
 │   ├── prompt_manifests/
@@ -2922,7 +2923,8 @@ src/
 │   ├── maintenance/
 │   │   ├── jobs/
 │   │   │   ├── db_retention/
-│   │   │   │   └── image_retention.rs
+│   │   │   │   ├── image_retention.rs
+│   │   │   │   └── queue_and_dispatch.rs
 │   │   │   ├── db_retention.rs
 │   │   │   ├── hang_dump_cleanup.rs
 │   │   │   ├── memento_consolidation.rs

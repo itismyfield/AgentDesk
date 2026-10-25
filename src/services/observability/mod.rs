@@ -30,7 +30,7 @@ mod helpers;
 mod pg_io;
 mod queries;
 mod relay_signal_alert;
-mod retention;
+pub(crate) mod retention;
 mod worker;
 
 // Public surface re-exports — keep `crate::services::observability::*`
