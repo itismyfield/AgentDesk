@@ -41,7 +41,9 @@ class RatchetAdmissionGuardTest(unittest.TestCase):
                     subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
                 for cap in (999, 1000, 100000):
                     config.write_text(f'[{ratchet}]\n"src/a.rs" = {cap}\n')
-                    with mock.patch.dict(os.environ, {"RATCHET_ADMISSION_BASE_REF": "HEAD"}):
+                    # PR CI exports GFP_EVENT_NAME=pull_request; the fixture repo has none of its SHAs.
+                    with mock.patch.dict(os.environ, {"RATCHET_ADMISSION_BASE_REF": "HEAD",
+                                                      "GFP_EVENT_NAME": ""}):
                         audit = admission.audit_repository_admissions(repo_root=root,
                             ratchet=ratchet, config_rel_path="scripts/reference.toml", table_name=ratchet)
                     self.assertEqual(audit.errors, ())
