@@ -8,17 +8,7 @@ use crate::services::session_backend::{
 };
 use chrono::{DateTime, Utc};
 
-/// Visible assistant prose, preserving the block's text and excluding signatures and blank thinking.
-pub(crate) fn visible_assistant_block_text(block: &serde_json::Value) -> Option<&str> {
-    match block.get("type").and_then(serde_json::Value::as_str) {
-        Some("text") => block.get("text").and_then(serde_json::Value::as_str),
-        Some("thinking") => block
-            .get("thinking")
-            .and_then(serde_json::Value::as_str)
-            .filter(|text| !text.trim().is_empty()),
-        _ => None,
-    }
-}
+pub(crate) use crate::services::tui_o::shadow::identity::visible_assistant_block_text;
 
 // #3034: test-only replay surface — `replay_transcript_file` and its outcome
 // type are exercised by the transcript-parser regression suite but not wired to

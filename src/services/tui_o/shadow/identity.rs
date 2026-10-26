@@ -9,6 +9,18 @@ use crate::services::discord::response_sanitizer::is_standalone_tui_response_chr
 use crate::services::provider::ProviderKind::{Claude as ClaudeKind, Codex as CodexKind};
 use crate::services::tui_turn_state::envelope_is_turn_end_terminator;
 
+/// Visible assistant prose, preserving the block's text and excluding signatures and blank thinking.
+pub(crate) fn visible_assistant_block_text(block: &serde_json::Value) -> Option<&str> {
+    match block.get("type").and_then(serde_json::Value::as_str) {
+        Some("text") => block.get("text").and_then(serde_json::Value::as_str),
+        Some("thinking") => block
+            .get("thinking")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.trim().is_empty()),
+        _ => None,
+    }
+}
+
 /// What a unit would post; `Excluded` units are recorded but never posted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UnitContent {
@@ -81,12 +93,7 @@ fn claude_blocks(record: &Value) -> Vec<RecordFact> {
     let mut facts = Vec::new();
     for (position, block) in (0u64..).zip(blocks) {
         let (kind, content) = match str_at(block, "type") {
-            Some("thinking")
-                if crate::services::claude_tui::transcript_tail::visible_assistant_block_text(
-                    block,
-                )
-                .is_some() =>
-            {
+            Some("thinking") if visible_assistant_block_text(block).is_some() => {
                 (UnitKind::Body, claude_body(resumed, block))
             }
             Some("thinking" | "redacted_thinking") => continue,
@@ -134,8 +141,7 @@ impl Drop for V3Rule {
 /// A cold resume writes a synthetic non-error row holding only TUI chrome; Legacy strips it, so it
 /// is not posted. API error rows always post.
 fn claude_body(resumed: bool, block: &Value) -> UnitContent {
-    let text = crate::services::claude_tui::transcript_tail::visible_assistant_block_text(block)
-        .unwrap_or("");
+    let text = visible_assistant_block_text(block).unwrap_or("");
     if resumed && is_standalone_tui_response_chrome(text) {
         return UnitContent::Excluded("claude_synthetic_resume_chrome");
     }
