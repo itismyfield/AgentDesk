@@ -98,15 +98,16 @@ pub(crate) async fn classify_normal(
 }
 
 /// The committed no-effect classification of one nonce; the permit layer turns it into a `RetryPermit`.
-#[derive(Debug)]
 pub(crate) struct NoEffectAck {
     receipt_id: i64,
     previous_nonce: String,
+    proof: HoldProof,
+    pool: PgPool,
 }
 
 impl NoEffectAck {
-    pub(crate) fn into_parts(self) -> (i64, String) {
-        (self.receipt_id, self.previous_nonce)
+    pub(crate) fn into_parts(self) -> (i64, String, HoldProof, PgPool) {
+        (self.receipt_id, self.previous_nonce, self.proof, self.pool)
     }
 }
 
@@ -121,7 +122,9 @@ pub(crate) async fn classify_no_effect(
     settle(pool, &attempt, "startup_failed_no_effect", None).await?;
     Ok(NoEffectAck {
         receipt_id: attempt.receipt_id,
-        previous_nonce: attempt.nonce,
+        previous_nonce: attempt.nonce.clone(),
+        proof: attempt.hold_proof(),
+        pool: pool.clone(),
     })
 }
 
@@ -134,4 +137,65 @@ pub(crate) async fn withhold(
     preserved: &serde_json::Value,
 ) -> Result<(), WriteError> {
     settle(pool, attempt, "withheld", Some((reason, preserved))).await
+}
+
+/// A copy of custody for settlement only; it cannot construct a start permit.
+#[derive(Debug, Clone)]
+pub(crate) struct HoldProof {
+    id: i64,
+    nonce: String,
+    owner: String,
+    retry: Option<String>,
+}
+impl ExactAttempt {
+    pub(crate) fn hold_proof(&self) -> HoldProof {
+        HoldProof {
+            id: self.receipt_id,
+            nonce: self.nonce.clone(),
+            owner: self.incarnation.clone(),
+            retry: self.retry_of.clone(),
+        }
+    }
+}
+impl HoldProof {
+    pub(crate) fn successor(&self, nonce: &str) -> Self {
+        Self {
+            id: self.id,
+            nonce: nonce.into(),
+            owner: self.owner.clone(),
+            retry: Some(self.nonce.clone()),
+        }
+    }
+    pub(crate) async fn abandon(&self, pool: &PgPool) -> Result<(), WriteError> {
+        let attempt = ExactAttempt {
+            receipt_id: self.id,
+            nonce: self.nonce.clone(),
+            incarnation: self.owner.clone(),
+            retry_of: self.retry.clone(),
+        };
+        let reason = "start or exact handoff did not execute";
+        let session:Option<String>=sqlx::query_scalar("SELECT session_key FROM sessions WHERE current_replay_receipt_id=$1 AND replay_episode_nonce=$2 LIMIT 1")
+            .bind(self.id).bind(&self.nonce).fetch_optional(pool).await.map_err(WriteError::Storage)?;
+        withhold_and_notify(
+            pool,
+            &attempt,
+            reason,
+            &serde_json::json!({"hold":{"nonce":self.nonce,"reason":reason}}),
+            crate::db::replay_disposition::hold_notice::NoticeRouting {
+                bot: "notify",
+                session_key: session.as_deref(),
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+}
+
+impl std::fmt::Debug for NoEffectAck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NoEffectAck")
+            .field("receipt_id", &self.receipt_id)
+            .field("previous_nonce", &self.previous_nonce)
+            .finish_non_exhaustive()
+    }
 }

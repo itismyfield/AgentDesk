@@ -13,6 +13,7 @@ pub(in crate::services::discord::router::message_handler) mod common;
 /// What the turn's start registers besides the inflight request itself.
 pub(super) struct StartRequest<'a> {
     pub(super) provider: &'a ProviderKind,
+    pub(super) remote: bool,
     pub(super) channel_id: ChannelId,
     pub(super) agent_id: Option<&'a str>,
     pub(super) reply_context: Option<&'a str>,
@@ -50,11 +51,6 @@ async fn admit(
 ) -> Result<(ReplayStart, bool), StartStop> {
     let channel = request.channel_id.get().to_string();
     let continuation = replay_policy::take_continuation();
-    if continuation.is_none()
-        && let Some(start) = admission::dormant_start(&channel)
-    {
-        return Ok((start, false));
-    }
     let uploads: Vec<String> = request
         .uploads
         .iter()
@@ -91,6 +87,12 @@ async fn admit(
         }),
         session_key: request.session_key.map(str::to_string),
     };
+    let scope = super::super::provider_dispatch::replay_scope::selected(
+        request.provider,
+        request.channel_id.get(),
+        request.remote,
+        inflight.tmux_session_name.as_deref(),
+    );
     common::begin(
         shared,
         request.provider,
@@ -99,6 +101,7 @@ async fn admit(
         input,
         projection,
         continuation,
+        scope,
     )
     .await
 }

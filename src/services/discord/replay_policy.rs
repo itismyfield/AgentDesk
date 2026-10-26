@@ -1,6 +1,7 @@
 //! Decisions for a protected attempt's stale resume or terminal: keep the legacy path, retry the
 //! exact attempt once, classify it as ordinary, or hold it.
 
+pub(crate) mod activation;
 pub(crate) mod live;
 #[cfg(all(test, unix))]
 mod live_tests;
@@ -68,10 +69,19 @@ async fn withhold(
     reason: &str,
     capture: Option<&InflightTurnState>,
 ) -> bool {
-    let preserved = serde_json::json!({
+    let mut preserved = serde_json::json!({
         "hold": { "nonce": attempt.nonce(), "reason": reason },
-        "recovery_snapshot": capture,
     });
+    if let Some(capture) = capture {
+        let Ok(snapshot) = serde_json::to_value(capture) else {
+            tracing::warn!(
+                receipt = attempt.receipt_id(),
+                "replay capture could not be preserved"
+            );
+            return false;
+        };
+        preserved["recovery_snapshot"] = snapshot;
+    }
     write::withhold_and_notify(
         pool, attempt, reason, &preserved,
         crate::db::replay_disposition::hold_notice::NoticeRouting {
@@ -92,16 +102,27 @@ pub(crate) struct RetryPermit {
     receipt_id: i64,
     previous_nonce: String,
     next_nonce: String,
+    abandonment: Abandonment,
 }
 
 impl RetryPermit {
     pub(crate) fn from_no_effect(ack: NoEffectAck) -> Self {
-        let (receipt_id, previous_nonce) = ack.into_parts();
+        let (receipt_id, previous_nonce, proof, pool) = ack.into_parts();
+        let next_nonce = uuid::Uuid::new_v4().to_string();
+        let next_proof = proof.successor(&next_nonce);
         Self {
             receipt_id,
             previous_nonce,
-            next_nonce: uuid::Uuid::new_v4().to_string(),
+            next_nonce,
+            abandonment: Abandonment {
+                pool,
+                proofs: vec![proof, next_proof],
+            },
         }
+    }
+
+    pub(crate) fn abandonment(&self) -> Abandonment {
+        self.abandonment.clone()
     }
 
     pub(crate) fn receipt_id(&self) -> i64 {
@@ -258,3 +279,53 @@ mod decision;
 pub(in crate::services::discord) use decision::{
     error_is_ordinary, hold_recovery, ordinary_outcome, stale_resume,
 };
+
+/// Non-executable custody follows a refusal even after the start right moved to a gateway.
+#[derive(Clone)]
+pub(crate) struct Abandonment {
+    pool: PgPool,
+    proofs: Vec<write::HoldProof>,
+}
+impl Abandonment {
+    pub(crate) fn new(pool: &PgPool, proof: write::HoldProof) -> Self {
+        Self {
+            pool: pool.clone(),
+            proofs: vec![proof],
+        }
+    }
+    pub(crate) async fn abandon(&self, reason: &str) {
+        loop {
+            let mut retry = false;
+            for proof in &self.proofs {
+                match proof.abandon(&self.pool).await {
+                    Ok(()) => return,
+                    Err(write::WriteError::CasMiss) => {}
+                    Err(error) => {
+                        retry = true;
+                        tracing::warn!(%error, reason, "unstarted custody settlement will retry");
+                    }
+                }
+            }
+            if !retry {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+    pub(crate) fn schedule(self, reason: &'static str) {
+        crate::services::discord::task_supervisor::spawn_observed(
+            "replay_unstarted_hold",
+            async move {
+                self.abandon(reason).await;
+            },
+        );
+    }
+}
+
+impl std::fmt::Debug for Abandonment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Abandonment")
+            .field("proofs", &self.proofs)
+            .finish_non_exhaustive()
+    }
+}

@@ -316,3 +316,5 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(all(test, unix))]
 #[path = "live/observer_tests.rs"]
 mod observer_tests;
+
+pub(crate) use seal::can_activate;

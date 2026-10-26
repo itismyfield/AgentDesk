@@ -26,22 +26,47 @@ pub(crate) struct ReplayAdmissionContext<'a> {
     pub(crate) instance: &'a str,
     pub(crate) incarnation: &'a str,
     pub(crate) producers: ProducerMode,
+    pub(crate) pass_registered: bool,
 }
 
 impl<'a> ReplayAdmissionContext<'a> {
-    /// No activation supplier is connected yet, so production stays dormant whatever the environment says.
+    /// A read context never enables a producer without its final execution scope.
     pub(crate) fn production(pool: &'a PgPool, instance: &'a str, incarnation: &'a str) -> Self {
         Self {
             pool,
             instance,
             incarnation,
             producers: ProducerMode::Dormant,
+            pass_registered: false,
         }
     }
 
-    /// Producers turn on only where an activation supplier connected; none exists outside tests.
+    /// A channel-only context reads prior custody without authorizing a new producer.
     pub(crate) fn for_channel(mut self, channel: &str) -> Self {
-        self.producers = producers_for(channel);
+        self.pass_registered = activation_supplied(channel);
+        self.producers = ProducerMode::Dormant;
+        self
+    }
+}
+
+impl ReplayAdmissionContext<'_> {
+    pub(crate) fn for_scope(
+        mut self,
+        channel: &str,
+        provider: &str,
+        driver: &str,
+        runtime: &str,
+        continuation: bool,
+    ) -> Self {
+        self.producers = if crate::services::discord::replay_policy::activation::supported(
+            provider, driver, runtime,
+        ) && (continuation || activation_supplied(channel))
+        {
+            ProducerMode::Active
+        } else {
+            ProducerMode::Dormant
+        };
+        self.pass_registered = self.producers == ProducerMode::Active;
         self
     }
 }
@@ -53,20 +78,13 @@ fn producers_for(channel: &str) -> ProducerMode {
     }
 }
 
-/// No production activation supplier is connected, so no environment or config turns it on.
-#[cfg(not(test))]
-fn activation_supplied(_channel: &str) -> bool {
-    false
-}
-
-#[cfg(test)]
 fn activation_supplied(channel: &str) -> bool {
-    test_activation::active(channel)
+    crate::services::discord::replay_policy::activation::requested(channel)
 }
 
 /// The start of a dormant build: the legacy path, with no receipt and no permit.
 pub(crate) fn dormant_start(channel: &str) -> Option<ReplayStart> {
-    (producers_for(channel) == ProducerMode::Dormant).then_some(ReplayStart(None))
+    (producers_for(channel) == ProducerMode::Dormant).then_some(ReplayStart(None, None))
 }
 
 /// TUI input stays with its existing owner even in an active non-TUI channel.
@@ -76,7 +94,20 @@ pub(crate) fn dormant_start_for_driver(
 ) -> Option<ReplayStart> {
     (driver == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting
         || producers_for(channel) == ProducerMode::Dormant)
-        .then_some(ReplayStart(None))
+        .then_some(ReplayStart(None, None))
+}
+
+pub(crate) fn dormant_start_for_scope(
+    channel: &str,
+    provider: &str,
+    driver: &str,
+    runtime: &str,
+) -> Option<ReplayStart> {
+    (!activation_supplied(channel)
+        || !crate::services::discord::replay_policy::activation::supported(
+            provider, driver, runtime,
+        ))
+    .then_some(ReplayStart(None, None))
 }
 
 /// Hash of the prompt a start actually submits.
@@ -119,7 +150,10 @@ pub(crate) fn discord_input(
 /// The right to make a provider start's first input: a dormant build's legacy start, or one
 /// sealed permit. Only `dormant_start` and `admit_start` make one.
 #[derive(Debug)]
-pub(crate) struct ReplayStart(Option<StartPermit>);
+pub(crate) struct ReplayStart(
+    Option<StartPermit>,
+    Option<crate::services::discord::replay_policy::Abandonment>,
+);
 
 impl ReplayStart {
     pub(crate) fn receipt_id(&self) -> Option<i64> {
@@ -132,6 +166,9 @@ impl ReplayStart {
             .as_ref()
             .is_some_and(|permit| !permit.matches_start_scope(driver, runtime))
         {
+            if let Some(a) = self.1 {
+                a.schedule("start scope changed");
+            }
             return Err(PermitRefusal::TargetMismatch);
         }
         Ok(self)
@@ -141,7 +178,7 @@ impl ReplayStart {
     pub(crate) fn exact_reset(self, reset: impl FnOnce()) -> Result<Self, PermitRefusal> {
         let permit = self.0.ok_or(PermitRefusal::NotARetry)?;
         let prepared = PreparedRetryStart::new((), permit)?;
-        Ok(prepared.launch(|_| reset(), |(), permit| Self(Some(permit))))
+        Ok(prepared.launch(|_| reset(), |(), permit| Self(Some(permit), self.1)))
     }
 
     /// Spends the start right before the first input; a permit binds its attempt to the token so
@@ -157,7 +194,13 @@ impl ReplayStart {
         };
         let live =
             |attempt| token.attach_replay_attempt(std::sync::Arc::new(LiveAttempt::new(attempt)));
-        match permit.consume(target, &input_hash(prompt), live)? {
+        let consumed = permit.consume(target, &input_hash(prompt), live);
+        if !matches!(consumed, Ok(true))
+            && let Some(a) = self.1
+        {
+            a.schedule("unspent start refused");
+        }
+        match consumed? {
             true => Ok(()),
             false => Err(PermitRefusal::Spent),
         }
@@ -200,15 +243,26 @@ pub(crate) async fn admit_start(
     continuation: Option<RetryPermit>,
 ) -> Result<ReplayStart, StartStop> {
     let candidate = match (preflight_source(ctx, input).await, continuation.as_ref()) {
+        (ReplayPreflight::LegacyUnprotected, None) => return Ok(ReplayStart(None, None)),
         (ReplayPreflight::Admit(candidate), None) => candidate,
         (ReplayPreflight::ConsumeProtected(held), Some(retry)) => {
             held.resume(retry).map_err(|_| StartStop::Consumed)?
         }
         (ReplayPreflight::ConsumeProtected(_), None) => return Err(StartStop::Consumed),
-        (other, _) => return Err(StartStop::Deferred(format!("{other:?}"))),
+        (other, _) => {
+            return Err(StartStop::Deferred(format!(
+                "{other:?}; retry this request"
+            )));
+        }
     };
     match prepare_effect_start(ctx, input, candidate, projection, continuation).await {
-        Ok(permit) => Ok(ReplayStart(Some(permit))),
+        Ok(permit) => {
+            let custody = crate::services::discord::replay_policy::Abandonment::new(
+                ctx.pool,
+                permit.hold_proof(),
+            );
+            Ok(ReplayStart(Some(permit), Some(custody)))
+        }
         Err(StartRefusal::Protected(receipt) | StartRefusal::AlreadyClassified(receipt)) => {
             tracing::info!(receipt, "the request's receipt already started or finished");
             Err(StartStop::Consumed)
@@ -281,6 +335,8 @@ pub(crate) async fn preflight_source(
     {
         return ReplayPreflight::Defer(ReplayDefer::IdentityUnknown);
     }
+    #[cfg(test)]
+    crate::services::discord::replay_policy::activation::record_read(&input.channel);
     let key = Some(input.request_key.as_str());
     let Ok(receipts) = receipt::receipts_for_request(
         ctx.pool,
@@ -302,9 +358,17 @@ pub(crate) async fn preflight_source(
     let registered = receipts
         .iter()
         .any(|r| r.disposition == Disposition::RegisteredNotStarted);
+    let registered_same_key = receipts.iter().any(|r| {
+        r.disposition == Disposition::RegisteredNotStarted
+            && r.request_key.as_deref() == Some(input.request_key.as_str())
+    });
     let blocking: Vec<_> = receipts
         .into_iter()
-        .filter(|r| r.disposition.blocks_rerun())
+        .filter(|r| {
+            r.disposition.blocks_rerun()
+                || (r.request_key.as_deref() == Some(input.request_key.as_str())
+                    && r.disposition == Disposition::ClassifiedNormal)
+        })
         .collect();
     if !blocking.is_empty() {
         let covered = input
@@ -321,6 +385,12 @@ pub(crate) async fn preflight_source(
             request_key: input.request_key.clone(),
             retry_receipt: None,
         }),
+        (ProducerMode::Dormant, true) if ctx.pass_registered && registered_same_key => {
+            ReplayPreflight::Admit(ReplayCandidate {
+                request_key: input.request_key.clone(),
+                retry_receipt: None,
+            })
+        }
         (ProducerMode::Dormant, true) => ReplayPreflight::Defer(ReplayDefer::ProducerDormant),
         (ProducerMode::Dormant, false) => ReplayPreflight::LegacyUnprotected,
     }
@@ -424,12 +494,13 @@ pub(crate) async fn prepare_effect_start(
 pub(crate) mod test_activation {
     static ACTIVE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-    pub(super) fn active(channel: &str) -> bool {
-        ACTIVE
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|active| active == channel)
+    pub(crate) fn active(channel: &str) -> bool {
+        let channels = ACTIVE.lock().unwrap().join(",");
+        crate::services::discord::replay_policy::activation::Settings::parse(
+            Some("1"),
+            Some(&channels),
+        )
+        .selected(channel)
     }
 
     pub(crate) struct Activated(String);

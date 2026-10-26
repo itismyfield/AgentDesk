@@ -16,10 +16,7 @@ pub(super) async fn hydrate_replay_hold(
         ReplayLookup::Verified => super::replay_decision::resume(pool, state).await,
         ReplayLookup::Unverified { projected, reason } => {
             tracing::debug!(channel_id = state.channel_id, %reason, "replay lookup unverified");
-            !projected
-                && crate::services::discord::router::replay_producers_dormant(
-                    &state.channel_id.to_string(),
-                )
+            !projected && pool.is_none()
         }
     }
 }

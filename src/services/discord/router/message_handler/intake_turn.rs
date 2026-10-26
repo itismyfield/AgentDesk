@@ -2110,6 +2110,7 @@ pub(super) async fn handle_text_message(
         let replay_reply_context = prepared_prompt.context.requeue();
         let replay_request = replay_start::StartRequest {
             provider: &provider,
+            remote: remote_profile.is_some(),
             channel_id,
             agent_id: role_binding.as_ref().map(|binding| binding.role_id.as_str()),
             reply_context: replay_reply_context.as_deref(),

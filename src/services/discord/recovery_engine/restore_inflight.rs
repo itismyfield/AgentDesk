@@ -68,13 +68,11 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         shared.restart.recovery_started_at.elapsed(),
     );
     if states.is_empty() {
-        #[cfg(test)]
         replay_decision::resume_pg_only(shared.pg_pool.as_ref(), provider.as_str()).await;
         return;
     }
 
     Box::pin(restore_inflight_states(http, shared, provider, states)).await;
-    #[cfg(test)]
     replay_decision::resume_pg_only(shared.pg_pool.as_ref(), provider.as_str()).await;
 }
 

@@ -221,6 +221,7 @@ impl Request<'_> {
 
     async fn preflight(&self) -> Result<(), StartStop> {
         let channel = self.channel.to_string();
+        let requested = !crate::services::discord::router::replay_producers_dormant(&channel);
         if retrying() {
             return if REENTRY
                 .with(|old| old.provider == *self.provider && old.agent.as_deref() == self.agent)
@@ -229,9 +230,6 @@ impl Request<'_> {
             } else {
                 Err(StartStop::Deferred("headless exact owner changed".into()))
             };
-        }
-        if admission::dormant_start(&channel).is_some() {
-            return Ok(());
         }
         let (name, remote) = self
             .shared
@@ -255,10 +253,26 @@ impl Request<'_> {
         );
         let scope =
             replay_scope::selected(self.provider, self.channel.get(), remote, tmux.as_deref());
-        if admission::dormant_start_for_driver(&channel, scope.driver).is_some() {
+        if scope.driver == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting {
             return Ok(());
         }
-        if let Some(turn) = self.metadata.and_then(|value| value.get("turn_id"))
+        if self.shared.pg_pool.is_none()
+            && (!requested
+                || !replay_policy::activation::supported(
+                    self.provider.as_str(),
+                    scope.driver.as_str(),
+                    scope.runtime,
+                ))
+        {
+            return Ok(());
+        }
+        if requested
+            && replay_policy::activation::supported(
+                self.provider.as_str(),
+                scope.driver.as_str(),
+                scope.runtime,
+            )
+            && let Some(turn) = self.metadata.and_then(|value| value.get("turn_id"))
             && turn.as_str() != Some(self.reservation.turn_id(self.channel).as_str())
         {
             return Err(StartStop::Deferred(
@@ -273,11 +287,19 @@ impl Request<'_> {
         let instance =
             crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
         let context = ReplayAdmissionContext::production(pool, &instance, admission::incarnation())
-            .for_channel(&channel);
+            .for_scope(
+                &channel,
+                self.provider.as_str(),
+                scope.driver.as_str(),
+                scope.runtime,
+                false,
+            );
         match admission::preflight_source(&context, &self.input()).await {
             ReplayPreflight::Admit(_) | ReplayPreflight::LegacyUnprotected => Ok(()),
             ReplayPreflight::ConsumeProtected(_) => Err(StartStop::Consumed),
-            other => Err(StartStop::Deferred(format!("{other:?}"))),
+            other => Err(StartStop::Deferred(format!(
+                "{other:?}; retry with the original reservation"
+            ))),
         }
     }
 
@@ -288,23 +310,51 @@ impl Request<'_> {
     ) -> Result<(ReplayStart, bool), StartStop> {
         let channel = self.channel.to_string();
         let continuation = replay_policy::take_continuation();
-        if continuation.is_none()
-            && let Some(start) = admission::dormant_start(&channel)
-        {
-            return Ok((start, false));
-        }
         let scope = replay_scope::selected(
             self.provider,
             self.channel.get(),
             prepared.remote,
             prepared.tmux,
         );
-        if let Some(start) = admission::dormant_start_for_driver(&channel, scope.driver) {
-            return if continuation.is_none() {
-                Ok((start, false))
-            } else {
-                Err(StartStop::Consumed)
+        let supported = replay_policy::activation::supported(
+            self.provider.as_str(),
+            scope.driver.as_str(),
+            scope.runtime,
+        );
+        if !supported && continuation.is_some() {
+            return Err(StartStop::Consumed);
+        }
+        if continuation.is_none() && (!supported || !replay_policy::activation::requested(&channel))
+        {
+            let Some(pool) = self.shared.pg_pool.as_ref() else {
+                return Ok((
+                    admission::dormant_start_for_scope(
+                        &channel,
+                        self.provider.as_str(),
+                        scope.driver.as_str(),
+                        scope.runtime,
+                    )
+                    .ok_or(StartStop::Consumed)?,
+                    false,
+                ));
             };
+            let ctx = ReplayAdmissionContext::production(pool, "", admission::incarnation());
+            return admission::admit_start(
+                &ctx,
+                &self.input(),
+                PreparedEffectProjection {
+                    target: EffectTarget::ProviderStart {
+                        provider: self.provider.as_str().into(),
+                        channel,
+                    },
+                    input_hash: admission::input_hash(prepared.prompt),
+                    binding: serde_json::json!({}),
+                    session_key: None,
+                },
+                None,
+            )
+            .await
+            .map(|s| (s, false));
         }
         let session_key = prepared
             .session_key
@@ -372,6 +422,7 @@ impl Request<'_> {
             input,
             projection,
             continuation,
+            scope,
         )
         .await
     }

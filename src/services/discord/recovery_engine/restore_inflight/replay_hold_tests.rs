@@ -1143,3 +1143,193 @@ async fn p4_dormant_no_store_history_retry_still_fetches_and_enqueues() {
     release_retry_pending(channel);
     server.abort();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn p5_off_boot_pg_only_resumes_without_an_execution_permit_pg() {
+    const CHILD: &str = "ADK_REPLAY_RECOVERY_CHILD";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    if let Ok(raw) = std::env::var(CHILD) {
+        let (url, channels): (String, Vec<u64>) = serde_json::from_str(&raw).unwrap();
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        let probe = tempfile::tempdir().unwrap();
+        let cli = probe.path().join("native-cli");
+        std::fs::write(&cli, "#!/usr/bin/python3\nimport os,sys\nfrom pathlib import Path\nif '--version' in sys.argv or '-v' in sys.argv: print('99.1.0');sys.exit(0)\nwith (Path(os.environ['ADK_RECOVERY_PROBE_CWD'])/'native_starts').open('a') as f: f.write(str(os.getpid())+'\\n')\nsys.stdin.read()\nprint('{\"type\":\"turn.completed\",\"usage\":{}}')\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _cli = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CODEX_PATH",
+            &cli,
+        );
+        let _cwd = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "ADK_RECOVERY_PROBE_CWD",
+            probe.path(),
+        );
+        execution_probe();
+        let starts = || {
+            std::fs::read_to_string(probe.path().join("native_starts"))
+                .unwrap()
+                .lines()
+                .count()
+        };
+        assert_eq!(
+            starts(),
+            1,
+            "positive control must cross the native provider entry"
+        );
+        let shared = shared_on(&pool).await;
+        let discord = o_cut_recorder::start(channels[0]).await;
+        for _ in 0..2 {
+            restore_inflight_turns(&discord.http, &shared, &ProviderKind::Claude).await;
+        }
+        let counts: (i64, i64) = sqlx::query_as("SELECT COUNT(*), COUNT(DISTINCT replay_preserved -> 'stale_replay_notice' ->> 'outbox_id') FROM intake_outbox WHERE replay_disposition='withheld'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(counts, (channels.len() as i64, channels.len() as i64));
+        assert!(shared.core.lock().await.sessions.is_empty());
+        assert!(
+            channels
+                .iter()
+                .all(|&id| !shared.tmux_watchers.contains_key(&ChannelId::new(id)))
+        );
+        assert!(
+            discord.calls().is_empty(),
+            "one durable event, no direct recovery POST"
+        );
+        assert!(inflight::load_inflight_states(&ProviderKind::Claude).is_empty());
+        assert_eq!(
+            starts(),
+            1,
+            "restart supplementation must cause no additional native execution"
+        );
+        println!("RECOVERY_FRESH_NODE_PG_ONLY_OK {}", channels.len());
+        pool.close().await;
+        return;
+    }
+    let (db, pool) = fixture().await;
+    let mut channels = Vec::new();
+    for n in 0..67_u64 {
+        let channel = 1_479_671_301_387_180_000 + n * 10;
+        let mut state = row(channel, "pg-only-no-runtime".into());
+        state.turn_nonce = (n != 0).then(|| format!("old-nonce-{n}"));
+        receipt(
+            &pool,
+            &state,
+            match n {
+                1 => "started_unclassified",
+                2 => "startup_failed_no_effect",
+                _ => "withheld",
+            },
+        )
+        .await;
+        channels.push(channel);
+    }
+    for _ in 0..2 {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("AGENTDESK_STALE_REPLAY_V1", "0")
+            .args([
+                "--exact",
+                concat!(
+                    module_path!(),
+                    "::p5_off_boot_pg_only_resumes_without_an_execution_permit_pg"
+                )
+                .split_once("::")
+                .unwrap()
+                .1,
+                "--nocapture",
+            ])
+            .env(
+                CHILD,
+                serde_json::to_string(&(&db.database_url, &channels)).unwrap(),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "fresh-node child: {} {}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains("RECOVERY_FRESH_NODE_PG_ONLY_OK 67")
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 67,
+        "restarts and pages must neither merge events nor duplicate them"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn p5_empty_boot_scan_has_one_read_and_no_effect_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = fixture().await;
+    let shared = shared_on(&pool).await;
+    let discord = o_cut_recorder::start(7_330_505).await;
+    let key = format!(
+        "scan:claude:{}",
+        pool.connect_options().get_database().unwrap()
+    );
+    let before = crate::services::discord::replay_policy::activation::reads(&key);
+    restore_inflight_turns(&discord.http, &shared, &ProviderKind::Claude).await;
+    assert_eq!(
+        crate::services::discord::replay_policy::activation::reads(&key) - before,
+        1
+    );
+    assert!(discord.calls().is_empty());
+    assert!(shared.core.lock().await.sessions.is_empty());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn p5_off_legacy_lookup_error_retries_until_authority_returns_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = fixture().await;
+    let state = row(7_330_517, "no-running-host".into());
+    receipt(&pool, &state, "withheld").await;
+    let shared = shared_on(&pool).await;
+    let discord = o_cut_recorder::start(state.channel_id).await;
+    sqlx::query("ALTER TABLE intake_outbox RENAME TO p5_retry_unavailable")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let waiting = crate::services::discord::turn_bridge::recovery_text::auto_retry_with_history(
+        &discord.http,
+        &shared,
+        &ProviderKind::Claude,
+        ChannelId::new(state.channel_id),
+        poise::serenity_prelude::MessageId::new(state.user_msg_id),
+        "original",
+    );
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(80), &mut waiting)
+            .await
+            .is_err(),
+        "query errors remain a scheduled retry, never an empty result"
+    );
+    assert!(discord.calls().is_empty());
+    sqlx::query("ALTER TABLE p5_retry_unavailable RENAME TO intake_outbox")
+        .execute(&pool)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), waiting)
+        .await
+        .unwrap();
+    assert!(
+        discord.calls().is_empty(),
+        "a restored held receipt stops before history fetch"
+    );
+    pool.close().await;
+    db.drop().await;
+}

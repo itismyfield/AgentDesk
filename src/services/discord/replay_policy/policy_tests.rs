@@ -201,3 +201,19 @@ async fn stale_decision_failures_hold_without_a_permit_pg() {
     pool.close().await;
     fixture.drop().await;
 }
+
+#[tokio::test]
+async fn p5_absent_capture_does_not_pin_a_null_snapshot_pg() {
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let attempt = start(&pool, "p5-no-capture").await;
+    let id = attempt.receipt_id();
+    let seen = observed(&attempt, &[Seen::Activity(Activity::Output)], true);
+    assert!(matches!(
+        decide_stale(&pool, Some(attempt), &seen, None).await,
+        ReplayDecision::WithholdReplay { persisted: true }
+    ));
+    assert!(stored(&pool, id).await.2.get("recovery_snapshot").is_none());
+    pool.close().await;
+    fixture.drop().await;
+}

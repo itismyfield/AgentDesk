@@ -10,22 +10,18 @@ pub(in crate::services::discord::turn_bridge) async fn retry_stale_resume(
     let pool = point.shared.pg_pool.as_ref();
     match replay_policy::stale_resume(pool, point.cancel_token, state.inflight_state).await {
         StaleResume::Legacy => {
-            if !crate::services::discord::router::replay_producers_dormant(
-                &point.channel_id.get().to_string(),
-            ) {
-                let Some(provider) = ProviderKind::from_str(&state.inflight_state.provider) else {
-                    return;
-                };
-                if super::super::recovery_text::replay::blocked(
-                    point.shared,
-                    &provider,
-                    point.channel_id.get(),
-                    point.user_msg_id.map_or(0, |id| id.get()),
-                )
-                .await
-                {
-                    return;
-                }
+            let Some(provider) = ProviderKind::from_str(&state.inflight_state.provider) else {
+                return;
+            };
+            if super::super::recovery_text::replay::blocked(
+                point.shared,
+                &provider,
+                point.channel_id.get(),
+                point.user_msg_id.map_or(0, |id| id.get()),
+            )
+            .await
+            {
+                return;
             }
             let reset = reset_session_for_auto_retry(
                 point.shared,

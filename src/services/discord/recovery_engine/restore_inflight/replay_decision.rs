@@ -10,8 +10,7 @@ pub(super) async fn resume(
     pool: Option<&sqlx::PgPool>,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    if crate::services::discord::router::replay_producers_dormant(&state.channel_id.to_string())
-        || !state.replay_rerun_blocked()
+    if !state.replay_rerun_blocked()
         || matches!(
             state.runtime_kind,
             Some(
@@ -63,14 +62,16 @@ pub(super) async fn resume(
     .is_ok()
 }
 
-// The dormant build exercises enumeration at the test boot hook; production wiring follows activation.
-#[cfg(test)]
 pub(super) async fn resume_pg_only(pool: Option<&sqlx::PgPool>, provider: &str) {
     let Some(pool) = pool else {
         return;
     };
     let mut cursor = 0_i64;
     loop {
+        #[cfg(test)]
+        crate::services::discord::replay_policy::activation::record_read(&format!(
+            "scan:{provider}"
+        ));
         let page: Result<Vec<(i64, String)>, _> = sqlx::query_as(
             "SELECT id, channel_id FROM intake_outbox WHERE id>$1
                AND lower(btrim(provider))=lower(btrim($2))
@@ -83,7 +84,8 @@ pub(super) async fn resume_pg_only(pool: Option<&sqlx::PgPool>, provider: &str) 
             Ok(page) => page,
             Err(error) => {
                 tracing::warn!(%error, "PG-only replay notice scan unverified");
-                return;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
             }
         };
         if page.is_empty() {
@@ -91,9 +93,6 @@ pub(super) async fn resume_pg_only(pool: Option<&sqlx::PgPool>, provider: &str) 
         }
         for (id, channel) in page {
             cursor = id;
-            if crate::services::discord::router::replay_producers_dormant(&channel) {
-                continue;
-            }
             if let Err(error) = write::recover_hold_notice(
                 pool,
                 id,
