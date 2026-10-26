@@ -191,12 +191,12 @@ class Freshness(FixtureCase):
                 self.assertEqual(report["completeness"]["status"], "complete")
                 self.assertEqual(len(report["deadlines"]["rows"]), 1)
 
-    def test_c1_04_bad_stamps_keep_deadline_rows_and_exit_nonzero(self) -> None:
+    def test_c1_04_bad_stamps_keep_deadline_rows_and_warn(self) -> None:
         for label, stamp in (("missing", None), ("format", "2026-10-06 23:02:50"),
                              ("future", "2026-10-13T12:00:01Z")):
             with self.subTest(stamp=label):
                 rc, report = self.run_at(NOW, metadata_text(refreshed_at=stamp))
-                self.assertEqual(rc, 2)
+                self.assertEqual(rc, 0)
                 self.assertEqual(report["metadata"]["freshness"], "INVALID")
                 self.assertEqual(report["completeness"]["status"], "partial")
                 self.assertIn("refreshed_at", problems(report))
@@ -204,6 +204,19 @@ class Freshness(FixtureCase):
 
 
 class RegistrySemantics(FixtureCase):
+    def test_missing_deadline_and_issue_warn_and_succeed(self) -> None:
+        entry = shrink("src/a.rs", "2026-10-20")
+        del entry["deadline"], entry["decompose_issue"]
+        root = write_root(self.tmp / "missing-plan", registry_text([entry]), metadata_text())
+        out, err = self.tmp / "missing-out", io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = reporter.main(["--root", str(root), "--out", str(out), "--now", NOW.isoformat()])
+        self.assertEqual(rc, 0, err.getvalue())
+        self.assertEqual(read_report(out)["completeness"]["status"], "partial")
+        self.assertIn("WARNING:", err.getvalue())
+        for value in ("src/a.rs", "deadline", "decompose_issue"):
+            self.assertIn(value, err.getvalue())
+
     def test_c1_05_omitted_decision_is_shrink_and_valid_keep_is_excluded(self) -> None:
         legacy = {key: value for key, value in shrink("src/legacy.rs", "2026-10-20").items() if key != "decision"}
         keep = {"file": "src/kept.rs", "decision": "keep", "owner": "relay", "keep_reason": "cohesive durable contract"}
@@ -212,13 +225,13 @@ class RegistrySemantics(FixtureCase):
         self.assertEqual(report["deadlines"]["counts"]["keep"], 1)
         self.assertEqual(report["completeness"]["status"], "complete")
 
-    def test_c1_05_unknown_decision_and_keep_with_deadline_are_errors(self) -> None:
+    def test_c1_05_unknown_decision_and_keep_with_deadline_warn(self) -> None:
         rc, report = run_report(registry_text([
             shrink("src/near.rs", "2026-10-20"),
             {**shrink("src/odd.rs", "2026-10-20"), "decision": "defer"},
             {"file": "src/kd.rs", "decision": "keep", "owner": "relay", "keep_reason": "cohesive", "deadline": "2026-10-20"},
         ]))
-        self.assertEqual((rc, list(by_path(report))), (2, ["src/near.rs"]))
+        self.assertEqual((rc, list(by_path(report))), (0, ["src/near.rs"]))
         drifted = main_report(registry_text([shrink("src/near.rs", "2026-10-20", extension="2027-01-01")]) + "[policy]\nmode = 1\n")
         self.assertEqual(list(by_path(drifted)), ["src/near.rs"])
         self.assertIn("unknown field(s) not interpreted: extension", problems(drifted))
@@ -235,26 +248,29 @@ class RegistrySemantics(FixtureCase):
                 root = write_root(self.tmp / label.replace(" ", "-"),
                                   registry_text(entries, grandfathered=["src/old.rs"]), metadata_text())
                 out = self.tmp / f"out-{label.replace(' ', '-')}"
-                self.assertEqual(run_main("--root", str(root), "--out", str(out), "--now", NOW.isoformat()), 2)
+                self.assertEqual(run_main("--root", str(root), "--out", str(out), "--now", NOW.isoformat()), 0)
                 report = read_report(out)
                 self.assertEqual(report["completeness"]["deadline_coverage"], "partial")
                 self.assertEqual(report["deadlines"]["untracked_paths"], ["src/old.rs"])
                 self.assertEqual((report["deadlines"]["counts"]["untracked"], report["deadlines"]["counts"]["keep"]), (1, 0))
                 self.assertEqual(list(by_path(report)), [e["file"] for e in entries])
 
-    def test_c1_05_live_registry_matches_the_existing_parser(self) -> None:
+    def test_c1_05_registry_fixture_matches_the_existing_parser(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "scripts"))
         import generate_inventory_docs as inventory
 
-        # A copy keeps a faulty entry point from writing into the repository under test.
-        live = {rel: (REPO_ROOT / rel).read_bytes() for rel in (reporter.REGISTRY_PATH, reporter.METADATA_PATH)}
-        root = write_root(self.tmp / "live", "", None, live)
-        stamp = json.loads(live[reporter.METADATA_PATH])["refreshed_at"]
+        entries = [shrink("src/a.rs", "2026-10-01"),
+                   {"file": "src/keep.rs", "owner": "discord-relay", "decision": "keep",
+                    "keep_reason": "Shared cursor and relay identity form one lifecycle."}]
+        registry, metadata = registry_text(entries), metadata_text()
+        root = write_root(self.tmp / "fixture", registry, metadata)
+        stamp = json.loads(metadata)["refreshed_at"]
         # Far future: every valid shrink registration is overdue and therefore listed.
         self.assertEqual(run_main("--root", str(root), "--out", str(self.tmp / "far"), "--now", "2200-01-01T00:00:00Z"), 0)
         report = read_report(self.tmp / "far")
         self.assertEqual(report["completeness"]["diagnostics"], [])
-        _grandfathered, entries, _baseline = inventory.load_giant_file_registry()
+        with mock.patch.object(inventory, "GIANT_FILE_REGISTRY", root / reporter.REGISTRY_PATH):
+            _grandfathered, entries, _baseline = inventory.load_giant_file_registry()
         expected = {(e["file"], e["owner"], e["deadline"], e["decompose_issue"])
                     for e in entries if e.get("decision", "shrink") == "shrink"}
         self.assertEqual({(r["path"], r["owner"], r["deadline"], r["issue"]) for r in report["deadlines"]["rows"]},
@@ -285,7 +301,7 @@ class RegistrySemantics(FixtureCase):
                               ("number", {"state": 7}), ("missing", {})):
             with self.subTest(state=label):
                 rc, report = run_report(registry, metadata_text([{"number": 4712, **record}]))
-                self.assertEqual(rc, 2)
+                self.assertEqual(rc, 0)
                 self.assertEqual(by_path(report)["src/a.rs"]["snapshot_issue_state"], "UNKNOWN")
                 self.assertEqual(report["completeness"]["status"], "partial")
                 self.assertIn("issue #4712 record", problems(report))
@@ -297,7 +313,7 @@ class RegistrySemantics(FixtureCase):
             shrink("src/far.rs", "2099-01-01", decompose_issue="#4519"),
             shrink("src/bad_date.rs", "2026-02-30"),
         ]), metadata_text())
-        self.assertEqual(run_main("--root", str(root), "--out", str(self.tmp / "out"), "--now", NOW.isoformat()), 2)
+        self.assertEqual(run_main("--root", str(root), "--out", str(self.tmp / "out"), "--now", NOW.isoformat()), 0)
         report = read_report(self.tmp / "out")
         self.assertEqual(list(by_path(report)), ["src/good.rs"])
         self.assertEqual(report["deadlines"]["counts"]["invalid"], 3)
@@ -311,7 +327,7 @@ class RegistrySemantics(FixtureCase):
                                      grandfathered=["src/b.rs"]),
                        metadata_text([{"number": 4712, "state": "closed"}, {"number": 4712, "state": "open"},
                                       {"number": 5000, "state": "open"}]))
-        self.assertEqual((rc, by_path(report)), (2, {}))
+        self.assertEqual((rc, by_path(report)), (0, {}))
         self.assertEqual(report["deadlines"]["counts"]["invalid"], 4)
         self.assertIn("issue #4712 is recorded more than once", problems(report))
         repeated_key = main_report(registry_text([shrink("src/a.rs", "2026-10-20")]),
@@ -563,14 +579,25 @@ class WorkflowSimulation(FixtureCase):
         self.assertIn("Completeness: **complete**", run["summary"])
 
     def test_c1_11_reporter_exit_2_still_records_publishes_and_uploads(self) -> None:
-        root, sha = self.workspace(registry_text([shrink("src/a.rs", "2099-12-31"), shrink("src/b.rs", "bad")]))
+        root, sha = self.workspace('grandfathered = [\n')
         run = self.simulate(root, sha)
         self.assertEqual(run["outcomes"]["report"], "failure")
         for step in ("postcheck", "execution", "summary", "upload", "retention"):
             self.assertNotEqual(run["outcomes"][step], "skipped", step)
         self.assertEqual(run["conclusion"], "failure")
-        self.assertIn("Completeness: **partial**", run["summary"])
+        self.assertIn("Completeness: **unavailable**", run["summary"])
         self.assertIn("report=failure\npostcheck=success\nreport_generated=yes", run["execution"])
+
+    def test_c1_11_planning_drift_warns_without_failing_workflow(self) -> None:
+        root, sha = self.workspace(registry_text([shrink("src/a.rs", "2099-12-31"),
+                                                  shrink("src/b.rs", "bad")]))
+        run = self.simulate(root, sha)
+        self.assertEqual(run["conclusion"], "success")
+        self.assertEqual(run["outcomes"]["report"], "success")
+        self.assertIn("Completeness: **partial**", run["summary"])
+        self.assertIn("report=success\npostcheck=success\nreport_generated=yes", run["execution"])
+        self.assertIn("WARNING: giant-file planning: src/b.rs",
+                      (run["out"] / "reporter.log").read_text())
 
     def test_c1_11_setup_failure_publishes_report_not_generated(self) -> None:
         root, sha = self.workspace(registry_text([shrink("src/a.rs", "2099-12-31")]))

@@ -1,38 +1,27 @@
-# Discord text-command policy
+# Discord command policy
 
-Text commands use a registered command ID, an explicit text-surface status, and
-the existing risk policy before the named handler is selected. This is separate
-from the intake authentication/admission checks, which still apply.
+Slash commands carry a risk tier, checked before the handler runs. This is
+separate from the intake authentication/admission checks, which still apply.
 
-| Risk | Existing permission contract |
+| Risk | Permission contract |
 | --- | --- |
 | ReadOnly | Existing authorized users |
 | Mutating | Existing authorized users; not globally owner-only |
-| ShellOrToolGrant | Bot owner and the existing explicit-enable setting |
+| ShellOrToolGrant | Bot owner and the explicit-enable setting (no command uses this tier today) |
 | CredentialSystem | Bot owner; no additional explicit-enable requirement |
 
-The environment opt-in is read by production and supplied as a boolean to the
-pure selection function. Existing named handlers retain their validation,
-timeouts, authorization checks, and argument handling.
+## Agent text commands
 
-`!vc` remains an implemented Mutating command with its existing downstream voice
-authorization check. `!cc` and `!skill` retain their shared handler and the
-existing `clear`, `stop`, `pwd`, `health`, `status`, `inflight`, and `help` behavior.
-The `clear` sub-alias gives guidance; it does not silently execute a clear.
+Agents cannot run slash commands, so three session controls stay as plain
+messages, mainly for the announce bot that agent-to-agent sends post as:
 
-The policy names `!sessions`, `!receipt`, `!usage`, `!model`, `!fast`, `!goals`,
-`!deletesession`, and `!restart` have no implemented text handler and are denied
-on the text surface. Their registered slash surfaces are unchanged.
+- `!clear` runs the `/clear` handler.
+- `!restart` runs the `/restart` handler.
+- `!stop` runs the native stop path `/stop` shares.
 
-Unknown and unavailable bang-prefixed text commands are consumed with a denial
-attempt, including when preceded by a leading bot mention. They are not
-reinterpreted as chat, queued provider instructions, or arbitrary process input.
-The legacy raw-command entry point remains for internal compatibility but only
-attempts a fixed denial; its generic execution capability has been removed.
-Ordinary non-command chat and supported provider-native input are unchanged.
-
-Regression evidence is intentionally limited: pure selection/risk tests check
-decisions, the actual exhaustive enum match supplies compile-time coverage, and
-bounded source tests check production wiring and preserved aliases. These tests
-do not invoke the live dispatcher, high-risk handlers, Discord, or an executor,
-and do not claim dynamic execution or reply-delivery coverage.
+A message is a text command only when its first word, after an optional leading
+bot mention, is exactly one of these names. The other `!` commands were removed;
+a message whose first word is a removed name gets a one-line answer naming the
+slash command to use instead, and runs nothing. Any other `!` text is ordinary
+chat. The owner-only `!herdr consent retry` is the Herdr consent flow's own
+command and keeps its exact form.

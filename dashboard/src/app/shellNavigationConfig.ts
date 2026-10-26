@@ -5,6 +5,7 @@ export const MOBILE_PRIMARY_ROUTE_IDS: AppRouteId[] = [
   "home",
   "stats",
   "kanban",
+  "campaigns",
 ];
 
 export const SIDEBAR_SECTION_ORDER: Array<{

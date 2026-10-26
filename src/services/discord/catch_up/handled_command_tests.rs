@@ -39,7 +39,7 @@ async fn authorize(shared: &discord::SharedData) {
 }
 
 /// Replied `!clear`/`!stop`/mention-led `!pwd` were consumed live; a reply to another
-/// message or from another bot is no evidence for `!status`.
+/// message or from another bot is no evidence for `!status`, and replied `!` chat recovers.
 #[tokio::test(flavor = "current_thread")]
 async fn sweep_skips_replied_commands_and_recovers_everything_else() {
     let root = scoped_runtime_root();
@@ -53,6 +53,7 @@ async fn sweep_skips_replied_commands_and_recovers_everything_else() {
     let (status, other_bot_answer) = (id(5, 70), id(12, 69));
     let (plain, plain_answer) = (id(6, 60), id(7, 59));
     let (mentioned, pwd_answer) = (id(8, 50), id(9, 49));
+    let (bang_chat, bang_answer) = (id(13, 45), id(14, 44));
     let (slash, dispatch) = (id(10, 40), id(11, 30));
     write_checkpoint(root.path(), &provider, channel_id, clear.get() - 1);
 
@@ -73,6 +74,8 @@ async fn sweep_skips_replied_commands_and_recovers_everything_else() {
         reply_to(channel_id, plain_answer, plain, "진행할게요."),
         discord_message(channel_id, mentioned, HUMAN_ID, false, "<@9001> !pwd"),
         reply_to(channel_id, pwd_answer, mentioned, "`/tmp/ws`"),
+        discord_message(channel_id, bang_chat, HUMAN_ID, false, "!clearall 해 줘"),
+        reply_to(channel_id, bang_answer, bang_chat, "진행할게요."),
         discord_message(channel_id, slash, HUMAN_ID, false, "/model gpt"),
         discord_message(channel_id, dispatch, INFO_BOT_ID, true, DISPATCH),
     ];
@@ -86,7 +89,7 @@ async fn sweep_skips_replied_commands_and_recovers_everything_else() {
 
     assert_eq!(
         queued_sources(&shared, channel_id).await,
-        vec![status, plain, slash, dispatch],
+        vec![status, plain, bang_chat, slash, dispatch],
         "replied commands are consumed; unanswered commands and other input recover"
     );
     assert_eq!(

@@ -1706,7 +1706,7 @@ test.describe("Dashboard smoke tests", () => {
 
     await expect(page.getByTestId("app-mobile-tabbar")).toBeVisible();
     await expect(page.getByTestId("app-sidebar-nav")).toHaveCount(0);
-    await expect(page.getByTestId("app-mobile-tabbar").locator("button")).toHaveCount(5);
+    await expect(page.getByTestId("app-mobile-tabbar").locator("button")).toHaveCount(6);
 
     await page.setViewportSize({ width: 900, height: 900 });
 
@@ -1714,18 +1714,19 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("app-mobile-tabbar")).toHaveCount(0);
   });
 
-  test("responsive: mobile viewport shows 5-tab bar and opens the More menu", async ({ page }, testInfo) => {
+  test("responsive: mobile viewport shows 6-tab bar and opens the More menu", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/home");
 
     const bottomNav = page.getByTestId("app-mobile-tabbar");
     const topbar = page.getByTestId("topbar");
     await expect(bottomNav).toBeVisible();
-    await expect(bottomNav.locator("button")).toHaveCount(5);
+    await expect(bottomNav.locator("button")).toHaveCount(6);
     await expect(page.getByTestId("app-mobile-tab-voice")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-home")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-stats")).toBeVisible();
     await expect(page.getByTestId("app-mobile-tab-kanban")).toBeVisible();
+    await expect(page.getByTestId("app-mobile-tab-campaigns")).toBeVisible();
 
     const tabMetrics = await bottomNav.locator("button").evaluateAll((buttons) =>
       buttons.map((button) => {
@@ -1771,6 +1772,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(moreMenu.getByRole("button", { name: /회의|Meetings/ })).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /업적|Achievements/ })).toBeVisible();
     await expect(moreMenu.getByRole("button", { name: /설정|Settings/ })).toBeVisible();
+    await expect(moreMenu.getByRole("button", { name: /캠페인|Campaigns/ })).toHaveCount(0);
 
     const moreMenuBackdropZIndex = await moreMenu.evaluate((element) =>
       Number(window.getComputedStyle(element.parentElement as HTMLElement).zIndex),
@@ -1873,6 +1875,11 @@ test.describe("Dashboard smoke tests", () => {
 
     await page.getByTestId("app-mobile-tab-kanban").click();
     await expect(page).toHaveURL(/\/kanban$/);
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByTestId("app-mobile-tab-campaigns").click();
+    await expect(page).toHaveURL(/\/campaigns$/);
+    await expect(page.getByTestId("app-mobile-tab-campaigns")).toHaveAttribute("aria-current", "page");
     await expectNoHorizontalOverflow(page);
 
     await page.getByTestId("app-mobile-tab-voice").click();

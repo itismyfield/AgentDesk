@@ -101,7 +101,7 @@ if false && pct >= ctx_cfg.compact_pct && !is_prompt_too_long && compact_cooldow
 | 주장 | 확인 결과 |
 |---|---|
 | `tmux_watcher/**` 네임스페이스 캡 = **700** (1000 아님) | ✅ `scripts/audit_maintainability_config.toml:35` |
-| hotfile cap 3571 / giant baseline 3571 / 실제 3569 → **여유 2** | ✅ `hotfile_ratchet.toml:123`, `audit_maintainability_giant_baseline.toml:143`, `wc -l` |
+| hotfile cap 3571 / giant baseline 3571 / 실제 3569 → **여유 2** | ✅ `hotfile_ratchet.toml`, `audit_maintainability_giant_baseline.toml:143`, `wc -l` |
 | #4712가 tmux_watcher.rs를 #4229에 위임 | ✅ 댓글 본문 직접 확인 |
 | registry는 `#4712`로 태그 | ✅ `giant_file_registry.toml:636` |
 | **PR #4972 OPEN + 같은 핫파일 + 3개 래칫 매니페스트 전부 수정** | ✅ files: `tmux_watcher.rs`, `hotfile_ratchet.toml`, `audit_maintainability_giant_baseline.toml`, `ratchet_admission_history.toml`, `test_lane_coverage_baseline.txt`, `outbound/delivery_record.rs`, `tmux_watcher/commit_decisions.rs`, `justfile`, `tests/test_fast_check_ci_wiring.py` |
@@ -118,7 +118,7 @@ if false && pct >= ctx_cfg.compact_pct && !is_prompt_too_long && compact_cooldow
 
 ```
 src/services/discord/tmux_watcher.rs                     3569 raw
-scripts/hotfile_ratchet.toml:123                         3571  (raw cap)   → 여유 2
+scripts/hotfile_ratchet.toml                         3571  (raw cap)   → 여유 2
 scripts/audit_maintainability_giant_baseline.toml:143    3571  (prod cap)  → 여유 2
 scripts/audit_maintainability_config.toml:35             tmux_watcher/** = 700
 ```
@@ -278,7 +278,7 @@ new_cap = measured_after_slice + R      (R = 60)
 
 ## 5. 핫파일 동시성 판정
 
-**루트를 건드리는 모든 슬라이스는 엄격히 직렬.** `tmux_watcher.rs`는 `check_hotfile_ratchet.py`의 `REQUIRED_HOTFILES`이자 #3016 동시편집 금지 4파일 중 하나다. **"disjoint" 슬라이스끼리도 병렬 불가** — 모든 슬라이스가 `hotfile_ratchet.toml:123`과 `audit_maintainability_giant_baseline.toml:143`이라는 **단일 물리 라인**(전체 주석 이력을 담은)을 편집하기 때문이다.
+**루트를 건드리는 모든 슬라이스는 엄격히 직렬.** `tmux_watcher.rs`는 `check_hotfile_ratchet.py`의 `REQUIRED_HOTFILES`이자 #3016 동시편집 금지 4파일 중 하나다. **"disjoint" 슬라이스끼리도 병렬 불가** — 모든 슬라이스가 `hotfile_ratchet.toml`과 `audit_maintainability_giant_baseline.toml:143`이라는 **단일 물리 라인**(전체 주석 이력을 담은)을 편집하기 때문이다.
 
 **병렬 가능한 것**: 이미 추출된 자식 모듈 내부 작업(전부 non-hot) / #4973 L1+L2 / 다른 27개 #4712 항목(`session_relay_sink.rs`, `turn_finalizer.rs` 제외 — 별도 hot).
 
@@ -373,7 +373,7 @@ use crate::services::discord::tmux::advance_watcher_confirmed_end as _;
 ## 구현 시 핵심 파일
 
 - `src/services/discord/tmux_watcher.rs` (핫파일; S-A는 `3425–3552` 이동)
-- `scripts/hotfile_ratchet.toml:123` (raw cap `3571`)
+- `scripts/hotfile_ratchet.toml` (raw cap `3571`)
 - `scripts/audit_maintainability_giant_baseline.toml:143` (prod cap `3571`)
 - `scripts/test_lane_coverage_baseline.txt` + `scripts/check_test_lane_coverage.py` (§6.1 하드 게이트)
 - `src/services/discord/tmux_watcher/liveness.rs:666-691` (W8을 제약하는 경로 결합 계약 앵커)

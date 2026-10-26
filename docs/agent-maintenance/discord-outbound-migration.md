@@ -352,7 +352,6 @@ interaction tokens or ephemeral visibility.
 | `src/services/discord/commands/skill.rs:141, 158, 161, 187, 206, 209, 247, 314, 321, 330` | `/skill` family ACK | excluded |
 | `src/services/discord/commands/control.rs` (`cmd_stop`, `cmd_cancel_queued`, `cmd_clear`) | `/stop`, `/cancel-queued`, `/clear` ACK | excluded |
 | `src/services/discord/commands/config.rs` (`cmd_allowall`) | `/allowall` ACK | excluded |
-| `src/services/discord/commands/text_commands.rs:1239` | text-command running banner | excluded |
 | `src/services/discord/commands/model_picker.rs:60, 132` | `/model` picker | excluded |
 | `src/services/discord/router/intake_gate.rs:960, 1071` | "duplicate-queue" + "drain-pending" notices | candidate — these are bot notifications, not interaction tokens. Triage: **low priority**, very short fixed strings, no length risk. |
 
@@ -366,10 +365,7 @@ fallback policy). Excluded by #1175.
 | File:line | Notes | Triage |
 |---|---|---|
 | `src/services/discord/discord_io.rs` (`send_file_to_channel`) | CLI `--discord-sendfile` | excluded — attachment is the payload |
-| `src/services/discord/commands/text_commands.rs` (`handle_text_command_with_uploads`, file branch) | text-command file output (moved out of `router/message_handler.rs`) | excluded |
-| `src/services/discord/commands/text_commands.rs:975` | text-command attached output | excluded |
 | `src/services/discord/outbound/manual_delivery.rs` (`post_text_attachment`) | announce-bot oversize fallback | excluded — attachment fallback that remains a compatibility shim while the v3 outbound text contract truncates first |
-| `src/services/discord/commands/text_commands.rs` (`handle_text_command_with_uploads`, skill branch) | skill-running banner (moved out of `router/message_handler.rs`) | excluded |
 | `src/services/discord/commands/skill.rs:273, 339` | skill announce | excluded |
 
 Total attachments-bucket: **7 callsites**.

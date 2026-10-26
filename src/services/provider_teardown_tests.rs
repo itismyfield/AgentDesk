@@ -76,7 +76,10 @@ pub(crate) mod test_support {
                  echo \"$*\" >> \"$d/calls\"\ncase \"$1\" in\n\
                  has-session) [ -f \"$d/probe_fails\" ] && {{ echo \"error connecting to $d/socket (Permission denied)\" >&2; exit 1; }}\n\
                  [ -f \"$d/missing\" ] && {{ echo \"can't find session: $3\" >&2; exit 1; }}; exit 0 ;;\nlist-panes) if [ -f \"$d/pane_dead\" ]; then echo 1; else echo 0; fi; exit 0 ;;\n\
-                 display-message) [ -f \"$d/pane_pid\" ] && {{ cat \"$d/pane_pid\"; exit 0; }} ;;\n\
+                 display-message) for adk_fake_arg do last=\"$adk_fake_arg\"; done; \n\
+                 if [ \"$last\" = '#{{pane_dead}}' ]; then [ -f \"$d/probe_fails\" ] && exit 1; \n\
+                 if [ -f \"$d/pane_dead\" ] || [ -f \"$d/missing\" ]; then echo 1; else echo 0; fi; exit 0; fi; \n\
+                 [ -f \"$d/pane_pid\" ] && {{ cat \"$d/pane_pid\"; exit 0; }} ;;\n\
                  -V) [ -f \"$d/launch_enabled\" ] && {{ echo tmux 3.5a; exit 0; }} ;;\n\
                  capture-pane) if [ -f \"$d/launch_enabled\" ]; then cat \"$d/ready\"; else echo pane; fi; exit 0 ;;\n\
                  kill-session) [ -f \"$(cat \"$d/reason_path\")\" ] && echo reason-before-kill >> \"$d/calls\"\n\
