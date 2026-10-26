@@ -62,6 +62,24 @@ pub fn process_stream_line(
     sender: &Sender<StreamMessage>,
     state: &mut StreamLineState,
 ) -> bool {
+    process_stream_line_with_body_policy(line, sender, state, false)
+}
+
+/// Native TUI transcripts expose their visible blocks as ordered body frames.
+pub(crate) fn process_claude_transcript_line(
+    line: &str,
+    sender: &Sender<StreamMessage>,
+    state: &mut StreamLineState,
+) -> bool {
+    process_stream_line_with_body_policy(line, sender, state, true)
+}
+
+fn process_stream_line_with_body_policy(
+    line: &str,
+    sender: &Sender<StreamMessage>,
+    state: &mut StreamLineState,
+    tui_transcript: bool,
+) -> bool {
     if line.trim().is_empty() {
         return true;
     }
@@ -177,6 +195,39 @@ pub fn process_stream_line(
         return false;
     }
 
+    if tui_transcript && msg_type == "assistant" {
+        if let Some(blocks) = json.pointer("/message/content").and_then(Value::as_array) {
+            for block in blocks {
+                let message =
+                    crate::services::claude_tui::transcript_tail::visible_assistant_block_text(
+                        block,
+                    )
+                    .filter(|text| !text.is_empty())
+                    .map(|text| StreamMessage::Text {
+                        content: text.to_owned(),
+                    })
+                    .or_else(|| {
+                        match block.get("type").and_then(Value::as_str) {
+                            Some("tool_use") => parse_claude_tool_use(block),
+                            Some("thinking") => Some(StreamMessage::redacted_thinking()),
+                            _ => None,
+                        }
+                    });
+                let Some(message) = message else { continue };
+                let bytes = match &message {
+                    StreamMessage::Text { content } => content.len() as u64,
+                    _ => 0,
+                };
+                if sender.send(message).is_err() {
+                    return false;
+                }
+                state.forwarded_message_count += 1;
+                state.forwarded_assistant_text_bytes += bytes;
+            }
+        }
+        return true;
+    }
+
     let Some(message) = parse_stream_message_with_state(&json, state) else {
         return true;
     };
@@ -242,6 +293,23 @@ pub fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
 
 fn json_str<'a>(json: &'a Value, key: &str) -> Option<&'a str> {
     json.get(key).and_then(Value::as_str)
+}
+
+fn parse_claude_tool_use(item: &Value) -> Option<StreamMessage> {
+    let name = item
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())?;
+    let input = item
+        .get("input")
+        .map(|value| serde_json::to_string_pretty(value).unwrap_or_default())
+        .unwrap_or_default();
+    let tool_use_id = item.get("id").and_then(Value::as_str).map(str::to_owned);
+    Some(StreamMessage::ToolUse {
+        name: name.to_owned(),
+        input,
+        tool_use_id,
+    })
 }
 
 pub(crate) fn parse_stream_message_with_state(
@@ -324,26 +392,8 @@ pub(crate) fn parse_stream_message_with_state(
                         }
                     }
                     "tool_use" => {
-                        let name = item
-                            .get("name")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("");
-                        if !name.is_empty() {
-                            let input = item
-                                .get("input")
-                                .map(|value| {
-                                    serde_json::to_string_pretty(value).unwrap_or_default()
-                                })
-                                .unwrap_or_default();
-                            let tool_use_id = item
-                                .get("id")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_string);
-                            return Some(StreamMessage::ToolUse {
-                                name: name.to_string(),
-                                input,
-                                tool_use_id,
-                            });
+                        if let Some(message) = parse_claude_tool_use(item) {
+                            return Some(message);
                         }
                     }
                     "thinking" => {

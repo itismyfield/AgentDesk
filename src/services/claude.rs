@@ -46,8 +46,9 @@ use crate::services::session_backend::{
     ReadHarvestStats, StreamLineState, emit_status_events_from_stream_json,
     insert_process_session_and_mark_active_turn, mark_process_session_active_turn,
     observe_stream_context, parse_assistant_extra_tool_uses, parse_stream_message_with_state,
-    process_session_available_for_followup, process_session_probe, read_output_file_until_result,
-    read_output_file_until_result_with_harvest, remove_process_session, send_process_session_input,
+    process_session_available_for_followup, process_session_probe,
+    read_claude_tui_output_file_until_result_with_harvest as read_output_file_until_result_with_harvest,
+    read_output_file_until_result, remove_process_session, send_process_session_input,
     terminate_process_handle,
 };
 mod active_usage;

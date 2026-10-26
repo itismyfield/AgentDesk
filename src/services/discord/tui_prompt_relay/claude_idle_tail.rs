@@ -347,7 +347,7 @@ pub(super) async fn run_claude_idle_response_tail(
         .name("claude_idle_response_tail_reader".to_string())
         .spawn(move || {
             let read_result =
-                crate::services::session_backend::read_output_file_until_result_with_harvest(
+                crate::services::session_backend::read_claude_tui_output_file_until_result_with_harvest(
                     &transcript_string,
                     start_offset,
                     reader_tx,

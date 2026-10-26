@@ -3,8 +3,22 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use crate::services::agent_protocol::StreamMessage;
-use crate::services::session_backend::{StreamLineState, process_stream_line};
+use crate::services::session_backend::{
+    StreamLineState, process_claude_transcript_line as process_stream_line,
+};
 use chrono::{DateTime, Utc};
+
+/// Visible assistant prose, preserving the block's text and excluding signatures and blank thinking.
+pub(crate) fn visible_assistant_block_text(block: &serde_json::Value) -> Option<&str> {
+    match block.get("type").and_then(serde_json::Value::as_str) {
+        Some("text") => block.get("text").and_then(serde_json::Value::as_str),
+        Some("thinking") => block
+            .get("thinking")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.trim().is_empty()),
+        _ => None,
+    }
+}
 
 // #3034: test-only replay surface — `replay_transcript_file` and its outcome
 // type are exercised by the transcript-parser regression suite but not wired to

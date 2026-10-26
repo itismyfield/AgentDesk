@@ -44,14 +44,14 @@ fn resumed(seq: u64, tmux: &str, source: &SourceId) -> BindingEvent {
     hop_at(seq, tmux, Some(source), source, BindingCause::Resume, &hook)
 }
 
-/// Six 256 KiB thinking records, longer than one read, that post nothing.
+/// Six signature-only records span more than one read and post nothing.
 fn backlog(first: u32) -> Vec<u8> {
     let thinking = |i: u32| {
         let text = "x".repeat(256 << 10);
         codex_line(
             serde_json::json!({"type": "assistant", "uuid": format!("u-t{i}"),
             "apiBlockIndex": 0, "message": {"id": format!("t{i}"),
-            "content": [{"type": "thinking", "thinking": text}]}}),
+            "content": [{"type": "thinking", "thinking": "", "signature": text}]}}),
         )
     };
     let lines: Vec<u8> = (first..first + 6).flat_map(thinking).collect();

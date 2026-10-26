@@ -81,8 +81,16 @@ fn claude_blocks(record: &Value) -> Vec<RecordFact> {
     let mut facts = Vec::new();
     for (position, block) in (0u64..).zip(blocks) {
         let (kind, content) = match str_at(block, "type") {
+            Some("thinking")
+                if crate::services::claude_tui::transcript_tail::visible_assistant_block_text(
+                    block,
+                )
+                .is_some() =>
+            {
+                (UnitKind::Body, claude_body(resumed, block))
+            }
             Some("thinking" | "redacted_thinking") => continue,
-            Some("text") => (UnitKind::Body, claude_text(resumed, block)),
+            Some("text") => (UnitKind::Body, claude_body(resumed, block)),
             Some("tool_use") => (UnitKind::Tool, tool_call(block, &["input"])),
             other => return vec![blocked(&format!("unsupported assistant block {other:?}"))],
         };
@@ -125,8 +133,9 @@ impl Drop for V3Rule {
 
 /// A cold resume writes a synthetic non-error row holding only TUI chrome; Legacy strips it, so it
 /// is not posted. API error rows always post.
-fn claude_text(resumed: bool, block: &Value) -> UnitContent {
-    let text = str_at(block, "text").unwrap_or("");
+fn claude_body(resumed: bool, block: &Value) -> UnitContent {
+    let text = crate::services::claude_tui::transcript_tail::visible_assistant_block_text(block)
+        .unwrap_or("");
     if resumed && is_standalone_tui_response_chrome(text) {
         return UnitContent::Excluded("claude_synthetic_resume_chrome");
     }
@@ -342,13 +351,12 @@ mod tests {
         }
     }
 
-    /// A row holding a whole message keys each block from its `apiBlockIndex`, exactly as one-block
-    /// rows of that message would; thinking yields nothing and an unplaceable block blocks the row.
+    /// Whole-message rows preserve each block's native index; empty thinking yields no unit.
     #[test]
     fn claude_multi_block_row_keys_each_block_like_one_block_rows() {
         use super::{RecordFact, UnitContent, classify};
         use crate::services::tui_o::shadow::UnitKind::{Body, Tool};
-        let thinking = json!({"type": "thinking", "thinking": "t", "signature": "s"});
+        let thinking = json!({"type": "thinking", "thinking": "", "signature": "s"});
         let tool = json!({"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"c": 1}});
         let text = |text: &str| json!({"type": "text", "text": text});
         let row = |index: Value, content: Vec<Value>| {
