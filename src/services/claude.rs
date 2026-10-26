@@ -1398,7 +1398,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 String::new(),
             )
         };
-
         debug_log(&format!(
             "Sending error: message={}, exit_code={:?}",
             message,
@@ -1412,6 +1411,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         };
         #[cfg(not(unix))]
         let exit_signal: Option<i32> = None;
+        tap.error(&message, &stderr_msg);
         let send_ok = sender
             .send(StreamMessage::Error {
                 message: message.clone(),
@@ -1420,7 +1420,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 exit_code,
             })
             .is_ok();
-        tap.finish(send_ok, drained);
+        tap.finish_error(send_ok, drained, &message, &stderr_msg);
         log_producer_exit(
             "child_exit_error",
             last_session_id.as_deref(),

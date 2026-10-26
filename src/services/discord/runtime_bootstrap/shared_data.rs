@@ -153,6 +153,7 @@ pub(super) fn run_bot_build_shared_data(
         // `Instant::now` ↔ `TurnFinalizer::spawn` ↔ `broadcast::channel`) is
         // preserved.
         restart: RestartLifecycle {
+            replay_restart: std::sync::OnceLock::new(),
             recovering_channels: dashmap::DashMap::new(),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             intake_worker_lifecycle:

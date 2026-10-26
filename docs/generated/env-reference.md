@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 132
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 135
 - Platform and third-party variables: 30
 
 ## AgentDesk variables
@@ -53,6 +53,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_TEST_FRAME_LEDGER_PATH` | `src/services/tui_input/human_frame/history.rs` | Test subprocesses reopen their parent's temporary ledger to verify restart replay. |
 | `ADK_TEST_HOME_COMMAND_MUTANT` | `src/server/routes/queue_api.rs` | Cancel the active turn in a channel. |
 | `ADK_TEST_INPUT_MUTANT` | `src/services/tui_input/mod.rs` | A named fault a test run switches on to check that the live input tests catch it. |
+| `ADK_TEST_PROCESS_WRAPPER_EXE` | `src/services/claude/process_session_launch.rs` | Execute Claude via ProcessBackend (direct child process, no tmux). |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs` |  |
 | `ADK_TURN_PRESENCE_TAIL` | `src/services/discord/turn_presence/activity/tail.rs` |  |
 | `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
@@ -140,6 +141,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_SELF_WATCHDOG_MODE` | `src/services/discord/health/recovery/self_watchdog.rs` |  |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs` |  |
+| `AGENTDESK_STALE_REPLAY_CHANNELS` | `src/services/discord/replay_policy/activation.rs` |  |
+| `AGENTDESK_STALE_REPLAY_V1` | `src/services/discord/replay_policy/activation.rs` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
 | `AGENTDESK_TEST_CODEX_BINDING_ROOT` | `src/services/tui_prompt_dedupe/binding_events/codex.rs` | Provider workers inherit only a fixture's explicit test root, never the live runtime root. |
 | `AGENTDESK_TEST_PG_RECLAIM_DENY_SERVERS` | `src/db/postgres/test_db_reclaim.rs` |  |
