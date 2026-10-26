@@ -798,13 +798,10 @@ pub(in crate::services::discord) async fn handle_event(
                 return Ok(());
             }
 
-            // ── Text commands (!start, !meeting, !stop, !clear) ──
-            // Strip leading bot mention to get the actual command text.
-            //
-            // #2044 F11: the helper uses a constant regex compiled once via
-            // `LazyLock`, avoiding a per-message compile cost in the hot path.
+            // Agent text commands and removed-name answers, read after the leading bot mention;
+            // the strip's regex is compiled once, keeping this hot path cheap.
             let cmd_text = strip_leading_bot_mention(text);
-            if cmd_text.starts_with('!') {
+            if super::super::catch_up::handled_command::is_text_command(&cmd_text) {
                 // Recorded before the handler, so even a silent or failing command is
                 // settled by catch-up instead of replaying as a provider prompt.
                 super::super::catch_up::consumed_commands::record(
@@ -813,42 +810,20 @@ pub(in crate::services::discord) async fn handle_event(
                     new_message.id,
                 )
                 .await;
-                // Skill prompts enter central admission with their upload paths
-                // still in the submission. Do not inject them into this
-                // gateway's local session before owner routing has admitted
-                // local execution.
-                let mut command_parts = cmd_text.split_whitespace();
-                let command = command_parts.next().unwrap_or_default();
-                let skill_name = command_parts.next().unwrap_or_default();
-                let is_skill_command = matches!(command, "!skill" | "!cc")
-                    && !skill_name.is_empty()
-                    && !matches!(
-                        skill_name,
-                        "clear" | "stop" | "pwd" | "health" | "status" | "inflight" | "help"
-                    );
-                if !is_skill_command {
-                    upload_records_appended_to_session =
-                        append_pending_uploads(&data.shared, channel_id, &upload_records).await;
-                }
+                upload_records_appended_to_session =
+                    append_pending_uploads(&data.shared, channel_id, &upload_records).await;
                 let handled = super::message_handler::handle_text_command(
                     ctx,
                     new_message,
                     &data,
                     channel_id,
                     &cmd_text,
-                    &upload_records,
-                    &mut attachment_local_permit,
                 )
                 .await?;
+                // An unhandled command, such as a consent retry Herdr does not serve here, is chat.
                 if handled {
-                    if (!is_skill_command || attachment_local_permit.is_some())
-                        && !upload_records_appended_to_session
-                    {
-                        let _ =
-                            append_pending_uploads(&data.shared, channel_id, &upload_records).await;
-                    }
+                    return Ok(());
                 }
-                return Ok(());
             }
 
             // Auto-restore session (for threads, fall back to parent channel's session)
@@ -1426,21 +1401,6 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             }
 
-            // Legacy command boundary: deny only; never reinterpret text as execution.
-            if text.starts_with('!') {
-                if !upload_records_appended_to_session {
-                    let _ = append_pending_uploads(&data.shared, channel_id, &upload_records).await;
-                }
-                super::message_handler::handle_shell_command_raw(
-                    ctx,
-                    channel_id,
-                    text,
-                    &data.shared,
-                )
-                .await?;
-                return Ok(());
-            }
-
             // Regular text → Claude AI
             let ts = chrono::Local::now().format("%H:%M:%S");
             let preview = truncate_str(text, 60);
@@ -1588,15 +1548,5 @@ mod live_intake_preserve_wiring_tests {
     #[test]
     fn one_admission_guard_precedes_all_soft_intervention_entrypoints() {
         assert_eq!(admission_guard_gaps(INTAKE_GATE), Vec::<String>::new());
-    }
-}
-
-#[cfg(test)]
-mod command_recognition_tests {
-    #[test]
-    fn command_outcomes_end_before_restore_and_preserve_upload_conditions() {
-        use super::live_intake_preserve_wiring_tests::source_guard_tests as guard;
-        use guard::{INTAKE_GATE, command_boundary_gaps};
-        assert_eq!(command_boundary_gaps(INTAKE_GATE), Vec::<String>::new());
     }
 }

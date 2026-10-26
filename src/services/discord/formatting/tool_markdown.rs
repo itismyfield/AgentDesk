@@ -71,15 +71,6 @@ pub(in crate::services::discord) const ALL_TOOLS: &[(&str, &str, bool)] = &[
     ("ExitPlanMode", "Exit planning mode (interactive)", false),
 ];
 
-/// Tool info: (description, is_destructive)
-pub(in crate::services::discord) fn tool_info(name: &str) -> (&'static str, bool) {
-    ALL_TOOLS
-        .iter()
-        .find(|(n, _, _)| *n == name)
-        .map(|(_, desc, destr)| (*desc, *destr))
-        .unwrap_or(("Custom tool", false))
-}
-
 /// Map a user-provided tool name onto its canonical Claude Code tool name.
 pub(in crate::services::discord) fn canonical_tool_name(name: &str) -> Option<&'static str> {
     let trimmed = name.trim();
@@ -112,11 +103,6 @@ where
     }
 
     normalized
-}
-
-/// Format a risk badge for display
-pub(in crate::services::discord) fn risk_badge(destructive: bool) -> &'static str {
-    if destructive { "⚠️" } else { "" }
 }
 
 /// Claude Code built-in slash commands
