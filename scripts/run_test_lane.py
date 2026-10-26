@@ -15,12 +15,12 @@ already moved this repository's other identity pin off a scalar and onto a
 sorted manifest set comparison that names both sides of the diff; this wrapper
 follows the same convention.
 
-The wrapper therefore derives the id set the lane is *supposed* to run from the
-checked-in inventory manifest and compares it against the id set the run
+The wrapper therefore reads the id set the lane is *supposed* to run from the
+plan's ``--expected-ids`` file and compares it against the id set the run
 actually reported, naming every id on either side of the difference:
 
-1. **Selection identity** -- ``expected = (manifest - static-only + cargo-only)
-   - skipped``, compared as a set against ``executed | ignored``. A module that
+1. **Selection identity** -- the planned ids, compared as a set against
+   ``executed | ignored``. A module that
    stops compiling, a filter that quietly narrows, and a test that is deleted
    all surface as named missing ids instead of a smaller number.
 2. **Ignore identity** -- ``#[ignore]`` moves a test out of *executed* while
@@ -65,12 +65,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from check_test_target_integrity import (  # noqa: E402
-    LIB_INVENTORY_KNOWN_CARGO_ONLY,
-    expected_lib_static_only,
-    load_lib_inventory_manifest,
-)
 
 # In multi-threaded mode libtest emits a result as two unsynchronised writes --
 # `test <id> ... ` and then the verdict -- onto a stdout it shares with every
@@ -163,7 +157,7 @@ from check_test_target_integrity import (  # noqa: E402
 #   4. A nested child libtest prints its own `failures:` block to the same
 #      inherited stdout, and those ids are UNIONed into `declared_failures`
 #      with the parent's. If a child fails on an id the parent never selected,
-#      the lane fails naming an id absent from the manifest. This is the same
+#      the lane fails naming an id absent from the plan. This is the same
 #      re-execution path that forces `--max-summaries 2`, so it is reachable by
 #      construction rather than hypothetically. Fail-closed.
 #   5. Foreign text at the START of a segment that begins with a verdict word
@@ -361,30 +355,6 @@ def parse_ledger(path: Path, lane: str, today: _datetime.date
     return entries, errors
 
 
-def derive_expected_selection(manifest_path: Path, platform_name: str,
-                              skips: list[str]) -> tuple[frozenset[str], list[str]]:
-    """Derive the id set this lane must select, from the checked-in manifest.
-
-    The manifest is the *static* inventory. libtest lists what compiled for the
-    host, so the two differ by the exact, reviewed sets #5144 pinned; reuse
-    those constants rather than restating them.
-    """
-    try:
-        manifest_ids = load_lib_inventory_manifest(manifest_path)
-    except (OSError, ValueError) as error:
-        return frozenset(), [f"inventory manifest: {error}"]
-    static_only = expected_lib_static_only(platform_name)
-    if static_only is None:
-        return frozenset(), [
-            f"inventory manifest: unsupported platform {platform_name!r}; the "
-            "static-only set is reviewed data and cannot be guessed"
-        ]
-    runtime_ids = (manifest_ids - static_only) | LIB_INVENTORY_KNOWN_CARGO_ONLY
-    selected = {test_id for test_id in runtime_ids
-                if not any(skip in test_id for skip in skips)}
-    return frozenset(selected), []
-
-
 def declared_skips_in_command(command: list[str]) -> list[str]:
     """Extract `--skip <pat>` / `--skip=<pat>` from the libtest half."""
     found: list[str] = []
@@ -537,14 +507,14 @@ def verify_structure(outcome: Outcome, declared_ignored: set[str] | frozenset[st
         errors, "lane-missing (expected but never reported)",
         expected_selected - observed_selected,
         "The lane did not run tests it is declared to run. Restore the "
-        "selection, or regenerate the inventory manifest if the tests were "
+        "selection, or drop the ids from the plan if the tests were "
         "deliberately deleted.",
     )
     _report_set(
         errors, "lane-extra (reported but not expected)",
         observed_selected - expected_selected,
-        "The run reported ids the manifest does not contain. Regenerate the "
-        "inventory manifest and review the diff.",
+        "The run reported ids the plan does not contain. Narrow the command "
+        "or add the ids to the plan.",
     )
 
     # (2) Ignore identity -- `#[ignore]` must not be a silent exit from (1).
@@ -583,7 +553,7 @@ def verify_structure(outcome: Outcome, declared_ignored: set[str] | frozenset[st
             errors.append(
                 f"libtest reported {primary.selected} selected tests "
                 f"({primary.passed} passed + {primary.failed} failed + "
-                f"{primary.ignored} ignored) but the manifest derives "
+                f"{primary.ignored} ignored) but the plan expects "
                 f"{len(expected_selected)} for this lane."
             )
         # Cross-validate the parsed sets against libtest's own arithmetic.
@@ -726,24 +696,20 @@ def _print_summary(lane: str, counters: dict[str, int]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lane", required=True)
-    parser.add_argument("--inventory-manifest", type=Path,
-                        default=Path(__file__).resolve().parent
-                        / "lib_test_inventory_manifest.txt")
     parser.add_argument("--skip", action="append", default=[],
                         help="libtest --skip pattern this lane declares; must "
                              "match the command exactly")
     parser.add_argument("--max-summaries", type=int, default=1,
                         help="libtest 'test result:' lines this lane declares; "
                              "nested test-binary re-execution emits extras")
-    parser.add_argument("--platform", default=sys.platform)
     parser.add_argument("--ledger", type=Path,
                         default=Path(__file__).resolve().parent
                         / "known_test_failures.txt")
     parser.add_argument("--log", type=Path)
     parser.add_argument("--nested-declarations", type=Path,
                         help="validated parent/child declarations for inherited libtest output")
-    parser.add_argument("--expected-ids", type=Path,
-                        help="a selection plan's id set, replacing the manifest-derived one")
+    parser.add_argument("--expected-ids", type=Path, required=True,
+                        help="the selection plan's id set, one id per line")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
 
@@ -755,18 +721,14 @@ def main(argv: list[str] | None = None) -> int:
 
     today = _datetime.date.today()
     entries, ledger_errors = parse_ledger(args.ledger, args.lane, today)
-    if args.expected_ids is None:
-        expected_selected, manifest_errors = derive_expected_selection(
-            args.inventory_manifest, args.platform, args.skip)
-    else:
-        try:
-            expected_selected = frozenset(args.expected_ids.read_text("utf-8").split())
-            manifest_errors = []
-        except OSError as error:
-            expected_selected, manifest_errors = frozenset(), [f"expected ids: {error}"]
-        # A planned subset reports ignored only the declared ids it selected.
-        entries = [entry for entry in entries
-                   if entry.mode != "ignored" or entry.pattern in expected_selected]
+    try:
+        expected_selected = frozenset(args.expected_ids.read_text("utf-8").split())
+        plan_errors = []
+    except OSError as error:
+        expected_selected, plan_errors = frozenset(), [f"expected ids: {error}"]
+    # A planned subset reports ignored only the declared ids it selected.
+    entries = [entry for entry in entries
+               if entry.mode != "ignored" or entry.pattern in expected_selected]
 
     nested = None
     if args.nested_declarations is not None:
@@ -775,7 +737,7 @@ def main(argv: list[str] | None = None) -> int:
             import nested_libtest as nested
             nested.inherited_pairs(Path(__file__).resolve().parents[1], args.nested_declarations)
         except (OSError, ValueError) as error:
-            manifest_errors.append(f"nested declarations: {error}")
+            plan_errors.append(f"nested declarations: {error}")
 
     # A lane that declares fewer skips than it executes would shrink its own
     # expectation to match whatever it chose to run. Refuse before running.
@@ -787,11 +749,11 @@ def main(argv: list[str] | None = None) -> int:
             f"--skip {sorted(command_skips)}; the adjudicator must be told the "
             "same selection the command executes"
         )
-    if not expected_selected and not manifest_errors:
+    if not expected_selected and not plan_errors:
         skip_errors.append("the derived expectation is empty; a lane that may "
                            "run zero tests cannot prove it ran")
 
-    startup_errors = ledger_errors + manifest_errors + skip_errors
+    startup_errors = ledger_errors + plan_errors + skip_errors
     if startup_errors:
         for error in startup_errors:
             print(f"ERROR {error}", file=sys.stderr)
@@ -810,7 +772,7 @@ def main(argv: list[str] | None = None) -> int:
         errors.extend(nested.validate_execution(Path(__file__).resolve().parents[1],
                                                expected_selected, outcome.executed,
                                                args.nested_declarations))
-    if args.expected_ids is not None and not counters["executed"]:
+    if not counters["executed"]:
         errors.append("no planned test executed; a plan whose ids are all ignored proves nothing")
     for warning in warnings:
         print(f"::warning::{warning}")

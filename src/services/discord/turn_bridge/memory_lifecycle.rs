@@ -172,13 +172,8 @@ async fn observe_background_memory_tasks_with_timeout(
     }
 }
 
-// #5168: the memento reflect-gate tests below belong to
-// `note_memento_context_from_turn` / `take_memento_reflect_request`, not to the
-// background-task observer this module is named for. They live here on purpose:
-// `scripts/test_lane_coverage_baseline.txt` is an append-forbidden ratchet and
-// no curated CI lane selects a NEW `memory_lifecycle` test module, so declaring
-// one would register as baseline growth and fail the gate. Same reasoning as the
-// `forget_ratio_tests` module comment in `services/memory/memento_throttle.rs`.
+// Tests for `note_memento_context_from_turn` and `take_memento_reflect_request`, kept beside the
+// background-task observer tests.
 #[cfg(test)]
 mod background_memory_task_tests {
     use super::super::recall_feedback::transcript_contains_explicit_memento_tool_call;

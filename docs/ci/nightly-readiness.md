@@ -64,11 +64,11 @@ change PostgreSQL filters, profiles, timeouts or repair those other failing lane
 
 ## N1 mitigation: profiles and macOS tmux (Refs #6006)
 
-Only `full_macos`, `full_windows` and `postgres_full` set both
-`CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` to `"0"` at job level.
+`full_macos`, `full_windows`, `rust_build`, `postgres_full` and `relay_authority_mutations_full`
+set both `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` to `"0"` at job level.
 This aligns their debug-information settings with Main/PR, reducing build/link
 work at the cost of native backtrace detail. Panic/assertion text remains.
-The focused Windows Discord step retains its explicit debug env and `BASH_ENV`.
+The native macOS and Windows lib tests run through `scripts/ci/nextest-native.sh`.
 macOS installs tmux and prints `tmux -V`; three historical failures directly
 reported missing tmux, two were inferred. Inspect all five, not a promised 55→50.
 

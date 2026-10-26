@@ -1,8 +1,8 @@
 name: CI PR
 
 on:
-  # PR-only: no push/dispatch run may publish `Script checks`. Mirrors use !cancelled(): on run cancel
-  # pending mirrors never start and running ones are cancelled; a timed-out upstream still mirrors red.
+  # PR-only: no push/dispatch run may publish `Script checks`. The judge uses !cancelled(): on run cancel
+  # it never starts or is cancelled; a timed-out upstream still judges red.
   pull_request:
 
 concurrency:
@@ -11,7 +11,7 @@ concurrency:
   # Manual dispatch has no PR payload, so isolate it by the selected ref.
   group: ci-pr-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
   # A newer push makes every result from the older SHA stale, so release its
-  # hosted runners immediately. The `*_required_context` mirrors remain
+  # hosted runners immediately. The required-context judge remains
   # fail-closed: cancellation may leave failed/cancelled contexts on the OLD
   # SHA, while branch protection still requires fresh green contexts on the
   # newest exact HEAD SHA. Manual cancellation of the newest run therefore
@@ -34,11 +34,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
-      # Verified docs/comment-only changes suppress heavy Rust jobs; their mirrors
-      # read the same effective outputs so expected skips still publish green.
+      # Verified docs/comment-only changes suppress heavy Rust jobs; the judge
+      # reads the same effective outputs so expected skips still publish green.
       comment_only: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'true' || 'false' }}
       high_risk_recovery: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.high_risk_recovery }}
-      pg_db: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || (steps.filter.outputs.pg_db == 'true' || steps.filter.outputs.rust_or_policy == 'true') && 'true' || 'false' }}
       rust_tests_skip: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'true' || 'false' }}
       rust_or_policy: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_lint_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
       # Include readers retain the compile and library lanes.
@@ -52,7 +51,7 @@ jobs:
       # True when a Rust-compile change touches a source surface that needs
       # native Windows verification. Most relay-only PRs leave this false, but
       # the cross-platform inflight lock primitive is an explicit exception.
-      # Its mirror permits unrelated-path skips and rejects unexpected skips.
+      # The judge permits unrelated-path skips and rejects unexpected skips.
       cross_os_rust: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.cross_os_rust }}
       win32_build_token: ${{ steps.filter.outputs.win32_build_token }}
     steps:
@@ -75,46 +74,16 @@ jobs:
               - 'scripts/verify-dashboard.sh'
             high_risk_recovery:
               - '.github/workflows/**'
-              # #5147: this lane owns the self-watchdog's kill-time forensics,
-              # and one of those tests asserts on `[profile.release]` -- it is
-              # what stops `strip = true` (which erased the Mach-O symbol table
-              # and stalled #4756/#4770/#5147) from coming back. A guard whose
-              # own subject cannot trigger it is the #5185 defect, so the files
-              # under guard are listed here alongside the tests.
-              #
-              # The `'!src/services/discord/placeholder_live_events/**'` line
-              # that used to sit below `src/services/discord/**` is GONE, and
-              # with it the accident that made this filter always true.
-              # dorny/paths-filter@v3 is NOT GitHub's native `paths:` -- it
-              # compiles every pattern into its own picomatch matcher
-              # (`{dot: true}`) and ORs them (`matchers.some(...)`; no
-              # `predicate-quantifier` is set here, so the default `some`
-              # applies), so a leading `!` was just another POSITIVE matcher
-              # for "anything that is not this" and matched nearly every
-              # changed file. Nothing below subtracts, so this list IS the
-              # whole selection rule: a path no pattern matches silently skips
-              # the lane; it is deliberately a superset of what the lane runs.
-              #
-              # STOPPED selecting when the `!` went: docs, `dashboard/**`,
-              # `tests/**`, src this lane never executes. ADDED below, because
-              # dropping the `!` would otherwise drop a real input:
-              # `migrations/**` (these tests call
-              # `connect_test_pool_and_migrate`; `build.rs` already has
-              # `rerun-if-changed` over `migrations/postgres`); `policies/**`
-              # replacing three named `.js` files, because
-              # `test_engine_with_pg` aims `config.policies.dir` here while
-              # `engine/loader.rs` loads EVERY root-level `*.js`,
-              # `check_policy_tree_trust` walks subdirectories and
-              # `pipeline::ensure_loaded` reads `default-pipeline.yaml`; and
-              # the two scripts this job's own steps run. `Cargo.toml` stays --
-              # `hang_forensics.rs` `include_str!`s it for the
-              # `[profile.release]` assertion above.
-              # `tests/test_high_risk_recovery_path_filter.py` pins the result
-              # and fails if any pattern here starts with `!` again.
+              # #5147: the self-watchdog's kill-time forensics and the `[profile.release]` guard
+              # against `strip = true` live in this lane, so their sources are listed beside the tests.
+              # dorny/paths-filter@v3 ORs one picomatch matcher per pattern, so a leading `!` is just
+              # another positive matcher; nothing here subtracts and this list is the whole rule, a
+              # deliberate superset. `migrations/**`, `policies/**` and `Cargo.toml` (read by
+              # `hang_forensics.rs` through `include_str!`) are real inputs of these tests.
+              # `tests/test_high_risk_recovery_path_filter.py` pins the result and rejects any `!`.
               - 'Cargo.toml'
               - 'migrations/**'
               - 'policies/**'
-              - 'scripts/check_test_target_integrity.py'
               - 'scripts/ci/postgres-service.sh'
               - 'src/db/**'
               - 'src/dispatch/**'
@@ -171,11 +140,7 @@ jobs:
               - 'src/services/health_diagnostics.rs'
               - 'src/services/message_outbox.rs'
               - 'src/services/message_outbox/**'
-              # #5232 R3: these five, and `outbound/source_registry.rs` above
-              # (already covered by `src/services/discord/**`), match no target
-              # among this job's 21 `cargo test --lib` invocations. They stay as
-              # part of the deliberate superset -- not, as previously claimed,
-              # because a ci-pr-only target shadows them.
+              # #5232 R3: part of the deliberate superset rather than a test target of their own.
               - 'src/services/message_outbox_recovery.rs'
               - 'src/services/message_outbox_recovery_support.rs'
               - 'src/services/message_outbox_recovery_tests.rs'
@@ -193,587 +158,12 @@ jobs:
               - 'src/services/observability/**'
               - 'Cargo.lock'
               - '.cargo/**'
-              # #5232 R3: 1-hop imports of the lane's OTHER two SUTs. The list
-              # above only ever tracked `src/high_risk_recovery.rs`, but this
-              # job also runs `services::hang_forensics::tests` and
-              # `services::health_diagnostics::tests`, and the latter reaches
-              # all four of these from its production path
-              # (`health_diagnostics.rs:65,311,448,469`). `platform/mod.rs` is
-              # the re-export `high_risk_recovery.rs:992` goes through, and its
-              # own comment declares itself temporary.
+              # #5232 R3: 1-hop imports that `services::hang_forensics::tests` and
+              # `services::health_diagnostics::tests` reach from their production path.
               - 'src/config_live_reload.rs'
               - 'src/services/dispatch_gate.rs'
               - 'src/services/platform/mod.rs'
               - 'src/services/session_activity.rs'
-            pg_db:
-              # BEGIN generated pg_db source paths -- #6014. Do not edit by hand.
-              # Every file scripts/pg_test_lane_manifest.txt [files] names as holding a live PG
-              # test, so a new PG test selects this lane on the PR that adds it. Run
-              #   python3 scripts/check_pg_test_lane_membership.py --write-pg-db-paths
-              # which scripts/ci-script-checks.sh reruns, demanding an empty diff. paths-
-              # filter ORs patterns, so a '!' excludes nothing (#5232): refused anywhere.
-              - 'src/cli/dcserver_pg_bootstrap.rs'
-              - 'src/cli/doctor/orchestrator/dispatch_outbox_tests.rs'
-              - 'src/cli/doctor/orchestrator/observation_tests.rs'
-              - 'src/cli/herdr_tests.rs'
-              - 'src/config/session_hosts/boot_pg_tests.rs'
-              - 'src/db/auto_queue/entries.rs'
-              - 'src/db/auto_queue/entries/dispatch_failure.rs'
-              - 'src/db/auto_queue/phase_gates.rs'
-              - 'src/db/auto_queue/run_admission_pg_tests.rs'
-              - 'src/db/auto_queue/run_completion_pg_tests.rs'
-              - 'src/db/auto_queue/run_owner_guard_pg_tests.rs'
-              - 'src/db/auto_queue/tests.rs'
-              - 'src/db/automation_candidates/verdict_tests.rs'
-              - 'src/db/calendar_sync/postgres_tests.rs'
-              - 'src/db/campaigns/tests.rs'
-              - 'src/db/dispatched_sessions.rs'
-              - 'src/db/dispatched_sessions/canonical_identity_pg_tests.rs'
-              - 'src/db/dispatched_sessions/hosted_execution/legacy_return_tests.rs'
-              - 'src/db/dispatched_sessions/rebind_override.rs'
-              - 'src/db/dispatched_sessions/tests.rs'
-              - 'src/db/dispatches/delivery_events.rs'
-              - 'src/db/dispatches/outbox/delivery.rs'
-              - 'src/db/idempotency.rs'
-              - 'src/db/imsg_reply_tests.rs'
-              - 'src/db/intake_outbox.rs'
-              - 'src/db/intake_outbox/consent_handoff_tests.rs'
-              - 'src/db/intake_outbox/owner_fence_pg_tests.rs'
-              - 'src/db/intake_outbox/postgres_tests.rs'
-              - 'src/db/intake_outbox_delivery_proof.rs'
-              - 'src/db/intake_outbox_dispatch_stamp/tests.rs'
-              - 'src/db/intake_outbox_dispatched_audit.rs'
-              - 'src/db/o_channel_activation.rs'
-              - 'src/db/o_channel_activation_fence_tests.rs'
-              - 'src/db/o_piece_ledger_tests.rs'
-              - 'src/db/postgres.rs'
-              - 'src/db/postgres/advisory_lock_tests.rs'
-              - 'src/db/postgres/test_db_reclaim.rs'
-              - 'src/db/prompt_manifests/tests.rs'
-              - 'src/db/provider_session_prompts/tests.rs'
-              - 'src/db/relay_dead_letter.rs'
-              - 'src/db/relay_dead_letter/migration_tests.rs'
-              - 'src/db/replay_disposition/register_tests.rs'
-              - 'src/db/replay_disposition/write_tests.rs'
-              - 'src/db/replay_disposition_tests.rs'
-              - 'src/db/replay_disposition_tests/compatibility_tests.rs'
-              - 'src/db/replay_disposition_tests/concurrency_tests.rs'
-              - 'src/db/replay_disposition_tests/consumer_tests.rs'
-              - 'src/db/scheduled_messages/attachments_pg_tests.rs'
-              - 'src/db/scheduled_messages/image_lifecycle_tests.rs'
-              - 'src/db/scheduled_messages/postgres_tests.rs'
-              - 'src/db/session_observability/background_ordering_pg_tests.rs'
-              - 'src/db/session_transcripts.rs'
-              - 'src/db/session_transcripts_retired_boundary_pg_tests.rs'
-              - 'src/dispatch/dispatch_cancel.rs'
-              - 'src/dispatch/dispatch_context.rs'
-              - 'src/dispatch/dispatch_status.rs'
-              - 'src/dispatch/dispatch_status/auto_queue_terminal_sync_policy_tests/migration_value_pg_tests.rs'
-              - 'src/dispatch/dispatch_status/review_skip.rs'
-              - 'src/dispatch/dispatch_status/terminal_timestamp_tests.rs'
-              - 'src/engine/ops/auto_queue_ops.rs'
-              - 'src/engine/ops/config_ops.rs'
-              - 'src/engine/ops/db_ops.rs'
-              - 'src/engine/ops/kanban_ops.rs'
-              - 'src/engine/ops/message_ops.rs'
-              - 'src/engine/ops/read_bridge/contract_tests.rs'
-              - 'src/engine/ops/read_bridge/epoch_tests.rs'
-              - 'src/engine/ops/timeouts_ops/host_repair_tests.rs'
-              - 'src/github/sync.rs'
-              - 'src/high_risk_recovery.rs'
-              - 'src/reconcile.rs'
-              - 'src/server/issue_specs.rs'
-              - 'src/server/mod.rs'
-              - 'src/server/multinode_regression.rs'
-              - 'src/server/outbox_worker/attachment_pg_tests.rs'
-              - 'src/server/outbox_worker/session_notice_pg_tests.rs'
-              - 'src/server/resource_locks.rs'
-              - 'src/server/routes/agents_host_guard_tests.rs'
-              - 'src/server/routes/agents_turn_deliver/pg_tests.rs'
-              - 'src/server/routes/auto_queue_admission_pg_tests.rs'
-              - 'src/server/routes/auto_queue_lifecycle_pg_tests.rs'
-              - 'src/server/routes/campaigns.rs'
-              - 'src/server/routes/dispatched_sessions_tests.rs'
-              - 'src/server/routes/dispatches/crud.rs'
-              - 'src/server/routes/escalation.rs'
-              - 'src/server/routes/health_api/db_deadline_tests.rs'
-              - 'src/server/routes/health_api/db_deadline_tests/amplification_profile_tests.rs'
-              - 'src/server/routes/health_api/host_guard_tests.rs'
-              - 'src/server/routes/health_api/kv_gate_tests.rs'
-              - 'src/server/routes/herdr_legacy_tests.rs'
-              - 'src/server/routes/memory_api.rs'
-              - 'src/server/routes/message_outbox.rs'
-              - 'src/server/routes/pipeline_stage_save_tests.rs'
-              - 'src/server/routes/queue_api.rs'
-              - 'src/server/routes/scheduled_messages/image_activation_tests.rs'
-              - 'src/server/routes/scheduled_messages/postgres_tests.rs'
-              - 'src/server/routes/session_evidence_tests.rs'
-              - 'src/server/routes/stats.rs'
-              - 'src/server/routes/tests/auto_queue_preflight_harness_tests.rs'
-              - 'src/server/task_dispatch_claims.rs'
-              - 'src/server/task_dispatch_claims/config_read_tests.rs'
-              - 'src/server/task_dispatch_claims_replay_tests.rs'
-              - 'src/services/agent_quality/regression_alerts.rs'
-              - 'src/services/agent_recovery/durable/postgres_tests.rs'
-              - 'src/services/agents/query.rs'
-              - 'src/services/auto_queue.rs'
-              - 'src/services/auto_queue/activate_command.rs'
-              - 'src/services/auto_queue/campaign_handoff_tests.rs'
-              - 'src/services/auto_queue/cancel_run.rs'
-              - 'src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs'
-              - 'src/services/auto_queue/cleanup_tasks_ownership_pg_tests.rs'
-              - 'src/services/auto_queue/cleanup_tasks_pg_tests.rs'
-              - 'src/services/auto_queue/command.rs'
-              - 'src/services/auto_queue/dispatch_query.rs'
-              - 'src/services/auto_queue/fsm.rs'
-              - 'src/services/auto_queue/phase_gate.rs'
-              - 'src/services/auto_queue/planning.rs'
-              - 'src/services/auto_queue/route_generate.rs'
-              - 'src/services/auto_queue/run_completion_activate_pg_tests.rs'
-              - 'src/services/auto_queue/runtime/clear_slot_sessions_pg_tests.rs'
-              - 'src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs'
-              - 'src/services/auto_queue/runtime/verified_reset_pg_tests.rs'
-              - 'src/services/automation_candidate_materializer/iteration_result_tests.rs'
-              - 'src/services/cluster/attachment_transfer/storage_tests.rs'
-              - 'src/services/cluster/execution_capacity/tests.rs'
-              - 'src/services/cluster/intake_preflight.rs'
-              - 'src/services/cluster/intake_router_hook.rs'
-              - 'src/services/cluster/intake_router_hook/agent_execution_node_tests.rs'
-              - 'src/services/cluster/intake_router_hook/attachment_tests.rs'
-              - 'src/services/cluster/intake_router_hook/capacity_tests.rs'
-              - 'src/services/cluster/intake_router_hook/edge_case_tests.rs'
-              - 'src/services/cluster/intake_router_hook/execution_requirement_tests.rs'
-              - 'src/services/cluster/intake_router_hook/o_route_tests.rs'
-              - 'src/services/cluster/intake_router_hook/owner_record.rs'
-              - 'src/services/cluster/intake_worker/consent_scope_tests.rs'
-              - 'src/services/cluster/intake_worker/dispatch_stamp_tests.rs'
-              - 'src/services/cluster/intake_worker/o_route_tests.rs'
-              - 'src/services/cluster/intake_worker/owner_fence_pg_tests.rs'
-              - 'src/services/cluster/intake_worker/replay_hold_tests.rs'
-              - 'src/services/cluster/machine_resources/store.rs'
-              - 'src/services/discord/admin_host_guard_tests.rs'
-              - 'src/services/discord/catch_up/too_old_drop_pg_tests.rs'
-              - 'src/services/discord/commands/cancel_backstop_tests.rs'
-              - 'src/services/discord/commands/config/provider_settings.rs'
-              - 'src/services/discord/commands/config/provider_settings/revision_tests.rs'
-              - 'src/services/discord/commands/control/clear_end_tests.rs'
-              - 'src/services/discord/commands/control/clear_entry_tests.rs'
-              - 'src/services/discord/commands/control/clear_persist_failure_tests.rs'
-              - 'src/services/discord/commands/control/codex_clear_relaunch_tests.rs'
-              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests.rs'
-              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests.rs'
-              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/joint_metadata_tests.rs'
-              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/joint_owner_tests.rs'
-              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/policy_tests.rs'
-              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/custody_tests.rs'
-              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/late_tests.rs'
-              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/negative_tests.rs'
-              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/source_boundary_tests.rs'
-              - 'src/services/discord/commands/control/codex_clear_retirement_tests.rs'
-              - 'src/services/discord/commands/control/consent_clear_tests.rs'
-              - 'src/services/discord/commands/restart.rs'
-              - 'src/services/discord/commands/system_prompt/tests.rs'
-              - 'src/services/discord/commands/text_commands/clear_http_overlap_tests.rs'
-              - 'src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs'
-              - 'src/services/discord/commands/tui_passthrough.rs'
-              - 'src/services/discord/health/o_transition/codex_context_tests.rs'
-              - 'src/services/discord/health/o_transition/codex_retention_e2e_tests.rs'
-              - 'src/services/discord/health/recovery.rs'
-              - 'src/services/discord/health/recovery/live_agent_recovery.rs'
-              - 'src/services/discord/health/recovery/self_watchdog/tests/health_response.rs'
-              - 'src/services/discord/health/recovery/stall_alert.rs'
-              - 'src/services/discord/health/snapshot/health_observation_pg_tests.rs'
-              - 'src/services/discord/health/turn_deliver/inject/catch_up_race_tests.rs'
-              - 'src/services/discord/health/turn_deliver/inject/herdr_tests.rs'
-              - 'src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs'
-              - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'
-              - 'src/services/discord/health/turn_deliver/inject_tests.rs'
-              - 'src/services/discord/herdr_terminate/http_force_e08_tests.rs'
-              - 'src/services/discord/herdr_terminate/http_force_forward_tests.rs'
-              - 'src/services/discord/herdr_terminate/http_force_hydrate_tests.rs'
-              - 'src/services/discord/herdr_terminate/http_force_identity_tests.rs'
-              - 'src/services/discord/herdr_terminate/http_force_purge_tests.rs'
-              - 'src/services/discord/herdr_terminate/http_force_terminal_tests.rs'
-              - 'src/services/discord/herdr_terminate/http_force_tests.rs'
-              - 'src/services/discord/herdr_terminate/http_force_writer_tests.rs'
-              - 'src/services/discord/herdr_terminate_exit_tests.rs'
-              - 'src/services/discord/herdr_terminate_route_tests.rs'
-              - 'src/services/discord/herdr_terminate_tests.rs'
-              - 'src/services/discord/host_defer_gate_tests.rs'
-              - 'src/services/discord/host_key_derivation_tests.rs'
-              - 'src/services/discord/idle_relay_drift.rs'
-              - 'src/services/discord/inflight/host_recovery_guard_keyed_tests.rs'
-              - 'src/services/discord/inflight/rebind_reap/tests.rs'
-              - 'src/services/discord/inflight/receipt_boundary_tests.rs'
-              - 'src/services/discord/inflight/removal/custody_notice_tests.rs'
-              - 'src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_restart_tests.rs'
-              - 'src/services/discord/mod.rs'
-              - 'src/services/discord/placeholder_sweeper/abandon_guard.rs'
-              - 'src/services/discord/placeholder_sweeper/retirement_tests.rs'
-              - 'src/services/discord/queue_dispatch/canary_workspace_tests.rs'
-              - 'src/services/discord/queue_io/queued_head_auto_tests.rs'
-              - 'src/services/discord/queue_io/queued_head_inject_tests.rs'
-              - 'src/services/discord/recovery_engine/herdr_before_start_restart_tests.rs'
-              - 'src/services/discord/recovery_engine/herdr_row_end_gate_tests.rs'
-              - 'src/services/discord/recovery_engine/herdr_row_end_guard_tests.rs'
-              - 'src/services/discord/recovery_engine/herdr_row_end_rig_tests.rs'
-              - 'src/services/discord/recovery_engine/herdr_row_end_settle_tests.rs'
-              - 'src/services/discord/recovery_engine/host_reconcile_tests.rs'
-              - 'src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs'
-              - 'src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs'
-              - 'src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs'
-              - 'src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs'
-              - 'src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs'
-              - 'src/services/discord/recovery_engine/routing_orphan_tests.rs'
-              - 'src/services/discord/relay_recovery/tests/host_deferred.rs'
-              - 'src/services/discord/relay_recovery_circuit_alert_producer.rs'
-              - 'src/services/discord/relay_recovery_circuit_breaker.rs'
-              - 'src/services/discord/replay_policy/live_tests.rs'
-              - 'src/services/discord/replay_policy/permit_tests.rs'
-              - 'src/services/discord/replay_policy/policy_tests.rs'
-              - 'src/services/discord/router/herdr_consent/admission_notice_tests.rs'
-              - 'src/services/discord/router/herdr_consent/admission_tests.rs'
-              - 'src/services/discord/router/herdr_consent/custody_tests.rs'
-              - 'src/services/discord/router/intake_dispatch/home_order_tests.rs'
-              - 'src/services/discord/router/intake_dispatch/initial_fresh_tests.rs'
-              - 'src/services/discord/router/intake_dispatch/replay_admission_tests.rs'
-              - 'src/services/discord/router/intake_dispatch/tests.rs'
-              - 'src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs'
-              - 'src/services/discord/router/intake_dispatch/tests/replay_hold.rs'
-              - 'src/services/discord/router/intake_gate/busy_inject/payload_tests.rs'
-              - 'src/services/discord/router/intake_gate/stale_turn_host_tests.rs'
-              - 'src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs'
-              - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
-              - 'src/services/discord/router/message_handler/intake_turn/claim_bootstrap.rs'
-              - 'src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs'
-              - 'src/services/discord/router/message_handler/intake_turn/retry_prompt/tests.rs'
-              - 'src/services/discord/router/message_handler/intake_turn/system_prompt_tests.rs'
-              - 'src/services/discord/router/message_handler/provider_dispatch.rs'
-              - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_activation_tests.rs'
-              - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs'
-              - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_http_cancel_tests.rs'
-              - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs'
-              - 'src/services/discord/router/message_handler/provider_dispatch_codex_live_end_tests.rs'
-              - 'src/services/discord/router/message_handler/provider_dispatch_codex_t14_actual_tests.rs'
-              - 'src/services/discord/router/message_handler/provider_dispatch_codex_t14_composed_tests.rs'
-              - 'src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs'
-              - 'src/services/discord/router/message_handler/provider_dispatch_herdr_start_offset_tests.rs'
-              - 'src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs'
-              - 'src/services/discord/router/message_handler/provider_dispatch_live_end_tests.rs'
-              - 'src/services/discord/router/message_handler/provider_isolation_host_tests.rs'
-              - 'src/services/discord/router/message_handler/root_replaced_recovery_tests.rs'
-              - 'src/services/discord/router/message_handler/root_replaced_recovery_tests/clear_tests.rs'
-              - 'src/services/discord/router/message_handler/root_replaced_recovery_tests/legacy_clear_tests.rs'
-              - 'src/services/discord/router/message_handler/root_replaced_recovery_tests/recheck_tests.rs'
-              - 'src/services/discord/router/message_handler/s1_entry_tests.rs'
-              - 'src/services/discord/router/message_handler/voice_announcement_route.rs'
-              - 'src/services/discord/router/message_handler/watchdog_host_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs'
-              - 'src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs'
-              - 'src/services/discord/runtime_bootstrap/o_writer_host.rs'
-              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests/boot_gate_alarm_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests/fresh_process_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests/fresh_scope_restart_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_joint_owner_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_repeated_absence_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_restart_phase_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/o_writer_host_takeover_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs'
-              - 'src/services/discord/session_idle_cleanup.rs'
-              - 'src/services/discord/session_idle_cleanup_tests.rs'
-              - 'src/services/discord/session_runtime.rs'
-              - 'src/services/discord/task_notification_delivery/footer_surface_tests.rs'
-              - 'src/services/discord/task_notification_delivery/inline_contract_tests.rs'
-              - 'src/services/discord/task_notification_delivery/inline_contract_tests/replacement_receipt_tests.rs'
-              - 'src/services/discord/task_notification_delivery/inline_contract_tests/retention_tests.rs'
-              - 'src/services/discord/task_notification_delivery/metadata_retirement_pg_tests.rs'
-              - 'src/services/discord/task_notification_delivery/tests.rs'
-              - 'src/services/discord/terminal_delivery_custody/pg_tests.rs'
-              - 'src/services/discord/terminal_ui_obligation.rs'
-              - 'src/services/discord/terminal_ui_obligation/sweep_tests.rs'
-              - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
-              - 'src/services/discord/tmux_reaper/retirement_await_tests/host_gate_pg_tests.rs'
-              - 'src/services/discord/tmux_watcher/codex_replacement_tests.rs'
-              - 'src/services/discord/tmux_watcher/discrete_trigger_marker.rs'
-              - 'src/services/discord/tmux_watcher/herdr_entry_host_tests.rs'
-              - 'src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs'
-              - 'src/services/discord/tmux_watcher/path_b_record_tests.rs'
-              - 'src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs'
-              - 'src/services/discord/tmux_watcher/streaming_baseline_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/herdr_source_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/rehydration.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_turn_mode_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_stop_activation_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_stop_activation_http_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_output_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/idle_inject_echo_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests/herdr_direct_actual_client_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests/herdr_direct_roundtrip_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs'
-              - 'src/services/discord/tui_prompt_relay/restore_after_rehydration_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/synthetic_start/claim/admitted/transition_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests/final_recheck_tests.rs'
-              - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests/hosted_classification_tests.rs'
-              - 'src/services/discord/turn_bridge/completion_guard/completion_postgres.rs'
-              - 'src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs'
-              - 'src/services/discord/turn_bridge/completion_postlude/prelude_lifecycle/settlement_pg_tests.rs'
-              - 'src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs'
-              - 'src/services/discord/turn_bridge/recovery_text.rs'
-              - 'src/services/discord/turn_bridge/resume_pin_tests.rs'
-              - 'src/services/discord/turn_bridge/stream_loop/provider_recovery.rs'
-              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/preparation_hold_tests.rs'
-              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs'
-              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs'
-              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs'
-              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs'
-              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs'
-              - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_cut_tests.rs'
-              - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs'
-              - 'src/services/discord/turn_bridge/tmux_runtime/herdr_http_cancel_tests.rs'
-              - 'src/services/discord/turn_bridge/tmux_runtime/herdr_stop_pane_tests.rs'
-              - 'src/services/discord/turn_bridge/tmux_runtime/native_stop_contract_tests.rs'
-              - 'src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs'
-              - 'src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs'
-              - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/clear_owner_race_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/collection_publication_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/cross_runtime_owner_e2e_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/cross_runtime_owners_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/effect_read_defer_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/herdr_chain_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/legacy_divergence_entry_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/legacy_divergence_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/live_owner_nonce_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/live_owner_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/live_review_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/midread_owner_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/receipt_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/routine_owner_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/routine_registered_receipt_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/stale_binding_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/superseded_measurement_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/unit_tests.rs'
-              - 'src/services/discord/turn_presence/activity/unbound/watcher_runtime_tests.rs'
-              - 'src/services/discord/turn_presence/activity_tests.rs'
-              - 'src/services/discord/turn_teardown_clearance_tests.rs'
-              - 'src/services/discord/watchers/dispatched_origin_ghost_tests.rs'
-              - 'src/services/discord/watchers/lifecycle/activity.rs'
-              - 'src/services/discord/watchers/lifecycle/n3bc_restore_tests.rs'
-              - 'src/services/discord/watchers/lifecycle/restore.rs'
-              - 'src/services/discord/watchers/lifecycle/restore_tests.rs'
-              - 'src/services/discord/watchers/lifecycle/resume_companion_restore_tests.rs'
-              - 'src/services/dispatches/discord_delivery/guard.rs'
-              - 'src/services/dispatches/outbox_claiming.rs'
-              - 'src/services/dispatches/outbox_queue_replay_tests.rs'
-              - 'src/services/dispatches/wait_queue.rs'
-              - 'src/services/health_diagnostics/request_batch_pg_tests.rs'
-              - 'src/services/herdr_launch/policy_tests.rs'
-              - 'src/services/herdr_launch_tests.rs'
-              - 'src/services/herdr_launch_tests/retired_hold_tests.rs'
-              - 'src/services/maintenance/jobs/db_retention.rs'
-              - 'src/services/maintenance/jobs/worktree_orphan_sweep.rs'
-              - 'src/services/message_outbox.rs'
-              - 'src/services/message_outbox_circuit_authority_tests.rs'
-              - 'src/services/message_outbox_recovery_tests.rs'
-              - 'src/services/observability/queries.rs'
-              - 'src/services/observability/recovery_audit.rs'
-              - 'src/services/observability/turn_lifecycle.rs'
-              - 'src/services/onboarding/canonical_status_tests/migration_value_pg_tests.rs'
-              - 'src/services/pipeline_override.rs'
-              - 'src/services/pipeline_routes.rs'
-              - 'src/services/routines/agent_executor/execution.rs'
-              - 'src/services/routines/agent_executor/owned_session/tests.rs'
-              - 'src/services/routines/agent_executor/reliability.rs'
-              - 'src/services/routines/reliability_pg_tests.rs'
-              - 'src/services/routines/session_control.rs'
-              - 'src/services/scheduled_messages/context_snapshot.rs'
-              - 'src/services/scheduled_messages/postgres_tests.rs'
-              - 'src/services/session_forwarding.rs'
-              - 'src/services/session_host/herdr_gate_tests.rs'
-              - 'src/services/session_host/herdr_terminate_real_tests.rs'
-              - 'src/services/session_host/session_record.rs'
-              - 'src/services/session_resume.rs'
-              - 'src/services/settings.rs'
-              - 'src/services/stale_turn_reconciler.rs'
-              - 'src/services/tmux_turn_liveness/tests_pg.rs'
-              - 'src/services/tui_o/alarm.rs'
-              - 'src/services/tui_o/exact_pg_tests.rs'
-              - 'src/services/tui_o/exact_submission.rs'
-              - 'src/services/tui_o/repost/admission_tests.rs'
-              - 'src/services/tui_o/repost/allowlist_host_tests.rs'
-              - 'src/services/tui_o/repost/allowlist_runner_tests.rs'
-              - 'src/services/tui_o/repost/backlog_tests.rs'
-              - 'src/services/tui_o/repost/projection_tests.rs'
-              - 'src/services/tui_o/repost/runner_activation_tests.rs'
-              - 'src/services/tui_o/repost/runner_tests.rs'
-              - 'src/services/tui_o/repost/runtime_host_activation_tests.rs'
-              - 'src/services/tui_o/repost/writer_activation_tests.rs'
-              - 'src/services/tui_o/writer/always_on_repost_tests.rs'
-              - 'src/services/tui_o/writer/bo_post_tests.rs'
-              - 'src/services/tui_o/writer/deferred_pg_tests.rs'
-              - 'src/services/tui_o/writer/local_retry_repost_tests.rs'
-              - 'src/services/tui_o/writer/repost_turn_tests.rs'
-              - 'src/services/tui_o/writer/scoped_repost_tests.rs'
-              - 'src/services/tui_o/writer/tool_result_repost_tests.rs'
-              - 'src/services/tui_o/writer/transition_route_tests.rs'
-              - 'src/services/turn_host_tests.rs'
-              - 'src/services/turn_lifecycle.rs'
-              - 'src/voice/announce_meta.rs'
-              - 'src/voice/turn_link.rs'
-              # END generated pg_db source paths
-              # Re-post production changes must run the shared-budget tests too.
-              - 'src/services/tui_o/repost/**'
-              # Presence hooks run inside the PG entry-point tests that install a runtime.
-              - 'src/services/discord/turn_presence/**'
-              - 'src/services/tui_o/writer/**'
-              - 'src/services/tui_o/store/ledger.rs'
-              - 'src/services/discord/outbound/o_writer*.rs'
-              - '.github/workflows/**'
-              - 'justfile'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              # Canonical campaign/anchor recovery and idle-session protection
-              # execute in just test-postgres, including their pure unit seams.
-              - 'src/server/routes/campaigns.rs'
-              - 'src/services/memory/**'
-              - 'src/services/discord/prompt_builder/**'
-              - 'src/services/discord/relay_recovery.rs'
-              - 'src/services/discord/relay_recovery/**'
-              - 'src/services/discord/session_idle_cleanup.rs'
-              - 'src/services/dispatched_sessions.rs'
-              - 'src/services/tmux_turn_liveness.rs'
-              - 'src/services/tmux_turn_liveness/**'
-              - 'src/services/tui_turn_state.rs'
-              - 'src/services/tmux_common.rs'
-              - 'src/services/provider.rs'
-              - 'src/services/platform/tmux.rs'
-              - 'migrations/**'
-              - 'scripts/ci/postgres-service.sh'
-              - 'src/db/**'
-              - 'src/dispatch/**'
-              - 'src/engine/**'
-              - 'src/high_risk_recovery.rs'
-              - 'src/kanban/**'
-              - 'src/reconcile.rs'
-              - 'src/server/routes/auto_queue.rs'
-              - 'src/server/routes/auto_queue_lifecycle_pg_tests.rs'
-              - 'src/server/routes/tests/auto_queue_preflight_harness_tests.rs'
-              - 'src/server/routes/dispatched_sessions.rs'
-              - 'src/server/routes/dispatched_sessions_tests.rs'
-              - 'src/server/routes/dispatches/**'
-              - 'src/server/routes/message_outbox.rs'
-              - 'src/server/routes/scheduled_messages.rs'
-              - 'src/server/routes/scheduled_messages/**'
-              - 'src/server/worker_registry.rs'
-              - 'src/services/auto_queue.rs'
-              - 'src/services/auto_queue/**'
-              - 'src/services/agent_recovery/**'
-              - 'src/services/automation_candidate_materializer/**'
-              - 'src/services/dispatches/**'
-              - 'src/services/queue.rs'
-              - 'src/services/session_forwarding.rs'
-              - 'src/services/session_forwarding/**'
-              - 'src/server/routes/queue_api.rs'
-              - 'src/server/resource_locks.rs'
-              # #4460: recovery owns production-shaped PostgreSQL/outbox
-              # tests; changes to the owner or its sidecars must run them.
-              - 'src/services/discord/health/recovery.rs'
-              - 'src/services/discord/health/recovery/**'
-              - 'src/services/discord/watchers/lifecycle/restore_tests.rs'
-              # #5462 S1: the restore-time ghost verdict is proven against a
-              # real `sessions` row, so the owner and its test sidecar both
-              # have to run the PG lane.
-              - 'src/services/discord/watchers/dispatched_origin_ghost.rs'
-              - 'src/services/discord/watchers/dispatched_origin_ghost_tests.rs'
-              - 'src/services/maintenance/jobs/worktree_orphan_sweep.rs'
-              # #5320 slice 2: maintenance jobs reach the database, so select the
-              # whole directory and stop leaving new siblings out of the PG lane.
-              - 'src/services/maintenance/jobs/**'
-              - 'src/services/pipeline_override.rs'
-              # #5025: terminal-delivery evidence routing and every local
-              # producer/epilogue sibling run in `test_fast`, whose registered
-              # required mirror is `Fast targeted tests (ubuntu-latest)`.
-              - 'src/services/discord/inflight.rs'
-              - 'src/services/discord/inflight/**'
-              # #5071 T2-W S-W1: the bridge-handoff stamp and its PG-backed
-              # sidecar tests must select the PostgreSQL lane together.
-              - 'src/services/cluster/intake_worker.rs'
-              - 'src/services/cluster/intake_worker/**'
-              - 'src/services/discord/router/message_handler/intake_turn.rs'
-              - 'src/services/discord/router/message_handler/intake_turn/**'
-              - 'src/services/discord/runtime_bootstrap/**'
-              - 'src/services/discord/tmux_watcher.rs'
-              - 'src/services/discord/tmux_watcher/**'
-              - 'src/services/discord/terminal_delivery_custody.rs'
-              - 'src/services/discord/terminal_delivery_custody/**'
-              - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
-              - 'src/services/discord/turn_bridge/terminal_outcome_delivery.rs'
-              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/**'
-              - 'src/services/discord/turn_bridge/headless_delivery.rs'
-              - 'src/services/discord/turn_bridge/headless_delivery/**'
-              - 'src/services/discord/turn_bridge/**'
-              - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
-              - 'src/services/scheduled_messages.rs'
-              - 'src/services/scheduled_messages/**'
-              - 'src/services/discord/outbound/source_registry.rs'
-              # #4985: footer marker changes require the protected targeted lane.
-              # Glob rather than a file list: enumerating siblings silently drops
-              # newly extracted modules (footer_only_marker.rs was created by this
-              # PR and missed the list), which skips the lane for the very file
-              # the change lives in.
-              - 'src/services/discord/task_notification_delivery/**'
-              - 'src/services/discord/tmux.rs'
-              - 'src/services/discord/tmux_watcher/discrete_trigger_marker.rs'
-              - 'src/services/discord/tui_prompt_relay/task_notification_prompt.rs'
-              - 'src/services/message_outbox.rs'
-              - 'src/services/message_outbox_recovery.rs'
-              - 'src/services/message_outbox_recovery_support.rs'
-              - 'src/services/message_outbox_recovery_tests.rs'
-              - 'src/services/message_outbox_circuit_authority_tests.rs'
-              - 'src/services/api_friction/**'
-              - 'src/services/retrospectives.rs'
-              - 'src/services/discord_dm_reply_store.rs'
-              - 'src/server/cluster.rs'
-              - 'src/server/task_dispatch_claims.rs'
-              - 'src/services/dispatch_watchdog.rs'
-              - 'src/services/cluster/intake_router_hook.rs'
-              - 'src/services/cluster/intake_router_hook/**'
-              - 'src/services/discord/router/intake_dispatch.rs'
-              - 'src/services/discord/router/intake_dispatch/**'
-              - 'src/services/observability/**'
-              # #5464 T5 S6b: the stale-turn apply-time contract is PG-only, so
-              # the PG lane has to run when its own file changes. Pays off the
-              # matching rule3 debt entry rather than leaving the new
-              # apply-time witnesses unreachable on a path-filtered PR.
-              - 'src/services/stale_turn_reconciler.rs'
-              - 'src/config.rs'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'sqlx-data.json'
             rust_or_policy:
               - 'src/**'
               - 'tests/**'
@@ -798,6 +188,8 @@ jobs:
               # (src/services/routines/loader.rs); adding/removing/renaming
               # a routine script can break the asserted file list.
               - 'routines/**'
+              # Was only in the retired pg_db filter; keeps that path set inside rust_tests.
+              - 'sqlx-data.json'
             # relay_contract: the doc<->code binding surface for the #4268
             # contract symbol-ref gate. When any of these change, the
             # compile-existence half (lint, whose clippy compiles the
@@ -854,7 +246,7 @@ jobs:
             # native Windows verification. Most relay-only changes remain out
             # of this positive list and rely on the nightly matrix, but owners
             # of cross-platform primitives may be listed explicitly below.
-            # When selected, the stable required-context mirror makes this
+            # When selected, the stable required-context judge makes this
             # PR-time Windows lane fail closed. Keep the broad positive list in
             # sync with `rust_compile` and document every relay exception.
             cross_os_rust:
@@ -1061,17 +453,17 @@ jobs:
       - name: dashboard build/test
         run: ./scripts/verify-dashboard.sh
 
-  # Cross-OS Rust compile lane. The required-context mirror below makes this
+  # Cross-OS Rust compile lane. The required-context judge makes this
   # conditionally required when `cross_os_rust` is true; unrelated paths may
   # skip it. Nightly retains the broader macOS/Windows test matrix.
   check_fast_cross_os:
     # Keep this job name stable: the infrastructure-failure classifier and
-    # the required-context mirror identify it by this exact context string.
+    # the required-context judge identify it by this exact context string.
     name: Fast check + non-PG tests (${{ matrix.os }})
     needs: changes
     # Run only when `cross_os_rust` selects a native Windows source surface.
     # Most relay-only PRs still skip it, while the inflight lock primitive is
-    # explicitly selected and enforced through the required-context mirror.
+    # explicitly selected and enforced through the required-context judge.
     if: needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'
     runs-on: ${{ matrix.os }}
     env:
@@ -1095,7 +487,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Provision Python 3.11 (tomllib owner for check_test_target_integrity, a2a-C PR-1)
+      - name: Provision Python 3.11 (tomllib owner for rust_test_sources)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -1137,12 +529,9 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Keep Windows inline and default-feature-only instead of `just check`.
-      # This PR lane provides broad compile signal; the bounded writer namespace
-      # owner runs in `check_fast_cross_os_targets`, and main-push and
-      # nightly retain the Windows runtime and non-PG test coverage outside the
-      # PR critical path (#4747 option 2). Ubuntu fmt/staged clippy and full
-      # workspace checks remain authoritative in the jobs above.
+      # Keep Windows inline and default-feature-only instead of `just check`. This PR lane gives
+      # broad compile signal; the writer namespace owner runs in `check_fast_cross_os_targets`
+      # and nightly keeps the Windows runtime and non-PG tests off the PR critical path (#4747).
       - name: cargo check
         shell: bash
         env:
@@ -1157,7 +546,7 @@ jobs:
         run: sccache --show-stats || true
 
   # The writer namespace test build runs on its own Windows runner so it
-  # overlaps `cargo check`; the required-context mirror waits for both jobs.
+  # overlaps `cargo check`; the required-context judge waits for both jobs.
   check_fast_cross_os_targets:
     name: Windows exact targets (${{ matrix.os }})
     needs: changes
@@ -1173,7 +562,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Provision Python 3.11 (tomllib owner for check_test_target_integrity, a2a-C PR-1)
+      - name: Provision Python 3.11 (tomllib owner for rust_test_sources)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -1221,6 +610,24 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: ./scripts/ci/run-writer-namespace-windows-targets.sh
 
+      - name: Install cargo-nextest
+        if: runner.os == 'Windows'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.149
+
+      # Every test the sources declare for Windows must be in the Windows lib test binary's list.
+      - name: Compare Windows Rust test sources with the nextest list
+        if: runner.os == 'Windows'
+        timeout-minutes: 30
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json
+          python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json
+
       - name: sccache stats
         if: always() && runner.os != 'macOS'
         shell: bash
@@ -1237,119 +644,32 @@ jobs:
       - shell: pwsh
         run: git cat-file -e "HEAD:scripts/build_token_win32.py" && git cat-file -e "HEAD:tests/test_build_token_win32_5663.py" && python -m unittest -v tests.test_build_token_win32_5663
 
-  # Publishes the required Fast check context from `lint`, whose clippy compiles the workspace.
-  fast_check_required_context:
-    name: Fast check (ubuntu-latest)
-    needs:
-      - changes
-      - lint
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Mirror fast check result for branch protection
-        if: ${{ needs.changes.outputs.relay_contract != 'true' }}
-        env:
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: rust_or_policy
-          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy }}
-          UPSTREAM_JOB_NAME: lint
-          UPSTREAM_RESULT: ${{ needs.lint.result }}
-        run: ./scripts/required-check-mirror.sh
-
-      # Contract changes use their own filter identity so a doc-only contract
-      # edit cannot make the required mirror treat the forced compile as an
-      # expected skip (#4268).
-      - name: Relay-contract fast check mirror (always, #4268)
-        if: ${{ needs.changes.outputs.relay_contract == 'true' }}
-        env:
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: relay_contract
-          FILTER_OUTPUT: ${{ needs.changes.outputs.relay_contract }}
-          UPSTREAM_JOB_NAME: lint
-          UPSTREAM_RESULT: ${{ needs.lint.result }}
-        run: ./scripts/required-check-mirror.sh
-
-  fast_targeted_tests_required_context:
-    name: Fast targeted tests (ubuntu-latest)
-    needs:
-      - changes
-      - test_fast
-      - pg15_owner_proof
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Mirror targeted test result for branch protection
-        env:
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: pg_db
-          FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}
-          UPSTREAM_JOB_NAME: test_fast
-          UPSTREAM_RESULT: ${{ needs.test_fast.result }}
-        run: ./scripts/required-check-mirror.sh
-
-      - name: Mirror PostgreSQL 15 owner proof result for branch protection
-        env:
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: pg_db
-          FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}
-          UPSTREAM_JOB_NAME: pg15_owner_proof
-          UPSTREAM_RESULT: ${{ needs.pg15_owner_proof.result }}
-        run: ./scripts/required-check-mirror.sh
-
-  dashboard_required_context:
-    name: Dashboard (Node 22)
-    needs:
-      - changes
-      - dashboard
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # The required context runs this helper, so pin its bytes before use.
-      - name: Pin required-check mirror helper (#5321)
-        env:
-          BASH_ENV: /dev/null
-        shell: bash
-        timeout-minutes: 10
-        run: |
-          helper_path=scripts/required-check-mirror.sh
-          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
-          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update every #5321 helper pin together"
-            exit 1
-          fi
-
-      - name: Mirror dashboard result for branch protection
-        env:
-          BASH_ENV: /dev/null
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: dashboard
-          FILTER_OUTPUT: ${{ needs.changes.outputs.dashboard }}
-          UPSTREAM_JOB_NAME: dashboard
-          UPSTREAM_RESULT: ${{ needs.dashboard.result }}
-        run: ./scripts/required-check-mirror.sh
-
-  lib_test_prepare:
-    name: Prepare shared lib tests
+  # One nextest archive, one unfiltered list and one LPT plan for every worker of this SHA.
+  rust_build:
+    name: Rust tests build and plan
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}
+    if: ${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The base comparison may rebuild the base plan when CI Main left no baseline.
+    timeout-minutes: 100
+    permissions:
+      actions: read
+      contents: read
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.149
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
       - name: Cache Cargo dependencies
@@ -1361,53 +681,62 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Ensure swap for the lib test build
         uses: ./.github/actions/ensure-swap
-      - name: Prepare and verify lib tests
+      - name: Check Rust test source wiring
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: python3 scripts/ci/rust_test_sources.py check
+      - name: Archive, list, compare and plan
         timeout-minutes: 45
         shell: bash
         env:
           BASH_ENV: /dev/null
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
         run: |
-          python3 scripts/ci/lib-test-artifact.py prepare --directory "$ADK_LIB_TEST_ARTIFACT"
-          python3 scripts/ci/lib-test-artifact.py validate --directory "$ADK_LIB_TEST_ARTIFACT"
-          python3 scripts/check_test_target_integrity.py --verify-lib-inventory
-          tar -C "$ADK_LIB_TEST_ARTIFACT" -czf "$RUNNER_TEMP/lib-test-artifact.tar.gz" .
-      - name: Upload shared lib tests
+          set -euo pipefail
+          NEXTEST_DIR="$RUNNER_TEMP/nextest"
+          mkdir -p "$NEXTEST_DIR"
+          cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"
+          cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
+            --ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"
+          python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"
+          python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \
+            --json-out "$NEXTEST_DIR/compare.json"
+          python3 scripts/ci/nextest_ci.py plan --universe "$NEXTEST_DIR/universe.json" \
+            --archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \
+            --rust-version 1.94.1 --nextest-version "$(cargo nextest --version | awk 'NR==1 {print $2}')" \
+            --target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \
+            --build-option CARGO_PROFILE_TEST_DEBUG=0 --output "$NEXTEST_DIR/plan"
+          python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"
+      - name: Upload nextest plan
         uses: actions/upload-artifact@v4
         with:
-          name: lib-test-artifact
-          path: ${{ runner.temp }}/lib-test-artifact.tar.gz
+          name: nextest-plan
+          path: ${{ runner.temp }}/nextest
           if-no-files-found: error
           retention-days: 1
-
-  pg_shards:
-    needs: changes
-    runs-on: ubuntu-latest
-    outputs:
-      force_full: ${{ steps.plan.outputs.force_full }}
-      matrix: ${{ steps.plan.outputs.matrix }}
-      sweep_matrix: ${{ steps.plan.outputs.sweep_matrix }}
-      plan: ${{ steps.plan.outputs.plan }}
-    steps:
-      - uses: actions/checkout@v4
-      # Every PR plans; ADK_CI_SELECT=off forces full now, the ci-full label from the next push or reopen (no `labeled` run).
-      - id: plan
+      # Lost tests against the comparison base fail unless scripts/ci/test-removal-justifications.txt names them.
+      - name: Compare tests with the comparison base
+        timeout-minutes: 40
         shell: bash
         env:
-          ADK_CI_SELECT: ${{ vars.ADK_CI_SELECT }}
-        run: python3 scripts/ci/test-selection.py plan
+          BASH_ENV: /dev/null
+          GH_TOKEN: ${{ github.token }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/ci/nextest-base-diff.sh "$RUNNER_TEMP/nextest"
 
-  test_fast:
-    name: PostgreSQL tests (shard ${{ matrix.shard }})
-    needs: [changes, pg_shards, lib_test_prepare]
-    if: ${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
+  # Every worker runs its planned exact IDs once, serially, against its own PostgreSQL server.
+  rust_tests:
+    name: Rust tests (worker ${{ matrix.worker }})
+    needs: [changes, rust_build]
+    if: ${{ !cancelled() && needs.rust_build.result == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 75
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.pg_shards.outputs.matrix) }}
+      matrix:
+        worker: [0, 1, 2, 3, 4, 5]
     env:
       RUST_BACKTRACE: 1
-      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
       POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
       POSTGRES_TEST_ADMIN_DB: postgres
       PGHOST: 127.0.0.1
@@ -1415,131 +744,162 @@ jobs:
       PGUSER: postgres
       PGPASSWORD: postgres
       AGENTDESK_REQUIRE_PG: "1"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
+      CI: "1"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download shared lib tests
-        continue-on-error: true
+      - name: Download nextest plan
         uses: actions/download-artifact@v4
         with:
-          name: lib-test-artifact
-          path: ${{ runner.temp }}/lib-test-download
-      - name: Restore shared lib tests
-        continue-on-error: true
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
-          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
-            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
-          fi
-
+          name: nextest-plan
+          path: ${{ runner.temp }}/nextest
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
-
       # Rollback rehearsal executes the runbook's literal rg command.
       - name: Install ripgrep
         uses: taiki-e/install-action@v2
         with:
           tool: ripgrep
-
       - name: Require ripgrep
-        shell: bash
         run: rg --version
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.1"
-
-      - name: Install just
+      - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: just@1.51.0
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      # See `lint` for rationale: `target/` excluded to protect the
-      # sccache GHA cache quota.
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-targets: false
-          cache-bin: false
-          shared-key: cargo-dependencies-v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Ensure swap for the lib test build
-        uses: ./.github/actions/ensure-swap
-
-      - name: Footer-only marker regressions
-        timeout-minutes: 10
+          tool: cargo-nextest@0.9.149
+      - name: Verify archive and plan
         shell: bash
         env:
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: >-
+          python3 scripts/ci/nextest_ci.py verify-archive --plan "$RUNNER_TEMP/nextest/plan/plan.json"
+          --worker ${{ matrix.worker }} --archive "$RUNNER_TEMP/nextest/lib-tests.tar.zst"
+          --config "$RUNNER_TEMP/nextest/plan/worker-${{ matrix.worker }}.toml" --sha "$GITHUB_SHA"
+          --record "$RUNNER_TEMP/nextest-result"
+      - name: Run planned tests
+        timeout-minutes: 60
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
         run: |
-          source scripts/ci/non-pg-test-filter.sh
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib task_notification -- "${NON_PG_SKIP_ARGS[@]}"
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- "${NON_PG_SKIP_ARGS[@]}"
-
-      - name: Trusted session forwarding tests
-        timeout-minutes: 10
-        shell: bash
-        env:
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          source scripts/ci/non-pg-test-filter.sh
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::session_forwarding -- "${NON_PG_SKIP_ARGS[@]}"
-
-      # #5025: this job is mirrored by the branch-protected
-      - name: Terminal delivery evidence regressions
-        timeout-minutes: 10
-        shell: bash
-        env:
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib inflight::terminal_delivery_evidence_loss::tests
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn
-
-      # The plan's shard subset, or main's `just test-postgres-shard` with the same budget.
-      - name: PostgreSQL shard tests
-        timeout-minutes: 75
-        shell: bash
-        env:
-          PG_INCLUDE_SHARD: ${{ matrix.shard }}
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-          ADK_TEST_SELECTION_PLAN: ${{ needs.pg_shards.outputs.plan }}
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: python3 scripts/ci/test-selection.py run --lane pg
-
+          set +e
+          NEXTEST_DIR="$RUNNER_TEMP/nextest"
+          RESULT_DIR="$RUNNER_TEMP/nextest-result"
+          mkdir -p "$RUNNER_TEMP/nextest-extract"
+          cargo nextest run --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \
+            --extract-to "$RUNNER_TEMP/nextest-extract" --extract-overwrite \
+            --config-file "$NEXTEST_DIR/plan/worker-${{ matrix.worker }}.toml" --profile ci --no-tests fail
+          code=$?
+          echo "$code" > "$RESULT_DIR/exit-code"
+          junit="$(find "$RUNNER_TEMP/nextest-extract" "$GITHUB_WORKSPACE/target" -path '*/nextest/ci/junit.xml' 2>/dev/null | head -n 1)"
+          [ -n "$junit" ] && cp "$junit" "$RESULT_DIR/junit.xml"
+          exit "$code"
       - name: Stop PostgreSQL service
         if: always()
         run: ./scripts/ci/postgres-service.sh stop
-
-      - name: sccache stats
+      # The attempt is part of the name so a rerun never reads an older attempt's results.
+      - name: Upload worker results
         if: always()
-        run: sccache --show-stats || true
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-worker-${{ matrix.worker }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nextest-result
+          if-no-files-found: warn
+          retention-days: 7
 
-  # PostgreSQL 15 is the supported floor; the canonical shards above run the image default.
+  # Planned == executed per worker, retry policy, and the targeted selectors; any gap is red.
+  test_evidence:
+    name: Rust tests evidence
+    needs: [changes, rust_build, rust_tests]
+    if: ${{ !cancelled() && needs.rust_build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download nextest plan
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-plan
+          path: ${{ runner.temp }}/nextest
+      - name: Download worker results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nextest-worker-*
+          path: ${{ runner.temp }}/nextest-artifacts
+      - name: Audit worker results
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/nextest/plan/plan.json"
+          python3 scripts/ci/nextest_ci.py collect-results --plan "$plan" --artifacts "$RUNNER_TEMP/nextest-artifacts" \
+            --output "$RUNNER_TEMP/nextest-results"
+          python3 scripts/ci/nextest_ci.py selector-audit --plan "$plan"
+          status=0
+          python3 scripts/ci/nextest_ci.py audit --plan "$plan" --results "$RUNNER_TEMP/nextest-results" \
+            --json-out "$RUNNER_TEMP/verdict.json" --summary-out "$RUNNER_TEMP/summary.md" || status=$?
+          cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  # The one branch-protection check: every context nextest_required.py judges over these needs.
+  # always(): a failed or cancelled need fails it; under success() it would skip, and a skip passes.
+  required_contexts:
+    name: CI required
+    needs:
+      - changes
+      - rust_build
+      - rust_tests
+      - test_evidence
+      - lint
+      - scripts
+      - scripts_guards
+      - scripts_contracts
+      - dashboard
+      - pg15_owner_proof
+      - relay_authority_mutations
+      - check_fast_cross_os
+      - check_fast_cross_os_targets
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      # Script checks and relay-authority-contract fold this outcome in, so every verdict still prints.
+      - name: Verify pinned judge and CI structure
+        id: pins
+        continue-on-error: true
+        env:
+          BASH_ENV: /dev/null
+        shell: bash
+        run: |
+          pin() {
+            actual="$(sha256sum "$1" | cut -d ' ' -f 1)"
+            if [ "$actual" != "$2" ]; then
+              echo "::error file=$1::content hash mismatch: expected $2, found $actual; review it and update every pin together"
+              exit 1
+            fi
+          }
+          pin scripts/ci/nextest_required.py e85dd6104fefd77f5deba1aca46c26df868c45c9b40d0c3fb32ee469b8587405
+          pin scripts/check-ci-runner-hardening.sh 06b4004a462baada234994fbf67a35bf54ef950aa46577cad5e50af0f6b2b3f4
+          scripts/check-ci-runner-hardening.sh
+          python3 scripts/check_writer_gate_ci_wiring.py
+      - name: Judge required checks
+        env:
+          BASH_ENV: /dev/null
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          PINS_OUTCOME: ${{ steps.pins.outcome }}
+        run: python3 scripts/ci/nextest_ci.py required-gate
+
   pg15_owner_proof:
     name: PostgreSQL 15 owner proof
-    needs: [changes, pg_shards, lib_test_prepare]
-    if: ${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     env:
@@ -1557,21 +917,6 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download shared lib tests
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: lib-test-artifact
-          path: ${{ runner.temp }}/lib-test-download
-      - name: Restore shared lib tests
-        continue-on-error: true
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
-          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
-            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
-          fi
 
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
@@ -1643,298 +988,6 @@ jobs:
         if: always()
         run: ./scripts/ci/postgres-service.sh stop
 
-  # The required `High-risk recovery` context is published by high_risk_recovery_required_context.
-  high-risk-recovery:
-    name: High-risk recovery runner
-    needs: [changes, lib_test_prepare]
-    if: ${{ !cancelled() && needs.changes.outputs.high_risk_recovery == 'true' }}
-    runs-on: ubuntu-latest
-    env:
-      RUST_BACKTRACE: 1
-      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
-      POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
-      POSTGRES_TEST_ADMIN_DB: postgres
-      PGHOST: 127.0.0.1
-      PGPORT: "5432"
-      PGUSER: postgres
-      PGPASSWORD: postgres
-      AGENTDESK_REQUIRE_PG: "1"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download shared lib tests
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: lib-test-artifact
-          path: ${{ runner.temp }}/lib-test-download
-      - name: Restore shared lib tests
-        continue-on-error: true
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
-          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
-            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
-          fi
-
-      - name: Start PostgreSQL service
-        run: ./scripts/ci/postgres-service.sh start
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.94.1"
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      # See `lint` for rationale.
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-targets: false
-          cache-bin: false
-          shared-key: cargo-dependencies-v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Ensure swap for the lib test build
-        uses: ./.github/actions/ensure-swap
-
-      - name: High-risk recovery lane
-        env:
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-        run: |
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib high_risk_recovery:: -- --test-threads=1
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::recovery_engine::state_extractors::tests -- --test-threads=1
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_health::tests -- --test-threads=1
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::session_enrichment::tests -- --test-threads=1
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::relay_dead_reattach::tests -- --test-threads=1
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::hang_forensics::tests -- --test-threads=1
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::recovery::self_watchdog -- --test-threads=1
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::health_diagnostics::tests -- --test-threads=1
-      - name: Herdr recovery and admission regressions
-        env:
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-        run: |
-          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- services::session_host::herdr_gate::tests::root_replaced_tests:: services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests:: services::tui_prompt_dedupe::hosted_source::tests:: services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests:: --test-threads=1
-      - name: Operational alert intake admission regressions
-        env:
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-        run: |
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::dispatch_policy::allowed_turn_sender_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::formatting::delivery::attachment_delivery_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected -- --exact --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::gate::tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib server::outbox_actionable_delivery::tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- server::policy_tick_logging:: services::observability::events:: server::policy_tick_schedule_tests::
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::message_outbox::dedupe_key_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints -- --exact --test-threads=1
-      - name: Accepted turn lifetime regressions
-        env:
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-        run: |
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib accepted_turn_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib child_exit_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::process::stream_child::stream_queue::tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::process::process_group_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::process::simple_cancel_watcher_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::provider::cancel_token_cleanup::executor::tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib accepted_quiet_turn_survives_virtual_day -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib accepted_stream_runs_past_virtual_day_until_real_eof -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib productive_turns_older_than_four_and_six_hours_defer_cleanup -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib quiet_native_turn_resumes_after_virtual_day -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::provider::cancel_watchdog::tests -- --test-threads=1
-      - name: Cancel-preserved queue observation regression
-        env:
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-        run: |
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::hold_detail_tests -- --test-threads=1
-      # #5003: this production-path E2E previously ran only in main's broad
-      # non-PG lane, so test-only fixes could merge without executing it on PRs.
-      - name: Local model durable queue wake regression
-        env:
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-        run: env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
-
-      # #5170: the transition-busy requeue oracles live in two modules that no
-      - name: Transition-busy requeue spin regressions
-        env:
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-        run: |
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::message_handler::intake_turn::race_loss:: -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_io::presleep_tests::race_loss_recheck_fences_on_transition_without_parking_a_waiter_5170 -- --exact --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_io:: -- --test-threads=1
-
-      - name: Codex resume ownership regressions
-        env: { ADK_LIB_TEST_ARTIFACT: "${{ runner.temp }}/lib-test-artifact" }
-        run: 'env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- --test-threads=1 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::executed_resume:: services::discord::router::message_handler::codex_resume_companion_queue_tests:: services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests:: services::tui_o::writer::binding::terminal_tests:: services::tui_o::writer::adoption::terminal_tests:: services::tui_o::writer::source_read_tests::executed_resume::resume_companion_live_era_advances_past_exact_terminals_and_restarts_without_repost services::tui_o::writer::tests::actor::host_start::first_init:: services::discord::turn_presence::activity::tests::codex_historical_terminals_remain_closed_in_next_incarnation services::discord::turn_presence::activity::tests::codex_unterminated_historical_pending_keeps_next_incarnation_queue_held services::tui_o::writer::tests::actor::rotation::retire_tests::codex_end_proof_tests:: services::tui_o::store::codex_end::tests:: services::discord::commands::control::clear_teardown::codex_end_tests::successor_tests::'
-
-      - name: Stop PostgreSQL service
-        if: always()
-        run: ./scripts/ci/postgres-service.sh stop
-
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
-
-  high_risk_recovery_required_context:
-    name: High-risk recovery
-    needs:
-      - changes
-      - high-risk-recovery
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # The required context runs this helper, so pin its bytes before use.
-      - name: Pin required-check mirror helper (#5321)
-        env:
-          BASH_ENV: /dev/null
-        shell: bash
-        timeout-minutes: 10
-        run: |
-          helper_path=scripts/required-check-mirror.sh
-          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
-          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update every #5321 helper pin together"
-            exit 1
-          fi
-
-      - name: Mirror high-risk recovery result across path-filter skips
-        env:
-          BASH_ENV: /dev/null
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: high_risk_recovery
-          FILTER_OUTPUT: ${{ needs.changes.outputs.high_risk_recovery }}
-          UPSTREAM_JOB_NAME: high-risk-recovery
-          UPSTREAM_RESULT: ${{ needs.high-risk-recovery.result }}
-        run: ./scripts/required-check-mirror.sh
-
-  # The plan's non-PG tests, or main's full sweep and replay, against live PostgreSQL without DATABASE_URL.
-  library_sweep:
-    name: Library test sweep (shard ${{ matrix.shard }})
-    needs: [changes, lib_test_prepare, pg_shards]
-    if: ${{ !cancelled() && (needs.changes.outputs.rust_tests == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.pg_shards.outputs.sweep_matrix) }}
-    env:
-      RUST_BACKTRACE: 1
-      # Fixture-side PostgreSQL wiring, matching `test_fast` /
-      # `high-risk-recovery` minus `DATABASE_URL` (see the job comment).
-      POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
-      POSTGRES_TEST_ADMIN_DB: postgres
-      PGHOST: 127.0.0.1
-      PGPORT: "5432"
-      PGUSER: postgres
-      PGPASSWORD: postgres
-      # Fail on an unreachable PG fixture server rather than silently skipping tests.
-      AGENTDESK_REQUIRE_PG: "1"
-      # Match the other test lanes: assertions and panic text are preserved,
-      # only native debug symbols are dropped to cut link memory (#4245).
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download shared lib tests
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: lib-test-artifact
-          path: ${{ runner.temp }}/lib-test-download
-      - name: Restore shared lib tests
-        continue-on-error: true
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
-          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
-            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
-          fi
-
-      - name: Start PostgreSQL service
-        run: ./scripts/ci/postgres-service.sh start
-
-      # Rollback rehearsal executes the runbook's literal rg command.
-      - name: Install ripgrep
-        uses: taiki-e/install-action@v2
-        with:
-          tool: ripgrep
-
-      - name: Require ripgrep
-        shell: bash
-        run: rg --version
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.94.1"
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      # See `lint` for rationale: `target/` excluded to protect the
-      # sccache GHA cache quota.
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-targets: false
-          cache-bin: false
-          shared-key: cargo-dependencies-v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Ensure swap for the lib test build
-        uses: ./.github/actions/ensure-swap
-
-      # Compare complete expected/executed ID sets rather than an execution-count floor.
-      - name: Library sweep (selection-set gated)
-        timeout-minutes: 60
-        shell: bash
-        env:
-          SWEEP_SHARD_TOTAL: ${{ strategy.job-total }}
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-          ADK_TEST_SELECTION_PLAN: ${{ needs.pg_shards.outputs.plan }}
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: python3 scripts/ci/test-selection.py run --lane sweep --shard "${{ matrix.shard }}"
-
-      - name: Stop PostgreSQL service
-        if: always()
-        run: ./scripts/ci/postgres-service.sh stop
-
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
-
-  library_sweep_required_context:
-    name: Library test sweep (ubuntu-latest)
-    needs:
-      - changes
-      - library_sweep
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Mirror library sweep result across path-filter skips
-        env:
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: rust_tests
-          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_tests }}
-          UPSTREAM_JOB_NAME: library_sweep
-          UPSTREAM_RESULT: ${{ needs.library_sweep.result }}
-        run: ./scripts/required-check-mirror.sh
-
-  # The required `Lint` context is published by lint_required_context.
   lint:
     name: Lint runner
     needs: changes
@@ -2003,80 +1056,6 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
-  lint_required_context:
-    name: Lint
-    needs:
-      - changes
-      - lint
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # The required context runs this helper, so pin its bytes before use.
-      - name: Pin required-check mirror helper (#5321)
-        env:
-          BASH_ENV: /dev/null
-        shell: bash
-        timeout-minutes: 10
-        run: |
-          helper_path=scripts/required-check-mirror.sh
-          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
-          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update every #5321 helper pin together"
-            exit 1
-          fi
-
-      - name: Mirror lint result for branch protection
-        env:
-          BASH_ENV: /dev/null
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: rust_or_policy_or_relay_contract
-          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true' }}
-          UPSTREAM_JOB_NAME: lint
-          UPSTREAM_RESULT: ${{ needs.lint.result }}
-        run: ./scripts/required-check-mirror.sh
-
-  check_fast_cross_os_required_context:
-    name: Fast check cross OS required context (ubuntu-latest)
-    needs:
-      - changes
-      - check_fast_cross_os
-      - check_fast_cross_os_targets
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Mirror check_fast_cross_os result for branch protection
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          # Mirror on `cross_os_rust`, NOT `rust_compile`: the cross-OS lane is
-          # now gated on cross_os_rust, so a relay-only PR (rust_compile=true,
-          # cross_os_rust=false) legitimately SKIPS the Windows job. Keying the
-          # mirror on rust_compile would fail closed on that expected skip;
-          # cross_os_rust=false lets required-check-mirror.sh treat the skip as
-          # pass, while cross_os_rust=true still requires the lane to succeed.
-          FILTER_NAME: cross_os_rust
-          FILTER_OUTPUT: ${{ needs.changes.outputs.cross_os_rust }}
-          UPSTREAM_JOB_NAME: check_fast_cross_os
-          UPSTREAM_RESULT: ${{ needs.check_fast_cross_os.result }}
-        run: ./scripts/required-check-mirror.sh
-
-      - name: Mirror check_fast_cross_os_targets result for branch protection
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: cross_os_rust
-          FILTER_OUTPUT: ${{ needs.changes.outputs.cross_os_rust }}
-          UPSTREAM_JOB_NAME: check_fast_cross_os_targets
-          UPSTREAM_RESULT: ${{ needs.check_fast_cross_os_targets.result }}
-        run: ./scripts/required-check-mirror.sh
-
   win32_build_token_required_context:
     name: Win32 build-token required context
     needs: [changes, win32_build_token]
@@ -2089,28 +1068,13 @@ jobs:
 
   scripts:
     name: Script checks runner
-    needs: [changes, lib_test_prepare]
+    needs: changes
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Download shared lib tests
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: lib-test-artifact
-          path: ${{ runner.temp }}/lib-test-download
-      - name: Restore shared lib tests
-        continue-on-error: true
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
-          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
-            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
-          fi
 
       # Keep Rust available for the lib inventory fallback.
       - name: Install Rust toolchain for lib inventory
@@ -2230,7 +1194,7 @@ jobs:
           retention-days: 14
 
   # Parallel Script checks shards without cargo. ci-script-checks.sh assigns
-  # every check to one shard, and the result mirror below requires all of them.
+  # every check to one shard, and the required-context judge requires all of them.
   scripts_guards:
     name: Script checks runner (guards)
     needs: changes
@@ -2302,161 +1266,6 @@ jobs:
           GFP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           TEST_LANE_BASELINE_REF: HEAD^1
           SCRIPT_CHECK_SHARD: contracts
-
-  scripts_required_context:
-    name: Script checks
-    needs:
-      - changes
-      - scripts
-      - scripts_guards
-      - scripts_contracts
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # Pin the shared result primitive out-of-band before running structural
-      # checks. Intentional helper edits must update this value, the independent
-      # relay-authority backstop below, and check-ci-runner-hardening.sh together.
-      - name: Verify Script checks mirror contract (#5321)
-        env:
-          BASH_ENV: /dev/null
-        shell: bash
-        timeout-minutes: 10
-        run: |
-          helper_path=scripts/required-check-mirror.sh
-          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
-          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"
-            exit 1
-          fi
-          gate_path=scripts/check-ci-runner-hardening.sh
-          expected=6776e15cb5f47a558dccb179fb987a8fc54f5391cf143bf0e395391412b4457c
-          actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
-            exit 1
-          fi
-          scripts/check-ci-runner-hardening.sh
-          python3 scripts/check_writer_gate_ci_wiring.py
-
-      # Keep the branch-protection context on an unconditional result mirror.
-      # required-check-mirror.sh fails closed when `changes` or any shard job is
-      # skipped, failed, or cancelled, regardless of which primitive caused it.
-      - name: Mirror script checks result for branch protection
-        env:
-          BASH_ENV: /dev/null
-          PYTHON: python3
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: scripts
-          FILTER_OUTPUT: true
-          UPSTREAM_JOB_NAME: scripts
-          UPSTREAM_RESULT: ${{ needs.scripts.result }}
-        run: ./scripts/required-check-mirror.sh
-
-      - name: Mirror script checks guards shard result for branch protection
-        env:
-          BASH_ENV: /dev/null
-          PYTHON: python3
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: scripts
-          FILTER_OUTPUT: true
-          UPSTREAM_JOB_NAME: scripts_guards
-          UPSTREAM_RESULT: ${{ needs.scripts_guards.result }}
-        run: ./scripts/required-check-mirror.sh
-
-      - name: Mirror script checks contracts shard result for branch protection
-        env:
-          BASH_ENV: /dev/null
-          PYTHON: python3
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: scripts
-          FILTER_OUTPUT: true
-          UPSTREAM_JOB_NAME: scripts_contracts
-          UPSTREAM_RESULT: ${{ needs.scripts_contracts.result }}
-        run: ./scripts/required-check-mirror.sh
-
-  relay_authority_targets:
-    name: Relay authority targets
-    needs: [changes, lib_test_prepare]
-    if: ${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download shared lib tests
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: lib-test-artifact
-          path: ${{ runner.temp }}/lib-test-download
-      - name: Restore shared lib tests
-        continue-on-error: true
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
-          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
-            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
-          fi
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.94.1"
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-targets: false
-          cache-bin: false
-          shared-key: cargo-dependencies-v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Ensure swap for the lib test build
-        uses: ./.github/actions/ensure-swap
-
-      - name: Verify named relay-authority targets and selection floors
-        env:
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        shell: bash
-        timeout-minutes: 30
-        run: python3 scripts/check_relay_authority_contract.py
-
-      - name: Run named relay-authority contract targets
-        env:
-          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        shell: bash
-        timeout-minutes: 30
-        run: |
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::session_relay_sink -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::entry_gate_matrix_over_outcome_and_anchor -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1
-
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
 
   relay_authority_mutations:
     name: Relay authority mutations (${{ matrix.shard }})
@@ -2553,72 +1362,3 @@ jobs:
       - name: sccache stats
         if: always() && (steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false')
         run: sccache --show-stats || true
-
-  relay-authority-contract:
-    name: relay-authority-contract
-    needs:
-      - changes
-      - relay_authority_targets
-      - relay_authority_mutations
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Pin required-check mirror content (#5321)
-        env:
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        shell: bash
-        timeout-minutes: 10
-        run: |
-          helper_path=scripts/required-check-mirror.sh
-          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
-          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"
-            exit 1
-          fi
-          gate_path=scripts/check-ci-runner-hardening.sh
-          expected=6776e15cb5f47a558dccb179fb987a8fc54f5391cf143bf0e395391412b4457c
-          actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
-            exit 1
-          fi
-          scripts/check-ci-runner-hardening.sh
-
-      - name: Mirror relay authority targets result for branch protection
-        env:
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-          PYTHON: python3
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: relay_authority
-          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_tests_skip != 'true' }}
-          UPSTREAM_JOB_NAME: relay_authority_targets
-          UPSTREAM_RESULT: ${{ needs.relay_authority_targets.result }}
-        shell: bash
-        timeout-minutes: 10
-        run: ./scripts/required-check-mirror.sh
-
-      - name: Mirror relay authority mutations result for branch protection
-        env:
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-          PYTHON: python3
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: relay_authority
-          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_tests_skip != 'true' }}
-          UPSTREAM_JOB_NAME: relay_authority_mutations
-          UPSTREAM_RESULT: ${{ needs.relay_authority_mutations.result }}
-        shell: bash
-        timeout-minutes: 10
-        run: ./scripts/required-check-mirror.sh

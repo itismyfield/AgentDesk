@@ -16,53 +16,21 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-REQUIRED_CHECK_MIRROR_SHA256 = (
-    "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
-)
-CI_RUNNER_HARDENING_SHA256 = (
-    "6776e15cb5f47a558dccb179fb987a8fc54f5391cf143bf0e395391412b4457c"
-)
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
+# The gate pin as the workflow holds it; fixtures that edit the gate swap this value for the edited hash.
+CI_RUNNER_HARDENING_SHA256 = re.search(
+    r"pin scripts/check-ci-runner-hardening\.sh ([0-9a-f]{64})", PR_WORKFLOW.read_text(encoding="utf-8")
+).group(1)
 NESTED_CHECKER_STUB = "import sys\nassert sys.argv[1:] == ['check'], 'nested checker must receive check'\n"
 
 MIRROR_IF = "${{ !cancelled() }}"
-MIRROR_IF_LINE = f"    if: {MIRROR_IF}\n"
+JUDGE_IF = "${{ always() }}"
+JUDGE_IF_LINE = f"    if: {JUDGE_IF}\n"
 RUST_REQUIRED_IF = "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
-RUST_REQUIRED_OUTPUT = "${{ needs.changes.outputs.rust_tests_skip != 'true' }}"
 _LINT_FILTER = (
     "needs.changes.outputs.rust_or_policy == 'true' || "
     "needs.changes.outputs.relay_contract == 'true'"
 )
-PATH_FILTER_REQUIRED_MIRRORS = (
-    (
-        "lint_required_context",
-        "Lint",
-        "lint",
-        "Lint runner",
-        _LINT_FILTER,
-        "rust_or_policy_or_relay_contract",
-        "${{ " + _LINT_FILTER + " }}",
-    ),
-    (
-        "high_risk_recovery_required_context",
-        "High-risk recovery",
-        "high-risk-recovery",
-        "High-risk recovery runner",
-        "${{ !cancelled() && needs.changes.outputs.high_risk_recovery == 'true' }}",
-        "high_risk_recovery",
-        "${{ needs.changes.outputs.high_risk_recovery }}",
-    ),
-    (
-        "dashboard_required_context",
-        "Dashboard (Node 22)",
-        "dashboard",
-        "Dashboard (Node 22) runner",
-        "needs.changes.outputs.dashboard == 'true'",
-        "dashboard",
-        "${{ needs.changes.outputs.dashboard }}",
-    ),
-)
-PATH_FILTER_MIRROR_PIN_STEP = "Pin required-check mirror helper (#5321)"
 FILTER_BLOCK_HEADER = re.compile(r"^            \w+:$", re.M)
 CROSS_OS_CONSUMER_SCRIPT = REPO_ROOT / "scripts/cross_os_consumer_paths.py"
 CFG_SHIM_CONSUMERS = (
@@ -99,115 +67,8 @@ UNREACHABLE_RUST_FILES = (
      "src/services/discord/tmux_watcher/terminal_direct_fallback.rs"),
 )
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
+WARM_WORKFLOW = REPO_ROOT / ".github/workflows/ci-windows-cache-warm.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
-MACOS_TRUSTED_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
-BUSY_RETRY_4888_TEST_COMMAND = (
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib _4888 -- --test-threads=1"
-)
-
-EXPECTED_TEST_NON_PG_COMMANDS = (
-    "cargo test --lib engine::ops::kv_ops::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib server::routes::docs::inventory::endpoints::part_0 -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::task_completion_v1::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::session_host:: -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib source_registry -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib delivery_lease_key -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::session_relay_sink::delivery_orchestration_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::verdict::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::discovery::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::tail::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::ledger::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::observation::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::obligation::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::health::reachability::divergence::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib server::routes::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib formatting -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib delivery_record -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::outbound::receipt_index::tests"
-    " -- --skip _pg --skip pg_ --skip postgres",
-    (
-        "cargo test --lib services::discord::recovery_known_ids::recovery_known_message_ids_tests"
-        " -- --skip _pg --skip pg_ --skip postgres"
-    ),
-    (
-        "cargo test --lib services::discord::tmux::placeholder_suppression::evidence::tests"
-        " -- --skip _pg --skip pg_ --skip postgres"
-    ),
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::watcher_lifecycle::tests::tests::turn_starts_reuse_healthy_runtime_path_incumbent_after_handoff -- --exact",
-    "cargo test --lib server::claude_oauth_usage_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::turn_bridge::headless_delivery",
-    "cargo test --lib services::dispatches::outbox_claiming::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::dispatches::discord_delivery::guard::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib discord_thread_create -- --test-threads=1",
-    "cargo test --lib reaction_control::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib intake_queue_transaction::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib pending_reaction_failure_adapter_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib intake_dispatch_invariant_queued_entrypoints_promote_markers -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::router::intake_dispatch::tests::telemetry_only_unopted -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib attachment -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib mailbox_reaction_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::zombie_foreground_release::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::placeholder_controller::queued_card_gate::tests"
-    " -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib queue_status_presentation::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib status_panel_singleton_store -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib busy_followup_retry_store -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::claude_tui::input::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::tmux_common::sentinel_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::turn_bridge::followup_requeue::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::busy_followup_retry::tests -- --skip _pg --skip pg_ --skip postgres",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight::destructive_commit::tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight::save_store::bridge_entry_guard_tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight::save_store::identity_gate::bridge_entry::tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::current_message_anchor::tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::guards::tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_loop::tool_arms::authority_tests -- --test-threads=1",
-    "cargo test --lib services::discord::gateway::tests -- --skip _pg --skip pg_ --skip postgres",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::gateway::outbound_messages::classified_edit_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::queued::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::intake_turn::placeholder_handoff::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission_actor::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::cleanup::tests::late_already_finalized_cleanup_releases_mailbox_and_rearms_once_4906 -- --exact --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::cleanup::tests::mailbox_release_backstop_coalesces_duplicate_arms_and_eventually_fires_4906 -- --exact --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::placeholder_reclaim::redrive_reclaim_e2e_tests::live_tmux_redrive_reclaim_cycle_terminates_4299 -- --exact --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests -- --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::placeholder_sweeper::abandon_guard::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact",
-    "cargo test --lib services::discord::outbound::delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact",
-    "cargo test --lib canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib session_canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::observability::metrics::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::observability::turn_lifecycle::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::observability::recovery_audit::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib cli::args::tests::legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract",
-    "cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --all-targets routines -- --skip _pg --skip pg_ --skip postgres",
-    "python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "cargo test --lib services::discord::model_catalog -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::commands::model_ui::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::runtime_bootstrap::shutdown::lifecycle_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::tui_prompt_relay::session_rotation_settle::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::discord::tui_prompt_relay::injected_prompt_policy::session_resetting_lifecycle_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib services::tui_prompt_dedupe::session_rotation::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --doc ClaudeBinary",
-)
 
 
 def job_block(workflow: str, job_name: str) -> str:
@@ -244,6 +105,11 @@ def eval_step_if(condition: object, context: dict[str, str]) -> bool:
     """
     if condition is None or isinstance(condition, bool):
         return condition is not False
+    return bool(eval_expression(condition, context))
+
+
+def eval_expression(condition: object, context: dict[str, object]) -> object:
+    """The value of an expression, keeping Actions' `a && b || c` operand result."""
     expr = str(condition).strip()
     if expr.startswith("${{") and expr.endswith("}}"):
         expr = expr[3:-2].strip()
@@ -266,16 +132,8 @@ def eval_step_if(condition: object, context: dict[str, str]) -> bool:
         else:
             raise AssertionError(f"unknown name {name!r} in step condition: {condition!r}")
         pos = match.end()
-    return bool(eval("".join(python), {"__builtins__": {}}))
+    return eval("".join(python), {"__builtins__": {}})
 
-
-MACOS_FILTER_SCENARIOS = (
-    ("success", "false", False),
-    ("success", "true", True),
-    ("success", "", True),
-    ("failure", "false", True),
-    ("failure", "", True),
-)
 
 
 def replace_last(source: str, old: str, new: str) -> str:
@@ -416,9 +274,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         lint_verified = verified.replace("outputs.rust_tests_skip", "outputs.rust_lint_skip")
         for name in ("rust_or_policy", "rust_compile"):
             self.assertEqual(outputs[name], "${{ " + lint_verified + " && 'false' || steps.filter.outputs." + name + " }}")
-        for name, needs in (("lib_test_prepare", "changes"),
-                            ("relay_authority_targets", ["changes", "lib_test_prepare"]),
-                            ("relay_authority_mutations", "changes")):
+        for name, needs in (("relay_authority_mutations", "changes"),):
             with self.subTest(job=name):
                 self.assertEqual(jobs[name]["needs"], needs)
                 self.assertEqual(jobs[name]["if"], RUST_REQUIRED_IF)
@@ -426,12 +282,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     self.assertEqual(eval_step_if(jobs[name]["if"], {
                         "cancelled()": False, "needs.changes.outputs.rust_tests_skip": skip,
                     }), skip != "true")
-        relay = jobs["relay-authority-contract"]
-        self.assertEqual(relay["needs"], ["changes", "relay_authority_targets", "relay_authority_mutations"])
-        for step in relay["steps"]:
-            if step.get("run") == "./scripts/required-check-mirror.sh":
-                self.assertEqual(step["env"]["CHANGED_PATHS_RESULT"], "${{ needs.changes.result }}")
-                self.assertEqual(step["env"]["FILTER_OUTPUT"], RUST_REQUIRED_OUTPUT)
 
     def test_rust_comment_skip_retains_compile_and_lint_checks(self) -> None:
         outputs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["changes"]["outputs"]
@@ -477,311 +327,114 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
         self.assertNotIn("continue-on-error", job_block(workflow, "lint"))
 
-    def test_required_fast_check_context_mirrors_the_same_upstream_job(self) -> None:
-        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        job = job_block(workflow, "fast_check_required_context")
-
-        self.assertIn("name: Fast check (ubuntu-latest)", job)
-        self.assertRegex(job, r"(?m)^    needs:\n      - changes\n      - lint\n")
-        self.assertIn(MIRROR_IF_LINE, job)
-        self.assertEqual(job.count("UPSTREAM_JOB_NAME: lint"), 2)
-        self.assertEqual(job.count("UPSTREAM_RESULT: ${{ needs.lint.result }}"), 2)
-        self.assertIn(
-            "if: ${{ needs.changes.outputs.relay_contract != 'true' }}", job
-        )
-        self.assertIn(
-            "if: ${{ needs.changes.outputs.relay_contract == 'true' }}", job
-        )
-
-        lint_job = job_block(workflow, "lint")
-        self.assertIn(
-            "if: needs.changes.outputs.rust_or_policy == 'true' || "
-            "needs.changes.outputs.relay_contract == 'true'",
-            lint_job,
-        )
-
-    def test_shared_lib_consumers_reject_producer_failure_skip_and_broken_fallback(self) -> None:
+    def test_nextest_jobs_reject_fail_open_and_artifact_mutants_after_repin(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
         baseline = self.run_hardening_fixture(workflow)
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
-        consumers = ("test_fast", "high-risk-recovery", "library_sweep", "scripts", "relay_authority_targets")
-        for job_id in consumers:
-            original = job_block(workflow, job_id)
-            mutations = {
-                "implicit-success": re.sub(r"(?m)^    if: .*\n", "", original, count=1),
-                "requires-producer-success": original.replace("!cancelled()", "success()", 1),
-                "missing-dependency": original.replace(", lib_test_prepare", "", 1),
-                "missing-download": original.replace(step_block(original, "Download shared lib tests"), "", 1),
-                "fallback-blocked": original.replace("        continue-on-error: true\n", "", 1),
-            }
-            for label, changed in mutations.items():
-                with self.subTest(job=job_id, mutation=label):
-                    self.assertNotEqual(changed, original)
-                    mutated = workflow.replace(original, changed, 1)
-                    gate = self._repin_job_hash(hardening, mutated, job_id) if job_id != "scripts" else hardening
-                    self.assertNotEqual(self.run_hardening_fixture(mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest()), hardening_script=gate).returncode, 0)
-        prepare = job_block(workflow, "lib_test_prepare")
-        for label, changed in {
-            "missing-upload": prepare.replace(step_block(prepare, "Upload shared lib tests"), "", 1),
-            "skip-compile": prepare.replace("lib-test-artifact.py prepare", "lib-test-artifact.py validate", 1),
-            "skip-inventory": prepare.replace("          python3 scripts/check_test_target_integrity.py --verify-lib-inventory\n", "", 1),
-            "conditional-producer": prepare.replace("    runs-on:", "    if: success()\n    runs-on:", 1),
-        }.items():
-            with self.subTest(producer=label):
-                self.assertNotEqual(changed, prepare)
-                self.assertNotEqual(self.run_hardening_fixture(workflow.replace(prepare, changed, 1)).returncode, 0)
-
-    def test_shared_lib_command_timeout_and_upload_mutants_fail_after_repin(self) -> None:
-        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
-        for job_id in ("test_fast", "high-risk-recovery", "library_sweep", "relay_authority_targets"):
-            original = job_block(workflow, job_id)
-            # The PR sweep's command lives in the selector; repointing its lane is the mutant.
-            old, new = ("run --lane sweep", "run --lane pg") if job_id == "library_sweep" else (
-                "lib-test-artifact.py run -- cargo test --lib", "lib-test-artifact.py run -- cargo test --lib missing_test")
-            changed = original.replace(old, new, 1)
-            mutated = workflow.replace(original, changed, 1)
-            with self.subTest(command=job_id):
+        mutants = (
+            ("rust_build", "if: ${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}", "if: ${{ !cancelled() }}", "required needs closure"),
+            ("rust_build", "          python3 scripts/ci/nextest_ci.py selector-audit --plan \"$NEXTEST_DIR/plan/plan.json\"\n", "", "exact cargo/test command list"),
+            ("rust_build", "python3 scripts/ci/rust_test_sources.py compare --platform linux", "true", "exact cargo/test command list"),
+            ("rust_build", "          name: nextest-plan\n", "          name: nextest-plan-copy\n", "artifact uploads"),
+            ("rust_tests", "if: ${{ !cancelled() && needs.rust_build.result == 'success' }}", "if: success()", "required needs closure"),
+            ("rust_tests", " --profile ci --no-tests fail", " --profile ci", "exact cargo/test command list"),
+            ("rust_tests", "fail-fast: false", "fail-fast: true", "matrix"),
+            ("rust_tests", "worker: [0, 1, 2, 3, 4, 5]", "worker: [0, 1, 2, 3, 4]", "matrix"),
+            ("rust_tests", "-attempt-${{ github.run_attempt }}", "", "artifact uploads"),
+            ("test_evidence", "python3 scripts/ci/nextest_ci.py collect-results", "python3 scripts/ci/nextest_ci.py --help", "exact cargo/test command list"),
+            ("test_evidence", "    needs: [changes, rust_build, rust_tests]\n", "    needs: [changes, rust_build]\n", "exact needs"),
+            ("rust_build", "          python3 scripts/check_relay_authority_contract.py --nextest-list \"$NEXTEST_DIR/universe.json\"\n", "", "exact cargo/test command list"),
+            ("rust_build", 'nextest-base-diff.sh "$RUNNER_TEMP/nextest"', 'nextest-base-diff.sh "$RUNNER_TEMP/nextest" --report-only', "exact cargo/test command list"),
+            ("rust_build", step_block(job_block(workflow, "rust_build"), "Compare tests with the comparison base"), "", 'exactly one "Compare tests with the comparison base"'),
+        )
+        for job_id, old, new, reason in mutants:
+            with self.subTest(job=job_id, mutation=old):
+                original = job_block(workflow, job_id)
+                changed = original.replace(old, new, 1)
                 self.assertNotEqual(changed, original)
+                mutated = workflow.replace(original, changed, 1)
                 gate = self._repin_job_hash(hardening, mutated, job_id)
-                self.assertNotEqual(self.run_hardening_fixture(mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest()), hardening_script=gate).returncode, 0)
-        original = job_block(workflow, "test_fast")
-        changed = original.replace("timeout-minutes: 75", "timeout-minutes: 60", 1)
-        mutated = workflow.replace(original, changed, 1)
-        gate = self._repin_job_hash(hardening, mutated, "test_fast")
-        self.assertNotEqual(self.run_hardening_fixture(mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest()), hardening_script=gate).returncode, 0)
-        # The gate pins the 60-minute library sweep budget on PR and main, even after a job re-pin.
-        sweep = job_block(workflow, "library_sweep")
-        mutated = workflow.replace(sweep, sweep.replace("timeout-minutes: 60", "timeout-minutes: 45", 1), 1)
-        self.assertNotEqual(mutated, workflow)
-        gate = self._repin_job_hash(hardening, mutated, "library_sweep")
-        result = self.run_hardening_fixture(mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest()), hardening_script=gate)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('"Library sweep (selection-set gated)" must retain exact timeout policy', result.stderr)
+                result = self.run_hardening_fixture(mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest()), hardening_script=gate)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reason, result.stderr)
+        # Main runs the PR's N: any drift from the PR jobs, or a lost or shortened baseline, is red.
         main = MAIN_WORKFLOW.read_text(encoding="utf-8")
-        main_sweep = step_block(job_block(main, "full_non_pg"), "Library sweep (selection-set gated)")
-        main_mutated = main.replace(main_sweep, main_sweep.replace("timeout-minutes: 60", "timeout-minutes: 45", 1), 1)
-        self.assertNotEqual(main_mutated, main)
-        result = self.run_hardening_fixture(workflow, extra_workflows={"ci-main.yml": main_mutated})
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("full_non_pg Library sweep (selection-set gated) must keep timeout-minutes: 60", result.stderr)
-        download = step_block(original, "Download shared lib tests")
-        changed = original.replace(download, download.replace("download-artifact@v4", "upload-artifact@v4"), 1)
-        self.assertNotEqual(self.run_hardening_fixture(workflow.replace(original, changed, 1)).returncode, 0)
-
-    def test_library_sweep_shards_keep_validated_matrices_and_required_names(self) -> None:
-        pr_jobs = yaml.safe_load(PR_WORKFLOW.read_text())["jobs"]
-        main_jobs = yaml.safe_load(MAIN_WORKFLOW.read_text())["jobs"]
-        for jobs, job_id, source, name in (
-            (pr_jobs, "library_sweep", "pg_shards.outputs.sweep_matrix", "Library test sweep (shard ${{ matrix.shard }})"),
-            (main_jobs, "full_non_pg", "sweep_shards.outputs.matrix", "Library test sweep (main shard ${{ matrix.shard }})"),
-        ):
-            with self.subTest(job=job_id):
-                self.assertEqual(jobs[job_id]["name"], name)
-                self.assertEqual(jobs[job_id]["strategy"], {"fail-fast": False, "matrix": "${{ fromJSON(needs." + source + ") }}"})
-                sweep = next(step for step in jobs[job_id]["steps"] if step.get("name") == "Library sweep (selection-set gated)")
-                self.assertEqual(sweep["env"]["SWEEP_SHARD_TOTAL"], "${{ strategy.job-total }}")
-        self.assertEqual(pr_jobs["pg_shards"]["outputs"]["sweep_matrix"], "${{ steps.plan.outputs.sweep_matrix }}")
-        self.assertEqual(main_jobs["sweep_shards"]["steps"][1]["run"], 'matrix=$(python3 scripts/ci/test-selection.py sweep-matrix)\necho "matrix=$matrix" >> "$GITHUB_OUTPUT"\n')
-        aggregate = main_jobs["full_non_pg_required_context"]
-        self.assertEqual(aggregate["name"], "Full tests (ubuntu-latest)")
-        self.assertEqual(aggregate["needs"], "full_non_pg")
-        self.assertEqual(aggregate["if"], "always()")
-        step = aggregate["steps"][0]
-        self.assertEqual(step["env"], {"SWEEP_RESULT": "${{ needs.full_non_pg.result }}"})
-        self.assertEqual(step["run"], 'echo "aggregate-only: upstream=full_non_pg result=$SWEEP_RESULT"\ntest "$SWEEP_RESULT" = success\n')
-        for result in ("success", "failure", "cancelled", "skipped", ""):
-            with self.subTest(result=result):
-                checked = subprocess.run(["bash", "-c", step["run"]], env={**os.environ, "SWEEP_RESULT": result}, capture_output=True)
-                self.assertEqual(checked.returncode == 0, result == "success")
-                self.assertIn(f"aggregate-only: upstream=full_non_pg result={result}\n".encode(), checked.stdout)
-        self.assertEqual(pr_jobs["library_sweep_required_context"]["name"], "Library test sweep (ubuntu-latest)")
-
-    def test_pg_shard_context_is_confined_to_the_unconditional_test_step(self) -> None:
-        for path, job_id, step_name in ((PR_WORKFLOW, "test_fast", "PostgreSQL shard tests"),
-                                        (MAIN_WORKFLOW, "postgres", "just test-postgres-shard")):
-            with self.subTest(workflow=path.name):
-                document = yaml.safe_load(path.read_text())
-                job = document["jobs"][job_id]
-                self.assertNotIn("PG_INCLUDE_SHARD", document.get("env", {}))
-                self.assertNotIn("PG_INCLUDE_SHARD", job.get("env", {}))
-                for step in job["steps"]:
-                    if step.get("name") == step_name:
-                        self.assertEqual(step["env"]["PG_INCLUDE_SHARD"], "${{ matrix.shard }}")
-                        self.assertNotIn("if", step)
-                    else:
-                        self.assertNotIn("PG_INCLUDE_SHARD", step.get("env", {}))
-
-    def test_shard_step_context_and_aggregate_marker_mutants_fail_after_repin(self) -> None:
-        hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
-        gate_sha = hashlib.sha256(hardening.encode()).hexdigest()
-        pr = PR_WORKFLOW.read_text().replace(CI_RUNNER_HARDENING_SHA256, gate_sha)
-        main = MAIN_WORKFLOW.read_text()
-        baseline = self.run_hardening_fixture(pr)
-        self.assertEqual(baseline.returncode, 0, baseline.stderr)
-        pg_line = '          PG_INCLUDE_SHARD: ${{ matrix.shard }}\n'
-        total_line = '          SWEEP_SHARD_TOTAL: ${{ strategy.job-total }}\n'
-        for is_pr, source, pg_job, step_name, sweep_job in (
-            (True, pr, "test_fast", "PostgreSQL shard tests", "library_sweep"),
-            (False, main, "postgres", "just test-postgres-shard", "full_non_pg"),
-        ):
-            pg = job_block(source, pg_job)
-            target = step_block(pg, step_name)
-            for label, altered_job, reason in (
-                ("missing-pg", pg.replace(pg_line, "", 1), "actual PostgreSQL shard step must set PG_INCLUDE_SHARD"),
-                ("job-pg", pg.replace(pg_line, "", 1).replace("    env:\n", "    env:\n      PG_INCLUDE_SHARD: ${{ matrix.shard }}\n", 1), "must not be inherited by the PostgreSQL prelude"),
-                ("prelude-pg", pg.replace("      - name: Start PostgreSQL service\n", "      - name: Start PostgreSQL service\n        env:\n" + pg_line, 1), "must be confined to the actual PostgreSQL shard step"),
-                ("conditional-pg", pg.replace(target, target.replace("        timeout-minutes:", "        if: false\n        timeout-minutes:", 1), 1), "may not set if"),
-                ("missing-total", job_block(source, sweep_job).replace(total_line, "", 1), "exact step env" if is_pr else "exactly one unconditional full sweep shard"),
-            ):
-                with self.subTest(pr=is_pr, mutation=label):
-                    job_id = sweep_job if label == "missing-total" else pg_job
-                    original = job_block(source, job_id)
-                    self.assertNotEqual(altered_job, original)
-                    altered = source.replace(original, altered_job, 1)
-                    gate = self._repin_job_hash(hardening, altered, job_id) if is_pr else hardening
-                    result = self.run_hardening_fixture(
-                        altered.replace(gate_sha, hashlib.sha256(gate.encode()).hexdigest()) if is_pr else pr,
-                        {} if is_pr else {"ci-main.yml": altered}, hardening_script=gate)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(reason, result.stderr)
-        marker = '          echo "aggregate-only: upstream=full_non_pg result=$SWEEP_RESULT"\n'
-        altered = main.replace(marker, "", 1)
-        self.assertNotEqual(altered, main)
-        result = self.run_hardening_fixture(pr, {"ci-main.yml": altered})
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("original required status", result.stderr)
-
-    def test_library_sweep_matrix_and_required_status_mutants_fail_after_repin(self) -> None:
-        pr = PR_WORKFLOW.read_text()
-        main = MAIN_WORKFLOW.read_text()
-        hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
-        baseline = self.run_hardening_fixture(pr)
-        self.assertEqual(baseline.returncode, 0, baseline.stderr)
-        job = job_block(pr, "library_sweep")
-        for label, old, new, reason in (
-            ("partial-matrix", "fromJSON(needs.pg_shards.outputs.sweep_matrix)", "fromJSON(needs.pg_shards.outputs.matrix)", "validated sweep matrix"),
-            ("fail-fast", "fail-fast: false", "fail-fast: true", "validated sweep matrix"),
-            ("missing-shard", ' --shard "${{ matrix.shard }}"', "", "exact cargo/test command list"),
-        ):
-            with self.subTest(pr=label):
-                altered = pr.replace(job, job.replace(old, new, 1), 1)
-                self.assertNotEqual(altered, pr)
-                gate = self._repin_job_hash(hardening, altered, "library_sweep")
-                altered = altered.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest())
-                result = self.run_hardening_fixture(altered, hardening_script=gate)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(reason, result.stderr)
-        for job_id, old, new, reason in (
-            ("sweep_shards", "test-selection.py sweep-matrix", "test-selection.py pg-matrix", "validate and emit the canonical full sweep matrix"),
-            ("full_non_pg", "fromJSON(needs.sweep_shards.outputs.matrix)", "fromJSON(needs.pg_shards.outputs.matrix)", "validated sweep matrix"),
-            ("full_non_pg", "fail-fast: false", "fail-fast: true", "validated sweep matrix"),
-            ("full_non_pg", "run --lane sweep --full --shard", "run --lane sweep --shard", "exactly one unconditional full sweep shard"),
-            ("full_non_pg", "if: ${{ !cancelled() }}", "if: success()", "producer-failure fallback"),
-            ("full_non_pg", "continue-on-error: true", "continue-on-error: false", "download and producer-failure fallback"),
-            ("full_non_pg_required_context", "name: Full tests (ubuntu-latest)", "name: Full tests changed", "original required status"),
-            ("full_non_pg_required_context", "if: always()", "if: success()", "original required status"),
-            ("full_non_pg_required_context", 'test "$SWEEP_RESULT" = success', "true", "original required status"),
-        ):
-            with self.subTest(main=job_id, mutation=old):
+        main_mutants = (
+            ("rust_tests", "worker: [0, 1, 2, 3, 4, 5]", "worker: [0, 1, 2, 3, 4]", "main rust_tests must equal the PR job"),
+            ("test_evidence", "    needs: [rust_build, rust_tests]\n", "    needs: rust_build\n", "main test_evidence must keep needs"),
+            ("rust_build", "          retention-days: 14\n", "          retention-days: 3\n", "nextest-baseline for 14 days"),
+            ("rust_build", "          name: nextest-baseline\n", "          name: nextest-plan-copy\n", "nextest-baseline for 14 days"),
+        )
+        for job_id, old, new, reason in main_mutants:
+            with self.subTest(main_job=job_id, mutation=old):
                 original = job_block(main, job_id)
-                altered = main.replace(original, original.replace(old, new, 1), 1)
-                self.assertNotEqual(altered, main)
-                result = self.run_hardening_fixture(pr, {"ci-main.yml": altered})
+                changed = original.replace(old, new, 1)
+                self.assertNotEqual(changed, original)
+                result = self.run_hardening_fixture(workflow, extra_workflows={"ci-main.yml": main.replace(original, changed, 1)})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(reason, result.stderr)
-        mirror = job_block(pr, "library_sweep_required_context")
-        for old, new in (("name: Library test sweep (ubuntu-latest)", "name: Sweep changed"), ("needs.library_sweep.result", "needs.lib_test_prepare.result")):
-            with self.subTest(mirror=old):
-                altered = pr.replace(mirror, mirror.replace(old, new, 1), 1)
-                result = self.run_hardening_fixture(altered)
+        # Nightly runs the same N, and no other nightly job may run lib tests outside it.
+        nightly = NIGHTLY_WORKFLOW.read_text(encoding="utf-8")
+        nightly_mutants = (
+            ("rust_tests", "worker: [0, 1, 2, 3, 4, 5]", "worker: [0, 1]", "nightly rust_tests must equal the main job"),
+            ("postgres_full", "cargo test --test e2e -- --test-threads=1", "cargo test --lib high_risk_recovery:: -- --test-threads=1",
+             "nightly lib tests run only in"),
+        )
+        for job_id, old, new, reason in nightly_mutants:
+            with self.subTest(nightly_job=job_id, mutation=old):
+                original = job_block(nightly, job_id)
+                changed = original.replace(old, new, 1)
+                self.assertNotEqual(changed, original)
+                result = self.run_hardening_fixture(workflow, extra_workflows={"ci-nightly.yml": nightly.replace(original, changed, 1)})
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("preserve its required status and mirror every sweep shard", result.stderr)
+                self.assertIn(reason, result.stderr)
 
-    def test_required_targeted_context_mirrors_test_fast_pg_db_gate(self) -> None:
-        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        job = job_block(workflow, "fast_targeted_tests_required_context")
-
-        self.assertIn("name: Fast targeted tests (ubuntu-latest)", job)
-        self.assertRegex(
-            job,
-            r"(?m)^    needs:\n      - changes\n      - test_fast\n      - pg15_owner_proof\n    if: "
-            + re.escape(MIRROR_IF)
-            + "$",
-        )
-        self.assertEqual(job.count("FILTER_NAME: pg_db"), 2)
-        self.assertEqual(
-            job.count("FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}"), 2
-        )
-        self.assertEqual(job.count("UPSTREAM_JOB_NAME: test_fast"), 1)
-        self.assertEqual(
-            job.count("UPSTREAM_RESULT: ${{ needs.test_fast.result }}"), 1
-        )
-        self.assertEqual(job.count("UPSTREAM_JOB_NAME: pg15_owner_proof"), 1)
-        self.assertEqual(
-            job.count("UPSTREAM_RESULT: ${{ needs.pg15_owner_proof.result }}"), 1
-        )
-
-        test_job = job_block(workflow, "test_fast")
-        self.assertRegex(
-            test_job,
-            r"(?m)^    if: " + re.escape("${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}") + "$",
-        )
-        command = (
-            "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib "
-            'services::session_forwarding -- "${NON_PG_SKIP_ARGS[@]}"'
-        )
-        self.assertEqual(test_job.count("- name: Trusted session forwarding tests"), 1)
-        self.assertIn("source scripts/ci/non-pg-test-filter.sh", test_job)
-        self.assertEqual(test_job.count(command), 1)
-        self.assertNotIn(command, job_block(workflow, "scripts"))
-
-    def test_pg15_owner_proof_runs_whenever_the_postgres_shards_run(self) -> None:
+    def test_retired_targeted_lane_regressions_stay_in_the_audited_selectors(self) -> None:
+        # The old test_fast and high-risk steps ran these by name; the selector audit now fails the run if one stops matching.
+        selectors = (REPO_ROOT / "scripts/ci/targeted-test-selectors.txt").read_text(encoding="utf-8").split()
+        for selector in (
+            "services::session_forwarding",
+            "task_notification",
+            "services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests",
+            "inflight::terminal_delivery_evidence_loss::tests",
+            "services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests",
+            "watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
+            "identity_guarded_save_rejects_stale_write_against_newer_turn",
+        ):
+            self.assertIn(selector, selectors)
         jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        self.assertEqual(jobs["pg15_owner_proof"]["needs"], ["changes", "pg_shards", "lib_test_prepare"])
-        for pg_db in ("true", "false"):
-            for force_full in ("true", "false"):
-                context = {
-                    "needs.changes.outputs.pg_db": pg_db,
-                    "needs.pg_shards.outputs.force_full": force_full,
-                }
-                for job_id in ("pg15_owner_proof", "test_fast"):
-                    with self.subTest(job=job_id, pg_db=pg_db, force_full=force_full):
-                        condition = jobs[job_id]["if"].replace("!cancelled()", "true")
-                        self.assertEqual(eval_step_if(condition, context), "true" in (pg_db, force_full))
+        for job_id in ("rust_build", "test_evidence"):
+            runs = " ".join(str(step.get("run", "")) for step in jobs[job_id]["steps"])
+            self.assertIn("nextest_ci.py selector-audit --plan", runs, job_id)
+
+    def test_pg15_owner_proof_runs_whenever_the_rust_tests_run(self) -> None:
+        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        self.assertEqual(jobs["pg15_owner_proof"]["needs"], "changes")
+        for rust_tests in ("true", "false"):
+            for job_id in ("pg15_owner_proof", "rust_build"):
+                with self.subTest(job=job_id, rust_tests=rust_tests):
+                    condition = jobs[job_id]["if"].replace("!cancelled()", "true")
+                    self.assertEqual(eval_step_if(condition, {"needs.changes.outputs.rust_tests": rust_tests}), rust_tests == "true")
 
     def test_fast_targeted_context_fails_closed_on_each_pg15_outcome_its_gate_forbids(self) -> None:
-        mirror = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"][
-            "fast_targeted_tests_required_context"
-        ]
-        self.assertIn("pg15_owner_proof", mirror["needs"])
-        steps = [step for step in mirror["steps"] if step.get("run") == "./scripts/required-check-mirror.sh"]
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import nextest_required
+        judge = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["required_contexts"]
+        self.assertIn("pg15_owner_proof", judge["needs"])
         red = {
             ("true", "success"): False, ("true", "skipped"): True,
             ("true", "failure"): True, ("true", "cancelled"): True,
             ("false", "success"): False, ("false", "skipped"): False,
             ("false", "failure"): True, ("false", "cancelled"): True,
         }
-        for (pg_db, outcome), expected_red in red.items():
-            values = {
-                "needs.changes.result": "success",
-                "needs.changes.outputs.pg_db": pg_db,
-                "needs.test_fast.result": "success",
-                "needs.pg15_owner_proof.result": outcome,
-            }
-            codes = []
-            for step in steps:
-                env = {
-                    key: values[value[3:-2].strip()] if value.startswith("${{") else value
-                    for key, value in step["env"].items()
-                }
-                codes.append(subprocess.run(
-                    ["bash", "scripts/required-check-mirror.sh"], cwd=REPO_ROOT,
-                    env={**os.environ, **env}, capture_output=True, check=False,
-                ).returncode)
-            with self.subTest(pg_db=pg_db, outcome=outcome):
-                self.assertEqual(any(codes), expected_red)
+        for (rust_tests, outcome), expected_red in red.items():
+            n_result = "success" if rust_tests == "true" else "skipped"
+            needs = {job: {"result": n_result} for job in ("rust_build", "rust_tests", "test_evidence")}
+            needs.update(changes={"result": "success", "outputs": {"rust_tests": rust_tests}}, pg15_owner_proof={"result": outcome})
+            with self.subTest(rust_tests=rust_tests, outcome=outcome):
+                ok, lines = nextest_required.context_verdict("Fast targeted tests (ubuntu-latest)", needs)
+                self.assertEqual(not ok, expected_red, lines)
 
     def test_pg15_owner_proof_runs_the_exact_ids_on_a_postgres_15_server(self) -> None:
         job = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["pg15_owner_proof"]
@@ -824,8 +477,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         ids = (REPO_ROOT / "scripts/ci/pg15_required_ids.txt").read_text(encoding="utf-8").split()
         self.assertTrue(ids)
         self.assertEqual(len(ids), len(set(ids)))
-        manifest = (REPO_ROOT / "scripts/lib_test_inventory_manifest.txt").read_text(encoding="utf-8")
-        inventoried = set(manifest.split("[tests]\n", 1)[1].split("\n[", 1)[0].split())
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import rust_test_sources
+        inventoried = rust_test_sources.compiled_lib_tests(REPO_ROOT)
         self.assertEqual([test_id for test_id in ids if test_id not in inventoried], [])
         ledger = (REPO_ROOT / "scripts/known_test_failures.txt").read_text(encoding="utf-8")
         patterns = [line.split("|")[1].strip() for line in ledger.splitlines()
@@ -834,72 +488,12 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual([(test_id, pattern) for test_id in ids for pattern in patterns
                           if test_id.startswith(pattern)], [])
 
-    def test_terminal_delivery_evidence_regressions_flow_through_registered_required_context(self) -> None:
-        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        changes_job = job_block(workflow, "changes")
-        test_job = job_block(workflow, "test_fast")
-        mirror_job = job_block(workflow, "fast_targeted_tests_required_context")
-        registered_required_contexts = {
-            "Lint",
-            "Script checks",
-            "Fast check (ubuntu-latest)",
-            "High-risk recovery",
-            "Dashboard (Node 22)",
-            "Fast targeted tests (ubuntu-latest)",
-        }
-
-        self.assertNotIn("terminal_delivery_evidence_tests:", workflow)
-        self.assertNotIn("terminal_delivery_evidence_required_context:", workflow)
-        for path in (
-            "src/services/discord/inflight.rs",
-            "src/services/discord/inflight/**",
-            "src/services/discord/tmux_watcher.rs",
-            "src/services/discord/tmux_watcher/**",
-            "src/services/discord/turn_bridge/terminal_outcome_delivery.rs",
-            "src/services/discord/turn_bridge/terminal_outcome_delivery/**",
-        ):
-            self.assertIn(f"- '{path}'", changes_job)
-        for command in (
-            "cargo test --lib inflight::terminal_delivery_evidence_loss::tests",
-            "cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests",
-            "cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
-            "cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn",
-        ):
-            self.assertIn(command, test_job)
-        self.assertIn("name: Fast targeted tests (ubuntu-latest)", mirror_job)
-        self.assertIn("Fast targeted tests (ubuntu-latest)", registered_required_contexts)
-        self.assertIn("- test_fast", mirror_job)
-        self.assertIn("FILTER_NAME: pg_db", mirror_job)
-        self.assertIn("FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}", mirror_job)
-        self.assertIn("UPSTREAM_JOB_NAME: test_fast", mirror_job)
-        self.assertIn("UPSTREAM_RESULT: ${{ needs.test_fast.result }}", mirror_job)
-
-    def test_footer_marker_regressions_run_in_required_test_fast_lane(self) -> None:
-        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        test_job = job_block(workflow, "test_fast")
-        self.assertEqual(test_job.count("- name: Footer-only marker regressions"), 1)
-        for command in (
-            'cargo test --lib task_notification -- "${NON_PG_SKIP_ARGS[@]}"',
-            'cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- "${NON_PG_SKIP_ARGS[@]}"',
-        ):
-            self.assertEqual(test_job.count(command), 1)
-
-        changes = job_block(workflow, "changes")
-        for path in (
-            "src/services/discord/task_notification_delivery/**",
-            "src/services/discord/tmux.rs",
-            "src/services/discord/tmux_watcher/discrete_trigger_marker.rs",
-            "src/services/discord/tui_prompt_relay/task_notification_prompt.rs",
-        ):
-            self.assertIn(f"- '{path}'", changes)
-
     def test_pr_cross_os_lane_allows_only_targeted_writer_runtime(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         jobs = yaml.safe_load(workflow)["jobs"]
         check, targets = jobs["check_fast_cross_os"], jobs["check_fast_cross_os_targets"]
         python_step_name = (
-            "Provision Python 3.11 (tomllib owner for "
-            "check_test_target_integrity, a2a-C PR-1)"
+            "Provision Python 3.11 (tomllib owner for rust_test_sources)"
         )
         self.assertEqual(check["name"], "Fast check + non-PG tests (${{ matrix.os }})")
         self.assertEqual(targets["name"], "Windows exact targets (${{ matrix.os }})")
@@ -919,7 +513,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(python_step["with"]["python-version"], "3.11")
 
         runs = [
-            (job_id, step["run"])
+            (job_id, step.get("run", step.get("uses")))
             for job_id in ("check_fast_cross_os", "check_fast_cross_os_targets")
             for step in jobs[job_id]["steps"][len(setup) :]
             if step.get("name") != "sccache stats"
@@ -929,8 +523,18 @@ class FastCheckCiWiringTests(unittest.TestCase):
             [
                 ("check_fast_cross_os", "cargo check --workspace --all-targets"),
                 ("check_fast_cross_os_targets", "./scripts/ci/run-writer-namespace-windows-targets.sh"),
+                ("check_fast_cross_os_targets", "taiki-e/install-action@v2"),
+                ("check_fast_cross_os_targets",
+                 "set -euo pipefail\n"
+                 "cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json\n"
+                 "python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json\n"),
             ],
         )
+        # The Windows list must come from the Windows runner, with the pinned nextest.
+        install, compare = targets["steps"][len(setup) + 1 : len(setup) + 3]
+        self.assertEqual(install["with"], {"tool": "cargo-nextest@0.9.149"})
+        self.assertEqual((install["if"], compare["if"]), ("runner.os == 'Windows'", "runner.os == 'Windows'"))
+        self.assertNotIn("continue-on-error", compare)
         writer = targets["steps"][len(setup)]
         self.assertEqual(writer["name"], "Writer namespace exact Windows targets")
         self.assertEqual(writer["if"], "runner.os == 'Windows'")
@@ -1059,7 +663,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         jobs = yaml.safe_load(workflow)["jobs"]
         cross_os = jobs["check_fast_cross_os"]
-        mirror = jobs["check_fast_cross_os_required_context"]
         owner_paths = (
             "src/services/discord/inflight/store.rs",
             "src/services/discord/inflight/save_store.rs",
@@ -1089,30 +692,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "needs.changes.outputs.cross_os_rust == 'true'",
         )
         self.assertEqual(cross_os["strategy"]["matrix"]["os"], ["windows-latest"])
-        self.assertEqual(
-            mirror["needs"],
-            ["changes", "check_fast_cross_os", "check_fast_cross_os_targets"],
-        )
-        self.assertEqual(mirror["if"], MIRROR_IF)
-        mirror_steps = [
-            step
-            for step in mirror["steps"]
-            if step.get("run") == "./scripts/required-check-mirror.sh"
-        ]
-        self.assertEqual(
-            [step["env"] for step in mirror_steps],
-            [
-                {
-                    "BASH_ENV": "/dev/null",
-                    "CHANGED_PATHS_RESULT": "${{ needs.changes.result }}",
-                    "FILTER_NAME": "cross_os_rust",
-                    "FILTER_OUTPUT": "${{ needs.changes.outputs.cross_os_rust }}",
-                    "UPSTREAM_JOB_NAME": runner,
-                    "UPSTREAM_RESULT": "${{ needs.%s.result }}" % runner,
-                }
-                for runner in ("check_fast_cross_os", "check_fast_cross_os_targets")
-            ],
-        )
+        # The judge reads both Windows runners for the cross-OS context.
+        self.assertLessEqual({"check_fast_cross_os", "check_fast_cross_os_targets"}, set(jobs["required_contexts"]["needs"]))
 
     def test_provider_and_session_host_trees_select_native_windows_lane(self) -> None:
         """Hand-listed cfg-shim trees outside the derived discord block.
@@ -1137,57 +718,30 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 )["cross_os_rust"]
                 self.assertFalse(selects(survivors, sample))
 
-    def test_trusted_macos_hosted_lane_runs_single_message_panel_tests(self) -> None:
-        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        command = (
-            "env -u AGENTDESK_ROOT_DIR cargo test --lib "
-            "single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres"
-        )
-        self.assertEqual(job_block(workflow, "macos_hosted").count(command), 1)
-
-    def test_trusted_macos_hosted_lane_runs_placeholder_live_events_tests(self) -> None:
-        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        command = (
-            "env -u AGENTDESK_ROOT_DIR cargo test --lib "
-            "placeholder_live_events -- --skip _pg --skip pg_ --skip postgres"
-        )
-        self.assertEqual(job_block(workflow, "macos_hosted").count(command), 1)
+    def test_herdr_macos_ids_file_matches_the_macos_source_inventory(self) -> None:
+        # Local Mac evidence reads this list as --expected-ids; no PR job compiles these tests.
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import rust_test_sources
+        ids = (REPO_ROOT / "scripts/ci/herdr_loaded_image_macos_ids.txt").read_text(encoding="utf-8").split()
+        macos = rust_test_sources.compiled_lib_tests(REPO_ROOT, "macos")
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(set(ids), {t for t in macos if "herdr_loaded_image_macos_" in t})
+        self.assertFalse(set(ids) & rust_test_sources.compiled_lib_tests(REPO_ROOT, "linux"))
 
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("check: fmt-check lint cargo-check test", justfile)
-        self.assertIn("test: test-non-pg", justfile)
-        self.assertEqual(
-            just_recipe_commands(justfile, "test-non-pg"),
-            EXPECTED_TEST_NON_PG_COMMANDS,
-        )
+        self.assertEqual(just_recipe_commands(justfile, "test"), ("cargo nextest run --lib --profile ci",))
+        # Local non-PG lib tests take the native CI path; the other commands equal CI Main's non-lib step.
+        recipe = just_recipe_commands(justfile, "test-non-pg")
+        self.assertTrue(any(command.startswith('RUNNER_TEMP="$PWD/target/nextest-local" GITHUB_WORKSPACE="$PWD" '
+                                               "bash scripts/ci/nextest-native.sh") for command in recipe))
+        self.assertTrue(any(command.endswith(" local-non-pg pg-classifier") for command in recipe))
+        non_lib = [command for command in recipe if command.startswith("cargo test ")]
+        self.assertEqual(non_lib, ["cargo test --bins --test '*' -- --skip _pg --skip pg_ --skip postgres",
+                                   "cargo test --doc ClaudeBinary"])
 
         main_jobs = yaml.safe_load(MAIN_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        pr_jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        sweep_step = "Library sweep (selection-set gated)"
-
-        def named(job: dict, name: str) -> list[dict]:
-            return [step for step in job["steps"] if step.get("name") == name]
-
-        shared_sweep = named(pr_jobs["library_sweep"], sweep_step)
-        self.assertEqual(len(shared_sweep), 1)
-        shared = shared_sweep[0]
-        self.assertEqual(shared["env"]["ADK_LIB_TEST_ARTIFACT"], "${{ runner.temp }}/lib-test-artifact")
-        self.assertEqual(shared["run"], 'python3 scripts/ci/test-selection.py run --lane sweep --shard "${{ matrix.shard }}"')
-        normalized = {**shared, "env": {key: value for key, value in shared["env"].items() if key != "ADK_TEST_SELECTION_PLAN"},
-                      "run": 'python3 scripts/ci/test-selection.py run --lane sweep --full --shard "${{ matrix.shard }}"'}
-        self.assertEqual(named(main_jobs["full_non_pg"], sweep_step), [normalized])
-        self.assertEqual(len(named(main_jobs["full_non_pg"], sweep_step)), 1)
-        recipe = just_recipe_commands(justfile, "test-non-pg")
-        non_lib = [
-            command.replace(" --all-targets", " --bins --test '*'").replace(
-                "-- --skip _pg --skip pg_ --skip postgres",
-                '-- "${NON_PG_SKIP_ARGS[@]}"',
-            )
-            for command in recipe
-            if "cargo test --lib " not in command
-        ]
-        self.assertIn("cargo test --doc ClaudeBinary", non_lib)
         lint_run = next(step["run"] for step in main_jobs["lint"]["steps"] if step.get("name") == "just lint")
         observed = next(line.strip().split(" | tee ")[0] for line in lint_run.splitlines() if line.strip().startswith("cargo clippy "))
         self.assertEqual(observed.replace(" --message-format=json", ""), just_recipe_commands(justfile, "lint")[0])
@@ -1207,7 +761,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "mkdir -p target/clippy-observation",
                 "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
                 "python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1",
-                "source scripts/ci/non-pg-test-filter.sh",
                 *non_lib,
                 "sccache --show-stats || true",
             ],
@@ -1217,77 +770,26 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for job_name in ("full_macos", "full_windows"):
             with self.subTest(job=job_name):
                 job = job_block(nightly, job_name)
-                self.assertIn("- name: cargo test (non-PG)", job)
-                self.assertIn("source scripts/ci/non-pg-test-filter.sh", job)
-                self.assertIn(
-                    'cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"', job
-                )
-                self.assertIn("run_non_pg_filter_replay", job)
-        self.assertIn(
-            "cargo test --lib discord_thread_create -- --test-threads=1",
-            job_block(nightly, "full_windows"),
-        )
-        postgres = job_block(nightly, "postgres_full")
-        self.assertIn("source scripts/ci/non-pg-test-filter.sh", postgres)
-        self.assertIn(
-            'cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" '
-            "--nocapture --test-threads=1",
-            postgres,
-        )
-        self.assertIn("run: cargo test --test e2e -- --test-threads=1", postgres)
+                # Lib tests run through the audited native path; the other targets run whole.
+                self.assertIn("pg-classifier", job)
+                self.assertIn("cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres", job)
+        self.assertIn("cargo test --test e2e -- --test-threads=1", job_block(nightly, "postgres_full"))
 
     def test_relay_authority_contract_job_uses_pinned_recipe(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        jobs = yaml.safe_load(workflow)["jobs"]
-        job = job_block(workflow, "relay_authority_targets")
-        setup = []
-        for job_id, cap in (("relay_authority_targets", 30), ("relay_authority_mutations", 45)):
-            runner = jobs[job_id]
-            if job_id == "relay_authority_targets":
-                self.assertEqual(runner["if"], RUST_REQUIRED_IF)
-                self.assertEqual(runner["needs"], ["changes", "lib_test_prepare"])
-            else:
-                self.assertEqual(runner["if"], RUST_REQUIRED_IF)
-                self.assertEqual(runner["needs"], "changes")
-            self.assertEqual(runner["runs-on"], "ubuntu-latest")
-            self.assertEqual(runner["timeout-minutes"], cap)
-            self.assertEqual(runner["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
-            self.assertEqual(runner["env"]["CARGO_PROFILE_TEST_DEBUG"], "0")
-            setup.append([step for step in runner["steps"] if "uses" in step and step.get("id") != "mutation_paths" and step.get("name") != "Download shared lib tests"])
-        self.assertEqual(setup[1][0], {"uses": "actions/checkout@v4", "with": {"fetch-depth": 2}})
-        setup[1][0] = {"uses": "actions/checkout@v4"}
-        self.assertEqual(
-            setup[0],
-            [{key: value for key, value in step.items() if key != "if"} for step in setup[1]],
-        )
-        self.assertEqual(setup[0][0], {"uses": "actions/checkout@v4"})
-        self.assertEqual(setup[0][1]["with"]["toolchain"], "1.94.1")
-        mutation = jobs["relay_authority_mutations"]
+        mutation = yaml.safe_load(workflow)["jobs"]["relay_authority_mutations"]
+        self.assertEqual(mutation["if"], RUST_REQUIRED_IF)
+        self.assertEqual(mutation["needs"], "changes")
+        self.assertEqual(mutation["runs-on"], "ubuntu-latest")
+        self.assertEqual(mutation["timeout-minutes"], 45)
+        self.assertEqual(mutation["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
+        self.assertEqual(mutation["env"]["CARGO_PROFILE_TEST_DEBUG"], "0")
+        setup = [step for step in mutation["steps"] if "uses" in step and step.get("id") != "mutation_paths"]
+        self.assertEqual(setup[0], {"uses": "actions/checkout@v4", "with": {"fetch-depth": 2}})
+        self.assertEqual(setup[1]["with"]["toolchain"], "1.94.1")
         self.assertEqual(mutation["strategy"], {"fail-fast": False, "matrix": {"shard": [0, 1, 2]}})
         self.assertEqual(mutation["env"]["RELAY_AUTHORITY_MUTATION_SHARD_INDEX"], "${{ matrix.shard }}")
         self.assertEqual(mutation["env"]["RELAY_AUTHORITY_MUTATION_SHARD_TOTAL"], "3")
-        self.assertRegex(
-            job,
-            r"(?m)^      - name: Run named relay-authority contract targets\n"
-            r"        env:\n"
-            r"          ADK_LIB_TEST_ARTIFACT: \$\{\{ runner\.temp \}\}/lib-test-artifact\n"
-            r"          BASH_ENV: /dev/null\n"
-            r'          CARGO_PROFILE_DEV_DEBUG: "0"\n'
-            r'          CARGO_PROFILE_TEST_DEBUG: "0"\n'
-            r"        shell: bash\n"
-            r"        timeout-minutes: 30\n"
-            r"        run: \|\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::session_relay_sink -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::entry_gate_matrix_over_outcome_and_anchor -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1$",
-        )
         self.assertRegex(
             job_block(workflow, "relay_authority_mutations"),
             r"(?m)^      - name: Require relay-authority mutations to be killed\n"
@@ -1345,32 +847,19 @@ class FastCheckCiWiringTests(unittest.TestCase):
         ]
         self.assert_mutation_dependency_preparation(job)
 
-    def test_required_relay_job_backstops_mirror_content_hash(self) -> None:
-        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        self.assertEqual(
-            hashlib.sha256(
-                (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_bytes()
-            ).hexdigest(),
-            CI_RUNNER_HARDENING_SHA256,
-        )
-        relay_job = yaml.safe_load(workflow)["jobs"]["relay-authority-contract"]
-        self.assertEqual(relay_job["if"], MIRROR_IF)
-        self.assertEqual(relay_job["needs"], ["changes", "relay_authority_targets", "relay_authority_mutations"])
-        pin_steps = {
-            step["name"]: step
-            for step in relay_job["steps"]
-            if isinstance(step, dict) and step.get("name", "").endswith("(#5321)")
-        }
-        self.assertEqual(set(pin_steps), {"Pin required-check mirror content (#5321)"})
-        pin = pin_steps["Pin required-check mirror content (#5321)"]
-        self.assertEqual(pin["shell"], "bash")
-        self.assertEqual(pin["timeout-minutes"], 10)
-        self.assertEqual(pin["env"]["BASH_ENV"], "/dev/null")
-        self.assertIn('sha256sum "$helper_path"', pin["run"])
-        self.assertIn(REQUIRED_CHECK_MIRROR_SHA256, pin["run"])
-        self.assertIn('sha256sum "$gate_path"', pin["run"])
-        self.assertIn(CI_RUNNER_HARDENING_SHA256, pin["run"])
-        self.assertTrue(pin["run"].endswith("scripts/check-ci-runner-hardening.sh\n"))
+    def test_required_judge_backstops_judge_and_gate_content_hashes(self) -> None:
+        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        gate_sha = hashlib.sha256((REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_bytes()).hexdigest()
+        judge_sha = hashlib.sha256((REPO_ROOT / "scripts/ci/nextest_required.py").read_bytes()).hexdigest()
+        self.assertEqual(gate_sha, CI_RUNNER_HARDENING_SHA256)
+        judge = jobs["required_contexts"]
+        self.assertEqual(judge["if"], JUDGE_IF)
+        pin = next(step for step in judge["steps"] if step.get("name") == "Verify pinned judge and CI structure")
+        self.assertEqual((pin.get("if"), pin["id"], pin["continue-on-error"]), (None, "pins", True))
+        self.assertEqual((pin["shell"], pin["env"]), ("bash", {"BASH_ENV": "/dev/null"}))
+        self.assertIn(f"pin scripts/ci/nextest_required.py {judge_sha}\n", pin["run"])
+        self.assertIn(f"pin scripts/check-ci-runner-hardening.sh {gate_sha}\n", pin["run"])
+        self.assertTrue(pin["run"].endswith("scripts/check-ci-runner-hardening.sh\npython3 scripts/check_writer_gate_ci_wiring.py\n"))
 
     def test_script_checks_aggregate_is_exactly_one_step(self) -> None:
         hardening = (
@@ -1574,8 +1063,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 1,
             ),
             "runs-on": workflow.replace(
-                "  scripts:\n    name: Script checks runner\n    needs: [changes, lib_test_prepare]\n    if: ${{ !cancelled() }}\n    runs-on: ubuntu-latest\n",
-                "  scripts:\n    name: Script checks runner\n    needs: [changes, lib_test_prepare]\n    if: ${{ !cancelled() }}\n    runs-on: macos-latest\n",
+                "  scripts:\n    name: Script checks runner\n    needs: changes\n    if: ${{ !cancelled() }}\n    runs-on: ubuntu-latest\n",
+                "  scripts:\n    name: Script checks runner\n    needs: changes\n    if: ${{ !cancelled() }}\n    runs-on: macos-latest\n",
                 1,
             ),
         }
@@ -1644,214 +1133,91 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(mutated)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(
-                    "protected step inventory changed; expected indices [11, 12]",
+                    "protected step inventory changed; expected indices [9, 10]",
                     result.stderr,
                 )
 
-    def test_script_checks_required_context_mirror_is_pinned_fail_closed(self) -> None:
+    def test_required_judge_job_is_pinned_fail_closed(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        mirror = job_block(workflow, "scripts_required_context")
-        job = yaml.safe_load(workflow)["jobs"]["scripts_required_context"]
-        self.assertEqual(job["name"], "Script checks")
-        self.assertEqual(
-            job["needs"], ["changes", "scripts", "scripts_guards", "scripts_contracts"]
-        )
-        self.assertEqual(job["if"], MIRROR_IF)
-        self.assertNotIn("continue-on-error", job)
-        self.assertEqual(job["runs-on"], "ubuntu-latest")
-        self.assertEqual(len(job["steps"]), 5)
-        self.assertEqual(job["steps"][0], {"uses": "actions/checkout@v4"})
-
-        contract, result = job["steps"][1:3]
-        self.assertEqual(contract["name"], "Verify Script checks mirror contract (#5321)")
-        self.assertEqual(contract["env"], {"BASH_ENV": "/dev/null"})
-        self.assertEqual(contract["shell"], "bash")
-        self.assertEqual(contract["timeout-minutes"], 10)
-        self.assertIn(f"expected={REQUIRED_CHECK_MIRROR_SHA256}", contract["run"])
-        self.assertIn(f"expected={CI_RUNNER_HARDENING_SHA256}", contract["run"])
-        self.assertIn("scripts/check-ci-runner-hardening.sh", contract["run"])
-        self.assertEqual(result["name"], "Mirror script checks result for branch protection")
-        self.assertEqual(result["run"], "./scripts/required-check-mirror.sh")
-        self.assertEqual(result["env"]["UPSTREAM_JOB_NAME"], "scripts")
-        self.assertEqual(result["env"]["UPSTREAM_RESULT"], "${{ needs.scripts.result }}")
-
+        judge = job_block(workflow, "required_contexts")
+        closure_if = 'required needs closure job "required_contexts" must exist with its exact if'
+        exact_judge = "required_contexts must retain its exact judge, pins and needs"
         mutations = {
-            "job deleted": "",
-            "changes dependency deleted": mirror.replace("      - changes\n", "", 1),
-            "job if weakened": mirror.replace(
-                MIRROR_IF_LINE,
-                "    if: ${{ github.event_name == 'push' }}\n",
-                1,
-            ),
-            "job continue-on-error injected": mirror.replace(
-                "    runs-on: ubuntu-latest\n",
-                "    continue-on-error: true\n    runs-on: ubuntu-latest\n",
-                1,
-            ),
-            "checkout provenance": mirror.replace(
-                "      - uses: actions/checkout@v4\n",
-                "      - uses: actions/checkout@v4\n"
-                "        with:\n"
-                "          repository: attacker/green-mirror\n",
-                1,
-            ),
-            "extra step": mirror.replace(
-                "      - uses: actions/checkout@v4\n",
-                "      - uses: actions/checkout@v4\n"
-                "      - run: printf 'exit 0\\n' > scripts/required-check-mirror.sh\n",
-                1,
-            ),
-            "mirror weakened": mirror.replace(
-                "        run: ./scripts/required-check-mirror.sh\n",
-                "        run: 'true'\n",
-                1,
-            ),
+            "job deleted": ("", None),
+            "changes dependency deleted": (judge.replace("      - changes\n", "", 1), None),
+            "evidence dependency deleted": (judge.replace("      - test_evidence\n", "", 1), None),
+            "job if deleted": (judge.replace(JUDGE_IF_LINE, "", 1), closure_if),
+            "job if success": (judge.replace(JUDGE_IF_LINE, "    if: success()\n", 1), closure_if),
+            "job if not cancelled": (judge.replace(JUDGE_IF_LINE, "    if: ${{ !cancelled() }}\n", 1), closure_if),
+            "job if event": (judge.replace(JUDGE_IF_LINE, "    if: ${{ github.event_name == 'push' }}\n", 1), closure_if),
+            "job continue-on-error injected": (judge.replace("    runs-on: ubuntu-latest\n", "    continue-on-error: true\n    runs-on: ubuntu-latest\n", 1), closure_if),
+            "checkout provenance": (judge.replace("      - uses: actions/checkout@v4\n", "      - uses: actions/checkout@v4\n        with:\n          repository: attacker/green-judge\n", 1), None),
+            "extra step": (judge.replace("      - uses: actions/checkout@v4\n", "      - uses: actions/checkout@v4\n      - run: printf 'exit 0\\n' > scripts/ci/nextest_required.py\n", 1), None),
+            "judge weakened": (judge.replace("        run: python3 scripts/ci/nextest_ci.py required-gate\n", "        run: 'true'\n", 1), None),
+            "judge step skipped": (judge.replace("      - name: Judge required checks\n", "      - name: Judge required checks\n        if: false\n", 1), exact_judge),
+            "pin step skipped": (judge.replace("        id: pins\n", "        id: pins\n        if: false\n", 1), exact_judge),
+            "pin step fails the job": (judge.replace("        continue-on-error: true\n", "", 1), exact_judge),
+            "pin outcome dropped": (judge.replace("          PINS_OUTCOME: ${{ steps.pins.outcome }}\n", "", 1), exact_judge),
+            "judge permissions checks write": (judge.replace("    permissions:\n      contents: read\n", "    permissions:\n      checks: write\n      contents: read\n", 1), exact_judge),
+            "job name renamed": (judge.replace("    name: CI required\n", "    name: Lint\n", 1), exact_judge),
+            "job split by a matrix": (judge.replace("    timeout-minutes: 15\n", "    timeout-minutes: 15\n    strategy:\n      matrix:\n        part: [a, b]\n", 1), exact_judge),
+            "stale judge pin": (re.sub(r"(pin scripts/ci/nextest_required\.py )[0-9a-f]{64}", r"\g<1>" + "0" * 64, judge), exact_judge),
         }
         for field, value in {
             "defaults": "defaults:\n      run:\n        shell: bash -n {0}",
             "env": "env:\n      PYTHON: /bin/true",
             "environment": "environment: never-approved",
-            "strategy": "strategy:\n      matrix:\n        shard: [only]",
             "container": "container: ubuntu:latest",
         }.items():
-            mutations[field] = mirror.replace(
-                "    runs-on: ubuntu-latest\n",
-                "    runs-on: ubuntu-latest\n"
-                + "\n".join(f"    {line}" for line in value.splitlines())
-                + "\n",
-                1,
-            )
-
-        for label, mutated_mirror in mutations.items():
+            mutations[field] = (judge.replace("    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n" + "\n".join(f"    {line}" for line in value.splitlines()) + "\n", 1), None)
+        for label, (mutated_judge, diagnostic) in mutations.items():
             with self.subTest(mutation=label):
-                mutated = workflow.replace(mirror, mutated_mirror, 1)
-                result = self.run_hardening_fixture(mutated)
+                self.assertNotEqual(mutated_judge, judge)
+                result = self.run_hardening_fixture(workflow.replace(judge, mutated_judge, 1))
                 self.assertNotEqual(result.returncode, 0, result.stderr)
+                if diagnostic:
+                    self.assertIn(diagnostic, result.stderr)
 
-    def test_script_checks_publisher_rejects_missing_always_condition(self) -> None:
+    def test_required_needs_closure_rejects_fail_open_mutations(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        mirror = job_block(workflow, "scripts_required_context")
-        mutated_mirror = mirror.replace(MIRROR_IF_LINE, "", 1)
-        self.assertNotEqual(mutated_mirror, mirror)
-        mutated = workflow.replace(mirror, mutated_mirror, 1)
-        result = self.run_hardening_fixture(mutated)
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn(
-            "publisher must carry `if: ${{ !cancelled() }}` so upstream failure still "
-            "runs the fail-closed mirror",
-            result.stderr,
-        )
-
-    def test_script_checks_publisher_rejects_conditional_if(self) -> None:
-        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        mirror = job_block(workflow, "scripts_required_context")
-        mutations = {
-            "success": mirror.replace(
-                MIRROR_IF_LINE, "    if: success()\n", 1
-            ),
-            "event condition": mirror.replace(
-                MIRROR_IF_LINE,
-                "    if: ${{ github.event_name == 'push' }}\n",
-                1,
-            ),
-        }
-        for label, mutated_mirror in mutations.items():
-            with self.subTest(condition=label):
-                self.assertNotEqual(mutated_mirror, mirror)
-                mutated = workflow.replace(mirror, mutated_mirror, 1)
-                result = self.run_hardening_fixture(mutated)
-                self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn(
-                    "publisher must carry `if: ${{ !cancelled() }}` so upstream failure "
-                    "still runs the fail-closed mirror",
-                    result.stderr,
-                )
-
-    def test_relay_authority_graph_rejects_fail_open_mutations(self) -> None:
-        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        publisher = job_block(workflow, "relay-authority-contract")
-        mutations = [
-            (publisher, publisher.replace(MIRROR_IF_LINE, "", 1), f"publisher must carry `if: {MIRROR_IF}`"),
-            (publisher, publisher.replace(MIRROR_IF_LINE, "    if: success()\n", 1), f"publisher must carry `if: {MIRROR_IF}`"),
-            (publisher, publisher.replace("      - relay_authority_mutations\n", "", 1), "required unconditional needs closure changed"),
-        ]
-        for job_id in ("relay_authority_targets", "relay_authority_mutations"):
+        mutations = []
+        for job_id in ("rust_build", "rust_tests", "test_evidence", "pg15_owner_proof",
+                       "relay_authority_mutations", "lint", "dashboard", "check_fast_cross_os_targets"):
             runner = job_block(workflow, job_id)
-            mutations.append((runner, re.sub(r"(?m)^    needs: .*\n", "", runner, count=1), "must retain"))
-            mutations.append((runner, runner.replace(f"    if: {RUST_REQUIRED_IF}\n", "    if: always()\n", 1), "must use the verified skip gate"))
-        for original, changed, diagnostic in mutations:
-            with self.subTest(mutation=changed.splitlines()[:6]):
+            mutations.append((job_id, runner, re.sub(r"(?m)^    if: .*\n", "    if: always()\n", runner, count=1)))
+            mutations.append((job_id, runner, runner.replace("    runs-on:", "    continue-on-error: true\n    runs-on:", 1)))
+        for job_id, original, changed in mutations:
+            with self.subTest(job=job_id, mutation=changed.splitlines()[2:4]):
                 self.assertNotEqual(original, changed)
                 result = self.run_hardening_fixture(workflow.replace(original, changed, 1))
                 self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn(diagnostic, result.stderr)
-
-    def test_relay_authority_mirror_rejects_unsuccessful_runner_results(self) -> None:
-        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        mirrors = jobs["relay-authority-contract"]["steps"][2:]
-        self.assertEqual(len(mirrors), 2)
-        for step in mirrors:
-            for result in ("success", "failure", "cancelled", "skipped", ""):
-                with self.subTest(step=step["name"], result=result):
-                    env = {**os.environ, **step["env"], "UPSTREAM_RESULT": result,
-                           "CHANGED_PATHS_RESULT": "success", "FILTER_OUTPUT": "true"}
-                    process = subprocess.run(["bash", "scripts/required-check-mirror.sh"], cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False)
-                    self.assertEqual(process.returncode == 0, result == "success", process.stderr)
-
-    def run_cross_os_mirror(self, mirror: dict, cross_os_rust: str, results: dict[str, str]) -> bool:
-        """Evaluate the mirror steps as Actions would; unlisted needs read as ''."""
-        context = {"changes": "success", **results}
-
-        def expand(value: str) -> str:
-            def lookup(match: re.Match[str]) -> str:
-                job, field = match.groups()
-                if job not in mirror["needs"]:
-                    return ""
-                return cross_os_rust if field == "outputs.cross_os_rust" else context[job]
-
-            return re.sub(r"\$\{\{ needs\.([\w-]+)\.(result|outputs\.\w+) \}\}", lookup, value)
-
-        for step in mirror["steps"]:
-            if "run" not in step:
-                continue
-            env = {**os.environ, **{key: expand(value) for key, value in step["env"].items()}}
-            process = subprocess.run(["bash", "-c", step["run"]], cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False)
-            if process.returncode != 0:
-                return False
-        return True
+                self.assertIn(f'required needs closure job "{job_id}" must exist with its exact if', result.stderr)
 
     def test_cross_os_required_context_fails_closed_on_either_runner(self) -> None:
-        mirror = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"][
-            "check_fast_cross_os_required_context"
-        ]
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import nextest_required
+        context = "Fast check cross OS required context (ubuntu-latest)"
         outcomes = ("success", "failure", "cancelled", "skipped")
         for cross_os_rust in ("true", "false"):
             for check in outcomes:
                 for targets in outcomes:
+                    needs = {job: {"result": "success"} for job in ("rust_build", "rust_tests", "test_evidence")}
+                    needs.update(changes={"result": "success", "outputs": {"rust_tests": "true", "cross_os_rust": cross_os_rust}},
+                                 check_fast_cross_os={"result": check}, check_fast_cross_os_targets={"result": targets})
                     with self.subTest(cross_os_rust=cross_os_rust, check=check, targets=targets):
                         allowed = {"success"} if cross_os_rust == "true" else {"success", "skipped"}
-                        self.assertEqual(
-                            self.run_cross_os_mirror(
-                                mirror,
-                                cross_os_rust,
-                                {"check_fast_cross_os": check, "check_fast_cross_os_targets": targets},
-                            ),
-                            check in allowed and targets in allowed,
-                        )
+                        self.assertEqual(nextest_required.context_verdict(context, needs)[0], check in allowed and targets in allowed)
 
     def test_cross_os_split_rejects_fail_open_mutations(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        mirror = job_block(workflow, "check_fast_cross_os_required_context")
+        judge = job_block(workflow, "required_contexts")
         targets = job_block(workflow, "check_fast_cross_os_targets")
-        targets_mirror = step_block(mirror, "Mirror check_fast_cross_os_targets result for branch protection")
         writer = step_block(targets, "Writer namespace exact Windows targets")
         mutations = (
-            (mirror, mirror.replace("      - check_fast_cross_os_targets\n", "", 1), "cross-OS required-context mirror must retain exact needs"),
-            (mirror, mirror.replace(MIRROR_IF_LINE, "", 1), "cross-OS required-context mirror must retain exact if"),
-            (mirror, mirror.replace(targets_mirror, "", 1), 'must retain exactly one "Mirror check_fast_cross_os_targets result for branch protection" step'),
-            (mirror, mirror.replace(targets_mirror, targets_mirror.replace("${{ needs.changes.outputs.cross_os_rust }}", "'false'"), 1), "must pin exact step env"),
-            (targets, targets.replace("    runs-on:", "    continue-on-error: true\n    runs-on:", 1), "cross-OS exact targets job must not be allowed to continue on error"),
-            (targets, targets.replace("    if: needs.changes.outputs.rust_compile == 'true' && ", "    if: ", 1), "cross-OS exact targets job must retain exact if"),
+            (judge, judge.replace("      - check_fast_cross_os_targets\n", "", 1), "required needs closure changed"),
+            (targets, targets.replace("    runs-on:", "    continue-on-error: true\n    runs-on:", 1), 'required needs closure job "check_fast_cross_os_targets" must exist with its exact if'),
+            (targets, targets.replace("    if: needs.changes.outputs.rust_compile == 'true' && ", "    if: ", 1), 'required needs closure job "check_fast_cross_os_targets" must exist with its exact if'),
             (targets, targets.replace(writer, "", 1), 'must retain exactly one "Writer namespace exact Windows targets" step'),
         )
         for original, changed, diagnostic in mutations:
@@ -1864,19 +1230,18 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_required_job_needs_closure_has_role_specific_scheduling_policy(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         jobs = yaml.safe_load(workflow)["jobs"]
-        expected_closure = {
-            "changes",
-            "lib_test_prepare",
-            "scripts",
-            "scripts_guards",
-            "scripts_contracts",
-            "scripts_required_context",
-            "relay-authority-contract",
-            "relay_authority_targets",
-            "relay_authority_mutations",
+        n_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
+        rust_gate = "${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
+        cross_os = "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'"
+        expected_if = {
+            "changes": None, "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": None, "scripts_contracts": None,
+            "rust_build": rust_gate, "pg15_owner_proof": rust_gate, "rust_tests": n_gate, "test_evidence": n_gate,
+            "relay_authority_mutations": RUST_REQUIRED_IF,
+            "lint": _LINT_FILTER, "dashboard": "needs.changes.outputs.dashboard == 'true'",
+            "check_fast_cross_os": cross_os, "check_fast_cross_os_targets": cross_os,
         }
         closure: set[str] = set()
-        frontier = ["scripts_required_context", "relay-authority-contract"]
+        frontier = ["required_contexts"]
         while frontier:
             job_id = frontier.pop()
             if job_id in closure:
@@ -1884,62 +1249,28 @@ class FastCheckCiWiringTests(unittest.TestCase):
             closure.add(job_id)
             needs = jobs[job_id].get("needs", [])
             frontier.extend([needs] if isinstance(needs, str) else needs)
-        self.assertEqual(closure, expected_closure)
-
-        self.assertEqual(jobs["scripts_required_context"]["if"], MIRROR_IF)
-        self.assertEqual(jobs["relay-authority-contract"]["if"], MIRROR_IF)
-        for job_id in (
-            "relay_authority_targets",
-            "relay_authority_mutations",
-            "changes",
-            "scripts",
-            "scripts_guards",
-            "scripts_contracts",
-        ):
-            if job_id in ("relay_authority_targets", "relay_authority_mutations", "lib_test_prepare"):
-                self.assertEqual(jobs[job_id]["if"], RUST_REQUIRED_IF)
-            elif job_id == "scripts":
-                self.assertEqual(jobs[job_id]["if"], MIRROR_IF)
-            else:
-                self.assertNotIn("if", jobs[job_id])
-
-        for job_id in sorted(expected_closure):
+        self.assertEqual(closure, set(expected_if))
+        for job_id, condition in expected_if.items():
+            self.assertEqual(jobs[job_id].get("if"), condition, job_id)
+        for job_id in sorted(expected_if):
             job = job_block(workflow, job_id)
             marker = f"    name: {jobs[job_id]['name']}\n"
             self.assertIn(marker, job)
-            with self.subTest(job=job_id, key="continue-on-error"):
-                mutated_job = job.replace(
-                    marker,
-                    f"{marker}    continue-on-error: true\n",
-                    1,
-                )
-                mutated = workflow.replace(job, mutated_job, 1)
-                result = self.run_hardening_fixture(mutated)
-                self.assertNotEqual(result.returncode, 0, result.stderr)
+            injected_if = "    if: ${{ github.event_name == 'push' }}\n"
+            for key, mutated_job in (
+                ("continue-on-error", job.replace(marker, f"{marker}    continue-on-error: true\n", 1)),
+                ("if", re.sub(r"(?m)^    if: .*\n", injected_if, job, count=1) if "if" in jobs[job_id] else job.replace(marker, marker + injected_if, 1)),
+            ):
+                with self.subTest(job=job_id, key=key):
+                    result = self.run_hardening_fixture(workflow.replace(job, mutated_job, 1))
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
 
-        for job_id in (
-            "relay_authority_targets",
-            "relay_authority_mutations",
-            "changes",
-            "scripts",
-            "scripts_guards",
-            "scripts_contracts",
-        ):
-            job = job_block(workflow, job_id)
-            marker = f"    name: {jobs[job_id]['name']}\n"
-            with self.subTest(job=job_id, key="if"):
-                injected_if = "    if: ${{ github.event_name == 'push' }}\n"
-                mutated_job = re.sub(r"(?m)^    if: .*\n", injected_if, job, count=1) if "if" in jobs[job_id] else job.replace(marker, marker + injected_if, 1)
-                mutated = workflow.replace(job, mutated_job, 1)
-                result = self.run_hardening_fixture(mutated)
-                self.assertNotEqual(result.returncode, 0, result.stderr)
-
-    def test_change_surfaces_wiring_table_is_the_exact_publisher_closure(self) -> None:
+    def test_change_surfaces_wiring_table_is_the_exact_judge_closure(self) -> None:
         jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
         doc = (REPO_ROOT / "docs/agent-maintenance/change-surfaces.md").read_text(encoding="utf-8")
-        blocks = re.findall(r"<!-- required-publisher-wiring -->\n(.*?)\n *<!-- /required-publisher-wiring -->", doc, re.S)
-        self.assertEqual(len(blocks), 1, "change-surfaces.md must hold exactly one publisher wiring table")
-        rows, frontier = {}, ["scripts_required_context", "relay-authority-contract"]
+        blocks = re.findall(r"<!-- required-gate-wiring -->\n(.*?)\n *<!-- /required-gate-wiring -->", doc, re.S)
+        self.assertEqual(len(blocks), 1, "change-surfaces.md must hold exactly one judge wiring table")
+        rows, frontier = {}, ["required_contexts"]
         while frontier:
             job_id = frontier.pop()
             if job_id not in rows:
@@ -1958,24 +1289,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
     def test_duplicate_required_job_id_is_rejected_before_last_wins_resolution(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        mirror = job_block(workflow, "scripts_required_context")
-        malicious_last = mirror.replace(
-            "FILTER_OUTPUT: true",
-            "FILTER_OUTPUT: !!binary dHJ1ZQ==",
-            1,
-        )
-        mutated = workflow.replace(
-            "  relay-authority-contract:\n",
-            malicious_last + "  relay-authority-contract:\n",
-            1,
-        )
+        judge = job_block(workflow, "required_contexts")
+        malicious_last = judge.replace("      - lint\n", "", 1)
+        mutated = workflow.replace("  lint:\n", malicious_last + "  lint:\n", 1)
         self.assertNotEqual(mutated, workflow)
         result = self.run_hardening_fixture(mutated)
         self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn(
-            "duplicate job IDs are forbidden: scripts_required_context",
-            result.stderr,
-        )
+        self.assertIn("duplicate job IDs are forbidden: required_contexts", result.stderr)
 
     def test_script_checks_mirror_fails_closed_on_skipped_upstream_results(self) -> None:
         mirror_script = REPO_ROOT / "scripts/required-check-mirror.sh"
@@ -2024,291 +1344,47 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
         self.assertEqual(success.returncode, 0, success.stderr)
 
-    def test_path_filter_required_contexts_publish_from_always_mirrors(self) -> None:
-        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        jobs = yaml.safe_load(workflow)["jobs"]
-        for (
-            mirror_id,
-            context,
-            runner_id,
-            runner_name,
-            runner_if,
-            filter_name,
-            filter_output,
-        ) in PATH_FILTER_REQUIRED_MIRRORS:
-            with self.subTest(context=context):
-                job = jobs[mirror_id]
-                self.assertEqual(job["name"], context)
-                self.assertEqual(job["needs"], ["changes", runner_id])
-                self.assertEqual(job["if"], MIRROR_IF)
-                self.assertNotIn("continue-on-error", job)
-                self.assertEqual(job["runs-on"], "ubuntu-latest")
-                self.assertEqual(len(job["steps"]), 3)
-                self.assertEqual(job["steps"][0], {"uses": "actions/checkout@v4"})
-                pin, result = job["steps"][1:]
-                self.assertEqual(pin["name"], PATH_FILTER_MIRROR_PIN_STEP)
-                self.assertEqual(pin["env"], {"BASH_ENV": "/dev/null"})
-                self.assertEqual(pin["shell"], "bash")
-                self.assertEqual(pin["timeout-minutes"], 10)
-                self.assertIn(f"expected={REQUIRED_CHECK_MIRROR_SHA256}", pin["run"])
-                self.assertEqual(result["run"], "./scripts/required-check-mirror.sh")
-                self.assertEqual(
-                    result["env"],
-                    {
-                        "BASH_ENV": "/dev/null",
-                        "CHANGED_PATHS_RESULT": "${{ needs.changes.result }}",
-                        "FILTER_NAME": filter_name,
-                        "FILTER_OUTPUT": filter_output,
-                        "UPSTREAM_JOB_NAME": runner_id,
-                        "UPSTREAM_RESULT": f"${{{{ needs.{runner_id}.result }}}}",
-                    },
-                )
-
-                runner = jobs[runner_id]
-                self.assertEqual(runner["name"], runner_name)
-                self.assertNotEqual(runner["name"], context)
-                self.assertEqual(runner["needs"], ["changes", "lib_test_prepare"] if runner_id == "high-risk-recovery" else "changes")
-                self.assertEqual(runner["if"], runner_if)
-                publishers = [
-                    job_id
-                    for job_id, candidate in jobs.items()
-                    if isinstance(candidate, dict)
-                    and str(candidate.get("name", job_id)).strip() == context
-                ]
-                self.assertEqual(publishers, [mirror_id])
-
-    def test_path_filter_required_mirrors_reject_fail_open_mutations(self) -> None:
+    def test_ci_required_is_published_only_by_the_judge(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         baseline = self.run_hardening_fixture(workflow)
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
-        batches: dict[str, list[tuple[str, str, str, tuple[str, ...]]]] = {}
-        for (
-            mirror_id,
-            context,
-            runner_id,
-            runner_name,
-            _runner_if,
-            _filter_name,
-            filter_output,
-        ) in PATH_FILTER_REQUIRED_MIRRORS:
-            mirror = job_block(workflow, mirror_id)
-            runner = job_block(workflow, runner_id)
-            mirror_mutations = {
-                "job deleted": "",
-                "changes dependency deleted": mirror.replace("      - changes\n", "", 1),
-                "job if deleted": mirror.replace(MIRROR_IF_LINE, "", 1),
-                "job if weakened": mirror.replace(
-                    MIRROR_IF_LINE, "    if: success()\n", 1
-                ),
-                "job continue-on-error injected": mirror.replace(
-                    "    runs-on: ubuntu-latest\n",
-                    "    continue-on-error: true\n    runs-on: ubuntu-latest\n",
-                    1,
-                ),
-                "helper pin deleted": mirror.replace(
-                    step_block(mirror, PATH_FILTER_MIRROR_PIN_STEP), "", 1
-                ),
-                "helper pin corrupted": mirror.replace(
-                    f"expected={REQUIRED_CHECK_MIRROR_SHA256}", "expected=" + "0" * 64, 1
-                ),
-                "mirror weakened": mirror.replace(
-                    "        run: ./scripts/required-check-mirror.sh\n",
-                    "        run: 'true'\n",
-                    1,
-                ),
-                "mirror step if false": mirror.replace(
-                    "        run: ./scripts/required-check-mirror.sh\n",
-                    "        if: false\n        run: ./scripts/required-check-mirror.sh\n",
-                    1,
-                ),
-                "mirror step or true": mirror.replace(
-                    "        run: ./scripts/required-check-mirror.sh\n",
-                    "        run: ./scripts/required-check-mirror.sh || true\n",
-                    1,
-                ),
-                "helper pin step if false": mirror.replace(
-                    f"      - name: {PATH_FILTER_MIRROR_PIN_STEP}\n",
-                    f"      - name: {PATH_FILTER_MIRROR_PIN_STEP}\n        if: false\n",
-                    1,
-                ),
-                "filter output forced false": mirror.replace(
-                    f"FILTER_OUTPUT: {filter_output}\n", "FILTER_OUTPUT: false\n", 1
-                ),
-                "required name moved off mirror": mirror.replace(
-                    f"    name: {context}\n", f"    name: {context} mirror\n", 1
-                ),
-            }
-            runner_mutations = {
-                "runner publishes required name": runner.replace(
-                    f"    name: {runner_name}\n", f"    name: {context}\n", 1
-                ),
-            }
-            diagnostics = (
-                f"{context} required-context mirror {mirror_id} ",
-                f"{context} runner job {runner_id} ",
-                f"required {context} context must belong only to jobs.{mirror_id};",
-            )
-            for label, mutated in mirror_mutations.items():
-                batches.setdefault(label, []).append((context, mirror, mutated, diagnostics))
-            for label, mutated in runner_mutations.items():
-                batches.setdefault(label, []).append((context, runner, mutated, diagnostics))
-        for label, cases in batches.items():
-            mutated = workflow
-            for context, original, mutated_block, _diagnostics in cases:
-                with self.subTest(context=context, mutation=label):
-                    self.assertNotEqual(mutated_block, original)
-                mutated = mutated.replace(original, mutated_block, 1)
-            result = self.run_hardening_fixture(mutated)
-            self.assertNotEqual(result.returncode, 0, result.stderr)
-            for context, _original, _mutated_block, diagnostics in cases:
-                with self.subTest(context=context, mutation=label):
-                    self.assertTrue(
-                        any(marker in result.stderr for marker in diagnostics),
-                        result.stderr,
-                    )
-
-        unnamed_jobs = (
-            "  Lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
-            "  Dashboard:\n    strategy:\n      matrix:\n        runtime: [\"Node 22\"]\n"
-            "    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
-        )
-        result = self.run_hardening_fixture(workflow.rstrip("\n") + "\n\n" + unnamed_jobs)
-        with self.subTest(in_pr_workflow="gate rc"):
-            self.assertNotEqual(result.returncode, 0, result.stderr)
-        for context, mirror_id, job_id in (
-            ("Lint", "lint_required_context", "Lint"),
-            ("Dashboard (Node 22)", "dashboard_required_context", "Dashboard"),
-        ):
-            with self.subTest(in_pr_workflow=job_id):
-                self.assertIn(
-                    f"required {context} context must belong only to jobs.{mirror_id}; "
-                    f"publishers: [\"{mirror_id}\", \"{job_id}\"]",
-                    result.stderr,
-                )
-
-        probes = {
-            "named-lint.yml": ("pull_request:", "probe", "    name: Lint\n", "Lint"),
-            "unnamed-lint.yml": ("pull_request:", "Lint", "", "Lint"),
-            "unnamed-matrix.yml": (
-                "pull_request:",
-                "Dashboard",
-                "    strategy:\n      matrix:\n        runtime: [\"Node 22\"]\n",
-                "Dashboard (Node 22)",
-            ),
-            "named-matrix.yml": (
-                "schedule:\n    - cron: '0 0 * * *'",
-                "probe",
-                "    name: Dashboard\n    strategy:\n      matrix:\n        runtime: [\"Node 22\"]\n",
-                "Dashboard (Node 22)",
-            ),
-            "dispatch.yml": ("workflow_dispatch:", "probe", "    name: High-risk recovery\n", "High-risk recovery"),
-            "push.yml": (
-                "push:\n    branches: [main]",
-                "probe",
-                "    name: Dashboard (Node 22)\n",
-                "Dashboard (Node 22)",
-            ),
-        }
-        extra_workflows = {
-            file: (
-                f"name: probe\non:\n  {trigger}\njobs:\n  {job_id}:\n{job_fields}"
-                "    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
-            )
-            for file, (trigger, job_id, job_fields, _context) in probes.items()
-        }
-        result = self.run_hardening_fixture(workflow, extra_workflows=extra_workflows)
-        with self.subTest(probe="gate rc"):
-            self.assertNotEqual(result.returncode, 0, result.stderr)
-        for file, (_trigger, job_id, _job_fields, context) in probes.items():
-            with self.subTest(probe=file):
-                self.assertIn(
-                    f".github/workflows/{file}: workflow must not publish required "
-                    f"{context} context (jobs: {job_id})",
-                    result.stderr,
-                )
-
-    def test_path_filter_required_mirrors_fail_closed_on_upstream_results(self) -> None:
-        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        mirror_script = REPO_ROOT / "scripts/required-check-mirror.sh"
+        rogue = "  rogue:\n    name: {name}\n    runs-on: ubuntu-latest\n{extra}    steps:\n      - run: 'true'\n\n"
+        matrix = "    strategy:\n      matrix:\n        part: [x]\n"
+        main = MAIN_WORKFLOW.read_text(encoding="utf-8")
         cases = (
-            ("success", "false", "skipped", True),
-            ("success", "false", "success", True),
-            ("success", "true", "success", True),
-            ("failure", "false", "skipped", False),
-            ("cancelled", "false", "skipped", False),
-            ("skipped", "false", "skipped", False),
-            ("success", "", "skipped", False),
-            ("success", "true", "skipped", False),
-            ("success", "true", "failure", False),
-            ("success", "true", "cancelled", False),
-            ("success", "false", "failure", False),
-            ("success", "false", "cancelled", False),
+            ("PR literal", workflow.replace("  lint:\n", rogue.format(name="CI required", extra="") + "  lint:\n", 1), {}),
+            ("PR padded literal", workflow.replace("  lint:\n", rogue.format(name="'CI required '", extra="") + "  lint:\n", 1), {}),
+            ("PR matrix expression", workflow.replace("  lint:\n", rogue.format(name="'${{ matrix.part }}'", extra=matrix) + "  lint:\n", 1), {}),
+            ("PR matrix suffix", workflow.replace("  lint:\n", rogue.format(name="CI required (${{ matrix.part }})", extra=matrix) + "  lint:\n", 1), {}),
+            ("main publishes it", workflow, {"ci-main.yml": main.replace("\njobs:\n", "\njobs:\n" + rogue.format(name="CI required", extra=""), 1)}),
+            ("other workflow publishes it", workflow, {"ci-extra.yml": "name: extra\non: push\njobs:\n" + rogue.format(name="CI required", extra="")}),
         )
-        for mirror_id, context, *_rest in PATH_FILTER_REQUIRED_MIRRORS:
-            step_env = jobs[mirror_id]["steps"][2]["env"]
-            for changes_result, filter_value, runner_result, passes in cases:
-                with self.subTest(
-                    context=context,
-                    changes=changes_result,
-                    filter=filter_value,
-                    runner=runner_result,
-                ):
-                    env = {
-                        **os.environ,
-                        **{key: str(value) for key, value in step_env.items()},
-                        "CHANGED_PATHS_RESULT": changes_result,
-                        "FILTER_OUTPUT": filter_value,
-                        "UPSTREAM_RESULT": runner_result,
-                    }
-                    result = subprocess.run(
-                        ["bash", str(mirror_script)],
-                        env=env,
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                    )
-                    if passes:
-                        self.assertEqual(result.returncode, 0, result.stderr)
-                    else:
-                        self.assertNotEqual(result.returncode, 0)
-                        self.assertIn("::error::", result.stderr)
+        for label, pr, extra in cases:
+            with self.subTest(case=label):
+                result = self.run_hardening_fixture(pr, extra_workflows=extra)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn("must publish the required check only from the required_contexts judge", result.stderr)
 
-    def test_path_filter_mirror_helper_pins_reject_helper_mutations(self) -> None:
-        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        helper = (REPO_ROOT / "scripts/required-check-mirror.sh").read_text(
-            encoding="utf-8"
+    def test_no_job_or_file_may_write_check_runs(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        lint = job_block(workflow, "lint")
+        judge = job_block(workflow, "required_contexts")
+        gh_post = "gh api -X POST repos/o/r/check-runs -f name=Lint -f head_sha=x\n"
+        cases = (
+            ("PR lint job checks: write", workflow.replace(lint, lint.replace("    runs-on:", "    permissions:\n      checks: write\n    runs-on:", 1), 1), {}, {}, "lint must not grant checks: write"),
+            ("PR top-level write-all", workflow.replace("\njobs:\n", "\npermissions: write-all\n\njobs:\n", 1), {}, {}, "<workflow> must not grant checks: write"),
+            ("other workflow checks: write", workflow, {"ci-extra.yml": "name: extra\non: push\npermissions:\n  checks: write\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n"}, {}, "<workflow> must not grant checks: write"),
+            ("PR judge checks: write", workflow.replace(judge, judge.replace("    permissions:\n      contents: read\n", "    permissions:\n      checks: write\n      contents: read\n", 1), 1), {}, {}, "required_contexts must not grant checks: write"),
+            ("workflow step calls check-runs", workflow, {"ci-extra.yml": "name: extra\non: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: " + gh_post}, {}, "ci-extra.yml: no CI file may call the check-runs API"),
+            ("another script calls check-runs", workflow, {}, {"scripts/ci/rogue_publish.sh": gh_post}, "rogue_publish.sh: no CI file may call the check-runs API"),
+            ("the judge script calls check-runs", workflow, {}, {"scripts/ci/nextest_required.py": "# gh api repos/o/r/check-runs\n"}, "nextest_required.py: no CI file may call the check-runs API"),
         )
-        for mirror_id, context, *_rest in PATH_FILTER_REQUIRED_MIRRORS:
-            run = jobs[mirror_id]["steps"][1]["run"]
-            self.assertEqual(run.count(REQUIRED_CHECK_MIRROR_SHA256), 1)
-            for label, helper_candidate, pin_run, passes in (
-                ("reviewed helper", helper, run, True),
-                ("one-byte helper mutation", helper + "#", run, False),
-                (
-                    "helper pin mutation",
-                    helper,
-                    run.replace(REQUIRED_CHECK_MIRROR_SHA256, "0" * 64, 1),
-                    False,
-                ),
-            ):
-                with self.subTest(context=context, case=label), tempfile.TemporaryDirectory() as temp:
-                    root = Path(temp)
-                    (root / "scripts").mkdir()
-                    (root / "scripts/required-check-mirror.sh").write_text(
-                        helper_candidate, encoding="utf-8"
-                    )
-                    result = subprocess.run(
-                        ["bash", "-c", pin_run],
-                        cwd=root,
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                    )
-                    if passes:
-                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    else:
-                        self.assertNotEqual(result.returncode, 0)
-                        self.assertIn("content hash mismatch", result.stdout + result.stderr)
+        for label, pr, extra, files, reason in cases:
+            with self.subTest(case=label):
+                self.assertTrue(pr != workflow or extra or files)
+                result = self.run_hardening_fixture(pr, extra_workflows=extra, extra_files=files)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(reason, result.stderr)
 
     def test_helper_content_pin_kills_all_prior_mutation_classes(self) -> None:
         helper = (REPO_ROOT / "scripts/required-check-mirror.sh").read_text(
@@ -2345,85 +1421,31 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("content hash mismatch", result.stderr)
 
-    def test_required_jobs_hash_backstops_reject_helper_and_gate_mutations(self) -> None:
-        workflow = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))
-        jobs = workflow["jobs"]
-        runs = (
-            jobs["scripts_required_context"]["steps"][1]["run"],
-            next(
-                step["run"]
-                for step in jobs["relay-authority-contract"]["steps"]
-                if step.get("name") == "Pin required-check mirror content (#5321)"
-            ),
-        )
-        helper = (REPO_ROOT / "scripts/required-check-mirror.sh").read_text(
-            encoding="utf-8"
-        )
-        gate = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text(
-            encoding="utf-8"
-        )
+    def test_required_jobs_hash_backstops_reject_judge_and_gate_mutations(self) -> None:
+        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        run = next(step["run"] for step in jobs["required_contexts"]["steps"] if step.get("name") == "Verify pinned judge and CI structure")
+        pin_only = run.rsplit("\nscripts/check-ci-runner-hardening.sh\n", 1)[0]
+        judge = (REPO_ROOT / "scripts/ci/nextest_required.py").read_text(encoding="utf-8")
+        gate = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text(encoding="utf-8")
+        judge_sha = hashlib.sha256(judge.encode()).hexdigest()
         cases = (
-            ("one-byte helper mutation", helper + "#", gate, None),
-            ("helper pin mutation", helper, gate, REQUIRED_CHECK_MIRROR_SHA256),
-            ("one-byte gate mutation", helper, gate + "#", None),
-            ("gate pin mutation", helper, gate, CI_RUNNER_HARDENING_SHA256),
+            ("matching bytes", judge, gate, pin_only, 0),
+            ("one-byte judge mutation", judge + "#", gate, pin_only, 1),
+            ("judge pin mutation", judge, gate, pin_only.replace(judge_sha, "0" * 64, 1), 1),
+            ("one-byte gate mutation", judge, gate + "#", pin_only, 1),
+            ("gate pin mutation", judge, gate, pin_only.replace(CI_RUNNER_HARDENING_SHA256, "0" * 64, 1), 1),
+            ("gate repin roundtrip", judge, gate + "# reviewed\n", pin_only.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256((gate + "# reviewed\n").encode()).hexdigest(), 1), 0),
         )
-        for label, helper_candidate, gate_candidate, pin_to_corrupt in cases:
-            for index, run in enumerate(runs):
-                with self.subTest(case=label, backstop=index), tempfile.TemporaryDirectory() as temp:
-                    root = Path(temp)
-                    (root / "scripts").mkdir()
-                    (root / "scripts/required-check-mirror.sh").write_text(
-                        helper_candidate, encoding="utf-8"
-                    )
-                    (root / "scripts/check-ci-runner-hardening.sh").write_text(
-                        gate_candidate, encoding="utf-8"
-                    )
-                    pin_only = run.rsplit("\nscripts/check-ci-runner-hardening.sh\n", 1)[0]
-                    if pin_to_corrupt is not None:
-                        self.assertEqual(pin_only.count(pin_to_corrupt), 1)
-                        pin_only = pin_only.replace(
-                            pin_to_corrupt,
-                            "0" * 64,
-                            1,
-                        )
-                    result = subprocess.run(
-                        ["bash", "-c", pin_only],
-                        cwd=root,
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                    )
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("content hash mismatch", result.stdout + result.stderr)
-
-        mutated_gate = gate + "# reviewed gate edit\n"
-        repinned_gate_sha256 = hashlib.sha256(mutated_gate.encode()).hexdigest()
-        for index, run in enumerate(runs):
-            with self.subTest(case="gate repin roundtrip", backstop=index), tempfile.TemporaryDirectory() as temp:
+        for label, judge_candidate, gate_candidate, script, code in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
-                (root / "scripts").mkdir()
-                (root / "scripts/required-check-mirror.sh").write_text(
-                    helper, encoding="utf-8"
-                )
-                (root / "scripts/check-ci-runner-hardening.sh").write_text(
-                    mutated_gate, encoding="utf-8"
-                )
-                pin_only = run.rsplit("\nscripts/check-ci-runner-hardening.sh\n", 1)[0]
-                self.assertEqual(pin_only.count(CI_RUNNER_HARDENING_SHA256), 1)
-                pin_only = pin_only.replace(
-                    CI_RUNNER_HARDENING_SHA256,
-                    repinned_gate_sha256,
-                    1,
-                )
-                result = subprocess.run(
-                    ["bash", "-c", pin_only],
-                    cwd=root,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                (root / "scripts/ci").mkdir(parents=True)
+                (root / "scripts/ci/nextest_required.py").write_text(judge_candidate, encoding="utf-8")
+                (root / "scripts/check-ci-runner-hardening.sh").write_text(gate_candidate, encoding="utf-8")
+                result = subprocess.run(["bash", "-c", script], cwd=root, text=True, capture_output=True, check=False)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                if code:
+                    self.assertIn("content hash mismatch", result.stdout + result.stderr)
 
     def test_warning_ceiling_and_cap_adjacency_reject_bypass(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -2478,10 +1500,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
     def test_unregistered_target_step_forbidden_runtime_env_is_rejected(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        relay_job = job_block(workflow, "relay_authority_targets")
+        relay_job = job_block(workflow, "relay_authority_mutations")
         mutated_relay_job = relay_job.replace(
-            "      - uses: actions/checkout@v4\n\n",
-            "      - uses: actions/checkout@v4\n\n"
+            "          fetch-depth: 2\n\n",
+            "          fetch-depth: 2\n\n"
             "      - name: Unregistered forbidden env\n"
             "        env:\n"
             '          CARGO_PROFILE_DEV_DEBUG: "1"\n'
@@ -2495,7 +1517,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             REPO_ROOT / "scripts/check-ci-runner-hardening.sh"
         ).read_text(encoding="utf-8")
         repinned_hardening = self._repin_job_hash(
-            hardening, mutated_workflow, "relay_authority_targets"
+            hardening, mutated_workflow, "relay_authority_mutations"
         )
         repinned_gate_sha256 = hashlib.sha256(repinned_hardening.encode()).hexdigest()
         mutated_workflow = mutated_workflow.replace(
@@ -2519,15 +1541,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 ),
                 ("Run script checks", "must not continue on error"),
             ),
-            "relay_authority_targets": (
-                (
-                    "Verify named relay-authority targets and selection floors",
-                    "must retain exact continue-on-error policy",
-                ),
-                (
-                    "Run named relay-authority contract targets",
-                    "must retain exact continue-on-error policy",
-                ),
+            "rust_build": (
+                ("Archive, list, compare and plan", "must retain exact continue-on-error policy"),
             ),
             "relay_authority_mutations": (
                 (
@@ -2610,7 +1625,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
     def test_registered_step_continue_policy_is_typed_and_exact(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        step_name = "Run named relay-authority contract targets"
+        step_name = "Archive, list, compare and plan"
         for label, yaml_value in (
             ("string-false", '"false"'),
             ("boolean-true", "true"),
@@ -2630,9 +1645,21 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     "must retain exact continue-on-error policy", result.stderr
                 )
 
+    def test_hardening_rejects_a_cargo_test_name_filter_in_main(self) -> None:
+        main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        whole = "cargo test --bins --test '*' -- --skip _pg"
+        self.assertEqual(main.count(whole), 1)
+        result = self.run_hardening_fixture(
+            PR_WORKFLOW.read_text(encoding="utf-8"),
+            {"ci-main.yml": main.replace(whole, "cargo test --bins --test '*' transition -- --skip _pg")},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("carries a name filter ['transition']", result.stderr)
+        self.assertIn("must not carry a name filter", result.stderr)
+
     def test_registered_step_continue_policy_accepts_absent_and_boolean_false(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        step_name = "Run named relay-authority contract targets"
+        step_name = "Archive, list, compare and plan"
         for label, insertion in (
             ("absent", ""),
             ("boolean-false", "        continue-on-error: false\n"),
@@ -2643,7 +1670,14 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     f"      - name: {step_name}\n{insertion}",
                     1,
                 )
-                result = self.run_hardening_fixture(mutated)
+                # Main and nightly must carry the same step policy, since their nextest jobs equal the PR's.
+                same = {
+                    name: path.read_text(encoding="utf-8").replace(
+                        f"      - name: {step_name}\n", f"      - name: {step_name}\n{insertion}", 1
+                    )
+                    for name, path in (("ci-main.yml", MAIN_WORKFLOW), ("ci-nightly.yml", NIGHTLY_WORKFLOW))
+                }
+                result = self.run_hardening_fixture(mutated, same)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_script_checks_run_accepts_equivalent_scalar_and_block_forms(self) -> None:
@@ -2677,81 +1711,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_script_checks_needs_preserves_producer_and_changes(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         scripts_job = job_block(workflow, "scripts")
-        for needs in ("changes", "[changes, other]", "lib_test_prepare"):
+        for needs in ("[changes, lib_test_prepare]", "[changes, other]", "other"):
             with self.subTest(needs=needs):
-                mutated = scripts_job.replace("needs: [changes, lib_test_prepare]", f"needs: {needs}", 1)
+                mutated = scripts_job.replace("needs: changes", f"needs: {needs}", 1)
                 self.assertNotEqual(mutated, scripts_job)
                 result = self.run_hardening_fixture(workflow.replace(scripts_job, mutated, 1))
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("must retain exact needs: [changes, lib_test_prepare]", result.stderr)
-
-    def test_trusted_macos_runs_busy_retry_regressions_on_hosted_runner(self) -> None:
-        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        hosted = job_block(workflow, "macos_hosted")
-        self.assertEqual(hosted.count(BUSY_RETRY_4888_TEST_COMMAND), 1)
-
-    def test_trusted_macos_has_only_an_unconditional_hosted_job(self) -> None:
-        workflow = yaml.safe_load(MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8"))
-        jobs = workflow["jobs"]
-        self.assertNotIn("macos_self_hosted", jobs)
-        self.assertNotIn("resolve_macos_runner", jobs)
-        self.assertEqual(set(jobs), {"macos_hosted"})
-        hosted = jobs["macos_hosted"]
-        self.assertEqual(hosted["name"], "Trusted macOS check (hosted)")
-        self.assertEqual(hosted["runs-on"], "macos-15")
-        self.assertNotIn("needs", hosted)
-        self.assertNotIn("if", hosted)
-
-    def assert_filter_gates_exactly(self, job_name: str, gated: set[str]) -> None:
-        """`gated` skips only on a successful run=false; other steps never skip."""
-        workflow = yaml.safe_load(MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8"))
-        steps = workflow["jobs"][job_name]["steps"]
-        start = next(i for i, step in enumerate(steps) if step.get("id") == "rust_filter")
-        conditions = {step["name"]: step.get("if") for step in steps[start + 1 :]}
-        self.assertLessEqual(gated, set(conditions))
-        for outcome, run, gated_runs in MACOS_FILTER_SCENARIOS:
-            context = {
-                "steps.rust_filter.outcome": outcome,
-                "steps.rust_filter.outputs.run": run,
-            }
-            for name, condition in conditions.items():
-                with self.subTest(job=job_name, step=name, outcome=outcome, run=run):
-                    self.assertEqual(
-                        eval_step_if(condition, context), gated_runs or name not in gated
-                    )
-
-    def test_trusted_macos_hosted_job_gates_only_heavy_steps(self) -> None:
-        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        hosted = job_block(workflow, "macos_hosted")
-        header, steps = hosted.split("    steps:\n", 1)
-        self.assertNotIn("rust_filter", header)
-        checkout = steps.index("      - uses: actions/checkout@v4\n")
-        filter_step = step_block(hosted, "Decide whether heavy steps are needed")
-        self.assertLess(checkout, steps.index(filter_step))
-        self.assertIn("fetch-depth: 0", steps[checkout : steps.index(filter_step)])
-        parsed = yaml.safe_load(workflow)["jobs"]["macos_hosted"]
-        filter_config = next(step for step in parsed["steps"] if step.get("id") == "rust_filter")
-        self.assertEqual(filter_config["continue-on-error"], True)
-        self.assertEqual(filter_config["shell"], "bash")
-        self.assertEqual(filter_config["env"], {"EVENT_NAME": "${{ github.event_name }}"})
-        self.assertEqual(
-            filter_config["run"],
-            'python3 scripts/ci/macos-trusted-rust-filter.py --event "$EVENT_NAME" '
-            '--base-ref origin/main >> "$GITHUB_OUTPUT"',
-        )
-        self.assert_filter_gates_exactly(
-            "macos_hosted",
-            {
-                "Install Rust toolchain",
-                "Install Opus on macOS",
-                "Cache Cargo dependencies",
-                "cargo check",
-                "cargo test (non-PG, targeted subset)",
-                "Fresh user portable smoke",
-            },
-        )
-        self.assertIn("Disable sccache on hosted macOS", hosted)
-        self.assertNotIn("Configure local sccache", hosted)
+                self.assertIn("must retain exact needs: changes", result.stderr)
 
     def assert_hosted_sccache_reset(self, run: str) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2775,11 +1741,11 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(entries.get("RUSTC_WRAPPER"), "")
         self.assertEqual(entries.get("SCCACHE_GHA_ENABLED"), "")
 
-    def test_trusted_macos_hosted_sccache_reset_writes_both_empty_values(self) -> None:
-        workflow = yaml.safe_load(MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8"))
+    def test_nightly_macos_sccache_reset_writes_both_empty_values(self) -> None:
+        workflow = yaml.safe_load(NIGHTLY_WORKFLOW.read_text(encoding="utf-8"))
         disable = next(
-            step for step in workflow["jobs"]["macos_hosted"]["steps"]
-            if step.get("name") == "Disable sccache on hosted macOS"
+            step for step in workflow["jobs"]["full_macos"]["steps"]
+            if step.get("name") == "Disable sccache on macOS"
         )
         self.assertEqual(disable["shell"], "bash")
         self.assertNotIn("if", disable)
@@ -2817,7 +1783,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn("pull_request:", pr_workflow)
         self.assertNotIn("workflow_dispatch:", pr_workflow)
         self.assertNotRegex(pr_workflow, r"(?m)^  push:")
-        self.assertEqual(pr_workflow.count("name: Script checks\n"), 1)
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import nextest_required
+        self.assertIn("Script checks", nextest_required.CONTEXTS)
+        self.assertEqual(yaml.safe_load(pr_workflow)["jobs"]["required_contexts"]["name"], nextest_required.GATE)
         self.assertRegex(
             job_block(pr_workflow, "scripts"),
             r"(?m)^          TEST_LANE_BASELINE_REF: HEAD\^1$",
@@ -2848,17 +1817,8 @@ def canonical_yaml(v)
   else v
   end
 end
-def normalize_required_check_pin(v)
-  case v
-  when Hash then v.transform_values { |x| normalize_required_check_pin(x) }
-  when Array then v.map { |x| normalize_required_check_pin(x) }
-  when String then v.gsub(/expected=[0-9a-f]{64}/, "expected=<required-check-pin-sha256>")
-  else v
-  end
-end
 workflow, job_id = ARGV
 canonical = canonical_yaml(YAML.load_file(workflow).fetch("jobs").fetch(job_id))
-canonical = normalize_required_check_pin(canonical) if job_id == "relay-authority-contract"
 puts Digest::SHA256.hexdigest(JSON.generate(canonical))
 """
         with tempfile.TemporaryDirectory() as temp:
@@ -2905,6 +1865,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
         hardening_script: str | None = None,
         mirror_helper: str | None = None,
         nested_checker: str | None = NESTED_CHECKER_STUB,
+        extra_files: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2912,13 +1873,9 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             workflows.mkdir(parents=True)
             (root / "scripts").mkdir()
             (workflows / "ci-pr.yml").write_text(pr_workflow, encoding="utf-8")
-            trusted = (REPO_ROOT / ".github/workflows/ci-macos-trusted.yml").read_text(
-                encoding="utf-8"
-            )
-            (workflows / "ci-macos-trusted.yml").write_text(
-                trusted, encoding="utf-8"
-            )
             (workflows / "ci-main.yml").write_text(MAIN_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
+            (workflows / WARM_WORKFLOW.name).write_text(WARM_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
+            (workflows / "ci-nightly.yml").write_text(NIGHTLY_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
             for name, content in (extra_workflows or {}).items():
                 (workflows / name).write_text(content, encoding="utf-8")
             for name, target in (workflow_symlinks or {}).items():
@@ -2935,11 +1892,15 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             (root / "scripts/required-check-mirror.sh").write_text(
                 helper, encoding="utf-8"
             )
+            (root / "scripts/ci").mkdir()
+            for helper in ("nextest_required.py", "cargo_test_filters.py"):
+                (root / "scripts/ci" / helper).write_bytes((REPO_ROOT / "scripts/ci" / helper).read_bytes())
             # Workflow fixtures isolate wiring; the real checker has its own declaration tests.
             if nested_checker is not None:
-                checker = root / "scripts/ci/nested_libtest.py"
-                checker.parent.mkdir()
-                checker.write_text(nested_checker, encoding="utf-8")
+                (root / "scripts/ci/nested_libtest.py").write_text(nested_checker, encoding="utf-8")
+            for name, content in (extra_files or {}).items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(content, encoding="utf-8")
             return subprocess.run(
                 ["bash", "scripts/check-ci-runner-hardening.sh"],
                 cwd=root,
@@ -2950,7 +1911,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
 
     def test_hardening_rejects_routing_outside_repository_hosted_runner_policy(self) -> None:
         pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        trusted = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        probe = "name: Runner probe\non: push\njobs:\n  probe:\n    runs-on: macos-15\n    steps:\n      - run: echo ok\n"
         variants = {
             "scalar": "    runs-on: self-hosted\n",
             "list": "    runs-on: [self-hosted, macOS]\n",
@@ -3045,10 +2006,10 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             "empty-runner-list": "    runs-on: []\n",
         }
         for name, runner in variants.items():
-            for path in ("ci-macos-trusted.yml", "extra.yaml"):
+            for path in ("runner-probe.yml", "extra.yaml"):
                 with self.subTest(runner=name, workflow=path):
-                    mutated = trusted.replace("    runs-on: macos-15\n", runner, 1)
-                    self.assertNotEqual(mutated, trusted)
+                    mutated = probe.replace("    runs-on: macos-15\n", runner, 1)
+                    self.assertNotEqual(mutated, probe)
                     result = self.run_hardening_fixture(
                         pr_workflow, extra_workflows={path: mutated}
                     )
@@ -3093,25 +2054,6 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_hardening_keeps_trusted_macos_scheduled_and_uncancelled(self) -> None:
-        pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        trusted = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
-        mutations = {
-            "push": ("  workflow_dispatch:\n", "  push:\n    branches: [main]\n  workflow_dispatch:\n"),
-            "no-cron": ("    - cron: ", "    - not-cron: "),
-            "cancel": ("  cancel-in-progress: false\n", "  cancel-in-progress: true\n"),
-            "shared-group": ("${{ github.event_name }}-", ""),
-        }
-        for name, (old, new) in mutations.items():
-            with self.subTest(mutation=name):
-                mutated = trusted.replace(old, new, 1)
-                self.assertNotEqual(mutated, trusted)
-                result = self.run_hardening_fixture(
-                    pr_workflow, extra_workflows={"ci-macos-trusted.yml": mutated}
-                )
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("no run may cancel another", result.stderr)
-
     def test_hardening_distinguishes_retired_variable_reads_from_prose(self) -> None:
         variants = {
             "step-name": ("name", "Verify self-hosted routing is absent", True),
@@ -3148,8 +2090,8 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_main_windows_warm_times_out_steps_before_advisory_job(self) -> None:
-        job = yaml.safe_load(MAIN_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["windows_cache_warm"]
+    def test_windows_warm_times_out_steps_before_advisory_job(self) -> None:
+        job = yaml.safe_load(WARM_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["windows_cache_warm"]
         self.assertIs(job["continue-on-error"], True)
         compile_steps = [step for step in job["steps"] if "cargo" in step.get("run", "")]
         self.assertEqual(len(compile_steps), 2)
@@ -3160,35 +2102,37 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
         budget = sum(step["timeout-minutes"] for step in compile_steps)
         self.assertGreaterEqual(job["timeout-minutes"], budget + 30)
 
-    def test_hardening_rejects_main_windows_warm_that_misses_pr_cache_key(self) -> None:
-        source = MAIN_WORKFLOW.read_text(encoding="utf-8")
-        warm = source.index("\n  # Warms the shared cargo registry cache")
+    def test_hardening_rejects_windows_warm_that_misses_pr_cache_key_or_trigger(self) -> None:
+        source = WARM_WORKFLOW.read_text(encoding="utf-8")
+        main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        warm_job = source[source.index("  # Warms the shared cargo registry cache"):]
         variants = {
-            "missing": (source[:warm] + "\n", "windows_cache_warm is missing"),
-            "save-if": (
-                source[:warm] + source[warm:].replace(
-                    "${{ github.ref == 'refs/heads/main' }}",
-                    "${{ github.event_name == 'pull_request' }}",
-                ),
-                "rust-cache must save the shared key from main only",
-            ),
-            "env drift": (
-                source[:warm] + source[warm:].replace(
-                    '      CARGO_PROFILE_TEST_DEBUG: "0"\n    steps:', "    steps:", 1
-                ),
-                "env must equal check_fast_cross_os",
-            ),
-            "runs tests": (
-                source.replace("cargo test --lib --no-run", "cargo test --lib"),
-                "without running tests",
-            ),
+            "missing": (source.replace("  windows_cache_warm:\n", "  windows_cache_warmed:\n", 1), None, "windows_cache_warm is missing"),
+            "save-if": (source.replace("${{ github.ref == 'refs/heads/main' }}", "${{ github.event_name == 'pull_request' }}"),
+                        None, "rust-cache must save the shared key from main only"),
+            "env drift": (source.replace('      CARGO_PROFILE_TEST_DEBUG: "0"\n    steps:', "    steps:", 1), None, "env must equal check_fast_cross_os"),
+            "runs tests": (source.replace("cargo test --lib --no-run", "cargo test --lib"), None, "without running tests"),
+            "sccache disabled": (source.replace('  SCCACHE_GHA_ENABLED: "true"\n', '  SCCACHE_GHA_ENABLED: "false"\n', 1), None, "sccache must write"),
+            "sccache read-only": (source.replace("  SCCACHE_GHA_RW_MODE: READ_WRITE\n", "  SCCACHE_GHA_RW_MODE: READ_ONLY\n", 1), None, "sccache must write"),
+            "sccache enable unset": (source.replace('  SCCACHE_GHA_ENABLED: "true"\n', "", 1), None, "sccache must write"),
+            "sccache mode unset": (source.replace("  SCCACHE_GHA_RW_MODE: READ_WRITE\n", "", 1), None, "sccache must write"),
+            "lockfile not watched": (source.replace("      - Cargo.lock\n", "", 1), None, "push paths must be exactly"),
+            "toolchain not watched": (source.replace("      - rust-toolchain.toml\n", "", 1), None, "push paths must be exactly"),
+            "every path watched": (source.replace("      - Cargo.lock\n", "      - '**'\n      - Cargo.lock\n", 1), None, "push paths must be exactly"),
+            "lockfile excluded": (source.replace("      - .github/workflows/ci-windows-cache-warm.yml\n", "      - .github/workflows/ci-windows-cache-warm.yml\n      - '!Cargo.lock'\n", 1), None, "push paths must be exactly"),
+            "warmed on every PR": (source.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n  pull_request:\n", 1), None, "triggers must be exactly"),
+            "every five minutes": (source.replace('"30 16 * * *"', '"*/5 * * * *"', 1), None, "exactly one daily schedule"),
+            "once a year": (source.replace('"30 16 * * *"', '"30 16 1 1 *"', 1), None, "exactly one daily schedule"),
+            "push off main": (source.replace("      - main\n", "      - release\n", 1), None, "push must run on main only"),
+            "no schedule": (source.replace('  schedule:\n    - cron: "30 16 * * *"\n', "", 1), None, "exactly one daily schedule"),
+            "no dispatch": (source.replace("  workflow_dispatch:\n", "", 1), None, "triggers must be exactly"),
+            "still warmed on every main push": (source, main.rstrip("\n") + "\n\n" + warm_job, "a second warm would double"),
         }
-        for name, (mutated, reason) in variants.items():
+        for name, (mutated, mutated_main, reason) in variants.items():
             with self.subTest(name):
-                self.assertNotEqual(mutated, source)
-                result = self.run_hardening_fixture(
-                    PR_WORKFLOW.read_text(encoding="utf-8"), {"ci-main.yml": mutated}
-                )
+                self.assertNotEqual((mutated, mutated_main), (source, None))
+                extra = {WARM_WORKFLOW.name: mutated, **({"ci-main.yml": mutated_main} if mutated_main else {})}
+                result = self.run_hardening_fixture(PR_WORKFLOW.read_text(encoding="utf-8"), extra)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(reason, result.stderr)
 
@@ -3205,13 +2149,13 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("triggered only by pull_request", result.stderr)
 
-    def test_hardening_rejects_yaml_manual_duplicate_script_context(self) -> None:
+    def test_hardening_rejects_yaml_manual_duplicate_required_check(self) -> None:
         duplicate = """\
-name: Duplicate required context
+name: Duplicate required check
 on: [push, workflow_dispatch]
 jobs:
   bypass:
-    name: "Script checks "
+    name: "CI required "
     runs-on: ubuntu-latest
     steps:
       - run: true
@@ -3221,7 +2165,7 @@ jobs:
             {"manual-bypass.yaml": duplicate},
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must not publish required Script checks context", result.stderr)
+        self.assertIn("must publish the required check only from the required_contexts judge", result.stderr)
         self.assertIn("manual-bypass.yaml", result.stderr)
 
     def test_hardening_accepts_clean_yaml_workflow(self) -> None:
@@ -3261,13 +2205,13 @@ jobs:
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_hardening_rejects_full_expression_script_context(self) -> None:
+    def test_hardening_rejects_full_expression_required_check(self) -> None:
         workflow = """\
 name: Dynamic bypass
 on: workflow_dispatch
 jobs:
   bypass:
-    name: ${{ 'Script checks' }}
+    name: ${{ 'CI required' }}
     runs-on: ubuntu-latest
     steps:
       - run: true
@@ -3277,16 +2221,16 @@ jobs:
             {"dynamic-bypass.yaml": workflow},
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("dynamic job names must not be able to publish", result.stderr)
+        self.assertIn("must publish the required check only from the required_contexts judge", result.stderr)
         self.assertIn("dynamic-bypass.yaml", result.stderr)
 
-    def test_hardening_rejects_split_expression_script_context(self) -> None:
+    def test_hardening_rejects_split_expression_required_check(self) -> None:
         workflow = """\
 name: Split dynamic bypass
 on: workflow_dispatch
 jobs:
   bypass:
-    name: Script check${{ 's' }}
+    name: CI require${{ 'd' }}
     runs-on: ubuntu-latest
     steps:
       - run: true
@@ -3296,16 +2240,16 @@ jobs:
             {"split-bypass.yml": workflow},
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("dynamic job names must not be able to publish", result.stderr)
+        self.assertIn("must publish the required check only from the required_contexts judge", result.stderr)
         self.assertIn("split-bypass.yml", result.stderr)
 
-    def test_hardening_rejects_matrix_name_with_required_static_context(self) -> None:
+    def test_hardening_rejects_matrix_name_with_required_static_check(self) -> None:
         workflow = """\
 name: Matrix suffix bypass
 on: workflow_dispatch
 jobs:
   bypass:
-    name: Script checks (${{ matrix.os }})
+    name: CI required (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -3318,14 +2262,14 @@ jobs:
             {"matrix-bypass.yml": workflow},
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("dynamic job names must not be able to publish", result.stderr)
+        self.assertIn("must publish the required check only from the required_contexts judge", result.stderr)
         self.assertIn("matrix-bypass.yml", result.stderr)
 
     def test_hardening_rejects_multiple_job_name_expressions(self) -> None:
         names = (
             "${{ matrix.a }}${{ matrix.b }}",
             "${{ matrix.a }} ${{ matrix.b }}",
-            "${{ 'Script' }} ${{ matrix.b }}",
+            "${{ 'CI' }} ${{ matrix.b }}",
             "${{ matrix.a }} ${{ github.event_name }}",
         )
         for index, name in enumerate(names):
@@ -3347,7 +2291,7 @@ jobs:
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(
-                    "dynamic job names must not be able to publish", result.stderr
+                    "must publish the required check only from the required_contexts judge", result.stderr
                 )
                 self.assertIn(filename, result.stderr)
 
@@ -3386,8 +2330,8 @@ jobs:
             "      - run: true\n\n"
         )
         mutated = workflow.replace(
-            "  scripts_required_context:\n",
-            collision + "  scripts_required_context:\n",
+            "  required_contexts:\n",
+            collision + "  required_contexts:\n",
             1,
         )
         self.assertNotEqual(mutated, workflow)
@@ -3408,8 +2352,8 @@ jobs:
                     "      - run: true\n\n"
                 )
                 mutated = workflow.replace(
-                    "  scripts_required_context:\n",
-                    probe + "  scripts_required_context:\n",
+                    "  required_contexts:\n",
+                    probe + "  required_contexts:\n",
                     1,
                 )
                 result = self.run_hardening_fixture(mutated)
@@ -3419,95 +2363,29 @@ jobs:
                     r"(?:non-string YAML job keys|ambiguous YAML plain job keys)",
                 )
         quoted = workflow.replace(
-            "  scripts_required_context:\n",
-            '  "yes":\n    name: quoted-key probe\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n\n  scripts_required_context:\n',
+            "  required_contexts:\n",
+            '  "yes":\n    name: quoted-key probe\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n\n  required_contexts:\n',
             1,
         )
         self.assertEqual(self.run_hardening_fixture(quoted).returncode, 0)
 
     def test_fixed_surfaces_use_raw_github_scalar_values(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        mirror = job_block(workflow, "scripts_required_context")
-        relay = job_block(workflow, "relay-authority-contract")
-        targets = job_block(workflow, "relay_authority_targets")
-        relay_pin = step_block(relay, "Pin required-check mirror content (#5321)")
+        judge = job_block(workflow, "required_contexts")
+        mutations = job_block(workflow, "relay_authority_mutations")
         cases = (
-            (
-                "plain yes is not the true string",
-                workflow.replace(
-                    mirror,
-                    mirror.replace("FILTER_OUTPUT: true", "FILTER_OUTPUT: yes", 1),
-                    1,
-                ),
-                1,
-            ),
-            (
-                "plain on is not the true string",
-                workflow.replace(
-                    mirror,
-                    mirror.replace("FILTER_OUTPUT: true", "FILTER_OUTPUT: on", 1),
-                    1,
-                ),
-                1,
-            ),
-            (
-                "quoted true changes the pinned scalar style",
-                workflow.replace(
-                    mirror,
-                    mirror.replace(
-                        "FILTER_OUTPUT: true", 'FILTER_OUTPUT: "true"', 1
-                    ),
-                    1,
-                ),
-                1,
-            ),
-            (
-                "explicit binary tag is not discarded",
-                workflow.replace(
-                    mirror,
-                    mirror.replace(
-                        "FILTER_OUTPUT: true",
-                        "FILTER_OUTPUT: !!binary dHJ1ZQ==",
-                        1,
-                    ),
-                    1,
-                ),
-                1,
-            ),
-            (
-                "backstop timeout leading zero is not decimal 10",
-                workflow.replace(
-                    relay,
-                    relay.replace(
-                        relay_pin,
-                        relay_pin.replace(
-                            "        timeout-minutes: 10\n",
-                            "        timeout-minutes: 012\n",
-                            1,
-                        ),
-                        1,
-                    ),
-                    1,
-                ),
-                1,
-            ),
-            (
-                "job timeout leading zero is not decimal 30",
-                workflow.replace(
-                    targets,
-                    targets.replace(
-                        "    timeout-minutes: 30\n", "    timeout-minutes: 036\n", 1
-                    ),
-                    1,
-                ),
-                1,
-            ),
+            ("plain yes is not the true boolean", judge, "        continue-on-error: true\n", "        continue-on-error: yes\n"),
+            ("quoted step name changes the pinned scalar style", judge, "      - name: Judge required checks\n", '      - name: "Judge required checks"\n'),
+            ("explicit str tag is not discarded", judge, "          BASH_ENV: /dev/null\n", "          BASH_ENV: !!str /dev/null\n"),
+            ("judge timeout leading zero is not decimal 15", judge, "    timeout-minutes: 15\n", "    timeout-minutes: 015\n"),
+            ("job timeout leading zero is not decimal 45", mutations, "    timeout-minutes: 45\n", "    timeout-minutes: 055\n"),
         )
-        for label, mutated, expected_rc in cases:
+        for label, job, old, new in cases:
             with self.subTest(case=label):
+                mutated = workflow.replace(job, job.replace(old, new, 1), 1)
                 self.assertNotEqual(mutated, workflow)
                 result = self.run_hardening_fixture(mutated)
-                self.assertEqual(result.returncode, expected_rc, result.stderr)
+                self.assertEqual(result.returncode, 1, result.stderr)
 
     def test_hardening_rejects_workflow_symlink(self) -> None:
         result = self.run_hardening_fixture(
@@ -3536,8 +2414,8 @@ jobs:
                 self.assertEqual(journal.read_text().splitlines(),
                                  ["-m", "unittest", "tests.test_nightly_ci_triage"])
 
-    def test_lane_coverage_cli_and_parity_suites_run_fatally_in_the_contracts_shard(self) -> None:
-        title = "Rust test-lane coverage ratchet (#4846/#4910)"
+    def test_rust_test_source_checks_run_fatally_in_the_contracts_shard(self) -> None:
+        title = "Rust test source wiring and PG classification"
         script = REPO_ROOT / "scripts/ci-script-checks.sh"
         env = {k: v for k, v in os.environ.items() if not k.startswith("SCRIPT_CHECK_")}
         listing = subprocess.run(
@@ -3549,35 +2427,25 @@ jobs:
         start = lines.index(f'if run_check contracts "{title}"; then') + 1
         after = next(i for i in range(start, len(lines)) if lines[i].startswith("if run_check "))
         block = "\n".join(lines[start:max(i for i in range(start, after) if lines[i] == "fi")])
-        calls = [
-            "scripts/check_test_lane_coverage.py --baseline-ref base-sha",
-            "-m unittest tests.test_test_lane_coverage",
-            "-m unittest tests.test_lane_source_parity tests.test_lane_activation",
-            "-m unittest tests.test_required_id_exception_fragments",
-        ]
         with tempfile.TemporaryDirectory() as tmp:
             probe, journal = Path(tmp) / "python-probe", Path(tmp) / "argv"
-            probe.write_text(
-                '#!/bin/bash\nprintf "%s\\n" "$*" >> "$JOURNAL"\n[ "$*" != "$FAIL_ON" ]\n'
-            )
+            probe.write_text('#!/bin/bash\nprintf "%s\\n" "$1" >> "$JOURNAL"\n[ "$1" != "$FAIL_ON" ]\n')
             probe.chmod(0o755)
 
-            def run(fail_on: str = "", **extra: str) -> tuple[int, list[str]]:
+            def run(fail_on: str = "") -> tuple[int, list[str]]:
                 journal.write_text("")
                 done = subprocess.run(
                     ["bash", "--noprofile", "--norc", "-c", "set -euo pipefail\n" + block],
-                    env={"PATH": os.environ["PATH"], "PYTHON": str(probe),
-                         "JOURNAL": str(journal), "FAIL_ON": fail_on, **extra},
+                    env={"PATH": os.environ["PATH"], "PYTHON": str(probe), "JOURNAL": str(journal), "FAIL_ON": fail_on},
                     capture_output=True, text=True,
                 )
                 return done.returncode, journal.read_text().splitlines()
 
-            self.assertEqual(run(TEST_LANE_BASELINE_REF="base-sha"), (0, calls))
-            self.assertEqual(run(), (1, []))
+            calls = ["scripts/ci/rust_test_sources.py", "scripts/ci/pg_test_classifier.py"]
+            self.assertEqual(run(), (0, calls))
             for index, call in enumerate(calls):
                 with self.subTest(failing=call):
-                    self.assertEqual(run(call, TEST_LANE_BASELINE_REF="base-sha"),
-                                     (1, calls[:index + 1]))
+                    self.assertEqual(run(call), (1, calls[:index + 1]))
 
 
 if __name__ == "__main__":
