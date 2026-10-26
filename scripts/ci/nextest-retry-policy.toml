@@ -1,4 +1,5 @@
-# Exact test IDs the CI nextest profile may retry once. Everything else runs with retries = 0.
+# Exact test IDs the strict (--retry-mode policy, nightly) nextest plans may retry once; everything else
+# runs with retries = 0 there. PR and main plans retry every test once but still validate these entries.
 # nextest_ci.py plan rejects expired, duplicate or stale entries and generates the overrides from here.
 version = 1
 

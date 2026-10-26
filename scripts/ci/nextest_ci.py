@@ -48,6 +48,9 @@ POLICY_KEYS = {"scope", "binary-id", "test", "issue", "expires", "reason"}
 # CLI/env settings outrank the config file and would bypass the generated policy.
 FORBIDDEN_ENV = ("NEXTEST_RETRIES", "NEXTEST_TEST_THREADS", "NEXTEST_FLAKY_RESULT")
 RETRY_TAGS = ("flakyFailure", "flakyError", "rerunFailure", "rerunError")
+# policy: only the retry policy entries get one retry. all-once: every test gets one retry and a retry
+# pass is green but listed as FLAKY.
+RETRY_MODES = ("policy", "all-once")
 
 
 class PlanError(ValueError):
@@ -247,8 +250,22 @@ def _check_base_config(cfg):
                                 "use the retry policy file")
 
 
-def worker_config(base_text, tests, policy):
-    """Base config with this worker's exact default-filter and the policy retry overrides appended."""
+def _replace_ci_line(lines, old, new):
+    """Swap the one `old` line inside [profile.ci]; the same key also appears under other profiles."""
+    starts = [i for i, line in enumerate(lines) if line.strip() == "[profile.ci]"]
+    if len(starts) != 1:
+        raise PlanError("base config must contain exactly one `[profile.ci]` line")
+    start = starts[0]
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+    hits = [i for i in range(start + 1, end) if lines[i].strip() == old]
+    if len(hits) != 1:
+        raise PlanError(f"base config [profile.ci] must contain exactly one `{old}` line")
+    lines[hits[0]] = new
+
+
+def worker_config(base_text, tests, policy, mode="policy"):
+    """Base config with this worker's exact default-filter and its retries: the policy overrides, or
+    one retry with a passing flaky result for every test under all-once."""
     base = tomllib.loads(base_text)
     _check_base_config(base)
     lines = base_text.splitlines()
@@ -257,18 +274,24 @@ def worker_config(base_text, tests, policy):
         raise PlanError(f"base config must contain exactly one `{DEFAULT_FILTER_LINE}` line")
     expr = default_filter(tests)
     lines[hits[0]] = f'default-filter = "{expr}"'
-    for entry in policy:
-        lines += ["", "[[profile.ci.overrides]]",
-                  f'filter = "{_exact(entry["binary_id"], [entry["test"]])}"',
-                  "retries = 1", 'flaky-result = "pass"']
+    if mode == "all-once":
+        _replace_ci_line(lines, "retries = 0", "retries = 1")
+        _replace_ci_line(lines, 'flaky-result = "fail"', 'flaky-result = "pass"')
+    else:
+        for entry in policy:
+            lines += ["", "[[profile.ci.overrides]]",
+                      f'filter = "{_exact(entry["binary_id"], [entry["test"]])}"',
+                      "retries = 1", 'flaky-result = "pass"']
     text = "\n".join(lines) + "\n"
     parsed = tomllib.loads(text)
     ci = parsed["profile"]["ci"]
     retry_filters = [o["filter"] for o in ci.get("overrides", []) if "retries" in o]
-    wanted = [_exact(e["binary_id"], [e["test"]]) for e in policy]
+    wanted = [] if mode == "all-once" else [_exact(e["binary_id"], [e["test"]]) for e in policy]
+    profile_retry = (1, "pass") if mode == "all-once" else (0, "fail")
     if ci.get("default-filter") != expr or retry_filters != wanted or \
+            (ci.get("retries"), ci.get("flaky-result")) != profile_retry or \
             any(o.get("retries") != 1 for o in ci.get("overrides", []) if "retries" in o):
-        raise PlanError("generated worker config does not round-trip to the planned filter and policy")
+        raise PlanError("generated worker config does not round-trip to the planned filter and retries")
     return text
 
 
@@ -341,7 +364,7 @@ def cmd_plan(args):
     out.mkdir(parents=True, exist_ok=True)
     workers = []
     for index, tests in enumerate(buckets):
-        text = worker_config(base_text, tests, policy)
+        text = worker_config(base_text, tests, policy, args.retry_mode)
         (out / f"worker-{index}.toml").write_text(text)
         workers.append({"index": index, "tests": [list(t) for t in tests],
                         "expected_seconds": round(loads[index], 3),
@@ -350,14 +373,20 @@ def cmd_plan(args):
             "identity": {"sha": args.sha, "archive_sha256": _sha256_file(archive), "scope": args.scope,
                          "run_id": args.run_id, **build},
             "universe_count": len(universe), "universe_digest": _digest(sorted(list(t) for t in universe)),
-            "ignored": sorted(list(t) for t in ignored), "retry_policy": policy,
+            "ignored": sorted(list(t) for t in ignored), "retry_policy": policy, "retry_mode": args.retry_mode,
             "timing": timing, "workers": workers}
     plan["plan_digest"] = _plan_digest(plan)
     (out / "plan.json").write_text(json.dumps(plan, indent=1, sort_keys=True) + "\n")
     print(f"planned {len(universe)} tests on {args.workers} workers "
-          f"(timing {timing['mode']}, known {timing['known']}, fallback {timing['fallback']}); "
+          f"(timing {timing['mode']}, known {timing['known']}, fallback {timing['fallback']}, "
+          f"retry mode {args.retry_mode}); "
           f"plan {plan['plan_digest'][:12]}")
     return 0
+
+
+def retry_mode(plan):
+    """Plans written before the mode existed ran under the policy."""
+    return plan.get("retry_mode", "policy")
 
 
 def load_plan(path):
@@ -369,6 +398,8 @@ def load_plan(path):
         raise PlanError(f"plan {path} is not a version {PLAN_VERSION} {PLAN_KIND}")
     if plan.get("plan_digest") != _plan_digest(plan):
         raise PlanError("plan digest does not match its content")
+    if retry_mode(plan) not in RETRY_MODES:
+        raise PlanError(f"plan retry_mode {plan['retry_mode']!r} is not one of {RETRY_MODES}")
     seen = set()
     for n, worker in enumerate(plan["workers"]):
         tests = {tuple(t) for t in worker["tests"]}
@@ -459,7 +490,7 @@ def audit_worker(plan, index, wdir, policy_ids):
     except PlanError as exc:
         bad("missing-junit", str(exc))
         return problems, [], row
-    executed, cases = set(), []
+    executed, cases, all_once = set(), [], retry_mode(plan) == "all-once"
     for binary_id, case in _cases(root):
         test_id = (binary_id, case.get("name"))
         outcome, attempts = classify(case)
@@ -481,10 +512,10 @@ def audit_worker(plan, index, wdir, policy_ids):
         if outcome == "failed":
             bad("failed" if attempts == 1 else "retry-exhausted",
                 f"failed after {attempts} attempt(s)", test_id)
-        if attempts > 1 and test_id not in policy_ids:
+        if attempts > 1 and not all_once and test_id not in policy_ids:
             bad("retry-not-allowed", f"{attempts} attempts but not in the retry policy", test_id)
         elif attempts > 2:
-            bad("retry-over-limit", f"{attempts} attempts; the policy allows one retry", test_id)
+            bad("retry-over-limit", f"{attempts} attempts; at most one retry is allowed", test_id)
     row["executed"] = len(executed)
     if not executed:
         bad("zero-tests", "no testcase executed")
@@ -499,6 +530,7 @@ def audit_worker(plan, index, wdir, policy_ids):
 
 def audit(plan, results):
     policy = {(e["binary_id"], e["test"]): e for e in plan["retry_policy"]}
+    mode = retry_mode(plan)
     problems, rows, retry_pass, totals = [], [], [], {"planned": plan["universe_count"], "executed": 0,
                                                       "passed": 0, "failed": 0, "retry_pass": 0}
     planned_dirs = {f"worker-{w['index']}" for w in plan["workers"]}
@@ -513,8 +545,8 @@ def audit(plan, results):
         totals["executed"] += row["executed"]
         for case in cases:
             totals[case["outcome"]] += 1
-            if case["outcome"] == "passed" and case["attempts"] == 2 and case["id"] in policy:
-                entry = policy[case["id"]]
+            if case["outcome"] == "passed" and case["attempts"] == 2 and (mode == "all-once" or case["id"] in policy):
+                entry = policy.get(case["id"], {"issue": None, "expires": None})
                 retry_pass.append({"id": _id_text(case["id"]), "worker": worker["index"],
                                    "attempts": case["attempts"], "seconds": case["seconds"],
                                    "total_attempt_seconds": case["total_attempt_seconds"],
@@ -522,7 +554,7 @@ def audit(plan, results):
     totals["retry_pass"] = len(retry_pass)
     if totals["executed"] == 0 and not any(p["kind"] == "zero-tests" for p in problems):
         problems.append({"worker": None, "kind": "zero-tests", "detail": "no testcase executed"})
-    return {"version": VERDICT_VERSION, "verdict": "fail" if problems else "pass",
+    return {"version": VERDICT_VERSION, "verdict": "fail" if problems else "pass", "retry_mode": mode,
             "plan_digest": plan["plan_digest"], "identity": plan["identity"], "totals": totals,
             "workers": rows, "retry_pass": retry_pass, "problems": problems}
 
@@ -531,16 +563,17 @@ def render_summary(verdict, limit=50):
     t, ident = verdict["totals"], verdict["identity"]
     lines = [f"## nextest {ident['scope']}: {verdict['verdict'].upper()}", "",
              f"SHA `{ident['sha']}` · plan `{verdict['plan_digest'][:12]}` · "
-             f"executed {t['executed']}/{t['planned']} · failed {t['failed']} · retry-pass {t['retry_pass']}", "",
+             f"executed {t['executed']}/{t['planned']} · failed {t['failed']} · retry-pass {t['retry_pass']} · "
+             f"retry mode {verdict['retry_mode']}", "",
              "| worker | planned | executed | exit | seconds | all attempts |", "|---|---|---|---|---|---|"]
     lines += [f"| {r['index']} | {r['planned']} | {r['executed']} | {r['exit_code']} | {r['seconds']} "
               f"| {r['total_attempt_seconds']} |"
               for r in verdict["workers"]]
     if verdict["retry_pass"]:
-        lines += ["", "### Passed only on retry", "", "| test | attempts | seconds | all attempts | issue | expires |",
+        lines += ["", "### FLAKY: passed only on retry", "", "| test | attempts | seconds | all attempts | issue | expires |",
                   "|---|---|---|---|---|---|"]
         lines += [f"| `{r['id']}` | {r['attempts']} | {r['seconds']} | {r['total_attempt_seconds']} "
-                  f"| {r['issue']} | {r['expires']} |"
+                  f"| {r['issue'] or '-'} | {r['expires'] or '-'} |"
                   for r in verdict["retry_pass"]]
     if verdict["problems"]:
         lines += ["", f"### Problems ({len(verdict['problems'])})", ""]
@@ -563,6 +596,10 @@ def cmd_audit(args):
     summary = render_summary(verdict)
     Path(args.summary_out).write_text(summary)
     print(summary)
+    if verdict["retry_pass"]:
+        # One workflow warning annotation naming every FLAKY test; %0A is an escaped newline.
+        names = "%0A".join(r["id"] for r in verdict["retry_pass"])
+        print(f"::warning title=FLAKY tests passed only on retry ({len(verdict['retry_pass'])})::{names}")
     return 0 if verdict["verdict"] == "pass" else 1
 
 
@@ -673,6 +710,8 @@ def main(argv=None):
     p.add_argument("--timings", action="append", help="nextest JUnit from an earlier run (repeatable)")
     p.add_argument("--base-config", default=".config/nextest.toml")
     p.add_argument("--retry-policy", default="scripts/ci/nextest-retry-policy.toml")
+    p.add_argument("--retry-mode", choices=RETRY_MODES, default="policy",
+                   help="policy: retry only the policy entries; all-once: retry every test once (FLAKY passes)")
     p.add_argument("--today", help="YYYY-MM-DD for policy expiry (default: UTC today)")
     p.add_argument("--identity-from", help="plan.json whose scope and build flags this plan takes")
     p.add_argument("--only", help="pg_test_classifier.py JSON; plan only the tests it names under non_pg")

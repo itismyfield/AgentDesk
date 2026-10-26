@@ -289,7 +289,7 @@ jobs:
             --archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \
             --rust-version 1.94.1 --nextest-version "$(cargo nextest --version | awk 'NR==1 {print $2}')" \
             --target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \
-            --build-option CARGO_PROFILE_TEST_DEBUG=0 --output "$NEXTEST_DIR/plan"
+            --build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode policy --output "$NEXTEST_DIR/plan"
           python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"
       - name: Upload nextest plan
         uses: actions/upload-artifact@v4

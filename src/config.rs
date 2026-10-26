@@ -22,6 +22,7 @@ pub(crate) mod session_hosts;
 pub use session_hosts::SessionHostsConfig;
 pub(crate) mod disk_write;
 mod peer_filter;
+pub mod reload_classes;
 mod server_surface;
 mod tool_activity_display;
 pub(crate) use disk_write::render_config_for_path;
@@ -85,17 +86,8 @@ pub struct Config {
     /// Channels run on a Herdr endpoint; restart-required, empty by default.
     #[serde(default, skip_serializing_if = "SessionHostsConfig::is_empty")]
     pub session_hosts: SessionHostsConfig,
-    /// When true (default), the server watches the on-disk config file and
-    /// hot-reloads the hot-swappable settings (routine tunables, thresholds)
-    /// without a restart, mirroring the policies watcher: the candidate file is
-    /// pre-validated (parsed + runtime defaults applied) and only then atomically
-    /// swapped in; a parse/validation failure keeps the running config. Infra
-    /// fields (`server` bind/port/auth, `database`, `data.dir`, `cluster`,
-    /// Discord/provider/agent launch and voice runtimes, MCP child processes and
-    /// credential watcher, `memory`, GitHub sync cadence, prompt retention, and
-    /// the config watcher flag itself) are NOT hot-swapped — a change to those is
-    /// applied to the shared snapshot but logged as restart-required, since live
-    /// subsystems bound them at boot.
+    /// When true (default), a validated edit to the config file replaces the live snapshot;
+    /// an invalid edit keeps it. `reload_classes::FIELDS` lists which fields act on the swap.
     #[serde(default = "default_true")]
     pub config_hot_reload: bool,
 }

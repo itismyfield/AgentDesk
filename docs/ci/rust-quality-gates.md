@@ -97,7 +97,9 @@ nightly does. CI does not call it: on `main` push and dispatch, every nightly, a
 over six `rust_tests` workers, each with its own PostgreSQL service, and
 `test_evidence` audits that every planned test ran. PR, main and nightly keep the same
 three jobs; `scripts/check-ci-runner-hardening.sh` allows them to differ only in
-`needs`, `if`, the PR base comparison and the main `nextest-baseline` upload.
+`needs`, `if`, the PR base comparison, the main `nextest-baseline` upload and the
+nightly plan's `--retry-mode policy` (PR and main plan `all-once`, see
+[known-flaky-retry.md](known-flaky-retry.md)).
 
 The `lint` job runs fmt, clippy, the policy JS tests, the non-lib side of the
 recipe's `--all-targets` lines (`--bins --test '*'`), and the `ClaudeBinary`

@@ -1,5 +1,29 @@
 # Known flaky retry
 
+## In-run retry of the nextest lib tests
+
+`scripts/ci/nextest_ci.py plan --retry-mode` decides how each worker config
+retries a failed lib test. `.config/nextest.toml` stays at `retries = 0` and
+`flaky-result = "fail"`, so a local run does not change.
+
+| Workflow | Mode | Retry | Passed on the retry (FLAKY) |
+|---|---|---|---|
+| CI PR (`ci-pr.yml`) | `all-once` | every test, once | pass, listed |
+| CI Main (`ci-main.yml`) | `all-once` | every test, once | pass, listed |
+| CI Nightly (`ci-nightly.yml`, native lanes) | `policy` | only `scripts/ci/nextest-retry-policy.toml` entries, once | pass for an entry, otherwise `retry-not-allowed` failure |
+
+A test that fails both attempts is `retry-exhausted` and fails the run in every
+mode; more than one retry is `retry-over-limit`. A FLAKY test still counts once
+toward planned == executed. The `audit` step lists every FLAKY test in one
+workflow warning annotation, in the step summary table and in the verdict JSON
+(`retry_pass`, `totals.retry_pass`, `retry_mode`). Nightly does not gate merges
+or deploys; it is where a flaky test outside the policy turns red.
+`scripts/check-ci-runner-hardening.sh` keeps the nightly plan on
+`--retry-mode policy` and the PR and main plans on `all-once`. Every plan still
+validates the policy file, so an expired entry fails all three.
+
+## PR rerun of known flaky tests
+
 `scripts/ci/known-flaky-tests.json` is a temporary retry allowlist. Each entry
 names an exact failed test, a CI run demonstrating the failure, and its cause.
 It does not skip tests or change their expected result.
