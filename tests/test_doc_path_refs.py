@@ -11,6 +11,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "check_doc_path_refs.py"
@@ -172,6 +173,7 @@ class BaselineTest(RepoCase):
             code = CHECKER.main(["--root", str(self.root), *args])
         return code, err.getvalue()
 
+    @mock.patch.object(CHECKER, "BASELINE_MAX_ENTRIES", 10)
     def test_baseline_tolerates_listed_pairs_only(self) -> None:
         self.findings("`src/a.rs`\n`src/b.rs`\n")
         code, err = self.run_main()
@@ -183,6 +185,7 @@ class BaselineTest(RepoCase):
         self.assertIn("src/b.rs", err)
         self.assertNotIn("src/a.rs", err)
 
+    @mock.patch.object(CHECKER, "BASELINE_MAX_ENTRIES", 10)
     def test_zero_test_command_cannot_be_baselined(self) -> None:
         self.findings("`cargo test --bin agentdesk foo::`\n")
         self.assertEqual(self.run_main("--write-baseline")[0], 0)
@@ -192,10 +195,29 @@ class BaselineTest(RepoCase):
         self.assertEqual(code, 1)
         self.assertIn("runs 0 tests", err)
 
+    @mock.patch.object(CHECKER, "BASELINE_MAX_ENTRIES", 10)
     def test_write_baseline_then_pass(self) -> None:
         self.findings("`src/a.rs`\n")
         self.assertEqual(self.run_main("--write-baseline")[0], 0)
         self.assertEqual(self.run_main()[0], 0)
+
+    def test_baseline_cannot_grow_past_ceiling(self) -> None:
+        self.findings("`src/a.rs`\n")
+        self.write("scripts/doc_path_refs_baseline.txt", "docs/page.md\tsrc/a.rs\n")
+        code, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("only shrinks", err)
+
+    def test_write_baseline_refuses_entries_past_ceiling(self) -> None:
+        self.findings("`src/a.rs`\n")
+        code, err = self.run_main("--write-baseline")
+        self.assertEqual(code, 1)
+        self.assertIn("only shrinks", err)
+        self.assertFalse((self.root / "scripts/doc_path_refs_baseline.txt").exists())
+
+    def test_repo_baseline_is_within_ceiling(self) -> None:
+        entries = CHECKER.load_baseline(REPO_ROOT / CHECKER.BASELINE_REL)
+        self.assertLessEqual(len(entries), CHECKER.BASELINE_MAX_ENTRIES)
 
 
 if __name__ == "__main__":
