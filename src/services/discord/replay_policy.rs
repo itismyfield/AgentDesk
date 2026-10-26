@@ -36,7 +36,7 @@ pub(crate) enum ReplayDecision {
 }
 
 /// Decides a stale attempt; anything short of committed no-effect evidence withholds.
-pub(crate) async fn decide_stale(
+pub(in crate::services::discord) async fn decide_stale(
     pool: &PgPool,
     attempt: Option<ExactAttempt>,
     observation: &RawObservation,

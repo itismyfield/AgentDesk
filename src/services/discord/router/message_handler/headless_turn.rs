@@ -127,16 +127,8 @@ async fn start_reserved_headless_turn_admitted(
         dm_hint: is_dm_hint,
         reservation,
     };
-    match replay_request.early().await {
-        Ok(()) => {}
-        Err(super::super::intake_dispatch::replay_admission::StartStop::Consumed) => {
-            return Ok(HeadlessTurnStartOutcome::consumed(
-                reservation.turn_id(channel_id),
-            ));
-        }
-        Err(super::super::intake_dispatch::replay_admission::StartStop::Deferred(reason)) => {
-            return Err(HeadlessTurnStartError::Conflict(reason));
-        }
+    if let Some(outcome) = replay_request.early().await? {
+        return Ok(outcome);
     }
     // A Herdr-configured channel is refused before this turn claims, resets or clears anything.
     let session_key = || {
@@ -300,31 +292,7 @@ async fn start_reserved_headless_turn_admitted(
     };
 
     let turn_id = reservation.turn_id(channel_id);
-    let routine_metadata_agent_id = routine_metadata_agent_id(metadata.as_ref());
-    let routine_targets_resolved_role = routine_metadata_agent_id
-        .zip(
-            role_binding
-                .as_ref()
-                .map(|binding| binding.role_id.as_str()),
-        )
-        .is_some_and(|(metadata_agent_id, role_id)| metadata_agent_id == role_id);
-    let routine_agent_identity_changed = if routine_targets_resolved_role {
-        if let Some(channel_name_hint) = channel_name_hint
-            .as_ref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            let data = shared.core.lock().await;
-            data.sessions.get(&channel_id).is_some_and(|session| {
-                session.channel_name.as_deref() != Some(channel_name_hint.as_str())
-            })
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    let routine_agent_identity_changed =
-        routine_agent_identity_changed && !replay_start::retrying();
+    let routine_agent_identity_changed = replay_request.identity_changed().await;
     if routine_agent_identity_changed {
         if let Err(error) = crate::db::session_transcripts::record_channel_clear_boundary(
             shared.pg_pool.as_ref(),
@@ -346,34 +314,14 @@ async fn start_reserved_headless_turn_admitted(
             session_strategy_reason = "routine_agent_identity_changed";
         }
     }
-    if !replay_start::retrying() {
-        let channel_name_for_isolation = {
-            let data = shared.core.lock().await;
-            data.sessions
-                .get(&channel_id)
-                .and_then(|session| session.channel_name.clone())
-                .or_else(|| channel_name_hint.clone())
-        };
-        let isolation_outcome = ensure_provider_worktree_isolation(
-            shared,
-            channel_id,
+    replay_request
+        .isolate(
             &mut current_path,
-            &provider,
-            channel_name_for_isolation.as_deref(),
-            None,
-        )
-        .await;
-        reset_provider_session_after_worktree_isolation(
-            shared,
-            channel_id,
-            &provider,
-            isolation_outcome,
             &mut session_id,
             &mut memento_context_loaded,
             &mut session_strategy_reason,
         )
         .await;
-    }
     let dispatch_profile = {
         let data = shared.core.lock().await;
         let channel_name = data
@@ -388,24 +336,14 @@ async fn start_reserved_headless_turn_admitted(
 
     let fast_mode_channel_id =
         feature_key(shared, &provider, channel_id, early_thread_parent.as_ref()).await;
-    if !replay_start::retrying() {
-        super::super::super::commands::reset_provider_session_if_pending(
-            &ctx.http,
-            shared,
-            &provider,
-            channel_id,
+    replay_request
+        .pending_reset(
             fast_mode_channel_id,
-        )
-        .await;
-        refresh_session_strategy_after_pending_reset(
-            shared,
-            channel_id,
             &mut session_id,
             &mut memento_context_loaded,
             &mut session_strategy_reason,
         )
         .await;
-    }
 
     let prompt_prep_started = std::time::Instant::now();
     let (channel_name, tmux_session_name, category_name) = {
@@ -905,28 +843,14 @@ async fn start_reserved_headless_turn_admitted(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
-    inflight_state.turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
-    apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
-    let (worktree_path, worktree_branch, base_commit) = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|session| session.worktree.as_ref())
-            .map(|wt| {
-                (
-                    Some(wt.worktree_path.clone()),
-                    Some(wt.branch_name.clone()),
-                    crate::services::platform::git_head_commit(&wt.original_path),
-                )
-            })
-            .unwrap_or((None, None, None))
-    };
-    inflight_state.set_worktree_context(worktree_path, worktree_branch, base_commit);
-    inflight_state.logical_channel_id = Some(channel_id.get());
-    inflight_state.session_key = adk_session_key.clone();
-    inflight_state.delivery_bot = metadata_delivery_bot(metadata.as_ref());
-    inflight_state.silent_turn = metadata_silent_flag(metadata.as_ref());
-    inflight_state.source = metadata_turn_source(source, metadata.as_ref());
+    replay_request
+        .bind_inflight(
+            &mut inflight_state,
+            &cancel_token,
+            adk_session_key.as_deref(),
+            prelaunch_runtime_kind,
+        )
+        .await;
     let prepared = replay_start::Prepared {
         prompt: &context_prompt,
         cwd: &current_path,
@@ -936,28 +860,22 @@ async fn start_reserved_headless_turn_admitted(
         remote: remote_profile.is_some(),
         tmux: tmux_session_name.as_deref(),
     };
-    let replay_start = match replay_request.admit(&mut inflight_state, prepared).await {
-        Ok((start, fresh)) => {
-            if fresh {
-                session_id = None;
-            }
-            start
-        }
-        Err(stopped) => {
-            unwind_unstarted_turn(shared, channel_id, &cancel_token).await;
-            return match stopped {
-                super::super::intake_dispatch::replay_admission::StartStop::Consumed => Ok(
-                    HeadlessTurnStartOutcome::consumed(reservation.turn_id(channel_id)),
-                ),
-                super::super::intake_dispatch::replay_admission::StartStop::Deferred(reason) => {
-                    Err(HeadlessTurnStartError::Conflict(reason))
-                }
-            };
+    let replay_start = match replay_request
+        .checked_start(
+            &mut inflight_state,
+            prepared,
+            &mut session_id,
+            &cancel_token,
+        )
+        .await?
+    {
+        Some(start) => start,
+        None => {
+            return Ok(HeadlessTurnStartOutcome::consumed(
+                reservation.turn_id(channel_id),
+            ));
         }
     };
-    if replay_start.receipt_id().is_some() {
-        inflight_state.followup_reply_context = reply_context.clone();
-    }
     let replay_gateway = replay_request.gateway(&inflight_state, &pending_uploads, &current_path);
     let turn_host = crate::services::turn_host::for_turn(
         shared.pg_pool.as_ref(),

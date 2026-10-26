@@ -42,6 +42,161 @@ pub(super) struct Prepared<'a> {
 }
 
 impl Request<'_> {
+    pub(super) async fn identity_changed(&self) -> bool {
+        if retrying()
+            || !routine_metadata_agent_id(self.metadata)
+                .zip(self.agent)
+                .is_some_and(|(metadata_agent, role)| metadata_agent == role)
+        {
+            return false;
+        }
+        let Some(hint) = self.channel_hint.filter(|value| !value.trim().is_empty()) else {
+            return false;
+        };
+        self.shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get(&self.channel)
+            .is_some_and(|session| session.channel_name.as_deref() != Some(hint))
+    }
+
+    pub(super) async fn bind_inflight(
+        &self,
+        state: &mut InflightTurnState,
+        token: &CancelToken,
+        session_key: Option<&str>,
+        runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    ) {
+        state.turn_nonce = token.turn_nonce().map(str::to_owned);
+        apply_prelaunch_runtime_kind(state, runtime_kind);
+        let (worktree_path, worktree_branch, base_commit) = {
+            let data = self.shared.core.lock().await;
+            data.sessions
+                .get(&self.channel)
+                .and_then(|session| session.worktree.as_ref())
+                .map(|wt| {
+                    (
+                        Some(wt.worktree_path.clone()),
+                        Some(wt.branch_name.clone()),
+                        crate::services::platform::git_head_commit(&wt.original_path),
+                    )
+                })
+                .unwrap_or((None, None, None))
+        };
+        state.set_worktree_context(worktree_path, worktree_branch, base_commit);
+        state.logical_channel_id = Some(self.channel.get());
+        state.session_key = session_key.map(str::to_owned);
+        state.delivery_bot = metadata_delivery_bot(self.metadata);
+        state.silent_turn = metadata_silent_flag(self.metadata);
+        state.source = metadata_turn_source(self.source, self.metadata);
+    }
+
+    pub(super) async fn early(
+        &self,
+    ) -> Result<Option<HeadlessTurnStartOutcome>, HeadlessTurnStartError> {
+        match self.preflight().await {
+            Ok(()) => Ok(None),
+            Err(StartStop::Consumed) => Ok(Some(HeadlessTurnStartOutcome::consumed(
+                self.reservation.turn_id(self.channel),
+            ))),
+            Err(StartStop::Deferred(reason)) => Err(HeadlessTurnStartError::Conflict(reason)),
+        }
+    }
+
+    pub(super) async fn isolate(
+        &self,
+        current_path: &mut String,
+        session_id: &mut Option<String>,
+        memento_context_loaded: &mut bool,
+        session_strategy_reason: &mut &'static str,
+    ) {
+        if !retrying() {
+            let channel_name_for_isolation = {
+                let data = self.shared.core.lock().await;
+                data.sessions
+                    .get(&self.channel)
+                    .and_then(|session| session.channel_name.clone())
+                    .or_else(|| self.channel_hint.map(str::to_owned))
+            };
+            let isolation_outcome = ensure_provider_worktree_isolation(
+                self.shared,
+                self.channel,
+                current_path,
+                self.provider,
+                channel_name_for_isolation.as_deref(),
+                None,
+            )
+            .await;
+            reset_provider_session_after_worktree_isolation(
+                self.shared,
+                self.channel,
+                self.provider,
+                isolation_outcome,
+                session_id,
+                memento_context_loaded,
+                session_strategy_reason,
+            )
+            .await;
+        }
+    }
+
+    pub(super) async fn pending_reset(
+        &self,
+        fast_mode_channel_id: ChannelId,
+        session_id: &mut Option<String>,
+        memento_context_loaded: &mut bool,
+        session_strategy_reason: &mut &'static str,
+    ) {
+        if !retrying() {
+            super::super::super::super::commands::reset_provider_session_if_pending(
+                &self.ctx.http,
+                self.shared,
+                self.provider,
+                self.channel,
+                fast_mode_channel_id,
+            )
+            .await;
+            refresh_session_strategy_after_pending_reset(
+                self.shared,
+                self.channel,
+                session_id,
+                memento_context_loaded,
+                session_strategy_reason,
+            )
+            .await;
+        }
+    }
+
+    pub(super) async fn checked_start(
+        &self,
+        state: &mut InflightTurnState,
+        prepared: Prepared<'_>,
+        session_id: &mut Option<String>,
+        token: &Arc<CancelToken>,
+    ) -> Result<Option<ReplayStart>, HeadlessTurnStartError> {
+        let reply = prepared.reply;
+        match self.admit(state, prepared).await {
+            Ok((start, fresh)) => {
+                if fresh {
+                    *session_id = None;
+                }
+                if start.receipt_id().is_some() {
+                    state.followup_reply_context = reply.map(str::to_owned);
+                }
+                Ok(Some(start))
+            }
+            Err(stop) => {
+                unwind_unstarted_turn(self.shared, self.channel, token).await;
+                match stop {
+                    StartStop::Consumed => Ok(None),
+                    StartStop::Deferred(reason) => Err(HeadlessTurnStartError::Conflict(reason)),
+                }
+            }
+        }
+    }
+
     fn key(&self) -> String {
         format!(
             "headless:{}:{}:{}",
@@ -64,7 +219,7 @@ impl Request<'_> {
         }
     }
 
-    pub(super) async fn early(&self) -> Result<(), StartStop> {
+    async fn preflight(&self) -> Result<(), StartStop> {
         let channel = self.channel.to_string();
         if retrying() {
             return if REENTRY
@@ -365,6 +520,6 @@ pub(super) fn take_session_retry_context(
     if retrying() {
         None
     } else {
-        super::super::super::turn_start::take_session_retry_context(shared, channel, turn)
+        super::super::take_session_retry_context(shared, channel, turn)
     }
 }

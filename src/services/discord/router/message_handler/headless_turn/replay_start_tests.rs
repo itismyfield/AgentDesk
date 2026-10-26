@@ -214,6 +214,12 @@ sys.exit(result.returncode)
                     channel.get(),
                 )
             {
+                crate::server::outbox_worker::drain_message_outbox_once(
+                    &Arc::new(self.pool.clone()),
+                    &self.registry,
+                    "p4-final-fixture-drain",
+                )
+                .await;
                 break;
             }
             assert!(
