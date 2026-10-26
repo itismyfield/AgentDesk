@@ -195,7 +195,11 @@ pub(crate) fn choices(
                 {
                     continue;
                 }
-                let Ok(meta) = entry.metadata() else { continue };
+                // Windows answers DirEntry metadata from the directory listing, which lags a
+                // transcript still being appended; ask the file itself, without following links.
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
                 if !meta.is_file() {
                     continue;
                 }

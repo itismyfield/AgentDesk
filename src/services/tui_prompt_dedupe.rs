@@ -426,6 +426,10 @@ mod test_clock {
         pub(crate) fn duration_since(self, earlier: Self) -> Duration {
             self.0.duration_since(earlier.0)
         }
+
+        pub(crate) fn checked_sub(self, by: Duration) -> Option<Self> {
+            self.0.checked_sub(by).map(Self)
+        }
     }
 
     impl Add<Duration> for Instant {

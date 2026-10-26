@@ -16,10 +16,19 @@ fn created() -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
+/// Windows needs a drive prefix for these fixture roots to count as absolute.
+fn abs(path: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{path}")
+    } else {
+        path.into()
+    }
+}
+
 fn source(number: u64) -> SourceId {
     SourceId {
         session_id: format!("session-{number}"),
-        path: format!("/native/sessions/source-{number}.jsonl").into(),
+        path: abs(&format!("/native/sessions/source-{number}.jsonl")).into(),
         dev: 1,
         ino: number,
     }
@@ -51,7 +60,7 @@ fn inputs(mode: &str) -> Inputs {
             tmux: PANE.into(),
             nonce: NONCE.into(),
             host: "mac-book".into(),
-            owner_runtime_root: "/owner".into(),
+            owner_runtime_root: abs("/owner"),
             host_path: HostPath::Legacy,
         },
         context: BindingContext {
@@ -61,11 +70,11 @@ fn inputs(mode: &str) -> Inputs {
             execution_nonce: NONCE.into(),
             tmux_session: PANE.into(),
             channel_id: Some(42),
-            owner_runtime_root: "/owner".into(),
+            owner_runtime_root: abs("/owner"),
             host: Some("mac-book".into()),
             expected_native_session_id: (mode == "resume").then(|| source(1).session_id),
             launch_mode: mode.into(),
-            provider_root: Some("/native".into()),
+            provider_root: Some(abs("/native").into()),
             first_prompt_digest: Some("first prompt".into()),
             source_policy: Some("shadow".into()),
         },
@@ -302,7 +311,7 @@ fn codex_observation_preserves_the_full_immutable_context() {
         let mut input = inputs("fresh");
         match mismatch {
             "host" => input.context.host = Some("other-host".into()),
-            "root" => input.context.provider_root = Some("/other-root".into()),
+            "root" => input.context.provider_root = Some(abs("/other-root").into()),
             "nonce" => input.context.execution_nonce = PRIOR.into(),
             "provider" => input.context.provider = "claude".into(),
             "channel" => input.context.channel_id = Some(99),

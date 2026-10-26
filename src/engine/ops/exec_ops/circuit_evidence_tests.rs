@@ -74,7 +74,10 @@ fn alpha_policy_handoffs_without_observer() {
         for (provider, channel) in [("Claude", "57153"), ("claude", "057153")] {
             let invalid = root.join(provider).join(format!("{channel}.json"));
             std::fs::create_dir_all(invalid.parent().unwrap()).unwrap();
-            std::fs::copy(root.join("claude/57153.json"), &invalid).unwrap();
+            // On a case-insensitive filesystem `Claude/` already is the real `claude/` row.
+            if !invalid.exists() {
+                std::fs::copy(root.join("claude/57153.json"), &invalid).unwrap();
+            }
             let before = std::fs::read(&invalid).unwrap();
             let result: String = ctx
                 .eval(format!(

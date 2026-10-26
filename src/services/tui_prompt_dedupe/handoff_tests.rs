@@ -283,6 +283,8 @@ fn restored_remaining_ttl(legacy_snapshot: bool) {
         std::fs::write(path, serde_json::to_string(&snapshot).unwrap()).unwrap();
     }
     reset_state_for_tests();
+    // The restarted process runs on a host already up longer than the handoff's age.
+    Instant::advance(PROMPT_ANCHOR_SUBMIT_TTL);
     let rollout = root.path().join("rollout.jsonl");
     std::fs::write(&rollout, "").unwrap();
     codex_rehydrated_scan_offset(TMUX, &rollout);
