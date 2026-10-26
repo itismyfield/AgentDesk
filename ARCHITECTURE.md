@@ -176,6 +176,8 @@ src/
 │   │   └── read.rs
 │   ├── campaigns/
 │   │   └── tests.rs
+│   ├── channel_home_preferences/
+│   │   └── pg_tests.rs
 │   ├── dispatched_sessions/
 │   │   ├── hosted_execution/
 │   │   │   ├── http_force.rs
@@ -268,6 +270,7 @@ src/
 │   ├── calendar_sync.rs
 │   ├── campaigns.rs
 │   ├── cancel_tombstones.rs
+│   ├── channel_home_preferences.rs
 │   ├── discarded_tx_result_scan_tests.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
@@ -850,6 +853,13 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── execution_requirements/
 │   │   │   └── tests.rs
+│   │   ├── input_fallback/
+│   │   │   ├── notice/
+│   │   │   │   ├── pg_tests.rs
+│   │   │   │   ├── tests.rs
+│   │   │   │   └── transport_tests.rs
+│   │   │   ├── notice.rs
+│   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
 │   │   │   ├── agent_execution_node_tests.rs
 │   │   │   ├── attachment_tests.rs
@@ -903,6 +913,7 @@ src/
 │   │   ├── capability_routing.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
+│   │   ├── input_fallback.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs

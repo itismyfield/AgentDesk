@@ -568,6 +568,9 @@ db::campaigns::tests::postgres_campaign_revision_prune_keeps_newest_by_rank_acro
 db::campaigns::tests::postgres_live_status_keeps_older_worker_with_latest_completed_sidecar_pg
 db::campaigns::tests::postgres_live_status_keeps_older_worker_with_latest_pending_sidecar_pg
 db::campaigns::tests::postgres_live_status_reads_the_issue_card_without_touching_the_ledger_pg
+db::channel_home_preferences::pg_tests::channel_home_commit_reset_and_retry_without_owner_pg
+db::channel_home_preferences::pg_tests::channel_home_concurrent_revision_cas_has_one_winner_pg
+db::channel_home_preferences::pg_tests::channel_home_rejects_invalid_settings_and_surfaces_pg_failure_pg
 db::discarded_tx_result_scan_tests::transaction_statements_never_discard_their_result
 db::dispatch_semaphores::tests::required_semaphore_names_accepts_object_and_singular_forms
 db::dispatch_semaphores::tests::required_semaphore_names_reads_required_namespace
@@ -2696,6 +2699,16 @@ services::cluster::attachment_transfer::tests::bundle_roundtrip_preserves_order_
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
 services::cluster::execution_requirements::tests::execution_requirements_are_strict_and_share_dispatch_matching
+services::cluster::input_fallback::notice::pg_tests::routing_notice_real_outbox_dedupe_reuses_event_and_separates_switches_pg
+services::cluster::input_fallback::notice::tests::routing_notice_keys_separate_generations_and_reuse_exact_event
+services::cluster::input_fallback::notice::tests::routing_notice_renders_actual_devices_and_session_choice
+services::cluster::input_fallback::notice::tests::routing_notice_same_device_is_silent_and_invalid_event_is_rejected
+services::cluster::input_fallback::notice::transport_tests::routing_notice_wire_keeps_nonce_after_lost_receipt_and_memory_restart
+services::cluster::input_fallback::tests::gateway_replacement_preserves_target_and_invalid_pair_holds
+services::cluster::input_fallback::tests::staged_input_recovers_after_gateway_gap_without_new_input
+services::cluster::input_fallback::tests::symmetric_home_peer_selection_covers_64_placements
+services::cluster::input_fallback::tests::unavailable_and_unknown_nodes_hold_without_guessing_gateway
+services::cluster::input_fallback::tests::unknown_conflict_and_storage_error_never_fall_back
 services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
 services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed
 services::cluster::intake_preflight::tests::evaluation_does_not_mutate_production_handoff_state_pg

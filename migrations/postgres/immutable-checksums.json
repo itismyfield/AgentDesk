@@ -765,6 +765,11 @@
       "path": "migrations/postgres/0150_kanban_cards_soft_delete.sql",
       "sha256": "0dd2f3c5f177d8b820a70e3141b7eca219e7fa280fde09144907b9a27fb59c09",
       "version": 150
+    },
+    {
+      "path": "migrations/postgres/0151_channel_home_preferences.sql",
+      "sha256": "a0523901b63e955bf3d7e9170180ffbc7d9b6763b26bb53015608f4932b84006",
+      "version": 151
     }
   ],
   "version": 1

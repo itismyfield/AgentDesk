@@ -15,6 +15,7 @@ src/db/auto_queue/tests.rs
 src/db/automation_candidates/verdict_tests.rs
 src/db/calendar_sync/postgres_tests.rs
 src/db/campaigns/tests.rs
+src/db/channel_home_preferences/pg_tests.rs
 src/db/dispatched_sessions.rs
 src/db/dispatched_sessions/canonical_identity_pg_tests.rs
 src/db/dispatched_sessions/hosted_execution/legacy_return_tests.rs
@@ -124,6 +125,7 @@ src/services/auto_queue/runtime/verified_reset_pg_tests.rs
 src/services/automation_candidate_materializer/iteration_result_tests.rs
 src/services/cluster/attachment_transfer/storage_tests.rs
 src/services/cluster/execution_capacity/tests.rs
+src/services/cluster/input_fallback/notice/pg_tests.rs
 src/services/cluster/intake_preflight.rs
 src/services/cluster/intake_router_hook.rs
 src/services/cluster/intake_router_hook/agent_execution_node_tests.rs
@@ -451,6 +453,7 @@ db::auto_queue::tests::grouped_card_count_pg_tests
 db::automation_candidates::verdict_tests
 db::calendar_sync::postgres_tests
 db::campaigns::tests
+db::channel_home_preferences::pg_tests
 db::dispatched_session_canonical_identity::pg_tests
 db::dispatched_session_rebind_override::tests
 db::dispatched_sessions::hosted_execution::legacy_return::high_risk_recovery
@@ -567,6 +570,7 @@ services::auto_queue::tests
 services::automation_candidate_materializer::iteration_result_tests
 services::cluster::attachment_transfer::storage_tests
 services::cluster::execution_capacity::tests
+services::cluster::input_fallback::notice::pg_tests
 services::cluster::intake_preflight::tests
 services::cluster::intake_router_hook::agent_execution_node_tests
 services::cluster::intake_router_hook::attachment_tests
@@ -1043,6 +1047,9 @@ db::campaigns::tests::postgres_campaign_revision_prune_keeps_newest_by_rank_acro
 db::campaigns::tests::postgres_live_status_keeps_older_worker_with_latest_completed_sidecar_pg
 db::campaigns::tests::postgres_live_status_keeps_older_worker_with_latest_pending_sidecar_pg
 db::campaigns::tests::postgres_live_status_reads_the_issue_card_without_touching_the_ledger_pg
+db::channel_home_preferences::pg_tests::channel_home_commit_reset_and_retry_without_owner_pg
+db::channel_home_preferences::pg_tests::channel_home_concurrent_revision_cas_has_one_winner_pg
+db::channel_home_preferences::pg_tests::channel_home_rejects_invalid_settings_and_surfaces_pg_failure_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_actor_pin_missing_insert_and_retry_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_actor_pin_missing_rejects_intervening_insert_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_actor_pin_nullable_and_prior_nonce_alias_update_pg
@@ -1680,6 +1687,7 @@ services::automation_candidate_materializer::iteration_result_tests::prepare_wor
 services::automation_candidate_materializer::iteration_result_tests::submit_iteration_result_rejects_cards_outside_active_loop_state_pg
 services::cluster::attachment_transfer::storage_tests::attachment_bundle_store_restart_identity_integrity_expiry_and_cleanup_pg
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
+services::cluster::input_fallback::notice::pg_tests::routing_notice_real_outbox_dedupe_reuses_event_and_separates_switches_pg
 services::cluster::intake_preflight::tests::evaluation_does_not_mutate_production_handoff_state_pg
 services::cluster::intake_router_hook::agent_execution_node_tests::agent_primary_inherits_into_thread_with_bounded_fallback_without_moving_owner_pg
 services::cluster::intake_router_hook::agent_execution_node_tests::preferred_leader_wins_but_unconfigured_agent_keeps_legacy_placement_pg
