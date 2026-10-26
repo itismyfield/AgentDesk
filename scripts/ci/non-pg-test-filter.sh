@@ -484,6 +484,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::o_transition::codex_context::tests::existing_codex_sweep_reaches_the_actual_actor_with_complete_legacy_evidence
   services::discord::health::o_transition::codex_context::tests::legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed
   services::discord::health::o_transition::codex_context::tests::retention_e2e::codex_native_legacy_sweep_retires_only_aged_backlog_and_records_atomic_audit
+  services::discord::health::o_transition::codex_context::tests::retention_e2e::older_unbound_resume_context_requires_superseding_marker_and_reaches_inspect
   services::discord::health::o_transition::codex_context::tests::same_source_resume_keeps_p5_bytes_and_reaches_actual_codex_sweep
   services::discord::health::o_transition::codex_context::tests::verified_fresh_durable_claim_and_marker_reach_actual_codex_sweep
   services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions

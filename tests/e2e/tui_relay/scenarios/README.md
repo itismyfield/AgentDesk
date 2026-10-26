@@ -115,38 +115,38 @@ does not establish live coverage.
 
 ## Automatic post-deploy smoke is a subset
 
-After `DEPLOY_OK`, the `# >>> BEGIN smoke-disposition region (#5244)` section in
-[`scripts/deploy-release.sh:4673`](../../../../scripts/deploy-release.sh#L4673)
+After `DEPLOY_OK`, the `smoke-disposition region` in
+[`scripts/deploy-release.sh`](../../../../scripts/deploy-release.sh)
 automatically calls `_run_post_deploy_functional_smoke`. Its default `full` scope
 conditionally selects these live specifications:
 
-| Scenario | Operational check and selection | Source |
+| Scenario | Operational check and selection | Source function |
 | --- | --- | --- |
-| `E-1` | Headless relay round-trip on the configured relay cell (default `claude-tui`). | `_post_deploy_smoke_check_relay_round_trip`, `--filter E-1` ([`deploy-release.sh:4317`](../../../../scripts/deploy-release.sh#L4317)) |
-| `E-35` | Normal Discord short turn with exact durable receipt and covering frontier on the resolved relay cell. | `_post_deploy_smoke_check_durable_record`, `--filter E-35` ([`deploy-release.sh:4358`](../../../../scripts/deploy-release.sh#L4358)) |
-| `E-50` | Consecutive Claude turns, `!clear`, then a new-session turn; selected only for a `claude-*` relay cell. | `_post_deploy_smoke_check_turn_scenarios`, `_post_deploy_smoke_run_turn_scenario E-50` ([`deploy-release.sh:4474`](../../../../scripts/deploy-release.sh#L4474)) |
-| `E-51` | Consecutive Codex turns, `!clear`, then a new-session turn; configured Codex cell defaults to `codex-tui`. | `_post_deploy_smoke_check_turn_scenarios`, `_post_deploy_smoke_run_turn_scenario E-51` ([`deploy-release.sh:4502`](../../../../scripts/deploy-release.sh#L4502)) |
+| `E-1` | Headless relay round-trip on the configured relay cell (default `claude-tui`). | `_post_deploy_smoke_check_relay_round_trip`, `--filter E-1` |
+| `E-35` | Normal Discord short turn with exact durable receipt and covering frontier on the resolved relay cell. | `_post_deploy_smoke_check_durable_record`, `--filter E-35` |
+| `E-50` | Consecutive Claude turns, `!clear`, then a new-session turn; selected only for a `claude-*` relay cell. | `_post_deploy_smoke_check_turn_scenarios`, `_post_deploy_smoke_run_turn_scenario E-50` |
+| `E-51` | Consecutive Codex turns, `!clear`, then a new-session turn; configured Codex cell defaults to `codex-tui`. | `_post_deploy_smoke_check_turn_scenarios`, `_post_deploy_smoke_run_turn_scenario E-51` |
 
-Defaults are declared by `POST_DEPLOY_SMOKE_SCOPE` (`deploy-release.sh:142`),
-`POST_DEPLOY_SMOKE_RELAY_CELL` (`:149`) and `POST_DEPLOY_SMOKE_CODEX_TURNS_CELL`
-(`:150`). In `_run_post_deploy_functional_smoke`,
-`AGENTDESK_POST_DEPLOY_SMOKE_SCOPE=api` or unconfirmed startup recovery leaves all
-four **not evaluated** (`:4552`). `_post_deploy_smoke_check_relay_round_trip`
-records `relay E-1=skipped` for standby, disabled gateway, missing channels and
-unproven/busy target state (`:4166`, `:4213`, `:4297`).
-`_post_deploy_smoke_check_durable_record`'s `E-35 channel unavailable` check
-(`:4346`) and `_post_deploy_smoke_check_turn_scenarios`'s
-`E-1 resolved no relay channel` check (`:4468`) make `E-35/E-50/E-51` depend on
-the relay channel resolved during `E-1`. `_post_deploy_smoke_run_turn_scenario`
-performs a fresh `post_deploy_turn_smoke.py preflight` (`:4397`). These conditions
-mean a successful deployment does not imply that any particular live scenario ran.
+Defaults are declared by `POST_DEPLOY_SMOKE_SCOPE`, `POST_DEPLOY_SMOKE_RELAY_CELL`
+and `POST_DEPLOY_SMOKE_CODEX_TURNS_CELL` in the deploy script's initialization.
+In `_run_post_deploy_functional_smoke`, `AGENTDESK_POST_DEPLOY_SMOKE_SCOPE=api` or
+unconfirmed startup recovery leaves all four **not evaluated**.
+`_post_deploy_smoke_check_relay_round_trip` records `relay E-1=skipped` for standby,
+disabled gateway, missing channels and unproven/busy target state.
+`_post_deploy_smoke_check_durable_record`'s `E-35 channel unavailable` check and
+`_post_deploy_smoke_check_turn_scenarios`'s `E-1 resolved no relay channel` check
+make `E-35/E-50/E-51` depend on the relay channel resolved during `E-1`.
+`_post_deploy_smoke_run_turn_scenario` performs a fresh `post_deploy_turn_smoke.py preflight`.
+These conditions mean a successful deployment does not imply that any particular live scenario ran.
+Before E-1, `cell-reset` acquires each configured legacy TUI E2E cell's existing driver lease and always inspects the turn lease; only for residue performs CAS release and `!clear`, preserving idle cells without residue (inflight without a lease needs only `!clear`).
+A foreign driver lease skips that cell; reset failure blocks only that cell's scenarios and is reported without stopping the other cells.
 
-The `smoke-disposition region` is fail-open after a healthy deploy
-(`deploy-release.sh:4673`); its results need their own evidence.
-[`post_deploy_turn_smoke.py:325`](../../../../scripts/e2e/post_deploy_turn_smoke.py#L325)
-registers `sub.add_parser("preflight")` and `sub.add_parser("judge")`, while the
-deploy script invokes the scenario runner. The judge evaluates its report and
-run-scoped dcserver log excerpt; it is not an additional live execution lane.
+The `smoke-disposition region` is fail-open after a healthy deploy;
+`_run_post_deploy_functional_smoke` results need their own evidence.
+[`post_deploy_turn_smoke.py`](../../../../scripts/e2e/post_deploy_turn_smoke.py)'s
+`main` registers `cell-guard`, `cell-reset`, `reset-status`, `preflight` and `judge`,
+while the deploy script invokes the scenario runner. The judge evaluates its report
+and run-scoped dcserver log excerpt; it is not an additional live execution lane.
 
 The separate [relay-continuity runbook](../../../../docs/runbooks/post-deploy-relay-continuity-smoke.md)
 is operator-invoked: its wrapper runs `E-9,E-19` with explicit `--confirm-live`

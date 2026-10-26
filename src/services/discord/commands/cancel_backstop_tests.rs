@@ -76,8 +76,9 @@ async fn relay(State(state): State<ActionProxyState>, request: Request<Body>) ->
     response
 }
 
-struct ActionTransport {
-    ctx: serenity::Context,
+/// Loopback Discord whose interaction callbacks and followups are recorded.
+pub(super) struct ActionTransport {
+    pub(super) ctx: serenity::Context,
     replies: Arc<Mutex<Vec<Value>>>,
     backend: tokio::task::JoinHandle<()>,
     frontend: tokio::task::JoinHandle<()>,
@@ -91,7 +92,7 @@ impl Drop for ActionTransport {
 }
 
 impl ActionTransport {
-    async fn new(mock: discord_mock::DiscordMockState) -> Self {
+    pub(super) async fn new(mock: discord_mock::DiscordMockState) -> Self {
         let (backend_url, gateway, backend) = discord_mock::start(mock).await;
         let replies = Arc::new(Mutex::new(Vec::new()));
         let state = ActionProxyState {
@@ -125,6 +126,16 @@ impl ActionTransport {
             frontend,
         }
     }
+
+    /// Text of every followup message the actions sent so far.
+    pub(super) fn followup_contents(&self) -> Vec<String> {
+        let replies = self.replies.lock().expect("slash responses");
+        replies
+            .iter()
+            .filter(|reply| reply["type"] == "followup")
+            .filter_map(|reply| reply["data"]["content"].as_str().map(str::to_string))
+            .collect()
+    }
 }
 
 async fn invoke_real_stop_action(
@@ -148,6 +159,20 @@ pub(super) async fn invoke_real_slash_action(
     author: serenity::UserId,
     command: poise::Command<Data, Error>,
     name: &str,
+) -> bool {
+    invoke_real_slash_action_with_options(ctx, data, channel, author, command, name, json!([]))
+        .await
+}
+
+/// [`invoke_real_slash_action`] with the interaction's raw `options` payload.
+pub(super) async fn invoke_real_slash_action_with_options(
+    ctx: &serenity::Context,
+    data: &Data,
+    channel: serenity::ChannelId,
+    author: serenity::UserId,
+    command: poise::Command<Data, Error>,
+    name: &str,
+    raw_options: Value,
 ) -> bool {
     ctx.http.set_application_id(serenity::ApplicationId::new(
         ctx.cache.current_user().id.get(),
@@ -175,7 +200,7 @@ pub(super) async fn invoke_real_slash_action(
     let interaction: serenity::CommandInteraction = serde_json::from_value(json!({
         "id": "60163003",
         "application_id": ctx.cache.current_user().id.get().to_string(),
-        "data": {"id": "60163004", "name": name, "type": 1, "resolved": {}, "options": []},
+        "data": {"id": "60163004", "name": name, "type": 1, "resolved": {}, "options": raw_options},
         "guild_id": null,
         "channel": null,
         "channel_id": channel.get().to_string(),
@@ -191,13 +216,14 @@ pub(super) async fn invoke_real_slash_action(
         "attachment_size_limit": 8388608
     }))
     .expect("real command interaction fixture");
+    let args = interaction.data.options();
     let has_sent_initial_response = AtomicBool::new(false);
     let invocation_data: tokio::sync::Mutex<Box<dyn Any + Send + Sync>> =
         tokio::sync::Mutex::new(Box::new(()));
     let app = poise::ApplicationContext {
         interaction: &interaction,
         interaction_type: poise::CommandInteractionType::Command,
-        args: &[],
+        args: &args,
         has_sent_initial_response: &has_sent_initial_response,
         framework: poise::FrameworkContext {
             serenity_context: ctx,

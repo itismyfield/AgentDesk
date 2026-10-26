@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::{
-    PROMPT, events, renderer, view,
+    PROMPT, events, renderer, view, wait,
 };
 use crate::services::claude_tui::{
     busy_inject::StashChannelGuard, guarded_outcome, input, submission_fence,
@@ -100,6 +100,12 @@ fn submit(
     .map_err(guarded_outcome::SubmissionError::into_legacy);
     let _ = stop.send(());
     timer.join().unwrap();
+    if result.is_ok() {
+        let root = transcript.parent().unwrap();
+        wait("managed Enter", || {
+            events(root).iter().any(|event| event == "Enter")
+        });
+    }
     result
 }
 
@@ -128,7 +134,7 @@ fn actual_entry(warm: bool) {
         "may_have_submitted"
     );
     assert_eq!(std::fs::read_to_string(pane.join("body")).unwrap(), PROMPT);
-    assert!(crate::services::claude_tui::composer_lock::draft_guarded(
+    assert!(!crate::services::claude_tui::composer_lock::draft_guarded(
         name
     ));
     let restored = crate::services::claude_tui::host_input::observe_draft(name).unwrap();
@@ -166,7 +172,7 @@ fn managed_idle_person_draft_submits_and_restores_at_warm_entry() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn ambiguous_effects_and_restore_failure_cross_owner_and_requeue_without_resubmit() {
+async fn successful_writes_do_not_need_receipt_or_restore_and_cannot_resubmit() {
     use crate::services::discord::inflight::SubmissionFailure;
     use crate::services::discord::turn_bridge::followup_requeue::{BusyAttempt, requeue_if_needed};
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -201,22 +207,14 @@ async fn ambiguous_effects_and_restore_failure_cross_owner_and_requeue_without_r
         }
         let result = submit(&cap, &name, &pane.join("transcript"), true);
         std::fs::write(&shim, &original).unwrap();
-        if mode == "never" {
-            assert!(
-                result.is_ok(),
-                "Observed+Unknown must remain delivery success: {result:?}"
-            );
-            assert!(matches!(
-                cap.classify_failure(),
-                SubmissionFailure::IdleStashObserved
-            ));
-        } else {
-            assert!(result.is_err());
-            assert!(matches!(
-                cap.classify_failure(),
-                SubmissionFailure::GuardedStopped(_)
-            ));
-        }
+        assert!(result.is_ok(), "mode={mode}: {result:?}");
+        assert!(matches!(
+            cap.classify_failure(),
+            SubmissionFailure::IdleStashObserved
+        ));
+        assert!(!crate::services::claude_tui::composer_lock::draft_guarded(
+            &name
+        ));
         let before = events(&pane);
         let again = submit(&cap, &name, &pane.join("transcript"), false);
         assert!(again.is_err());
@@ -232,8 +230,8 @@ async fn ambiguous_effects_and_restore_failure_cross_owner_and_requeue_without_r
         );
         assert_eq!(
             frame.is_some(),
-            mode == "never",
-            "only observed delivery reaches the provider-error bridge; held ambiguity retains its owner"
+            true,
+            "Enter completion reaches the provider-error bridge"
         );
         let mut requeued = None;
         requeue_if_needed(
@@ -333,95 +331,6 @@ fn stale_episode_wrong_target_and_fence_write_failure_send_no_key() {
         assert!(!cap.idle_stash_entered());
     }
 }
-#[test]
-fn attach_resize_and_person_changes_at_each_effect_boundary_never_enter() {
-    use crate::services::claude_tui::host_input::{InputRefusal, MutationGate, guarded_submission};
-    use std::cell::Cell;
-    use std::rc::Rc;
-    struct Race {
-        f: Rc<Fixture>,
-        root: std::path::PathBuf,
-        session: String,
-        stage: usize,
-        kind: &'static str,
-        fired: Cell<bool>,
-    }
-    impl MutationGate for Race {
-        fn admit(&self, _: &str) -> Result<(), InputRefusal> {
-            if events(&self.root).len() == self.stage && !self.fired.replace(true) {
-                let target = format!("={}:", self.session);
-                match self.kind {
-                    "resize" => {
-                        self.f
-                            .tmux(&["resize-window", "-t", &target, "-x", "80", "-y", "24"]);
-                    }
-                    "attach" => self.f.attach(&self.session),
-                    _ => {
-                        self.f.tmux(&["send-keys", "-t", &target, "C-r"]);
-                        let until = std::time::Instant::now() + Duration::from_secs(4);
-                        while !self
-                            .f
-                            .tmux(&["capture-pane", "-p", "-t", &target])
-                            .contains("changed by person")
-                        {
-                            assert!(
-                                std::time::Instant::now() < until,
-                                "actual screen mutation was not observed"
-                            );
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-    }
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let f = Rc::new(Fixture::after_shared_test_env_lock());
-    for (n, (stage, kind)) in (0..3)
-        .flat_map(|stage| ["resize", "attach", "screen"].map(|kind| (stage, kind)))
-        .enumerate()
-    {
-        let id = 6_899_970 + n as u64;
-        let _listed = StashChannelGuard::new(id);
-        let name = format!("act-race-{n}");
-        let pane = renderer(&f, &name, "normal");
-        std::fs::write(pane.join("tampered"), view("changed by person", stage > 0)).unwrap();
-        let (_, cap) = managed(id, &name, &pane.join("transcript"));
-        let race = Rc::new(Race {
-            f: f.clone(),
-            root: pane.clone(),
-            session: name.clone(),
-            stage,
-            kind,
-            fired: Cell::new(false),
-        });
-        let gate: Rc<dyn MutationGate> = race.clone();
-        let (result, _) = guarded_submission::test_support::with_request(&name, gate, || {
-            submit(&cap, &name, &pane.join("transcript"), true)
-        });
-        assert!(result.is_err(), "{stage}/{kind}");
-        assert!(
-            race.fired.get(),
-            "effect boundary was not reached: {stage}/{kind}"
-        );
-        assert!(
-            !events(&pane).iter().any(|event| event == "Enter"),
-            "{stage}/{kind}: mixed body must not receive Enter"
-        );
-        if kind == "attach" {
-            assert!(
-                std::process::Command::new(&f.real)
-                    .args(["-L", &format!("{}-driver", f.socket), "kill-server"])
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
-        guarded_outcome::forget_test_hold(&name);
-    }
-}
-
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn held_head_new_input_and_duplicate_wakes_deliver_fifo_once() {
     held_fifo(false, false).await;
@@ -848,167 +757,27 @@ fn warm_host_recovery_and_busy_wait_reach_managed_idle_submission() {
     assert!(cap.idle_stash_entered());
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn unsupported_body_reholds_without_repeated_wake_or_mutation() {
-    use crate::services::claude_tui::composer_lock::{DraftGuard, guard_draft};
-    use crate::services::discord::turn_bridge::followup_requeue::{
-        BusyAttempt, requeue_claude_tui_followup_pre_submit_timeout, requeue_if_needed,
-        rewatch_draft_holds,
-    };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+#[test]
+fn unpredicted_body_submits_without_a_draft_hold() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::after_shared_test_env_lock();
     let id = 6_899_999;
-    let channel = ChannelId::new(id);
     let _listed = StashChannelGuard::new(id);
-    let name = "act-unsupported-wake";
+    let name = "act-unpredicted";
     let pane = renderer(&f, name, "normal");
     let path = pane.join("transcript");
-    let shared = crate::services::discord::make_shared_data_for_tests();
-    let unsupported = "unmeasured\tcolumn";
-    assert!(input::plan_prompt_submit(unsupported).is_ok());
-    let mut held = InflightTurnState::new(
-        ProviderKind::Claude,
-        id,
-        None,
-        7,
-        id + 10,
-        id + 11,
-        unsupported.to_string(),
-        None,
-        Some(name.into()),
-        Some(path.display().to_string()),
-        None,
-        0,
-    );
-    held.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
-    guard_draft(name, DraftGuard::DraftRestored);
-    let _ = requeue_claude_tui_followup_pre_submit_timeout(
-        &shared,
-        &ProviderKind::Claude,
-        channel,
-        &held,
-        None,
-        None,
-        BusyAttempt {
-            turn_id: "original hold",
-            cost: Duration::ZERO,
-        },
-    )
-    .await;
-    // The binding is observational; the fresh capability below comes only from the actual dequeue.
-    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
-        name,
-        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-            runtime_kind: RuntimeHandoffKind::ClaudeTui,
-            output_path: path.display().to_string(),
-            relay_output_path: None,
-            input_fifo_path: None,
-            session_id: None,
-            last_offset: 0,
-            relay_last_offset: None,
-        },
-    );
-    let kicks = Arc::new(AtomicUsize::new(0));
-    let seen = kicks.clone();
-    let idle = path.clone();
-    let _hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
-        move |shared, provider, ch, _| {
-            let (seen, idle) = (seen.clone(), idle.clone());
-            Box::pin(async move {
-                if ch != channel {
-                    return None;
-                }
-                seen.fetch_add(1, Ordering::SeqCst);
-                let taken = crate::services::discord::mailbox_take_next_automatic_intervention(
-                    &shared, &provider, ch,
-                )
-                .await;
-                let input = taken
-                    .intervention
-                    .expect("released held input must be dequeued");
-                let (row, _) =
-                    managed_request(id, name, &idle, input.message_id.get(), &input.text);
-                let cap = row.managed_submission_capability().unwrap();
-                let error = guarded_outcome::with_owner(Some(cap.observer()), || {
-                    submission_fence::with_scope(Some(cap.fence()), || {
-                        input::send_followup_prompt_or_idle_transcript_owned(
-                            name,
-                            &input.text,
-                            None,
-                            &idle,
-                        )
-                    })
-                })
-                .unwrap_err();
-                assert!(
-                    matches!(error, guarded_outcome::SubmissionError::Held(ref hold) if hold.reason == "draft_recovery_hold"),
-                    "{error:?}"
-                );
-                assert!(!cap.idle_stash_entered());
-                let mut outcome = None;
-                requeue_if_needed(
-                    &mut outcome,
-                    (true, false),
-                    (&shared, &provider, ch),
-                    &row,
-                    None,
-                    None,
-                    BusyAttempt {
-                        turn_id: "unsupported hold",
-                        cost: Duration::ZERO,
-                    },
-                )
-                .await;
-                assert!(outcome.is_some());
-                assert_eq!(
-                    crate::services::discord::inflight::clear_inflight_state_if_matches(
-                        &provider,
-                        id,
-                        row.user_msg_id
-                    ),
-                    crate::services::discord::inflight::GuardedClearOutcome::Cleared
-                );
-                let restored = crate::services::discord::mailbox_restore_dequeued_head(
-                    &shared,
-                    &provider,
-                    ch,
-                    input,
-                    taken.dispatch_lease.unwrap(),
-                )
-                .await;
-                assert!(restored.enqueued || restored.merged);
-                Some(crate::services::discord::IdleQueueKickoffChannelOutcome { started: true })
-            })
-        },
-    ));
-    let live =
-        std::collections::HashMap::from([(channel, std::collections::HashSet::from([id + 10]))]);
-    for _ in 0..3 {
-        rewatch_draft_holds(&shared, &ProviderKind::Claude, &live);
-    }
-    for _ in 0..8 {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        kicks.load(Ordering::SeqCst),
-        1,
-        "the same unresolved state must not wake the queue repeatedly"
-    );
-    assert!(events(&pane).is_empty());
-    let budget = crate::services::discord::busy_followup_retry_store::load(
-        &ProviderKind::Claude,
-        id,
-        id + 10,
-    )
-    .unwrap();
-    assert!(budget.draft_hold);
-    assert_eq!(budget.busy_retry_count, 0);
-    assert!(crate::services::claude_tui::composer_lock::draft_guarded(
+    let prompt = "unmeasured\tcolumn";
+    let (_, cap) = managed_request(id, name, &path, id + 10, prompt);
+    let result = guarded_outcome::with_owner(Some(cap.observer()), || {
+        submission_fence::with_scope(Some(cap.fence()), || {
+            input::send_followup_prompt_or_idle_transcript_owned(name, prompt, None, &path)
+        })
+    });
+    assert!(result.is_ok(), "{result:?}");
+    wait("unpredicted Enter", || events(&pane).len() == 3);
+    assert_eq!(events(&pane), ["C-s", "paste", "Enter"]);
+    assert_eq!(std::fs::read_to_string(pane.join("body")).unwrap(), prompt);
+    assert!(!crate::services::claude_tui::composer_lock::draft_guarded(
         name
     ));
-    let queued = crate::services::discord::mailbox_snapshot(&shared, channel).await;
-    assert_eq!(queued.intervention_queue.len(), 1);
-    assert_eq!(queued.intervention_queue[0].text, unsupported.to_string());
 }

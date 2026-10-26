@@ -10,9 +10,7 @@ use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
-use crate::services::process::{
-    configure_child_process_group, kill_child_tree, wait_with_output_timeout,
-};
+use crate::services::process::{configure_child_process_group, kill_child_tree};
 use crate::services::provider::{
     CancelToken, ProviderKind, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
     cancel_requested, is_readonly_tool_policy, register_child_pid, run_retrying_stream_attempts,
@@ -25,14 +23,10 @@ pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash";
 const GEMINI_RESUME_LATEST: &str = "latest";
 const GEMINI_SESSION_DEAD_MESSAGE: &str = "Gemini stream ended without a terminal result";
 const GEMINI_INVALID_RESUME_SELECTOR_MESSAGE: &str = "InvalidArgument: Gemini resume selector must be `latest`, a numeric session index, or a UUID-like Gemini session reference";
-const GEMINI_NO_PREVIOUS_SESSIONS_MESSAGE: &str = "No previous sessions found for this project.";
-const GEMINI_NO_SESSIONS_FOUND_MESSAGE: &str = "No sessions found for this project.";
-const GEMINI_DELETE_CURRENT_SESSION_MESSAGE: &str = "Cannot delete the current active session.";
 const GEMINI_STREAM_POLL_TIMEOUT: Duration = EXIT_POLL;
 const GEMINI_STREAM_STARTUP_WATCHDOG: Duration = Duration::from_secs(60);
 const GEMINI_MAX_SESSION_RETRIES: usize = 1;
 const GEMINI_TRUSTED_FOLDERS_PATH: &str = ".gemini/trustedFolders.json";
-const GEMINI_MANAGEMENT_TIMEOUT: Duration = Duration::from_secs(30);
 const GEMINI_MEETING_READONLY_POLICY: &str = r#"
 [[rule]]
 toolName = [
@@ -139,15 +133,6 @@ struct GeminiAttemptState {
     meaningful_progress_seen: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GeminiProjectSession {
-    pub index: usize,
-    pub title: String,
-    pub relative_time: String,
-    pub is_current_session: bool,
-    pub session_id: String,
-}
-
 impl GeminiAttemptState {
     fn new(last_resume_selector: Option<String>) -> Self {
         Self {
@@ -216,84 +201,6 @@ pub fn execute_command_simple_cancellable(
     } else {
         Ok(text)
     }
-}
-
-pub(crate) fn list_project_sessions(
-    working_dir: &str,
-) -> Result<Vec<GeminiProjectSession>, String> {
-    let resolved_working_dir = resolve_gemini_working_dir(working_dir)?;
-    let (stdout, stderr, exit_code) = run_gemini_management_command(
-        &resolved_working_dir,
-        &["--list-sessions".to_string()],
-        "Gemini --list-sessions",
-    )?;
-
-    match parse_gemini_session_list_output(&stdout) {
-        Ok(sessions) => {
-            if !stderr.trim().is_empty() {
-                tracing::warn!(
-                    provider = "gemini",
-                    stderr = stderr.trim(),
-                    "Gemini --list-sessions emitted stderr while returning parseable output"
-                );
-            }
-            Ok(sessions)
-        }
-        Err(parse_error) => {
-            if !stderr.trim().is_empty() {
-                Err(derive_error_message(
-                    &stdout,
-                    &stderr,
-                    exit_code,
-                    "Gemini --list-sessions",
-                ))
-            } else {
-                Err(parse_error)
-            }
-        }
-    }
-}
-
-pub(crate) fn delete_project_session(
-    working_dir: &str,
-    session_identifier: &str,
-) -> Result<String, String> {
-    let resolved_working_dir = resolve_gemini_working_dir(working_dir)?;
-    let sessions = list_project_sessions(working_dir)?;
-    let normalized_identifier = normalize_gemini_delete_identifier(session_identifier, &sessions)?;
-    let (stdout, stderr, exit_code) = run_gemini_management_command(
-        &resolved_working_dir,
-        &[
-            "--delete-session".to_string(),
-            normalized_identifier.clone(),
-        ],
-        "Gemini --delete-session",
-    )?;
-
-    let trimmed_stdout = stdout.trim();
-    if trimmed_stdout.starts_with("Deleted session ") {
-        if !stderr.trim().is_empty() {
-            tracing::warn!(
-                provider = "gemini",
-                stderr = stderr.trim(),
-                "Gemini --delete-session emitted stderr alongside a success message"
-            );
-        }
-        return Ok(trimmed_stdout.to_string());
-    }
-
-    if !stderr.trim().is_empty() {
-        return Err(derive_error_message(
-            &stdout,
-            &stderr,
-            exit_code,
-            "Gemini --delete-session",
-        ));
-    }
-
-    Err(format!(
-        "Gemini --delete-session returned an unrecognized response for selector `{normalized_identifier}`"
-    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -768,37 +675,6 @@ fn is_cancelled(token: Option<&CancelToken>) -> bool {
     cancel_requested(token)
 }
 
-fn run_gemini_management_command(
-    working_dir: &Path,
-    args: &[String],
-    label: &str,
-) -> Result<(String, String, Option<i32>), String> {
-    let resolution = resolve_gemini_binary();
-    let gemini_bin = resolution
-        .resolved_path
-        .clone()
-        .ok_or_else(|| "Gemini CLI not found".to_string())?;
-
-    let mut command = Command::new(&gemini_bin);
-    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    configure_child_process_group(&mut command);
-    let output = command
-        .args(args)
-        .current_dir(working_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to start Gemini: {e}"))
-        .and_then(|child| wait_with_output_timeout(child, GEMINI_MANAGEMENT_TIMEOUT, label))?;
-
-    Ok((
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        output.status.code(),
-    ))
-}
-
 fn remote_profile_not_supported_message() -> String {
     "NotSupported: Gemini provider does not support remote execution yet. Remove `remote_profile` or use a provider with remote support.".to_string()
 }
@@ -1084,135 +960,6 @@ fn observed_session_to_resume_selector_with_source(
 fn is_common_session_metadata(session_id: &str) -> bool {
     let session_id = session_id.trim();
     !session_id.is_empty() && is_valid_session_id(session_id)
-}
-
-fn parse_gemini_session_list_output(output: &str) -> Result<Vec<GeminiProjectSession>, String> {
-    let trimmed = output.trim();
-    if trimmed.is_empty() {
-        return Err("Gemini session list output was empty".to_string());
-    }
-    if trimmed == GEMINI_NO_PREVIOUS_SESSIONS_MESSAGE {
-        return Ok(Vec::new());
-    }
-
-    let mut sessions = Vec::new();
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("Available sessions for this project") {
-            continue;
-        }
-        sessions.push(parse_gemini_session_list_line(trimmed)?);
-    }
-
-    if sessions.is_empty() {
-        return Err("Gemini session list output did not contain any parseable entries".to_string());
-    }
-
-    Ok(sessions)
-}
-
-fn parse_gemini_session_list_line(line: &str) -> Result<GeminiProjectSession, String> {
-    let dot_index = line
-        .find(". ")
-        .ok_or_else(|| format!("Gemini session line is missing an index separator: {line}"))?;
-    let index = line[..dot_index]
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| format!("Gemini session line has an invalid index: {line}"))?;
-
-    let remainder = line[dot_index + 2..].trim();
-    let closing_bracket = remainder.rfind(']').ok_or_else(|| {
-        format!("Gemini session line is missing a closing session id bracket: {line}")
-    })?;
-    let opening_bracket = remainder[..closing_bracket].rfind('[').ok_or_else(|| {
-        format!("Gemini session line is missing an opening session id bracket: {line}")
-    })?;
-    let session_id = remainder[opening_bracket + 1..closing_bracket].trim();
-    if session_id.is_empty() {
-        return Err(format!(
-            "Gemini session line has an empty session id: {line}"
-        ));
-    }
-
-    let before_session_id = remainder[..opening_bracket].trim_end();
-    let closing_paren = before_session_id.rfind(')').ok_or_else(|| {
-        format!("Gemini session line is missing a closing metadata parenthesis: {line}")
-    })?;
-    let opening_paren = before_session_id[..closing_paren]
-        .rfind('(')
-        .ok_or_else(|| {
-            format!("Gemini session line is missing an opening metadata parenthesis: {line}")
-        })?;
-    let title = before_session_id[..opening_paren].trim_end();
-    if title.is_empty() {
-        return Err(format!("Gemini session line has an empty title: {line}"));
-    }
-    let metadata = before_session_id[opening_paren + 1..closing_paren].trim();
-    if metadata.is_empty() {
-        return Err(format!("Gemini session line has empty metadata: {line}"));
-    }
-
-    let (relative_time, is_current_session) =
-        if let Some(relative_time) = metadata.strip_suffix(", current") {
-            (relative_time.trim().to_string(), true)
-        } else {
-            (metadata.to_string(), false)
-        };
-
-    Ok(GeminiProjectSession {
-        index,
-        title: title.to_string(),
-        relative_time,
-        is_current_session,
-        session_id: session_id.to_string(),
-    })
-}
-
-fn normalize_gemini_delete_identifier(
-    session_identifier: &str,
-    sessions: &[GeminiProjectSession],
-) -> Result<String, String> {
-    let session_identifier = session_identifier.trim();
-    if session_identifier.is_empty() {
-        return Err(
-            "Invalid session identifier \"\". Use --list-sessions to see available sessions."
-                .to_string(),
-        );
-    }
-    if sessions.is_empty() {
-        return Err(GEMINI_NO_SESSIONS_FOUND_MESSAGE.to_string());
-    }
-
-    if session_identifier.chars().all(|ch| ch.is_ascii_digit()) {
-        let index = session_identifier.parse::<usize>().map_err(|_| {
-            format!(
-                "Invalid session identifier \"{session_identifier}\". Use --list-sessions to see available sessions."
-            )
-        })?;
-        let Some(session) = sessions.iter().find(|session| session.index == index) else {
-            return Err(format!(
-                "Invalid session identifier \"{session_identifier}\". Use --list-sessions to see available sessions."
-            ));
-        };
-        if session.is_current_session {
-            return Err(GEMINI_DELETE_CURRENT_SESSION_MESSAGE.to_string());
-        }
-        return Ok(session_identifier.to_string());
-    }
-
-    let Some(session) = sessions
-        .iter()
-        .find(|session| session.session_id == session_identifier)
-    else {
-        return Err(format!(
-            "Invalid session identifier \"{session_identifier}\". Use --list-sessions to see available sessions."
-        ));
-    };
-    if session.is_current_session {
-        return Err(GEMINI_DELETE_CURRENT_SESSION_MESSAGE.to_string());
-    }
-
-    Ok(session_identifier.to_string())
 }
 
 fn looks_like_uuid(value: &str) -> bool {

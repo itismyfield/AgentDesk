@@ -202,8 +202,8 @@ pub async fn phase_gate_catalog(state: State<AppState>) -> (StatusCode, Json<ser
 ///
 /// Reports any auto-queue entry whose `batch_phase` exceeds the run's
 /// current phase pointer while still being pending or actively dispatched.
-/// Read-only — does not block dispatches. Surfaced via the `/adk-phase`
-/// Discord slash command and `agentdesk phase status` CLI.
+/// Read-only — does not block dispatches. Also surfaced by the
+/// `agentdesk phase status` CLI.
 pub async fn phase_gate_violations(
     state: State<AppState>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {

@@ -26,7 +26,6 @@ mod fast_mode;
 mod goals;
 mod help;
 mod inspect;
-mod meeting_cmd;
 mod model_picker;
 mod model_ui;
 mod node;
@@ -53,10 +52,6 @@ pub(super) const SESSION_CLEARED_RESPONSE: &str = "세션을 초기화했어요.
 
 pub(super) fn session_started_response(path: &str) -> String {
     format!("`{path}`에서 세션을 시작했어요.")
-}
-
-pub(super) fn session_restored_response(path: &str) -> String {
-    format!("`{path}`에서 세션을 복원했어요.")
 }
 
 pub(in crate::services::discord) fn owner_error_response(summary: &str, detail: &str) -> String {
@@ -122,6 +117,7 @@ pub(in crate::services::discord) use command_policy::{
 pub(in crate::services::discord) use super::model_catalog::{
     provider_supports_model_override, validate_model_input,
 };
+pub(super) use config::cmd_allowall;
 #[cfg(unix)]
 pub(in crate::services::discord) use config::effective_provider_for_channel;
 pub(in crate::services::discord) use config::{
@@ -131,53 +127,47 @@ pub(in crate::services::discord) use config::{
     model_picker_pending_to_override, parse_model_picker_custom_id, resolve_model_for_turn,
     update_channel_model_override, would_channel_model_override_change,
 };
-pub(super) use config::{cmd_adduser, cmd_allowall, cmd_allowed, cmd_allowedtools, cmd_removeuser};
 pub(in crate::services::discord) use control::{
     clear_channel_session_state, reset_channel_provider_state, reset_managed_process_session,
     reset_provider_session_if_pending,
 };
-pub(super) use control::{cmd_cancel_queued, cmd_clear, cmd_down, cmd_shell, cmd_stop};
+pub(super) use control::{cmd_cancel_queued, cmd_clear, cmd_stop};
 pub(in crate::services::discord) use diagnostics::{
     build_health_report, build_inflight_report, build_queue_report, build_status_report,
 };
-pub(super) use diagnostics::{
-    cmd_adk_phase, cmd_debug, cmd_deletesession, cmd_health, cmd_inflight, cmd_metrics, cmd_queue,
-    cmd_sessions, cmd_status,
-};
+pub(super) use diagnostics::{cmd_health, cmd_inflight, cmd_queue, cmd_status};
 pub(super) use fast_mode::cmd_fast;
 pub(super) use goals::cmd_goals;
 pub(super) use help::cmd_help;
 pub(super) use inspect::cmd_adk;
-pub(super) use meeting_cmd::cmd_meeting;
 pub(super) use model_picker::cmd_model;
 pub(super) use node::cmd_node;
 pub(in crate::services::discord) use node::{
     channel_node_override, handle_node_picker_interaction, is_node_picker_custom_id,
 };
-pub(super) use receipt::{cmd_receipt, cmd_usage};
-pub(super) use recovery_ops::{cmd_deadlock_recover, cmd_machine_flip, cmd_stuck_pr_rebase};
+pub(super) use receipt::cmd_usage;
 pub(super) use restart::cmd_restart;
-pub(super) use session::{cmd_pwd, cmd_resume, cmd_start};
+pub(super) use session::{cmd_pwd, cmd_resume};
 pub(super) use sidecar::cmd_sidecar;
 pub(in crate::services::discord) use skill::build_provider_skill_prompt;
-pub(super) use skill::{cmd_cc, cmd_skill};
+pub(super) use skill::cmd_skill;
 pub(super) use system_prompt::cmd_system_prompt;
 pub(in crate::services::discord) use text_commands::handle_text_command_with_uploads;
 pub(super) use tool_call::cmd_tool_call;
-pub(super) use tui_passthrough::{cmd_compact, cmd_context, cmd_cost, cmd_effort};
+pub(super) use tui_passthrough::{cmd_compact, cmd_effort};
+pub(super) use voice::cmd_voice;
 pub(in crate::services::discord) use voice::{
     auto_join_voice_channels, handle_vc_text_command, join_voice_channel, notify_voice_alert,
     register_songbird, voice_occupancy,
 };
-pub(super) use voice::{cmd_vc_join, cmd_vc_leave, cmd_voice};
 
 #[cfg(test)]
 mod response_wording_tests {
     use super::{
         ALREADY_STOPPING_RESPONSE, NO_ACTIVE_TURN_RESPONSE, SESSION_CLEARED_RESPONSE,
-        STOPPING_RESPONSE, owner_error_response, session_restored_response,
-        session_started_response, shell_command_execution_error_response,
-        shell_command_output_response, shell_command_task_error_response,
+        STOPPING_RESPONSE, owner_error_response, session_started_response,
+        shell_command_execution_error_response, shell_command_output_response,
+        shell_command_task_error_response,
     };
 
     #[test]
@@ -189,10 +179,6 @@ mod response_wording_tests {
         assert_eq!(
             session_started_response("/tmp/work"),
             "`/tmp/work`에서 세션을 시작했어요."
-        );
-        assert_eq!(
-            session_restored_response("/tmp/work"),
-            "`/tmp/work`에서 세션을 복원했어요."
         );
     }
 
@@ -231,22 +217,20 @@ mod response_wording_tests {
     }
 }
 
-/// Apply the issue #1005 owner guard to a slash command.
+/// Apply the command risk policy to a slash command.
 ///
 /// Returns `Ok(true)` if the caller may proceed, `Ok(false)` if the request
 /// was denied (a denial message has already been posted to the channel via
 /// `ctx.say(...)`). Slash command handlers should:
 ///
 /// ```ignore
-/// if !enforce_slash_command_policy(&ctx, "/shell").await? {
+/// if !enforce_slash_command_policy(&ctx, "/clear").await? {
 ///     return Ok(());
 /// }
 /// ```
 ///
-/// Mirrors the gate at the top of `text_commands::handle_text_command` so a
-/// non-owner with `allow_all_users=true` cannot invoke `/shell`, `/allowed`,
-/// `/clear`, etc. Codex review of issue #1005 PR caught that the slash
-/// surface was missing this check.
+/// Mirrors the gate in `text_commands::handle_text_command`: high-risk tiers
+/// stay owner-only even with `allow_all_users=true`.
 pub(in crate::services::discord) async fn enforce_slash_command_policy(
     ctx: &super::Context<'_>,
     slash_cmd: &str,

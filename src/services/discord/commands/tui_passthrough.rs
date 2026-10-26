@@ -48,8 +48,6 @@ impl EffortLevel {
 enum ClaudeSlashPassthrough {
     Effort(EffortLevel),
     Compact,
-    Cost,
-    Context,
 }
 
 impl ClaudeSlashPassthrough {
@@ -57,8 +55,6 @@ impl ClaudeSlashPassthrough {
         match self {
             Self::Effort(_) => "/effort",
             Self::Compact => "/compact",
-            Self::Cost => "/cost",
-            Self::Context => "/context",
         }
     }
 
@@ -66,8 +62,6 @@ impl ClaudeSlashPassthrough {
         match self {
             Self::Effort(level) => format!("/effort {}", level.as_str()),
             Self::Compact => "/compact".to_string(),
-            Self::Cost => "/cost".to_string(),
-            Self::Context => "/context".to_string(),
         }
     }
 
@@ -84,7 +78,7 @@ impl ClaudeSlashPassthrough {
                 total_items: EFFORT_SLIDER_STOPS.len(),
                 target_index: level.selector_index(),
             }),
-            Self::Compact | Self::Cost | Self::Context => None,
+            Self::Compact => None,
         }
     }
 }
@@ -102,6 +96,8 @@ impl ClaudeSlashPassthrough {
 /// (e.g. anything `/loop`-shaped) MUST stay off this list or its turn loses its
 /// `⏳`→`✅` lifecycle. The `local_only_whitelist_matches_passthrough_command_set`
 /// anti-drift test pins this against the [`ClaudeSlashPassthrough`] variant set.
+/// `/cost` and `/context` stay listed: no longer passed through, they still
+/// complete locally when typed in the TUI.
 #[cfg(test)]
 pub(in crate::services::discord) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
     crate::services::tui_prompt_control::LOCAL_ONLY_SLASH_COMMANDS;
@@ -345,18 +341,6 @@ pub(in crate::services::discord) async fn cmd_compact(ctx: Context<'_>) -> Resul
     run_claude_passthrough(ctx, ClaudeSlashPassthrough::Compact).await
 }
 
-/// /cost — pass through Claude native /cost to the live TUI.
-#[poise::command(slash_command, rename = "cost")]
-pub(in crate::services::discord) async fn cmd_cost(ctx: Context<'_>) -> Result<(), Error> {
-    run_claude_passthrough(ctx, ClaudeSlashPassthrough::Cost).await
-}
-
-/// /context — pass through Claude native /context to the live TUI.
-#[poise::command(slash_command, rename = "context")]
-pub(in crate::services::discord) async fn cmd_context(ctx: Context<'_>) -> Result<(), Error> {
-    run_claude_passthrough(ctx, ClaudeSlashPassthrough::Context).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,10 +381,11 @@ mod tests {
         let variants = [
             ClaudeSlashPassthrough::Effort(EffortLevel::High),
             ClaudeSlashPassthrough::Compact,
-            ClaudeSlashPassthrough::Cost,
-            ClaudeSlashPassthrough::Context,
         ];
-        let variant_names: BTreeSet<&str> = variants.iter().map(|cmd| cmd.slash_name()).collect();
+        let mut variant_names: BTreeSet<&str> =
+            variants.iter().map(|cmd| cmd.slash_name()).collect();
+        // Retired pass-throughs that still complete locally when typed in the TUI.
+        variant_names.extend(["/cost", "/context"]);
         let whitelist: BTreeSet<&str> = LOCAL_ONLY_SLASH_COMMANDS.iter().copied().collect();
         assert_eq!(
             variant_names, whitelist,
@@ -469,7 +454,7 @@ mod host_guard_tests {
                 .await
                 .unwrap();
             tmux.take_calls();
-            let command = ClaudeSlashPassthrough::Cost;
+            let command = ClaudeSlashPassthrough::Compact;
             let block = passthrough_block(&shared, &provider, channel, &name, command).await;
             let probes = tmux.take_calls();
             if case.admitted() {
@@ -481,7 +466,10 @@ mod host_guard_tests {
                 assert!(!probes.is_empty(), "{case:?}: main probes the pane");
             } else {
                 let notice = block.expect("a kept session refuses the passthrough");
-                assert!(notice.starts_with("/cost를 전달하지 않았어요"), "{notice}");
+                assert!(
+                    notice.starts_with("/compact를 전달하지 않았어요"),
+                    "{notice}"
+                );
                 assert_eq!(probes, Vec::<String>::new(), "{case:?}: no tmux probe");
             }
         }
@@ -496,11 +484,14 @@ mod host_guard_tests {
             &provider,
             remote_channel,
             "foreign-pane",
-            ClaudeSlashPassthrough::Cost,
+            ClaudeSlashPassthrough::Compact,
         )
         .await
         .unwrap();
-        assert!(notice.starts_with("/cost를 전달하지 않았어요"), "{notice}");
+        assert!(
+            notice.starts_with("/compact를 전달하지 않았어요"),
+            "{notice}"
+        );
         assert!(notice.contains("노드 `remote-node` 소유"), "{notice}");
         assert!(tmux.take_calls().is_empty());
         db.drop().await;
