@@ -790,3 +790,37 @@ fn every_entry_on_an_unlisted_channel_takes_the_one_submission() {
         }
     }
 }
+
+/// Codex keeps its own submission: a pane that turns busy after the payload gets no Enter, and the
+/// typed text stays in the composer.
+#[test]
+fn cg_b3_codex_production_submission_keeps_busy_veto_after_payload() {
+    use crate::services::codex_tui::{host_input as codex_host, input as codex_input};
+    use crate::services::tui_input::actor::gate::{own_draft, submission_busy};
+    use crate::services::tui_o::shadow::ShadowProvider;
+    let f = Fixture::new();
+    let before = include_str!("../../../../tests/fixtures/tui_input/codex-idle-dim.ansi");
+    let own = "• Working (1s • esc to interrupt)\n  bypass permissions\n› own\n\n  gpt-5.5 xhigh · Fast off · /fixture/workspace · Context 100% left";
+    let name = "b3-codex-busy";
+    let before_screen = format!("  bypass permissions\n{before}");
+    frame_renderer(&f, name, "own", &before_screen, own, own);
+    let plan = [
+        codex_input::TuiInputAction::Literal("own".into()),
+        codex_input::TuiInputAction::Enter,
+    ];
+    let run = codex_host::run_prompt_submission_legacy(name, &plan, Some(before), None);
+    assert!(matches!(
+        run.run,
+        codex_host::InputRun::Indeterminate { confirmed: 1, .. }
+    ));
+    assert!(run.composer_mutated);
+    assert!(!run.enter_attempted);
+    let root = f.root.path().join(name);
+    wait("codex payload", || root.join("payloads").exists());
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(fs::read_to_string(root.join("kind")).unwrap(), "literal");
+    assert_eq!(f.received(name), b"own", "one literal payload and no Enter");
+    let after = f.tmux(&["capture-pane", "-p", "-t", &format!("={name}:")]);
+    assert!(own_draft(ShadowProvider::Codex, &after, "own", true));
+    assert!(submission_busy(ShadowProvider::Codex, &after));
+}

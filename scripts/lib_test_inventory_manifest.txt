@@ -2407,6 +2407,7 @@ services::claude_tui::input::draft_hold::draft_hold_session_tests::receipted_pla
 services::claude_tui::input::final_ready_tests::final_readiness_vetoes_spinner_auth_draft_blind_and_dead_panes
 services::claude_tui::input::hold_lifecycle_tests::bundle_preparation_scope_carries_input_run_without_duplicate_owner_callbacks
 services::claude_tui::input::preparation_hold::idle_injection_tests::idle_menu_requeues_without_locking_and_write_failures_do_not_lock
+services::claude_tui::input::submission::tests::cg_b3_codex_production_submission_keeps_busy_veto_after_payload
 services::claude_tui::input::submission::tests::every_entry_on_an_unlisted_channel_takes_the_one_submission
 services::claude_tui::input::submission::tests::fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels
 services::claude_tui::input::submission::tests::idle_fence_and_revoked_authority_precede_every_key
