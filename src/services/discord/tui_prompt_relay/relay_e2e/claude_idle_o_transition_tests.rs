@@ -16,6 +16,122 @@ fn prefix(f: &Fixture) -> String {
     record(&f.pane.b, "a1", "2026-10-01T02:00:00Z", "A_BODY", false)
 }
 
+fn spool_versions(f: &Fixture, relabel: Option<u32>) -> Vec<u32> {
+    let spool = f
+        .root
+        .join("o_store")
+        .join(f.pane.channel.get().to_string())
+        .join("spool");
+    let mut versions = Vec::new();
+    for entry in std::fs::read_dir(spool).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|value| value.to_str()) != Some("seg") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let split = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+        let mut header: serde_json::Value = serde_json::from_slice(&bytes[..split]).unwrap();
+        if let Some(version) = relabel {
+            header["identity_version"] = version.into();
+            let mut rewritten = serde_json::to_vec(&header).unwrap();
+            rewritten.extend_from_slice(&bytes[split..]);
+            std::fs::write(path, rewritten).unwrap();
+        }
+        versions.push(header["identity_version"].as_u64().unwrap() as u32);
+    }
+    versions.sort_unstable();
+    versions
+}
+
+#[test]
+fn retained_v5_thinking_stays_excluded_while_new_v6_bodies_post_in_order() {
+    run(async |f| {
+        use crate::services::tui_o::shadow::identity::V5Rule;
+        use crate::services::tui_o::shadow::{UnitKey, UnitKind};
+        let row = |id: &str, thought: &str, text: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type":"assistant", "sessionId":f.pane.a, "uuid":id, "apiBlockIndex":0,
+                    "message":{"id":id, "content":[{"type":"thinking", "thinking":thought},
+                        {"type":"text", "text":text}], "stop_reason":"end_turn"}
+                })
+            )
+        };
+        std::fs::write(&f.pane.path, row("old-v5", "T_OLD", "X_OLD")).unwrap();
+        f.initialize(0);
+        f.gate.acquired();
+        let mut old = f.engine();
+        {
+            let _v5 = V5Rule::hold();
+            old.capture().unwrap();
+        }
+        old.deliver(20).await;
+        assert_eq!(f.posts(), ["X_OLD"]);
+        let old_text = UnitKey {
+            channel_id: f.pane.channel.get(),
+            provider: ShadowProvider::Claude,
+            native_key: "old-v5:1".into(),
+            kind: UnitKind::Body,
+        };
+        assert!(
+            f.channel()
+                .ledger()
+                .latest_piece(&old_text, 0)
+                .is_some_and(|(_, piece)| {
+                    matches!(
+                        piece.outcome,
+                        Some(crate::services::tui_o::store::ledger::PieceOutcome::Posted(
+                            _
+                        ))
+                    )
+                }),
+            "old text must be durably settled before the v6 replay"
+        );
+        drop(old);
+        assert_eq!(spool_versions(&f, Some(5)), [5]);
+        let mut resumed = f.engine();
+        resumed.deliver(20).await;
+        assert_eq!(
+            f.posts(),
+            ["X_OLD"],
+            "retained v5 thinking must never backfill after settled text"
+        );
+        let old_thought = UnitKey {
+            channel_id: f.pane.channel.get(),
+            provider: ShadowProvider::Claude,
+            native_key: "old-v5:0".into(),
+            kind: UnitKind::Body,
+        };
+        assert_eq!(
+            f.channel().ledger().excluded(&old_thought),
+            Some("pre_v6_thinking")
+        );
+        append(&f.pane.path, &row("new-v6", "T_NEW", "X_NEW"));
+        resumed.capture().unwrap();
+        resumed.deliver(20).await;
+        assert_eq!(
+            f.posts(),
+            ["X_OLD", "T_NEW", "X_NEW"],
+            "new v6 bodies must retain their native order"
+        );
+        assert_eq!(spool_versions(&f, None), [5, 6]);
+        drop(resumed);
+        let mut restarted = f.engine();
+        restarted.capture().unwrap();
+        restarted.deliver(20).await;
+        assert_eq!(
+            f.posts(),
+            ["X_OLD", "T_NEW", "X_NEW"],
+            "mixed-version replay must not repost either generation"
+        );
+        assert_eq!(
+            f.channel().ledger().excluded(&old_thought),
+            Some("pre_v6_thinking")
+        );
+    });
+}
+
 #[test]
 fn visible_thinking_realtime_idle_and_rewind_recovery_post_once() {
     run(async |f| {
@@ -75,37 +191,13 @@ fn visible_thinking_realtime_idle_and_rewind_recovery_post_once() {
         append(&f.pane.path, &tail);
         engine.capture().unwrap();
         drop(engine);
-        // Replay retained frames written under the previous body-selection rules.
-        let spool = f
-            .root
-            .join("o_store")
-            .join(f.pane.channel.get().to_string())
-            .join("spool");
-        let mut segments = 0;
-        for entry in std::fs::read_dir(spool).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|value| value.to_str()) != Some("seg") {
-                continue;
-            }
-            let bytes = std::fs::read(&path).unwrap();
-            let split = bytes.iter().position(|byte| *byte == b'\n').unwrap();
-            let mut header: serde_json::Value = serde_json::from_slice(&bytes[..split]).unwrap();
-            header["identity_version"] = 5.into();
-            let mut rewritten = serde_json::to_vec(&header).unwrap();
-            rewritten.extend_from_slice(&bytes[split..]);
-            std::fs::write(path, rewritten).unwrap();
-            segments += 1;
-        }
-        assert!(
-            segments > 0,
-            "recovery must exercise retained old-version spool frames"
-        );
+        assert_eq!(spool_versions(&f, Some(5)), [5]);
         let mut recovered = f.engine();
         recovered.deliver(20).await;
         assert_eq!(
             f.posts(),
-            ["A_BODY", "OLD_BRANCH", "BRANCH_THOUGHT", "BRANCH_TEXT"],
-            "writer must recover the thinking tail without replaying the old branch"
+            ["A_BODY", "OLD_BRANCH", "BRANCH_TEXT"],
+            "v5 replay must recover text without backfilling historical thinking"
         );
 
         let mut buffer = tail.clone();
@@ -179,7 +271,7 @@ fn visible_thinking_realtime_idle_and_rewind_recovery_post_once() {
         restarted.deliver(20).await;
         assert_eq!(
             f.posts(),
-            ["A_BODY", "OLD_BRANCH", "BRANCH_THOUGHT", "BRANCH_TEXT"],
+            ["A_BODY", "OLD_BRANCH", "BRANCH_TEXT"],
             "restart and both relay paths must leave each body posted once"
         );
     });

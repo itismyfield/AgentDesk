@@ -47,8 +47,17 @@ pub enum RecordFact {
 }
 
 pub fn classify(provider: ShadowProvider, record: &Value) -> Vec<RecordFact> {
+    classify_with_version(provider, record, super::IDENTITY_VERSION)
+}
+
+/// Classifies replay using the identity version stored with the frame.
+pub(crate) fn classify_with_version(
+    provider: ShadowProvider,
+    record: &Value,
+    identity_version: u32,
+) -> Vec<RecordFact> {
     match provider {
-        ShadowProvider::Claude => claude(record),
+        ShadowProvider::Claude => claude(record, identity_version),
         ShadowProvider::Codex => codex(record),
     }
 }
@@ -58,14 +67,14 @@ pub fn row_key(record: &Value) -> Option<String> {
     str_at(record, "uuid").map(str::to_owned)
 }
 
-fn claude(record: &Value) -> Vec<RecordFact> {
+fn claude(record: &Value, identity_version: u32) -> Vec<RecordFact> {
     // Strict E wins over any other reading of the row, e.g. an interrupt marker user row.
     if envelope_is_turn_end_terminator(&ClaudeKind, record) {
         return vec![RecordFact::Idle(None)];
     }
     match str_at(record, "type") {
         Some("assistant") => std::iter::once(RecordFact::Assistant)
-            .chain(claude_blocks(record))
+            .chain(claude_blocks(record, identity_version))
             .collect(),
         Some("user") => claude_user(record),
         _ => Vec::new(),
@@ -74,7 +83,7 @@ fn claude(record: &Value) -> Vec<RecordFact> {
 
 /// Each block is keyed `(message.id, apiBlockIndex + position)`, so a one-block row keeps its key;
 /// any unplaceable block blocks the whole row.
-fn claude_blocks(record: &Value) -> Vec<RecordFact> {
+fn claude_blocks(record: &Value, identity_version: u32) -> Vec<RecordFact> {
     let message = record.get("message").unwrap_or(&Value::Null);
     let content = message.get("content").and_then(Value::as_array);
     #[cfg(test)]
@@ -92,9 +101,18 @@ fn claude_blocks(record: &Value) -> Vec<RecordFact> {
     let index = record.get("apiBlockIndex").and_then(Value::as_u64);
     let mut facts = Vec::new();
     for (position, block) in (0u64..).zip(blocks) {
+        #[cfg(test)]
+        if V5_RULE.get() && str_at(block, "type") == Some("thinking") {
+            continue;
+        }
         let (kind, content) = match str_at(block, "type") {
             Some("thinking") if visible_assistant_block_text(block).is_some() => {
-                (UnitKind::Body, claude_body(resumed, block))
+                let content = if identity_version < 6 {
+                    UnitContent::Excluded("pre_v6_thinking")
+                } else {
+                    claude_body(resumed, block)
+                };
+                (UnitKind::Body, content)
             }
             Some("thinking" | "redacted_thinking") => continue,
             Some("text") => (UnitKind::Body, claude_body(resumed, block)),
@@ -135,6 +153,30 @@ impl V3Rule {
 impl Drop for V3Rule {
     fn drop(&mut self) {
         V3_RULE.set(false);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static V5_RULE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Captures a store using the old thinking-skip rule without creating thinking ledger entries.
+#[cfg(test)]
+pub(crate) struct V5Rule(());
+
+#[cfg(test)]
+impl V5Rule {
+    pub(crate) fn hold() -> Self {
+        V5_RULE.set(true);
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for V5Rule {
+    fn drop(&mut self) {
+        V5_RULE.set(false);
     }
 }
 
