@@ -1,7 +1,6 @@
 //! The Claude source check a hook's continuation candidate passes before the pane follows it.
 //! The candidate is the payload's own transcript; its first record, entrypoint and file identity
-//! decide, and the pane's history in the binding log decides whether a session it left may come
-//! back.
+//! decide, and the pane's binding log history decides whether a session it left may come back.
 
 use std::io;
 use std::path::Path;
