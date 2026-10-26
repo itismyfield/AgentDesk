@@ -58,3 +58,7 @@ impl Snapshot {
         own.then(|| name.to_owned())
     }
 }
+
+#[cfg(test)]
+#[path = "inflight_bound_tests.rs"]
+mod tests;

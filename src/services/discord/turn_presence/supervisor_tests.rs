@@ -52,6 +52,11 @@ impl LiveSupervisor {
         self.inner.tick(Instant::now()).await;
     }
 
+    /// Ticks as of `at`, so an Unknown first seen then is already past the notice grace now.
+    pub(in crate::services::discord) async fn tick_at(&self, at: Instant) {
+        self.inner.tick(at).await;
+    }
+
     pub(in crate::services::discord) fn state(&self) -> serde_json::Value {
         lock(&self.inner.channels[&self.channel]).json()
     }
