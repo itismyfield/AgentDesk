@@ -97,6 +97,7 @@ impl ChannelMailboxRegistry {
     }
 
     /// An actor that keeps every request and answers none, so each read waits until it is cut.
+    #[cfg(unix)]
     pub(crate) fn insert_silent_for_test(&self, channel_id: ChannelId) {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         tokio::spawn(async move {

@@ -50,7 +50,7 @@ impl TickMailboxes {
         UNREACHABLE.reasons(UNREACHABLE_FORGET, now);
         let deadline = now + MAILBOX_READ_DEADLINE;
         let by_runtime = futures::future::join_all(runtimes.iter().map(|shared| {
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             ENUMERATIONS.with(|count| count.set(count.get() + 1));
             shared
                 .mailboxes
@@ -151,13 +151,13 @@ impl TickMailboxes {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 thread_local! {
     static ENUMERATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Runtime enumerations this thread has made so far.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(in crate::services::discord::health) fn enumerations_for_tests() -> usize {
     ENUMERATIONS.with(std::cell::Cell::get)
 }
