@@ -48,15 +48,16 @@ the gate, never producing a valid zero. Main uploads the observation. The count
 is compiler-emitted diagnostics, not source occurrences or a deduplicated
 cross-target debt estimate.
 
-The warning-total gate uses `scripts/clippy_warning_baseline.json`: **342**
+The warning-total gate uses `scripts/clippy_warning_baseline.json`: **290**
 diagnostics, measured locally on WSL at
-`59428323837079635d0fdf321d872c1e9b31e4b6` after reducing the previous 379-warning
+`6330b17f93a7852c42580e65df8f0c90752a1765` after reducing the previous 342-warning
 ceiling. The observation records its local WSL source, commit SHA and diagnostics
 digest; it does not claim a CI run or uploaded artifact. The environment remains
 Rust 1.94.1, x86_64 Linux and the staged argv above; local Mac totals cannot
 substitute for it. Main and PR CI measure again and reject warning growth or
-invalid/mismatched observations. The existing required `Lint` mirror owns PR
-enforcement; no required context is added.
+invalid/mismatched observations. PR CI observes the merge ref with main, so the
+combined change needs a fresh observation when it lands. The existing required
+`Lint` mirror owns PR enforcement; no required context is added.
 
 Lower the baseline with a valid observation when warning debt decreases.
 Admission compares the committed PR base (main uses its first parent) and
