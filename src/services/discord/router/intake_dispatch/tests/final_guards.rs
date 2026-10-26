@@ -19,7 +19,7 @@ async fn skill_dispatch_rejects_a_mismatched_local_permit() {
             UserId::new(4350),
             "original owner".into(),
             "skill prompt".into(),
-            IntakeOrigin::TextSkill,
+            IntakeOrigin::SlashSkill,
             Vec::new(),
             Some(super::super::LocalAdmissionPermit {
                 channel_id,

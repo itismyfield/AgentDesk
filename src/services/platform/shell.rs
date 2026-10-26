@@ -1,6 +1,5 @@
-//! Platform-aware shell command execution.
-//!
-//! Abstracts `bash -c` (Unix) vs `cmd /C` (Windows) behind a unified API.
+//! Platform helpers: the host's short name, and git helpers re-exported for
+//! platform callers.
 
 use std::process::Command;
 
@@ -15,25 +14,6 @@ pub(crate) use crate::services::git::{
     parse_github_repo_from_remote, resolve_repo_dir, resolve_repo_dir_for_id,
     resolve_repo_dir_for_target,
 };
-
-/// Build a `Command` for the platform shell, ready for further customization.
-///
-/// Returns a `Command` set up as `bash -c <cmd>` (Unix) or `cmd.exe /C <cmd>` (Windows).
-/// Caller can add `.stdin()`, `.stdout()`, `.current_dir()`, etc.
-pub fn shell_command_builder(cmd: &str) -> Command {
-    #[cfg(unix)]
-    {
-        let mut c = Command::new("bash");
-        c.args(["-c", cmd]);
-        c
-    }
-    #[cfg(windows)]
-    {
-        let mut c = Command::new("cmd.exe");
-        c.args(["/C", cmd]);
-        c
-    }
-}
 
 /// Get the short hostname of the current machine.
 ///

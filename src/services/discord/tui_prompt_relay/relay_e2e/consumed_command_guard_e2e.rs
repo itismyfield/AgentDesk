@@ -12,8 +12,6 @@ use super::{PROVIDER_KEY, RelayE2eHarness, wait_until};
 use crate::services::discord::catch_up::consumed_commands::test_gate::{self, Stage};
 use crate::services::discord::runtime_store;
 
-const SKILL_PROMPT: &str = "Execute the skill `/review`";
-
 #[derive(Clone, Copy, Debug)]
 enum Phase {
     One,
@@ -258,57 +256,4 @@ async fn record_io_failures_never_settle_unconsumed_input() {
         }
         assert_no_unhandled(&harness);
     }
-}
-
-/// `!skill` consumes only its own message: catch-up settles it, while the skill
-/// prompt dispatched under the confirmation message still reaches the provider.
-#[test]
-fn a_skill_command_is_settled_while_its_skill_prompt_runs() {
-    // Skill intake runs deeper than a default 2 MiB worker stack in debug builds.
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .thread_stack_size(16 << 20)
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    runtime.block_on(skill_command_scenario());
-}
-
-async fn skill_command_scenario() {
-    let harness = RelayE2eHarness::start().await;
-    harness.register_channel_in_role_map();
-    harness.answer_placeholders_immediately();
-    (harness.shared.skills_cache.write().await).push(("review".into(), "review".into()));
-    let base = recent_snowflake_base();
-    let (answered, skill, missed) = (base | 1, base | 2, base | 3);
-    harness.seed_channel_history(&[
-        (answered, "bot answer", true),
-        (skill, "!skill review", false),
-        (missed, "question the gateway dropped", false),
-    ]);
-
-    harness
-        .spawn_user_message(skill, "!skill review")
-        .await
-        .expect("delivery task")
-        .expect("live intake handles the command");
-    let dispatched = wait_until(Duration::from_secs(15), {
-        let root = harness.root.path().to_path_buf();
-        move || {
-            let inputs = std::fs::read_to_string(root.join(super::PROVIDER_INPUTS_FILE));
-            let ran = inputs.is_ok_and(|inputs| inputs.contains(SKILL_PROMPT));
-            Box::pin(async move { ran })
-        }
-    })
-    .await;
-    assert!(
-        dispatched,
-        "the skill prompt must reach the provider: {:?}",
-        harness.messages()
-    );
-
-    harness.run_catch_up().await;
-
-    assert_eq!(queued_ids(&harness).await, vec![missed]);
-    assert_no_unhandled(&harness);
 }

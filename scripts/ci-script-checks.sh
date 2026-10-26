@@ -646,7 +646,7 @@ if run_check contracts "Build token fairness tests (#5968)"; then
 fi
 
 if run_check cargo "Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036)"; then
-# Measure size before refreshing snapshots; planning metadata is advisory.
+# Report giant raw growth and planning metadata warnings before refreshing snapshots.
 GFP_REFRESH_DOCS=1 "$PYTHON" scripts/giant_file_progress.py
 "$PYTHON" -m unittest tests.test_refresh_giant_file_issue_metadata
 fi
