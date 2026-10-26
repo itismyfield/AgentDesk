@@ -235,8 +235,8 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
   | `rust_build` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}` |
   | `rust_tests` | `changes`, `rust_build` | `${{ !cancelled() && needs.rust_build.result == 'success' }}` |
   | `scripts` | `changes` | `${{ !cancelled() }}` |
-  | `scripts_contracts` | `changes` | none |
-  | `scripts_guards` | `changes` | none |
+  | `scripts_contracts` | `changes` | `${{ !cancelled() }}` |
+  | `scripts_guards` | `changes` | `${{ !cancelled() }}` |
   | `test_evidence` | `changes`, `rust_build`, `rust_tests` | `${{ !cancelled() && needs.rust_build.result == 'success' }}` |
   <!-- /required-gate-wiring -->
 
