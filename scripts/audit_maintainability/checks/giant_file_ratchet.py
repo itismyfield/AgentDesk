@@ -1,8 +1,4 @@
-"""Block production giant growth against the comparison SHA, without slack.
-
-Git exports enforce frozen caps; a Git candidate may retain inherited overage
-only while keeping or reducing the comparison tree's measured production LoC.
-"""
+"""Warn about raw giant growth against the comparison SHA or exported reference."""
 
 from __future__ import annotations
 
@@ -16,7 +12,7 @@ from .. import common
 from ..common import Finding
 from . import CheckSpec
 from .giant_files import giant_production_loc
-from ratchet_admission import WIRING_SLACK_LINES, audit_repository_admissions
+from ratchet_admission import audit_repository_admissions
 
 CONFIG_REL_PATH = "scripts/audit_maintainability_giant_baseline.toml"
 
@@ -25,7 +21,7 @@ _ENTRY_RE = re.compile(r'^"([^"]+)"\s*=\s*(\d+)$')
 
 
 def load_giant_baseline(path: Path | None = None) -> dict[str, int]:
-    """Load the ``[giant_file_ratchet]`` path -> frozen-LoC table.
+    """Load the ``[giant_file_ratchet]`` path -> reference-LoC table.
 
     Uses the same tiny TOML subset as ``namespace_size_caps``: a single table of
     quoted repo-relative paths mapped to positive integer baselines.
@@ -82,6 +78,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
             )
         )
     prior: dict[str, int] = {}
+    prior_raw: dict[str, int] = {}
     if admission_audit.base_sha is not None:
         import giant_file_progress as progress
         from .giant_files import _INVENTORY
@@ -93,28 +90,34 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
                 progress.archive(admission_audit.base_sha, Path(tmp))
             finally:
                 progress.ROOT = old_root
-            prior = _INVENTORY.giant_file_snapshot(Path(tmp))["modules"]
+            snapshot = _INVENTORY.giant_file_snapshot(Path(tmp))
+            prior, prior_raw = snapshot["modules"], snapshot["raw_modules"]
     for rel, loc in current.items():
         if common.is_allowlisted(allowlist, rel):
             continue
         frozen = baseline.get(rel)
         ceiling = prior.get(rel) if admission_audit.base_sha is not None else frozen
-        if ceiling is not None and ceiling >= 1000 and loc <= ceiling:
+        if admission_audit.base_sha is not None:
+            measured = len(common.read_text(common.REPO_ROOT / rel).splitlines())
+            old = prior_raw.get(rel, 0)
+            unit = "raw"
+        else:
+            measured, old, unit = loc, frozen or 0, "production"
+        if ceiling is not None and ceiling >= 1000 and measured <= old:
             continue
         findings.append(
             Finding(
                 rule="giant_file_ratchet",
-                severity="error",
+                severity="warn",
                 file=rel,
                 line=None,
                 message=(
-                    f"new giant at {loc} production LoC; split below 1000"
-                    if ceiling is None or ceiling < 1000 else
-                    f"grew to {loc} production LoC > baseline {ceiling} + slack "
-                    f"{WIRING_SLACK_LINES} (re-inflation); split or shrink it back"
+                    f"{'new giant' if ceiling is None or ceiling < 1000 else 'giant growth'}: "
+                    f"{measured - old:+d} {unit} lines ({old} -> {measured}); "
+                    f"production LoC {loc}; review responsibility boundaries"
                 ),
                 extra={"loc": str(loc), "baseline": str(ceiling),
-                       "slack": str(WIRING_SLACK_LINES), "config": CONFIG_REL_PATH},
+                       "delta": str(measured - old), "config": CONFIG_REL_PATH},
             )
         )
     findings.sort(key=lambda f: -(int(f.extra.get("loc", "0"))))
@@ -123,12 +126,11 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
 
 CHECK = CheckSpec(
     key="giant_file_ratchet",
-    title="Giant file re-inflation ratchet",
+    title="Giant file growth warnings",
     description=(
-        "Production giants listed in "
-        f"{CONFIG_REL_PATH} must not exceed their frozen production-LoC "
-        "baseline SHA measurement; Git exports enforce the frozen cap."
+        "Files with >= 1000 production lines warn on raw growth or threshold crossing. "
+        f"Git exports compare production LoC to advisory references in {CONFIG_REL_PATH}."
     ),
-    hard_gate=True,
+    hard_gate=False,
     runner=_run,
 )

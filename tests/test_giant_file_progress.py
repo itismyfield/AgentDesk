@@ -21,42 +21,62 @@ META_ROOT = ("shrink", "team", "2026-08-31", "#4712", "")
 
 class GiantFileProgressTest(unittest.TestCase):
     def fixture(self, size=1200):
-        base = {"modules": {"src/fixture.rs": 1200}, "pins": {"src/fixture.rs": 1100},
+        base = {"modules": {"src/fixture.rs": 1200}, "raw_modules": {"src/fixture.rs": 1200}, "pins": {"src/fixture.rs": 1100},
                 "overdue": ["src/fixture.rs"], "registrations": {"src/fixture.rs": META_ROOT}}
         candidate = copy.deepcopy(base)
         candidate["modules"]["src/fixture.rs"] = size
+        candidate["raw_modules"]["src/fixture.rs"] = size
         facts = {"changed": {"src/fixture.rs"}, "additions": 1}
         return base, candidate, facts
 
-    def test_new_and_growing_giants_fail_without_wiring_slack(self):
+    def test_new_and_growing_giants_warn_with_file_and_delta(self):
         for old, new, expected in ((1200, 1201, True), (1200, 1200, False),
                 (1200, 1199, False), (1200, 999, False), (999, 1000, True),
                 (0, 1000, True), (0, 999, False)):
             with self.subTest(old=old, new=new):
                 base, candidate, facts = self.fixture(new)
                 base["modules"]["src/fixture.rs"] = old
-                self.assertEqual(bool(P.pr_evaluation(base, candidate, facts)[1]), expected)
+                base["raw_modules"]["src/fixture.rs"] = old
+                warnings = P.giant_growth_warnings(base, candidate)
+                self.assertEqual(bool(warnings), expected)
+                if expected:
+                    self.assertIn("src/fixture.rs", warnings[0])
+                    self.assertIn(f"+{new - old} raw lines", warnings[0])
 
     def test_overdue_one_line_shrink_passes_with_warning(self):
         base, candidate, facts = self.fixture(1199)
-        self.assertEqual(P.pr_evaluation(base, candidate, facts)[1], [])
+        self.assertEqual(P.giant_growth_warnings(base, candidate), [])
         self.assertIn("under 200-line giant progress", "; ".join(P.planning_warnings(base, candidate, facts)))
 
     def test_ledger_deadline_and_progress_form_only_warn(self):
         base, candidate, facts = self.fixture()
         candidate.update(overdue=[], registrations={})
         facts.update(changed=set(P.LEDGER) | {f"src/p{i}.rs" for i in range(21)}, additions=900)
-        self.assertEqual(P.pr_evaluation(base, candidate, facts)[1], [])
+        self.assertEqual(P.giant_growth_warnings(base, candidate), [])
         warnings = "; ".join(P.planning_warnings(base, candidate, facts))
         for fragment in ("ledger changed", "overdue planning set changed", "20 files or 800"):
             self.assertIn(fragment, warnings)
 
-    def test_cap_increase_cannot_be_authorized_by_planning_changes(self):
+    def test_reference_increase_is_advisory(self):
         base, candidate, facts = self.fixture(1199)
         candidate["pins"]["src/fixture.rs"] = 1101
-        self.assertIn("giant cap increased", "; ".join(P.pr_evaluation(base, candidate, facts)[1]))
+        self.assertIn("giant reference increased", "; ".join(P.pr_evaluation(base, candidate, facts)[1]))
         candidate["pins"].clear()
-        self.assertEqual(P.pr_evaluation(base, candidate, facts)[1], [])
+        self.assertEqual(P.giant_growth_warnings(base, candidate), [])
+
+    def test_raw_growth_warns_when_production_count_stays_equal_or_shrinks(self):
+        for production in (1200, 1199):
+            base, candidate, _ = self.fixture(production)
+            candidate["raw_modules"]["src/fixture.rs"] = 1201
+            self.assertIn("src/fixture.rs: +1 raw lines", P.giant_growth_warnings(base, candidate)[0])
+
+    def test_warning_goes_to_log_and_pr_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary, err = Path(directory) / "summary.md", io.StringIO()
+            with mock.patch.dict(P.os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}), redirect_stderr(err):
+                P.emit_warnings(["giant growth: src/fixture.rs: +1 raw lines"])
+            self.assertIn("WARNING: giant growth: src/fixture.rs: +1 raw lines", err.getvalue())
+            self.assertIn("src/fixture.rs: +1 raw lines", summary.read_text())
 
     def test_invalid_pin_authority_and_loader_exception_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -153,6 +173,7 @@ class GiantFileCandidateBaseTest(unittest.TestCase):
         def snapshot(root, evaluation_date=None):
             return {"overdue": ["src/fixture.rs"],
                     "modules": {"src/fixture.rs": len((root / "src/fixture.rs").read_text().splitlines())},
+                    "raw_modules": {"src/fixture.rs": len((root / "src/fixture.rs").read_text().splitlines())},
                     "registrations": {"src/fixture.rs": META_ROOT}}
         with mock.patch.dict(P.os.environ, env, clear=True), mock.patch.object(
                 P, "EVIDENCE", self.evidence), mock.patch.object(
@@ -196,7 +217,7 @@ class GiantFileCandidateBaseTest(unittest.TestCase):
     def test_main_uses_actual_parent_for_archive_diff_and_evidence(self):
         rc, evidence, scan, archive, diff = self.run_candidate()
         self.assertEqual(rc, 0, evidence)
-        self.assertEqual(evidence["selector"], "pr_ordinary_no_regression")
+        self.assertEqual(evidence["selector"], "pr_giant_warnings")
         self.assertEqual(evidence["event_base_sha"], self.event_base)
         self.assertEqual(evidence["comparison_base_sha"], self.comparison_base)
         self.assertEqual(evidence["merge_first_parent"], self.comparison_base)
@@ -232,11 +253,11 @@ class GiantFileCandidateBaseTest(unittest.TestCase):
                 archive.assert_not_called()
                 diff.assert_not_called()
 
-    def test_advanced_base_does_not_hide_giant_growth_or_cap_raise(self):
+    def test_advanced_base_does_not_hide_giant_growth_or_reference_warning(self):
         tree = self.git("rev-parse", self.candidate + "^{tree}")
         for path, text, reason in (
-                ("src/fixture.rs", "pub fn fixture() {}\n" * 1101, "new or growing giant"),
-                (P.GIANT_PIN, '[giant_file_ratchet]\n"src/fixture.rs" = 1201\n', "giant cap increased")):
+                ("src/fixture.rs", "pub fn fixture() {}\n" * 1101, "giant growth"),
+                (P.GIANT_PIN, '[giant_file_ratchet]\n"src/fixture.rs" = 1201\n', "giant reference increased")):
             with self.subTest(path=path):
                 self.git("checkout", "-qf", "--detach", self.candidate)
                 self.put(path, text)
@@ -246,16 +267,16 @@ class GiantFileCandidateBaseTest(unittest.TestCase):
                                    "-p", self.head, "-m", "invalid integration candidate")
                 self.git("checkout", "-qf", "--detach", changed)
                 rc, evidence, _, _, _ = self.run_candidate(candidate=changed)
-                self.assertEqual(rc, 2, evidence)
-                self.assertIn(reason, evidence["reason"])
+                self.assertEqual(rc, 0, evidence)
+                self.assertIn(reason, "; ".join(evidence["warnings"]))
                 self.assertEqual(evidence["event_base_sha"], self.event_base)
                 self.assertEqual(evidence["comparison_base_sha"], self.comparison_base)
 
-    def test_giant_pinned_at_base_rejects_any_growth(self):
+    def test_giant_pinned_at_base_warns_on_growth(self):
         self.git("checkout", "-q", "main")
         self.put(P.GIANT_PIN, '[giant_file_ratchet]\n"src/fixture.rs" = 1100\n')
         pinned_base = self.commit("pin the fixture giant")
-        for lines, expected_rc in ((1099, 0), (1100, 0), (1101, 2)):
+        for lines, warns in ((1099, False), (1100, False), (1101, True)):
             with self.subTest(lines=lines):
                 self.git("checkout", "-qf", "--detach", pinned_base)
                 self.put("docs/pr.txt", "PR-only change\n")
@@ -265,12 +286,12 @@ class GiantFileCandidateBaseTest(unittest.TestCase):
                                    "-p", self.head, "-m", "pinned integration candidate")
                 self.git("checkout", "-qf", "--detach", changed)
                 rc, evidence, _, _, _ = self.run_candidate(candidate=changed)
-                self.assertEqual(rc, expected_rc, evidence)
+                self.assertEqual(rc, 0, evidence)
                 self.assertEqual(evidence["comparison_base_sha"], pinned_base)
-                if expected_rc:
-                    self.assertIn(f"grew to {lines} > base 1100", evidence["reason"])
+                if warns:
+                    self.assertTrue(any("+1 raw lines" in warning for warning in evidence["warnings"]))
                 else:
-                    self.assertEqual(evidence["selector"], "pr_ordinary_no_regression")
+                    self.assertEqual(evidence["selector"], "pr_giant_warnings")
 
 
 class GiantMeasurementFailureTest(unittest.TestCase):
@@ -351,19 +372,28 @@ class GiantRealSnapshotTest(unittest.TestCase):
             rc = P.main()
         return rc, json.loads(self.evidence.read_text()), err.getvalue()
 
-    def test_real_snapshot_one_line_shrink_and_equal_pass_growth_fails(self):
-        for size, expected in ((1199, 0), (1200, 0), (1201, 2)):
+    def test_real_snapshot_one_line_shrink_equal_and_growth_pass(self):
+        for size, warns in ((1199, False), (1200, False), (1201, True)):
             rc, evidence, err = self.run_pr({"src/fixture.rs": "pub fn fixture() {}\n" * size})
-            self.assertEqual(rc, expected, (evidence, err))
-            if expected:
-                self.assertIn("new or growing giant", evidence["reason"])
+            self.assertEqual(rc, 0, (evidence, err))
+            if warns:
+                self.assertIn("src/fixture.rs: +1 raw lines", err)
+                self.assertIn("giant growth", "; ".join(evidence["warnings"]))
             else:
                 self.assertIn("WARNING:", err)
 
-    def test_real_snapshot_new_giant_is_blocked(self):
-        rc, evidence, _ = self.run_pr({"src/new.rs": "pub fn new() {}\n" * 1000})
-        self.assertEqual(rc, 2, evidence)
-        self.assertIn("new or growing giant", evidence["reason"])
+    def test_real_snapshot_new_giant_warns(self):
+        rc, evidence, err = self.run_pr({"src/new.rs": "pub fn new() {}\n" * 1000})
+        self.assertEqual(rc, 0, evidence)
+        self.assertIn("new giant: src/new.rs: +1000 raw lines", err)
+        self.assertTrue(any("src/new.rs" in warning for warning in evidence["warnings"]))
+
+    def test_real_snapshot_inline_test_growth_warns_in_raw_delta(self):
+        text = "pub fn fixture() {}\n" * 1200 + "#[cfg(test)]\nmod tests {\nfn test_helper() {}\n}\n"
+        rc, evidence, err = self.run_pr({"src/fixture.rs": text})
+        self.assertEqual(rc, 0, evidence)
+        self.assertIn("src/fixture.rs: +4 raw lines", err)
+        self.assertIn("production LoC 1200 -> 1200", err)
 
     def test_real_snapshot_unreadable_source_measurement_fails(self):
         rc, evidence, _ = self.run_pr({"src/fixture.rs": b"\xff"})
@@ -404,7 +434,7 @@ class GiantProtectedMainDispatchTest(unittest.TestCase):
         dispatch_rc, dispatch, scan, archive, diff = self.run_main()
         self.assertEqual(dispatch_rc, 0, dispatch)
         self.assertEqual(dispatch["verdict"], "progress-pass")
-        self.assertEqual(dispatch["selector"], "main_no_regression_record")
+        self.assertEqual(dispatch["selector"], "main_giant_record")
         self.assertEqual(dispatch["overdue"], ["src/fixture.rs"])
         self.assertEqual(dispatch["overdue_count"], 1)
         self.assertEqual(scan.call_count, 1)

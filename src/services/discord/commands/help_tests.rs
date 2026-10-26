@@ -117,8 +117,8 @@ fn retired_slash_commands_are_not_registered() {
     }
 }
 
-/// `/help` lists only the text session controls agents can send today, not
-/// the other `!` commands.
+/// `/help` lists the three text session controls agents can send, and no
+/// other `!` command.
 #[test]
 fn help_lists_only_working_agent_text_commands() {
     let body = build_slash_help_messages(&ProviderKind::Claude, &run_bot_build_slash_commands())
@@ -128,5 +128,5 @@ fn help_lists_only_working_agent_text_commands() {
         .filter_map(|line| line.strip_prefix("`!"))
         .map(|rest| &rest[..rest.find([' ', '`']).unwrap_or(rest.len())])
         .collect();
-    assert_eq!(listed, BTreeSet::from(["clear", "stop"]));
+    assert_eq!(listed, BTreeSet::from(["clear", "restart", "stop"]));
 }

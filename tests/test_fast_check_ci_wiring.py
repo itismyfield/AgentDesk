@@ -892,6 +892,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "GFP_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
                 "TEST_LANE_BASELINE_REF": "HEAD^1",
                 "SCRIPT_CHECK_SHARD": "cargo",
+                "SCRIPT_CHECK_CHANGES_RESULT": "${{ needs.changes.result }}",
+                "SCRIPT_CHECK_CHANGED_FILES": "${{ needs.changes.outputs.script_check_files }}",
                 "ADK_LIB_TEST_ARTIFACT": "${{ runner.temp }}/lib-test-artifact",
                 "CARGO_PROFILE_DEV_DEBUG": "0",
                 "CARGO_PROFILE_TEST_DEBUG": "0",
@@ -1234,7 +1236,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         rust_gate = "${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
         cross_os = "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'"
         expected_if = {
-            "changes": None, "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": None, "scripts_contracts": None,
+            "changes": None, "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": MIRROR_IF, "scripts_contracts": MIRROR_IF,
             "rust_build": rust_gate, "pg15_owner_proof": rust_gate, "rust_tests": n_gate, "test_evidence": n_gate,
             "relay_authority_mutations": RUST_REQUIRED_IF,
             "lint": _LINT_FILTER, "dashboard": "needs.changes.outputs.dashboard == 'true'",

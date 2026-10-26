@@ -7,7 +7,7 @@
 
 | Method | Path | Handler | Handler Source | Route Decl |
 | --- | --- | --- | --- | --- |
-| `GET` | `/` | `runner_entry` | `src/server/web_surface.rs:54` | `src/server/web_surface.rs:48` |
+| `GET` | `/` | `runner_entry` | `src/server/web_surface.rs:57` | `src/server/web_surface.rs:51` |
 | `GET` | `/api/achievements` | `analytics::achievements` | `src/server/routes/analytics.rs:431` | `src/server/routes/domains/analytics.rs:16` |
 | `GET` | `/api/activity-heatmap` | `analytics::activity_heatmap` | `src/server/routes/analytics.rs:446` | `src/server/routes/domains/analytics.rs:17` |
 | `GET` | `/api/agents` | `agents_crud::list_agents` | `src/server/routes/agents_crud.rs:381` | `src/server/routes/domains/agents.rs:16` |
@@ -320,5 +320,5 @@
 | `PUT` | `/api/voice/config` | `voice_config::put_voice_config` | `src/server/routes/voice_config.rs:165` | `src/server/routes/domains/admin.rs:62` |
 | `POST` | `/api/voice/speak` | `voice_audio::speak` | `src/server/routes/voice_audio.rs:73` | `src/server/routes/domains/runtime.rs:142` |
 | `POST` | `/api/voice/transcribe` | `voice_audio::transcribe` | `src/server/routes/voice_audio.rs:40` | `src/server/routes/domains/runtime.rs:141` |
-| `GET` | `/settings` | `runner_entry` | `src/server/web_surface.rs:54` | `src/server/web_surface.rs:49` |
-| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:27` | `src/server/web_surface.rs:22` |
+| `GET` | `/settings` | `runner_entry` | `src/server/web_surface.rs:57` | `src/server/web_surface.rs:52` |
+| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:27` | `src/server/web_surface.rs:25` |

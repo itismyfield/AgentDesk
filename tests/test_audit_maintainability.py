@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import io
 import json
 import sys
 import textwrap
@@ -167,13 +168,11 @@ class GiantFileRatchetCheck(unittest.TestCase):
     _BASELINE = "scripts/audit_maintainability_giant_baseline.toml"
     # The admission audit reads this; without it every run adds a metadata error.
     _HISTORY = {"scripts/ratchet_admission_history.toml": "schema_version = 1\nadmission = []\n"}
-    _SLACK = giant_file_ratchet.WIRING_SLACK_LINES
 
     def test_real_pin_overrun_and_threshold_controls_reach_check_exit_code(self) -> None:
         path = "src/pinned.rs"
-        cases = ((1000, 1000, 0), (1000 + self._SLACK, 1000, 0),
-                 (1001 + self._SLACK, 1000, 1), (999, 500, 0))
-        for loc, cap, expected_rc in cases:
+        cases = ((1000, 1000, False), (1001, 1000, True), (999, 500, False))
+        for loc, cap, warns in cases:
             with self.subTest(loc=loc, cap=cap), _FakeSrcTree({
                 path: "fn production() {}\n" * loc,
                 self._BASELINE: f'[giant_file_ratchet]\n"{path}" = {cap}\n',
@@ -187,12 +186,12 @@ class GiantFileRatchetCheck(unittest.TestCase):
                 # A pin below 1000 does not expand the audit's measured population.
                 self.assertEqual(giant_files.giant_production_loc(), {path: loc} if loc >= 1000 else {})
                 hits = list(giant_file_ratchet.CHECK.runner(set()))
-                if expected_rc:
+                if warns:
                     self.assertEqual(len(hits), 1)
                     self.assertEqual((hits[0].rule, hits[0].file, hits[0].severity),
-                                     ("giant_file_ratchet", path, "error"))
+                                     ("giant_file_ratchet", path, "warn"))
                     self.assertEqual((hits[0].extra["loc"], hits[0].extra["baseline"]),
-                                     (str(1001 + self._SLACK), "1000"))
+                                     ("1001", "1000"))
                 else:
                     self.assertEqual(hits, [])
                 self.assertFalse(any("admission metadata invalid" in hit.message for hit in hits))
@@ -200,14 +199,14 @@ class GiantFileRatchetCheck(unittest.TestCase):
                         mock.patch.object(sys, "stdout", new=mock.MagicMock()), \
                         mock.patch.object(sys, "stderr", new=mock.MagicMock()):
                     rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
-                self.assertEqual(rc, expected_rc)
+                self.assertEqual(rc, 0)
 
-    def test_flags_file_grown_past_frozen_baseline(self) -> None:
+    def test_warns_for_growth_and_new_giant(self) -> None:
         over = "fn x() {}\n" * (giant_files.THRESHOLD + 50)  # 1050 prod LoC
         with _FakeSrcTree(
             {
                 "src/services/discord/tmux_watcher.rs": over,
-                "src/other_giant.rs": over,  # a new giant needs a frozen baseline
+                "src/other_giant.rs": over,  # a new giant warns without registration
                 **self._HISTORY,
             }
         ) as root:
@@ -236,7 +235,7 @@ class GiantFileRatchetCheck(unittest.TestCase):
             hits = list(giant_file_ratchet.CHECK.runner(set()))
         self.assertEqual(hits, [])
 
-    def _slack_hits(self, loc: int) -> list:
+    def _growth_hits(self, loc: int) -> list:
         path = "src/services/discord/tmux_watcher.rs"
         with _FakeSrcTree({
             path: "fn x() {}\n" * loc,
@@ -245,20 +244,14 @@ class GiantFileRatchetCheck(unittest.TestCase):
         }):
             return list(giant_file_ratchet.CHECK.runner(set()))
 
-    def test_any_growth_fails(self) -> None:
-        self.assertEqual(self._SLACK, 0)
-        for loc in (1201, 1230):
+    def test_growth_warns_with_delta_without_a_cap(self) -> None:
+        for loc in (1201, 1230, 1500):
             with self.subTest(loc=loc):
-                self.assertEqual(len(self._slack_hits(loc)), 1)
-
-    def test_growth_past_wiring_slack_fails_naming_baseline_and_slack(self) -> None:
-        loc = 1201 + self._SLACK
-        hits = self._slack_hits(loc)
-        self.assertEqual(len(hits), 1)
-        self.assertIn(f"grew to {loc} production LoC > baseline 1200 + slack {self._SLACK}",
-                      hits[0].message)
-        self.assertEqual((hits[0].extra["loc"], hits[0].extra["baseline"], hits[0].extra["slack"]),
-                         (str(loc), "1200", str(self._SLACK)))
+                hits = self._growth_hits(loc)
+                self.assertEqual(len(hits), 1)
+                self.assertEqual(hits[0].severity, "warn")
+                self.assertIn(f"+{loc - 1200} production lines", hits[0].message)
+                self.assertEqual(hits[0].extra["delta"], str(loc - 1200))
 
     def test_file_dropped_below_threshold_is_not_a_regression(self) -> None:
         small = "fn y() {}\n" * 10  # below giant threshold -> not in giant map
@@ -274,12 +267,12 @@ class GiantFileRatchetCheck(unittest.TestCase):
             hits = list(giant_file_ratchet.CHECK.runner(set()))
         self.assertEqual(hits, [])
 
-    def test_inherited_overage_can_stay_or_shrink_but_cannot_grow(self) -> None:
+    def test_inherited_overage_growth_warns_and_check_passes(self) -> None:
         import giant_file_progress as progress
         from ratchet_admission import AdmissionAudit
 
         path = "src/giant.rs"
-        for prior, current, expected in ((1250, 1250, 0), (1250, 1249, 0), (1250, 1251, 1), (999, 1000, 1)):
+        for prior, current in ((1250, 1250), (1250, 1249), (1250, 1251), (999, 1000)):
             with self.subTest(prior=prior, current=current), _FakeSrcTree({
                     path: "fn x() {}\n" * current,
                     self._BASELINE: f'[giant_file_ratchet]\n"{path}" = 1200\n',
@@ -288,11 +281,11 @@ class GiantFileRatchetCheck(unittest.TestCase):
                                   return_value=AdmissionAudit((), (), "a" * 40)), \
                     mock.patch.object(progress, "archive"), \
                     mock.patch.object(giant_files._INVENTORY, "giant_file_snapshot",
-                                      return_value={"modules": {path: prior}}), \
+                                      return_value={"modules": {path: prior}, "raw_modules": {path: prior}}), \
                     mock.patch.object(HARNESS, "load_check_specs", return_value=[giant_file_ratchet.CHECK]), \
                     mock.patch.object(HARNESS, "load_allowlist", return_value={}), \
                     mock.patch.object(sys, "stdout"), mock.patch.object(sys, "stderr"):
-                self.assertEqual(HARNESS.main(["--check"]), expected)
+                self.assertEqual(HARNESS.main(["--check"]), 0)
 
     def test_allowlist_suppresses(self) -> None:
         over = "fn x() {}\n" * (giant_files.THRESHOLD + 50)
@@ -960,7 +953,6 @@ class HarnessCli(unittest.TestCase):
         self.assertEqual(
             hard_gated,
             {
-                "giant_file_ratchet",
                 "direct_discord_sends",
                 "direct_discord_reactions",
                 "footer_view_writes",
@@ -975,6 +967,7 @@ class HarnessCli(unittest.TestCase):
             {"route_srp_violations", "service_server_backflow", "parent_test_residue"},
         )
         warning_only = {
+            "giant_file_ratchet",
             "route_srp_violations",
             "service_server_backflow",
             "limit_clamp_duplication",
@@ -989,10 +982,10 @@ class HarnessCli(unittest.TestCase):
             yaml_text = HARNESS.render_yaml(specs, findings)
             json_payload = json.loads(HARNESS.render_json(specs, findings))
         self.assertIn("hard_gate_enabled: true", yaml_text)
-        self.assertIn("hard_gate_count: 8", yaml_text)
+        self.assertIn("hard_gate_count: 7", yaml_text)
         self.assertIn("baseline_gate_count: 3", yaml_text)
         self.assertIs(json_payload["hard_gate_enabled"], True)
-        self.assertEqual(json_payload["hard_gate_count"], 8)
+        self.assertEqual(json_payload["hard_gate_count"], 7)
         self.assertEqual(json_payload["baseline_gate_count"], 3)
 
     def test_check_mode_returns_zero_with_no_findings(self) -> None:
@@ -1097,16 +1090,20 @@ class HarnessCli(unittest.TestCase):
                 rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
         self.assertEqual(rc, 1)
 
-    def test_check_mode_fails_on_undocumented_giant_file_regression(self) -> None:
+    def test_check_mode_warns_on_undocumented_new_giant(self) -> None:
         big = "fn x() {}\n" * (giant_files.THRESHOLD + 5)
-        with _FakeSrcTree({"src/new_giant.rs": big}) as root:
+        with _FakeSrcTree({"src/new_giant.rs": big,
+                           GiantFileRatchetCheck._BASELINE: "[giant_file_ratchet]\n",
+                           **GiantFileRatchetCheck._HISTORY}) as root:
             allowlist = root / "empty.toml"
             allowlist.write_text("", encoding="utf-8")
             with mock.patch.object(sys, "stdout", new=mock.MagicMock()), mock.patch.object(
-                sys, "stderr", new=mock.MagicMock()
+                sys, "stderr", new=io.StringIO()
             ):
                 rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
-        self.assertEqual(rc, 1)
+                self.assertIn("warning `giant_file_ratchet` src/new_giant.rs", sys.stderr.getvalue())
+                self.assertIn("+1005 production lines", sys.stderr.getvalue())
+        self.assertEqual(rc, 0)
 
     def test_operational_guards_still_block_real_fixtures(self) -> None:
         fixtures = ((direct_discord_sends.CHECK, 'ch.send_message(&http, payload);'),

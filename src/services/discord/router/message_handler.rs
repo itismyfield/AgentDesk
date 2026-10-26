@@ -267,7 +267,7 @@ pub(super) use self::attachments::{
     AttachmentDescriptor, LocalAttachmentPreparationPermit, describe_attachments,
     prepare_admitted_local_attachment, prepare_busy_inject_uploads, prepare_portable_attachments,
 };
-pub(super) use self::control::{handle_shell_command_raw, handle_text_command};
+pub(super) use self::control::handle_text_command;
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::headless_turn::{
     start_headless_turn, start_reserved_headless_turn, start_reserved_headless_turn_with_owner,

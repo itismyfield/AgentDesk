@@ -532,14 +532,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python for script checks
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      - name: Install script-test Python deps
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
       - name: Install shellcheck
-        run: sudo apt-get install -y shellcheck
+        run: sudo apt-get install -y shellcheck zsh ripgrep
+
+      - name: Run script self-tests
+        shell: bash
+        run: ./scripts/ci-script-checks.sh
+        env:
+          BASH_ENV: /dev/null
+          PYTHON: python3
+          GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REPOSITORY: ${{ github.repository }}
+          GFP_CANDIDATE_SHA: ${{ github.sha }}
+          TEST_LANE_BASELINE_REF: HEAD
+          SCRIPT_CHECK_SELF_TESTS_ONLY: "1"
 
       - name: shellcheck scripts
         shell: bash

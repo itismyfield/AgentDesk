@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 import textwrap
 import unittest
+from contextlib import redirect_stderr
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -377,30 +380,55 @@ class ApiDocsCoverageTest(unittest.TestCase):
             "route-delegation-sentinel\n",
         )
 
-    def test_overdue_giant_failure_precedes_route_generation(self) -> None:
+    def test_giant_parse_failure_precedes_route_generation(self) -> None:
         inventory = CHECKER.inventory
         calls: list[str] = []
 
-        def overdue_giant_check(
+        def malformed_giant_check(
             _modules: list[object], *, allow_overdue: bool = False
         ) -> list[object]:
             self.assertFalse(allow_overdue)
             calls.append("giant")
-            raise inventory.ParseError("synthetic shrink deadline is overdue")
+            raise inventory.ParseError("synthetic malformed giant metadata")
 
         def forbidden_route_generation() -> str:
             calls.append("route")
-            raise AssertionError("route generation ran after an overdue giant failure")
+            raise AssertionError("route generation ran after a giant parse failure")
 
-        with patch.object(
-            inventory, "build_giant_registrations", overdue_giant_check
+        with patch.object(inventory, "collect_modules", return_value=[]), patch.object(
+            inventory, "build_giant_registrations", malformed_giant_check
         ), patch.object(
             inventory, "generated_route_inventory", forbidden_route_generation
         ):
-            with self.assertRaisesRegex(inventory.ParseError, "deadline is overdue"):
+            with self.assertRaisesRegex(inventory.ParseError, "malformed giant metadata"):
                 inventory.generated_documents()
 
         self.assertEqual(calls, ["giant"])
+
+    def test_overdue_giant_warning_allows_route_generation(self) -> None:
+        inventory = CHECKER.inventory
+        path = "src/config.rs"
+        module = inventory.ModuleEntry("config", path, 1200, 1200, 0, ("giant-file",))
+        entry = {"file": path, "owner": "team", "decision": "shrink",
+                 "deadline": "2026-01-01", "decompose_issue": "#1"}
+        err = io.StringIO()
+        with patch.object(inventory, "collect_modules", return_value=[module]), \
+                patch.object(inventory, "load_giant_file_registry", return_value=([], [entry], [])), \
+                patch.object(inventory, "load_giant_file_issue_metadata", return_value={
+                    1: {"state": "open", "owners": ["team"], "files": [path]}}), \
+                patch.object(inventory, "load_giant_file_closed_issue_transition_list", return_value=set()), \
+                patch.object(inventory, "load_giant_file_issue_ratchets", return_value={
+                    "closed_deadline_entries": 0, "transition_list_entries": 0}), \
+                patch.object(inventory, "today_utc", return_value=date(2026, 10, 26)), \
+                patch.object(inventory, "collect_workers", return_value=[]), \
+                patch.object(inventory, "render_architecture_doc", return_value="architecture\n"), \
+                patch.object(inventory, "generated_route_inventory", return_value="route-sentinel\n") as route, \
+                redirect_stderr(err):
+            documents = inventory.generated_documents()
+        route.assert_called_once_with()
+        self.assertEqual(documents[inventory.GENERATED_DOCS_DIR / "route-inventory.md"], "route-sentinel\n")
+        self.assertIn("WARNING: giant-file overdue: src/config.rs; deadline 2026-01-01; decompose_issue #1",
+                      err.getvalue())
 
     def test_mounted_route_source_paths_follow_compose_api_router(self) -> None:
         with TemporaryDirectory() as tmp:

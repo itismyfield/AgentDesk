@@ -617,20 +617,12 @@ pub(in crate::services::discord) async fn cmd_allowall(
     Ok(())
 }
 
-/// Note appended to `/allowall` and `!allowall` replies: what public access
-/// really grants, and that it covers only this bot on this node.
-pub(in crate::services::discord) fn build_allowall_policy_note() -> String {
-    let shell_state = if super::high_risk_enabled_via_env() {
-        "enabled"
-    } else {
-        "disabled"
-    };
-    format!(
-        "**Note:** this setting applies only to this bot on this node. Agents run with \
-         permission prompts bypassed, so anyone who can chat here can make the agent run \
-         commands on this host. Owner-only commands stay owner-only: `/allowall`, \
-         `!allowall`, `!adduser`, `!removeuser`, and `!shell`/`!allowed` (opt-in, now {shell_state})."
-    )
+/// Note appended to `/allowall` replies: what public access really grants, and
+/// that it covers only this bot on this node.
+fn build_allowall_policy_note() -> &'static str {
+    "**Note:** this setting applies only to this bot on this node. Agents run with \
+     permission prompts bypassed, so anyone who can chat here can make the agent run \
+     commands on this host. `/allowall` itself stays owner-only."
 }
 
 #[cfg(all(test, unix))]

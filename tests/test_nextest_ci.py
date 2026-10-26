@@ -640,10 +640,13 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
         self.sp = subprocess
         self.repo = self.dir / "repo"
         for rel in ("scripts/ci/nextest_ci.py", "scripts/ci/nextest_required.py", "scripts/ci/rust_test_sources.py",
-                    "scripts/ci/nextest-base-diff.sh", "scripts/ci/test-removal-justifications.txt", ".config/nextest.toml",
+                    "scripts/ci/nextest-base-diff.sh", ".config/nextest.toml",
                     "scripts/ci/nextest-native.sh", "scripts/ci/pg_test_classifier.py", "scripts/ci/nextest-retry-policy.toml"):
             (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / rel, self.repo / rel)
+        # Only the header: the rows a real change carries match no loss in this fixture.
+        rows = (ROOT / "scripts/ci/test-removal-justifications.txt").read_text().splitlines(keepends=True)
+        (self.repo / "scripts/ci/test-removal-justifications.txt").write_text("".join(r for r in rows if r.startswith("#")))
         (self.repo / "Cargo.toml").write_text('[package]\nname = "agentdesk"\n')
         (self.repo / "src").mkdir()
         self.base_sha = self.commit(self.LIB, "base")

@@ -389,7 +389,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
 
         self.assertEqual(findings, [])
 
-    def test_warns_on_ghost_freeze_entry_below_threshold(self) -> None:
+    def test_warns_on_stale_review_entry_below_threshold(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._setup(
@@ -402,6 +402,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].severity, "warning")
         self.assertIn("no longer a giant file", findings[0].message)
+        self.assertIn("stale giant review entry", findings[0].message)
 
 
     def test_warning_only_line_count_gate_warns_on_ghost_entry(self) -> None:
@@ -444,19 +445,20 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
 
         self.assertEqual(result, 0)
 
-    def test_warns_on_count_free_frozen_entry(self) -> None:
+    def test_warns_on_count_free_review_entry(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._setup(
                 root,
                 "| `services::foo` | `src/services/foo.rs` | 4000 | 64 | 3936 |  |",
-                "- `src/services/foo.rs` (frozen giant surface) — provider adapter.\n",
+                "- `src/services/foo.rs` (giant review surface) — provider adapter.\n",
             )
             findings = CHECKER.check_change_surface_line_counts(root)
 
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].severity, "warning")
         self.assertIn("no longer a giant file", findings[0].message)
+        self.assertIn("stale giant review entry", findings[0].message)
 
     def test_count_free_entry_is_not_double_counted(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -471,10 +473,10 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].severity, "warning")
 
-    def test_warns_when_frozen_path_missing_from_disk(self) -> None:
+    def test_warns_when_review_path_missing_from_disk(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            # Inventory has an unrelated module; the frozen path does not exist
+            # Inventory has an unrelated module; the review path does not exist
             # on disk (deleted/renamed) -> stale document warning.
             self._setup(
                 root,
@@ -486,8 +488,9 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].severity, "warning")
         self.assertIn("missing from disk", findings[0].message)
+        self.assertIn("giant review entry", findings[0].message)
 
-    def test_warns_when_frozen_path_is_test_file(self) -> None:
+    def test_warns_when_review_path_is_test_file(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "src/db").mkdir(parents=True)
@@ -502,6 +505,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].severity, "warning")
         self.assertIn("test file", findings[0].message)
+        self.assertIn("giant review entry", findings[0].message)
 
 
 class ScannerFailureTest(unittest.TestCase):

@@ -13,6 +13,9 @@
 //! scenario module inherits that only once it is named in the same invocation.
 
 #[cfg(unix)]
+#[path = "agent_text_command_e2e_tests.rs"]
+mod agent_text_command_e2e;
+#[cfg(unix)]
 #[path = "busy_inject_e2e_tests.rs"]
 mod busy_inject_e2e;
 #[cfg(unix)]

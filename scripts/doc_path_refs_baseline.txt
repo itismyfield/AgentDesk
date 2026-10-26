@@ -21,5 +21,4 @@ tests/TEST_PLAN.md	router_test.rs
 tests/TEST_PLAN.md	session_persistence.rs
 tests/TEST_PLAN.md	settings_test.rs
 tests/TEST_PLAN.md	src/integration_tests.rs
-tests/TEST_PLAN.md	src/integration_tests/tests/high_risk_recovery.rs
 tests/TEST_PLAN.md	src/server/routes/settings_tests.rs

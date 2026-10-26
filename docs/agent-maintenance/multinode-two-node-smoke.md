@@ -26,8 +26,11 @@ Coverage:
 Local command:
 
 ```bash
-cargo test --bin agentdesk multinode_regression:: -- --nocapture --test-threads=1
+cargo test --lib server::multinode_regression:: -- --nocapture --test-threads=1
 ```
+
+These are PostgreSQL tests. A run that reports `running 0 tests` is a failure,
+not a pass.
 
 ## Physical Smoke
 

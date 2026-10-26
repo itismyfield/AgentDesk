@@ -49,10 +49,6 @@ pub(super) fn runtime_root() -> Option<PathBuf> {
     agentdesk_root().map(|root| root.join("runtime"))
 }
 
-pub(super) fn workspace_root() -> Option<PathBuf> {
-    agentdesk_root().map(|root| root.join("workspaces"))
-}
-
 pub(super) fn worktrees_root() -> Option<PathBuf> {
     agentdesk_root().map(|root| root.join("worktrees"))
 }

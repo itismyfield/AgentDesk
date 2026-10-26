@@ -22,6 +22,7 @@ pub(crate) struct DashboardAccess {
     // server restart, which also invalidates tickets and existing sockets.
     token: Option<Arc<str>>,
     tickets: Arc<Mutex<HashMap<[u8; 32], Ticket>>>,
+    browser_guard: Option<super::web_surface::browser_guard::BrowserGuard>,
 }
 
 impl DashboardAccess {
@@ -29,11 +30,33 @@ impl DashboardAccess {
         Self {
             token: config.server.auth_token.as_deref().map(Arc::from),
             tickets: Arc::default(),
+            browser_guard: None,
         }
     }
 
+    /// Same Host allowlist and mode as the HTTP layer, so a socket admitted here
+    /// never targets a Host that layer would reject.
+    pub(super) fn with_browser_guard(
+        mut self,
+        guard: super::web_surface::browser_guard::BrowserGuard,
+    ) -> Self {
+        self.browser_guard = Some(guard);
+        self
+    }
+
+    fn request_origin(&self, headers: &HeaderMap) -> Result<String, StatusCode> {
+        if self
+            .browser_guard
+            .as_ref()
+            .is_some_and(|guard| guard.rejects_host(headers))
+        {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        request_origin(headers)
+    }
+
     pub(crate) fn issue(&self, headers: &HeaderMap) -> Result<(String, u64), StatusCode> {
-        let origin = request_origin(headers)?;
+        let origin = self.request_origin(headers)?;
         let now = Instant::now();
         let mut tickets = self
             .tickets
@@ -60,7 +83,7 @@ impl DashboardAccess {
 
     pub(crate) fn authorize_ws(&self, headers: &HeaderMap, ticket: Option<&str>) -> bool {
         if let Some(value) = ticket {
-            let Ok(origin) = request_origin(headers) else {
+            let Ok(origin) = self.request_origin(headers) else {
                 return false;
             };
             let Ok(mut tickets) = self.tickets.lock() else {
@@ -73,7 +96,7 @@ impl DashboardAccess {
         }
         // Native clients may supply Bearer on their upgrade. A browser without
         // a ticket cannot supply it, and cross-origin browser upgrades are denied.
-        if headers.contains_key(header::ORIGIN) && request_origin(headers).is_err() {
+        if headers.contains_key(header::ORIGIN) && self.request_origin(headers).is_err() {
             return false;
         }
         ws_token_authorized(
