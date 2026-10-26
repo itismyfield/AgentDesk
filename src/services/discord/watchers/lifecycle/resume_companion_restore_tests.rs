@@ -582,13 +582,84 @@ const QUEUED_HEAD: &str = "preserve the queued instruction";
 /// The input queued before boot.
 const QUEUED_PROMPT: &str = "preserve the queued instruction\n한글";
 const QUEUED_ANSWER: &str = "I7327 queued head answered";
+const FIRST_REPLY_ID: u64 = 900_001;
+
+fn message_reply(
+    method: &axum::http::Method,
+    path: &str,
+    channel: u64,
+    next_id: &std::sync::atomic::AtomicU64,
+) -> Option<(u16, serde_json::Value)> {
+    let messages = format!("/api/v10/channels/{channel}/messages");
+    let id = if method == axum::http::Method::POST && path == messages {
+        next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    } else if method == axum::http::Method::PATCH {
+        path.strip_prefix(&format!("{messages}/"))?.parse().ok()?
+    } else {
+        return None;
+    };
+    Some((
+        200,
+        crate::services::discord::health::test_support::message_json(
+            id,
+            channel,
+            1,
+            "",
+            "2026-10-02T00:00:00+00:00",
+        ),
+    ))
+}
+
+/// Replay the mock's unique POST ids and in-place edits to count visible answer messages.
+fn answer_count(requests: Vec<String>) -> usize {
+    let mut next_id = FIRST_REPLY_ID;
+    let mut messages = std::collections::BTreeMap::new();
+    for request in requests {
+        let mut parts = request.splitn(3, ' ');
+        let (method, path, body) = (
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+            parts.next().unwrap_or_default(),
+        );
+        let id = match method {
+            "POST" if path.ends_with("/messages") => {
+                let id = next_id;
+                next_id += 1;
+                id
+            }
+            "PATCH" | "DELETE" => match path
+                .rsplit_once("/messages/")
+                .and_then(|(_, id)| id.parse::<u64>().ok())
+            {
+                Some(id) => id,
+                None => continue,
+            },
+            _ => continue,
+        };
+        if method == "DELETE" {
+            messages.remove(&id);
+        } else if let Some(content) =
+            serde_json::from_str::<serde_json::Value>(body).unwrap()["content"].as_str()
+        {
+            messages.insert(id, content.to_owned());
+        }
+    }
+    messages
+        .values()
+        .filter(|content| content.contains(QUEUED_ANSWER))
+        .count()
+}
 
 /// The Discord stand-in a REST kickoff needs: it names the fixture channel so routing resolves.
 async fn channel_discord(
     channel: u64,
 ) -> crate::services::discord::health::test_support::MockDiscord {
+    let next_id = std::sync::atomic::AtomicU64::new(FIRST_REPLY_ID);
     crate::services::discord::health::test_support::MockDiscord::start_with(std::sync::Arc::new(
         move |method: &axum::http::Method, path: &str| {
+            if let Some(reply) = message_reply(method, path, channel, &next_id) {
+                return Some(reply);
+            }
             (method == axum::http::Method::GET && path.ends_with(&format!("/channels/{channel}")))
                 .then(|| {
                     (
@@ -789,13 +860,51 @@ impl LegacyQueued {
         (memory.intervention_queue.len(), durable.len())
     }
 
-    /// Codex's rollout rows for the submitted head and its one answer.
-    fn answer(&self) {
+    /// Observe the streaming edit before completing the turn, so both delivery phases run.
+    async fn answer(
+        &self,
+        discord: &crate::services::discord::health::test_support::MockDiscord,
+        trace: impl Fn() -> String,
+    ) {
         let mut native = std::fs::OpenOptions::new()
             .append(true)
             .open(&self.native)
             .unwrap();
-        std::io::Write::write_all(&mut native, queued_turn_rows().as_bytes()).unwrap();
+        let rows = queued_turn_rows();
+        let (complete, streaming) = rows.split_last().unwrap();
+        std::io::Write::write_all(&mut native, streaming.concat().as_bytes()).unwrap();
+        wait_for(
+            "the streaming answer reaches Discord",
+            || answer_count(discord.requests_for(self.install.channel.get())) > 0,
+            trace,
+        )
+        .await;
+        std::io::Write::write_all(&mut native, complete.as_bytes()).unwrap();
+    }
+
+    async fn wait_for_completion(
+        &self,
+        discord: &crate::services::discord::health::test_support::MockDiscord,
+        trace: impl Fn() -> String,
+    ) {
+        let post = format!("POST /api/v10/channels/{}/messages ", self.install.channel);
+        wait_for(
+            "the terminal completion footer reaches Discord",
+            || {
+                discord
+                    .requests_for(self.install.channel.get())
+                    .iter()
+                    .any(|request| {
+                        request.strip_prefix(&post).is_some_and(|body| {
+                            serde_json::from_str::<serde_json::Value>(body).unwrap()["content"]
+                                .as_str()
+                                .is_some_and(|content| content.starts_with("-# ⏱️ "))
+                        })
+                    })
+            },
+            trace,
+        )
+        .await;
     }
 
     async fn activity(&self) -> (Activity, String) {
@@ -810,7 +919,7 @@ impl LegacyQueued {
 }
 
 /// The rollout rows Codex writes for the submitted queued head and its one answer.
-fn queued_turn_rows() -> String {
+fn queued_turn_rows() -> [String; 5] {
     let at = chrono::Utc::now().to_rfc3339();
     let message = |role: &str, kind: &str, text: &str| {
         json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":role,
@@ -827,7 +936,6 @@ fn queued_turn_rows() -> String {
             "turn_id":"i7327-boot","last_agent_message":QUEUED_ANSWER}}),
     ]
     .map(|row| format!("{row}\n"))
-    .concat()
 }
 
 /// Exactly one Enter submitted the whole queued input, Korean line included.
@@ -883,19 +991,7 @@ fn rehydrated_idle_codex_boot_kickoff_submits_queued_head_once_and_drains() {
         };
         let submitted_once = || !install::pane_submits().is_empty();
         wait_for("the queued head is submitted", submitted_once, &trace).await;
-        fixture.answer();
-        let answered = |requests: Vec<String>| {
-            requests
-                .iter()
-                .filter(|request| request.contains(QUEUED_ANSWER))
-                .count()
-        };
-        wait_for(
-            "the answer reaches Discord",
-            || answered(discord.requests_for(channel.get())) > 0,
-            &trace,
-        )
-        .await;
+        fixture.answer(&discord, &trace).await;
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(40), kickoff)
                 .await
@@ -903,18 +999,17 @@ fn rehydrated_idle_codex_boot_kickoff_submits_queued_head_once_and_drains() {
                 .unwrap(),
             1
         );
-        // A duplicate submission or relay would land within the same watcher poll window.
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        fixture.wait_for_completion(&discord, &trace).await;
+        let _ = submitted.cancel_and_join_all().await;
         assert_submitted_once(&trace());
         assert_eq!(
-            answered(discord.requests_for(channel.get())),
+            answer_count(discord.requests_for(channel.get())),
             1,
             "{}",
             trace()
         );
         assert_eq!(fixture.queue_depths().await, (0, 0));
         assert_eq!(settled, (Activity::Idle, "closed".to_owned()));
-        let _ = submitted.cancel_and_join_all().await;
     });
 }
 
@@ -939,6 +1034,7 @@ async fn ingress_discord(
     message: u64,
 ) -> crate::services::discord::health::test_support::MockDiscord {
     use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+    let next_id = std::sync::atomic::AtomicU64::new(FIRST_REPLY_ID);
     let mut history = discord_mock::history_message_json(message, QUEUED_PROMPT, false);
     history["channel_id"] = json!(channel.to_string());
     history["guild_id"] = json!("42000");
@@ -960,6 +1056,9 @@ async fn ingress_discord(
     crate::services::discord::health::test_support::MockDiscord::start_with_query(
         std::sync::Arc::new(move |method: &axum::http::Method, target: &str| {
             let (path, query) = target.split_once('?').unwrap_or((target, ""));
+            if let Some(reply) = message_reply(method, path, channel, &next_id) {
+                return Some(reply);
+            }
             if method != axum::http::Method::GET {
                 return None;
             }
@@ -1023,6 +1122,7 @@ fn restart_gap_message_is_submitted_once(order: Ingress, channel: u64) {
     runtime().block_on(async {
         let fixture = LegacyQueued::booted(channel).await;
         let shared = fixture.install.shared.clone();
+        let submitted = Scope::new(&shared);
         let session = fixture.install.session.clone();
         install::ready_codex_composer(&session);
         let message = recent_message_id();
@@ -1100,23 +1200,20 @@ fn restart_gap_message_is_submitted_once(order: Ingress, channel: u64) {
             &trace,
         )
         .await;
-        fixture.answer();
-        let answered = || {
-            discord
-                .requests_for(channel)
-                .iter()
-                .filter(|request| request.contains(QUEUED_ANSWER))
-                .count()
-        };
-        wait_for("the answer reaches Discord", || answered() > 0, &trace).await;
+        fixture.answer(&discord, &trace).await;
         let kicks = tokio::time::timeout(std::time::Duration::from_secs(40), boot)
             .await
             .unwrap()
             .unwrap();
-        // A duplicate submission or relay would land within the same watcher poll window.
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        fixture.wait_for_completion(&discord, &trace).await;
+        let _ = submitted.cancel_and_join_all().await;
         assert_submitted_once(&format!("kicks {kicks:?}; {}", trace()));
-        assert_eq!(answered(), 1, "{}", trace());
+        assert_eq!(
+            answer_count(discord.requests_for(channel)),
+            1,
+            "{}",
+            trace()
+        );
         assert_eq!(fixture.queue_depths().await, (0, 0), "{}", trace());
         gateway.abort();
     });
