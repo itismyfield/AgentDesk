@@ -292,26 +292,36 @@ pub(in crate::services::discord) struct TurnFacts {
 }
 
 impl TurnFacts {
-    /// The mailbox's turn and the younger of its start and the inflight row's; either may be stale.
     pub(in crate::services::discord) fn new(
         channel_id: u64,
         mailbox: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
         session: &super::session_enrichment::SessionEnrichment,
     ) -> Self {
-        let now = chrono::Utc::now().timestamp();
-        let inflight_started = session.inflight_started_at();
-        let inflight = inflight_started
-            .as_deref()
-            .and_then(crate::services::discord::inflight::parse_started_at_unix);
-        let mailbox_started = mailbox.turn_started_at.map(|at| at.timestamp());
-        let started = [mailbox_started, inflight].into_iter().flatten().max();
         Self {
             channel_id,
             turn_open: mailbox.cancel_token.is_some() || mailbox.active_user_message_id.is_some(),
-            turn_age_secs: started.map(|started| now.saturating_sub(started).max(0) as u64),
+            turn_age_secs: turn_age_secs(mailbox, session.inflight_started_at().as_deref()),
             inflight_present: session.inflight_state_present,
         }
     }
+}
+
+/// Seconds since the younger of the mailbox turn's start and the inflight row's; either may be
+/// stale, and a turn cannot have waited longer than the newer of the two.
+pub(in crate::services::discord) fn turn_age_secs(
+    mailbox: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
+    inflight_started_at: Option<&str>,
+) -> Option<u64> {
+    let inflight =
+        inflight_started_at.and_then(crate::services::discord::inflight::parse_started_at_unix);
+    let mailbox_started = mailbox.turn_started_at.map(|at| at.timestamp());
+    let started = [mailbox_started, inflight].into_iter().flatten().max()?;
+    Some(
+        chrono::Utc::now()
+            .timestamp()
+            .saturating_sub(started)
+            .max(0) as u64,
+    )
 }
 
 /// #5188 (R5/R6): gather the evidence for [`classify_transcript_binding_stall`]

@@ -47,10 +47,14 @@ fn watcher(tmux: &str, output: &std::path::Path) -> discord::TmuxWatcherHandle {
     }
 }
 
-/// The turn bridge rewrote the row every second while waiting, so its `updated_at` and open
-/// tool read as live; O had posted the footer and owed nothing, and the mailbox stayed open.
-#[tokio::test]
-async fn a_drained_o_turn_pages_without_the_capture_axis_despite_a_self_refreshed_row() {
+/// The pass on an O-owned channel whose turn O drained `still_secs` ago while the mailbox, opened
+/// `turn_age_secs` ago, stayed open over a 30-minute Legacy row the turn bridge rewrote every
+/// second; returns its WARN logs once it has checked that the pass cleaned nothing.
+async fn pass_on_a_drained_o_turn(
+    channel: ChannelId,
+    turn_age_secs: u64,
+    still_secs: u64,
+) -> Option<String> {
     let _absence = watcher_respawn::lock_watcher_absence_for_test().await;
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let tempdir = tempfile::tempdir().expect("runtime root");
@@ -60,13 +64,16 @@ async fn a_drained_o_turn_pages_without_the_capture_axis_despite_a_self_refreshe
     );
     if !crate::services::platform::tmux::is_available() {
         eprintln!("SOFT_SKIP: tmux unavailable");
-        return;
+        return None;
     }
     let provider = ProviderKind::Codex;
-    let channel = ChannelId::new(7_333_401);
-    let user_msg = MessageId::new(7_333_402);
+    let user_msg = MessageId::new(channel.get() + 1);
     // A per-run name whose pane exits on its own, so the fixture never kills a session.
-    let tmux = format!("AgentDesk-codex-7333-o-stall-{}", std::process::id());
+    let tmux = format!(
+        "AgentDesk-codex-7333-o-stall-{}-{}",
+        channel.get(),
+        std::process::id()
+    );
     assert!(
         crate::services::platform::tmux::create_session(&tmux, None, "sleep 30")
             .expect("start tmux fixture")
@@ -91,7 +98,7 @@ async fn a_drained_o_turn_pages_without_the_capture_axis_despite_a_self_refreshe
     );
     let mailbox = shared.mailbox_peek(channel).expect("mailbox actor");
     mailbox
-        .age_active_turn_for_test(Duration::from_secs(1_800))
+        .age_active_turn_for_test(Duration::from_secs(turn_age_secs))
         .await;
 
     let rollout = tempdir.path().join("rollout-7333.jsonl");
@@ -134,7 +141,7 @@ async fn a_drained_o_turn_pages_without_the_capture_axis_despite_a_self_refreshe
         unsealed: false,
         serial: 96,
     });
-    binding_stall::o_witness_backdate_for_tests(channel.get(), 96, 400);
+    binding_stall::o_witness_backdate_for_tests(channel.get(), 96, still_secs);
 
     let captured = Captured::default();
     let subscriber = tracing_subscriber::fmt()
@@ -154,10 +161,6 @@ async fn a_drained_o_turn_pages_without_the_capture_axis_despite_a_self_refreshe
         "the snapshot names the open mailbox:\n{logs}"
     );
     assert!(
-        logs.contains(&format!("suspected stall on channel {}", channel.get())),
-        "the drained turn pages:\n{logs}"
-    );
-    assert!(
         !logs.contains("STALL-WATCHDOG: shadow_verdict"),
         "the capture axis is not judged for an O-owned channel:\n{logs}"
     );
@@ -170,4 +173,31 @@ async fn a_drained_o_turn_pages_without_the_capture_axis_despite_a_self_refreshe
         "paging cleans nothing"
     );
     assert!(discord::inflight::load_inflight_state(&provider, channel.get()).is_some());
+    Some(logs)
+}
+
+/// 10-23 01:51Z: O posted the footer and owed nothing, and the mailbox stayed open for 30 minutes.
+#[tokio::test]
+async fn a_drained_o_turn_pages_without_the_capture_axis_despite_a_self_refreshed_row() {
+    let channel = ChannelId::new(7_333_401);
+    let Some(logs) = pass_on_a_drained_o_turn(channel, 1_800, 400).await else {
+        return;
+    };
+    assert!(
+        logs.contains(&format!("suspected stall on channel {}", channel.get())),
+        "the drained turn pages:\n{logs}"
+    );
+}
+
+/// The page waits for the turn the verdict judged, however old the Legacy row is.
+#[tokio::test]
+async fn a_drained_o_turn_younger_than_the_page_threshold_does_not_page_on_an_old_row() {
+    let channel = ChannelId::new(7_333_411);
+    let Some(logs) = pass_on_a_drained_o_turn(channel, 450, 350).await else {
+        return;
+    };
+    assert!(
+        !logs.contains("suspected stall on channel"),
+        "a 450 s turn is short of the 600 s page threshold:\n{logs}"
+    );
 }

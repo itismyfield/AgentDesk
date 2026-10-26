@@ -144,7 +144,6 @@ async fn page_o_stall(
     provider: &ProviderKind,
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
-    basis: &stall_liveness::StallWatchdogJudgmentBasis,
 ) {
     let delivery = [
         TranscriptBindingStall::ODeliveryStalled,
@@ -153,10 +152,13 @@ async fn page_o_stall(
     let blamed = delivery
         .iter()
         .any(|stall| stall.as_str() == snapshot.transcript_binding_stall);
-    let young = basis
-        .inflight_age_secs
-        .is_some_and(|age| age < STALL_WATCHDOG_THRESHOLD_SECS);
-    if !blamed || young {
+    if !blamed {
+        return;
+    }
+    // The turn the verdict judged, not the Legacy row, which may be left from an earlier turn.
+    let mailbox = discord::mailbox_snapshot(shared, channel_id).await;
+    let turn_age = binding_stall::turn_age_secs(&mailbox, snapshot.inflight_started_at.as_deref());
+    if turn_age.is_none_or(|age| age < STALL_WATCHDOG_THRESHOLD_SECS) {
         return;
     }
     let inflight = discord::inflight::load_inflight_state(provider, channel_id.get());
@@ -491,7 +493,7 @@ pub(crate) async fn run_stall_watchdog_pass(
         }
         if !should_clean {
             if o_owned {
-                page_o_stall(&shared, provider, channel_id, &snapshot, &judgment_basis).await;
+                page_o_stall(&shared, provider, channel_id, &snapshot).await;
             }
             // Detection-only sibling probe for "completed-stale" inflight
             // leaks: bridge handed off cleanup to the watcher (or the watcher
