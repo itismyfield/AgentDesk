@@ -692,9 +692,8 @@ esac
     assert!(!composer_lock::draft_guarded("scripted-idle"));
 }
 
-/// Every Claude entry, inside a managed attempt or not, on a channel outside the stash list takes
-/// the one submission: one pre-paste read, the paste behind the draft and one Enter, and nothing
-/// goes through the legacy transport.
+/// Every Claude entry, managed or not, on a channel outside the stash list takes one pre-paste
+/// read, a paste behind the draft and one Enter; nothing goes through the legacy transport.
 #[test]
 fn every_entry_on_an_unlisted_channel_takes_the_one_submission() {
     use crate::services::claude_tui::busy_inject::StashChannelGuard;
