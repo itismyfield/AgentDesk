@@ -137,7 +137,8 @@ impl Fixture {
             busy_followup_retry_user_msg_id: MessageId::new(source),
             request_owner: UserId::new(1),
             request_owner_name: "owner".into(),
-            user_text: "original held prompt".into(),
+            // Distinct text, so the mailbox never folds one source into another as a repeat.
+            user_text: format!("original held prompt {source}"),
             reply_to_user_message: false,
             defer_watcher_resume: false,
             wait_for_completion: false,
