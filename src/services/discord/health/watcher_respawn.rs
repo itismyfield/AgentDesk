@@ -49,6 +49,7 @@ use poise::serenity_prelude::ChannelId;
 
 use super::HealthRegistry;
 use super::snapshot::WatcherStateSnapshot;
+use super::tick_mailboxes::{TickMailboxes, WatcherRead};
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
 
@@ -232,18 +233,19 @@ async fn complete_force_clean_watcher_recovery_admitted(
 pub(super) async fn sweep_and_retry_absences(
     registry: &HealthRegistry,
     provider: &ProviderKind,
-    runtimes: &[Arc<SharedData>],
+    tick: &TickMailboxes,
     watcher_derived: &std::collections::HashSet<ChannelId>,
     now_unix_secs: i64,
 ) {
     observe_watcher_absence_for_unwatched_work(
         registry,
         provider,
-        runtimes,
+        tick,
         watcher_derived,
         now_unix_secs,
     )
     .await;
+    let runtimes = tick.runtimes();
     // #5957: the registry-derived authority runs AFTER the relay-work one, so a
     // channel both can reach is observed by the sweep carrying the richer
     // evidence and this one steps aside (see `observed_on_this_tick`).
@@ -301,17 +303,16 @@ pub(super) async fn retry_pending_watcher_respawns(
 pub(super) async fn observe_watcher_absence_for_unwatched_work(
     registry: &HealthRegistry,
     provider: &ProviderKind,
-    runtimes: &[Arc<SharedData>],
+    tick: &TickMailboxes,
     watcher_derived: &std::collections::HashSet<ChannelId>,
     now_unix_secs: i64,
 ) -> usize {
     let mut absent = 0usize;
     for (channel_id, shared) in
-        unwatched_relay_work_candidates(provider, runtimes, watcher_derived).await
+        unwatched_relay_work_candidates(provider, tick, watcher_derived).await
     {
-        let Some(snapshot) = registry
-            .snapshot_watcher_state_for_shared(provider, shared, channel_id.get())
-            .await
+        let WatcherRead::Observed(snapshot) =
+            tick.watcher_state(registry, shared, channel_id).await
         else {
             continue;
         };
@@ -331,14 +332,19 @@ pub(super) async fn observe_watcher_absence_for_unwatched_work(
 /// mailbox and the persisted inflight row.
 async fn unwatched_relay_work_candidates(
     provider: &ProviderKind,
-    runtimes: &[Arc<SharedData>],
+    tick: &TickMailboxes,
     watcher_derived: &std::collections::HashSet<ChannelId>,
 ) -> Vec<(ChannelId, Arc<SharedData>)> {
+    let runtimes = tick.runtimes();
     let mut seen: std::collections::HashSet<ChannelId> = watcher_derived.clone();
     let mut candidates: Vec<(ChannelId, Arc<SharedData>)> = Vec::new();
-    for shared in runtimes {
-        for (channel_id, mailbox) in shared.mailboxes.snapshot_all().await {
-            if !mailbox_owes_relay_work(&mailbox) {
+    for (shared, mailboxes) in tick.mailboxes() {
+        for (&channel_id, mailbox) in mailboxes {
+            // An actor that did not answer may still owe work, so it stays a candidate.
+            if mailbox
+                .as_ref()
+                .is_ok_and(|mailbox| !mailbox_owes_relay_work(mailbox))
+            {
                 continue;
             }
             if seen.insert(channel_id) {
@@ -1762,7 +1768,8 @@ mod tests {
         runtimes: &[std::sync::Arc<crate::services::discord::SharedData>],
         watcher_derived: &std::collections::HashSet<ChannelId>,
     ) -> Vec<ChannelId> {
-        unwatched_relay_work_candidates(provider, runtimes, watcher_derived)
+        let tick = TickMailboxes::enumerate(provider, runtimes.to_vec()).await;
+        unwatched_relay_work_candidates(provider, &tick, watcher_derived)
             .await
             .into_iter()
             .map(|(channel_id, _)| channel_id)
@@ -1857,7 +1864,7 @@ mod tests {
         let absent = observe_watcher_absence_for_unwatched_work(
             &registry,
             &provider,
-            &[shared],
+            &TickMailboxes::enumerate(&provider, vec![shared]).await,
             &std::collections::HashSet::new(),
             chrono::Utc::now().timestamp(),
         )
@@ -1897,7 +1904,7 @@ mod tests {
         observe_watcher_absence_for_unwatched_work(
             &registry,
             &provider,
-            &runtimes,
+            &TickMailboxes::enumerate(&provider, runtimes.clone()).await,
             &std::collections::HashSet::new(),
             t0,
         )

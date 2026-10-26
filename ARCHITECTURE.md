@@ -1220,7 +1220,8 @@ src/
 │   │   │   │   ├── stop_judgement/
 │   │   │   │   │   └── judged_finish_tests.rs
 │   │   │   │   ├── watchdog_pass/
-│   │   │   │   │   └── o_stall_tests.rs
+│   │   │   │   │   ├── o_stall_tests.rs
+│   │   │   │   │   └── tick_tests.rs
 │   │   │   │   ├── channel_runtime.rs
 │   │   │   │   ├── inflight_repair.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
@@ -1234,6 +1235,7 @@ src/
 │   │   │   │   ├── stall_watchdog_task.rs
 │   │   │   │   ├── stop_judgement.rs
 │   │   │   │   ├── stop_result.rs
+│   │   │   │   ├── tick_mailboxes.rs
 │   │   │   │   ├── watchdog_decisions.rs
 │   │   │   │   ├── watchdog_pass.rs
 │   │   │   │   └── zombie_reclaim.rs
@@ -1302,6 +1304,7 @@ src/
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── tail_evidence.rs
 │   │   │   ├── test_support.rs
+│   │   │   ├── tmux_preflight.rs
 │   │   │   ├── transcript_binding_stall.rs
 │   │   │   ├── turn_deliver.rs
 │   │   │   ├── unbound_owners.rs

@@ -13,7 +13,7 @@ use super::liveness_authority::{CaptureCoordinateObservation, CoordinateStatus};
 
 #[path = "probe_runtime.rs"]
 mod probe_runtime;
-use probe_runtime::{HealthProbeRuntime, ProbeOutcome};
+pub(super) use probe_runtime::{HealthProbeRuntime, ProbeFault, ProbeOutcome};
 
 pub(super) const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
 

@@ -2,6 +2,7 @@
 
 use super::*;
 
+use super::super::tick_mailboxes::{TickMailboxes, WatcherRead};
 use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_via_shared as tv_clear;
 
@@ -190,9 +191,11 @@ pub(crate) async fn run_stall_watchdog_pass(
     if runtimes.is_empty() {
         return 0;
     }
+    // Every consumer of this tick reads the one enumeration; the next tick makes its own.
+    let tick = TickMailboxes::enumerate(provider, runtimes).await;
     let mut candidate_channels: Vec<(ChannelId, Arc<SharedData>)> = Vec::new();
     let mut seen: std::collections::HashSet<ChannelId> = std::collections::HashSet::new();
-    for runtime in &runtimes {
+    for runtime in tick.runtimes() {
         let runtime_channels: Vec<ChannelId> = runtime
             .tmux_watchers
             .iter()
@@ -214,12 +217,12 @@ pub(crate) async fn run_stall_watchdog_pass(
     for (channel_id, shared) in candidate_channels {
         // Use the selected runtime so same-provider multi-bot snapshots target
         // the bot that owns this watcher.
-        let snapshot = match registry
-            .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
+        let snapshot = match tick
+            .watcher_state(registry, shared.clone(), channel_id)
             .await
         {
-            Some(snapshot) => snapshot,
-            None => continue,
+            WatcherRead::Observed(snapshot) => *snapshot,
+            WatcherRead::Gone | WatcherRead::Unknown => continue,
         };
         // A successful takeover owns this tick; the snapshot is now stale.
         if recovering.contains(&channel_id.get())
@@ -674,10 +677,12 @@ pub(crate) async fn run_stall_watchdog_pass(
     }
     // A cancelled watcher and a failed respawn both leave the channel out of the
     // watcher-derived candidate loop above, so neither is reachable from it.
-    watcher_respawn::sweep_and_retry_absences(registry, provider, &runtimes, &seen, now_unix_secs)
+    watcher_respawn::sweep_and_retry_absences(registry, provider, &tick, &seen, now_unix_secs)
         .await;
-    cleaned + relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &runtimes).await
+    cleaned + relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &tick).await
 }
 
 #[cfg(test)]
 mod o_stall_tests;
+#[cfg(all(test, unix))]
+mod tick_tests;

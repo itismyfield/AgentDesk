@@ -131,7 +131,7 @@ impl Fixture {
         sweep_and_retry_absences(
             &self.registry,
             &PROVIDER,
-            std::slice::from_ref(&self.shared),
+            &TickMailboxes::enumerate(&PROVIDER, vec![self.shared.clone()]).await,
             &std::collections::HashSet::new(),
             now,
         )

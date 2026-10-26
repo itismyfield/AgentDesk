@@ -50,7 +50,8 @@ pub(crate) async fn run_orphan_token_auto_heal_pass_for_tests(
     provider: &ProviderKind,
     runtimes: &[Arc<SharedData>],
 ) -> usize {
-    relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, runtimes).await
+    let tick = tick_mailboxes::TickMailboxes::enumerate(provider, runtimes.to_vec()).await;
+    relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &tick).await
 }
 pub(in crate::services::discord) use relay_auto_heal::relay_recovery_retry_delay_secs;
 mod relay_dead_reattach;
@@ -65,9 +66,14 @@ mod stall_verdict;
 pub(in crate::services::discord) mod tail_evidence;
 #[cfg(test)]
 pub(in crate::services::discord) mod test_support;
+#[path = "health/recovery/tick_mailboxes.rs"]
+mod tick_mailboxes;
 pub(in crate::services::discord) use tail_evidence::TailObservation;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
+mod tmux_preflight;
 mod transcript_binding_stall;
+pub(crate) use tmux_preflight::attach_tmux_probe_preflight;
+pub(crate) use tmux_preflight::spawn as spawn_tmux_probe_preflight;
 mod turn_deliver;
 mod unbound_owners;
 mod unpaired_active_token;

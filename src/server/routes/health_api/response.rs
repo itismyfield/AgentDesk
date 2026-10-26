@@ -117,6 +117,12 @@ async fn assemble(
             detailed,
         );
         health::attach_o_stall_reasons(&mut status, &mut degraded_reasons);
+        health::attach_tmux_probe_preflight(
+            registry,
+            &mut status,
+            &mut degraded_reasons,
+            &mut json,
+        );
         // Read from the snapshot's reasons before the `retain` below drops
         // `no_providers_registered` on a standby node.
         let cluster_standby_without_gateway = late.standby_without_gateway && server_up;

@@ -13,7 +13,7 @@ use crate::services::provider::CancelToken;
 use crate::services::tui_o::writer::progress::{ChannelProgress, Publisher};
 
 #[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
+pub(super) struct Captured(pub(super) Arc<Mutex<Vec<u8>>>);
 
 impl std::io::Write for Captured {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -34,7 +34,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
     }
 }
 
-fn watcher(tmux: &str, output: &std::path::Path) -> discord::TmuxWatcherHandle {
+pub(super) fn watcher(tmux: &str, output: &std::path::Path) -> discord::TmuxWatcherHandle {
     discord::TmuxWatcherHandle {
         tmux_session_name: tmux.to_string(),
         output_path: output.to_string_lossy().into_owned(),
