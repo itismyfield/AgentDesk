@@ -189,7 +189,6 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "router/intake_gate.rs": {".say": 3},
     "router/intake_gate/busy_inject.rs": {".say": 1},
     "router/message_handler/attachments.rs": {".say": 4},
-    "router/message_handler/control.rs": {".say": 1},
     "router/message_handler/goal_lifecycle.rs": {".say": 1},
     "router/message_handler/intake_turn.rs": {".say": 2},
     "router/message_handler/intake_turn/host_refusal.rs": {".say": 1},
@@ -312,7 +311,6 @@ CENSUS: dict[str, tuple[str, ...]] = {
     # Injection notices (unconfirmed paste, unknown handback); no body text.
     "router/intake_gate/busy_inject.rs": ("INTAKE", "KEEP_NONBODY"),
     "router/message_handler/attachments.rs": ("INTAKE", "KEEP_NONBODY"),
-    "router/message_handler/control.rs": ("INTAKE", "KEEP_NONBODY"),
     "router/message_handler/goal_lifecycle.rs": ("INTAKE", "KEEP_NONBODY"),
     "router/message_handler/intake_turn.rs": ("INTAKE", "KEEP_NONBODY"),
     "router/message_handler/intake_turn/host_refusal.rs": ("INTAKE", "KEEP_NONBODY"),
