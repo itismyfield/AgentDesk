@@ -33,8 +33,7 @@ use super::transcript_binding_stall::{self, resolve_bound_selector};
 use super::unpaired_active_token::{self, RelayHealthBuildInput, build_relay_health_snapshot};
 use super::{BotTokenReloadScopes, HealthRegistry, bot_token_reload_scopes};
 use crate::services::discord::relay_health::{
-    DurableFrontierObservation, RelayActiveTurn, RelayHealthSnapshot, RelayStallClassifier,
-    RelayStallState,
+    DurableFrontierObservation, RelayActiveTurn, RelayHealthSnapshot, RelayStallState,
 };
 use crate::services::discord::{self, SharedData};
 use crate::services::provider::ProviderKind;
@@ -601,7 +600,7 @@ async fn watcher_state_snapshot_for_shared(
             session.inflight.as_ref(),
         ),
     });
-    let relay_stall_state = RelayStallClassifier::classify(&relay_health);
+    let relay_stall_state = transcript_binding_stall::classify_relay_stall(&relay_health);
     trace_relay_health_classification(&relay_health, relay_stall_state);
     // #4408 phase-2 (I1): resolve the relay tail's bound transcript/session. The
     // runtime binding is a sync single-shot lookup (its Mutex guard is released

@@ -32,7 +32,7 @@ mod transition_log;
 
 #[cfg(test)]
 pub(in crate::services::discord) use o_witness::backdate_for_tests as o_witness_backdate_for_tests;
-pub(in crate::services::discord) use o_witness::{OWitness, o_owns};
+pub(in crate::services::discord) use o_witness::{OWitness, classify_relay_stall, o_owns};
 pub(in crate::services::discord) use transition_log::{Transition, TransitionLog};
 
 #[cfg(not(test))]
@@ -431,6 +431,9 @@ pub(in crate::services::discord) fn resolve_transcript_binding_stall(
 
 #[cfg(test)]
 mod o_verdict_tests;
+
+#[cfg(all(test, unix))]
+mod o_relay_stall_tests;
 
 #[cfg(test)]
 mod tests {

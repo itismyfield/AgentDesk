@@ -1,11 +1,14 @@
-//! O's side of the binding-stall verdict. When O posts a channel's TUI body, the Legacy inflight
-//! row and capture offsets say nothing about delivery; O's own position after each poll does.
+//! O's side of the stall verdicts. When O posts a channel's TUI body, the Legacy inflight row,
+//! capture offsets and watcher frontier say nothing about delivery; O's own position does.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use tokio::time::Instant;
 
+use crate::services::discord::relay_health::{
+    RelayHealthSnapshot, RelayStallClassifier, RelayStallState,
+};
 use crate::services::tui_o::writer::progress::{self, ChannelProgress};
 
 /// What health can see of the actor that posts an O-owned channel's body.
@@ -30,6 +33,21 @@ pub(in crate::services::discord) fn o_owns(channel: u64) -> bool {
     crate::services::tui_o::cutover::boot_ownership()
         .into_iter()
         .any(|(id, _, candidate)| id == channel && candidate.is_some_and(|c| c.peek().owned()))
+}
+
+/// The relay stall state recovery acts on. O posts an owned channel's body while the watcher
+/// frontier stays put, so that lag is no dead relay; O's own stall verdict judges the turn.
+pub(in crate::services::discord) fn classify_relay_stall(
+    relay_health: &RelayHealthSnapshot,
+) -> RelayStallState {
+    if !o_owns(relay_health.channel_id) {
+        return RelayStallClassifier::classify(relay_health);
+    }
+    // `desynced` feeds only the watcher-relay branch; every other state classifies as it would.
+    RelayStallClassifier::classify(&RelayHealthSnapshot {
+        desynced: false,
+        ..relay_health.clone()
+    })
 }
 
 /// O's witness for `channel`, or `None` when O does not own its body.
