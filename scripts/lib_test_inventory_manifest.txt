@@ -4409,6 +4409,7 @@ services::discord::health::recovery::stop_judgement::judged_finish_tests::a_forc
 services::discord::health::recovery::stop_judgement::judged_finish_tests::a_lookup_stop_finishes_only_the_turn_it_judged
 services::discord::health::recovery::stop_judgement::judged_finish_tests::a_stop_leaves_a_turn_admitted_after_the_judged_one_ended
 services::discord::health::recovery::stop_judgement::judged_finish_tests::c1_lookup_stop_keeps_runtime_when_live_receiver_drops_judgement_reply
+services::discord::health::recovery::watchdog_pass::o_stall_tests::a_drained_o_turn_pages_without_the_capture_axis_despite_a_self_refreshed_row
 services::discord::health::redaction::tests::visible_message_id_redacts_zero_placeholders
 services::discord::health::relay_auto_heal::orphan_token_tests::agentdesk_session_probe_failure_is_graded_as_unmeasured
 services::discord::health::relay_auto_heal::orphan_token_tests::confirmed_dead_rowless_orphan_token_still_needs_a_warrant
@@ -4609,6 +4610,15 @@ services::discord::health::tests::registered_token_hashes_are_the_providers_own_
 services::discord::health::tests::reload_bot_tokens_keeps_previous_client_when_credential_is_missing
 services::discord::health::tests::reload_bot_tokens_reports_success_and_invalidates_user_id_cache
 services::discord::health::tests::utility_bot_user_id_cache_rejects_stale_http_after_reload
+services::discord::health::transcript_binding_stall::o_verdict_tests::a_continuing_stall_warns_once_across_consumers_and_ticks
+services::discord::health::transcript_binding_stall::o_verdict_tests::a_position_first_seen_after_a_restart_starts_unobserved
+services::discord::health::transcript_binding_stall::o_verdict_tests::a_turn_younger_than_the_threshold_is_not_frozen_on_an_old_transcript
+services::discord::health::transcript_binding_stall::o_verdict_tests::an_idle_o_channel_with_a_leftover_row_is_quiet
+services::discord::health::transcript_binding_stall::o_verdict_tests::an_o_delivery_stall_reaches_health_and_leaves_when_o_moves
+services::discord::health::transcript_binding_stall::o_verdict_tests::an_o_turn_without_a_running_writer_fails_closed
+services::discord::health::transcript_binding_stall::o_verdict_tests::o_debt_alerts_only_once_the_ledger_has_stood_still
+services::discord::health::transcript_binding_stall::o_verdict_tests::the_drained_turn_left_open_alerts_as_an_open_mailbox
+services::discord::health::transcript_binding_stall::o_verdict_tests::the_native_turn_at_work_is_not_a_delivery_stall
 services::discord::health::transcript_binding_stall::tests::a_binding_left_on_a_superseded_session_alerts_after_the_rotation_record_is_gone
 services::discord::health::transcript_binding_stall::tests::a_dead_pane_or_detached_relay_is_somebody_elses_verdict
 services::discord::health::transcript_binding_stall::tests::a_live_turn_waiting_on_a_frozen_transcript_alerts
@@ -13853,6 +13863,7 @@ services::tui_o::writer::owed::tests::verified::turn_summaries::a_codex_summary_
 services::tui_o::writer::owed::tests::verified::turn_summaries::a_revoked_exact_permit_keeps_the_codex_summary_owed_after_its_body_posted
 services::tui_o::writer::owed::tests::verified::turn_summaries::native_codex_summary_uses_its_closing_record_origin_and_exact_episode_permit
 services::tui_o::writer::owed::tests::verified::with_the_readiness_gate_off_a_valid_permit_and_span_post_nothing
+services::tui_o::writer::progress::tests::an_ended_actor_leaves_no_position_and_never_removes_its_successor
 services::tui_o::writer::renumbered::tests::two_stored_variants_of_one_file_refuse_every_dev_including_their_own
 services::tui_o::writer::rotation::fork_lineage::tests::all_identities_and_each_announced_or_sealed_alternative_need_range_evidence
 services::tui_o::writer::rotation::fork_lineage::tests::every_byte_split_preserves_offsets_and_never_promotes_an_incomplete_tail

@@ -111,6 +111,7 @@ pub use headless_turn::{
 };
 pub use mailbox::purge_idle_channel_mailbox_registry_entry;
 pub(crate) use presence_unknown::attach_turn_presence_unknown;
+pub(crate) use transcript_binding_stall::attach_o_stall_reasons;
 #[cfg(all(test, unix))]
 pub(crate) use turn_deliver::inject_tests::{
     InjectPane, claim_kinded, end_turn, inject_hook, queue_texts, register_inject_runtime,

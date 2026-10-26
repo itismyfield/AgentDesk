@@ -1222,6 +1222,8 @@ src/
 │   │   │   │   │   └── policy.rs
 │   │   │   │   ├── stop_judgement/
 │   │   │   │   │   └── judged_finish_tests.rs
+│   │   │   │   ├── watchdog_pass/
+│   │   │   │   │   └── o_stall_tests.rs
 │   │   │   │   ├── channel_runtime.rs
 │   │   │   │   ├── inflight_repair.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
@@ -1250,6 +1252,10 @@ src/
 │   │   │   │   └── relay_probe.rs
 │   │   │   ├── stall_liveness/
 │   │   │   │   └── redrive_grace.rs
+│   │   │   ├── transcript_binding_stall/
+│   │   │   │   ├── o_verdict_tests.rs
+│   │   │   │   ├── o_witness.rs
+│   │   │   │   └── transition_log.rs
 │   │   │   ├── turn_deliver/
 │   │   │   │   ├── inject/
 │   │   │   │   │   ├── catch_up_race.rs
@@ -3553,6 +3559,7 @@ src/
 │   │   │   ├── p5a2_actor_tests.rs
 │   │   │   ├── past_bind.rs
 │   │   │   ├── pieces.rs
+│   │   │   ├── progress.rs
 │   │   │   ├── readers_host_tests.rs
 │   │   │   ├── reclaim_tests.rs
 │   │   │   ├── recovery_tests.rs

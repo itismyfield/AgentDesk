@@ -145,8 +145,8 @@ pub struct WatcherStateSnapshot {
     /// advances a watermark) is intentionally never consulted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound_session_id: Option<String>,
-    /// #5188 (R5/R6): `"none"`, or why a delivery binding is pointed at a
-    /// transcript that stopped growing. See
+    /// `"none"`, or why delivery looks stalled: a binding on a transcript that stopped growing,
+    /// or for an O-owned channel O's own verdict. See
     /// [`super::transcript_binding_stall::TranscriptBindingStall`].
     pub transcript_binding_stall: &'static str,
     /// #3126: `true` when the in-flight row records a turn whose terminal
@@ -628,7 +628,7 @@ async fn watcher_state_snapshot_for_shared(
         bound_session_id.as_deref(),
         session.attached,
         tmux_session_alive,
-        session.inflight_state_present,
+        transcript_binding_stall::TurnFacts::new(channel.get(), &mailbox_snapshot, &session),
     );
     // #5071 T4-B4 (4987 S4): compare the row's transcript coordinate against the
     // registry's independently resolved one by FILE IDENTITY. Does NOT replace

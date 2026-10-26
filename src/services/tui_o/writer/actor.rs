@@ -311,6 +311,7 @@ where
             }
         }
     }
+    let progress = super::progress::Publisher::new(actor.writer.channel());
     let mut sources_resumed = false;
     while !actor.writer.is_stopped() && !*stop.borrow() {
         if actor.rescope() {
@@ -357,6 +358,7 @@ where
         actor.read_sources();
         actor.poll_transition(sources_resumed, &unsettled).await;
         actor.observe_waiting(sources_resumed);
+        progress.publish(actor.progress());
         #[cfg(test)]
         fresh_resume::note_work(actor.owed.len(), actor.deriver.has_unsealed());
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
@@ -671,6 +673,19 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let retired: HashSet<String> = retired.map(|cursor| source_key(&cursor.source)).collect();
         let old = rotation.successors.keys();
         Some(old.filter(|key| !retired.contains(*key)).count())
+    }
+
+    /// What this poll left owed, whether a unit waits on its seal, and the ledger position.
+    fn progress(&mut self) -> super::progress::ChannelProgress {
+        let verified = self.verified.as_ref().map_or(0, |log| log.work.len());
+        let retry = usize::from(self.writer.has_local_retry());
+        let ledger = self.writer.store().ledger();
+        let open = usize::from(ledger.unresolved().is_some());
+        super::progress::ChannelProgress {
+            debt: self.owed.len() + verified + retry + open,
+            unsealed: self.deriver.has_unsealed(),
+            serial: ledger.next_serial(),
+        }
     }
 
     /// Pieces, an open `Prepared`, unsealed units, sources read short of their end and binds not
