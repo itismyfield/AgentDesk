@@ -2410,6 +2410,7 @@ services::claude_tui::input::preparation_hold::idle_injection_tests::idle_menu_r
 services::claude_tui::input::submission::tests::cg_b3_codex_production_submission_keeps_busy_veto_after_payload
 services::claude_tui::input::submission::tests::every_entry_on_an_unlisted_channel_takes_the_one_submission
 services::claude_tui::input::submission::tests::fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels
+services::claude_tui::input::submission::tests::fresh_swallowed_enter_preserves_payload_and_never_retries
 services::claude_tui::input::submission::tests::idle_fence_and_revoked_authority_precede_every_key
 services::claude_tui::input::submission::tests::idle_menu_blocks_every_key_and_empty_or_unread_never_stashes
 services::claude_tui::input::submission::tests::idle_sends_the_same_sequence_without_receipt_or_restore_verdicts

@@ -185,7 +185,7 @@ pub(crate) fn renderer_with(
         ("before", before),
         ("empty", view("", false)),
         ("stashed", view("", true)),
-        ("own", view(prompt, mode != "fresh")),
+        ("own", view(prompt, !matches!(mode, "fresh" | "swallow"))),
         (
             "after",
             view(
@@ -222,7 +222,9 @@ if mode == 'fresh':
     (root/'composer-ready').write_text('ready')
 pending = b''
 while True:
-    pending += os.read(0, 65536)
+    chunk = os.read(0, 65536)
+    with (root/'received').open('ab') as out: out.write(chunk)
+    pending += chunk
     if pending.startswith(b'\x12'):
         if (root/'body').exists(): (root/'body').write_text((root/'body').read_text()+' changed by person')
         render('tampered'); pending=pending[1:]
@@ -237,8 +239,12 @@ while True:
         body, pending = pending[6:].split(b'\x1b[201~',1)
         (root/'body').write_bytes(body); event('paste')
         render('own' if mode != 'own_race' else 'before')
+    if b'\x15' in pending:
+        event('clear'); render('empty'); pending=pending.replace(b'\x15', b'')
     if b'\r' in pending:
         event('Enter')
+        if mode == 'swallow' and not (root/'swallowed').exists():
+            (root/'swallowed').write_text('1'); pending=b''; continue
         body=(root/'body').read_text()
         if mode == 'foreign': record('foreign before expected')
         if mode == 'wrapped': record('\n\n<pasted_content id="a17f">\n'+body+'\n</pasted_content id="a17f">\n')
@@ -823,4 +829,88 @@ fn cg_b3_codex_production_submission_keeps_busy_veto_after_payload() {
     let after = f.tmux(&["capture-pane", "-p", "-t", &format!("={name}:")]);
     assert!(own_draft(ShadowProvider::Codex, &after, "own", true));
     assert!(submission_busy(ShadowProvider::Codex, &after));
+}
+
+/// A fresh pane that swallows the first Enter keeps the pasted prompt and gets no second Enter:
+/// the one submission reads nothing after a key, so it cannot notice this case.
+#[test]
+fn fresh_swallowed_enter_preserves_payload_and_never_retries() {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::claude_tui::submission_fence::IdleStashContext;
+    struct Attempt(String);
+    impl SubmissionFence for Attempt {
+        fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
+            panic!("the managed attempt claims through its idle fence")
+        }
+        fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
+            None
+        }
+        fn idle_stash_context(&self) -> Option<IdleStashContext> {
+            Some(IdleStashContext {
+                channel: 6_899_980,
+                target: self.0.clone(),
+                available: true,
+            })
+        }
+        fn idle_stash_admits(&self, target: &str) -> bool {
+            target == self.0
+        }
+        fn claim_idle_stash(&self, _: &str) -> Result<(), PreSubmitPersistenceRefused> {
+            Ok(())
+        }
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    for managed in [false, true] {
+        let name = format!("fresh-swallow-{managed}");
+        let root = renderer_with(
+            &f,
+            &name,
+            "swallow",
+            view("", false),
+            "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+            PROMPT,
+        );
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            &name,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: root.join("transcript").display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: None,
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        let send = || {
+            crate::services::claude_tui::input::send_prompt_with_readiness(
+                &name,
+                PROMPT,
+                PromptReadinessKind::FreshTurn,
+                None,
+            )
+        };
+        let result = if managed {
+            with_scope(Some(Arc::new(Attempt(name.clone()))), send)
+        } else {
+            send()
+        };
+        assert!(result.is_ok(), "managed={managed}: {result:?}");
+        wait("swallowed-enter", || root.join("swallowed").exists());
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(events(&root), ["paste", "Enter"], "managed={managed}");
+        assert_eq!(fs::read_to_string(root.join("body")).unwrap(), PROMPT);
+        let sent = [b"\x1b[200~".as_slice(), PROMPT.as_bytes(), b"\x1b[201~\r"].concat();
+        assert_eq!(
+            fs::read(root.join("received")).unwrap(),
+            sent,
+            "managed={managed}: one paste and one Enter, no cleanup key"
+        );
+        let pane = f.tmux(&["capture-pane", "-p", "-t", &format!("={name}:")]);
+        assert!(pane.contains("prepared question"), "{pane}");
+        let transcript = fs::read_to_string(root.join("transcript")).unwrap();
+        assert!(!transcript.contains("\"user\""), "{transcript}");
+        assert!(!composer_lock::draft_guarded(&name));
+    }
 }
