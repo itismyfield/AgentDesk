@@ -30,12 +30,12 @@ impl Drop for RuntimeRootGuard {
     }
 }
 
-fn isolate_agentdesk_runtime_root() -> (std::sync::MutexGuard<'static, ()>, RuntimeRootGuard) {
-    let lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let root = RuntimeRootGuard::new();
-    (lock, root)
+fn isolate_agentdesk_runtime_root() -> (
+    crate::config::test_env_lock::SharedTestEnvLockGuard,
+    RuntimeRootGuard,
+) {
+    let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    (lock, RuntimeRootGuard::new())
 }
 
 fn state_for_recovery(user_msg_id: u64) -> super::inflight::InflightTurnState {

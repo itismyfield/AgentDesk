@@ -995,9 +995,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn durable_matched_reuse_returns_delivered_without_discord_post() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let (_temp, _reset) = set_runtime_root();
         let provider = ProviderKind::Codex;
         let state = state(provider.clone(), 44_003);
@@ -1070,9 +1068,7 @@ mod tests {
     async fn a_recovery_relay_that_posts_nothing_leaves_a_pending_adoption() {
         use crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
         use crate::services::tui_o::channel_policy::{Adoption, BodyCheck};
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let (_temp, _reset) = set_runtime_root();
         let provider = ProviderKind::Codex;
         let mut state = state(provider.clone(), 44_021);

@@ -395,120 +395,123 @@ mod tests {
 
     /// `ProbedPool` makes a missing bracket a compile error; this pins that each
     /// bracket runs, records once per await, and leaks no in-flight slot.
-    #[tokio::test]
-    async fn every_health_path_database_await_is_bracketed() {
-        let _serial = hang_forensics::counter_test_lock();
-        let pool = unreachable_pool();
+    #[test]
+    fn every_health_path_database_await_is_bracketed() {
+        crate::test_support::serial_runtime::run(hang_forensics::counter_test_lock, async {
+            let pool = unreachable_pool();
 
-        macro_rules! assert_bracketed {
-            ($label:expr, $expected:expr, $call:expr) => {{
-                let before = hang_forensics::snapshot();
-                let _ = $call.await;
-                let after = hang_forensics::snapshot();
-                assert_eq!(
-                    after.db_probes_started - before.db_probes_started,
-                    $expected,
-                    "{} must bracket exactly {} database await(s)",
-                    $label,
-                    $expected
-                );
-                assert_eq!(
-                    after.db_probes_failed - before.db_probes_failed,
-                    $expected,
-                    "{} awaits an unreachable database, so every bracketed await \
-                     must be recorded as a failed probe",
-                    $label
-                );
-                assert_eq!(
-                    after.db_in_flight, before.db_in_flight,
-                    "{} must not leak an in-flight slot",
-                    $label
-                );
-            }};
-        }
+            macro_rules! assert_bracketed {
+                ($label:expr, $expected:expr, $call:expr) => {{
+                    let before = hang_forensics::snapshot();
+                    let _ = $call.await;
+                    let after = hang_forensics::snapshot();
+                    assert_eq!(
+                        after.db_probes_started - before.db_probes_started,
+                        $expected,
+                        "{} must bracket exactly {} database await(s)",
+                        $label,
+                        $expected
+                    );
+                    assert_eq!(
+                        after.db_probes_failed - before.db_probes_failed,
+                        $expected,
+                        "{} awaits an unreachable database, so every bracketed await \
+                         must be recorded as a failed probe",
+                        $label
+                    );
+                    assert_eq!(
+                        after.db_in_flight, before.db_in_flight,
+                        "{} must not leak an in-flight slot",
+                        $label
+                    );
+                }};
+            }
 
-        // The `GET /api/health` path from the module table.
-        assert_bracketed!("probe_server_up", 1, super::probe_server_up(Some(&pool)));
-        assert_bracketed!(
-            "load_dispatch_outbox_stats",
-            1,
-            super::load_dispatch_outbox_stats(Some(&pool))
-        );
-        assert_bracketed!(
-            "load_auto_queue_cleanup_backlog",
-            1,
-            super::load_auto_queue_cleanup_backlog(Some(&pool))
-        );
-        assert_bracketed!(
-            "load_health_kv_meta",
-            1,
-            super::load_health_kv_meta(Some(&pool))
-        );
-        assert_bracketed!(
-            "load_mailbox_session_states",
-            1,
-            super::load_mailbox_session_states(Some(&pool), &[7, 7, 8])
-        );
-        assert_bracketed!(
-            "is_recent_cluster_worker",
-            1,
-            super::is_recent_cluster_worker(Some(&pool), "node-1", 30)
-        );
+            // The `GET /api/health` path from the module table.
+            assert_bracketed!("probe_server_up", 1, super::probe_server_up(Some(&pool)));
+            assert_bracketed!(
+                "load_dispatch_outbox_stats",
+                1,
+                super::load_dispatch_outbox_stats(Some(&pool))
+            );
+            assert_bracketed!(
+                "load_auto_queue_cleanup_backlog",
+                1,
+                super::load_auto_queue_cleanup_backlog(Some(&pool))
+            );
+            assert_bracketed!(
+                "load_health_kv_meta",
+                1,
+                super::load_health_kv_meta(Some(&pool))
+            );
+            assert_bracketed!(
+                "load_mailbox_session_states",
+                1,
+                super::load_mailbox_session_states(Some(&pool), &[7, 7, 8])
+            );
+            assert_bracketed!(
+                "is_recent_cluster_worker",
+                1,
+                super::is_recent_cluster_worker(Some(&pool), "node-1", 30)
+            );
+        });
     }
 
     /// Router tests rely on an injected backlog returning before any probe.
-    #[tokio::test]
-    async fn an_injected_backlog_short_circuits_before_any_probe() {
-        let _serial = hang_forensics::counter_test_lock();
-        let pool = unreachable_pool();
-        let _injected = super::backlog_probe::inject(AutoQueueCleanupBacklog {
-            pending: 7,
-            dead_lettered: 3,
+    #[test]
+    fn an_injected_backlog_short_circuits_before_any_probe() {
+        crate::test_support::serial_runtime::run(hang_forensics::counter_test_lock, async {
+            let pool = unreachable_pool();
+            let _injected = super::backlog_probe::inject(AutoQueueCleanupBacklog {
+                pending: 7,
+                dead_lettered: 3,
+            });
+
+            let before = hang_forensics::snapshot();
+            let backlog = super::load_auto_queue_cleanup_backlog(Some(&pool))
+                .await
+                .expect("an injected backlog is returned"); // agentdesk-audit: allow-unwrap — test assertion
+            let after = hang_forensics::snapshot();
+
+            assert_eq!((backlog.pending, backlog.dead_lettered), (7, 3));
+            assert_eq!(
+                after.db_probes_started, before.db_probes_started,
+                "the injected path must not reach the database at all"
+            );
+            assert_eq!(after.db_in_flight, before.db_in_flight);
         });
-
-        let before = hang_forensics::snapshot();
-        let backlog = super::load_auto_queue_cleanup_backlog(Some(&pool))
-            .await
-            .expect("an injected backlog is returned"); // agentdesk-audit: allow-unwrap — test assertion
-        let after = hang_forensics::snapshot();
-
-        assert_eq!((backlog.pending, backlog.dead_lettered), (7, 3));
-        assert_eq!(
-            after.db_probes_started, before.db_probes_started,
-            "the injected path must not reach the database at all"
-        );
-        assert_eq!(after.db_in_flight, before.db_in_flight);
     }
 
     /// A stuck probe must be visible while it is stuck, not only on completion.
-    #[tokio::test]
-    async fn a_pending_health_await_is_visible_as_in_flight() {
-        let _serial = hang_forensics::counter_test_lock();
-        let pool = unreachable_pool();
+    #[test]
+    fn a_pending_health_await_is_visible_as_in_flight() {
+        crate::test_support::serial_runtime::run(hang_forensics::counter_test_lock, async {
+            let pool = unreachable_pool();
 
-        let before = hang_forensics::snapshot();
-        // Boxed, not `pin!`ed: dropping a `Pin<&mut _>` would drop only the
-        // pointer, not the future.
-        let mut probe = Box::pin(super::probe_server_up(Some(&pool)));
-        tokio::select! {
-            biased;
-            _ = &mut probe => panic!("an unreachable pool must not answer within 20ms"),
-            () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
-        }
+            let before = hang_forensics::snapshot();
+            // Boxed, not `pin!`ed: dropping a `Pin<&mut _>` would drop only the
+            // pointer, not the future.
+            let mut probe = Box::pin(super::probe_server_up(Some(&pool)));
+            tokio::select! {
+                biased;
+                _ = &mut probe => panic!("an unreachable pool must not answer within 20ms"),
+                () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            }
 
-        let during = hang_forensics::snapshot();
-        assert_eq!(
-            during.db_in_flight,
-            before.db_in_flight + 1,
-            "a health await that has not returned must read as in flight"
-        );
+            let during = hang_forensics::snapshot();
+            assert_eq!(
+                during.db_in_flight,
+                before.db_in_flight + 1,
+                "a health await that has not returned must read as in flight"
+            );
 
-        drop(probe);
-        let after = hang_forensics::snapshot();
-        assert_eq!(
-            after.db_in_flight, before.db_in_flight,
-            "a cancelled health await must not leak an in-flight slot"
-        );
+            drop(probe);
+            let after = hang_forensics::snapshot();
+            assert_eq!(
+                after.db_in_flight, before.db_in_flight,
+                "a cancelled health await must not leak an in-flight slot"
+            );
+        });
     }
 
     #[test]

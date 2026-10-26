@@ -1168,9 +1168,7 @@ mod tests {
     // what makes the record a divergence signal rather than a per-poll log.
     #[tokio::test(flavor = "current_thread")]
     async fn health_load_records_transcript_source_divergence_only_when_the_paths_split() {
-        let _env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tmp = tempfile::tempdir().expect("temp runtime root");
         let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",
@@ -1242,9 +1240,7 @@ mod tests {
     // exactly that cut: the observation degrades to `RowAbsent`.
     #[tokio::test(flavor = "current_thread")]
     async fn health_load_carries_the_row_birth_offset_into_the_durable_observation_5943() {
-        let _env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tmp = tempfile::tempdir().expect("temp runtime root");
         let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",

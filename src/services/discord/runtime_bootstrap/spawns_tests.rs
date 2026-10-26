@@ -476,7 +476,7 @@ fn cancellation_before_durable_commit_rolls_back_but_after_commit_stays_committe
     )
     .expect("restart request");
 
-    let permit = begin_deferred_restart(&shared).expect("restart permit");
+    let _permit = begin_deferred_restart(&shared).expect("restart permit");
     let guard = DeferredRestartCancellationGuard::new(
         shared.clone(),
         root.path().to_path_buf(),
@@ -494,7 +494,6 @@ fn cancellation_before_durable_commit_rolls_back_but_after_commit_stays_committe
     drop(guard);
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
     assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
-    drop(permit);
 
     std::fs::remove_file(root.path().join("restart_cancelled")).expect("clear cancellation");
     let permit = begin_deferred_restart(&shared).expect("new restart permit");
