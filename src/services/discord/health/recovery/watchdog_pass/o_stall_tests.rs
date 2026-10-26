@@ -47,9 +47,8 @@ fn watcher(tmux: &str, output: &std::path::Path) -> discord::TmuxWatcherHandle {
     }
 }
 
-/// The pass on an O-owned channel whose turn O drained `still_secs` ago while the mailbox, opened
-/// `turn_age_secs` ago, stayed open over a 30-minute Legacy row the turn bridge rewrote every
-/// second; returns its WARN logs once it has checked that the pass cleaned nothing.
+/// The pass over an O turn drained `still_secs` ago in a mailbox open `turn_age_secs`, above a
+/// 30-minute self-refreshed Legacy row; returns its WARN logs after checking it cleaned nothing.
 async fn pass_on_a_drained_o_turn(
     channel: ChannelId,
     turn_age_secs: u64,
