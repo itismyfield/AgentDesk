@@ -1,4 +1,4 @@
-//! Typed guarded stops survive owner decisions and protect the composer before its lock returns.
+//! Typed submission stops and preparation holds reach the attempt's owner through nested adapters.
 
 use super::host_input::InputRun;
 #[cfg(test)]
@@ -7,8 +7,7 @@ use super::input::{PreparationHold, UserReceipt};
 #[cfg(test)]
 use crate::services::provider::CancelToken;
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SubmissionError {
@@ -50,9 +49,6 @@ pub(crate) trait Owner: Send + Sync {
     fn finished(&self, run: &InputRun);
     fn preparation_held(&self, _hold: &PreparationHold) {}
     fn receipt(&self, _receipt: UserReceipt) {}
-    fn submission_record_observed(&self) -> bool {
-        false
-    }
     fn native_session_id(&self) -> Option<String> {
         None
     }
@@ -224,14 +220,6 @@ pub(crate) fn fresh_receipt(session: &str, prompt: &str, path: &str, sid: &str) 
         owner.receipt(receipt);
     }
 }
-/// A fresh composer redraw is not evidence that its native user record exists.
-pub(crate) fn fresh_submission_observed() -> Option<bool> {
-    OWNER.with(|slot| {
-        let scope = slot.borrow();
-        let scope = scope.as_ref().filter(|scope| scope.fresh_path.is_some())?;
-        Some(scope.owner.as_ref()?.submission_record_observed())
-    })
-}
 pub(crate) fn begin() {
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
     if let Some(owner) = owner {
@@ -250,18 +238,6 @@ pub(crate) fn finish(run: &InputRun) {
     }
 }
 
-static HELD: LazyLock<Mutex<HashMap<String, InputRun>>> = LazyLock::new(Default::default);
-pub(crate) fn held(session: &str) -> Option<InputRun> {
-    HELD.lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .get(session)
-        .cloned()
-}
-pub(crate) fn held_result(session: &str) -> Result<(), SubmissionError> {
-    held(session)
-        .or_else(|| super::host_input::guarded_submission::selection_refusal(session))
-        .map_or(Ok(()), |run| Err(SubmissionError::Guarded(run)))
-}
 pub(crate) fn readiness_error(session: &str, error: String) -> SubmissionError {
     let preparation = OWNER.with(|slot| {
         slot.borrow()
@@ -270,26 +246,7 @@ pub(crate) fn readiness_error(session: &str, error: String) -> SubmissionError {
             .filter(|hold| hold.target == session)
             .cloned()
     });
-    if let Some(hold) = preparation {
-        return SubmissionError::Held(hold);
-    }
-    held(session).map_or(SubmissionError::Legacy(error), SubmissionError::Guarded)
-}
-/// The composer permit is still held; no automatic path releases this submission.
-pub(crate) fn retain(session: &str, run: &InputRun) {
-    if matches!(run, InputRun::Indeterminate { .. }) {
-        HELD.lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .entry(session.to_owned())
-            .or_insert_with(|| run.clone());
-    }
-    finish(run);
-}
-#[cfg(test)]
-pub(crate) fn forget_test_hold(session: &str) {
-    HELD.lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .remove(session);
+    preparation.map_or(SubmissionError::Legacy(error), SubmissionError::Held)
 }
 
 #[cfg(test)]
@@ -307,14 +264,12 @@ pub fn send_fresh_prompt(
     .map_err(SubmissionError::into_legacy)
 }
 #[cfg(test)]
-pub fn send_followup_prompt_or_idle_transcript(
+pub fn send_warm_followup(
     session: &str,
     prompt: &str,
     cancel: Option<&CancelToken>,
-    transcript: &std::path::Path,
 ) -> Result<(), String> {
-    input::send_followup_prompt_or_idle_transcript_owned(session, prompt, cancel, transcript)
-        .map_err(SubmissionError::into_legacy)
+    input::send_warm_followup_owned(session, prompt, cancel).map_err(SubmissionError::into_legacy)
 }
 
 #[cfg(unix)]

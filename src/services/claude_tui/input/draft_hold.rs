@@ -2,8 +2,9 @@
 //! composer admission first and sends no key when the pane is held.
 
 use super::{
-    CancelToken, PROMPT_READY_TIMEOUT_ERROR_PREFIX, PromptReadinessKind, TuiInputAction,
-    host_input, prompt_readiness_snapshot, run_actions,
+    CancelToken, PROMPT_DRAFT_CLEANUP_CANCEL_TOKEN, PROMPT_READY_TIMEOUT_ERROR_PREFIX,
+    PreparationHold, PromptReadinessKind, TuiInputAction, host_input, prompt_draft_cleanup_actions,
+    prompt_readiness_snapshot, prompt_readiness_snapshot_from_capture, run_actions,
 };
 use crate::services::claude_tui::busy_inject::{ComposerOwner, composer_owner_in_session};
 use crate::services::claude_tui::composer_lock::{
@@ -19,8 +20,6 @@ pub(super) fn admit_automatic_write(
     session_name: &str,
     readiness: PromptReadinessKind,
 ) -> Result<(), String> {
-    super::guarded_outcome::held_result(session_name)
-        .map_err(super::SubmissionError::into_legacy)?;
     let capture = || host_input::observe_draft(session_name);
     admit_composer_write(session_name, capture)
         .map_err(|_| held_error(session_name, readiness, "draft_recovery_hold"))
@@ -85,8 +84,6 @@ pub(crate) fn stranded_draft_is_ours(
     session_name: &str,
     readiness: PromptReadinessKind,
 ) -> Result<bool, String> {
-    super::guarded_outcome::held_result(session_name)
-        .map_err(super::SubmissionError::into_legacy)?;
     let capture = host_input::observe_draft(session_name);
     match capture
         .as_deref()
@@ -95,6 +92,35 @@ pub(crate) fn stranded_draft_is_ours(
         Some(ComposerOwner::Empty) => Ok(false),
         Some(ComposerOwner::AgentDesk) => Ok(true),
         _ => Err(held(session_name, readiness, capture.as_deref())),
+    }
+}
+
+/// Clears a stranded draft only while the composer still shows the prompt AgentDesk typed.
+pub(super) fn clear_prompt_draft(session_name: &str) {
+    let capture = host_input::observe_draft(session_name);
+    let snapshot = prompt_readiness_snapshot_from_capture(
+        capture.as_deref(),
+        host_input::legacy_pane_alive(session_name),
+    );
+    if capture
+        .as_deref()
+        .map(|capture| composer_owner_in_session(session_name, capture))
+        != Some(ComposerOwner::AgentDesk)
+    {
+        super::guarded_outcome::preparation_held(&PreparationHold::before(
+            session_name,
+            "cleanup_not_owned",
+            "claude tui cleanup held: composer ownership changed".into(),
+        ));
+        return;
+    }
+    let actions = prompt_draft_cleanup_actions(&snapshot);
+    if let Err(error) = run_actions(session_name, &actions, PROMPT_DRAFT_CLEANUP_CANCEL_TOKEN) {
+        tracing::warn!(
+            tmux_session_name = session_name,
+            error = %error,
+            "failed to clear Claude TUI draft after prompt submit retries"
+        );
     }
 }
 
