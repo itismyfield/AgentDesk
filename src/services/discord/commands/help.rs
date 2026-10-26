@@ -1,4 +1,5 @@
 use super::super::{Context, Data, Error};
+use super::command_policy::TEXT_COMMANDS;
 use crate::services::provider::ProviderKind;
 
 /// Discord rejects single messages over 2000 characters; keep headroom.
@@ -39,9 +40,7 @@ fn build_slash_help_messages(
     let provider_name = provider.display_name();
     let mut lines = vec![
         "**AgentDesk Discord Bot**".to_string(),
-        format!(
-            "Manage files and chat with {provider_name}. Each channel gets an independent session."
-        ),
+        format!("Chat with {provider_name}. Each channel gets an independent session."),
         format!("Any other message is sent to {provider_name}; send a file/photo to upload it."),
         String::new(),
         "**Slash Commands**".to_string(),
@@ -53,6 +52,11 @@ fn build_slash_help_messages(
             let sub_path = format!("{path} {}", sub.name);
             lines.push(slash_help_line(&sub_path, sub.description.as_deref()));
         }
+    }
+    lines.push(String::new());
+    lines.push("**Agent Text Commands** (plain messages, for agents)".to_string());
+    for (_, _, line) in TEXT_COMMANDS {
+        lines.push(line.to_string());
     }
 
     let mut messages = Vec::new();

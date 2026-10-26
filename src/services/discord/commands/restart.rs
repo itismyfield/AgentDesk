@@ -6,7 +6,8 @@ use crate::services::discord::admin_host_guard::ManagedReset;
 use crate::services::provider::ProviderKind;
 
 use super::super::{
-    Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_has_active_turn,
+    Context, Data, Error, SharedData, check_auth, mailbox_cancel_active_turn,
+    mailbox_has_active_turn,
 };
 
 const RESTART_SEED_PROMPT: &str = "안녕하세요. 세션 재시작 완료.";
@@ -55,6 +56,7 @@ pub(super) enum RestartSeedStatus {
     Started,
     Busy,
     Failed(String),
+    RetryFailed(String),
 }
 
 fn provider_supports_resume(provider: &ProviderKind) -> bool {
@@ -90,14 +92,15 @@ fn restart_tmux_note(tmux_name: Option<&str>) -> String {
 
 fn restart_seed_note(status: &RestartSeedStatus) -> String {
     match status {
-        // Successful seed turn needs no narration — the agent's own greeting
-        // turn follows immediately and speaks for itself.
-        RestartSeedStatus::Started => String::new(),
+        RestartSeedStatus::Started => "인사말 turn이 시작됐습니다.".to_string(),
         RestartSeedStatus::Busy => {
-            "기존 턴 정리가 아직 끝나지 않아 인사말 turn은 시작하지 못했습니다.".to_string()
+            "1회 재시도 후에도 Busy 상태라 인사말 turn은 시작하지 못했습니다.".to_string()
         }
         RestartSeedStatus::Failed(error) => {
             format!("인사말 turn 시작 실패: {error}")
+        }
+        RestartSeedStatus::RetryFailed(error) => {
+            format!("인사말 turn 1회 재시도 후 실패: {error}")
         }
     }
 }
@@ -108,14 +111,15 @@ fn build_restart_response(
     tmux_name: Option<&str>,
     seed_status: &RestartSeedStatus,
 ) -> String {
-    let header = format!(
-        "♻ 세션 재시작됨 (provider={}). 현재 인증된 MCP/설정이 부착됐습니다.",
-        provider.as_str()
-    );
+    let header = format!("♻ 세션 재시작 요청 결과 (provider={}).", provider.as_str());
     let parts = [
         header,
         restart_tmux_note(tmux_name),
-        restart_resume_note(provider, action),
+        if *seed_status == RestartSeedStatus::Started {
+            restart_resume_note(provider, action)
+        } else {
+            String::new()
+        },
         restart_seed_note(seed_status),
     ];
     parts
@@ -126,38 +130,50 @@ fn build_restart_response(
         .join("\n")
 }
 
-async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
-    const MAX_ATTEMPTS: usize = 30;
-    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
-
-    let channel_id = ctx.channel_id();
+async fn start_restart_seed_turn(
+    serenity_ctx: &serenity::Context,
+    data: &Data,
+    channel_id: serenity::ChannelId,
+    command_name: &'static str,
+) -> RestartSeedStatus {
     let channel_name_hint = {
-        let data = ctx.data().shared.core.lock().await;
-        data.sessions
+        let core = data.shared.core.lock().await;
+        core.sessions
             .get(&channel_id)
             .and_then(|session| session.channel_name.clone())
     };
     let metadata = serde_json::json!({
-        "command": "/restart",
-        "provider": ctx.data().provider.as_str(),
+        "command": command_name,
+        "provider": data.provider.as_str(),
     });
 
-    for attempt in 0..MAX_ATTEMPTS {
-        match super::super::router::start_headless_turn(
-            (
-                ctx.serenity_context(),
-                &ctx.data().shared,
-                &ctx.data().token,
-            ),
+    retry_restart_seed(|| async {
+        super::super::router::start_headless_turn(
+            (serenity_ctx, &data.shared, &data.token),
             channel_id,
             RESTART_SEED_PROMPT,
-            "/restart",
-            Some("/restart"),
+            command_name,
+            Some(command_name),
             Some(metadata.clone()),
             channel_name_hint.clone(),
         )
         .await
-        {
+        .map(|_| ())
+    })
+    .await
+}
+
+async fn retry_restart_seed<Start, Fut>(mut start: Start) -> RestartSeedStatus
+where
+    Start: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), super::super::router::HeadlessTurnStartError>>,
+{
+    const MAX_ATTEMPTS: usize = 2;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+    // Conflict is a pre-spawn rejection; an accepted seed is never submitted again.
+    for attempt in 0..MAX_ATTEMPTS {
+        match start().await {
             Ok(_) => return RestartSeedStatus::Started,
             Err(super::super::router::HeadlessTurnStartError::Conflict(_))
                 if attempt + 1 < MAX_ATTEMPTS =>
@@ -171,7 +187,11 @@ async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
                 super::super::router::HeadlessTurnStartError::Internal(error)
                 | super::super::router::HeadlessTurnStartError::InvalidTarget(error),
             ) => {
-                return RestartSeedStatus::Failed(error);
+                return if attempt == 0 {
+                    RestartSeedStatus::Failed(error)
+                } else {
+                    RestartSeedStatus::RetryFailed(error)
+                };
             }
         }
     }
@@ -234,6 +254,61 @@ where
     }
 }
 
+/// The restart `/restart` and `!restart` share once the sender is authorized; every
+/// reply goes through `say`.
+async fn restart_channel<Say, SayFut>(
+    serenity_ctx: &serenity::Context,
+    data: &Data,
+    channel_id: serenity::ChannelId,
+    user_name: &str,
+    command_name: &'static str,
+    say: Say,
+) -> Result<(), Error>
+where
+    Say: Fn(String) -> SayFut,
+    SayFut: std::future::Future<Output = Result<(), Error>>,
+{
+    log_command_received!(channel_id.get(), user_name, command_name);
+    say("♻ 세션 재시작 중...".into()).await?;
+
+    let action = resolve_restart_action(&data.shared, channel_id).await;
+    let (shared, provider) = (&data.shared, &data.provider);
+    let warn = || say("⚠ 진행 중 턴 1회 손실 가능 — 안전하게 중단합니다.".into());
+    let restarted = restart_managed_session(
+        &serenity_ctx.http,
+        shared,
+        provider,
+        channel_id,
+        command_name,
+        warn,
+    );
+    let tmux_name = match restarted.await? {
+        Ok(tmux_name) => tmux_name,
+        Err(reason) => {
+            say(format!("♻ 세션을 재시작하지 않았어요: {reason}")).await?;
+            return Ok(());
+        }
+    };
+
+    let seed_status = start_restart_seed_turn(serenity_ctx, data, channel_id, command_name).await;
+    say(build_restart_response(
+        provider,
+        &action,
+        tmux_name.as_deref(),
+        &seed_status,
+    ))
+    .await?;
+    log_info_event!(
+        "discord_restart_triggered",
+        channel_id = channel_id.get(),
+        user_name = %user_name,
+        command = %command_name,
+        provider = provider.as_str(),
+        status = ?seed_status,
+    );
+    Ok(())
+}
+
 async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
@@ -243,50 +318,34 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
     if !super::enforce_slash_command_policy(&ctx, command_name).await? {
         return Ok(());
     }
+    let say = |text: String| async move { ctx.say(text).await.map(|_| ()).map_err(Error::from) };
+    let serenity_ctx = ctx.serenity_context();
+    restart_channel(
+        serenity_ctx,
+        ctx.data(),
+        ctx.channel_id(),
+        user_name,
+        command_name,
+        say,
+    )
+    .await
+}
 
-    {
-        log_command_received!(ctx.channel_id().get(), user_name, command_name);
-        ctx.say("♻ 세션 재시작 중...").await?;
-
-        let channel_id = ctx.channel_id();
-        let action = resolve_restart_action(&ctx.data().shared, channel_id).await;
-        let http = ctx.serenity_context().http.clone();
-        let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
-        let warn = || async {
-            ctx.say("⚠ 진행 중 턴 1회 손실 가능 — 안전하게 중단합니다.")
-                .await
-                .map(|_| ())
-                .map_err(Error::from)
-        };
-        let restarted =
-            restart_managed_session(&http, shared, provider, channel_id, command_name, warn);
-        let tmux_name = match restarted.await? {
-            Ok(tmux_name) => tmux_name,
-            Err(reason) => {
-                ctx.say(format!("♻ 세션을 재시작하지 않았어요: {reason}"))
-                    .await?;
-                return Ok(());
-            }
-        };
-
-        let seed_status = start_restart_seed_turn(&ctx).await;
-        ctx.say(build_restart_response(
-            &ctx.data().provider,
-            &action,
-            tmux_name.as_deref(),
-            &seed_status,
-        ))
-        .await?;
-        log_info_event!(
-            "discord_restart_triggered",
-            channel_id = channel_id.get(),
-            user_name = %user_name,
-            command = %command_name,
-            provider = ctx.data().provider.as_str(),
-            status = ?seed_status,
-        );
-        Ok(())
-    }
+/// `!restart`, the agents' `/restart`: intake has already authorized the sender, and
+/// each reply answers the command message.
+pub(super) async fn run_text_restart(
+    ctx: &serenity::Context,
+    msg: &serenity::Message,
+    data: &Data,
+    channel_id: serenity::ChannelId,
+) -> Result<(), Error> {
+    let say = |text: String| async move {
+        msg.reply(&ctx.http, text)
+            .await
+            .map(|_| ())
+            .map_err(Error::from)
+    };
+    restart_channel(ctx, data, channel_id, &msg.author.name, "!restart", say).await
 }
 
 /// Restart the current provider session immediately.
@@ -403,3 +462,6 @@ mod host_guard_tests {
         db.drop().await;
     }
 }
+
+#[cfg(test)]
+mod seed_tests;

@@ -22,12 +22,11 @@ pub(in crate::services::discord) fn replay_producers_dormant(channel: &str) -> b
 #[cfg(test)]
 pub(in crate::services::discord) use intake_dispatch::replay_admission::test_activation as replay_test_activation;
 pub(crate) use intake_dispatch::{
-    IntakeOrigin, IntakeSubmission, LocalAdmissionPermit, QueuedAdmissionDisposition,
-    admit_queued_intake, admit_text_intake, checkpoint_waits_for_admission,
-    dispatch_live_text_intake, dispatch_skill_intake, dispatch_text_intake,
-    finish_admitted_queued_intake, finish_admitted_text_intake,
-    finish_nonlocal_attachment_admission, live_checkpoint_waits, prepare_admitted_live_attachments,
-    resolve_attachment_admission,
+    IntakeOrigin, IntakeSubmission, QueuedAdmissionDisposition, admit_queued_intake,
+    admit_text_intake, checkpoint_waits_for_admission, dispatch_live_text_intake,
+    dispatch_skill_intake, dispatch_text_intake, finish_admitted_queued_intake,
+    finish_admitted_text_intake, finish_nonlocal_attachment_admission, live_checkpoint_waits,
+    prepare_admitted_live_attachments, resolve_attachment_admission,
 };
 #[cfg(test)]
 pub(in crate::services::discord) use intake_gate::busy_inject::test_support as busy_inject_support;

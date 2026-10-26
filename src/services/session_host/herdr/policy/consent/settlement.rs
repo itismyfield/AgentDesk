@@ -15,6 +15,41 @@ pub(crate) struct SettlementKey {
 pub(crate) enum Resolution {
     Released,
     Discarded,
+    /// Reserved for the legacy binding `target`; held until that binding is the durable approval.
+    Returned {
+        target: [u8; 32],
+    },
+    /// `target` is the durable approval; the original may still wait in its custody.
+    Adopted {
+        target: [u8; 32],
+    },
+    /// After adoption custody no longer holds the original, so nothing remains to return.
+    Closed {
+        target: [u8; 32],
+    },
+}
+
+impl Resolution {
+    /// The legacy binding of a returned intent; such intents never release under this consent.
+    pub(crate) fn returned_to(self) -> Option<[u8; 32]> {
+        match self {
+            Self::Returned { target } | Self::Adopted { target } | Self::Closed { target } => {
+                Some(target)
+            }
+            Self::Released | Self::Discarded => None,
+        }
+    }
+
+    /// Clear may discard an open return; a return retargets until adopted, then only closes.
+    fn may_follow(self, previous: Self) -> bool {
+        match (previous, self) {
+            (Self::Returned { .. }, Self::Returned { .. } | Self::Discarded) => true,
+            (Self::Returned { target }, Self::Adopted { target: next })
+            | (Self::Adopted { target }, Self::Closed { target: next }) => target == next,
+            (Self::Adopted { .. }, Self::Discarded) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,25 +60,39 @@ pub(crate) struct Settlement {
 }
 
 impl Consent {
+    pub(crate) fn resolution(&self, intent: &IntentRef) -> Option<Resolution> {
+        self.settlements
+            .iter()
+            .find(|settled| settled.key.store == intent.store && settled.key.id == intent.id)
+            .map(|settled| settled.resolution)
+    }
+
+    /// Open returns stay unresolved: they hold the channel until their legacy binding closes them.
     pub(crate) fn unresolved_intents(&self) -> Vec<IntentRef> {
         self.intents
             .iter()
             .filter(|intent| {
-                !self
-                    .settlements
-                    .iter()
-                    .any(|settled| settled.key.store == intent.store && settled.key.id == intent.id)
+                matches!(
+                    self.resolution(intent),
+                    None | Some(Resolution::Returned { .. } | Resolution::Adopted { .. })
+                )
             })
             .cloned()
             .collect()
+    }
+
+    /// Unsettled intents that this consent may still release; returned ones never are.
+    fn awaiting(&self) -> impl Iterator<Item = &IntentRef> {
+        self.intents
+            .iter()
+            .filter(|intent| self.resolution(intent).is_none())
     }
 
     pub(crate) fn releasable_intents(&self) -> Vec<IntentRef> {
         if self.state != State::Applied {
             return Vec::new();
         }
-        self.unresolved_intents()
-            .into_iter()
+        self.awaiting()
             .filter(|intent| {
                 self.intent_previews.is_empty()
                     || self.intent_previews.iter().any(|held| {
@@ -52,7 +101,61 @@ impl Consent {
                             && held.preview == self.preview
                     })
             })
+            .cloned()
             .collect()
+    }
+
+    /// An Applied retry opens a new generation only for awaiting input bound to another preview.
+    pub(crate) fn needs_new_generation(&self) -> bool {
+        self.releasable_intents().is_empty()
+            && self.awaiting().any(|intent| {
+                self.intent_previews.iter().any(|held| {
+                    held.store == intent.store
+                        && held.id == intent.id
+                        && held.preview != self.preview
+                })
+            })
+    }
+
+    fn settle(&mut self, intent: &IntentRef, resolution: Resolution) -> Result<(), String> {
+        if !self.intents.contains(intent) {
+            return Err("custody identity changed; preserve the unresolved intent".into());
+        }
+        if let Some(previous) = self
+            .settlements
+            .iter_mut()
+            .find(|previous| previous.key.store == intent.store && previous.key.id == intent.id)
+        {
+            if previous.resolution != resolution {
+                if !resolution.may_follow(previous.resolution) {
+                    return Err("custody already has a different confirmed settlement".into());
+                }
+                previous.resolution = resolution;
+            }
+            return Ok(());
+        }
+        if resolution == Resolution::Released && !self.releasable_intents().contains(intent) {
+            return Err(
+                "release requires a durable Applied receipt for this intent preview".into(),
+            );
+        }
+        if matches!(
+            resolution,
+            Resolution::Adopted { .. } | Resolution::Closed { .. }
+        ) {
+            return Err(
+                "a return closes only after it was reserved for that legacy binding".into(),
+            );
+        }
+        self.settlements.push(Settlement {
+            key: SettlementKey {
+                nonce: self.nonce.clone(),
+                store: intent.store.clone(),
+                id: intent.id.clone(),
+            },
+            resolution,
+        });
+        Ok(())
     }
 }
 
@@ -124,36 +227,19 @@ impl ConsentStore {
         intent: &IntentRef,
         resolution: Resolution,
     ) -> Result<Consent, String> {
+        self.settle(expected, &[(intent.clone(), resolution)])
+    }
+
+    /// Applies every transition in one durable update, or none of them.
+    pub(crate) fn settle(
+        &self,
+        expected: &Consent,
+        changes: &[(IntentRef, Resolution)],
+    ) -> Result<Consent, String> {
         self.update(expected, |current| {
-            if !current.intents.contains(intent) {
-                return Err("custody identity changed; preserve the unresolved intent".into());
-            }
-            if let Some(previous) = current
-                .settlements
+            changes
                 .iter()
-                .find(|previous| previous.key.store == intent.store && previous.key.id == intent.id)
-            {
-                return if previous.resolution == resolution {
-                    Ok(())
-                } else {
-                    Err("custody already has a different confirmed settlement".into())
-                };
-            }
-            if resolution == Resolution::Released && !current.releasable_intents().contains(intent)
-            {
-                return Err(
-                    "release requires a durable Applied receipt for this intent preview".into(),
-                );
-            }
-            current.settlements.push(Settlement {
-                key: SettlementKey {
-                    nonce: current.nonce.clone(),
-                    store: intent.store.clone(),
-                    id: intent.id.clone(),
-                },
-                resolution,
-            });
-            Ok(())
+                .try_for_each(|(intent, resolution)| current.settle(intent, *resolution))
         })
     }
 
@@ -205,3 +291,7 @@ pub(crate) async fn release(
 #[cfg(test)]
 #[path = "settlement_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "return_tests.rs"]
+mod return_tests;

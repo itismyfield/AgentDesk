@@ -235,6 +235,59 @@ async fn idle_bundle_precheck_never_reads_storage_or_retains_files_pg() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn unavailable_pane_hands_back_without_losing_discord_input_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (offset, display) in ["exit 0", "printf '1\\n'", "exit 1"]
+        .into_iter()
+        .enumerate()
+    {
+        let channel = 7_414_100 + offset as u64;
+        let (_database, shared, pane) = runtime(channel).await;
+        let _gate = test_support::open_gate(channel);
+        let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(channel);
+        pane.set(
+            "tmux",
+            &r#"#!/bin/sh
+d='@D@'
+echo "$*" >> "$d/log"
+case "$2" in
+display-message) @DISPLAY@ ;;
+capture-pane) exit 1 ;;
+paste-buffer|send-keys) echo "$2" >> "$d/keys"; exit 1 ;;
+esac
+exit 0
+"#
+            .replace(
+                "@D@",
+                &pane.path("tmux").parent().unwrap().display().to_string(),
+            )
+            .replace("@DISPLAY@", display),
+        );
+        let message = message(channel, "after clear", 0);
+        let result = attempt(&shared, &ProviderKind::Claude, &live(&message, &[])).await;
+        assert!(
+            matches!(
+                result,
+                Some(InjectAttempt::HandedBack {
+                    veto: "pane_unavailable",
+                    ..
+                })
+            ),
+            "display={display}: {result:?}"
+        );
+        assert!(
+            pane.keys().is_empty(),
+            "unavailable pane must receive no keys"
+        );
+        let snapshot =
+            crate::services::discord::mailbox_snapshot(&shared, message.channel_id).await;
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(snapshot.intervention_queue[0].message_id, message.id);
+        assert_eq!(pane.alarm_count("busy_inject_unconfirmed"), 0);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn pane_veto_hands_back_one_normal_busy_queue_payload_with_uploads_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let channel = 7_196_103;
@@ -247,14 +300,14 @@ async fn pane_veto_hands_back_one_normal_busy_queue_payload_with_uploads_pg() {
     live.has_reply_boundary = true;
     let normal = super::super::busy_queue::spec(&live).into_intervention();
     assert_eq!(normal.pending_uploads, uploads);
-    pane.draft();
+    pane.menu();
     let before = crate::services::discord::mailbox_snapshot(&shared, live.channel_id).await;
     assert_eq!(before.intervention_queue.len(), 0);
     let result = attempt(&shared, &ProviderKind::Claude, &live).await;
     assert!(
         matches!(
             result,
-            Some(InjectAttempt::HandedBack { veto: "draft", .. })
+            Some(InjectAttempt::HandedBack { veto: "modal", .. })
         ),
         "{result:?}"
     );
@@ -324,7 +377,7 @@ async fn plain_text_bytes_and_unregistered_command_routes_stay_unchanged_pg() {
     let channel = 7_196_106;
     let (shared, pane) = seeded_runtime(channel, None).await;
     let _gate = test_support::open_gate(channel);
-    for (n, text) in ["!unregistered", "DISPATCH: task", "/meeting task"]
+    for (n, text) in ["!pwd", "DISPATCH: task", "/meeting task"]
         .into_iter()
         .enumerate()
     {

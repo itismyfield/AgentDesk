@@ -213,3 +213,7 @@ mod known_tests;
 #[cfg(test)]
 #[path = "tool_card_codex_result_tests.rs"]
 mod codex_result_tests;
+
+#[cfg(test)]
+#[path = "tool_card_accuracy_tests.rs"]
+mod accuracy_tests;

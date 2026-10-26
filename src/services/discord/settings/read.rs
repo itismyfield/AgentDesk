@@ -237,61 +237,6 @@ pub(crate) fn load_last_session_path(
     load_kv_meta_value(pg_pool, &last_session_path_key(token_hash, channel_id))
 }
 
-pub(crate) fn save_last_session_runtime(
-    pg_pool: Option<&sqlx::PgPool>,
-    token_hash: &str,
-    channel_id: u64,
-    current_path: &str,
-) {
-    let session_key = last_session_path_key(token_hash, channel_id);
-    let remote_key = last_remote_profile_key(token_hash, channel_id);
-    // Remote SSH is disabled by policy (#2193). Older builds may have persisted
-    // a remote profile key, but runtime saves now delete it so it cannot affect
-    // routing/path validation while the #2193 prerequisites remain unimplemented.
-
-    let helper_write_ok =
-        crate::services::discord::internal_api::set_kv_value(&session_key, current_path).is_ok()
-            && crate::services::discord::internal_api::delete_kv_value(&remote_key).is_ok();
-    if helper_write_ok {
-        return;
-    }
-
-    if let Some(pg_pool) = pg_pool {
-        let session_value = current_path.to_string();
-        let _ = crate::utils::async_bridge::block_on_pg_result(
-            pg_pool,
-            move |pool| async move {
-                let mut tx = pool
-                    .begin()
-                    .await
-                    .map_err(|error| format!("begin discord runtime metadata tx: {error}"))?;
-                sqlx::query(
-                    "INSERT INTO kv_meta (key, value)
-                     VALUES ($1, $2)
-                     ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value",
-                )
-                .bind(&session_key)
-                .bind(&session_value)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("save {session_key}: {error}"))?;
-
-                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-                    .bind(&remote_key)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|error| format!("delete {remote_key}: {error}"))?;
-
-                tx.commit()
-                    .await
-                    .map_err(|error| format!("commit discord runtime metadata tx: {error}"))?;
-                Ok(())
-            },
-            |message| message,
-        );
-    }
-}
-
 pub(crate) fn load_bot_settings(token: &str) -> DiscordBotSettings {
     let configured = agentdesk_config::find_discord_bot_by_token(token);
     let legacy = load_legacy_bot_settings_entry(token);

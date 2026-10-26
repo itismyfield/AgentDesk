@@ -22,26 +22,19 @@ def filter_block(workflow: str, name: str, next_name: str) -> str:
 class ScheduledMessagesCiWiringTest(unittest.TestCase):
     def test_scheduler_submodules_trigger_pg_and_high_risk_lanes(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-        for filter_name, next_filter in (
-            ("high_risk_recovery", "pg_db"),
-            ("pg_db", "rust_or_policy"),
-        ):
-            with self.subTest(filter=filter_name):
-                block = filter_block(workflow, filter_name, next_filter)
-                self.assertIn(
-                    SCHEDULER_SUBMODULE_GLOB,
-                    block,
-                    f"{filter_name} must cover scheduled_messages submodules",
-                )
+        self.assertIn(SCHEDULER_SUBMODULE_GLOB, filter_block(workflow, "high_risk_recovery", "rust_or_policy"),
+                      "high_risk_recovery must cover scheduled_messages submodules")
+        # The PostgreSQL tests run in the single Rust test run that every src/ change selects.
+        self.assertIn("- 'src/**'", filter_block(workflow, "rust_or_policy", "relay_contract"))
 
     def test_route_submodules_trigger_high_risk_lane(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         self.assertIn("- 'src/server/routes/scheduled_messages/**'",
-                      filter_block(workflow, "high_risk_recovery", "pg_db"))
+                      filter_block(workflow, "high_risk_recovery", "rust_or_policy"))
 
     def test_image_outbox_children_trigger_high_risk_lane(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-        block = filter_block(workflow, "high_risk_recovery", "pg_db")
+        block = filter_block(workflow, "high_risk_recovery", "rust_or_policy")
         for path in ("src/services/message_outbox/**", "src/server/outbox_worker.rs", "src/server/outbox_worker/**"):
             with self.subTest(path=path):
                 self.assertIn(f"- '{path}'", block)

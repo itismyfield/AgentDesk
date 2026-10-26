@@ -85,6 +85,8 @@ src/
 │   ├── discord_thread_create_lock.rs
 │   ├── doctor.rs
 │   ├── herdr.rs
+│   ├── herdr_probe.rs
+│   ├── herdr_probe_tests.rs
 │   ├── herdr_terminate_tests.rs
 │   ├── herdr_tests.rs
 │   ├── init.rs
@@ -111,14 +113,16 @@ src/
 │   ├── session_hosts/
 │   │   ├── migration/
 │   │   │   ├── consent_holds.rs
-│   │   │   └── consent_holds_tests.rs
+│   │   │   ├── consent_holds_tests.rs
+│   │   │   └── consent_returns_tests.rs
 │   │   ├── approval_store.rs
 │   │   ├── boot_pg_tests.rs
 │   │   ├── migration.rs
 │   │   ├── migration_tests.rs
 │   │   ├── projection.rs
 │   │   ├── user_default.rs
-│   │   └── user_default_tests.rs
+│   │   ├── user_default_tests.rs
+│   │   └── user_default_validator_tests.rs
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── agent_channels.rs
@@ -213,6 +217,7 @@ src/
 │   │   ├── listing.rs
 │   │   ├── metadata.rs
 │   │   ├── mod.rs
+│   │   ├── soft_delete.rs
 │   │   └── transitions.rs
 │   ├── postgres/
 │   │   ├── advisory_lock.rs
@@ -310,6 +315,7 @@ src/
 │   ├── dispatch_status/
 │   │   ├── auto_queue_terminal_sync_policy_tests/
 │   │   │   └── migration_value_pg_tests.rs
+│   │   ├── review_skip.rs
 │   │   └── terminal_timestamp_tests.rs
 │   ├── completion_hooks.rs
 │   ├── dispatch_cancel.rs
@@ -500,6 +506,8 @@ src/
 │   │   │   ├── session_repair.rs
 │   │   │   ├── tui_output_readiness_tests.rs
 │   │   │   └── unread_tail_attribution_tests.rs
+│   │   ├── kanban/
+│   │   │   └── card_delete.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
@@ -748,10 +756,6 @@ src/
 │   │   ├── busy_inject/
 │   │   │   ├── screen/
 │   │   │   │   └── paste_footer.rs
-│   │   │   ├── stash_tests/
-│   │   │   │   ├── a1_stash_tests.rs
-│   │   │   │   ├── hold_tests.rs
-│   │   │   │   └── paste_footer_tests.rs
 │   │   │   ├── ownership.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_interleave_tests.rs
@@ -789,8 +793,7 @@ src/
 │   │   ├── host_input/
 │   │   │   ├── guarded_submission/
 │   │   │   │   ├── idle_stash/
-│   │   │   │   │   ├── idle_stash_tests.rs
-│   │   │   │   │   └── receipt.rs
+│   │   │   │   │   └── idle_stash_tests.rs
 │   │   │   │   ├── executor_tests.rs
 │   │   │   │   └── idle_stash.rs
 │   │   │   └── guarded_submission.rs
@@ -1057,6 +1060,7 @@ src/
 │   │   │   ├── config/
 │   │   │   │   ├── provider_settings/
 │   │   │   │   │   └── revision_tests.rs
+│   │   │   │   ├── allowall_tests.rs
 │   │   │   │   └── provider_settings.rs
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
@@ -1098,7 +1102,9 @@ src/
 │   │   │   │   └── provider_reset.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
-│   │   │   │   └── reports.rs
+│   │   │   │   ├── recovery_command_tests.rs
+│   │   │   │   ├── reports.rs
+│   │   │   │   └── session_details.rs
 │   │   │   ├── inspect/
 │   │   │   │   ├── formatting.rs
 │   │   │   │   ├── mod.rs
@@ -1110,19 +1116,23 @@ src/
 │   │   │   │   ├── render_recovery.rs
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── restart/
+│   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
-│   │   │   │   └── autocomplete.rs
+│   │   │   │   ├── autocomplete.rs
+│   │   │   │   └── resume_key_tests.rs
+│   │   │   ├── skill/
+│   │   │   │   └── stop_response_tests.rs
 │   │   │   ├── system_prompt/
 │   │   │   │   ├── reconstruct.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── text_commands/
-│   │   │   │   ├── command_dispatch_contract_tests/
-│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── clear_http_overlap_tests.rs
 │   │   │   │   ├── clear_refusal_reply_tests.rs
 │   │   │   │   └── native_stop.rs
 │   │   │   ├── voice/
-│   │   │   │   └── alert.rs
+│   │   │   │   ├── alert.rs
+│   │   │   │   └── sensitivity.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── command_policy.rs
 │   │   │   ├── config.rs
@@ -1131,13 +1141,11 @@ src/
 │   │   │   ├── goals.rs
 │   │   │   ├── help.rs
 │   │   │   ├── help_tests.rs
-│   │   │   ├── meeting_cmd.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── model_picker.rs
 │   │   │   ├── model_ui.rs
 │   │   │   ├── node.rs
 │   │   │   ├── receipt.rs
-│   │   │   ├── recovery_ops.rs
 │   │   │   ├── restart.rs
 │   │   │   ├── session.rs
 │   │   │   ├── sidecar.rs
@@ -1516,6 +1524,8 @@ src/
 │   │   │   ├── status_panel/
 │   │   │   │   ├── completed_kind.rs
 │   │   │   │   └── derived_status.rs
+│   │   │   ├── tool_summary/
+│   │   │   │   └── code_mode.rs
 │   │   │   ├── background_task_events.rs
 │   │   │   ├── channel_visibility.rs
 │   │   │   ├── clock_tests.rs
@@ -1540,8 +1550,10 @@ src/
 │   │   │   ├── task_panel.rs
 │   │   │   ├── tests.rs
 │   │   │   ├── tool_activity.rs
+│   │   │   ├── tool_activity_accuracy_tests.rs
 │   │   │   ├── tool_activity_tests.rs
 │   │   │   ├── tool_summary.rs
+│   │   │   ├── tool_summary_accuracy_tests.rs
 │   │   │   ├── tool_summary_label_tests.rs
 │   │   │   ├── tool_summary_tests.rs
 │   │   │   ├── turn_anchor.rs
@@ -1729,9 +1741,13 @@ src/
 │   │   ├── router/
 │   │   │   ├── herdr_consent/
 │   │   │   │   ├── admission.rs
+│   │   │   │   ├── admission_notice_tests.rs
+│   │   │   │   ├── admission_refusal.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── custody_tests.rs
+│   │   │   │   ├── return_input.rs
+│   │   │   │   ├── return_input_tests.rs
 │   │   │   │   ├── service_tests.rs
 │   │   │   │   ├── startup.rs
 │   │   │   │   ├── startup_tests.rs
@@ -2254,6 +2270,7 @@ src/
 │   │   │   │   ├── prompt_identity_e2e_tests/
 │   │   │   │   │   ├── herdr_direct_actual_client_tests.rs
 │   │   │   │   │   └── herdr_direct_roundtrip_tests.rs
+│   │   │   │   ├── agent_text_command_e2e_tests.rs
 │   │   │   │   ├── busy_inject_e2e_tests.rs
 │   │   │   │   ├── busy_inject_thread_e2e_tests.rs
 │   │   │   │   ├── busy_inject_turn_mode_e2e_tests.rs
@@ -3215,6 +3232,7 @@ src/
 │   │   │   │   │   ├── engine_tests.rs
 │   │   │   │   │   ├── preview.rs
 │   │   │   │   │   ├── preview_tests.rs
+│   │   │   │   │   ├── return_tests.rs
 │   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   ├── settlement_tests.rs
 │   │   │   │   │   ├── workflow.rs
@@ -3240,6 +3258,7 @@ src/
 │   │   │   │   ├── grant_store.rs
 │   │   │   │   ├── grant_store_tests.rs
 │   │   │   │   ├── loaded_image.rs
+│   │   │   │   ├── loaded_image_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── peer.rs
 │   │   │   │   ├── peer_tests.rs
@@ -3588,6 +3607,7 @@ src/
 │   │   │   ├── suspension.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── tool_card_accuracy_tests.rs
 │   │   │   ├── tool_card_actor_replay_tests.rs
 │   │   │   ├── tool_card_actor_tests.rs
 │   │   │   ├── tool_card_codex_result_tests.rs
@@ -3880,7 +3900,6 @@ src/
 │   ├── session_resume.rs
 │   ├── session_selector_validity.rs
 │   ├── settings.rs
-│   ├── shell_guard.rs
 │   ├── stale_turn_reconciler.rs
 │   ├── task_completion_v1.rs
 │   ├── terminal_status_formatting.rs

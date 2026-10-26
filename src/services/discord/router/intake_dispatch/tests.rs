@@ -517,21 +517,6 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
     .expect("slash skill forwards");
     mark_open_routes_done(&pool, channel_id).await;
 
-    dispatch_skill_intake(
-        &deps,
-        ProviderKind::Claude,
-        channel_id,
-        MessageId::new(4_350_113),
-        UserId::new(4350),
-        "text-owner".to_string(),
-        "Execute /registered-skill".to_string(),
-        IntakeOrigin::TextSkill,
-        Vec::new(),
-        None,
-    )
-    .await
-    .expect("text skill forwards");
-
     let rows: Vec<(String, String, Option<bool>)> = sqlx::query_as(
         "SELECT target_instance_id, provider, preserve_on_cancel FROM intake_outbox
          WHERE channel_id = $1 ORDER BY id",
@@ -544,7 +529,6 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
         rows,
         vec![
             (owner.to_string(), "claude".to_string(), Some(true)),
-            (owner.to_string(), "claude".to_string(), Some(false)),
             (owner.to_string(), "claude".to_string(), Some(false)),
         ]
     );

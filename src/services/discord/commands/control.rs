@@ -1,6 +1,5 @@
 use poise::serenity_prelude as serenity;
-use serenity::{CreateAttachment, MessageId};
-use std::path::Path;
+use serenity::MessageId;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -9,7 +8,6 @@ use crate::services::provider::ProviderKind;
 
 use super::super::admin_host_guard::ManagedReset;
 use super::super::catch_up::retry_state::clear_channel_discarding_catch_up_backlog;
-use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::queue_io::mailbox_cancel_queued_primary_message;
 use super::super::settings::save_bot_settings;
 use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_global_active};
@@ -391,8 +389,7 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
         return Ok(());
     }
-    // Issue #1005: runtime-control tier — owner-only regardless of
-    // `allow_all_users`. Mirrors the text-surface gate in `handle_text_command`.
+    // Mutating tier like /clear and /resume: any authorized user passes this gate.
     if !super::enforce_slash_command_policy(&ctx, "/stop").await? {
         return Ok(());
     }
@@ -457,6 +454,21 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     Ok(())
 }
 
+// Dispatch aliases through the real slash action so owner checks and replies stay shared.
+pub(super) async fn run_stop(ctx: Context<'_>) -> Result<(), Error> {
+    let poise::Context::Application(app) = ctx else {
+        return Err("Stop aliases require a slash interaction.".into());
+    };
+    let action = cmd_stop()
+        .slash_action
+        .ok_or("Stop slash action is unavailable.")?;
+    match action(app).await {
+        Ok(()) => Ok(()),
+        Err(poise::FrameworkError::Command { error, .. }) => Err(error),
+        Err(_) => Err("Stop slash action could not be dispatched.".into()),
+    }
+}
+
 pub(super) fn parse_queued_message_id(raw: &str) -> Option<MessageId> {
     raw.trim()
         .parse::<u64>()
@@ -514,12 +526,14 @@ pub(in crate::services::discord) async fn cmd_cancel_queued(
 /// /clear — Clear AI conversation history
 #[poise::command(slash_command, rename = "clear")]
 pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer().await?;
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        ctx.say("권한이 없어 세션을 초기화하지 않았어요.").await?;
         return Ok(());
     }
-    // Issue #1005: runtime-control tier — owner-only.
+    // Mutating tier like /stop and /resume: any authorized user passes this gate.
     if !super::enforce_slash_command_policy(&ctx, "/clear").await? {
         return Ok(());
     }
@@ -528,14 +542,23 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         log_command_received!(ctx.channel_id().get(), user_name, "/clear");
 
         let http = ctx.serenity_context().http.clone();
-        let report = clear_channel_session_state(
+        let report = match clear_channel_session_state(
             &http,
             &ctx.data().shared,
             &ctx.data().provider,
             ctx.channel_id(),
             "/clear",
         )
-        .await?;
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::error!(channel_id = ctx.channel_id().get(), %error, "clear failed");
+                ctx.say(format!("세션 초기화에 실패했어요: {error}"))
+                    .await?;
+                return Ok(());
+            }
+        };
 
         ctx.say(report.reply()).await?;
         log_info_event!(
@@ -594,158 +617,6 @@ mod clear_end_tests;
 mod clear_entry_tests;
 #[cfg(test)]
 mod clear_persist_failure_tests;
-
-/// /down <file> — Download file from server
-#[poise::command(slash_command, rename = "down")]
-pub(in crate::services::discord) async fn cmd_down(
-    ctx: Context<'_>,
-    #[description = "File path to download"] file: String,
-) -> Result<(), Error> {
-    let user_id = ctx.author().id;
-    let user_name = &ctx.author().name;
-    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
-        return Ok(());
-    }
-
-    log_command_received!(ctx.channel_id().get(), user_name, "/down", path = %file);
-
-    let file_path = file.trim();
-    if file_path.is_empty() {
-        ctx.say("Usage: `/down <filepath>`\nExample: `/down /home/user/file.txt`")
-            .await?;
-        return Ok(());
-    }
-
-    // Resolve relative path
-    let resolved_path = if Path::new(file_path).is_absolute() {
-        file_path.to_string()
-    } else {
-        let current_path = {
-            let mut data = ctx.data().shared.core.lock().await;
-            data.sessions
-                .get_mut(&ctx.channel_id())
-                .and_then(|s| s.validated_path(ctx.channel_id()))
-        };
-        match current_path {
-            Some(base) => format!("{}/{}", base.trim_end_matches('/'), file_path),
-            None => {
-                ctx.say("No active session or session path is stale. Use absolute path or `/start <path>` first.")
-                    .await?;
-                return Ok(());
-            }
-        }
-    };
-
-    let path = Path::new(&resolved_path);
-    if !path.exists() {
-        ctx.say(format!("File not found: {}", resolved_path))
-            .await?;
-        return Ok(());
-    }
-    if !path.is_file() {
-        ctx.say(format!("Not a file: {}", resolved_path)).await?;
-        return Ok(());
-    }
-
-    // Send file as attachment
-    let attachment = CreateAttachment::path(path).await?;
-    ctx.send(poise::CreateReply::default().attachment(attachment))
-        .await?;
-
-    Ok(())
-}
-
-/// /shell <command> — Run shell command directly
-#[poise::command(slash_command, rename = "shell")]
-pub(in crate::services::discord) async fn cmd_shell(
-    ctx: Context<'_>,
-    #[description = "Shell command to execute"] command: String,
-) -> Result<(), Error> {
-    let user_id = ctx.author().id;
-    let user_name = &ctx.author().name;
-    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
-        return Ok(());
-    }
-    // Issue #1005: shell/tool-grant tier — owner-only AND default-disabled.
-    // Even `allow_all_users=true` must NOT unlock RCE.
-    if !super::enforce_slash_command_policy(&ctx, "/shell").await? {
-        return Ok(());
-    }
-
-    let preview = truncate_str(&command, 60);
-    log_command_received!(ctx.channel_id().get(), user_name, "/shell", command_preview = %preview);
-
-    // Defer for potentially long-running commands
-    ctx.defer().await?;
-
-    let working_dir = {
-        let mut data = ctx.data().shared.core.lock().await;
-        data.sessions
-            .get_mut(&ctx.channel_id())
-            .and_then(|s| s.validated_path(ctx.channel_id()))
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .map(|h| h.display().to_string())
-                    .unwrap_or_else(|| "/".to_string())
-            })
-    };
-
-    let cmd_owned = command.clone();
-    let working_dir_clone = working_dir.clone();
-
-    let result = tokio::task::spawn_blocking(move || {
-        let child = crate::services::platform::shell::shell_command_builder(&cmd_owned)
-            .current_dir(&working_dir_clone)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
-
-        match child {
-            Ok(child) => child.wait_with_output(),
-            Err(e) => Err(e),
-        }
-    })
-    .await;
-
-    let response = match result {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let exit_code = output.status.code().unwrap_or(-1);
-
-            let mut parts = Vec::new();
-            if !stdout.is_empty() {
-                parts.push(format!("```\n{}\n```", stdout.trim_end()));
-            }
-            if !stderr.is_empty() {
-                parts.push(super::owner_error_response(
-                    "셸 명령이 오류 출력을 반환했어요.",
-                    stderr.trim_end(),
-                ));
-            }
-            if parts.is_empty() {
-                parts.push(format!("(종료 코드: {})", exit_code));
-            } else if exit_code != 0 {
-                parts.push(format!("(종료 코드: {})", exit_code));
-            }
-            parts.join("\n")
-        }
-        Ok(Err(e)) => super::owner_error_response("셸 명령을 실행하지 못했어요.", &e.to_string()),
-        Err(e) => {
-            super::owner_error_response("셸 명령을 처리하는 중 오류가 발생했어요.", &e.to_string())
-        }
-    };
-
-    send_long_message_ctx(ctx, &response).await?;
-    log_info_event!(
-        "discord_shell_command_completed",
-        channel_id = ctx.channel_id().get(),
-        user_name = %user_name,
-        status = "completed",
-    );
-    Ok(())
-}
 
 async fn persist_fast_mode_reset_marker(
     shared: &Arc<SharedData>,

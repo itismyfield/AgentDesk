@@ -173,7 +173,7 @@ surfaces. The code-side companion that answers "which Rust module do I edit?"
 for in-flight migrations and known-legacy paths lives under
 [`docs/agent-maintenance/`](agent-maintenance/index.md) (#1279):
 
-- [`agent-maintenance/change-surfaces.md`](agent-maintenance/change-surfaces.md) — canonical modules, giant-file hard-gate source of truth, `do_not_edit_without_migration_plan` list.
+- [`agent-maintenance/change-surfaces.md`](agent-maintenance/change-surfaces.md) — canonical modules, giant-file warning and review map, `do_not_edit_without_migration_plan` list.
 - [`agent-maintenance/discord-outbound-migration.md`](agent-maintenance/discord-outbound-migration.md) — per-callsite coverage map (#1006, #1175, #1280).
 - [`agent-maintenance/known-legacy.md`](agent-maintenance/known-legacy.md) — intentionally-legacy modules with cleanup-owner issue numbers.
 

@@ -1,12 +1,12 @@
 """Comment-only CI skip: scripts/ci/comment_only_gate.py and its ci-pr.yml wiring.
 
-A false ``comment_only=true`` skips the PostgreSQL, high-risk, Windows and
-library-sweep lanes for real code, so the gate cases below pin the refusals. A
-false ``rust_tests_skip=true`` skips the library sweep whose tests read a changed
-file through ``include_str!``, so the include cases pin what that scan resolves.
-The workflow cases evaluate ci-pr.yml's own expressions and run the real
-required-check-mirror.sh, so a mirror that reads a different output than the
-job it mirrors turns a skipped lane into a red required context here.
+A false ``comment_only=true`` skips the Rust tests, Windows and lint lanes for
+real code, so the gate cases below pin the refusals. A false
+``rust_tests_skip=true`` skips the Rust tests that read a changed file through
+``include_str!``, so the include cases pin what that scan resolves. The workflow
+cases evaluate ci-pr.yml's own expressions, the judge job's own `if` and the real
+`CI required` judge over its needs, so a judge gate that reads a different output
+than the job it expects turns a skipped lane into a red sub-verdict here.
 """
 
 from __future__ import annotations
@@ -26,26 +26,26 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
-MIRROR = REPO_ROOT / "scripts/required-check-mirror.sh"
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "ci"))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import comment_only_gate as gate  # noqa: E402
+import nextest_required  # noqa: E402
 import rust_include_reads as includes  # noqa: E402
 
 SKIPPED_WHEN_COMMENT_ONLY = (
-    "lib_test_prepare",
+    "rust_build",
+    "rust_tests",
+    "test_evidence",
     "lint",
-    "relay_authority_targets",
     "relay_authority_mutations",
-    "test_fast",
-    "high-risk-recovery",
+    "pg15_owner_proof",
     "check_fast_cross_os",
     "check_fast_cross_os_targets",
-    "library_sweep",
 )
 KEPT_WHEN_COMMENT_ONLY = ("scripts", "scripts_guards", "scripts_contracts")
-KEPT_FOR_INCLUDED_RUST = {"lib_test_prepare", "lint", "relay_authority_targets", "relay_authority_mutations", "library_sweep"}
+KEPT_FOR_INCLUDED_RUST = {"rust_build", "rust_tests", "test_evidence", "lint",
+                          "relay_authority_mutations", "pg15_owner_proof"}
 REQUIRED_CONTEXTS = (
     "Lint",
     "Script checks",
@@ -61,8 +61,9 @@ REQUIRED_CONTEXTS = (
 
 def outputs(**lists: list[str]) -> dict[str, str]:
     """paths-filter outputs as toJSON renders them with ``list-files: json``."""
-    lists = {**dict.fromkeys(("dashboard", "high_risk_recovery", "pg_db", "rust_or_policy",
-                            "rust_compile", "relay_contract", "cross_os_rust", "win32_build_token"), []), **lists}
+    lists = {**dict.fromkeys(("dashboard", "high_risk_recovery", "rust_or_policy",
+                            "rust_compile", "relay_contract", "cross_os_rust", "win32_build_token",
+                            "script_check_files"), []), **lists}
     rendered: dict[str, str] = {"changes": json.dumps([n for n, f in lists.items() if f])}
     for name, files in lists.items():
         rendered[name] = "true" if files else "false"
@@ -72,7 +73,8 @@ def outputs(**lists: list[str]) -> dict[str, str]:
 
 
 RS = "src/server/mod.rs"
-RS_FILTERS = dict(pg_db=[RS], rust_or_policy=[RS], rust_compile=[RS], cross_os_rust=[RS], dashboard=[], relay_contract=[])
+RS_FILTERS = dict(rust_or_policy=[RS], rust_compile=[RS], cross_os_rust=[RS], dashboard=[],
+                  relay_contract=[], script_check_files=[RS])
 
 
 class DecideTests(unittest.TestCase):
@@ -88,6 +90,33 @@ class DecideTests(unittest.TestCase):
     def test_rust_edit_with_an_unfiltered_markdown_passes(self) -> None:
         entries = [("M", RS, RS), ("M", "docs/guide.md", "docs/guide.md"), ("A", "notes.md", "notes.md")]
         self.assertVerdict(True, 0, entries, outputs(**RS_FILTERS))
+
+    def test_all_file_filter_preserves_verified_rust_and_markdown_skip(self) -> None:
+        doc = "docs/guide.md"
+        for entries, lists in (
+            ([("M", RS, RS), ("M", doc, doc)], {**RS_FILTERS, "script_check_files": [RS, doc]}),
+            ([("M", doc, doc)], {"script_check_files": [doc]}),
+        ):
+            with self.subTest(entries=entries):
+                self.assertVerdict(True, 0, entries, outputs(**lists))
+
+    def test_all_file_filter_refuses_unverified_inputs(self) -> None:
+        filters = outputs(**{**RS_FILTERS, "script_check_files": [RS, "docs/unverified.md"]})
+        self.assertVerdict(False, 0, [("M", RS, RS)], filters,
+                           "filter script_check_files: selected by unverified file docs/unverified.md")
+
+    def test_all_file_filter_missing_or_malformed_refuses(self) -> None:
+        complete = outputs(**RS_FILTERS)
+        missing = {key: value for key, value in complete.items()
+                   if key not in {"script_check_files", "script_check_files_files", "script_check_files_count"}}
+        missing["changes"] = json.dumps([name for name in json.loads(complete["changes"])
+                                         if name != "script_check_files"])
+        malformed = {**complete, "script_check_files_files": "not JSON"}
+        wrong_type = {**complete, "script_check_files_files": '[true]'}
+        wrong_count = {**complete, "script_check_files_count": "0"}
+        for filters in (missing, malformed, wrong_type, wrong_count):
+            with self.subTest(filters=filters):
+                self.assertVerdict(False, 0, [("M", RS, RS)], filters, "filter script_check_files:")
 
     def test_judge_failure_or_usage_error_refuses(self) -> None:
         for rc in (1, 2, -9):
@@ -143,14 +172,14 @@ class DecideTests(unittest.TestCase):
                 self.assertVerdict(False, 0, [("M", RS, RS), entry], outputs(**RS_FILTERS), "not an in-place edit")
 
     def test_filter_file_git_did_not_report_refuses(self) -> None:
-        filters = {**RS_FILTERS, "pg_db": [RS, "src/db/postgres.rs"]}
+        filters = {**RS_FILTERS, "rust_compile": [RS, "src/db/postgres.rs"]}
         self.assertVerdict(False, 0, [("M", RS, RS)], outputs(**filters), "src/db/postgres.rs")
 
     def test_missing_or_malformed_filter_outputs_refuse(self) -> None:
         broken = outputs(**RS_FILTERS)
-        del broken["pg_db_files"]
+        del broken["rust_compile_files"]
         true_but_empty = {**outputs(**RS_FILTERS), "dashboard": "true"}
-        for filters in (None, "[]", {}, broken, {**broken, "pg_db_files": "not json"}, true_but_empty):
+        for filters in (None, "[]", {}, broken, {**broken, "rust_compile_files": "not json"}, true_but_empty):
             with self.subTest(filters=filters):
                 self.assertVerdict(False, 0, [("M", RS, RS)], filters)
 
@@ -510,11 +539,11 @@ class GateProcessTests(unittest.TestCase):
 
 TOKEN = re.compile(r"\s*(?:(\|\||&&|==|!=|!|\(|\))|'((?:[^']|'')*)'|([A-Za-z_][\w.-]*))")
 FORCE_FULL = "needs.pg_shards.outputs.force_full == 'true'"
+UPSTREAM_RESULT = re.compile(r"needs\.([A-Za-z0-9_-]+)\.result\s*==\s*'success'")
 
 
 def cancelled_path_gate(expr: str, lookup) -> bool:
-    """Only the status-first cancellation guard and one path output, which the selector's
-    kill switch may open in parentheses, are shared gates."""
+    """Only the status-first cancellation guard and one changes output or upstream success are shared gates."""
     def unparen(value: str) -> str:
         value = value.strip()
         while value.startswith("(") and value.endswith(")"):
@@ -532,15 +561,17 @@ def cancelled_path_gate(expr: str, lookup) -> bool:
     status = unparen(terms[0])
     assert len(terms) == 2 and status.startswith("!"), expr
     assert re.fullmatch(r"cancelled\s*\(\s*\)", unparen(status[1:])), expr
-    path, *opened = unparen(terms[1]).split("||")
-    assert not opened or terms[1].strip().startswith("(") and [o.strip() for o in opened] == [FORCE_FULL], expr
-    output = re.fullmatch(r"needs\.changes\.outputs\.([A-Za-z0-9_-]+)\s*(==|!=)\s*'true'", unparen(path))
-    assert output, expr
-    forced = bool(opened) and str(lookup("needs.pg_shards.outputs.force_full")).lower() == "true"
-    selected = str(lookup("needs.changes.outputs." + output.group(1))).lower() == "true"
-    if output.group(2) == "!=":
-        selected = not selected
-    return not truthy(lookup("cancelled()")) and (selected or forced)
+    path = unparen(terms[1])
+    assert "||" not in path, expr
+    upstream = UPSTREAM_RESULT.fullmatch(path)
+    output = re.fullmatch(r"needs\.changes\.outputs\.([A-Za-z0-9_-]+)\s*(==|!=)\s*'true'", path)
+    assert output or upstream, expr
+    if upstream:
+        selected = lookup(f"needs.{upstream.group(1)}.result") == "success"
+    else:
+        selected = str(lookup("needs.changes.outputs." + output.group(1))).lower() == "true"
+        selected = not selected if output.group(2) == "!=" else selected
+    return not truthy(lookup("cancelled()")) and selected
 
 
 def evaluate(expr: str, lookup) -> object:
@@ -638,6 +669,9 @@ def mirror_steps(job: dict) -> list[dict]:
     return [s for s in job.get("steps", []) if s.get("run") == "./scripts/required-check-mirror.sh"]
 
 
+JUDGE = "required_contexts"
+
+
 class WorkflowSimulation:
     """Evaluates one ci-pr.yml run from the filter and gate step outputs."""
 
@@ -650,10 +684,8 @@ class WorkflowSimulation:
         rust_lint_skip: str | None = None,
         gate_outcome: str = "success",
         run_cancelled: bool = False,
-        force_full: str = "false",
     ):
         self.run_cancelled = run_cancelled
-        self.force_full = force_full
         self.jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
         gate_outputs = {"comment_only": comment_only, "rust_tests_skip": rust_tests_skip, "rust_lint_skip": rust_lint_skip}
         steps = {"filter": filters, "comment_only": {k: v for k, v in gate_outputs.items() if v is not None}}
@@ -668,41 +700,39 @@ class WorkflowSimulation:
 
         self.changes = {key: render(value, step_lookup) for key, value in self.jobs["changes"]["outputs"].items()}
         self.results = {"changes": "success"}
+        forced = forced or {}
+        # Jobs are listed after their needs, so a forced upstream result reaches its dependants.
         for job_id, job in self.jobs.items():
-            if job_id != "changes" and not mirror_steps(job):
+            if job_id not in ("changes", JUDGE) and not mirror_steps(job):
                 runs = "if" not in job or truthy(evaluate(job["if"], self.lookup))
-                self.results[job_id] = "success" if runs else "skipped"
-        self.results.update(forced or {})
+                self.results[job_id] = forced.get(job_id, "success" if runs else "skipped")
+        self.results.update(forced)
 
     def lookup(self, name: str) -> object:
         if name == "cancelled()":
             return self.run_cancelled
         parts = name.split(".")
         assert parts[0] == "needs", name
-        if parts[2] == "outputs" and parts[1] == "pg_shards":
-            assert parts[3] == "force_full", name
-            return self.force_full
         if parts[2] == "outputs":
             assert parts[1] == "changes", name
             return self.changes.get(parts[3], "")
         return self.results[parts[1]]
 
-    def mirror_runs(self) -> dict[str, list[subprocess.CompletedProcess[str]]]:
-        """Every job that publishes through required-check-mirror.sh, keyed by its context name."""
-        published: dict[str, list[subprocess.CompletedProcess[str]]] = {}
-        for job in self.jobs.values():
-            if not mirror_steps(job) or not self.job_runs(job):
-                continue
-            runs = published.setdefault(job["name"], [])
-            for step in mirror_steps(job):
-                if "if" in step and not truthy(evaluate(render(step["if"], self.lookup), self.lookup)):
-                    continue
-                env = {key: render(value, self.lookup) for key, value in step["env"].items()}
-                runs.append(subprocess.run(
-                    ["bash", str(MIRROR)], env={"PATH": os.environ["PATH"], **env},
-                    capture_output=True, text=True, check=False,
-                ))
-        return published
+    def verdicts(self) -> dict[str, tuple[bool, list[str]]]:
+        """The judge's sub-verdict per context over `toJSON(needs)`, or {} when the judge job is not run."""
+        judge = self.jobs[JUDGE]
+        if not self.job_runs(judge):
+            return {}
+        needs = {name: {"result": self.results[name], "outputs": self.changes if name == "changes" else {}}
+                 for name in judge["needs"]}
+        _ok, rows = nextest_required.gate_verdict(needs, "success")
+        return {name: (ok, lines) for name, ok, lines in rows}
+
+    def gate(self) -> str:
+        """The `CI required` conclusion branch protection reads; a skipped required check passes."""
+        if not self.job_runs(self.jobs[JUDGE]):
+            return "skipped"
+        return "success" if all(ok for ok, _ in self.verdicts().values()) else "failure"
 
     def job_runs(self, job: dict) -> bool:
         """A job-level `if:`; one without a status function implies success(), as in Actions."""
@@ -718,10 +748,22 @@ class WorkflowSimulation:
 
 # Raw filters for a comment edit that selects every heavy lane.
 HEAVY_RAW = outputs(
-    dashboard=[], high_risk_recovery=[RS], pg_db=[RS], rust_or_policy=[RS], rust_compile=[RS],
-    relay_contract=[], cross_os_rust=[RS], win32_build_token=[],
+    dashboard=[], high_risk_recovery=[RS], rust_or_policy=[RS], rust_compile=[RS],
+    relay_contract=[], cross_os_rust=[RS], win32_build_token=[], script_check_files=[RS],
 )
-OVERRIDDEN = {"pg_db": "pg_db", "high_risk_recovery": "high_risk_recovery", "cross_os_rust": "cross_os_rust", "rust_tests": "rust_or_policy"}
+OVERRIDDEN = {"high_risk_recovery": "high_risk_recovery", "cross_os_rust": "cross_os_rust", "rust_tests": "rust_or_policy"}
+N_JOBS = ("rust_build", "rust_tests", "test_evidence")
+# The contexts each upstream job decides, written here independently of the judge's table.
+CONTEXTS_OF = {
+    **{job: set(REQUIRED_CONTEXTS) for job in N_JOBS},
+    "lint": {"Lint", "Fast check (ubuntu-latest)"},
+    "scripts": {"Script checks"}, "scripts_guards": {"Script checks"}, "scripts_contracts": {"Script checks"},
+    "dashboard": {"Dashboard (Node 22)"},
+    "pg15_owner_proof": {"Fast targeted tests (ubuntu-latest)"},
+    "relay_authority_mutations": {"relay-authority-contract"},
+    "check_fast_cross_os": {"Fast check cross OS required context (ubuntu-latest)"},
+    "check_fast_cross_os_targets": {"Fast check cross OS required context (ubuntu-latest)"},
+}
 
 
 class CancelledPathExpressionTests(unittest.TestCase):
@@ -772,9 +814,9 @@ class CancelledPathExpressionTests(unittest.TestCase):
         self.assertTrue(evaluate("always()", lookup))
         self.assertTrue(evaluate("always() && runner.os != 'macOS'", lookup))
 
-    def test_spaced_status_guard_bypasses_failed_prepare_but_respects_cancellation(self) -> None:
-        run = WorkflowSimulation(HEAVY_RAW, "false", forced={"lib_test_prepare": "failure"})
-        job = {"needs": ["changes", "lib_test_prepare"], "if": "${{ ! (cancelled ( )) && needs.changes.outputs.pg_db == 'true' }}"}
+    def test_spaced_status_guard_bypasses_failed_build_but_respects_cancellation(self) -> None:
+        run = WorkflowSimulation(HEAVY_RAW, "false", forced={"rust_build": "failure"})
+        job = {"needs": ["changes", "rust_build"], "if": "${{ ! (cancelled ( )) && needs.changes.outputs.rust_tests == 'true' }}"}
         self.assertTrue(run.job_runs(job))
         run.run_cancelled = True
         self.assertFalse(run.job_runs(job))
@@ -800,12 +842,14 @@ class CancelledPathExpressionTests(unittest.TestCase):
 
 class WorkflowWiringTests(unittest.TestCase):
     def assertPublishedGreen(self, run: WorkflowSimulation) -> None:
-        published = run.mirror_runs()
+        verdicts = run.verdicts()
         for context in REQUIRED_CONTEXTS:
             with self.subTest(context=context):
-                self.assertTrue(published.get(context), f"{context} ran no mirror step")
-                for result in published[context]:
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(context, verdicts, f"{context} has no judge verdict")
+                self.assertTrue(verdicts[context][0], verdicts[context][1])
+
+    def assertRed(self, run: WorkflowSimulation, context: str, message: str) -> None:
+        self.assertFalse(run.verdicts()[context][0], message)
 
     def test_comment_only_skips_heavy_lanes_and_every_required_context_is_green(self) -> None:
         for raw in (HEAVY_RAW, outputs(rust_or_policy=["tests/scenario.yaml", "tests/README.md"],
@@ -821,22 +865,27 @@ class WorkflowWiringTests(unittest.TestCase):
                 self.assertEqual(run.changes["rust_or_policy"], "false")
                 self.assertPublishedGreen(run)
 
-    def test_rust_comments_skip_sweep_but_keep_lint_and_compile(self) -> None:
+    def test_rust_comments_skip_rust_tests_but_keep_lint_and_compile(self) -> None:
         for lint_skip in ("false", None, ""):
             run = WorkflowSimulation(HEAVY_RAW, "true", rust_tests_skip="true", rust_lint_skip=lint_skip)
             with self.subTest(rust_lint_skip=lint_skip):
                 self.assertEqual(run.changes["rust_or_policy"], "true")
                 self.assertEqual(run.changes["rust_compile"], "true")
                 self.assertEqual(run.results["lint"], "success")
-                self.assertEqual(run.results["library_sweep"], "skipped")
+                self.assertEqual((run.results["rust_build"], run.results["rust_tests"]), ("skipped", "skipped"))
                 self.assertPublishedGreen(run)
 
-    def test_include_reader_runs_only_the_library_sweep(self) -> None:
+    def test_script_check_raw_files_survive_comment_only_filter_overrides(self) -> None:
+        for comment_only in ("true", "false"):
+            with self.subTest(comment_only=comment_only):
+                run = WorkflowSimulation(HEAVY_RAW, comment_only, rust_tests_skip="true", rust_lint_skip="true")
+                self.assertEqual(run.changes["script_check_files"], HEAVY_RAW["script_check_files_files"])
+
+    def test_include_reader_runs_the_rust_tests(self) -> None:
         for skip in ("false", None, ""):
             run = WorkflowSimulation(HEAVY_RAW, "true", rust_tests_skip=skip)
             with self.subTest(rust_tests_skip=skip):
                 self.assertEqual(run.changes["rust_tests"], HEAVY_RAW["rust_or_policy"])
-                self.assertEqual(run.results["library_sweep"], "success")
                 for job_id in SKIPPED_WHEN_COMMENT_ONLY:
                     self.assertEqual(run.results[job_id], "success" if job_id in KEPT_FOR_INCLUDED_RUST else "skipped", job_id)
                 self.assertPublishedGreen(run)
@@ -853,53 +902,44 @@ class WorkflowWiringTests(unittest.TestCase):
                     self.assertEqual(run.results[job_id], "success", job_id)
                 self.assertPublishedGreen(run)
 
-    def test_the_kill_switch_runs_both_heavy_lanes_even_for_a_comment_only_change(self) -> None:
-        run = WorkflowSimulation(HEAVY_RAW, "true", rust_tests_skip="true", force_full="true")
-        self.assertEqual((run.results["test_fast"], run.results["library_sweep"]), ("success", "success"))
-        self.assertPublishedGreen(run)
-        failed = {"test_fast": "failure", "library_sweep": "failure"}
-        published = WorkflowSimulation(HEAVY_RAW, "true", rust_tests_skip="true", force_full="true",
-                                       forced=failed).mirror_runs()
-        for context in ("Fast targeted tests (ubuntu-latest)", "Library test sweep (ubuntu-latest)"):
-            self.assertIn(1, [result.returncode for result in published[context]], context)
-
-    def test_heavy_mirrors_still_fail_closed_when_not_comment_only(self) -> None:
-        contexts = {
-            "lint": "Lint",
-            "relay_authority_targets": "relay-authority-contract",
-            "relay_authority_mutations": "relay-authority-contract",
-            "test_fast": "Fast targeted tests (ubuntu-latest)",
-            "high-risk-recovery": "High-risk recovery",
-            "check_fast_cross_os": "Fast check cross OS required context (ubuntu-latest)",
-            "check_fast_cross_os_targets": "Fast check cross OS required context (ubuntu-latest)",
-            "library_sweep": "Library test sweep (ubuntu-latest)",
-        }
-        for job_id, context in contexts.items():
+    def test_heavy_jobs_still_fail_closed_when_not_comment_only(self) -> None:
+        for job_id, contexts in CONTEXTS_OF.items():
+            if job_id == "dashboard":
+                continue
             with self.subTest(job=job_id):
                 run = WorkflowSimulation(HEAVY_RAW, "false", forced={job_id: "skipped"})
-                codes = [result.returncode for result in run.mirror_runs()[context]]
-                self.assertIn(1, codes, f"{context} passed with {job_id} skipped while its filter is true")
-        kept = WorkflowSimulation(HEAVY_RAW, "true", forced={"library_sweep": "skipped"}, rust_tests_skip="false")
-        codes = [result.returncode for result in kept.mirror_runs()["Library test sweep (ubuntu-latest)"]]
-        self.assertIn(1, codes, "library sweep kept for an include reader passed while skipped")
+                for context in contexts:
+                    self.assertRed(run, context, f"{context} passed with {job_id} skipped while its filter is true")
+        kept = WorkflowSimulation(HEAVY_RAW, "true", forced={"rust_tests": "skipped"}, rust_tests_skip="false")
+        self.assertRed(kept, "Library test sweep (ubuntu-latest)", "Rust tests kept for an include reader passed while skipped")
 
-    def test_only_a_cancelled_run_stops_the_required_context_mirrors(self) -> None:
-        # A condition-skipped required job counts as passing, and a job timeout reads as `cancelled`.
-        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        needs = {job["name"]: [job["needs"]] if isinstance(job["needs"], str) else job["needs"]
-                 for job in jobs.values() if mirror_steps(job)}
-        self.assertLessEqual(set(REQUIRED_CONTEXTS), set(needs))
-        for upstream in sorted({name for names in needs.values() for name in names}):
+    def test_every_need_failure_cancel_or_unexpected_skip_fails_ci_required(self) -> None:
+        # A job timeout reads as `cancelled`; only a skip its filter allows may pass.
+        judge = WorkflowSimulation(HEAVY_RAW, "false").jobs[JUDGE]
+        self.assertEqual(judge["name"], nextest_required.GATE)
+        self.assertEqual(sorted(set(judge["needs"]) - {"changes"}), sorted(CONTEXTS_OF))
+        self.assertEqual(WorkflowSimulation(HEAVY_RAW, "false").gate(), "success")
+        for upstream in sorted(CONTEXTS_OF):
             for outcome in ("failure", "skipped", "cancelled"):
                 with self.subTest(upstream=upstream, outcome=outcome):
-                    live = WorkflowSimulation(HEAVY_RAW, "false", forced={upstream: outcome}).mirror_runs()
-                    self.assertEqual(set(live), set(needs), "a live run skipped a required-context mirror")
-                    for context, names in needs.items():
-                        if upstream in names and outcome != "skipped":
-                            self.assertIn(1, [run.returncode for run in live[context]], context)
-            with self.subTest(upstream=upstream, run="cancelled"):
-                cancelled = WorkflowSimulation(HEAVY_RAW, "false", forced={upstream: "cancelled"}, run_cancelled=True)
-                self.assertEqual(cancelled.mirror_runs(), {}, "a cancelled run still published a mirror")
+                    run = WorkflowSimulation(HEAVY_RAW, "false", forced={upstream: outcome})
+                    verdicts = run.verdicts()
+                    self.assertEqual(set(verdicts), set(REQUIRED_CONTEXTS), "a live run skipped a sub-verdict")
+                    # dashboard is not selected by HEAVY_RAW, so its skip is the allowed path-filter skip.
+                    red = set() if (upstream, outcome) == ("dashboard", "skipped") else CONTEXTS_OF[upstream]
+                    self.assertEqual({context for context, (ok, _) in verdicts.items() if not ok}, red)
+                    self.assertEqual(run.gate(), "failure" if red else "success")
+
+    def test_a_cancelled_run_still_runs_ci_required_and_fails_it(self) -> None:
+        for upstream in sorted(CONTEXTS_OF):
+            with self.subTest(upstream=upstream):
+                run = WorkflowSimulation(HEAVY_RAW, "false", forced={upstream: "cancelled"}, run_cancelled=True)
+                self.assertEqual(run.gate(), "failure")
+
+    def test_comment_only_gate_requires_exactly_the_workflow_filters(self) -> None:
+        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        step = next(s for s in jobs["changes"]["steps"] if s.get("uses") == "dorny/paths-filter@v3")
+        self.assertEqual(gate.REQUIRED_FILTERS, set(yaml.safe_load(step["with"]["filters"])))
 
 
 if __name__ == "__main__":

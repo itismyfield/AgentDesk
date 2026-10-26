@@ -95,17 +95,54 @@ pub(super) fn stopped(session: &str, error: SubmissionError) -> SubmissionError 
 
 #[cfg(unix)]
 pub(super) fn idle_stash_stopped(session: &str, error: SubmissionError) -> SubmissionError {
-    let SubmissionError::Legacy(detail) = error else {
-        return stopped(session, error);
-    };
-    // The live fence, rather than timeout text, proves whether this adapter preceded payload.
-    let before =
-        super::super::submission_fence::idle_stash_scope().is_some_and(|(fence, context)| {
-            context.available && context.target == session && fence.idle_stash_admits(session)
-        });
-    SubmissionError::Held(if before {
-        PreparationHold::before(session, "draft_recovery_hold", detail)
-    } else {
-        PreparationHold::uncertain(session, detail)
-    })
+    use crate::services::tui_input::submission::Refusal;
+    use host_input::{InputRefusal, InputRun};
+    match error {
+        SubmissionError::Guarded(InputRun::Refused(InputRefusal::Composer(
+            Refusal::NotReady | Refusal::CaptureUnavailable | Refusal::WriterContended,
+        ))) => SubmissionError::Held(PreparationHold {
+            target: session.into(),
+            reason: "composer_not_ready",
+            phase: EffectPhase::BeforePayload,
+            detail: "claude tui idle preparation held before payload".into(),
+        }),
+        other => other,
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod idle_injection_tests {
+    use super::*;
+    use crate::services::claude_tui::host_input::{InputRefusal, InputRun, StopCause};
+    use crate::services::tui_input::submission::Refusal;
+
+    #[test]
+    fn idle_menu_requeues_without_locking_and_write_failures_do_not_lock() {
+        let session = format!("idle-preparation-{}", uuid::Uuid::new_v4());
+        for refusal in [Refusal::NotReady, Refusal::WriterContended] {
+            let held = idle_stash_stopped(
+                &session,
+                SubmissionError::Guarded(InputRun::Refused(InputRefusal::Composer(refusal))),
+            );
+            assert!(matches!(held, SubmissionError::Held(ref hold) if hold.may_requeue()));
+            assert!(!crate::services::claude_tui::composer_lock::draft_guarded(
+                &session
+            ));
+        }
+        let failed = idle_stash_stopped(
+            &session,
+            SubmissionError::Guarded(InputRun::Indeterminate {
+                confirmed: 0,
+                cause: StopCause::Send("tmux write failed".into()),
+            }),
+        );
+        assert!(matches!(
+            failed,
+            SubmissionError::Guarded(InputRun::Indeterminate { .. })
+        ));
+        assert!(!crate::services::claude_tui::composer_lock::draft_guarded(
+            &session
+        ));
+    }
 }

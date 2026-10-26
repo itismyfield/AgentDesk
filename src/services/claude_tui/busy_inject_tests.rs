@@ -20,11 +20,8 @@ const FAST: Timing = Timing {
         Duration::from_millis(10),
     ],
     settle: Duration::ZERO,
-    rechecks: 3,
-    recheck_interval: Duration::from_millis(5),
-    confirm_window: Duration::from_millis(300),
+    confirm_window: Duration::ZERO,
     confirm_poll: Duration::from_millis(20),
-    restore_window: Duration::from_millis(100),
 };
 
 fn text() -> String {
@@ -95,6 +92,7 @@ echo "$*" >> "$d/log"
 [ -f "$d/fail.$2" ] && exit 1
 case "$2" in
 display-message)
+  for last do :; done; [ "$last" = '#{pane_dead}' ] && { printf ' 0 \n'; exit 0; }
   # A bare count gets a never-attached generation and a roomy pane.
   a=$(next attach); case "$a" in *,*) echo "$a" ;; *) echo "$a,,200,50" ;; esac ;;
 capture-pane) next cap ;;
@@ -165,17 +163,6 @@ impl Fake {
         fs::write(self.dir.path().join("on_enter"), enqueue_record(&text())).unwrap();
     }
 
-    /// The transcript records the input `seconds` after the Enter.
-    fn accept_on_enter_after(&self, seconds: &str) {
-        self.accept_on_enter();
-        fs::write(self.dir.path().join("on_enter_delay"), seconds).unwrap();
-    }
-
-    /// The Enter command replies `seconds` after the delayed record has landed.
-    fn reply_after_record(&self, seconds: &str) {
-        fs::write(self.dir.path().join("reply_gap"), seconds).unwrap();
-    }
-
     fn session(&self) -> String {
         let name = self.dir.path().file_name().unwrap().to_string_lossy();
         let name: String = name
@@ -211,39 +198,6 @@ impl Fake {
             .filter(|line| line.split_whitespace().nth(1) == Some(subcommand))
             .map(str::to_string)
             .collect()
-    }
-
-    /// Resolve late evidence using the identity and exact bytes actually pasted.
-    fn pasted_attempt_submission(&self) -> Option<bool> {
-        let loads = self.calls("load-buffer");
-        assert_eq!(loads.len(), 1, "one pasted attempt owns the late receipt");
-        let mut args = loads[0].split_whitespace();
-        args.find(|arg| *arg == "-b").unwrap();
-        let id = args
-            .next()
-            .unwrap()
-            .strip_prefix("agentdesk-busy-inject-")
-            .unwrap();
-        let pasted = fs::read_to_string(self.dir.path().join("buffer")).unwrap();
-        let registered = crate::services::tui_input::human_frame::history::registered;
-        assert!(
-            registered(id, &self.transcript, &pasted),
-            "late receipt must retain its pasted attempt ID and exact frame hash"
-        );
-        assert!(!registered("foreign-attempt", &self.transcript, &pasted));
-        assert!(!registered(
-            id,
-            &self.transcript,
-            &format!("{pasted}\nforeign")
-        ));
-        transcript_submission(&self.transcript, 0, id, Some(&pasted))
-    }
-
-    /// Keys the server applied while a client was attached.
-    fn keys_while_attached(&self) -> usize {
-        fs::read_to_string(self.dir.path().join("keys_while_attached"))
-            .map(|log| log.lines().count())
-            .unwrap_or(0)
     }
 
     /// (pastes, Enter keys, any other key) — the only keys busy_inject may send are one Enter.
@@ -468,9 +422,7 @@ fn the_header_names_the_person_and_cannot_start_a_command_or_close_early() {
 #[test]
 fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_prompt() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    use crate::services::claude_tui::composer_lock::{
-        ComposerAdmission, DraftGuard, DraftSighting, composer_admission, guard_draft,
-    };
+    use crate::services::claude_tui::composer_lock::DraftSighting;
     let source = "discord:1479671298497183835:1561196979327869080";
     let framed = crate::services::tui_input::human_frame::inject(
         source,
@@ -487,20 +439,6 @@ fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_promp
         let shown = screen(composer, "");
         assert_eq!(draft_sighting(&shown), DraftSighting::Unsettled, "{shown}");
         assert_eq!(composer_owner(&shown), ComposerOwner::Unread, "{shown}");
-        let fake = Fake::new();
-        fake.caps(std::slice::from_ref(&shown));
-        let session = fake.session();
-        guard_draft(&session, DraftGuard::RecoveryRequired);
-        assert_eq!(
-            composer_admission(&session, || Some(shown.clone())),
-            ComposerAdmission::Held,
-            "our residue must keep a person's mixed-in text protected"
-        );
-        assert_eq!(fake.run(&FAST), Outcome::NotSent(Veto::Draft));
-        assert_eq!(fake.keys(), (0, 0, 0));
-        assert!(fake.calls("load-buffer").is_empty());
-        let pane = Pane::with_program(&session, fake.dir.path().join("tmux"));
-        assert_eq!(pane.capture().as_deref(), Some(shown.as_str()));
     }
     let idle = screen("[User: 0hbujang (ID: 343742347365974026)] status?", "");
     assert_eq!(composer_owner(&idle), ComposerOwner::AgentDesk);
@@ -509,459 +447,97 @@ fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_promp
 }
 
 #[test]
-fn every_pre_paste_veto_leaves_the_pane_untouched() {
+fn preparation_failures_and_menu_send_no_keys() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    type Setup = fn(&Fake);
-    let cases: [(&str, Setup, Veto); 10] = [
-        (
-            "attached",
-            |f| f.answers("attach", &["1"]),
-            Veto::HumanAttached,
-        ),
-        (
-            "last attached in the current second",
-            |f| {
-                // One second ahead, so a clock tick during the test cannot age it out.
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                f.answers("attach", &[&format!("0,{},200,50", now + 1)])
-            },
-            Veto::HumanAttached,
-        ),
-        (
-            "attach query fails",
-            |f| f.fail("display-message"),
-            Veto::AttachUnknown,
-        ),
-        (
-            "capture fails",
-            |f| f.fail("capture-pane"),
-            Veto::PaneUnavailable,
-        ),
-        ("modal", |f| f.caps(&[modal_screen()]), Veto::Modal),
-        (
-            "draft beside a stash",
-            |f| f.caps(&[screen("half typed", &format!("{:>58}", "› stashed"))]),
-            Veto::Draft,
-        ),
-        ("idle pane", |f| f.caps(&[idle_empty()]), Veto::NotBusy),
-        (
-            "idle transcript",
-            |f| {
-                fs::write(
-                    &f.transcript,
-                    "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
-                )
-                .unwrap()
-            },
-            Veto::NotBusy,
-        ),
-        ("load fails", |f| f.fail("load-buffer"), Veto::LoadFailed),
-        (
-            "session gone at the paste",
-            |f| f.answers("keyattach", &["gone"]),
-            Veto::PaneUnavailable,
-        ),
-    ];
-    for (name, setup, veto) in cases {
+    for (subcommand, capture, expected) in [
+        ("display-message", busy_empty(), Veto::PaneUnavailable),
+        ("load-buffer", busy_empty(), Veto::LoadFailed),
+        ("unused", modal_screen(), Veto::Modal),
+    ] {
         let fake = Fake::new();
-        fake.caps(&[busy_empty()]);
-        setup(&fake);
-        assert_eq!(fake.run(&FAST), Outcome::NotSent(veto), "{name}");
-        assert_eq!(fake.keys(), (0, 0, 0), "{name}");
+        fake.caps(&[capture]);
+        fake.fail(subcommand);
+        assert_eq!(fake.run(&FAST), Outcome::NotSent(expected));
+        assert_eq!(fake.keys(), (0, 0, 0));
     }
-    // A session or nonce that could leave a tmux command string is refused before any call.
     let fake = Fake::new();
-    let pane = Pane::with_program("x'y", fake.dir.path().join("tmux"));
-    for (session, nonce) in [("x'y", NONCE), ("plain", "ab cd")] {
+    fake.caps(&[idle_empty()]);
+    fs::write(
+        &fake.transcript,
+        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+    )
+    .unwrap();
+    assert_eq!(fake.run(&FAST), Outcome::NotSent(Veto::NotBusy));
+    assert_eq!(fake.keys(), (0, 0, 0));
+    assert_eq!(
+        fake.run_text(" ", &FAST),
+        Outcome::NotSent(Veto::InvalidInput)
+    );
+}
+
+#[test]
+fn transcript_is_diagnostic_and_no_post_paste_capture_or_guard_runs() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    for after in [
+        "unread render".into(),
+        modal_screen(),
+        screen("person typed", ""),
+    ] {
+        let fake = Fake::new();
+        fake.answers("attach", &["4,,46,37"]);
+        fake.caps(&[busy_empty(), after]);
+        assert_eq!(fake.run(&FAST), Outcome::Injected);
+        assert_eq!(fake.keys(), (1, 1, 0));
+        assert_eq!(fake.calls("capture-pane").len(), 1);
+        assert!(fake.calls("if-shell").is_empty());
+        assert!(
+            crate::services::tui_input::human_frame::history::registered(
+                NONCE,
+                &fake.transcript,
+                &text()
+            )
+        );
+        assert!(!super::composer_lock::draft_guarded(&fake.session()));
+    }
+}
+
+#[test]
+fn capture_failure_on_an_attached_pane_does_not_lock_later_inputs() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let fake = Fake::new();
+    fake.answers("attach", &["4,,46,37"]);
+    fake.fail("capture-pane");
+    for (nonce, text) in [("1234abcd", "first input"), ("5678abcd", "later input")] {
+        let session = fake.session();
+        let pane = Pane::with_program(&session, fake.dir.path().join("tmux"));
         let request = Request {
-            session,
+            session: &session,
             transcript: &fake.transcript,
             source: "iMessage",
             author: "200",
             name: "ann",
             nonce,
-            text: "are you there?",
+            text,
         };
-        let outcome = inject(&pane, &request, &FAST);
-        assert_eq!(outcome, Outcome::NotSent(Veto::InvalidInput), "{session}");
+        assert_eq!(inject(&pane, &request, &FAST), Outcome::Injected);
+        assert!(!super::composer_lock::draft_guarded(&fake.session()));
     }
-    assert!(fs::read_to_string(fake.dir.path().join("log")).is_err());
+    assert_eq!(fake.keys(), (2, 2, 0));
 }
 
 #[test]
-fn a_held_composer_lock_is_tried_three_times_without_any_tmux_call() {
+fn actual_write_failures_stop_without_retrying_enter() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let fake = Fake::new();
-    fake.caps(&[busy_empty()]);
-    let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
-    let session = fake.session();
-    let holder = std::thread::spawn(move || {
-        super::composer_lock::with_composer_mutation_lock(&session, || {
-            held.0.send(()).unwrap();
-            release.1.recv().unwrap();
-        })
-    });
-    held.1.recv().unwrap();
-    assert_eq!(fake.run(&FAST), Outcome::NotSent(Veto::LockContended));
-    release.0.send(()).unwrap();
-    holder.join().unwrap();
-    assert!(fs::read_to_string(fake.dir.path().join("log")).is_err());
-
-    // Attempts land at fixed offsets from the first try; the waits do not add up.
-    let clock = std::cell::Cell::new(Duration::ZERO);
-    let mut tries = Vec::new();
-    let never: Option<()> = at_offsets(
-        TIMING.lock_retries,
-        || clock.get(),
-        |wait| clock.set(clock.get() + wait),
-        || {
-            tries.push(clock.get());
-            clock.set(clock.get() + Duration::from_millis(3));
-            None
-        },
-    );
-    let offsets = [0, 80, 160].map(Duration::from_millis).to_vec();
-    assert_eq!((never, tries), (None, offsets));
-}
-
-#[test]
-fn an_owned_draft_is_entered_once_and_confirmed_from_the_transcript() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    // A person's stash beside an empty composer needs no C-s; Claude hands it back on the submit.
-    let stashed = format!("{:>58}", "› stashed");
-    for status in ["", stashed.as_str()] {
-        let owned = text();
-        let fake = Fake::new();
-        let empty =
-            busy_empty().replace(&format!("\n\n{BORDER}"), &format!("\n{status}\n{BORDER}"));
-        fake.caps(&[empty, screen(&owned, status)]);
-        fake.accept_on_enter_after("0");
-        fake.reply_after_record("0.5");
-        let timing = Timing {
-            confirm_window: Duration::from_secs(30),
-            ..FAST
-        };
-        let started = std::time::Instant::now();
-        assert_eq!(
-            fake.run(&timing),
-            Outcome::Injected,
-            "owned={owned:?} elapsed={:?} keys={:?} transcript={:?}",
-            started.elapsed(),
-            fake.keys(),
-            fs::read_to_string(&fake.transcript)
-        );
-        assert_eq!(fake.keys(), (1, 1, 0));
-        assert_eq!(
-            fs::read_to_string(fake.dir.path().join("buffer")).unwrap(),
-            text()
-        );
-        let paste = &fake.calls("paste-buffer")[0];
-        assert!(paste.contains(" -p ") && paste.contains(&format!("={}:", fake.session())));
-    }
-}
-
-// Fake tmux subprocesses can be delayed by compiler load; use the production receipt window.
-const MULTILINE_TIMING: Timing = Timing {
-    confirm_window: Duration::from_secs(3),
-    ..FAST
-};
-
-fn multiline_payload() -> String {
-    format!(
-        "Please inspect these files:\n{}\n\n  Preserve this indentation.\nReport one result per file.",
-        (0..24)
-            .map(|i| format!("/tmp/downloads/design-reference-{i:02}.txt"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    )
-}
-
-fn paste_block(inner: &str) -> String {
-    format!("<pasted_content id=\"dfd9\">\n{inner}\n</pasted_content id=\"dfd9\">")
-}
-
-#[test]
-fn multiline_folded_paste_confirms_the_exact_wrapped_or_bare_transcript() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let payload = multiline_payload();
-    let expected = frame("iMessage", "200", "ann", NONCE, &payload);
-    assert!(expected.encode_utf16().count() > 800);
-    let folded = format!("[Pasted text #1 +{} lines]", expected.matches('\n').count());
-    let wrapped = paste_block(&expected);
-    for body in [
-        expected.clone(),
-        wrapped.clone(),
-        format!("\n\n{wrapped}\n"),
-    ] {
-        for record in [
-            serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": body}),
-            serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": body}}),
-            serde_json::json!({"type": "user", "message": {"content": body}}),
-        ] {
-            let fake = Fake::new();
-            fake.caps(&[busy_empty(), screen(&folded, "")]);
-            fs::write(
-                fake.dir.path().join("on_enter"),
-                real(record.clone()) + "\n",
-            )
-            .unwrap();
-            assert_eq!(
-                fake.run_text(&payload, &MULTILINE_TIMING),
-                Outcome::Injected,
-                "{record}"
-            );
-            assert_eq!(fake.keys(), (1, 1, 0), "{record}");
-            assert_eq!(
-                fs::read_to_string(fake.dir.path().join("buffer")).unwrap(),
-                expected
-            );
-        }
-    }
-}
-
-#[test]
-fn multiline_folded_paste_keeps_foreign_input_contaminated() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let payload = multiline_payload();
-    let expected = frame("iMessage", "200", "ann", NONCE, &payload);
-    let folded = format!("[Pasted text #1 +{} lines]", expected.matches('\n').count());
-    let wrapped = paste_block(&expected);
-    for body in [
-        format!("{expected}\noperator input"),
-        paste_block(&format!("{expected}\noperator input")),
-        format!("operator input\n{wrapped}"),
-        format!("{wrapped}\noperator input"),
-        wrapped.replace(
-            "</pasted_content id=\"dfd9\">",
-            "</pasted_content id=\"abcd\">",
-        ),
-        paste_block(&wrapped),
-        format!("{wrapped}\n{}", paste_block("operator input")),
-        format!("\n{wrapped}\n"),
-        format!("\n\n\n{wrapped}\n"),
-        format!("\n\n{wrapped}"),
-        format!("\n\n{wrapped}\n\n"),
-        format!("\n\n{expected}\n"),
-        format!("\r\n\r\n{wrapped}\r\n"),
-    ] {
-        for body in [body.clone(), format!("\n\n{body}\n")] {
-            let fake = Fake::new();
-            fake.caps(&[busy_empty(), screen(&folded, "")]);
-            fs::write(fake.dir.path().join("on_enter"), enqueue_record(&body)).unwrap();
-            assert_eq!(
-                fake.run_text(&payload, &MULTILINE_TIMING),
-                Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit),
-                "submitted body: {body:?}"
-            );
-            assert_eq!(
-                fake.keys(),
-                (1, 1, 0),
-                "a contaminated receipt never resubmits"
-            );
-        }
-    }
-}
-
-/// After the paste nothing is NotSent; every path ends with at most one Enter and no deletion.
-#[test]
-fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let prefix = |n: usize| text().chars().take(n).collect::<String>();
-    // (name, captures, transcript accepts on Enter, outcome, (pastes, Enter keys, other keys))
-    type Case<'a> = (&'a str, Vec<String>, bool, Outcome, (usize, usize, usize));
-    let cases: Vec<Case> = vec![
-        (
-            "stale capture",
-            vec![busy_empty()],
-            true,
-            Outcome::Unconfirmed(Unconfirmed::DraftNotOwned),
-            (1, 0, 0),
-        ),
-        (
-            "bytewise paste completes",
-            vec![
-                busy_empty(),
-                screen(&prefix(5), ""),
-                screen(&prefix(20), ""),
-                screen(&text(), ""),
-            ],
-            true,
-            Outcome::Injected,
-            (1, 1, 0),
-        ),
-        (
-            "bytewise paste stalls",
-            vec![
-                busy_empty(),
-                screen(&prefix(5), ""),
-                screen(&prefix(20), ""),
-            ],
-            true,
-            Outcome::Unconfirmed(Unconfirmed::DraftNotOwned),
-            (1, 0, 0),
-        ),
-        (
-            "modal after paste",
-            vec![busy_empty(), modal_screen()],
-            true,
-            Outcome::Unconfirmed(Unconfirmed::ModalAfterPaste),
-            (1, 0, 0),
-        ),
-    ];
-    for (name, caps, accept, outcome, keys) in cases {
-        let fake = Fake::new();
-        fake.caps(&caps);
-        if accept {
-            fake.accept_on_enter();
-        }
-        assert_eq!(fake.run(&FAST), outcome, "{name}");
-        assert_eq!(fake.keys(), keys, "{name}");
-    }
-    // The input is taken but recorded 1s after Enter: past an 80ms window, before a 1.5s poll.
-    let late = Timing {
-        confirm_window: Duration::from_millis(80),
-        confirm_poll: Duration::from_millis(1500),
-        ..FAST
-    };
-    let fake = Fake::new();
-    fake.caps(&[busy_empty(), screen(&text(), "")]);
-    fake.accept_on_enter_after("1");
-    let outcome = fake.run(&late);
-    // The record that lands afterwards changes nothing and asks for nothing.
-    std::thread::sleep(Duration::from_millis(1300));
-    assert_eq!(
-        (
-            outcome,
-            fake.keys(),
-            fake.pasted_attempt_submission() == Some(true)
-        ),
-        (
-            Outcome::Unconfirmed(Unconfirmed::NotObserved),
-            (1, 1, 0),
-            true
-        ),
-        "late transcript belongs to the pasted attempt and frame hash"
-    );
-    // Production window: 3s window < record at 3.2s <= reply at 3.3s < 5s tmux call budget.
-    // The Enter takes effect at once; the window must not start from the late reply.
-    let production = Timing {
-        confirm_window: TIMING.confirm_window,
-        confirm_poll: TIMING.confirm_poll,
-        ..FAST
-    };
-    let fake = Fake::new();
-    fake.caps(&[busy_empty(), screen(&text(), "")]);
-    fake.accept_on_enter_after("3.2");
-    fake.reply_after_record("0.1");
-    let outcome = fake.run(&production);
-    assert_eq!(
-        (
-            outcome,
-            fake.keys(),
-            fake.pasted_attempt_submission() == Some(true)
-        ),
-        (
-            Outcome::Unconfirmed(Unconfirmed::NotObserved),
-            (1, 1, 0),
-            true
-        ),
-        "slow Enter reply retains the pasted attempt receipt"
-    );
-    for (name, subcommand, outcome) in [
-        ("paste fails", "paste-buffer", Unconfirmed::PasteFailed),
-        ("enter fails", "send-keys", Unconfirmed::EnterFailed),
+    for (command, error, keys) in [
+        ("paste-buffer", WriteFailure::Paste, (1, 0, 0)),
+        ("send-keys", WriteFailure::Enter, (1, 1, 0)),
     ] {
         let fake = Fake::new();
-        fake.caps(&[busy_empty(), screen(&text(), "")]);
-        fake.fail(subcommand);
-        assert_eq!(fake.run(&FAST), Outcome::Unconfirmed(outcome), "{name}");
+        fake.caps(&[busy_empty()]);
+        fake.fail(command);
+        assert_eq!(fake.run(&FAST), Outcome::Failed(error));
+        assert_eq!(fake.keys(), keys);
     }
-}
-
-/// A person's keys mixed into the composer stop the Enter; nothing is ever deleted.
-#[test]
-fn human_typing_or_attaching_around_the_paste_sends_no_enter_and_no_delete() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let owned = || vec![busy_empty(), screen(&text(), "")];
-    // (name, captures, attach seen by checks, attach when the server applies each key, ...)
-    type Case<'a> = (
-        &'a str,
-        Vec<String>,
-        Vec<&'a str>,
-        Vec<&'a str>,
-        Outcome,
-        (usize, usize, usize),
-    );
-    let cases: Vec<Case> = vec![
-        (
-            "typed before the paste",
-            vec![busy_empty(), screen(&format!("hi {}", text()), "")],
-            vec!["0"],
-            vec!["0"],
-            Outcome::Unconfirmed(Unconfirmed::DraftNotOwned),
-            (1, 0, 0),
-        ),
-        (
-            "typed after the paste",
-            vec![busy_empty(), screen(&format!("{} and more", text()), "")],
-            vec!["0"],
-            vec!["0"],
-            Outcome::Unconfirmed(Unconfirmed::DraftNotOwned),
-            (1, 0, 0),
-        ),
-        (
-            "attached after the paste",
-            owned(),
-            vec!["0", "1"],
-            vec!["0"],
-            Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste),
-            (1, 0, 0),
-        ),
-        (
-            "attached between the last check and Enter",
-            owned(),
-            vec!["0"],
-            vec!["0", "1"],
-            Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste),
-            (1, 0, 0),
-        ),
-        (
-            "attached between the first check and the paste",
-            owned(),
-            vec!["0"],
-            vec!["1"],
-            Outcome::NotSent(Veto::HumanAttached),
-            (0, 0, 0),
-        ),
-    ];
-    let mut seen = Vec::new();
-    let mut expected = Vec::new();
-    for (name, caps, attach, keyattach, outcome, keys) in cases {
-        let fake = Fake::new();
-        fake.caps(&caps);
-        fake.answers("attach", &attach);
-        fake.answers("keyattach", &keyattach);
-        fake.accept_on_enter();
-        let got = fake.run(&FAST);
-        seen.push((name, got, fake.keys(), fake.keys_while_attached()));
-        expected.push((name, outcome, keys, 0));
-    }
-    assert_eq!(seen, expected);
-    // Unconfirmed after Enter while a person types: busy_inject sends no cleanup keys.
-    let fake = Fake::new();
-    fake.caps(&[
-        busy_empty(),
-        screen(&text(), ""),
-        screen(&format!("{} typed", text()), ""),
-    ]);
-    assert_eq!(
-        fake.run(&FAST),
-        Outcome::Unconfirmed(Unconfirmed::NotObserved)
-    );
-    assert_eq!(fake.keys(), (1, 1, 0));
 }
 
 #[test]
@@ -1014,4 +590,55 @@ fn identical_plain_frames_need_their_own_fresh_enqueue_and_not_a_late_command_or
         transcript_submission(&path, second, "ca720105", Some(&framed)),
         Some(true)
     );
+}
+
+#[test]
+fn truncated_46_column_footer_still_sends_enter() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let fake = Fake::new();
+    fake.answers("attach", &["0,,46,37"]);
+    let before = include_str!("../../../tests/fixtures/claude_tui/truncated-footer-empty.ansi")
+        .replace("✳ Ruminating…", "✻ Thinking…")
+        .replace("(4m 18s)", "(12s · esc to interrupt)");
+    let after = before.replace("❯\u{00a0}", &format!("❯\u{00a0}{}", text()));
+    fake.caps(&[before, after]);
+    fake.accept_on_enter();
+    assert_eq!(fake.run(&FAST), Outcome::Injected);
+    assert_eq!(fake.keys(), (1, 1, 0));
+}
+
+#[test]
+fn a_held_composer_lock_is_tried_three_times_without_any_tmux_call() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let fake = Fake::new();
+    fake.caps(&[busy_empty()]);
+    let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let session = fake.session();
+    let holder = std::thread::spawn(move || {
+        super::composer_lock::with_composer_mutation_lock(&session, || {
+            held.0.send(()).unwrap();
+            release.1.recv().unwrap();
+        })
+    });
+    held.1.recv().unwrap();
+    assert_eq!(fake.run(&FAST), Outcome::NotSent(Veto::LockContended));
+    release.0.send(()).unwrap();
+    holder.join().unwrap();
+    assert!(fs::read_to_string(fake.dir.path().join("log")).is_err());
+
+    // Attempts land at fixed offsets from the first try; the waits do not add up.
+    let clock = std::cell::Cell::new(Duration::ZERO);
+    let mut tries = Vec::new();
+    let never: Option<()> = at_offsets(
+        TIMING.lock_retries,
+        || clock.get(),
+        |wait| clock.set(clock.get() + wait),
+        || {
+            tries.push(clock.get());
+            clock.set(clock.get() + Duration::from_millis(3));
+            None
+        },
+    );
+    let offsets = [0, 80, 160].map(Duration::from_millis).to_vec();
+    assert_eq!((never, tries), (None, offsets));
 }

@@ -33,7 +33,7 @@ const FAKE_TMUX: &str = r##"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
 case "$2" in
-display-message) echo "$(cat "$d/attach"),,$(cat "$d/size" 2>/dev/null || echo 80,24)" ;;
+display-message) for last do :; done; case "$last" in '#{pane_dead}') printf ' 0 \n' ;; *) echo "$(cat "$d/attach"),,$(cat "$d/size" 2>/dev/null || echo 80,24)" ;; esac ;;
 capture-pane)
   if [ -f "$d/hold" ]; then
     rm -f "$d/hold"; touch "$d/at_hold"; i=0
@@ -55,6 +55,26 @@ if-shell)
   [ -f "$d/fail_paste" ] && exit 1
   echo "$7" >> "$d/keys"
   case "$7" in
+  paste-buffer*)
+    touch "$d/pasted"
+    [ -f "$d/draw" ] && {
+      cat "$d/draw"
+      if [ -f "$d/draw.first" ]; then cat "$d/draw.first"; else printf '\342\235\257\302\240%s\n' "$(head -n 1 "$d/buffer")"; fi
+      if [ -f "$d/draw.rows" ]; then cat "$d/draw.rows"; else awk 'NR > 1 { print ($0 == "" ? "" : "  " $0) }' "$d/buffer"; fi
+      cat "$d/draw.tail"; } > "$d/cap.pasted" ;;
+  send-keys*) python3 -c 'import json,os,sys; b=open(sys.argv[1]).read(); t=sys.argv[2]
+r=open(t).read().strip() if os.path.exists(t) else json.dumps({"type":"queue-operation","operation":"enqueue","content":"@BODY@","sessionId":"6245","timestamp":"2026-10-06T00:00:00.000Z"})
+e=lambda v: json.dumps(v)[1:-1]
+print(r.replace("@BODY@", e(b)).replace("@HEAD@", e(b.split("\n")[0])))' "$d/buffer" "$d/receipt" >> "$d/@T@" ;;
+  esac ;;
+send-keys|paste-buffer)
+  if [ -f "$d/gate" ]; then
+    touch "$d/at_gate"; i=0
+    while [ ! -f "$d/go" ] && [ $i -lt 80 ]; do sleep 0.05; i=$((i+1)); done
+  fi
+  [ -f "$d/fail_paste" ] && exit 1
+  shift; echo "$*" >> "$d/keys"
+  case "$1" in
   paste-buffer*)
     touch "$d/pasted"
     [ -f "$d/draw" ] && {
@@ -538,103 +558,58 @@ async fn discord_origin_uses_the_attached_stash_transaction_once_pg() {
     assert_eq!(pane.records(), records);
 }
 
-/// Stable attached clients permit stash; a changed attachment generation still vetoes the key.
+/// A person may change the pane between the one capture and the keys; Enter still follows.
 #[tokio::test(flavor = "current_thread")]
-async fn deliver_stash_stops_on_generation_change_or_mixed_human_text_pg() {
+async fn deliver_stash_ignores_later_generation_changes_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
-    let channels = [6_845_631, 6_845_632];
+    let channel = 6_845_631;
     let registry = HealthRegistry::new();
-    let shared = register_inject_runtime(&registry, &channels, Some(pool)).await;
-    let draft = "사람 초안\n보존 대상";
-    let mut changed = InjectPane::new(channels[0], "external");
-    changed.stash(draft, true);
-    // The capture already returned; a client changes before the guarded C-s reaches tmux.
-    changed.set("human.1", "attach 101; echo 4 > \"$d/attached\"");
+    let shared = register_inject_runtime(&registry, &[channel], Some(pool)).await;
+    let mut pane = InjectPane::new(channel, "external");
+    pane.stash("사람 초안\n보존 대상", true);
+    pane.set("human.1", r#"attach 101; echo 4 > "$d/attached""#);
     assert_eq!(
-        deliver(&registry, channels[0]).await,
-        "queued handed_back veto=human_attached"
+        deliver(&registry, channel).await,
+        "Ok(Injected { turn_id: None })"
     );
-    assert!(changed.applied().is_empty());
-    assert!(changed.records().is_empty());
-    assert_eq!(changed.read("composer").as_deref(), Some(draft));
-    assert!(changed.read("stash").is_none());
-    assert_eq!(queue_texts(&shared, channels[0]).await, ["status?"]);
-
-    let mut mixed = InjectPane::new(channels[1], "external");
-    mixed.stash(draft, true);
-    // A person types after the empty/stashed capture and before paste. Never submit mixed bytes.
-    mixed.set("human.2", "type_text 'person typed '");
-    let result = deliver(&registry, channels[1]).await;
-    assert!(result.contains("Unconfirmed"), "{result}");
-    assert!(result.contains("draft_not_owned"), "{result}");
-    assert_eq!(mixed.applied(), ["C-s", "paste"]);
-    assert!(mixed.records().is_empty());
-    assert_eq!(mixed.read("stash").as_deref(), Some(draft));
-    assert!(mixed.read("composer").unwrap().starts_with("person typed "));
-    assert!(queue_texts(&shared, channels[1]).await.is_empty());
-    assert_eq!(
-        crate::services::claude_tui::composer_lock::composer_admission(&mixed.session(), || None),
-        crate::services::claude_tui::composer_lock::ComposerAdmission::Held,
-    );
+    assert_eq!(pane.applied(), ["C-s", "paste", "Enter"]);
+    assert!(queue_texts(&shared, channel).await.is_empty());
+    assert_eq!(pane.alarm_count("busy_inject_unconfirmed"), 0);
 }
 
-/// Nonce presence alone must not confirm an Enter whose actual composer gained human bytes.
 #[tokio::test(flavor = "current_thread")]
-async fn shared_deliver_rejects_contaminated_submit_and_holds_mixed_direct_draft_pg() {
+async fn mixed_human_input_is_submitted_without_an_alert_or_later_hold_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
-    let channels = [6_845_641, 6_845_642];
+    let channel = 6_845_641;
     let registry = HealthRegistry::new();
-    let shared = register_inject_runtime(&registry, &channels, Some(pool)).await;
-    let draft = "  사람 초안\n\n  정확히 보존";
-    let mut contaminated = InjectPane::new(channels[0], "external");
-    contaminated.stash(draft, true);
-    // A person types after own capture, then moves the caret back to the same coordinates.
-    contaminated.set("human.3", "x=$(cat \"$d/cursor_x\"); y=$(cat \"$d/cursor_y\"); type_text X; echo \"$x\" > \"$d/cursor_x\"; echo \"$y\" > \"$d/cursor_y\"");
-    let result = deliver(&registry, channels[0]).await;
-    assert!(result.contains("Unconfirmed"), "{result}");
-    assert!(result.contains("contaminated_submit"), "{result}");
-    assert_eq!(contaminated.applied(), ["C-s", "paste", "Enter"]);
-    let submitted = contaminated.records();
-    assert_eq!(
-        submitted,
-        [format!("{}X", contaminated.read("buffer").unwrap())]
-    );
-    assert_eq!(contaminated.read("composer").as_deref(), Some(draft));
-    assert!(contaminated.read("stash").is_none());
-    assert_eq!(contaminated.alarm_count("busy_inject_unconfirmed"), 1);
-    assert!(queue_texts(&shared, channels[0]).await.is_empty());
-
-    let mut direct = InjectPane::new(channels[1], "external");
-    direct.stash("", true);
-    direct.set("human.1", "type_text 'person typed '");
-    let result = deliver(&registry, channels[1]).await;
-    assert!(result.contains("Unconfirmed"), "{result}");
-    assert_eq!(direct.applied(), ["paste"]);
-    assert!(direct.records().is_empty());
-    assert!(
-        direct
-            .read("composer")
-            .unwrap()
-            .starts_with("person typed ")
-    );
-    assert!(queue_texts(&shared, channels[1]).await.is_empty());
-    assert_eq!(direct.alarm_count("busy_inject_draft_unrecovered"), 1);
-    assert_eq!(
-        crate::services::claude_tui::composer_lock::composer_admission(&direct.session(), || None),
-        crate::services::claude_tui::composer_lock::ComposerAdmission::Held,
-    );
-    let applied = direct.applied();
-    assert_eq!(
-        deliver(&registry, channels[1]).await,
-        "queued handed_back veto=draft"
-    );
-    assert_eq!(direct.applied(), applied);
-    assert!(direct.records().is_empty());
-    assert_eq!(queue_texts(&shared, channels[1]).await, ["status?"]);
+    let shared = register_inject_runtime(&registry, &[channel], Some(pool)).await;
+    let mut pane = InjectPane::new(channel, "external");
+    pane.stash("", true);
+    pane.set("human.after-paste", "type_text X");
+    for payload in ["first status?", "later status?"] {
+        assert_eq!(
+            deliver_text(&registry, channel, payload).await,
+            "Ok(Injected { turn_id: None })"
+        );
+        assert!(!crate::services::claude_tui::composer_lock::draft_guarded(
+            &pane.session()
+        ));
+    }
+    assert_eq!(pane.applied(), ["paste", "Enter", "paste", "Enter"]);
+    assert_eq!(pane.alarm_count("busy_inject_unconfirmed"), 0);
+    assert_eq!(pane.alarm_count("busy_inject_draft_unrecovered"), 0);
+    assert!(queue_texts(&shared, channel).await.is_empty());
+    let notices: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_outbox WHERE reason_code='claude.input.preparation_hold'",
+    )
+    .fetch_one(shared.pg_pool.as_ref().unwrap())
+    .await
+    .unwrap();
+    assert_eq!(notices, 0);
 }
 
 #[test]
@@ -848,7 +823,7 @@ async fn a_flat_paste_drawn_with_its_indent_is_injected_pg() {
 /// At 80x24 measured rows or the complete captured body prove a wrapped paste, even when its
 /// glyph widths are unknown.
 #[tokio::test(flavor = "current_thread")]
-async fn a_wrapped_paste_is_injected_only_when_its_rows_are_predicted_pg() {
+async fn a_wrapped_paste_is_injected_without_a_render_prediction_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
@@ -890,7 +865,7 @@ async fn a_wrapped_paste_is_injected_only_when_its_rows_are_predicted_pg() {
 /// A pasted `─` or `❯` row the composer reader would misread, a pane of unknown size, and a resize
 /// after the prediction each hand the input back unpasted.
 #[tokio::test(flavor = "current_thread")]
-async fn a_paste_its_rows_cannot_prove_is_handed_back_unpasted_pg() {
+async fn a_paste_with_unknown_rendering_still_sends_enter_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
@@ -902,7 +877,8 @@ async fn a_paste_its_rows_cannot_prove_is_handed_back_unpasted_pg() {
         (6_687_024, "status?".to_string(), Some(("size", ""))),
         (6_687_025, x(77), Some(("live", "79,24"))),
     ];
-    let handed_back = "queued handed_back veto=unpredictable_render keys= seen=false queued=1";
+    let handed_back =
+        "Ok(Injected { turn_id: None }) keys=paste-buffer+send-keys seen=true queued=0";
     let expected: Vec<_> = cases
         .iter()
         .map(|case| format!("{}: {handed_back}", case.1))
@@ -1309,14 +1285,23 @@ async fn an_effect_that_dies_outside_its_guard_is_still_reported_once_pg() {
 }
 
 impl InjectPane {
-    /// A composer holding a half-typed draft, so the pane vetoes the paste as `draft`.
+    /// A composer holding a half-typed draft, which the injection stashes on a listed channel.
     pub(crate) fn draft(&self) {
         let pane =
             format!("⏺ Working on it.\n\n{SPINNER}\n\n{BORDER}\n❯ half typed\n{BORDER}\n{FOOTER}");
         self.set("cap.before", &pane);
     }
 
-    /// A pane whose turn has ended, so the paste is vetoed as `not_busy`.
+    /// A menu above the composer, so the paste is vetoed as `modal` before any key. It replaces
+    /// any screen an earlier paste drew.
+    pub(crate) fn menu(&self) {
+        let menu = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel";
+        let pane = format!("{menu}\n{BORDER}\n❯\u{00a0}\n{BORDER}\n{FOOTER}");
+        self.set("cap.before", &pane);
+        let _ = fs::remove_file(self.path("pasted"));
+    }
+
+    /// A pane whose turn has ended; with an ended transcript the paste is vetoed as `not_busy`.
     pub(crate) fn idle(&self) {
         let pane = format!("⏺ Done.\n\n{BORDER}\n❯\u{00a0}\n{BORDER}\n{FOOTER}");
         self.set("cap.before", &pane);
@@ -1368,7 +1353,7 @@ async fn a_vetoed_paste_hands_the_input_back_ahead_of_input_sent_after_its_reser
     let registry = Arc::new(HealthRegistry::new());
     let shared = register_inject_runtime(&registry, &[ch], Some(pool)).await;
     let pane = InjectPane::new(ch, "all");
-    pane.draft();
+    pane.menu();
     let request = deliver_parked(&registry, &pane).await;
     send_meanwhile(&shared, ch, ch + 10, "earlier input").await;
     let support = crate::services::turn_orchestrator::test_support::fail_queue_saves;
@@ -1381,7 +1366,7 @@ async fn a_vetoed_paste_hands_the_input_back_ahead_of_input_sent_after_its_reser
     let keys = pane.keys().len();
     assert_eq!(
         format!("{outcome} [{queue}] keys={keys} faults_left={left}"),
-        "queued handed_back veto=draft [status?,earlier input] keys=0 faults_left=0"
+        "queued handed_back veto=modal [status?,earlier input] keys=0 faults_left=0"
     );
 }
 
@@ -1397,7 +1382,7 @@ async fn a_handback_that_never_lands_refuses_the_delivery_and_keeps_no_place_pg(
     let registry = Arc::new(HealthRegistry::new());
     let shared = register_inject_runtime(&registry, &[ch], Some(pool)).await;
     let pane = InjectPane::new(ch, "all");
-    pane.draft();
+    pane.menu();
     let request = deliver_parked(&registry, &pane).await;
     send_meanwhile(&shared, ch, ch + 10, "earlier input").await;
     let support = crate::services::turn_orchestrator::test_support::fail_queue_saves;
@@ -1454,6 +1439,10 @@ async fn a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg() {
     request.abort();
     assert!(request.await.unwrap_err().is_cancelled());
     pane.idle();
+    pane.set(
+        InjectPane::TRANSCRIPT,
+        &format!("{BUSY_TURN}{{\"type\":\"result\",\"subtype\":\"success\"}}\n"),
+    );
     pane.set("go", "");
     let kicked = async {
         while kicks.lock().unwrap().is_empty() {
@@ -1485,7 +1474,7 @@ async fn a_handback_onto_a_full_queue_records_its_one_overflow_pg() {
     let registry = Arc::new(HealthRegistry::new());
     let shared = register_inject_runtime(&registry, &[ch], Some(pool.clone())).await;
     let pane = InjectPane::new(ch, "all");
-    pane.draft();
+    pane.menu();
     let request = deliver_parked(&registry, &pane).await;
     let cap = crate::services::turn_orchestrator::MAX_INTERVENTIONS_PER_CHANNEL as u64;
     for n in 1..=cap {
@@ -1524,7 +1513,7 @@ async fn a_handback_onto_a_full_queue_records_its_one_overflow_pg() {
             queue[queue.len() - 1]
         ),
         format!(
-            "queued handed_back veto=draft evicted=[Some(\"{}\")] more=0 len={cap} first=status? last=sent {}",
+            "queued handed_back veto=modal evicted=[Some(\"{}\")] more=0 len={cap} first=status? last=sent {}",
             ch + 100 + cap,
             cap - 1
         )

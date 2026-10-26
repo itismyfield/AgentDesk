@@ -101,12 +101,11 @@ partially-generated content.
   runner` job in `.github/workflows/ci-pr.yml`; the required *Script checks*
   context is published separately by a fail-closed result mirror over every
   shard job) first runs `python3
-  scripts/generate_inventory_docs.py`. Generation hard-fails source-of-truth
-  violations such as an unregistered giant or invalid registry metadata. CI
-  then runs `git diff --exit-code` for `ARCHITECTURE.md`, route inventory, and
-  worker inventory, the three generated outputs that remain tracked.
+  scripts/giant_file_progress.py` with workspace document refresh enabled.
+  Unregistered giants, raw growth, and planning fields warn; unreadable inputs,
+  malformed documents, and invalid Git provenance still fail measurement.
   `check_agent_maintenance_docs.py` consumes the freshly generated, untracked
-  module inventory and keeps frozen-surface membership/threshold checks active.
+  module inventory and warns about giant-surface membership or threshold drift.
 - **Local convenience — the pre-push hook.** `.githooks/pre-push` regenerates
   inventory docs when `src` changed and blocks/amends before push, so most
   tracked drift never leaves the machine. It is a convenience only: it is
@@ -142,7 +141,7 @@ ancestor of the comparison base. Rewinds, unrelated histories, unavailable
 objects and Git errors fail closed. The candidate is trusted as GitHub's event
 input; this check does not independently reconstruct its merge tree.
 
-Archives, diffs, frozen-blob checks and debt accounting all use the candidate's
+Archives, diffs, size warnings and debt accounting all use the candidate's
 actual first parent, so another PR's intervening changes cannot be credited or
 charged to this PR. Evidence preserves the original `event_base_sha` separately
 from `comparison_base_sha` / `merge_first_parent`; `base_tree` belongs to the

@@ -133,6 +133,7 @@ async fn assert_sweep(fixture: &Fixture, shared: Arc<SharedData>, count: usize, 
                 .await
                 .unwrap();
             assert!(first.refused.is_none(), "{first:?}");
+            assert_eq!(first.diagnostics.as_ref().unwrap().candidates.len(), count);
             let owed = first
                 .summary
                 .as_ref()
@@ -196,6 +197,66 @@ fn codex_native_legacy_sweep_retires_only_aged_backlog_and_records_atomic_audit(
         .build()
         .unwrap();
     runtime.block_on(assert_sweep(&fixture, fixture.shared(None), 2, false));
+}
+
+#[test]
+fn older_unbound_resume_context_requires_superseding_marker_and_reaches_inspect() {
+    let fixture = Fixture::new(false);
+    let mut old = fixture.context.clone();
+    old.execution_nonce = "b".repeat(32);
+    old.created_at -= chrono::TimeDelta::seconds(1);
+    old.launch_mode = "resume".into();
+    let pending = PreparedIncarnation::create(old.clone()).unwrap();
+    let mut legacy = serde_json::to_value(&old).unwrap();
+    for field in ["first_prompt_digest", "source_policy"] {
+        legacy.as_object_mut().unwrap().remove(field);
+    }
+    std::fs::write(&pending.path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shared = fixture.shared(None);
+    let prepared = runtime
+        .block_on(prepare(&HealthRegistry::new(), shared.clone(), CHANNEL))
+        .expect("an older unbound resume is superseded by the current pane marker");
+    let observed = fixture.observe(&prepared).unwrap();
+    let host = census::host_inventory(None, &prepared.tmux).unwrap();
+    let marker = tc::session_temp_path(&prepared.tmux, "spawn_nonce");
+    for value in [None, Some(old.execution_nonce.as_str()), Some("")] {
+        match value {
+            None => std::fs::remove_file(&marker).unwrap(),
+            Some(value) => std::fs::write(&marker, value).unwrap(),
+        }
+        assert_eq!(
+            census::read(
+                &shared,
+                &observed.target,
+                &fixture.context,
+                &observed.events,
+                &host
+            )
+            .unwrap_err(),
+            "prepared or unaccounted launch context"
+        );
+    }
+    std::fs::write(&marker, &fixture.context.execution_nonce).unwrap();
+    let mut equal = old;
+    equal.created_at = fixture.context.created_at;
+    std::fs::write(&pending.path, serde_json::to_vec(&equal).unwrap()).unwrap();
+    assert_eq!(
+        census::read(
+            &shared,
+            &observed.target,
+            &fixture.context,
+            &observed.events,
+            &host
+        )
+        .unwrap_err(),
+        "prepared or unaccounted launch context"
+    );
+    std::fs::write(&pending.path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    runtime.block_on(assert_sweep(&fixture, shared, 2, false));
 }
 
 #[test]

@@ -8,13 +8,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("nested_libtest", ROOT / "scripts/ci/nested_libtest.py")
 N = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(N)
-from check_test_target_integrity import render_lib_inventory_manifest
 
 PARENT = "services::claude_tui::hook_relay::tests::claude_non_wait_hanging_transport_returns_after_stdout_within_750ms"
 CHILD = "services::claude_tui::hook_relay::tests::non_wait_relay_parent_subprocess_entry"
@@ -53,11 +51,7 @@ fn child() {}
                 "source": "src/lib.rs", "function": "parent", **call}]}]}
         (self.root / N.REL).parent.mkdir(parents=True)
         self.save()
-        (self.root / "scripts/lib_test_inventory_manifest.txt").write_text(
-            render_lib_inventory_manifest({"tests::parent", "tests::child"}))
-        (self.root / "scripts/known_test_failures.txt").write_text(ledger())
-        (self.root / "scripts/ci/non-pg-test-filter.sh").write_text(
-            "NON_PG_SKIP_ARGS=(\n  --skip _pg\n)\nNON_PG_FILTER_REPLAY=(\n  tests::not_present\n)\n")
+        (self.root / "Cargo.toml").write_text('[package]\nname = "fixture"\n')
 
     def save(self, table=None):
         (self.root / N.REL).write_text(json.dumps(self.table if table is None else table))
@@ -91,7 +85,7 @@ fn child() {}
                 if errors:
                     self.assertIn("tests::child", errors[0])
 
-    def test_static_audit_covers_new_sites_source_changes_inventory_and_ledger(self):
+    def test_static_audit_covers_new_sites_source_changes_and_inventory(self):
         self.assertEqual(N.check(self.root), [])
         source = self.root / "src/lib.rs"
         original = source.read_text()
@@ -99,48 +93,20 @@ fn child() {}
         self.assertTrue(any("source audit differs" in error for error in N.check(self.root)))
         source.write_text(original.replace('.status()', '.stdout(Stdio::null()).status()'))
         self.assertTrue(any("source audit differs" in error for error in N.check(self.root)))
-        source.write_text(original)
-        (self.root / "scripts/known_test_failures.txt").write_text("")
-        self.assertTrue(any("ignored ledger" in error for error in N.check(self.root)))
-        (self.root / "scripts/known_test_failures.txt").write_text(ledger())
-        (self.root / "scripts/lib_test_inventory_manifest.txt").write_text(
-            render_lib_inventory_manifest({"tests::parent"}))
+        # A linux child the linux build no longer compiles is gone from the inventory.
+        source.write_text(original.replace('#[ignore = "helper subprocess"]', '#[ignore = "helper subprocess"]\n#[cfg(windows)]'))
         self.assertTrue(any("child absent from inventory" in error for error in N.check(self.root)))
+        source.write_text(original.replace("fn parent()", "fn parent_renamed()"))
+        self.assertTrue(any("parent absent from inventory" in error for error in N.check(self.root)))
 
     def test_comments_and_raw_prose_are_not_new_spawn_sites(self):
         source = self.root / "src/lib.rs"
         source.write_text(source.read_text() + '\n// "--ignored"\nfn prose() { let s = r#"\"--ignored\""#; }\n')
         self.assertEqual(N.check(self.root), [])
 
-    def test_pg_hash_split_wrong_lane_and_replay_harness_split_are_rejected(self):
-        filtering = self.root / "scripts/ci/non-pg-test-filter.sh"
-        filtering.write_text("NON_PG_SKIP_ARGS=(\n  --skip tests::\n)\nNON_PG_FILTER_REPLAY=(\n  tests::not_present\n)\n")
-        (self.root / "scripts/known_test_failures.txt").write_text(ledger(lane="pg"))
-        with mock.patch("check_pg_test_lane_membership.pg_test_shard", side_effect=lambda name: int(name.endswith("child"))):
-            self.assertTrue(any("numeric shard" in error for error in N.check(self.root)))
-        with mock.patch("check_pg_test_lane_membership.pg_test_shard", return_value=0):
-            self.assertEqual(N.check(self.root), [])
-            filtering.write_text("NON_PG_SKIP_ARGS=(\n  --skip tests::\n)\nNON_PG_FILTER_REPLAY=(\n  tests::parent\n)\n")
-            errors = N.check(self.root)
-            self.assertTrue(any("judged/replay harness" in error for error in errors))
-            self.assertTrue(any("parent's lane non-pg-sweep" in error for error in errors))
-
-    def test_inherited_child_needs_the_same_lane_ignored_declaration(self):
-        (self.root / "scripts/known_test_failures.txt").write_text(ledger(lane="pg"))
-        self.assertTrue(any("parent's lane non-pg-sweep" in error for error in N.check(self.root)))
-
-    def test_replay_parity_is_required_even_when_pg_hashes_match(self):
-        (self.root / "scripts/ci/non-pg-test-filter.sh").write_text(
-            "NON_PG_SKIP_ARGS=(\n  --skip tests::\n)\nNON_PG_FILTER_REPLAY=(\n  tests::parent\n)\n")
-        (self.root / "scripts/known_test_failures.txt").write_text(ledger(lane="pg") + ledger())
-        with mock.patch("check_pg_test_lane_membership.pg_test_shard", return_value=0):
-            self.assertTrue(any("judged/replay harness" in error for error in N.check(self.root)))
-
     def test_declared_parent_must_be_the_real_test_owning_the_call(self):
         source = self.root / "src/lib.rs"
         source.write_text(source.read_text().replace("fn child() {}", "fn child() {}\n#[test] fn other() {}"))
-        (self.root / "scripts/lib_test_inventory_manifest.txt").write_text(
-            render_lib_inventory_manifest({"tests::parent", "tests::child", "tests::other"}))
         self.table["children"][0]["parents"] = ["tests::other"]
         self.save()
         self.assertTrue(any("do not match inherited test call owners" in error for error in N.check(self.root)))
@@ -152,9 +118,6 @@ fn child() {}
         self.assertTrue(any("child inventory source differs" in error for error in N.check(self.root)))
         source = self.root / "src/lib.rs"
         source.write_text(source.read_text().replace("fn child() {}", "fn child() {}\n#[test] #[ignore] fn other() {}"))
-        (self.root / "scripts/lib_test_inventory_manifest.txt").write_text(
-            render_lib_inventory_manifest({"tests::parent", "tests::child", "tests::other"}))
-        (self.root / "scripts/known_test_failures.txt").write_text(ledger() + ledger("tests::other"))
         self.table["children"][0].update(id="tests::other", source="src/lib.rs")
         self.save()
         self.assertTrue(any("not named by its spawn function" in error for error in N.check(self.root)))

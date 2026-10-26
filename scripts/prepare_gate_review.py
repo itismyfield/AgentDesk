@@ -14,7 +14,6 @@ COMMANDS = (
     ("generate_inventory_docs.py", "--review-docs-only", "--sync-giant-docs"),
     ("generate_env_reference.py",),
     ("generate_cli_reference.py",),
-    ("check_test_target_integrity.py", "--write-lib-inventory-manifest"),
 )
 
 
@@ -28,7 +27,6 @@ def prepare(root: Path, fragment: str | None = None) -> int:
             print(f"review preparation failed: {command[0]} exit={result.returncode}", file=sys.stderr)
             return result.returncode if result.returncode > 0 else 1
     print("REVIEW_ARTIFACTS_READY: review and commit corrections before freezing the review SHA")
-    print("PG lane membership synchronization remains a separate required step")
     return 0
 
 

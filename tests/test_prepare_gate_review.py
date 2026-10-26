@@ -25,7 +25,6 @@ class PrepareGateReviewTest(unittest.TestCase):
         commands = [call.args[0][2:] for call in run.call_args_list]
         self.assertEqual(commands, [
             ["--sync-skips"], ["--review-docs-only", "--sync-giant-docs"], [], [],
-            ["--write-lib-inventory-manifest"],
         ])
         self.assertTrue(all(call.kwargs["cwd"] == ROOT for call in run.call_args_list))
         self.assertEqual([Path(call.args[0][1]).name for call in run.call_args_list], [command[0] for command in PREPARE.COMMANDS])
@@ -61,7 +60,7 @@ class PrepareGateReviewTest(unittest.TestCase):
             scripts.mkdir()
             docs = ["ARCHITECTURE.md", "docs/generated/route-inventory.md", "docs/generated/worker-inventory.md",
                     "docs/generated/env-reference.md", "docs/generated/cli-reference.md"]
-            writes = [[], docs[:3], docs[3:4], docs[4:], ["scripts/lib_test_inventory_manifest.txt"]]
+            writes = [[], docs[:3], docs[3:4], docs[4:]]
             for command, outputs in zip(PREPARE.COMMANDS, writes):
                 (scripts / command[0]).write_text(
                     "from pathlib import Path\n" +
@@ -78,40 +77,6 @@ class PrepareGateReviewTest(unittest.TestCase):
             self.assertTrue(all((root / name).read_text() == "fresh\n" for name in docs))
             self.assertEqual(untouched.read_text(), "manual\n")
             self.assertEqual(PREPARE.prepare(root), 0)
-
-    def test_official_static_manifest_writer_corrects_drift(self):
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "src").mkdir()
-            (root / "scripts").mkdir()
-            (root / "Cargo.toml").write_text('[package]\nname="fixture"\nversion="0.1.0"\n')
-            (root / "src/lib.rs").write_text('#[cfg(test)]\nmod tests { #[test] fn selected() {} }\n')
-            manifest = root / "scripts/lib_test_inventory_manifest.txt"
-            manifest.write_text("drift\n")
-            argv = [sys.executable, str(ROOT / "scripts/check_test_target_integrity.py"),
-                    "--repo-root", str(root), "--write-lib-inventory-manifest"]
-            result = subprocess.run(argv, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("tests::selected", manifest.read_text())
-            expected = manifest.read_bytes()
-            self.assertEqual(subprocess.run(argv, capture_output=True).returncode, 0)
-            self.assertEqual(manifest.read_bytes(), expected)
-
-    def test_unclear_static_inventory_refuses_write(self):
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "src").mkdir()
-            (root / "scripts").mkdir()
-            (root / "Cargo.toml").write_text('[package]\nname="fixture"\nversion="0.1.0"\n')
-            (root / "src/lib.rs").write_text("mod missing;\n")
-            manifest = root / "scripts/lib_test_inventory_manifest.txt"
-            manifest.write_text("preserve\n")
-            result = subprocess.run([sys.executable, str(ROOT / "scripts/check_test_target_integrity.py"),
-                                     "--repo-root", str(root), "--write-lib-inventory-manifest"],
-                                    capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("not unambiguous", result.stderr)
-            self.assertEqual(manifest.read_text(), "preserve\n")
 
 
 class SafeAdditiveSkipTest(unittest.TestCase):

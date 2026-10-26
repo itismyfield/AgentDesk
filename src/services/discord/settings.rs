@@ -44,7 +44,7 @@ pub(crate) use memory::{
     memory_settings_for_binding, memory_settings_for_role, resolve_agent_memory_settings,
     resolve_memory_settings,
 };
-pub(super) use read::{load_bot_settings, load_last_session_path, save_last_session_runtime};
+pub(super) use read::{load_bot_settings, load_last_session_path};
 pub use read::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
 };
@@ -110,10 +110,6 @@ fn find_bot_settings_entry<'a>(
 
 fn last_session_path_key(token_hash: &str, channel_id: u64) -> String {
     format!("discord:last_session:{token_hash}:{channel_id}")
-}
-
-fn last_remote_profile_key(token_hash: &str, channel_id: u64) -> String {
-    format!("discord:last_remote:{token_hash}:{channel_id}")
 }
 
 #[derive(Clone, Debug)]

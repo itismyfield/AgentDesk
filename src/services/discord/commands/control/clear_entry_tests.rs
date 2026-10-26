@@ -249,21 +249,35 @@ impl Rig {
                 message.author.id = author;
                 message.author.name = "clear-entry".into();
                 message.content = "!clear".into();
-                let handle = super::super::text_commands::handle_text_command_with_uploads;
-                let mut permit = None;
-                let handled = handle(
-                    &self.ctx,
-                    &message,
-                    &self.data,
-                    channel,
-                    "!clear",
-                    &[],
-                    &mut permit,
-                );
+                let handle = super::super::text_commands::handle_text_command;
+                let handled = handle(&self.ctx, &message, &self.data, channel, "!clear");
                 assert!(Box::pin(handled).await.expect("the text clear is handled"));
             }
         }
-        let replies = self.api.take().into_iter().filter_map(|call| {
+        let calls = self.api.take();
+        if entry == Entry::Slash {
+            let callback = calls
+                .iter()
+                .find(|call| call.contains("/callback "))
+                .expect("defer callback");
+            let body = callback
+                .split_once(' ')
+                .unwrap()
+                .1
+                .split_once(' ')
+                .unwrap()
+                .1;
+            let body: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                body["type"], 5,
+                "clear acknowledges before sending its result"
+            );
+            assert!(
+                calls.iter().any(|call| call.contains("/webhooks/")),
+                "the clear result follows the defer: {calls:?}"
+            );
+        }
+        let replies = calls.into_iter().filter_map(|call| {
             let (_, body) = call.split_once(' ')?.1.split_once(' ')?;
             let body: Value = serde_json::from_str(body).ok()?;
             let content = body["content"]

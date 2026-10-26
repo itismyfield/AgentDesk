@@ -473,11 +473,7 @@ fn normalize_feedback_trigger_type(trigger_type: &str) -> String {
 }
 
 #[cfg(test)]
-// Module name kept as-is on purpose: the #2655 forget:recall alarm it was
-// named for is gone (#5168), but `scripts/test_lane_coverage_baseline.txt` is
-// an append-forbidden ratchet, so renaming the module would register as
-// baseline growth and fail the gate. The surviving test covers the
-// tool_feedback-trigger metric counter.
+// Covers the tool_feedback-trigger metric counter; the module keeps its historical name.
 mod forget_ratio_tests {
     use super::*;
 

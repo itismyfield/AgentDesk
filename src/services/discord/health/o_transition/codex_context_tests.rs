@@ -433,12 +433,22 @@ fn legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed() {
     .unwrap();
     let mut pending = fixture.context.clone();
     pending.execution_nonce = "b".repeat(32);
-    pending.created_at = chrono::Utc::now();
+    pending.created_at = fixture.context.created_at + chrono::TimeDelta::seconds(1);
     let pending = PreparedIncarnation::create(pending).unwrap();
     assert!(
         fixture.observe(&prepared).is_err(),
         "new prepared context changes census"
     );
+    let unavailable = runtime
+        .block_on(prepare(
+            &HealthRegistry::new(),
+            fixture.shared(None),
+            CHANNEL,
+        ))
+        .err()
+        .expect("pane_census: prepared or unaccounted launch context");
+    assert_eq!(unavailable.component.as_str(), "pane_census");
+    assert_eq!(unavailable.reason, "prepared or unaccounted launch context");
     std::fs::remove_file(pending.path).unwrap();
     std::fs::write(
         fixture.bin.path().join("tmux"),

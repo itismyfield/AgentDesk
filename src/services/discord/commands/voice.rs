@@ -5,9 +5,9 @@ use songbird::{CoreEvent, Event, SerenityInit as _};
 
 use super::super::{Context, Data, Error, check_auth};
 use crate::voice::barge_in::BargeInSensitivity;
-use crate::voice::commands::{VoiceCommand, parse_voice_command};
 
 mod alert;
+mod sensitivity;
 pub(in crate::services::discord) use alert::notify_voice_alert;
 #[cfg(test)]
 use alert::voice_notify_should_send;
@@ -25,13 +25,6 @@ impl VoiceSensitivityChoice {
         match self {
             Self::Normal => BargeInSensitivity::Normal,
             Self::Conservative => BargeInSensitivity::Conservative,
-        }
-    }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Normal => "normal",
-            Self::Conservative => "conservative",
         }
     }
 }
@@ -56,24 +49,16 @@ pub(in crate::services::discord) async fn cmd_voice(_ctx: Context<'_>) -> Result
     Ok(())
 }
 
-/// /vc_join — Join the caller's current voice channel and start WAV capture.
-#[poise::command(slash_command, rename = "vc_join")]
-pub(in crate::services::discord) async fn cmd_vc_join(ctx: Context<'_>) -> Result<(), Error> {
-    voice_join_impl(ctx).await
-}
-
 /// /voice join — Join the caller's current voice channel and start WAV capture.
 #[poise::command(slash_command, rename = "join")]
 async fn cmd_voice_join(ctx: Context<'_>) -> Result<(), Error> {
-    voice_join_impl(ctx).await
-}
-
-async fn voice_join_impl(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
         return Ok(());
     }
+    // The voice gateway handshake can outlast Discord's 3-second ack window.
+    ctx.defer().await?;
 
     if !ctx.data().voice_config.enabled {
         ctx.say(voice_disabled_guidance()).await?;
@@ -125,19 +110,9 @@ async fn voice_join_impl(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// /vc_leave — Leave the current guild voice channel and flush active WAV capture.
-#[poise::command(slash_command, rename = "vc_leave")]
-pub(in crate::services::discord) async fn cmd_vc_leave(ctx: Context<'_>) -> Result<(), Error> {
-    voice_leave_impl(ctx).await
-}
-
 /// /voice leave — Leave the current guild voice channel and flush active WAV capture.
 #[poise::command(slash_command, rename = "leave")]
 async fn cmd_voice_leave(ctx: Context<'_>) -> Result<(), Error> {
-    voice_leave_impl(ctx).await
-}
-
-async fn voice_leave_impl(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
@@ -255,199 +230,13 @@ async fn cmd_voice_sensitivity(
         .voice_barge_in
         .set_sensitivity(mode.sensitivity())
         .await;
-    ctx.say(format!("Voice barge-in sensitivity: {}.", mode.as_str()))
-        .await?;
-    Ok(())
-}
-
-pub(in crate::services::discord) async fn handle_vc_text_command(
-    ctx: &serenity::Context,
-    msg: &serenity::Message,
-    data: &Data,
-    subcommand: &str,
-) -> Result<(), Error> {
-    if !check_auth(msg.author.id, &msg.author.name, &data.shared, &data.token).await {
-        return Ok(());
-    }
-
-    match subcommand {
-        "join" => {
-            if !data.voice_config.enabled {
-                let _ = msg.reply(&ctx.http, voice_disabled_guidance()).await;
-                return Ok(());
-            }
-            let (guild_id, channel_id) =
-                resolve_user_voice_channel(ctx, msg.guild_id, msg.author.id)?;
-            let control_channel_id = data
-                .shared
-                .voice_pairings
-                .target_channel(channel_id)
-                .unwrap_or(msg.channel_id);
-            data.shared
-                .voice_barge_in
-                .voice_join_started(channel_id, guild_id);
-            let join_result = join_voice_channel(
-                ctx,
-                data.voice_receiver.clone(),
-                data.provider.as_str(),
-                guild_id,
-                channel_id,
-                control_channel_id,
-            )
-            .await;
-            if let Err(error) = join_result {
-                data.shared.voice_barge_in.voice_disconnected(channel_id);
-                return Err(error);
-            }
-            super::super::voice_lifecycle::record_join_success(
-                &data.shared.voice_barge_in,
-                data.provider.as_str(),
-                guild_id,
-                channel_id,
-                control_channel_id,
-            );
-            let _ = msg
-                .reply(
-                    &ctx.http,
-                    format!(
-                        "VC joined `{}`; voice turns route to text channel `{}`.",
-                        channel_id.get(),
-                        control_channel_id.get()
-                    ),
-                )
-                .await;
-        }
-        "conservative" | "보수" | "보수모드" => {
-            data.shared
-                .voice_barge_in
-                .set_sensitivity(BargeInSensitivity::Conservative)
-                .await;
-            let _ = msg
-                .reply(&ctx.http, "Voice barge-in sensitivity: conservative.")
-                .await;
-        }
-        "normal" | "기본" | "기본감도" | "일반" => {
-            data.shared
-                .voice_barge_in
-                .set_sensitivity(BargeInSensitivity::Normal)
-                .await;
-            let _ = msg
-                .reply(&ctx.http, "Voice barge-in sensitivity: normal.")
-                .await;
-        }
-        "leave" => {
-            let guild_id = msg
-                .guild_id
-                .ok_or_else(|| anyhow!("!vc leave requires a guild"))?;
-            let flushed = leave_voice_channel(ctx, data, guild_id).await?;
-            let _ = msg
-                .reply(
-                    &ctx.http,
-                    format!("VC left; flushed `{}` pending utterance(s).", flushed),
-                )
-                .await;
-        }
-        "latency" => {
-            let _ = msg
-                .reply(
-                    &ctx.http,
-                    format!(
-                        "Voice path: enabled=`{}`, verbose_progress=`{}`.",
-                        data.voice_config.enabled,
-                        data.shared.voice_barge_in.verbose_progress_enabled()
-                    ),
-                )
-                .await;
-        }
-        _ => {
-            if let Some(command) = parse_voice_command(subcommand) {
-                match command {
-                    VoiceCommand::Sensitivity(sensitivity) => {
-                        data.shared
-                            .voice_barge_in
-                            .set_sensitivity(sensitivity)
-                            .await;
-                        let _ = msg
-                            .reply(
-                                &ctx.http,
-                                format!("Voice barge-in sensitivity: {sensitivity:?}."),
-                            )
-                            .await;
-                        return Ok(());
-                    }
-                    VoiceCommand::VerboseProgress(enabled) => {
-                        data.shared
-                            .voice_barge_in
-                            .set_verbose_progress_enabled(enabled);
-                        let _ = msg
-                            .reply(&ctx.http, format!("Voice verbose progress: {enabled}."))
-                            .await;
-                        return Ok(());
-                    }
-                    // F8 (#2046): 텍스트 디스패처에서도 Language/TtsVoice/VoiceClone/
-                    // WakeWords 명령을 모두 처리한다. 기존엔 무성공으로 끝나 사용자가
-                    // 변경 적용 여부를 알 수 없었다.
-                    VoiceCommand::Language(language) => {
-                        data.shared
-                            .voice_barge_in
-                            .set_runtime_language_external(language.clone())
-                            .await;
-                        let _ = msg
-                            .reply(&ctx.http, format!("Voice STT language: `{language}`."))
-                            .await;
-                        return Ok(());
-                    }
-                    VoiceCommand::TtsVoice(voice) => {
-                        data.shared
-                            .voice_barge_in
-                            .set_runtime_tts_voice_external(voice.clone())
-                            .await;
-                        let _ = msg
-                            .reply(&ctx.http, format!("Voice TTS voice: `{voice}`."))
-                            .await;
-                        return Ok(());
-                    }
-                    VoiceCommand::VoiceClone { reference } => {
-                        let detail = reference.as_deref().unwrap_or("<none>");
-                        tracing::info!(
-                            reference = %detail,
-                            "voice clone command accepted via text dispatcher"
-                        );
-                        let _ = msg
-                            .reply(
-                                &ctx.http,
-                                format!("Voice clone request acknowledged (reference=`{detail}`)."),
-                            )
-                            .await;
-                        return Ok(());
-                    }
-                    VoiceCommand::WakeWords(wake_command) => {
-                        let words = data
-                            .shared
-                            .voice_barge_in
-                            .apply_wake_word_command_external(wake_command)
-                            .await;
-                        let summary = if words.is_empty() {
-                            "<disabled>".to_string()
-                        } else {
-                            words.join(", ")
-                        };
-                        let _ = msg
-                            .reply(&ctx.http, format!("Voice wake words: {summary}"))
-                            .await;
-                        return Ok(());
-                    }
-                }
-            }
-            let _ = msg
-                .reply(
-                    &ctx.http,
-                    "Usage: `!vc join`, `!vc leave`, `!vc latency`, `!vc conservative`, or `!vc normal`.",
-                )
-                .await;
-        }
-    }
-
+    let barge_in = &ctx.data().voice_config.barge_in;
+    let reply = sensitivity::reply(
+        mode.sensitivity(),
+        barge_in.sensitivity,
+        barge_in.conservative_ttl_secs,
+    );
+    ctx.say(reply).await?;
     Ok(())
 }
 

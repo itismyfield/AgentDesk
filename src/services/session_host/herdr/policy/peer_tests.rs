@@ -66,7 +66,7 @@ impl Fixture {
             executable: ExecutableImage {
                 checker: self.checker.clone(),
                 checker_token: token.clone(),
-                loaded: Some(loaded_image::fixture(token.dev_ino())),
+                loaded: Ok(loaded_image::fixture(token.dev_ino())),
             },
         }
     }
@@ -185,7 +185,7 @@ fn policy_peer_checks_version_protocol_start_and_current_witness() {
             Unverified::Peer,
         ),
         (
-            |peer| peer.executable.loaded = Some(loaded_image::fixture((0, 0))),
+            |peer| peer.executable.loaded = Ok(loaded_image::fixture((0, 0))),
             Unverified::Identity,
         ),
     ];
@@ -208,7 +208,9 @@ fn policy_peer_path_stat_alone_or_another_loaded_image_never_passes() {
     std::fs::write(&other, b"fixture executable image").unwrap();
     for loaded in [None, Some(file::image(&other).unwrap())] {
         let mut observed = fixture.observation();
-        observed.executable.loaded = loaded.map(|token| loaded_image::fixture(token.dev_ino()));
+        observed.executable.loaded = loaded
+            .map(|token| loaded_image::fixture(token.dev_ino()))
+            .ok_or(Unverified::Identity);
         assert!(
             matches!(validate(observed), Err(Unverified::Identity)),
             "loaded-image identity contract"
@@ -288,7 +290,7 @@ fn policy_loaded_image_construction_is_os_adapter_only() {
     let linux = adapter
         .split("#[cfg(target_os = \"linux\")]")
         .nth(1)
-        .and_then(|body| body.split("#[cfg(not(target_os").next())
+        .and_then(|body| body.split("#[cfg(").next())
         .expect("Linux loaded-image adapter is present");
     assert!(
         linux.contains("\"/proc/{pid}/exe\""),
@@ -297,5 +299,25 @@ fn policy_loaded_image_construction_is_os_adapter_only() {
     assert!(
         !linux.contains("process_exec_path") && !linux.contains("canonicalize"),
         "loaded_image_linux_adapter_forbids_pathname_fallback_contract"
+    );
+    let macos = adapter
+        .split_once("#[cfg(target_os = \"macos\")]")
+        .and_then(|(_, body)| body.split("#[cfg(test)]").next())
+        .expect("macOS loaded-image adapter is present");
+    for required in [
+        "PROC_PIDREGIONPATHINFO",
+        "PROC_PIDARCHINFO",
+        "proc_pidpath_audittoken",
+    ] {
+        assert!(
+            macos.contains(required),
+            "loaded_image_macos_vnode_adapter_contract: {required}"
+        );
+    }
+    assert!(
+        !macos.contains("process_exec_path")
+            && !macos.contains("canonicalize")
+            && !macos.contains("std::fs::"),
+        "loaded_image_macos_adapter_forbids_pathname_fallback_contract"
     );
 }

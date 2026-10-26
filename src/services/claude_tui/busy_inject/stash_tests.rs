@@ -5,74 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-use super::screen::{self, Composer, Stash};
 use super::*;
-
-mod environment_tests {
-    use super::*;
-
-    #[test]
-    fn production_environment_initialization_selects_only_the_listed_channel() {
-        const CHILD: &str = "ADK_BUSY_INJECT_STASH_CONFIG_SUBPROCESS";
-        if std::env::var_os(CHILD).is_none() {
-            let test = format!(
-                "{}::production_environment_initialization_selects_only_the_listed_channel",
-                module_path!().split_once("::").unwrap().1
-            );
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", &test, "--nocapture"])
-                .env(CHILD, "1")
-                .env("ADK_BUSY_INJECT_STASH_CHANNELS", "invalid, 6245, , 6245")
-                .output()
-                .unwrap();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(stdout.contains("running 1 test"), "{stdout}\n{stderr}");
-            assert!(output.status.success(), "{stdout}\n{stderr}");
-            assert!(
-                stdout.contains("1 passed; 0 failed; 0 ignored"),
-                "{stdout}\n{stderr}"
-            );
-            return;
-        }
-
-        let _runtime = crate::config::TestRuntimeRootGuard::new();
-        USE_PRODUCTION_CHANNELS.set(true);
-        for channel in [Some(6245), Some(6246), None] {
-            let tui = Tui::new("human draft A");
-            tui.put("attached", "4");
-            let session = tui.session();
-            let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
-            let nonce = tui.next_nonce();
-            let request = Request {
-                session: &session,
-                transcript: &tui.transcript,
-                source: "iMessage",
-                author: "200",
-                name: "ann",
-                nonce: &nonce,
-                text: TEXT,
-            };
-            let got = inject_report(&pane, &request, channel, &FAST);
-            if channel == Some(6245) {
-                assert_eq!(got, report(Outcome::Injected, DraftState::RestoredObserved));
-                assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
-                assert_eq!(tui.records(), [framed()]);
-            } else {
-                assert_eq!(
-                    got,
-                    report(Outcome::NotSent(Veto::HumanAttached), DraftState::Unchanged)
-                );
-                assert!(tui.applied().is_empty());
-                assert!(tui.records().is_empty());
-            }
-            assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
-        }
-    }
-}
-mod a1_stash_tests;
-mod hold_tests;
-mod paste_footer_tests;
 
 thread_local! {
     pub(super) static USE_PRODUCTION_CHANNELS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -114,7 +47,6 @@ pub(crate) fn configured_channels() -> Vec<u64> {
         .collect()
 }
 
-const NONCE: &str = "abcd1234";
 const TEXT: &str = "are you there?";
 
 /// Windows only bound the waits for evidence that never comes; found evidence returns at once.
@@ -126,11 +58,8 @@ const FAST: Timing = Timing {
         Duration::from_millis(10),
     ],
     settle: Duration::ZERO,
-    rechecks: 3,
-    recheck_interval: Duration::from_millis(5),
-    confirm_window: Duration::from_secs(3),
+    confirm_window: Duration::ZERO,
     confirm_poll: Duration::from_millis(20),
-    restore_window: Duration::from_millis(600),
 };
 
 /// A scripted Claude TUI behind `tmux`: composer, stash, the single-slot C-s, a submit handing the
@@ -160,7 +89,7 @@ enter() {
   [ -s "$d/composer" ] || return 0
   # The acceptance record carries what the composer held at Enter.
   awk 'BEGIN { printf "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\"" }
-    { gsub(/"/, "\\\""); printf "%s%s", (NR > 1 ? "\\n" : ""), $0 } END { print "\"}" }' "$d/composer" >> '@T@'
+    { gsub(/"/, "\""); printf "%s%s", (NR > 1 ? "\\n" : ""), $0 } END { print "\"}" }' "$d/composer" >> '@T@'
   : > "$d/composer"
   rm -f "$d/chip"
   [ -f "$d/stash" ] || return 0
@@ -202,7 +131,7 @@ render() {
   cat "$d/border" "$d/footer"
 }
 case "$2" in
-display-message) echo "$(cat "$d/attached"),$(cat "$d/last"),$(cat "$d/width"),$(cat "$d/height")" ;;
+display-message) for last do :; done; case "$last" in '#{pane_dead}') printf ' 0 \n' ;; *) echo "$(cat "$d/attached"),$(cat "$d/last"),$(cat "$d/width"),$(cat "$d/height")" ;; esac ;;
 capture-pane)
   n=$(($(cat "$d/cap.n" 2>/dev/null || echo 0) + 1)); echo $n > "$d/cap.n"
   [ -f "$d/fail.cap.$n" ] && exit 1
@@ -307,11 +236,6 @@ impl Tui {
         fs::read_to_string(self.dir.path().join(name)).ok()
     }
 
-    /// Shell run by the fake right after it prints capture `n`.
-    fn person_after_capture(&self, n: usize, script: &str) {
-        self.put(&format!("human.{n}"), script);
-    }
-
     fn session(&self) -> String {
         let name = self.dir.path().file_name().unwrap().to_string_lossy();
         let name: String = name
@@ -347,12 +271,6 @@ impl Tui {
         self.run_text(TEXT, &FAST)
     }
 
-    /// The pane as the fake shows it now.
-    fn capture(&self) -> String {
-        let pane = Pane::with_program(&self.session(), self.dir.path().join("tmux"));
-        pane.capture().unwrap()
-    }
-
     /// Keys the server applied for AgentDesk, in order.
     fn applied(&self) -> Vec<String> {
         let log = self.get("applied").unwrap_or_default();
@@ -362,21 +280,6 @@ impl Tui {
     /// (composer, stash) as the person would find them.
     fn drafts(&self) -> (String, Option<String>) {
         (self.get("composer").unwrap_or_default(), self.get("stash"))
-    }
-
-    fn taken(&self) -> bool {
-        let Some(frame) = self.get("buffer") else {
-            return false;
-        };
-        fs::read_to_string(&self.transcript)
-            .unwrap()
-            .lines()
-            .skip(2)
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter_map(|record| human_input_text(&record, false))
-            .filter(|(text, _)| receipt::exact(text, &frame))
-            .count()
-            == 1
     }
 
     /// Every submission the fake recorded, as the composer held it at Enter.
@@ -400,840 +303,159 @@ impl Tui {
     }
 }
 
-fn report(outcome: Outcome, draft: DraftState) -> Report {
-    Report { outcome, draft }
-}
-
-fn framed() -> String {
-    frame("iMessage", "200", "ann", NONCE, TEXT)
-}
-
 #[test]
-fn a_draft_is_stashed_then_the_input_entered_once_and_the_draft_handed_back() {
+fn visible_draft_is_stashed_once_and_submitted_without_post_reads() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    for draft in ["human draft A", "first line\n\n  indented third"] {
-        let tui = Tui::new(draft);
-        let got = tui.run();
-        assert_eq!(
-            (got, got.delivery()),
-            (
-                report(Outcome::Injected, DraftState::RestoredObserved),
-                Delivery::Observed
-            ),
-            "{draft:?}"
-        );
-        assert_eq!(tui.applied(), ["C-s", "paste", "Enter"], "{draft:?}");
-        assert_eq!(tui.drafts(), (draft.to_string(), None), "{draft:?}");
-        assert!(tui.taken() && tui.alerts().is_empty(), "{draft:?}");
-    }
-}
-
-#[test]
-fn an_allowlisted_attached_pane_stashes_submits_once_and_restores_the_exact_draft() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    for draft in ["human draft A", "first line\n\n  indented third"] {
+    for draft in ["human draft A", "first line\n\n  들여쓰기"] {
         let tui = Tui::new(draft);
         tui.put("attached", "4");
-        assert_eq!(
-            tui.run(),
-            report(Outcome::Injected, DraftState::RestoredObserved),
-            "{draft:?}"
+        tui.put(
+            "human.after-paste",
+            r#"echo 101 > "$d/last"; echo 20 > "$d/width""#,
         );
+        assert_eq!(tui.run().outcome, Outcome::Injected);
         assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
-        assert_eq!(tui.records(), [framed()]);
-        assert_eq!(tui.drafts(), (draft.to_string(), None));
+        assert_eq!(tui.drafts(), (draft.into(), None));
+        assert_eq!(tui.get("cap.n").as_deref(), Some("1\n"));
+        assert_eq!(tui.records(), [tui.get("buffer").unwrap()]);
         assert!(tui.alerts().is_empty());
+        assert!(!super::super::composer_lock::draft_guarded(&tui.session()));
     }
 }
 
+/// Also when streamed output above the box hides the `› stashed` marker.
 #[test]
-fn only_an_allowlisted_empty_attached_pane_takes_the_direct_paste() {
+fn empty_never_toggles_an_old_stash_back_before_pasting() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let tui = Tui::new("");
-    tui.put("attached", "4");
-    let session = tui.session();
-    let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
-    let nonce = tui.next_nonce();
-    let request = Request {
-        session: &session,
-        transcript: &tui.transcript,
-        source: "iMessage",
-        author: "200",
-        name: "ann",
-        nonce: &nonce,
-        text: TEXT,
-    };
-    assert_eq!(
-        inject_gated(&pane, &request, &FAST, false),
-        report(Outcome::NotSent(Veto::HumanAttached), DraftState::Unchanged)
-    );
-    assert!(tui.applied().is_empty());
-    assert_eq!(tui.run(), report(Outcome::Injected, DraftState::Unchanged));
-    assert_eq!(tui.applied(), ["paste", "Enter"]);
-    assert_eq!(tui.records(), [framed()]);
-}
-
-#[test]
-fn same_generation_contamination_after_ownership_never_confirms_a_nonce_only_match() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let tui = Tui::new("human draft A");
-    tui.put("attached", "4");
-    // The person types, then returns the caret to the observed location: body evidence must
-    // reject the resulting submission even though the cursor and attach generation still match.
-    tui.person_after_capture(
-        3,
-        "x=$(cat \"$d/cursor_x\"); y=$(cat \"$d/cursor_y\"); type_text X; echo \"$x\" > \"$d/cursor_x\"; echo \"$y\" > \"$d/cursor_y\"",
-    );
-    assert_eq!(
-        tui.run(),
-        report(
-            Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit),
-            DraftState::RestoredObserved
-        )
-    );
-    assert_eq!(tui.records(), [format!("{}X", framed())]);
-    assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
-    assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
-}
-
-#[test]
-fn an_image_added_before_enter_is_contaminated_even_with_matching_text_and_generation() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let tui = Tui::new("human draft A");
-    tui.put("attached", "4");
-    tui.put(
-        "submission",
-        &format!(
-            "{}\n",
-            serde_json::json!({"type": "user", "message": {"content": [
-                {"type": "text", "text": framed()},
-                {"type": "image", "source": {"type": "base64", "data": "AA=="}}
-            ]}})
-        ),
-    );
-    tui.put(
-        "human.before-Enter",
-        "enter() { cat \"$d/submission\" >> \"$d/transcript.jsonl\"; : > \"$d/composer\"; mv \"$d/stash\" \"$d/composer\"; }",
-    );
-    assert_eq!(
-        tui.run(),
-        report(
-            Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit),
-            DraftState::RestoredObserved
-        )
-    );
-    assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
-    assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
-    assert!(tui.taken());
-}
-
-#[test]
-fn a_same_generation_cursor_change_after_ownership_withholds_enter() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let tui = Tui::new("human draft A");
-    tui.put("attached", "4");
-    tui.person_after_capture(3, "type_text X");
-    assert_eq!(
-        tui.run(),
-        report(
-            Outcome::Unconfirmed(Unconfirmed::CursorChangedBeforeEnter),
-            DraftState::Unknown
-        )
-    );
-    assert_eq!(tui.applied(), ["C-s", "paste"]);
-    assert!(tui.records().is_empty());
-    assert_eq!(
-        tui.drafts(),
-        (format!("{}X", framed()), Some("human draft A".to_string()))
-    );
-    assert_eq!(
-        tui.run(),
-        report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
-    );
-    assert_eq!(tui.applied(), ["C-s", "paste"]);
-}
-
-#[test]
-fn an_attached_direct_paste_beside_new_human_keys_is_unconfirmed_and_held() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let tui = Tui::new("");
-    tui.put("attached", "4");
-    tui.person_after_capture(1, "type_text 'person typed '");
-    assert_eq!(
-        tui.run(),
-        report(
-            Outcome::Unconfirmed(Unconfirmed::DraftNotOwned),
-            DraftState::Unknown
-        )
-    );
-    assert_eq!(tui.applied(), ["paste"]);
-    assert!(tui.records().is_empty());
-    assert_eq!(tui.drafts(), (format!("person typed {}", framed()), None));
-    assert_eq!(tui.alerts().len(), 1);
-    assert_eq!(tui.alerts()[0]["automatic_writes_held"], true);
-    assert!(super::super::composer_lock::draft_guarded(&tui.session()));
-
-    // The attached-empty happy path and the unattended direct path keep their original axis.
-    for attached in ["4", "0"] {
-        let empty = Tui::new("");
-        empty.put("attached", attached);
-        assert_eq!(
-            empty.run(),
-            report(Outcome::Injected, DraftState::Unchanged)
-        );
-        assert_eq!(empty.applied(), ["paste", "Enter"]);
-        assert!(empty.alerts().is_empty());
-    }
-}
-
-#[test]
-fn an_attached_direct_paste_resize_is_not_misclassified_as_an_attach_change() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let tui = Tui::new("");
-    tui.put("attached", "4");
-    tui.person_after_capture(1, "echo 161 > \"$d/width\"");
-    assert_eq!(
-        tui.run(),
-        report(
-            Outcome::NotSent(Veto::UnpredictableRender),
-            DraftState::Unchanged
-        )
-    );
-    assert!(tui.applied().is_empty());
-    assert!(tui.records().is_empty());
-    assert_eq!(tui.drafts(), (String::new(), None));
-}
-
-#[test]
-fn an_attached_generation_change_stops_the_next_stash_key() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    for (capture, action, draft, applied) in [
-        (1, "echo 5 > \"$d/attached\"", DraftState::Unchanged, vec![]),
-        (1, "echo 101 > \"$d/last\"", DraftState::Unchanged, vec![]),
-        (2, "detach", DraftState::StashedVerified, vec!["C-s"]),
-        (
-            2,
-            "echo 101 > \"$d/last\"",
-            DraftState::StashedVerified,
-            vec!["C-s"],
-        ),
-    ] {
-        let tui = Tui::new("human draft A");
-        tui.put("attached", "4");
-        tui.person_after_capture(capture, action);
-        assert_eq!(
-            tui.run(),
-            report(Outcome::NotSent(Veto::HumanAttached), draft)
-        );
-        assert_eq!(tui.applied(), applied);
-        assert!(tui.records().is_empty());
-        let expected = if capture == 1 {
-            ("human draft A".to_string(), None)
-        } else {
-            (String::new(), Some("human draft A".to_string()))
-        };
-        assert_eq!(tui.drafts(), expected);
-    }
-}
-
-#[test]
-fn an_attached_generation_change_after_ownership_withholds_enter_and_never_retries() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    for action in ["echo 5 > \"$d/attached\"", "echo 101 > \"$d/last\""] {
-        let tui = Tui::new("human draft A");
-        tui.put("attached", "4");
-        tui.person_after_capture(3, action);
-        assert_eq!(
-            tui.run(),
-            report(
-                Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste),
-                DraftState::Unknown
-            )
-        );
-        assert_eq!(tui.applied(), ["C-s", "paste"]);
-        assert!(tui.records().is_empty());
-        assert_eq!(tui.drafts(), (framed(), Some("human draft A".to_string())));
-        assert_eq!(
-            tui.run(),
-            report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
-        );
-        assert_eq!(tui.applied(), ["C-s", "paste"]);
-    }
-}
-
-#[test]
-fn a_stash_marker_and_empty_composer_are_required_before_paste() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    for action in [
-        "type_text 'human typed'",
-        "echo unknown-stash > \"$d/status\"",
-    ] {
-        let tui = Tui::new("human draft A");
-        tui.put("attached", "4");
-        tui.put("human.after-C-s", action);
-        assert_eq!(
-            tui.run(),
-            report(Outcome::NotSent(Veto::Draft), DraftState::Unknown)
-        );
-        assert_eq!(tui.applied(), ["C-s"]);
-        assert!(tui.records().is_empty());
-        assert_eq!(tui.get("stash").as_deref(), Some("human draft A"));
-        assert_eq!(
-            tui.run(),
-            report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
-        );
-        assert_eq!(tui.applied(), ["C-s"]);
-    }
-}
-
-#[test]
-fn generation_changes_stop_evidence_reads_after_stash_or_paste() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    for after in ["C-s", "paste"] {
-        let tui = Tui::new("human draft A");
-        tui.put("attached", "4");
-        tui.put(&format!("human.after-{after}"), "echo 101 > \"$d/last\"");
-        let (outcome, applied, captures) = if after == "C-s" {
-            (Outcome::NotSent(Veto::HumanAttached), vec!["C-s"], "1")
-        } else {
-            (
-                Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste),
-                vec!["C-s", "paste"],
-                "2",
-            )
-        };
-        assert_eq!(tui.run(), report(outcome, DraftState::Unknown));
-        assert_eq!(tui.applied(), applied);
-        assert_eq!(tui.get("cap.n").unwrap().trim_end(), captures);
-        assert!(tui.records().is_empty());
-        assert_eq!(tui.get("stash").as_deref(), Some("human draft A"));
-    }
-}
-
-#[test]
-fn human_text_mixed_after_an_attached_paste_is_unconfirmed_without_enter_or_retry() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let tui = Tui::new("human draft A");
-    tui.put("attached", "4");
-    tui.put("human.after-paste", "type_text ' person typed'");
-    assert_eq!(
-        tui.run(),
-        report(
-            Outcome::Unconfirmed(Unconfirmed::DraftNotOwned),
-            DraftState::Unknown
-        )
-    );
-    assert_eq!(tui.applied(), ["C-s", "paste"]);
-    assert!(tui.records().is_empty());
-    assert_eq!(
-        tui.drafts(),
-        (
-            format!("{} person typed", framed()),
-            Some("human draft A".to_string())
-        )
-    );
-    assert_eq!(
-        tui.run(),
-        report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
-    );
-    assert_eq!(tui.applied(), ["C-s", "paste"]);
-}
-
-#[test]
-fn allowing_attached_clients_keeps_the_same_second_attach_floor_veto() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let tui = Tui::new("human draft A");
-    tui.put("attached", "4");
-    // Future by a minute: a slow test cannot accidentally age this ambiguous attach out.
-    tui.put("last", &(unix_seconds() + 60).to_string());
-    assert_eq!(
-        tui.run(),
-        report(Outcome::NotSent(Veto::HumanAttached), DraftState::Unchanged)
-    );
-    assert!(tui.applied().is_empty());
-    assert!(tui.get("cap.n").is_none());
-    assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
-}
-
-/// A person who attaches after the pre-capture, stashes A, types B and leaves keeps both.
-#[test]
-fn a_person_attaching_after_the_pre_capture_keeps_both_drafts() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let tui = Tui::new("human draft A");
-    tui.person_after_capture(1, "attach 200; cs; type_text 'human draft B'; detach");
-    assert_eq!(
-        tui.run(),
-        report(Outcome::NotSent(Veto::HumanAttached), DraftState::Unchanged)
-    );
-    assert!(tui.applied().is_empty());
-    let kept = (
-        "human draft B".to_string(),
-        Some("human draft A".to_string()),
-    );
-    assert_eq!(tui.drafts(), kept);
-
-    // An attach in the current second could repeat unseen, so nothing is read or sent. One second
-    // ahead, so a clock tick during the test cannot age it out.
-    let tui = Tui::new("human draft A");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    tui.put("last", &(now + 1).to_string());
-    assert_eq!(
-        tui.run(),
-        report(Outcome::NotSent(Veto::HumanAttached), DraftState::Unchanged)
-    );
-    assert!(tui.applied().is_empty() && tui.get("cap.n").is_none());
-
-    // Attached and gone again between the last check and Enter: the Enter is withheld.
-    let tui = Tui::new("human draft A");
-    tui.person_after_capture(3, "attach 300; detach");
-    let got = tui.run();
-    let withheld = Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste);
-    assert_eq!(got, report(withheld, DraftState::Unknown));
-    assert_eq!(tui.applied(), ["C-s", "paste"]);
-    assert_eq!(tui.drafts(), (framed(), Some("human draft A".to_string())));
-}
-
-/// Delivery and draft are judged apart; nothing is resent and a pane in doubt is held.
-#[test]
-fn delivery_and_draft_outcomes_stay_apart_and_an_unrecovered_pane_is_held() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    // Enter applied but its reply lost: no retry, and the restore is still watched.
-    let tui = Tui::new("human draft A");
-    tui.put("lost.Enter", "");
-    let entered = Outcome::Unconfirmed(Unconfirmed::EnterFailed);
-    assert_eq!(tui.run(), report(entered, DraftState::RestoredObserved));
-    assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
-    assert!(tui.taken());
-    assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
-
-    // The transcript first, the draft two captures later.
-    let tui = Tui::new("human draft A");
-    tui.put("restore_after", "2");
-    assert_eq!(
-        tui.run(),
-        report(Outcome::Injected, DraftState::RestoredObserved)
-    );
-    assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
-
-    // Never handed back: still delivered, with an alert and the pane held.
-    let tui = Tui::new("human draft A");
-    tui.put("restore_after", "never");
-    let got = tui.run();
-    assert_eq!(
-        (got, got.delivery()),
-        (
-            report(Outcome::Injected, DraftState::Unknown),
-            Delivery::Observed
-        )
-    );
-    let alerts = tui.alerts();
-    assert_eq!(alerts.len(), 1);
-    let fields = ["delivery", "composer", "stash", "automatic_writes_held"]
-        .map(|field| alerts[0][field].to_string());
-    assert_eq!(fields, ["\"observed\"", "\"empty\"", "\"present\"", "true"]);
-    assert!(
-        alerts[0]["guidance"]
-            .as_str()
-            .unwrap()
-            .contains("press Ctrl+S once")
-    );
-    assert_eq!(
-        tui.run(),
-        report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
-    );
-    assert_eq!(tui.applied().len(), 3);
-    // The person restores it; the next input releases the hold and runs again.
-    tui.put("composer", "human draft A");
-    fs::remove_file(tui.dir.path().join("stash")).unwrap();
-    fs::remove_file(tui.dir.path().join("restore_after")).unwrap();
-    assert_eq!(
-        tui.run(),
-        report(Outcome::Injected, DraftState::RestoredObserved)
-    );
-    assert_eq!(tui.applied().len(), 6);
-
-    // The capture after C-s fails: the input was not sent, the draft is unaccounted for.
-    let tui = Tui::new("human draft A");
-    tui.put("fail.cap.2", "");
-    let got = tui.run();
-    assert_eq!(
-        (got, got.delivery()),
-        (
-            report(Outcome::NotSent(Veto::PaneUnavailable), DraftState::Unknown),
-            Delivery::NotAttempted
-        )
-    );
-    assert_eq!(tui.applied(), ["C-s"]);
-    assert_eq!(
-        tui.drafts(),
-        (String::new(), Some("human draft A".to_string()))
-    );
-    let guidance = tui.alerts()[0]["guidance"].as_str().unwrap().to_string();
-    assert!(guidance.contains("could not be read"), "{guidance}");
-    assert_eq!(
-        tui.run(),
-        report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
-    );
-    assert_eq!(tui.applied(), ["C-s"]);
-}
-
-/// The lock spans C-s to the recovery decision, so a second input never starts a second stash.
-#[test]
-fn a_second_input_waits_out_the_whole_stash_transaction() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let tui = Tui::new("human draft A");
-    tui.put("restore_after", "never");
-    tui.put("barrier", "");
-    std::thread::scope(|scope| {
-        let first = scope.spawn(|| tui.run());
-        // The first input is parked inside its restore watch, the lock still held.
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while tui.get("reached").is_none() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "no restore watch began"
-            );
-            std::thread::sleep(Duration::from_millis(5));
+    for status in [None, Some("  12. streamed line\n")] {
+        let tui = Tui::new("");
+        tui.put("stash", "old stashed draft");
+        if let Some(status) = status {
+            tui.put("status", status);
         }
-        let second = tui.run();
-        tui.put("go", "");
-        assert_eq!(
-            second,
-            report(Outcome::NotSent(Veto::LockContended), DraftState::Unchanged)
-        );
-        let first = first.join().unwrap();
-        assert_eq!(first, report(Outcome::Injected, DraftState::Unknown));
-    });
-    assert_eq!(
-        tui.run(),
-        report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged)
-    );
-    assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
+        assert_eq!(tui.run().outcome, Outcome::Injected, "{status:?}");
+        assert_eq!(tui.applied(), ["paste", "Enter"], "{status:?}");
+        assert_eq!(tui.records(), [tui.get("buffer").unwrap()]);
+        assert_eq!(tui.drafts(), ("old stashed draft".into(), None));
+    }
 }
 
 #[test]
-fn a_frame_that_folds_or_wraps_stashes_and_restores_the_draft() {
+fn a_shown_stash_is_never_overwritten_by_parking_a_new_draft() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    type Setup = fn(&Tui);
-    let cases: [(&str, &str, Setup); 3] = [
-        ("three more lines", "one\ntwo\nthree", |tui| {
-            tui.put("fold", "")
-        }),
-        ("wraps in a narrow pane", TEXT, |tui| tui.put("width", "30")),
-        ("folds in a short pane", "one\ntwo", |tui| {
-            tui.put("height", "11");
-            tui.put("fold", "");
-        }),
-    ];
-    for (name, text, setup) in cases {
-        let tui = Tui::new("human draft A");
-        setup(&tui);
-        let got = tui.run_text(text, &FAST);
-        assert_eq!(
-            got,
-            report(Outcome::Injected, DraftState::RestoredObserved),
-            "{name}"
-        );
-        assert_eq!(tui.applied(), ["C-s", "paste", "Enter"], "{name}");
-        assert_eq!(tui.drafts(), ("human draft A".to_string(), None), "{name}");
-        assert!(tui.taken(), "{name}");
-    }
-    // A zero-LF Rows plan cannot own a chip even when it was pasted in this attempt.
-    let tui = Tui::new("human draft A");
-    tui.put("fold", "");
-    let unowned = Outcome::Unconfirmed(Unconfirmed::DraftNotOwned);
-    assert_eq!(tui.run(), report(unowned, DraftState::Unknown));
-    assert_eq!(tui.applied(), ["C-s", "paste"]);
-    assert_eq!(tui.drafts(), (framed(), Some("human draft A".to_string())));
-    assert_eq!(tui.get("chip").as_deref(), Some("[Pasted text #1]"));
+    let tui = Tui::new("B");
+    tui.put("stash", "A");
+    assert_eq!(tui.run().outcome, Outcome::Injected);
+    assert_eq!(tui.applied(), ["paste", "Enter"]);
+    assert_eq!(tui.records(), [format!("B{}", tui.get("buffer").unwrap())]);
+    assert_eq!(tui.drafts(), ("A".into(), None));
 }
 
 #[test]
-fn a_draft_beside_an_occupied_or_unreadable_stash_is_left_alone() {
+fn unread_box_sends_without_stashing_and_never_holds_the_next_input() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    type Setup = fn(&Tui);
-    let cases: [(&str, &str, Setup); 4] = [
-        ("stash occupied", "draft B", |tui| {
-            tui.put("stash", "draft A")
-        }),
-        ("status row is output", "draft B", |tui| {
-            tui.put("status", "  12. streamed line\n")
-        }),
-        ("image chip", "[Image #1] look", |_| {}),
-        ("unknown pane size", "draft B", |tui| tui.put("width", "")),
-    ];
-    for (name, draft, setup) in cases {
-        let tui = Tui::new(draft);
-        setup(&tui);
-        let before = tui.drafts();
-        let got = tui.run();
-        assert_eq!(
-            got,
-            report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged),
-            "{name}"
-        );
-        assert!(tui.applied().is_empty(), "{name}");
-        assert_eq!(tui.drafts(), before, "{name}");
+    let tui = Tui::new("person draft");
+    tui.put("attached", "4");
+    tui.put("border", "incomplete border\n");
+    for payload in ["first input", "later input"] {
+        assert_eq!(tui.run_text(payload, &FAST).outcome, Outcome::Injected);
+        assert!(!super::super::composer_lock::draft_guarded(&tui.session()));
     }
-}
-
-/// A box of `width` columns with `status` above it and `rows` inside, as `capture-pane -e` prints.
-fn pane(width: usize, status: &str, rows: &[&str], footer: bool) -> String {
-    let border = "─".repeat(width);
-    let mut lines = vec![
-        "⏺ Earlier answer".to_string(),
-        String::new(),
-        status.to_string(),
-        border.clone(),
-    ];
-    lines.extend(rows.iter().map(|row| row.to_string()));
-    lines.push(border);
-    if footer {
-        lines.push("  ⏵⏵ bypass permissions on".to_string());
-    }
-    lines.join("\n") + "\n"
+    assert_eq!(tui.applied(), ["paste", "Enter", "paste", "Enter"]);
+    assert!(tui.records()[0].starts_with("person draft[User:"));
+    assert!(tui.alerts().is_empty());
 }
 
 #[test]
-fn the_stash_is_read_from_the_status_row_above_the_active_box_only() {
-    let draft = ["❯\u{00a0}half typed"];
-    let empty = ["❯\u{00a0}"];
-    let on = "  ⏵⏵ bypass permissions on";
-    let text = |rows: &[&str]| Composer::Text(rows.iter().map(|row| row.to_string()).collect());
-    let old_box = format!("{}\n❯\u{00a0}old\n{}\n", "─".repeat(60), "─".repeat(60));
-    let scrollback = format!("{:>58}\n{old_box}", "› stashed") + &pane(60, "", &draft, true);
-    let cases = [
-        (
-            "normal footer",
-            pane(60, "", &draft, true),
-            text(&["half typed"]),
-            Stash::AbsentInRecognizedLayout,
-        ),
-        (
-            "stashed",
-            pane(120, &format!("{:>118}", "› stashed"), &empty, true),
-            Composer::Empty,
-            Stash::Present,
-        ),
-        (
-            "hint then stashed",
-            pane(
-                100,
-                &format!("{:>98}", "ctrl+g to edit in Micro · › stashed"),
-                &draft,
-                true,
-            ),
-            text(&["half typed"]),
-            Stash::Present,
-        ),
-        (
-            "toast drawn whole",
-            pane(120, &format!("{:>118}", "Draft restored"), &draft, true),
-            text(&["half typed"]),
-            Stash::AbsentInRecognizedLayout,
-        ),
-        (
-            "narrow pane",
-            pane(28, &format!("{:>26}", "› stashed"), &empty, true),
-            Composer::Empty,
-            Stash::Present,
-        ),
-        (
-            "narrow pane, toast cut",
-            pane(28, "   Ctrl+Y to paste del", &draft, true),
-            text(&["half typed"]),
-            Stash::Unknown,
-        ),
-        (
-            "output above the border",
-            pane(60, "  12. streamed line", &draft, true),
-            text(&["half typed"]),
-            Stash::Unknown,
-        ),
-        (
-            "truncated footer",
-            pane(60, "", &draft, false),
-            Composer::Unknown,
-            Stash::Unknown,
-        ),
-        (
-            "box cut before its bottom",
-            pane(60, "", &draft, true).replace(&format!("{}\n  ⏵⏵", "─".repeat(60)), "  ⏵⏵"),
-            Composer::Unknown,
-            Stash::Unknown,
-        ),
-        (
-            "stashed only in scrollback",
-            scrollback,
-            text(&["half typed"]),
-            Stash::AbsentInRecognizedLayout,
-        ),
-        (
-            "multi-line composer",
-            pane(60, "", &["❯\u{00a0}first", "", "    indented"], true),
-            text(&["first", "", "  indented"]),
-            Stash::AbsentInRecognizedLayout,
-        ),
-        (
-            "unequal borders",
-            pane(60, "", &draft, true).replacen(&"─".repeat(60), &"─".repeat(59), 1),
-            Composer::Unknown,
-            Stash::Unknown,
-        ),
-        (
-            "a bash-mode box below an older one",
-            pane(60, "", &draft, true) + &pane(60, "", &["! ls"], true),
-            Composer::Unknown,
-            Stash::Unknown,
-        ),
-        (
-            "image alone",
-            pane(60, "", &["❯\u{00a0}[Image #1]"], true),
-            Composer::Unknown,
-            Stash::AbsentInRecognizedLayout,
-        ),
-        (
-            "text and an image",
-            pane(60, "", &["❯\u{00a0}look at", "  this [Image #2]"], true),
-            Composer::Unknown,
-            Stash::AbsentInRecognizedLayout,
-        ),
-        (
-            "truncated text chip",
-            pane(
-                60,
-                "",
-                &["❯\u{00a0}[...Truncated text #1 +40 lines...]"],
-                true,
-            ),
-            Composer::Unknown,
-            Stash::AbsentInRecognizedLayout,
-        ),
-        (
-            "footer with both hints",
-            pane(60, "", &draft, true)
-                .replace(on, &format!("{on} (shift+tab to cycle) · esc to interrupt")),
-            text(&["half typed"]),
-            Stash::AbsentInRecognizedLayout,
-        ),
-        (
-            "footer cut at the edge",
-            pane(60, "", &draft, true).replace(on, &format!("{on} (shift+tab ")),
-            Composer::Unknown,
-            Stash::Unknown,
-        ),
-        (
-            "unmeasured footer",
-            pane(60, "", &draft, true).replace(on, "  ? for shortcuts"),
-            Composer::Unknown,
-            Stash::Unknown,
-        ),
-        (
-            "a row under the footer",
-            pane(60, "", &draft, true) + "  Context left until auto-compact: 9%\n",
-            Composer::Unknown,
-            Stash::Unknown,
-        ),
-    ];
-    for (name, capture, composer, stash) in cases {
-        let got = screen::read(&capture);
-        assert_eq!((got.composer, got.stash), (composer, stash), "{name}");
+fn an_unlisted_channel_sends_without_stashing_a_visible_draft() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    for channel in [None, Some(2)] {
+        let tui = Tui::new("draft");
+        let session = tui.session();
+        let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
+        let nonce = tui.next_nonce();
+        let request = Request {
+            session: &session,
+            transcript: &tui.transcript,
+            source: "iMessage",
+            author: "200",
+            name: "ann",
+            nonce: &nonce,
+            text: TEXT,
+        };
+        assert_eq!(
+            inject_listed(&pane, &request, channel, &[1], &FAST).outcome,
+            Outcome::Injected
+        );
+        assert_eq!(tui.applied(), ["paste", "Enter"]);
     }
-    // Real `capture-pane -e` rows from Claude Code 2.1.292: colours, and a faint placeholder.
-    let ansi = format!(
-        "\n{}\x1b[38;5;246m › stashed\x1b[39m\n\x1b[38;5;244m{b}\n\x1b[38;5;246m❯\u{00a0}\x1b[39m\n\x1b[38;5;244m{b}\n\x1b[39m  \x1b[38;5;211m⏵⏵ bypass permissions on\x1b[38;5;246m (shift+tab to cycle) · esc to interrupt\x1b[39m\n",
-        " ".repeat(108),
-        b = "─".repeat(120)
-    );
-    let got = screen::read(&ansi);
-    assert_eq!((got.composer, got.stash), (Composer::Empty, Stash::Present));
-    let placeholder = pane(
-        60,
-        "",
-        &["\x1b[39m❯\u{00a0}\x1b[2mTry \"edit <filepath> to...\"\x1b[0m"],
-        true,
-    );
-    assert_eq!(screen::read(&placeholder).composer, Composer::Empty);
-    let ghost = pane(60, "", &["❯\u{00a0}/he\x1b[2mlp\x1b[0m"], true);
-    assert_eq!(screen::read(&ghost).composer, Composer::Unknown);
 }
 
-/// Rows `capture-pane -p -e` gave from Claude Code 2.1.292 (default theme, 120 columns), and
-/// variants with a cursor cell or faint runs of other shapes: only the measured placeholder is empty.
 #[test]
-fn only_the_measured_placeholder_shape_reads_as_an_empty_composer() {
-    let border = format!("\x1b[38;5;244m{}", "\u{2500}".repeat(120));
-    let footer = "\x1b[39m  \x1b[38;5;211m\u{23f5}\u{23f5} bypass permissions on\x1b[38;5;246m (shift+tab to cycle)\x1b[39m";
-    let screen =
-        |status: &str, row: &str| format!("{status}\n{border}\n{row}\n{border}\n{footer}\n");
-    let text = |row: &str| Composer::Text(vec![row.to_string()]);
-    let captured = [
-        (
-            "idle placeholder",
-            "\x1b[39m\u{276f}\u{a0}\x1b[2mTry \"refactor <filepath>\"\x1b[0m",
-            Composer::Empty,
-        ),
-        (
-            "draft",
-            "\x1b[39m\u{276f}\u{a0}hello there",
-            text("hello there"),
-        ),
-        (
-            "typed like the placeholder",
-            "\x1b[39m\u{276f}\u{a0}Try \"edit <filepath> to...\"",
-            text("Try \"edit <filepath> to...\""),
-        ),
-        (
-            "busy empty",
-            "\x1b[38;5;246m\u{276f}\u{a0}\x1b[39m",
-            Composer::Empty,
-        ),
-    ];
-    let variants = [
-        (
-            "cursor cell in a draft",
-            "\x1b[39m\u{276f}\u{a0}hel\x1b[7ml\x1b[27mo",
-            text("hello"),
-        ),
-        (
-            "faint closed by SGR 22",
-            "\x1b[39m\u{276f}\u{a0}\x1b[2mhuman draft\x1b[22m",
-            Composer::Unknown,
-        ),
-        (
-            "faint after a plain space",
-            "\x1b[39m\u{276f} \x1b[2mTry \"x\"\x1b[0m",
-            Composer::Unknown,
-        ),
-        (
-            "colour inside the faint run",
-            "\x1b[39m\u{276f}\u{a0}\x1b[2m\x1b[38;5;246mTry \"x\"\x1b[0m",
-            Composer::Unknown,
-        ),
-        (
-            "placeholder behind a cursor cell",
-            "\x1b[39m\u{276f}\u{a0}\x1b[7m \x1b[27m\x1b[2mTry \"x\"\x1b[0m",
-            Composer::Unknown,
-        ),
-        (
-            "partial suggestion",
-            "\x1b[39m\u{276f}\u{a0}/he\x1b[2mlp\x1b[0m",
-            Composer::Unknown,
-        ),
-    ];
-    for (name, row, composer) in captured.into_iter().chain(variants) {
-        let got = screen::read(&screen("", row));
-        assert_eq!(
-            (got.composer, got.stash),
-            (composer, Stash::AbsentInRecognizedLayout),
-            "{name}"
-        );
+fn menus_and_permission_cards_precede_stash_and_paste() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    for menu in [
+        "Run this tool? allow / deny",
+        "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel",
+    ] {
+        let tui = Tui::new("draft");
+        tui.put("head", &format!("{menu}\n"));
+        assert_eq!(tui.run().outcome, Outcome::NotSent(Veto::Modal));
+        assert!(tui.applied().is_empty());
+        assert_eq!(tui.drafts(), ("draft".into(), None));
     }
-    // Typing `/he` lists commands above the box; that status row is no stash row anyone measured.
-    let listed = "                                \x1b[38;5;246m\u{2014} what t\x1b[1m\x1b[39mhe\x1b[0m\x1b[38;5;246m `claude doctor` terminal diagnostics cover \u{2014} from local data (duplicate or\u{2026}\x1b[39m";
-    let got = screen::read(&screen(listed, "\x1b[39m\u{276f}\u{a0}/he"));
-    assert_eq!((got.composer, got.stash), (text("/he"), Stash::Unknown));
+}
+
+mod environment_tests {
+    use super::*;
+    #[test]
+    fn production_environment_initialization_selects_only_the_listed_channel() {
+        const CHILD: &str = "ADK_BUSY_INJECT_STASH_CONFIG_SUBPROCESS";
+        if std::env::var_os(CHILD).is_none() {
+            let test = format!(
+                "{}::production_environment_initialization_selects_only_the_listed_channel",
+                module_path!().split_once("::").unwrap().1
+            );
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test, "--nocapture"])
+                .env(CHILD, "1")
+                .env("ADK_BUSY_INJECT_STASH_CHANNELS", "invalid, 6245, , 6245")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        let _runtime = crate::config::TestRuntimeRootGuard::new();
+        USE_PRODUCTION_CHANNELS.set(true);
+        for channel in [Some(6245), Some(6246), None] {
+            let tui = Tui::new("human draft A");
+            tui.put("attached", "4");
+            let session = tui.session();
+            let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
+            let nonce = tui.next_nonce();
+            let request = Request {
+                session: &session,
+                transcript: &tui.transcript,
+                source: "iMessage",
+                author: "200",
+                name: "ann",
+                nonce: &nonce,
+                text: TEXT,
+            };
+            assert_eq!(
+                inject_report(&pane, &request, channel, &FAST).outcome,
+                Outcome::Injected
+            );
+            let expected = if channel == Some(6245) {
+                vec!["C-s", "paste", "Enter"]
+            } else {
+                vec!["paste", "Enter"]
+            };
+            assert_eq!(tui.applied(), expected);
+        }
+    }
 }

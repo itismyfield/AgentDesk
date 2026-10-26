@@ -398,27 +398,6 @@ impl VoiceBargeInRuntime {
         }
     }
 
-    // F8 (#2046): 텍스트 디스패처(`!vc <subcommand>`)도 음성 디스패처와 동일하게
-    // Language/TtsVoice/VoiceClone/WakeWords 명령을 모두 적용할 수 있도록 setter
-    // 들을 노출한다.
-    pub(in crate::services::discord) async fn set_runtime_language_external(
-        &self,
-        language: String,
-    ) {
-        self.set_runtime_language(language).await;
-    }
-
-    pub(in crate::services::discord) async fn set_runtime_tts_voice_external(&self, voice: String) {
-        self.set_runtime_tts_voice(voice).await;
-    }
-
-    pub(in crate::services::discord) async fn apply_wake_word_command_external(
-        &self,
-        command: WakeWordCommand,
-    ) -> Vec<String> {
-        self.apply_wake_word_command(command).await
-    }
-
     pub(super) async fn set_runtime_language(&self, language: String) {
         let config = {
             let mut config = self.voice_config_state.write().await;
