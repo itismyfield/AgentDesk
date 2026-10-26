@@ -108,7 +108,7 @@ pub(super) use session::{cmd_pwd, cmd_resume};
 pub(super) use sidecar::cmd_sidecar;
 pub(super) use skill::cmd_skill;
 pub(super) use system_prompt::cmd_system_prompt;
-pub(in crate::services::discord) use text_commands::handle_text_command_with_uploads;
+pub(in crate::services::discord) use text_commands::handle_text_command;
 pub(super) use tool_call::cmd_tool_call;
 pub(super) use tui_passthrough::{cmd_compact, cmd_effort};
 pub(super) use voice::cmd_voice;

@@ -43,6 +43,18 @@ async fn session_id(harness: &RelayE2eHarness) -> Option<String> {
     core.sessions.get(&channel)?.session_id.clone()
 }
 
+/// Whether `text` reached the provider stub as turn input within 15s.
+async fn reaches_provider(harness: &RelayE2eHarness, text: &str) -> bool {
+    let root = harness.root.path().to_path_buf();
+    let text = text.to_string();
+    wait_until(Duration::from_secs(15), move || {
+        let inputs = std::fs::read_to_string(root.join(super::PROVIDER_INPUTS_FILE));
+        let reached = inputs.is_ok_and(|inputs| inputs.contains(&text));
+        Box::pin(async move { reached })
+    })
+    .await
+}
+
 fn replies_to(harness: &RelayE2eHarness, message: u64) -> Vec<String> {
     harness
         .messages()
@@ -70,6 +82,7 @@ async fn announce_bot_stop_interrupts_the_active_turn() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn announce_bot_clear_resets_the_session() {
     let harness = harness_with_announce().await;
+    harness.answer_placeholders_immediately();
     let _tmux = ScriptedTmux::install();
     assert!(
         session_id(&harness).await.is_some(),
@@ -90,6 +103,35 @@ async fn announce_bot_clear_resets_the_session() {
         replies[0].starts_with(crate::services::discord::commands::SESSION_CLEARED_RESPONSE),
         "{replies:?}"
     );
+    assert_no_unhandled(&harness);
+}
+
+/// The classifier swap keeps `!clear` a handled command: a mention-led `!clear` resets the
+/// session and nothing of it reaches chat, the mailbox or the provider.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clear_stays_a_command_and_never_reaches_chat() {
+    let harness = harness_with_announce().await;
+    harness.answer_placeholders_immediately();
+    let _tmux = ScriptedTmux::install();
+    let clear = recent_snowflake_base() | 1;
+    let text = format!("<@{}> !clear", super::discord_mock::BOT_ID);
+
+    harness
+        .deliver_user_message(clear, &text)
+        .await
+        .expect("live intake handles the command");
+
+    assert_eq!(session_id(&harness).await, None, "the clear ran");
+    let mailbox = harness.mailbox().await;
+    assert!(mailbox.cancel_token.is_none(), "no turn started");
+    assert!(mailbox.intervention_queue.is_empty(), "nothing queued");
+    assert_eq!(
+        harness.placeholder_posts(),
+        0,
+        "no chat turn was dispatched"
+    );
+    assert_eq!(harness.provider_starts(), 0);
+    assert_eq!(replies_to(&harness, clear).len(), 1);
     assert_no_unhandled(&harness);
 }
 
@@ -134,6 +176,7 @@ async fn announce_bot_restart_restarts_the_session() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn announce_bot_removed_commands_only_get_an_answer() {
     let harness = harness_with_announce().await;
+    harness.answer_placeholders_immediately();
     let root = harness.root.path().to_path_buf();
     let marker = root.join("shell-ran");
     let shell = format!("!shell touch {}", marker.display());
@@ -222,18 +265,35 @@ async fn announce_bot_other_bang_text_is_chat() {
 
     from_announce(&harness, message, "!clearall the cache, please").await;
 
-    let started = wait_until(Duration::from_secs(15), {
-        let root = harness.root.path().to_path_buf();
-        move || {
-            let inputs = std::fs::read_to_string(root.join(super::PROVIDER_INPUTS_FILE));
-            let started = inputs.is_ok_and(|inputs| inputs.contains("!clearall the cache, please"));
-            Box::pin(async move { started })
-        }
-    })
-    .await;
     assert!(
-        started,
+        reaches_provider(&harness, "!clearall the cache, please").await,
         "the text reaches the provider: {:?}",
+        harness.messages()
+    );
+    assert!(
+        replies_to(&harness, message).is_empty(),
+        "{:?}",
+        harness.messages()
+    );
+    assert_no_unhandled(&harness);
+}
+
+/// With no Herdr consent endpoint for the channel, the owner's `!herdr consent retry` is
+/// not handled here and goes on as chat instead of being swallowed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unserved_consent_retry_is_chat() {
+    let harness = harness_with_announce().await;
+    harness.answer_placeholders_immediately();
+    let message = recent_snowflake_base() | 1;
+
+    harness
+        .deliver_user_message(message, "!herdr consent retry")
+        .await
+        .expect("live intake");
+
+    assert!(
+        reaches_provider(&harness, "!herdr consent retry").await,
+        "the retry reaches the provider: {:?}",
         harness.messages()
     );
     assert!(

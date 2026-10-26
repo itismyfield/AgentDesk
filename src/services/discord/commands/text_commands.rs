@@ -2,7 +2,6 @@ mod native_stop;
 use poise::serenity_prelude as serenity;
 use std::sync::Arc;
 
-use super::super::router::LocalAdmissionPermit;
 use super::super::turn_bridge::CommandStop;
 use super::super::*;
 use super::command_policy::{TextCommand, TextCommandMatch, match_text_command};
@@ -63,14 +62,12 @@ pub(super) fn schedule_text_stop_pending_queue_drain(
 
 /// Runs `!clear`, `!restart` and `!stop` and answers a removed command name with its
 /// replacement. `Ok(false)` means the text is not a command and is ordinary chat.
-pub(in crate::services::discord) async fn handle_text_command_with_uploads(
+pub(in crate::services::discord) async fn handle_text_command(
     ctx: &serenity::Context,
     msg: &serenity::Message,
     data: &Data,
     channel_id: serenity::ChannelId,
     text: &str,
-    _preloaded_uploads: &[crate::services::cluster::attachment_transfer::uploads::Upload],
-    _admitted_attachment_permit: &mut Option<LocalAdmissionPermit>,
 ) -> Result<bool, Error> {
     #[cfg(unix)]
     if super::super::router::herdr_consent::retry(ctx, msg, data, channel_id, text).await? {

@@ -264,19 +264,14 @@ impl Fixture {
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
         };
-        let mut permit = None;
         assert!(
-            Box::pin(
-                crate::services::discord::commands::handle_text_command_with_uploads(
-                    &self.ctx,
-                    &message,
-                    &data,
-                    self.rig.channel,
-                    "!clear",
-                    &[],
-                    &mut permit,
-                )
-            )
+            Box::pin(crate::services::discord::commands::handle_text_command(
+                &self.ctx,
+                &message,
+                &data,
+                self.rig.channel,
+                "!clear",
+            ))
             .await
             .unwrap()
         );

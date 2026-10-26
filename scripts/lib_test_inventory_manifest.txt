@@ -7103,16 +7103,13 @@ services::discord::router::intake_gate::busy_inject::payload_tests::pane_veto_ha
 services::discord::router::intake_gate::busy_inject::payload_tests::plain_text_bytes_and_unregistered_command_routes_stay_unchanged_pg
 services::discord::router::intake_gate::busy_inject::payload_tests::retained_bundle_files_outlive_preparation_and_confirm_as_normal_input_chunks_pg
 services::discord::router::intake_gate::busy_inject::tests::the_gate_opens_only_on_all_or_a_readable_channel_list
-services::discord::router::intake_gate::command_recognition_tests::command_outcomes_end_before_restore_and_preserve_upload_conditions
 services::discord::router::intake_gate::gate::tests::boundary_keeps_alert_rejection_and_admits_unmarked_announce_handoff
 services::discord::router::intake_gate::gate::tests::live_human_preservation_requires_determinate_non_utility_identity
 services::discord::router::intake_gate::gate::tests::live_known_automation_is_excluded_even_with_false_bot_flag
 services::discord::router::intake_gate::live_entry_tests::actual_live_entry_keeps_all_six_queue_branches
-services::discord::router::intake_gate::live_entry_tests::text_skill_aliases_keep_lookup_and_control_dispatch
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests::live_human_preservation_precedes_stale_dispatch_suppression
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests::source_guard_tests::admission_guard_rejects_commented_guard_and_counts_coded_sender_checks
-services::discord::router::intake_gate::live_intake_preserve_wiring_tests::source_guard_tests::command_boundary_guard_rejects_commented_outcomes_and_denial
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests::source_guard_tests::preservation_guard_rejects_commented_and_reordered_wiring
 services::discord::router::intake_gate::queue_effects::channel_queued_placeholder_pure_tests::different_author_reuses_existing_channel_card
 services::discord::router::intake_gate::queue_effects::channel_queued_placeholder_pure_tests::falls_back_to_any_card_when_no_live_owner
@@ -7186,9 +7183,6 @@ services::discord::router::message_handler::codex_resume_companion_queue_tests::
 services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_backstop_rechecks_after_source_publication
 services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_partial_settlement_failure_preserves_queue_and_retries
 services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_settlement_preserves_queue_then_admits_once
-services::discord::router::message_handler::control::command_boundary_tests::command_boundary_guards_reject_commented_code_and_count_coded_execution
-services::discord::router::message_handler::control::command_boundary_tests::legacy_boundary_is_only_a_fixed_denial
-services::discord::router::message_handler::control::command_boundary_tests::wrapper_consumes_unhandled_dispatch_results_with_denial
 services::discord::router::message_handler::foreign_row::tests::a_merged_head_keeps_every_source_id_through_the_requeue_and_settles_them_all
 services::discord::router::message_handler::foreign_row::tests::a_requeued_merged_head_keeps_each_body_on_its_own_id_through_a_partial_strip
 services::discord::router::message_handler::foreign_row::tests::an_external_row_requeues_the_promoted_input_and_starts_it_once_after_clear
@@ -9459,6 +9453,8 @@ services::discord::tui_prompt_relay::rehydration::tests::codex_tui_rehydrate_pla
 services::discord::tui_prompt_relay::rehydration::tests::host_defer::a_dead_pane_mirror_is_evicted_only_for_what_the_host_guard_admits_pg
 services::discord::tui_prompt_relay::rehydration::tests::markerless_codex_tui_fallback_allows_unambiguous_cwd_sessions
 services::discord::tui_prompt_relay::rehydration::tests::markerless_codex_tui_fallback_rejects_ambiguous_same_cwd_sessions
+services::discord::tui_prompt_relay::relay_e2e::agent_text_command_e2e::a_clear_stays_a_command_and_never_reaches_chat
+services::discord::tui_prompt_relay::relay_e2e::agent_text_command_e2e::an_unserved_consent_retry_is_chat
 services::discord::tui_prompt_relay::relay_e2e::agent_text_command_e2e::announce_bot_clear_resets_the_session
 services::discord::tui_prompt_relay::relay_e2e::agent_text_command_e2e::announce_bot_other_bang_text_is_chat
 services::discord::tui_prompt_relay::relay_e2e::agent_text_command_e2e::announce_bot_removed_commands_only_get_an_answer
