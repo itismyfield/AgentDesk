@@ -435,7 +435,6 @@ fn cg_d1_off_restart_keeps_durable_may_have_submitted_and_refuses_resend() {
         guarded: Mutex::new(GuardedState::Dormant),
         evidence: Mutex::new(evidence::Evidence::default()),
     }));
-    let session = row.tmux_session_name.as_deref().unwrap();
     // The row already left Waiting, so the restarted attempt is never admitted to type.
     let result = crate::services::claude_tui::guarded_outcome::with_owner(
         Some(restarted.observer()),
