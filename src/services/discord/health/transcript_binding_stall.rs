@@ -247,6 +247,19 @@ fn classify_o_turn(
     }
 }
 
+/// The verdict on an open O turn `turn_age_secs` old whose transcript stopped, from the position
+/// `channel`'s actor last published, read the way the health snapshot reads it.
+#[cfg(all(test, unix))]
+pub(crate) fn o_verdict_for_tests(channel: u64, turn_age_secs: u64) -> &'static str {
+    let position = crate::services::tui_o::writer::progress::read(channel);
+    let witness = o_witness::witness_for_tests(channel, position, tokio::time::Instant::now());
+    let turn = OTurn {
+        witness,
+        turn_open: true,
+    };
+    classify_o_turn(turn, Some(turn_age_secs), Some(u64::MAX)).as_str()
+}
+
 /// #4408 phase-2 (I1): resolve the transcript path / provider session the relay
 /// tail is bound to, surfaced on `watcher-state` so the out-of-band watchdog can
 /// compare the server's asserted selector (B) against its own growth-aware

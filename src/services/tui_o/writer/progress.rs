@@ -1,10 +1,13 @@
-//! Each running actor's delivery position after its latest poll, read by health's stall verdict.
+//! Each running actor's delivery position after each delivered piece and each poll, read by
+//! health's stall verdict.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
-/// What a channel's actor still had to deliver after its latest poll.
+use crate::services::tui_o::store::ledger::LedgerState;
+
+/// What a channel's actor still had to deliver after its latest delivered piece or poll.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ChannelProgress {
     /// Derived pieces not delivered yet, a pending local retry and a `Prepared` without a result.
@@ -13,6 +16,21 @@ pub struct ChannelProgress {
     pub unsealed: bool,
     /// The ledger's next serial; it grows with every piece the actor prepares.
     pub serial: u64,
+}
+
+/// A channel's position: `owed` pieces, a pending local retry and an open `Prepared` are debt.
+pub(super) fn position(
+    owed: usize,
+    retry: bool,
+    ledger: &LedgerState,
+    unsealed: bool,
+) -> ChannelProgress {
+    let open = usize::from(ledger.unresolved().is_some());
+    ChannelProgress {
+        debt: owed + usize::from(retry) + open,
+        unsealed,
+        serial: ledger.next_serial(),
+    }
 }
 
 type Board = Mutex<HashMap<u64, (u64, ChannelProgress)>>;
