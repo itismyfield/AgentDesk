@@ -62,7 +62,8 @@ REQUIRED_CONTEXTS = (
 def outputs(**lists: list[str]) -> dict[str, str]:
     """paths-filter outputs as toJSON renders them with ``list-files: json``."""
     lists = {**dict.fromkeys(("dashboard", "high_risk_recovery", "rust_or_policy",
-                            "rust_compile", "relay_contract", "cross_os_rust", "win32_build_token"), []), **lists}
+                            "rust_compile", "relay_contract", "cross_os_rust", "win32_build_token",
+                            "script_check_files"), []), **lists}
     rendered: dict[str, str] = {"changes": json.dumps([n for n, f in lists.items() if f])}
     for name, files in lists.items():
         rendered[name] = "true" if files else "false"
@@ -72,7 +73,8 @@ def outputs(**lists: list[str]) -> dict[str, str]:
 
 
 RS = "src/server/mod.rs"
-RS_FILTERS = dict(rust_or_policy=[RS], rust_compile=[RS], cross_os_rust=[RS], dashboard=[], relay_contract=[])
+RS_FILTERS = dict(rust_or_policy=[RS], rust_compile=[RS], cross_os_rust=[RS], dashboard=[],
+                  relay_contract=[], script_check_files=[RS])
 
 
 class DecideTests(unittest.TestCase):
@@ -88,6 +90,33 @@ class DecideTests(unittest.TestCase):
     def test_rust_edit_with_an_unfiltered_markdown_passes(self) -> None:
         entries = [("M", RS, RS), ("M", "docs/guide.md", "docs/guide.md"), ("A", "notes.md", "notes.md")]
         self.assertVerdict(True, 0, entries, outputs(**RS_FILTERS))
+
+    def test_all_file_filter_preserves_verified_rust_and_markdown_skip(self) -> None:
+        doc = "docs/guide.md"
+        for entries, lists in (
+            ([("M", RS, RS), ("M", doc, doc)], {**RS_FILTERS, "script_check_files": [RS, doc]}),
+            ([("M", doc, doc)], {"script_check_files": [doc]}),
+        ):
+            with self.subTest(entries=entries):
+                self.assertVerdict(True, 0, entries, outputs(**lists))
+
+    def test_all_file_filter_refuses_unverified_inputs(self) -> None:
+        filters = outputs(**{**RS_FILTERS, "script_check_files": [RS, "docs/unverified.md"]})
+        self.assertVerdict(False, 0, [("M", RS, RS)], filters,
+                           "filter script_check_files: selected by unverified file docs/unverified.md")
+
+    def test_all_file_filter_missing_or_malformed_refuses(self) -> None:
+        complete = outputs(**RS_FILTERS)
+        missing = {key: value for key, value in complete.items()
+                   if key not in {"script_check_files", "script_check_files_files", "script_check_files_count"}}
+        missing["changes"] = json.dumps([name for name in json.loads(complete["changes"])
+                                         if name != "script_check_files"])
+        malformed = {**complete, "script_check_files_files": "not JSON"}
+        wrong_type = {**complete, "script_check_files_files": '[true]'}
+        wrong_count = {**complete, "script_check_files_count": "0"}
+        for filters in (missing, malformed, wrong_type, wrong_count):
+            with self.subTest(filters=filters):
+                self.assertVerdict(False, 0, [("M", RS, RS)], filters, "filter script_check_files:")
 
     def test_judge_failure_or_usage_error_refuses(self) -> None:
         for rc in (1, 2, -9):
@@ -720,7 +749,7 @@ class WorkflowSimulation:
 # Raw filters for a comment edit that selects every heavy lane.
 HEAVY_RAW = outputs(
     dashboard=[], high_risk_recovery=[RS], rust_or_policy=[RS], rust_compile=[RS],
-    relay_contract=[], cross_os_rust=[RS], win32_build_token=[],
+    relay_contract=[], cross_os_rust=[RS], win32_build_token=[], script_check_files=[RS],
 )
 OVERRIDDEN = {"high_risk_recovery": "high_risk_recovery", "cross_os_rust": "cross_os_rust", "rust_tests": "rust_or_policy"}
 N_JOBS = ("rust_build", "rust_tests", "test_evidence")
@@ -845,6 +874,12 @@ class WorkflowWiringTests(unittest.TestCase):
                 self.assertEqual(run.results["lint"], "success")
                 self.assertEqual((run.results["rust_build"], run.results["rust_tests"]), ("skipped", "skipped"))
                 self.assertPublishedGreen(run)
+
+    def test_script_check_raw_files_survive_comment_only_filter_overrides(self) -> None:
+        for comment_only in ("true", "false"):
+            with self.subTest(comment_only=comment_only):
+                run = WorkflowSimulation(HEAVY_RAW, comment_only, rust_tests_skip="true", rust_lint_skip="true")
+                self.assertEqual(run.changes["script_check_files"], HEAVY_RAW["script_check_files_files"])
 
     def test_include_reader_runs_the_rust_tests(self) -> None:
         for skip in ("false", None, ""):
