@@ -66,6 +66,10 @@ impl StartPermit {
         })
     }
 
+    pub(crate) fn hold_proof(&self) -> crate::db::replay_disposition::write::HoldProof {
+        self.attempt.hold_proof()
+    }
+
     pub(crate) fn attempt(&self) -> &ExactAttempt {
         &self.attempt
     }
@@ -77,7 +81,7 @@ impl StartPermit {
                 .all(|(key, expected)| {
                     self.binding
                         .get(key)
-                        .is_none_or(|stored| stored.as_str() == Some(*expected))
+                        .is_some_and(|stored| stored.as_str() == Some(*expected))
                 })
     }
 

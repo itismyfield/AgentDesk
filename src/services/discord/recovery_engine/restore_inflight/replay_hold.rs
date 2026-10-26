@@ -11,15 +11,13 @@ pub(super) enum ReplayLookup {
 pub(super) async fn hydrate_replay_hold(
     pool: Option<&sqlx::PgPool>,
     state: &mut inflight::InflightTurnState,
+    root: Option<&crate::cli::dcserver::replay_recovery::OwnedRuntimeRoot>,
 ) -> bool {
     match hydrate_replay_hold_checked(pool, state).await {
-        ReplayLookup::Verified => super::replay_decision::resume(pool, state).await,
+        ReplayLookup::Verified => super::replay_decision::resume(pool, state, root).await,
         ReplayLookup::Unverified { projected, reason } => {
             tracing::debug!(channel_id = state.channel_id, %reason, "replay lookup unverified");
-            !projected
-                && crate::services::discord::router::replay_producers_dormant(
-                    &state.channel_id.to_string(),
-                )
+            !projected && pool.is_none()
         }
     }
 }

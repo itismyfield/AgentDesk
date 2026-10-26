@@ -647,6 +647,7 @@ async fn prepare_commits_the_receipt_before_the_permit_and_never_reissues_pg() {
     let input = request("once", &["o1", "o2"]);
     let first = admitted(preflight_source(&ctx, &input).await);
     let second = admitted(preflight_source(&ctx, &input).await);
+    let stale_candidate = admitted(preflight_source(&ctx, &input).await);
     let permit = prepare_effect_start(&ctx, &input, first, projection(None), None)
         .await
         .expect("first preparation starts");
@@ -688,13 +689,16 @@ async fn prepare_commits_the_receipt_before_the_permit_and_never_reissues_pg() {
         .execute(&pool)
         .await
         .unwrap();
-    let again = admitted(preflight_source(&ctx, &input).await);
+    assert!(matches!(
+        preflight_source(&ctx, &input).await,
+        ReplayPreflight::ConsumeProtected(_)
+    ));
     assert!(
         matches!(
-            prepare_effect_start(&ctx, &input, again, projection(None), None).await,
+            prepare_effect_start(&ctx, &input, stale_candidate, projection(None), None).await,
             Err(StartRefusal::AlreadyClassified(classified)) if classified == id
         ),
-        "a classified request goes back to its ordinary policy, not to a new start"
+        "a completed key is consumed and a stale preparation cannot issue another start"
     );
 
     sqlx::raw_sql(
@@ -1105,6 +1109,258 @@ async fn p4_off_terminal_paths_keep_legacy_and_restored_hold_results_pg() {
         notices, 0,
         "off cannot reach the new live hold/notice branch"
     );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn p5_missing_start_scope_is_refused_pg() {
+    let (db, pool) = setup().await;
+    let ctx = active(&pool);
+    let input = request("p5-missing", &["p5-missing"]);
+    let candidate = admitted(preflight_source(&ctx, &input).await);
+    let permit = prepare_effect_start(&ctx, &input, candidate, projection(None), None)
+        .await
+        .unwrap();
+    assert!(!permit.matches_start_scope("legacy-prompt", "owned_direct"));
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn p5_off_completed_key_is_consumed_pg() {
+    let (db, pool) = setup().await;
+    let ctx = active(&pool);
+    let input = request("p5-complete", &["p5-complete"]);
+    let candidate = admitted(preflight_source(&ctx, &input).await);
+    let permit = prepare_effect_start(&ctx, &input, candidate, projection(None), None)
+        .await
+        .unwrap();
+    let attempt = permit
+        .consume(&projection(None).target, "prepared-input", |a| a)
+        .unwrap();
+    let mut seen = RawObservation::for_attempt(&attempt);
+    for fact in [
+        Seen::StdoutEof,
+        Seen::Exited { waited: true },
+        Seen::StderrDrained,
+        Seen::Terminal(crate::services::discord::replay_policy::live::TerminalKind::Done),
+    ] {
+        seen.record(fact);
+    }
+    write::classify_normal(&pool, &attempt, &seen.terminal_evidence().unwrap())
+        .await
+        .unwrap();
+    let off = ReplayAdmissionContext::production(&pool, "new-node", "new-incarnation");
+    assert!(matches!(
+        preflight_source(&off, &input).await,
+        ReplayPreflight::ConsumeProtected(_)
+    ));
+    assert!(matches!(
+        preflight_source(&off, &request("new", &["new"])).await,
+        ReplayPreflight::LegacyUnprotected
+    ));
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn p5_scoped_admission_cannot_produce_for_unsupported_runtimes_pg() {
+    let (db, pool) = setup().await;
+    let channel = "7330506";
+    let _selected = test_activation::activate(channel.parse().unwrap());
+    let mut count = 0;
+    for provider in ["claude", "codex", "qwen", "gemini"] {
+        for runtime in [
+            "owned_direct",
+            "process_backend",
+            "legacy_tmux_wrapper",
+            "remote",
+            "tui",
+            "",
+        ] {
+            let mut input = request(
+                &format!("{provider}-{runtime}"),
+                &[&format!("{provider}-{runtime}")],
+            );
+            input.channel = channel.into();
+            input.provider = provider.into();
+            let ctx = ReplayAdmissionContext::production(&pool, "node", "current").for_scope(
+                channel,
+                provider,
+                "legacy-prompt",
+                runtime,
+                false,
+            );
+            let mut prepared = projection(None);
+            prepared.target = EffectTarget::ProviderStart {
+                provider: provider.into(),
+                channel: channel.into(),
+            };
+            prepared.binding =
+                serde_json::json!({"driver_scope":"legacy-prompt","runtime_scope":runtime});
+            let start = admit_start(&ctx, &input, prepared, None).await.unwrap();
+            let expected = matches!(provider, "claude" | "codex") && runtime == "owned_direct";
+            assert_eq!(
+                start.receipt_id().is_some(),
+                expected,
+                "{provider}/{runtime}"
+            );
+            if expected {
+                count += 1;
+            } else {
+                let token = crate::services::provider::CancelToken::new();
+                start
+                    .spend(
+                        &EffectTarget::ProviderStart {
+                            provider: provider.into(),
+                            channel: channel.into(),
+                        },
+                        "legacy input",
+                        &token,
+                    )
+                    .unwrap();
+                assert!(token.replay_attempt().is_none());
+                assert!(
+                    !crate::services::discord::replay_policy::live::RawTap::for_token(Some(&token))
+                        .active()
+                );
+            }
+        }
+    }
+    let receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM intake_outbox WHERE replay_disposition IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(receipts, count);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn p5_off_before_registration_does_not_create_another_owner_pg() {
+    let (db, pool) = setup().await;
+    let channel = "7330507";
+    let selected = test_activation::activate(channel.parse().unwrap());
+    drop(selected);
+    let mut input = request("not-registered", &["not-registered"]);
+    input.channel = channel.into();
+    let ctx = ReplayAdmissionContext::production(&pool, "node", "current").for_scope(
+        channel,
+        "claude",
+        "legacy-prompt",
+        "owned_direct",
+        false,
+    );
+    let start = admit_start(&ctx, &input, projection(None), None)
+        .await
+        .unwrap();
+    assert!(start.receipt_id().is_none());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM intake_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn p5_off_exact_continuation_drains_only_its_existing_budget_pg() {
+    let (db, pool) = setup().await;
+    let input = request("off-drain", &["off-drain"]);
+    let ctx = active(&pool);
+    let candidate = admitted(preflight_source(&ctx, &input).await);
+    let permit = prepare_effect_start(&ctx, &input, candidate, projection(None), None)
+        .await
+        .unwrap();
+    let attempt = permit
+        .consume(&projection(None).target, "prepared-input", |a| a)
+        .unwrap();
+    let id = attempt.receipt_id();
+    let nonce = attempt.nonce().to_owned();
+    let mut observation = RawObservation::for_attempt(&attempt);
+    for fact in [
+        Seen::StdoutEof,
+        Seen::Exited { waited: true },
+        Seen::StderrDrained,
+    ] {
+        observation.record(fact);
+    }
+    let ReplayDecision::AllowStartupRetry(retry) =
+        decide_stale(&pool, Some(attempt), &observation, None).await
+    else {
+        panic!("no effect proof");
+    };
+    sqlx::query("INSERT INTO sessions (session_key,channel_id,provider,status,current_replay_receipt_id,replay_episode_nonce,claude_session_id) VALUES ('p5-drain','chan','claude','turn_active',$1,$2,'old')").bind(id).bind(nonce).execute(&pool).await.unwrap();
+    let off = ReplayAdmissionContext::production(&pool, "off-node", "incarnation-a").for_scope(
+        "chan",
+        "claude",
+        "legacy-prompt",
+        "owned_direct",
+        true,
+    );
+    let mut next = projection(Some("p5-drain"));
+    next.input_hash = input_hash("prepared-input");
+    next.binding =
+        serde_json::json!({"driver_scope":"legacy-prompt","runtime_scope":"owned_direct"});
+    let start = admit_start(&off, &input, next, Some(retry)).await.unwrap();
+    assert_eq!(start.receipt_id(), Some(id));
+    let token = crate::services::provider::CancelToken::new();
+    start
+        .spend(&projection(None).target, "prepared-input", &token)
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM intake_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let _live = token
+        .replay_attempt()
+        .expect("a spent exact retry remains protected even off");
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn p5_registered_read_can_reach_a_scoped_start_without_producer_rights_pg() {
+    let (db, pool) = setup().await;
+    let channel = "7330521";
+    let _selected = test_activation::activate(channel.parse().unwrap());
+    let mut input = request("registered-scope", &["registered-scope"]);
+    input.channel = channel.into();
+    let row = write::register_or_reuse(&pool, &input, "node")
+        .await
+        .unwrap();
+    let read = ReplayAdmissionContext::production(&pool, "node", "current").for_channel(channel);
+    let candidate = admitted(preflight_source(&read, &input).await);
+    assert!(matches!(
+        prepare_effect_start(&read, &input, candidate, projection(None), None).await,
+        Err(StartRefusal::ProducerDormant)
+    ));
+    let scoped = ReplayAdmissionContext::production(&pool, "node", "current").for_scope(
+        channel,
+        "claude",
+        "legacy-prompt",
+        "owned_direct",
+        false,
+    );
+    let mut prepared = projection(None);
+    prepared.target = EffectTarget::ProviderStart {
+        provider: "claude".into(),
+        channel: channel.into(),
+    };
+    prepared.binding =
+        serde_json::json!({"driver_scope":"legacy-prompt","runtime_scope":"owned_direct"});
+    let start = admit_start(&scoped, &input, prepared, None).await.unwrap();
+    assert_eq!(start.receipt_id(), Some(row.id));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM intake_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
     pool.close().await;
     db.drop().await;
 }

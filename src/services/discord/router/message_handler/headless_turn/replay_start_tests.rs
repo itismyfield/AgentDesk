@@ -96,13 +96,37 @@ sys.exit(result.returncode)
             health_registry: None,
             cluster_instance_id: None,
         };
-        let app = axum::Router::new()
-            .route(
-                "/api/dispatched-sessions/webhook",
-                axum::routing::post(crate::services::dispatched_sessions::hook_session_with_query),
-            )
-            .fallback(|| async { axum::Json(serde_json::json!({"ok": true})) })
-            .with_state(app_state);
+        let app =
+            axum::Router::new()
+                .route(
+                    "/api/dispatched-sessions/webhook",
+                    axum::routing::post(
+                        |state: axum::extract::State<crate::app_state::AppState>,
+                         query: axum::extract::Query<
+                            crate::services::dispatched_sessions::HookSessionQuery,
+                        >,
+                         body: axum::Json<
+                            crate::services::dispatched_sessions::HookSessionBody,
+                        >| async move {
+                            let terminal = body.status.as_deref() == Some("idle");
+                            let result =
+                                crate::services::dispatched_sessions::hook_session_with_query(
+                                    state, query, body,
+                                )
+                                .await;
+                            if terminal
+                                && std::env::var("ADK_TEST_REPLAY_PEER_ROLE").ok().as_deref()
+                                    == Some("owner")
+                            {
+                                println!("P5_TERMINAL_SNAPSHOT_BARRIER");
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                            result
+                        },
+                    ),
+                )
+                .fallback(|| async { axum::Json(serde_json::json!({"ok": true})) })
+                .with_state(app_state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -204,7 +228,13 @@ sys.exit(result.returncode)
                 "p4-owned-fixture",
             )
             .await;
+            let (protected_pending, delivery_pending):(bool,bool)=sqlx::query_as(
+                "SELECT EXISTS(SELECT 1 FROM intake_outbox WHERE channel_id=$1 AND replay_disposition IN ('started_unclassified','startup_failed_no_effect')),
+                        EXISTS(SELECT 1 FROM message_outbox WHERE target=$2 AND source='headless_turn' AND status IN ('pending','sending'))")
+                .bind(channel.to_string()).bind(format!("channel:{channel}")).fetch_one(&self.pool).await.unwrap();
             if self.starts() > 0
+                && !protected_pending
+                && !delivery_pending
                 && mailbox_snapshot(&self.shared, channel)
                     .await
                     .cancel_token
@@ -370,6 +400,12 @@ impl Host {
     async fn disposition(&self, expected: &str) -> serde_json::Value {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(35);
         loop {
+            crate::server::outbox_worker::drain_message_outbox_once(
+                &Arc::new(self.pool.clone()),
+                &self.registry,
+                "p5-disposition-fixture-drain",
+            )
+            .await;
             let row: Option<(String, serde_json::Value)> = sqlx::query_as(
                 "SELECT replay_disposition, replay_preserved FROM intake_outbox WHERE replay_disposition IS NOT NULL ORDER BY id LIMIT 1")
                 .fetch_optional(&self.pool).await.unwrap();
@@ -428,6 +464,32 @@ fn p4_exact_headless_quiet_stale_keeps_reservation_and_metadata_pg() {
         assert_eq!(preserved["projection"]["binding"]["source"], "routine");
         let prompt = std::fs::read_to_string(host.calls.with_extension("prompt")).unwrap();
         assert!(prompt.contains("caller rendered original"));
+        assert_eq!(crate::services::discord::replay_policy::activation::reads(&format!("headless_retry_wait:{channel}")),1,"the actual gateway must use the owner wait");
+        {
+        let deadline=tokio::time::Instant::now()+Duration::from_secs(5);
+        while crate::services::discord::inflight::load_inflight_state(&ProviderKind::Claude,channel.get()).is_some() {
+            crate::server::outbox_worker::drain_message_outbox_once(&Arc::new(host.pool.clone()),&host.registry,"p5-wait-fixture-drain").await;
+            assert!(tokio::time::Instant::now()<deadline);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (receipt,message):(i64,String)=sqlx::query_as("SELECT id,user_msg_id FROM intake_outbox WHERE replay_disposition='classified_normal'").fetch_one(&host.pool).await.unwrap();
+        let message=message.parse::<u64>().unwrap();
+        let mut retiring=InflightTurnState::new(ProviderKind::Claude,channel.get(),None,7,message,7330599,"original".into(),None,None,None,None,0);
+        retiring.replay_receipt_id=Some(receipt);
+        crate::services::discord::inflight::save_inflight_state_create_new(&retiring).unwrap();
+        let waiting=super::replay_start::wait_for_retry_owner(&host.shared,&ProviderKind::Claude,channel,receipt,message);
+        tokio::pin!(waiting);
+        assert!(tokio::time::timeout(Duration::from_millis(100),&mut waiting).await.is_err(),"an idle mailbox does not retire its own snapshot");
+        let path=crate::services::discord::runtime_store::agentdesk_root().unwrap().join(format!("runtime/discord_inflight/claude/{channel}.json"));
+        std::fs::rename(&path,host._workspace.path().join("retired-own-snapshot")).unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(2),waiting).await.unwrap());
+        retiring.user_msg_id+=1;
+        crate::services::discord::inflight::save_inflight_state_create_new(&retiring).unwrap();
+        assert!(!tokio::time::timeout(Duration::from_secs(2),super::replay_start::wait_for_retry_owner(&host.shared,&ProviderKind::Claude,channel,receipt,message)).await.unwrap(),"a foreign snapshot is refused, never retired by retry");
+        assert!(path.exists());
+        std::fs::rename(&path,host._workspace.path().join("retained-foreign-snapshot")).unwrap();
+        assert_eq!(host.starts(),2,"the wait does not grant another start");
+        }
         host.close().await;
     });
 }
@@ -600,7 +662,7 @@ fn p4_final_dispatch_refuses_a_changed_driver_scope_pg() {
         let host = Host::new(&[channel]).await;
         let _active = admission::test_activation::activate(channel.get());
         let input = admission::discord_input("claude", channel.get(), 7330411, [], "original");
-        let context = admission::ReplayAdmissionContext::production(&host.pool, "node-p4", admission::incarnation()).for_channel(&channel.to_string());
+        let context = admission::ReplayAdmissionContext::production(&host.pool, "node-p4", admission::incarnation()).for_scope(&channel.to_string(),"claude","legacy-prompt","owned_direct",false);
         let projection = admission::PreparedEffectProjection {
             target: EffectTarget::ProviderStart { provider: "claude".into(), channel: channel.to_string() },
             input_hash: admission::input_hash("prepared"),
@@ -625,6 +687,9 @@ fn p4_final_dispatch_refuses_a_changed_driver_scope_pg() {
         assert!(error.contains("replay driver scope changed"), "{error}");
         assert!(token.replay_attempt().is_none(), "gate precedes permit spend and native input");
         assert_eq!(host.starts(), 0);
+        host.disposition("withheld").await;
+        let notices:i64=sqlx::query_scalar("SELECT count(*) FROM message_outbox WHERE reason_code='stale_replay_withheld'").fetch_one(&host.pool).await.unwrap();
+        assert_eq!(notices,1,"a begun scope refusal must notify");
         host.close().await;
     });
 }
@@ -657,15 +722,425 @@ fn p4_exact_begin_ack_loss_never_clears_or_starts_again_pg() {
         std::fs::write(release, "1").unwrap();
         let deadline = tokio::time::Instant::now()+Duration::from_secs(15);
         loop {
-            let acknowledged_unknown: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox WHERE replay_retry_of_nonce IS NOT NULL AND replay_disposition='started_unclassified')")
+            let acknowledged_unknown: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox WHERE replay_retry_of_nonce IS NOT NULL AND replay_disposition IN ('started_unclassified','withheld'))")
                 .fetch_one(&host.pool).await.unwrap();
             if acknowledged_unknown { break; }
             assert!(tokio::time::Instant::now()<deadline, "exact begin never reached the lost-ACK boundary");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        host.disposition("withheld").await;
         host.settled(channel).await;
         assert_eq!(host.starts(), 1, "a committed-but-unacknowledged begin cannot execute");
         assert!(host.shared.core.lock().await.sessions[&channel].memento_context_loaded, "local context reset runs only after ACK");
         host.close().await;
+    });
+}
+
+#[test]
+fn p5_env_on_exact_retry_replies_to_original_source_pg() {
+    let name = concat!(
+        module_path!(),
+        "::p5_env_on_exact_retry_replies_to_original_source_pg"
+    );
+    if !child(name) {
+        return;
+    }
+    intake_replay_rt().block_on(async {
+        let channel = ChannelId::new(7_330_501);
+        let mut host = Host::new(&[channel]).await;
+        host.stale_cli(None);
+        host.vars.push(crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_STALE_REPLAY_V1", std::path::Path::new("1")));
+        host.vars.push(crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_STALE_REPLAY_CHANNELS", std::path::Path::new(&channel.to_string())));
+        assert!(crate::services::discord::replay_policy::activation::production_requested(&channel.to_string()));
+        let reservation = health::reserve_headless_agent_turn(channel);
+        let turn_id = reservation.turn_id().to_owned();
+        let metadata = serde_json::json!({
+            "routine_id": "same-routine", "routine_run_id": "same-durable-run", "turn_id": turn_id,
+            "execution_strategy": "fresh", "execution_mode": "process", "delivery_bot": "claude", "silent": false
+        });
+        let outcome = host.start(channel, "routine", Some(metadata.clone()), reservation).await;
+        assert!(outcome.is_ok(), "protected headless start was refused: {outcome:?}");
+        assert_eq!(outcome.unwrap().turn_id, turn_id);
+        host.native_started(1).await;
+        let registered: i64 = sqlx::query_scalar("SELECT count(*) FROM intake_outbox WHERE replay_disposition IS NOT NULL").fetch_one(&host.pool).await.unwrap();
+        assert_eq!(registered, 1, "real env supplier must register before the first effect");
+        let preserved = host.disposition("classified_normal").await;
+        host.settled(channel).await;
+        assert_eq!(host.starts(), 2, "one exact retry, same headless path");
+        let responses: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox WHERE source='headless_turn' AND content LIKE '%fixture answer%' AND status='sent' AND target=$1")
+            .bind(format!("channel:{channel}")).fetch_one(&host.pool).await.unwrap();
+        assert_eq!(responses, 1, "quiet stale yields one actually delivered response");
+        let receipts: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT replay_request_key, user_text, replay_retry_of_nonce FROM intake_outbox WHERE replay_disposition IS NOT NULL")
+            .fetch_all(&host.pool).await.unwrap();
+        assert_eq!(receipts.len(), 1, "retry cannot issue a new synthetic identity");
+        assert!(receipts[0].0.contains(&turn_id));
+        assert_eq!(receipts[0].1, "caller rendered original");
+        assert!(receipts[0].2.is_some(), "second native start needs the exact permit");
+        assert_eq!(preserved["projection"]["binding"]["metadata"], metadata);
+        assert_eq!(preserved["projection"]["binding"]["source"], "routine");
+        let prompt = std::fs::read_to_string(host.calls.with_extension("prompt")).unwrap();
+        assert!(prompt.contains("caller rendered original"));
+        host.close().await;
+    });
+}
+
+#[test]
+fn p5_off_no_rows_keeps_effects_with_two_replay_reads_pg() {
+    if !child(concat!(
+        module_path!(),
+        "::p5_off_no_rows_keeps_effects_with_two_replay_reads_pg"
+    )) {
+        return;
+    }
+    intake_replay_rt().block_on(async {
+        let channel=ChannelId::new(7_330_502);
+        let host=Host::new(&[channel]).await;
+        let reservation=health::reserve_headless_agent_turn(channel);
+        host.start(channel,"routine",Some(serde_json::json!({"routine_id":"p5-off","routine_run_id":"p5-off-run","turn_id":reservation.turn_id(),"execution_strategy":"fresh","execution_mode":"process","delivery_bot":"claude","silent":false})),reservation).await.unwrap();
+        host.settled(channel).await;
+        assert_eq!(host.starts(),1);
+        assert_eq!(crate::services::discord::replay_policy::activation::reads(&channel.to_string()),2);
+        let counts:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM intake_outbox WHERE replay_disposition IS NOT NULL),(SELECT count(*) FROM message_outbox WHERE reason_code='stale_replay_withheld'),(SELECT count(*) FROM message_outbox WHERE source='headless_turn' AND content LIKE '%fixture answer%' AND status='sent')").fetch_one(&host.pool).await.unwrap();
+        assert_eq!(counts,(0,0,1));
+        host.close().await;
+    });
+}
+
+#[test]
+fn p5_unsupported_process_backend_keeps_existing_effects_pg() {
+    if !child(concat!(
+        module_path!(),
+        "::p5_unsupported_process_backend_keeps_existing_effects_pg"
+    )) {
+        return;
+    }
+    intake_replay_rt().block_on(async {
+        let channel=ChannelId::new(7_330_503);
+        let host=Host::new(&[channel]).await;
+        let _active=crate::services::discord::router::replay_test_activation::activate(channel.get());
+        let reservation=health::reserve_headless_agent_turn(channel);
+        host.start(channel,"api",None,reservation).await.unwrap();
+        host.native_started(1).await;
+        assert_eq!(host.starts(),1);
+        let count:i64=sqlx::query_scalar("SELECT count(*) FROM intake_outbox WHERE replay_disposition IS NOT NULL").fetch_one(&host.pool).await.unwrap();
+        assert_eq!(count,0,"unsupported process backend must remain legacy");
+        println!("P5 PROCESS_BACKEND native=1 receipt=0 completion=NOT_ASSERTED(U3 FAIL) no_effect=NOT_PROVEN");
+        host.close().await;
+    });
+}
+
+#[test]
+fn p5_off_sql_failure_is_retryable_with_the_original_reservation_pg() {
+    if !child(concat!(
+        module_path!(),
+        "::p5_off_sql_failure_is_retryable_with_the_original_reservation_pg"
+    )) {
+        return;
+    }
+    intake_replay_rt().block_on(async {
+        let channel=ChannelId::new(7_330_504);
+        let host=Host::new(&[channel]).await;
+        let reservation=health::reserve_headless_agent_turn(channel);
+        sqlx::query("ALTER TABLE intake_outbox RENAME TO p5_temporarily_unavailable").execute(&host.pool).await.unwrap();
+        let failed=host.start(channel,"routine",Some(Host::direct_metadata(&reservation)),reservation.clone()).await;
+        assert!(matches!(&failed,Err(HeadlessTurnStartError::Conflict(reason)) if reason.contains("retry")),"{failed:?}");
+        assert_eq!(host.starts(),0,"lookup failure cannot be read as no protected rows");
+        sqlx::query("ALTER TABLE p5_temporarily_unavailable RENAME TO intake_outbox").execute(&host.pool).await.unwrap();
+        host.start(channel,"routine",Some(Host::direct_metadata(&reservation)),reservation).await.unwrap();
+        host.settled(channel).await;
+        assert_eq!(host.starts(),1,"retry uses the original reservation");
+        host.close().await;
+    });
+}
+
+#[test]
+fn p5_exact_unsupported_scope_is_held_without_legacy_reregistration_pg() {
+    if !child(concat!(
+        module_path!(),
+        "::p5_exact_unsupported_scope_is_held_without_legacy_reregistration_pg"
+    )) {
+        return;
+    }
+    intake_replay_rt().block_on(async {
+        use crate::services::discord::router::intake_dispatch::replay_admission as admission;
+        use crate::services::discord::replay_policy::{self,ReplayDecision,ExactHandoff};
+        use crate::services::discord::replay_policy::live::Seen;
+        use crate::services::discord::replay_policy::permit::EffectTarget;
+        let channel=ChannelId::new(7_330_518);let host=Host::new(&[channel]).await;
+        let _active=crate::services::discord::router::replay_test_activation::activate(channel.get());
+        let input=admission::discord_input("claude",channel.get(),7330518,[],"original");
+        let context=admission::ReplayAdmissionContext::production(&host.pool,"p5",admission::incarnation()).for_scope(&channel.to_string(),"claude","legacy-prompt","owned_direct",false);
+        let target=EffectTarget::ProviderStart{provider:"claude".into(),channel:channel.to_string()};
+        let projection=|| admission::PreparedEffectProjection {target:target.clone(),input_hash:admission::input_hash("prepared"),binding:serde_json::json!({"driver_scope":"legacy-prompt","runtime_scope":"owned_direct"}),session_key:None};
+        let start=admission::admit_start(&context,&input,projection(),None).await.unwrap();
+        let token=CancelToken::new();start.spend(&target,"prepared",&token).unwrap();
+        let live=token.replay_attempt().unwrap();
+        for fact in [Seen::StdoutEof,Seen::Exited{waited:true},Seen::StderrDrained] {live.record(fact);}
+        let (attempt,seen)=live.take_for_decision(Duration::from_millis(50)).await.unwrap();
+        let ReplayDecision::AllowStartupRetry(permit)=replay_policy::decide_stale(&host.pool,Some(attempt),&seen,None).await else {panic!("exact permit");};
+        let unstarted=permit.abandonment();
+        let mut state=InflightTurnState::new(ProviderKind::Claude,channel.get(),None,7,7330518,7331518,"original".into(),None,None,None,None,0);
+        let (result,handoff)=replay_policy::hand_over(permit,async {
+            super::super::intake_turn::replay_start::common::begin(&host.shared,&ProviderKind::Claude,&mut state,input,projection(),replay_policy::take_continuation(),super::super::provider_dispatch::replay_scope::Scope{driver:crate::services::provider_hosting::ProviderSessionDriver::LegacyPrompt,runtime:"remote"}).await
+        }).await;
+        assert!(result.is_err());assert_eq!(handoff,ExactHandoff::Refused);
+        unstarted.abandon("exact retry handoff refused").await;
+        host.disposition("withheld").await;
+        assert_eq!(host.starts(),0,"a refused scope never invokes a provider");
+        let counts:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM intake_outbox WHERE replay_disposition IS NOT NULL),(SELECT count(*) FROM message_outbox WHERE reason_code='stale_replay_withheld')").fetch_one(&host.pool).await.unwrap();
+        assert_eq!(counts,(1,1));host.close().await;
+    });
+}
+
+#[test]
+fn p5_process_start_env_variants_use_the_production_selector_pg() {
+    const MARKER: &str = "ADK_TEST_STALE_REPLAY_VARIANT";
+    let name = concat!(
+        module_path!(),
+        "::p5_process_start_env_variants_use_the_production_selector_pg"
+    )
+    .strip_prefix("agentdesk::")
+    .unwrap();
+    if let Ok(label) = std::env::var(MARKER) {
+        intake_replay_rt().block_on(async {
+            let channel=ChannelId::new(7_330_519);let host=Host::new(&[channel]).await;
+            let selected=crate::services::discord::replay_policy::activation::production_requested(&channel.to_string());
+            assert_eq!(selected,label=="on");
+            if selected {host.stale_cli(None);}
+            let reservation=health::reserve_headless_agent_turn(channel);
+            let metadata=serde_json::json!({"routine_id":"p5-env","routine_run_id":"p5-env-run","turn_id":reservation.turn_id(),"execution_strategy":"fresh","execution_mode":"process","delivery_bot":"claude","silent":false});
+            host.start(channel,"routine",Some(metadata),reservation).await.unwrap();host.settled(channel).await;
+            let counts:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM intake_outbox WHERE replay_disposition IS NOT NULL),(SELECT count(*) FROM message_outbox WHERE reason_code='stale_replay_withheld'),(SELECT count(*) FROM message_outbox WHERE source='headless_turn' AND content LIKE '%fixture answer%' AND status='sent' AND target=$1)").bind(format!("channel:{channel}")).fetch_one(&host.pool).await.unwrap();
+            assert_eq!(counts,(if selected {1_i64} else {0},0,1));assert_eq!(host.starts(),if selected {2}else{1});
+            println!("P5_ENV_VARIANT label={label} selected={selected} native={} receipt={} notice={} original_source_reply={}",host.starts(),counts.0,counts.1,counts.2);
+            host.close().await;
+        });
+        return;
+    }
+    for (label, flag, channels) in [
+        ("unset", None, Some("7330519")),
+        ("zero", Some("0"), Some("7330519")),
+        ("false", Some("false"), Some("7330519")),
+        ("invalid", Some("invalid"), Some("7330519")),
+        ("missing-list", Some("1"), None),
+        ("bad-list", Some("1"), Some("7330519,bad")),
+        ("unlisted", Some("1"), Some("7330520")),
+        ("on", Some("1"), Some("7330519")),
+    ] {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", name, "--nocapture"])
+            .env(MARKER, label)
+            .env_remove("AGENTDESK_STALE_REPLAY_V1")
+            .env_remove("AGENTDESK_STALE_REPLAY_CHANNELS");
+        if let Some(flag) = flag {
+            cmd.env("AGENTDESK_STALE_REPLAY_V1", flag);
+        }
+        if let Some(channels) = channels {
+            cmd.env("AGENTDESK_STALE_REPLAY_CHANNELS", channels);
+        }
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{label}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<_> = stdout
+            .lines()
+            .filter(|l| l.starts_with("P5_ENV_VARIANT"))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "{label}: child must execute exactly one witness"
+        );
+        println!("{}", lines[0]);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn p5_live_foreign_boot_does_not_preempt_the_owner_pg() {
+    const ROLE: &str = "ADK_TEST_REPLAY_PEER_ROLE";
+    const DATABASE: &str = "ADK_TEST_REPLAY_PEER_DATABASE";
+    const SCENARIO: &str = "ADK_TEST_REPLAY_PEER_SCENARIO";
+    let name = concat!(
+        module_path!(),
+        "::p5_live_foreign_boot_does_not_preempt_the_owner_pg"
+    )
+    .strip_prefix("agentdesk::")
+    .unwrap();
+    let role = std::env::var(ROLE).unwrap_or_default();
+    if role == "peer" && std::env::var(SCENARIO).ok().as_deref() == Some("same-root-overlap") {
+        let root = std::env::var("ADK_TEST_REPLAY_PEER_ROOT").unwrap();
+        assert!(
+            crate::cli::dcserver::replay_recovery::acquire_for_tests(std::path::Path::new(&root))
+                .is_err()
+        );
+        println!("P5_SAME_ROOT_OVERLAP_REFUSED");
+        return;
+    }
+    if role == "peer" {
+        intake_replay_rt().block_on(async {
+            let _root = crate::config::TestRuntimeRootGuard::new();
+            let pool = sqlx::PgPool::connect(&std::env::var(DATABASE).unwrap())
+                .await
+                .unwrap();
+            let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(
+                pool.clone(),
+            ));
+            let http = Arc::new(serenity::Http::new("fixture-peer"));
+            assert!(
+                !crate::services::discord::replay_policy::activation::production_requested(
+                    "7330522"
+                )
+            );
+            assert!(
+                crate::services::discord::inflight::load_inflight_states(&ProviderKind::Claude)
+                    .is_empty()
+            );
+            if std::env::var(SCENARIO).ok().as_deref() == Some("db-direct") {
+                let id: i64 = sqlx::query_scalar(
+                    "SELECT id FROM intake_outbox WHERE replay_disposition='started_unclassified'",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                let result = crate::db::replay_disposition::write::recover_hold_notice(
+                    &pool,
+                    id,
+                    "claude",
+                    "7330522",
+                    None,
+                    None,
+                    crate::db::replay_disposition::hold_notice::NoticeRouting {
+                        bot: "notify",
+                        session_key: None,
+                    },
+                )
+                .await;
+                assert!(matches!(
+                    result,
+                    Err(crate::db::replay_disposition::write::WriteError::CasMiss)
+                ));
+            } else {
+                crate::services::discord::recovery_engine::restore_inflight_turns(
+                    &http,
+                    &shared,
+                    &ProviderKind::Claude,
+                )
+                .await;
+            }
+            pool.close().await;
+            println!("P5_PEER_SCAN_DONE off=true local_inflight=0");
+        });
+        return;
+    }
+    if role != "owner" {
+        for scenario in [
+            "quiet-control",
+            "quiet-peer",
+            "db-direct",
+            "same-root-overlap",
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env(ROLE, "owner")
+                .env(SCENARIO, scenario)
+                .env("AGENTDESK_INSTANCE_ID", "p5-live-owner")
+                .env("AGENTDESK_STALE_REPLAY_V1", "1")
+                .env("AGENTDESK_STALE_REPLAY_CHANNELS", "7330522")
+                .output()
+                .unwrap();
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            assert!(
+                output.status.success(),
+                "{scenario} owner process: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    }
+    intake_replay_rt().block_on(async {
+        let scenario=std::env::var(SCENARIO).unwrap();
+        let channel=ChannelId::new(7_330_522);let host=Host::new(&[channel]).await;
+        let locked_root=crate::services::discord::runtime_store::agentdesk_root().unwrap();
+        std::fs::create_dir_all(locked_root.join("runtime")).unwrap();
+        let authority=crate::cli::dcserver::replay_recovery::acquire_for_tests(&locked_root).unwrap();
+        host.shared.restart.replay_restart.set(authority).unwrap();
+        assert!(crate::services::discord::replay_policy::activation::production_requested(&channel.to_string()));
+        let metadata=|reservation:&health::HeadlessAgentTurnReservation,run:&str| serde_json::json!({
+            "routine_id":"p5-live-owner","routine_run_id":run,"turn_id":reservation.turn_id(),
+            "execution_strategy":"fresh","execution_mode":"process","delivery_bot":"claude","silent":false});
+        let control=health::reserve_headless_agent_turn(channel);
+        host.start(channel,"routine",Some(metadata(&control,"control")),control).await.unwrap();
+        host.settled(channel).await;
+        let control_deadline=tokio::time::Instant::now()+Duration::from_secs(5);
+        while crate::services::discord::inflight::load_inflight_state(&ProviderKind::Claude,channel.get()).is_some() {
+            assert!(tokio::time::Instant::now()<control_deadline,"control snapshot must finish cleanup");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let control_replies:i64=sqlx::query_scalar("SELECT count(*) FROM message_outbox WHERE source='headless_turn' AND status='sent' AND content LIKE '%fixture answer%'")
+            .fetch_one(&host.pool).await.unwrap();
+        assert_eq!((host.starts(),control_replies),(1,1),"healthy ordinary-completion control");
+
+        let release=host._workspace.path().join("live-release");let pid_file=host._workspace.path().join("live-pid");
+        let script=format!(r#"#!/bin/sh
+printf 'start\n' >> '{}'
+printf '%s' "$$" > '{}'
+cat > '{}.prompt'
+if [ $(wc -l < '{}') -eq 2 ]; then
+while [ -d '{}' ] && [ ! -f '{}' ]; do sleep 0.01; done
+printf '%s' 'Error: No conversation found' >&2
+exit 1
+fi
+printf '%s\n' '{{"type":"result","subtype":"success","result":"fixture answer","session_id":"73300000-0000-4000-8000-000000000005"}}'
+"#,host.calls.display(),pid_file.display(),host.calls.display(),host.calls.display(),host._workspace.path().display(),release.display());
+        std::fs::write(host._workspace.path().join("claude"),script).unwrap();
+        let subject=health::reserve_headless_agent_turn(channel);
+        host.start(channel,"routine",Some(metadata(&subject,"subject")),subject).await.unwrap();
+        host.native_started(2).await;
+        let pid=std::fs::read_to_string(&pid_file).unwrap();
+        let alive=std::path::Path::new(&format!("/proc/{pid}")).exists()
+            && mailbox_snapshot(&host.shared,channel).await.cancel_token.is_some() && !release.exists();
+        let before:(i64,String,String)=sqlx::query_as("SELECT id,replay_disposition,target_instance_id FROM intake_outbox WHERE replay_disposition IS NOT NULL ORDER BY id DESC LIMIT 1")
+            .fetch_one(&host.pool).await.unwrap();
+        sqlx::query("INSERT INTO worker_nodes (instance_id,process_id,status,last_heartbeat_at) VALUES ($1,$2,'online',NOW()) ON CONFLICT(instance_id) DO UPDATE SET status='online',last_heartbeat_at=NOW()")
+            .bind(&before.2).bind(std::process::id() as i32).execute(&host.pool).await.unwrap();
+        let peer=if scenario!="quiet-control" {
+            Some(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact",name,"--nocapture"]).env(ROLE,"peer").env(SCENARIO,&scenario).env("ADK_TEST_REPLAY_PEER_ROOT",&locked_root).env(DATABASE,&host.db.database_url)
+                .env("AGENTDESK_INSTANCE_ID","p5-live-peer").env("AGENTDESK_STALE_REPLAY_V1","0")
+                .env("AGENTDESK_STALE_REPLAY_CHANNELS","").output())
+        } else {None};
+        let after:String=sqlx::query_scalar("SELECT replay_disposition FROM intake_outbox WHERE id=$1").bind(before.0).fetch_one(&host.pool).await.unwrap();
+        std::fs::write(&release,"finish").unwrap();
+        let settled=tokio::time::timeout(Duration::from_secs(8),async {
+            loop {
+                crate::server::outbox_worker::drain_message_outbox_once(
+                    &Arc::new(host.pool.clone()),&host.registry,"p5-retry-fixture-drain",
+                ).await;
+                let disposition:String=sqlx::query_scalar("SELECT replay_disposition FROM intake_outbox WHERE id=$1")
+                    .bind(before.0).fetch_one(&host.pool).await.unwrap();
+                if matches!(disposition.as_str(),"classified_normal"|"withheld") {break;}
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            host.settled(channel).await;
+        }).await.is_ok();
+        let final_disposition:String=sqlx::query_scalar("SELECT replay_disposition FROM intake_outbox WHERE id=$1").bind(before.0).fetch_one(&host.pool).await.unwrap();
+        let replies:i64=sqlx::query_scalar("SELECT count(*) FROM message_outbox WHERE source='headless_turn' AND status='sent' AND content LIKE '%fixture answer%'")
+            .fetch_one(&host.pool).await.unwrap();
+        let notices:i64=sqlx::query_scalar("SELECT count(*) FROM message_outbox WHERE reason_code='stale_replay_withheld'").fetch_one(&host.pool).await.unwrap();
+        let starts=host.starts();
+        println!("P5_LIVE_FOREIGN scenario={scenario} before={} after={} final={final_disposition} owner={} native_alive={alive} native={starts} control_reply={control_replies} subject_reply={} notice={notices} settled={settled}",before.1,after,before.2,replies-control_replies);
+        host.close().await;
+        if let Some(peer)=peer {let peer=peer.unwrap();assert!(peer.status.success(),"peer failed: {}\n{}",String::from_utf8_lossy(&peer.stdout),String::from_utf8_lossy(&peer.stderr));}
+        assert!(alive);assert_eq!(before.1,"started_unclassified");
+        assert_eq!(after,"started_unclassified","an off peer cannot dispose a live foreign attempt");
+        assert!(settled);assert_eq!(starts,3,"quiet stale still owes exactly one startup retry");
+        assert_eq!(replies,2,"quiet stale still owes its original successful response");
+        assert_eq!(notices,0,"no active owner has been lost");
     });
 }

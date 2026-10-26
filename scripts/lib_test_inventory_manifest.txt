@@ -58,6 +58,7 @@ cli::client::health_compare_tests::render_machine_compare_table_synthesises_offl
 cli::client::health_compare_tests::validate_status_payload_rejects_missing_arrays
 cli::client::runtime_config::tests::api_get_payload_preserves_explicit_keys_for_cli_set
 cli::client::runtime_config::tests::plain_cli_set_stays_metadata_less_for_server_authority
+cli::dcserver::replay_recovery::tests::p5_singleton_requires_exclusive_ownership_across_processes
 cli::dcserver::startup::tests::clean_audit_emits_no_boot_warning_and_scheduling_never_waits_for_inspection
 cli::dcserver::startup::tests::stale_agent_and_unlisted_skill_emit_one_boot_warning_in_same_process
 cli::dcserver::tests::lock_pid_write_removes_stale_suffix
@@ -6651,6 +6652,9 @@ services::discord::recovery_engine::restore_inflight::ready_without_output_tests
 services::discord::recovery_engine::restore_inflight::ready_without_output_tests::watcher_offset_at_eof_preserves_unsent_body_on_failed_delivery_then_retries
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::p3_restart_backfills_old_withheld_without_readopting_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::p4_dormant_no_store_history_retry_still_fetches_and_enqueues
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::p5_empty_boot_scan_has_one_read_and_no_effect_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::p5_off_boot_pg_only_resumes_without_an_execution_permit_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::p5_off_legacy_lookup_error_retries_until_authority_returns_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::recovery_history_retry_reads_the_canonical_fence_before_and_after_http_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::recovery_malformed_notice_retains_raw_episode_and_has_a_healthy_control_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::recovery_pg_only_restart_paginates_without_an_execution_permit_pg
@@ -6938,6 +6942,8 @@ services::discord::replace_outcome_policy::a0_replace_outcome_policy_tests::watc
 services::discord::replace_outcome_policy::a0_replace_outcome_policy_tests::watcher_send_failure_plan_rewinds_only_transient_4154
 services::discord::replace_outcome_policy::a0_replace_outcome_policy_tests::watcher_send_failure_status_classifies_transient_vs_permanent_4154
 services::discord::replace_outcome_policy::a0_replace_outcome_policy_tests::watcher_send_failure_strip_class_marker_removes_only_valid_prefix_4154
+services::discord::replay_policy::activation::tests::p5_activation_parser_is_closed_and_channel_scoped
+services::discord::replay_policy::activation::tests::p5_activation_runtime_matrix_is_closed
 services::discord::replay_policy::live::observer_tests::p2_actual_output_and_tool_before_stale_never_get_retry_pg
 services::discord::replay_policy::live::observer_tests::p2_codex_quiet_stale_observer_pg
 services::discord::replay_policy::live::observer_tests::p2_file_reader_cannot_mint_no_effect_after_wrapper_exit_pg
@@ -6955,8 +6961,13 @@ services::discord::replay_policy::live_tests::direct_adapter_completes_the_obser
 services::discord::replay_policy::live_tests::direct_adapter_without_a_live_attempt_is_unchanged_pg
 services::discord::replay_policy::permit_tests::effect_permits_cannot_be_cloned_or_serialised
 services::discord::replay_policy::permit_tests::start_permit_runs_one_effect_only_on_its_own_target_pg
+services::discord::replay_policy::policy_tests::p5_absent_capture_does_not_pin_a_null_snapshot_pg
 services::discord::replay_policy::policy_tests::stale_attempt_retries_only_on_committed_no_effect_evidence_pg
 services::discord::replay_policy::policy_tests::stale_decision_failures_hold_without_a_permit_pg
+services::discord::replay_policy::recovery::tests::p5_actual_own_restart_and_foreign_orphan_preserve_the_authority_boundary_pg
+services::discord::replay_policy::recovery::tests::p5_db_locked_recovery_rejects_each_unproved_local_identity_pg
+services::discord::replay_policy::recovery::tests::p5_live_no_effect_handoff_survives_local_and_foreign_recovery_pg
+services::discord::replay_policy::recovery::tests::p5_null_unfinished_identity_and_withheld_only_pagination_pg
 services::discord::response_sanitizer::subagent_notification_card::tests::an_inject_frame_body_is_never_a_card
 services::discord::response_sanitizer::subagent_notification_card::tests::card_hides_raw_envelope_and_agent_path
 services::discord::response_sanitizer::subagent_notification_card::tests::detects_bare_wrapped_and_provider_reuse_subagent_notifications
@@ -7068,6 +7079,12 @@ services::discord::router::intake_dispatch::replay_admission_tests::dormant_prod
 services::discord::router::intake_dispatch::replay_admission_tests::exact_retry_reenters_only_through_its_own_continuation_pg
 services::discord::router::intake_dispatch::replay_admission_tests::exact_retry_refuses_a_different_request_before_begin_pg
 services::discord::router::intake_dispatch::replay_admission_tests::p4_off_terminal_paths_keep_legacy_and_restored_hold_results_pg
+services::discord::router::intake_dispatch::replay_admission_tests::p5_missing_start_scope_is_refused_pg
+services::discord::router::intake_dispatch::replay_admission_tests::p5_off_before_registration_does_not_create_another_owner_pg
+services::discord::router::intake_dispatch::replay_admission_tests::p5_off_completed_key_is_consumed_pg
+services::discord::router::intake_dispatch::replay_admission_tests::p5_off_exact_continuation_drains_only_its_existing_budget_pg
+services::discord::router::intake_dispatch::replay_admission_tests::p5_registered_read_can_reach_a_scoped_start_without_producer_rights_pg
+services::discord::router::intake_dispatch::replay_admission_tests::p5_scoped_admission_cannot_produce_for_unsupported_runtimes_pg
 services::discord::router::intake_dispatch::replay_admission_tests::preflight_sends_every_blocking_state_to_protected_consumption_pg
 services::discord::router::intake_dispatch::replay_admission_tests::prepare_commits_the_receipt_before_the_permit_and_never_reissues_pg
 services::discord::router::intake_dispatch::replay_admission_tests::provider_begin_remains_single_update_pg
@@ -7089,6 +7106,8 @@ services::discord::router::intake_dispatch::tests::obligation_window_facade_rest
 services::discord::router::intake_dispatch::tests::queued_foreign_attachment_is_rejected_without_requeue_pg
 services::discord::router::intake_dispatch::tests::queued_foreign_owner_forwards_without_local_body_pg
 services::discord::router::intake_dispatch::tests::raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg
+services::discord::router::intake_dispatch::tests::replay_hold::p5_off_intake_custody_consumes_every_prior_state_pg
+services::discord::router::intake_dispatch::tests::replay_hold::p5_off_intake_query_error_notifies_and_preserves_retry_pg
 services::discord::router::intake_dispatch::tests::replay_hold::replay_admission_dormant_and_other_identity_keeps_local_policy_pg
 services::discord::router::intake_dispatch::tests::replay_hold::replay_live_absorbed_sources_cannot_forward_and_keep_original_pg
 services::discord::router::intake_dispatch::tests::replay_hold::replay_queued_whole_consumed_and_mixed_original_restored_pg
@@ -7267,6 +7286,13 @@ services::discord::router::message_handler::headless_turn::replay_start_tests::p
 services::discord::router::message_handler::headless_turn::replay_start_tests::p4_off_headless_without_store_still_starts_pg
 services::discord::router::message_handler::headless_turn::replay_start_tests::p4_reopened_store_new_state_consumes_held_reservation_pg
 services::discord::router::message_handler::headless_turn::replay_start_tests::p4_u3_health_reservation_webhook_and_native_start_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p5_env_on_exact_retry_replies_to_original_source_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p5_exact_unsupported_scope_is_held_without_legacy_reregistration_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p5_live_foreign_boot_does_not_preempt_the_owner_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p5_off_no_rows_keeps_effects_with_two_replay_reads_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p5_off_sql_failure_is_retryable_with_the_original_reservation_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p5_process_start_env_variants_use_the_production_selector_pg
+services::discord::router::message_handler::headless_turn::replay_start_tests::p5_unsupported_process_backend_keeps_existing_effects_pg
 services::discord::router::message_handler::headless_turn::routine_metadata::memory_scope_tests::routine_memory_group_absent_hint_preserves_main_bytes
 services::discord::router::message_handler::headless_turn::routine_metadata::memory_scope_tests::routine_memory_group_reaches_binding_and_three_tier_hint
 services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::fresh_process_turn_suppresses_tmux_but_keeps_isolated_session_key
@@ -10688,6 +10714,8 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::held_request_refuses_the_legacy_history_retry_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::legacy_and_protected_retries_claim_a_request_once_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::normal_terminal_is_classified_before_ordinary_completion_pg
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::p5_refused_exact_handoff_is_withheld_and_notified_pg
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::p5_rest_witness_excludes_probes_but_keeps_empty_or_foreign_writes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::producer_dormant_keeps_legacy_execution_paths_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::quick_empty_resume_after_tool_is_withheld_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::recovered_started_attempt_cannot_bypass_replay_hold_pg

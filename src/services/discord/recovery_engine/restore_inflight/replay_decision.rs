@@ -9,9 +9,9 @@ use crate::db::replay_disposition::{
 pub(super) async fn resume(
     pool: Option<&sqlx::PgPool>,
     state: &inflight::InflightTurnState,
+    root: Option<&crate::cli::dcserver::replay_recovery::OwnedRuntimeRoot>,
 ) -> bool {
-    if crate::services::discord::router::replay_producers_dormant(&state.channel_id.to_string())
-        || !state.replay_rerun_blocked()
+    if !state.replay_rerun_blocked()
         || matches!(
             state.runtime_kind,
             Some(
@@ -46,12 +46,13 @@ pub(super) async fn resume(
     let Ok(capture) = serde_json::to_value(state) else {
         return false;
     };
+    let proof = crate::services::discord::replay_policy::recovery::LocalSnapshot::load(root, state);
     write::recover_hold_notice(
         pool,
         id,
         &state.provider,
         &state.channel_id.to_string(),
-        crate::services::discord::replay_policy::incarnation(),
+        proof.as_ref(),
         Some(&capture),
         NoticeRouting {
             bot: "notify",
@@ -63,27 +64,37 @@ pub(super) async fn resume(
     .is_ok()
 }
 
-// The dormant build exercises enumeration at the test boot hook; production wiring follows activation.
-#[cfg(test)]
 pub(super) async fn resume_pg_only(pool: Option<&sqlx::PgPool>, provider: &str) {
     let Some(pool) = pool else {
         return;
     };
+    if pool.is_closed() {
+        return;
+    }
     let mut cursor = 0_i64;
     loop {
+        #[cfg(test)]
+        crate::services::discord::replay_policy::activation::record_read(&format!(
+            "scan:{provider}:{}",
+            pool.connect_options().get_database().unwrap_or_default()
+        ));
         let page: Result<Vec<(i64, String)>, _> = sqlx::query_as(
             "SELECT id, channel_id FROM intake_outbox WHERE id>$1
                AND lower(btrim(provider))=lower(btrim($2))
-               AND replay_disposition IN ('withheld','started_unclassified','startup_failed_no_effect')
+               AND replay_disposition = 'withheld'
                AND replay_preserved -> 'stale_replay_notice' IS NULL
-               AND (replay_disposition='withheld' OR replay_owner_incarnation IS DISTINCT FROM $3)
              ORDER BY id LIMIT 64",
-        ).bind(cursor).bind(provider).bind(crate::services::discord::replay_policy::incarnation()).fetch_all(pool).await;
+        )
+        .bind(cursor)
+        .bind(provider)
+        .fetch_all(pool)
+        .await;
         let page = match page {
             Ok(page) => page,
             Err(error) => {
                 tracing::warn!(%error, "PG-only replay notice scan unverified");
-                return;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
             }
         };
         if page.is_empty() {
@@ -91,15 +102,12 @@ pub(super) async fn resume_pg_only(pool: Option<&sqlx::PgPool>, provider: &str) 
         }
         for (id, channel) in page {
             cursor = id;
-            if crate::services::discord::router::replay_producers_dormant(&channel) {
-                continue;
-            }
             if let Err(error) = write::recover_hold_notice(
                 pool,
                 id,
                 provider,
                 &channel,
-                crate::services::discord::replay_policy::incarnation(),
+                None,
                 None,
                 NoticeRouting {
                     bot: "notify",

@@ -68,13 +68,11 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         shared.restart.recovery_started_at.elapsed(),
     );
     if states.is_empty() {
-        #[cfg(test)]
         replay_decision::resume_pg_only(shared.pg_pool.as_ref(), provider.as_str()).await;
         return;
     }
 
     Box::pin(restore_inflight_states(http, shared, provider, states)).await;
-    #[cfg(test)]
     replay_decision::resume_pg_only(shared.pg_pool.as_ref(), provider.as_str()).await;
 }
 
@@ -107,7 +105,13 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             continue;
         }
         // An unverified projected receipt waits for another pass without persisting a read error.
-        if !replay_hold::hydrate_replay_hold(shared.pg_pool.as_ref(), &mut state).await {
+        if !replay_hold::hydrate_replay_hold(
+            shared.pg_pool.as_ref(),
+            &mut state,
+            shared.restart.replay_restart.get(),
+        )
+        .await
+        {
             continue;
         }
         if state.replay_rerun_blocked() {

@@ -351,7 +351,7 @@ async fn exact_retry_moves_session_off_stale_resume_once_pg() {
         "general clear of a started session",
     );
     let evidence = observed(&attempt, &COMPLETE).no_effect_evidence().unwrap();
-    let (acked_id, acked_previous) = write::classify_no_effect(&pool, attempt, &evidence)
+    let (acked_id, acked_previous, ..) = write::classify_no_effect(&pool, attempt, &evidence)
         .await
         .expect("commit no-effect")
         .into_parts();

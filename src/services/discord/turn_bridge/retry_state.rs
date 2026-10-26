@@ -52,10 +52,12 @@ fn spawn_retry(
             }
             Some(retry) => {
                 let receipt = retry.permit.receipt_id();
+                let unstarted = retry.permit.abandonment();
                 let handoff = gateway
                     .schedule_exact_retry_with_history(channel_id, retry)
                     .await;
                 if handoff == crate::services::discord::replay_policy::ExactHandoff::Refused {
+                    unstarted.abandon("exact retry handoff refused").await;
                     tracing::warn!(
                         channel_id = channel_id.get(),
                         receipt,

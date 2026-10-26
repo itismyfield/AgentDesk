@@ -23,6 +23,21 @@ pub(in crate::services::discord::router::message_handler) fn selected(
         Some(channel),
     )
     .driver;
+    // The execution stub owns a direct effect; native runtime capability still uses the real path.
+    #[cfg(test)]
+    if !remote
+        && driver == ProviderSessionDriver::LegacyPrompt
+        && super::INPUT_EFFECT_PROBE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_some_and(|probe| probe.channel == channel)
+    {
+        return Scope {
+            driver,
+            runtime: "owned_direct",
+        };
+    }
     let runtime = if remote {
         "remote"
     } else if tmux.is_none() {

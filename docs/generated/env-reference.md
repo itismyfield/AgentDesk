@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 133
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 135
 - Platform and third-party variables: 30
 
 ## AgentDesk variables
@@ -141,6 +141,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_SELF_WATCHDOG_MODE` | `src/services/discord/health/recovery/self_watchdog.rs` |  |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs` |  |
+| `AGENTDESK_STALE_REPLAY_CHANNELS` | `src/services/discord/replay_policy/activation.rs` |  |
+| `AGENTDESK_STALE_REPLAY_V1` | `src/services/discord/replay_policy/activation.rs` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
 | `AGENTDESK_TEST_CODEX_BINDING_ROOT` | `src/services/tui_prompt_dedupe/binding_events/codex.rs` | Provider workers inherit only a fixture's explicit test root, never the live runtime root. |
 | `AGENTDESK_TEST_PG_RECLAIM_DENY_SERVERS` | `src/db/postgres/test_db_reclaim.rs` |  |

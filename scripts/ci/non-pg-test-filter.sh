@@ -151,6 +151,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::replay_policy::live_tests
   --skip services::discord::replay_policy::permit_tests
   --skip services::discord::replay_policy::policy_tests
+  --skip services::discord::replay_policy::recovery::tests
   --skip services::discord::router::herdr_consent::admission::tests
   --skip services::discord::router::herdr_consent::custody::tests
   --skip services::discord::router::intake_dispatch::home_order_tests
@@ -824,6 +825,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests::a2_dispatch_settles_without_tui_receipt_but_completion_stays_gated
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests::a2_may_have_submitted_and_old_or_contaminated_records_never_confirm_completion
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests::a2_owner_cannot_restart_a_finished_receipt_window
+  services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::p5_rest_witness_excludes_probes_but_keeps_empty_or_foreign_writes
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_each_stop_reason_preserves_delivery_and_settlement_axes
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::source_guard_tests::slash_stop_guards_reject_commented_steps_and_count_coded_calls
   services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::high_risk_recovery::reader_liveness_wait_rejects_accumulated_probes

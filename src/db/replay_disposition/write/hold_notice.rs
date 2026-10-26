@@ -121,19 +121,83 @@ pub(crate) async fn recover_hold_notice(
     receipt_id: i64,
     provider: &str,
     channel: &str,
-    current_incarnation: &str,
+    proof: Option<&crate::services::discord::replay_policy::recovery::LocalSnapshot>,
     capture: Option<&serde_json::Value>,
     routing: NoticeRouting<'_>,
 ) -> Result<HoldNotice, WriteError> {
     let mut tx = pool.begin().await.map_err(WriteError::Storage)?;
-    let row: (String, Option<String>, Option<String>, Option<serde_json::Value>) = sqlx::query_as(
-        "SELECT replay_disposition, replay_episode_nonce, replay_owner_incarnation, replay_preserved
+    let row = sqlx::query(
+        "SELECT replay_disposition, replay_episode_nonce, replay_owner_incarnation, replay_preserved,
+                target_instance_id, user_msg_id, request_owner_id, user_text, replay_source_message_ids
            FROM intake_outbox WHERE id=$1 AND lower(btrim(provider))=lower(btrim($2))
-             AND channel_id=$3 AND (replay_disposition='withheld'
-                 OR replay_owner_incarnation IS DISTINCT FROM $4) FOR UPDATE",
-    ).bind(receipt_id).bind(provider).bind(channel).bind(current_incarnation).fetch_optional(&mut *tx).await
+             AND channel_id=$3 FOR UPDATE",
+    ).bind(receipt_id).bind(provider).bind(channel).fetch_optional(&mut *tx).await
         .map_err(WriteError::Storage)?.ok_or(WriteError::CasMiss)?;
-    let (disposition, nonce, incarnation, stored) = row;
+    let disposition: String = row
+        .try_get("replay_disposition")
+        .map_err(WriteError::Storage)?;
+    let nonce: Option<String> = row
+        .try_get("replay_episode_nonce")
+        .map_err(WriteError::Storage)?;
+    let incarnation: Option<String> = row
+        .try_get("replay_owner_incarnation")
+        .map_err(WriteError::Storage)?;
+    let stored: Option<serde_json::Value> = row
+        .try_get("replay_preserved")
+        .map_err(WriteError::Storage)?;
+    if disposition != "withheld" {
+        let proof = proof.ok_or(WriteError::CasMiss)?;
+        let state = proof.state();
+        let target: String = row
+            .try_get("target_instance_id")
+            .map_err(WriteError::Storage)?;
+        let message: String = row.try_get("user_msg_id").map_err(WriteError::Storage)?;
+        let owner: String = row
+            .try_get("request_owner_id")
+            .map_err(WriteError::Storage)?;
+        let text: String = row.try_get("user_text").map_err(WriteError::Storage)?;
+        let mut sources: Vec<String> = row
+            .try_get("replay_source_message_ids")
+            .map_err(WriteError::Storage)?;
+        let mut local_sources: Vec<_> = state
+            .source_message_ids
+            .iter()
+            .chain([&state.user_msg_id])
+            .map(u64::to_string)
+            .collect();
+        sources.sort();
+        sources.dedup();
+        local_sources.sort();
+        local_sources.dedup();
+        let projection = stored.as_ref().and_then(|v| v.get("projection"));
+        let projected_nonce = projection
+            .and_then(|v| v.get("nonce"))
+            .and_then(|v| v.as_str());
+        let turn = projection
+            .and_then(|v| v.pointer("/binding/turn_nonce"))
+            .and_then(|v| v.as_str());
+        if !proof.understood()
+            || state.replay_receipt_id != Some(receipt_id)
+            || !state.provider.trim().eq_ignore_ascii_case(provider.trim())
+            || state.channel_id.to_string() != channel
+            || target != proof.instance()
+            || message != state.user_msg_id.to_string()
+            || owner != state.request_owner_user_id.to_string()
+            || text != state.user_text
+            || sources != local_sources
+            || !incarnation.as_deref().is_some_and(|v| {
+                !v.trim().is_empty() && v != crate::services::discord::replay_policy::incarnation()
+            })
+            || !nonce
+                .as_deref()
+                .is_some_and(|v| !v.is_empty() && Some(v) == projected_nonce)
+            || !state
+                .turn_nonce
+                .is_some_and(|v| !v.trim().is_empty() && Some(v) == turn)
+        {
+            return Err(WriteError::CasMiss);
+        }
+    }
     if !matches!(
         disposition.as_str(),
         "started_unclassified" | "startup_failed_no_effect" | "withheld"

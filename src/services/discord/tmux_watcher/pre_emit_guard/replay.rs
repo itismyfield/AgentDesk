@@ -2,15 +2,12 @@
 
 use super::PreEmitGuardContext;
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::discord::{inflight, router, turn_bridge};
+use crate::services::discord::{inflight, turn_bridge};
 
 pub(super) async fn blocked(context: &PreEmitGuardContext<'_>) -> bool {
-    if router::replay_producers_dormant(&context.channel_id.get().to_string()) {
-        return false;
-    }
     let loaded = inflight::load_inflight_state(context.watcher_provider, context.channel_id.get());
     let Some(state) = context.captured_turn.or(loaded.as_ref()) else {
-        return true;
+        return false;
     };
     if matches!(
         state.runtime_kind,
@@ -21,11 +18,12 @@ pub(super) async fn blocked(context: &PreEmitGuardContext<'_>) -> bool {
     if state.replay_rerun_blocked() {
         return true;
     }
-    turn_bridge::recovery_text::replay::blocked(
+    turn_bridge::recovery_text::replay::lookup(
         context.shared,
         context.watcher_provider,
         state.channel_id,
         state.user_msg_id,
     )
     .await
+    .unwrap_or(true)
 }

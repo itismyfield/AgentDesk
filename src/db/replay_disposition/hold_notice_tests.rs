@@ -589,17 +589,17 @@ async fn recovery_hold_notice_serializes_with_the_live_hold_writer_pg() {
             attempt.receipt_id(),
             "claude",
             "123456789",
-            "incarnation-current",
+            None,
             Some(&body),
             ROUTING
         ),
         write::withhold_and_notify(&pool, &attempt, "activity", &body, ROUTING),
     );
-    let notice = recovered.unwrap();
-    match live {
-        Ok(live) => assert_eq!(notice, live),
+    let notice = live.unwrap();
+    match recovered {
+        Ok(recovered) => assert_eq!(notice, recovered),
         Err(write::WriteError::CasMiss) => {}
-        Err(error) => panic!("unexpected live writer failure: {error}"),
+        Err(error) => panic!("unexpected recovery failure: {error}"),
     }
     assert_eq!(
         read(&pool, attempt.receipt_id()).await.unwrap(),
@@ -612,7 +612,7 @@ async fn recovery_hold_notice_serializes_with_the_live_hold_writer_pg() {
             attempt.receipt_id(),
             "codex",
             "123456789",
-            "incarnation-current",
+            None,
             None,
             ROUTING
         )
@@ -625,7 +625,7 @@ async fn recovery_hold_notice_serializes_with_the_live_hold_writer_pg() {
             attempt.receipt_id(),
             "claude",
             "999",
-            "incarnation-current",
+            None,
             None,
             ROUTING
         )
@@ -645,7 +645,7 @@ async fn recovery_hold_notice_serializes_with_the_live_hold_writer_pg() {
         attempt.receipt_id(),
         "claude",
         "123456789",
-        "incarnation-current",
+        None,
         None,
         ROUTING,
     )
@@ -660,6 +660,14 @@ async fn recovery_hold_notice_serializes_with_the_live_hold_writer_pg() {
 async fn recovery_enqueue_failure_keeps_original_tuple_and_delivery_custody_pg() {
     let (db, pool) = fixture().await;
     let attempt = start(&pool, "recovery-rollback").await;
+    write::withhold(
+        &pool,
+        &attempt,
+        "activity",
+        &serde_json::json!({"captured":"kept"}),
+    )
+    .await
+    .unwrap();
     let before = snapshot(&pool, attempt.receipt_id()).await;
     reject(&pool, "message_outbox").await;
     assert!(
@@ -668,7 +676,7 @@ async fn recovery_enqueue_failure_keeps_original_tuple_and_delivery_custody_pg()
             attempt.receipt_id(),
             "claude",
             "123456789",
-            "incarnation-current",
+            None,
             None,
             ROUTING
         )
@@ -688,7 +696,7 @@ async fn recovery_enqueue_failure_keeps_original_tuple_and_delivery_custody_pg()
             attempt.receipt_id(),
             "claude",
             "123456789",
-            "incarnation-current",
+            None,
             None,
             ROUTING
         )
@@ -710,7 +718,7 @@ async fn p4_recovery_cannot_withhold_the_current_live_owner_pg() {
         attempt.receipt_id(),
         "claude",
         "123456789",
-        "incarnation-a",
+        None,
         None,
         ROUTING,
     )

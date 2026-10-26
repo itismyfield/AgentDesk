@@ -25,6 +25,8 @@ src/
 │   │   ├── runtime_config.rs
 │   │   └── transport.rs
 │   ├── dcserver/
+│   │   ├── replay_recovery.rs
+│   │   ├── replay_recovery_tests.rs
 │   │   ├── startup.rs
 │   │   └── startup_audit_tests.rs
 │   ├── direct/
@@ -1709,12 +1711,15 @@ src/
 │   │   │   │   ├── seal.rs
 │   │   │   │   ├── stderr.rs
 │   │   │   │   └── tap.rs
+│   │   │   ├── activation.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── live.rs
 │   │   │   ├── live_tests.rs
 │   │   │   ├── permit.rs
 │   │   │   ├── permit_tests.rs
-│   │   │   └── policy_tests.rs
+│   │   │   ├── policy_tests.rs
+│   │   │   ├── recovery.rs
+│   │   │   └── recovery_tests.rs
 │   │   ├── restart_report/
 │   │   │   ├── model/
 │   │   │   │   ├── entry_tests.rs
