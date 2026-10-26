@@ -2667,6 +2667,7 @@ src/
 │   │   │   │   │   ├── routine_owner.rs
 │   │   │   │   │   ├── routine_owner_tests.rs
 │   │   │   │   │   ├── routine_registered_receipt_tests.rs
+│   │   │   │   │   ├── session_hosts_reload_tests.rs
 │   │   │   │   │   ├── stale_binding_tests.rs
 │   │   │   │   │   ├── superseded_measurement_tests.rs
 │   │   │   │   │   ├── unit_tests.rs

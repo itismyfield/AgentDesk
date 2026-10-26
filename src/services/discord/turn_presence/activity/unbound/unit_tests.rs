@@ -578,6 +578,8 @@ fn scope(
     marker: HostKindMarker,
     row: &Result<Option<InflightTurnState>, String>,
 ) -> Scope {
+    // Hosting is read from the boot section, so boot with this config's.
+    let _hosts = crate::config::session_hosts::force_config_for_test(config);
     host_scope(HostReads {
         channel: owner.channel_id.parse().unwrap(),
         provider: &ProviderKind::Claude,

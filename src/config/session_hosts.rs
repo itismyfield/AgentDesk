@@ -427,6 +427,16 @@ pub(crate) fn force_for_test(
     )
 }
 
+/// Boots this thread with the section `config` validates to, until dropped.
+#[cfg(test)]
+pub(crate) fn force_config_for_test(config: &Config) -> ForcedSessionHosts {
+    let boot = BootSessionHosts::from_config(config).expect("valid session_hosts");
+    ForcedSessionHosts(
+        FORCED.with(|forced| forced.replace(Some(boot))),
+        FORCED_MIGRATION.with(|forced| forced.take()),
+    )
+}
+
 /// Fixes `channels` as the boot section of this whole process; only an isolated child may call it.
 #[cfg(test)]
 pub(crate) fn install_for_test(local_node: Option<&str>, channels: &[(u64, &str)]) {
