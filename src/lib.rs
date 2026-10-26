@@ -1,4 +1,5 @@
 #![recursion_limit = "256"]
+#![deny(clippy::drop_non_drop)]
 // Non-dead-code clippy debt predates the bin/lib split. Keep the existing
 // style/complexity debt explicit here so this change can remove the crate-wide
 // dead_code blanket without rewriting unrelated modules.

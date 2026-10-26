@@ -130,9 +130,9 @@
 | `POST` | `/api/github/issues/create` | `github::create_issue` | `src/server/routes/github.rs:300` | `src/server/routes/domains/integrations.rs:74` |
 | `GET` | `/api/github/pr-summary` | `pr_summary::get_pr_summary` | `src/server/routes/pr_summary.rs:88` | `src/server/routes/domains/integrations.rs:80` |
 | `POST` | `/api/github/pr-summary/invalidate` | `pr_summary::invalidate_pr_summary` | `src/server/routes/pr_summary.rs:131` | `src/server/routes/domains/integrations.rs:81` |
-| `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:787` | `src/server/routes/domains/integrations.rs:75` |
-| `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:820` | `src/server/routes/domains/integrations.rs:75` |
-| `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:864` | `src/server/routes/domains/integrations.rs:79` |
+| `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:783` | `src/server/routes/domains/integrations.rs:75` |
+| `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:816` | `src/server/routes/domains/integrations.rs:75` |
+| `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:860` | `src/server/routes/domains/integrations.rs:79` |
 | `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:368` | `src/server/routes/domains/access.rs:15` |
 | `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:373` | `src/server/routes/domains/runtime.rs:21` |
 | `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:37` | `src/server/routes/domains/ops.rs:267` |

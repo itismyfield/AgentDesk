@@ -671,7 +671,7 @@ mod tests {
     // `repair_cooldown_and_single_flight_gate` raced a peer's
     // `reset_drift_state_for_tests`). Tests that only use a LOCAL `DriftState`
     // or the IO-free `evaluate_drift_repair` core do not need it.
-    static DRIFT_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static DRIFT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[cfg(unix)]
     fn inputs() -> RepairInputs {
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn drift_warn_sessions_are_independent() {
-        let _serial = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = DRIFT_TEST_LOCK.blocking_lock();
         reset_drift_state_for_tests();
         // Two distinct sessions each get their own immediate first emit.
         assert!(should_emit_drift_warn("tmux-a").emit);
@@ -875,7 +875,7 @@ mod tests {
 
     #[test]
     fn confirmed_dead_orphan_drains_pending_emissions_once() {
-        let _serial = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = DRIFT_TEST_LOCK.blocking_lock();
         reset_drift_state_for_tests();
         let tmux = "AgentDesk-codex-confirmed-dead-orphan";
 
@@ -896,7 +896,7 @@ mod tests {
 
     #[test]
     fn ttl_expiry_accounts_pending_emissions_before_removal() {
-        let _serial = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = DRIFT_TEST_LOCK.blocking_lock();
         reset_drift_state_for_tests();
         let tmux = "AgentDesk-claude-expired-pending";
         let channel_id = 4_794_024;
@@ -933,7 +933,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn repair_cooldown_and_single_flight_gate() {
-        let _serial = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = DRIFT_TEST_LOCK.blocking_lock();
         reset_drift_state_for_tests();
         let start = Instant::now();
 
@@ -976,7 +976,7 @@ mod tests {
         use crate::services::discord::host_defer_gate::tests::{Case, ScriptedTmux};
         use crate::services::discord::host_teardown_gate::test_support::{channel_key, shared_on};
         let _root = crate::config::TestRuntimeRootGuard::new();
-        let _drift = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _drift = DRIFT_TEST_LOCK.lock().await;
         let tmux = ScriptedTmux::install();
         let (db, pool) = crate::services::discord::host_defer_gate::tests::postgres().await;
         let shared = shared_on(&pool).await;
