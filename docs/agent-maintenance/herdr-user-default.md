@@ -30,7 +30,7 @@ config는 socket peer의 실제 HOME/XDG/config 환경과 실행 파일 identity
 
 ## 동의와 진단
 
-실행 사용자의 config에서 restore resume를 false로 만드는 동의는 owner만 결정한다. 아니오·만료·오류에서도 원 입력과 업로드는 기존 custody에 남는다. `!herdr consent retry`는 새 질문 또는 미완료 복구를 요청한다. 카드 없이 보류된 입력에는 원 메시지에 안내가 한 번 붙는다. 안내는 그 요청이 관측한 `reason`/`action`과 안정 오류 코드(예: `consent_store_unavailable`)만 담는다. 경로가 든 상세는 실행 노드 로컬 로그에서 같은 코드로 찾는다. 중복 클릭·release는 동일 내구 키로 억제한다. worker 기록 전 오류는 같은 exact row의 기존 Pending 경로로만 돌아가며, 기록을 시도한 뒤의 오류는 Spawned로 보존하고 원 메시지에 row id를 알린다.
+실행 사용자의 config에서 restore resume를 false로 만드는 동의는 owner만 결정한다. 아니오·만료·오류에서도 원 입력과 업로드는 기존 custody에 남는다. `!herdr consent retry`는 새 질문 또는 미완료 복구를 요청한다. 카드 없이 보류된 입력에는 원 메시지에 원인별로 안내가 한 번 붙는다(프로세스 재시작을 넘는 중복 억제는 보장하지 않는다). 안내는 그 요청이 관측한 `reason`/`action`과 안정 오류 코드(예: `consent_store_unavailable`)만 담는다. 경로가 든 상세는 실행 노드 로컬 로그에서 같은 코드로 찾는다. 중복 클릭·release는 동일 내구 키로 억제한다. worker 기록 전 오류는 같은 exact row의 기존 Pending 경로로만 돌아가며, 기록을 시도한 뒤의 오류는 Spawned로 보존하고 원 메시지에 row id를 알린다.
 
 `agentdesk doctor --json`과 `/api/health/detail`의 `herdr`를 확인한다. endpoint별 `next_restart_ready`, `startup_proof`, `reason`, `action`, 제한된 checker stdout/stderr, candidate/applied mapping과 migration 진단을 구분한다. health는 마지막 관측을 읽기만 하며 현재 파일을 재검증하거나 create 권한을 주지 않는다. 마지막 fence가 실제 권한을 다시 확인한다.
 
