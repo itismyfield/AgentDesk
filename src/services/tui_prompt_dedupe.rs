@@ -397,6 +397,9 @@ mod test_clock {
 
     // The shared state and Tokio workers must observe the same test clock.
     static OFFSET: Mutex<Duration> = Mutex::new(Duration::ZERO);
+    // Mimics a Windows host booted more recently than the instant being dated.
+    static BEFORE_BOOT_UNDATABLE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
 
     fn offset() -> std::sync::MutexGuard<'static, Duration> {
         OFFSET.lock().unwrap_or_else(|poison| poison.into_inner())
@@ -412,6 +415,12 @@ mod test_clock {
 
         pub(crate) fn reset() {
             *offset() = Duration::ZERO;
+            BEFORE_BOOT_UNDATABLE.store(false, Ordering::SeqCst);
+        }
+
+        /// Makes every `checked_sub` fail until the next `reset`.
+        pub(crate) fn refuse_dates_before_boot() {
+            BEFORE_BOOT_UNDATABLE.store(true, Ordering::SeqCst);
         }
 
         /// Moves the clock forward without restamping anything, so recorded entries age.
@@ -428,6 +437,9 @@ mod test_clock {
         }
 
         pub(crate) fn checked_sub(self, by: Duration) -> Option<Self> {
+            if BEFORE_BOOT_UNDATABLE.load(Ordering::SeqCst) {
+                return None;
+            }
             self.0.checked_sub(by).map(Self)
         }
     }
