@@ -8,10 +8,8 @@
 // occurrences carry narrow item/module allows so newly introduced debt remains
 // visible to Clippy.
 //
-// `await_holding_lock` is intentionally NOT suppressed here (#3034): production
-// lock-across-await races must surface in clippy. The only legitimate holders
-// are test-serialization guards (process-global env/metrics/PG-setup Mutexes),
-// each carrying a narrow `#[allow(clippy::await_holding_lock)]` + `// SAFETY:`.
+// Test environment wrappers intentionally hold their lock across await to serialize per-test runtimes.
+// Clippy cannot see the MutexGuard stored inside those wrappers.
 #![allow(
     clippy::absurd_extreme_comparisons,
     clippy::assertions_on_constants,

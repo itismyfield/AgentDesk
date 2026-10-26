@@ -17,13 +17,22 @@ repository is already clippy-clean.
 
 ## Current Staging
 
-`Cargo.toml` configures eight Clippy denies: `dbg_macro`, `todo`,
-`unimplemented`, `await_holding_lock`, `large_enum_variant`, `result_large_err`,
+`Cargo.toml` configures nine Clippy denies: `dbg_macro`, `todo`,
+`unimplemented`, `await_holding_lock`, `drop_non_drop`, `large_enum_variant`, `result_large_err`,
 `too_many_arguments` and `type_complexity`. The authoritative staged command is
 `cargo clippy --workspace --all-targets --all-features -- -W clippy::all`.
-The trailing group level overrides the five group-member denies to warnings;
-only `dbg_macro`, `todo` and `unimplemented` remain denied. Configured deny
-entries must not be mistaken for effective hard gates under this argv.
+The trailing group level overrides the Cargo levels of six group-member denies;
+five remain warnings.
+
+Effective denies for lib/bin under the staged command: `dbg_macro`, `todo`,
+`unimplemented` and `drop_non_drop`.
+
+The first three are outside `clippy::all`. For `drop_non_drop`, `src/lib.rs` and
+`src/main.rs` redeclare `#![deny(clippy::drop_non_drop)]` as a crate attribute,
+which keeps it denied under this argv. These attributes cover the lib/bin
+crates, including their unit tests; separate integration-test crates are not
+covered by those attributes. Configured Cargo deny entries alone must not be
+mistaken for effective hard gates under this argv.
 
 Main and PR lint run this same invocation once, adding only Cargo's JSON output
 format. `check_clippy_warning_count.py` counts compiler warning diagnostics
