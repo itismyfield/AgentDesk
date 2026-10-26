@@ -4,9 +4,9 @@ A false ``comment_only=true`` skips the Rust tests, Windows and lint lanes for
 real code, so the gate cases below pin the refusals. A false
 ``rust_tests_skip=true`` skips the Rust tests that read a changed file through
 ``include_str!``, so the include cases pin what that scan resolves. The workflow
-cases evaluate ci-pr.yml's own expressions and the real required-context judge
-over the judge job's needs, so a judge gate that reads a different output than
-the job it expects turns a skipped lane into a red required context here.
+cases evaluate ci-pr.yml's own expressions, the judge job's own `if` and the real
+`CI required` judge over its needs, so a judge gate that reads a different output
+than the job it expects turns a skipped lane into a red sub-verdict here.
 """
 
 from __future__ import annotations
@@ -690,15 +690,20 @@ class WorkflowSimulation:
         return self.results[parts[1]]
 
     def verdicts(self) -> dict[str, tuple[bool, list[str]]]:
-        """The judge's verdict per matrix context over `toJSON(needs)`, or {} when the judge job is not run."""
+        """The judge's sub-verdict per context over `toJSON(needs)`, or {} when the judge job is not run."""
         judge = self.jobs[JUDGE]
         if not self.job_runs(judge):
             return {}
         needs = {name: {"result": self.results[name], "outputs": self.changes if name == "changes" else {}}
                  for name in judge["needs"]}
-        # The publisher judges the fork-branch names with the same function, so one set covers both branches.
-        _same_repo, contexts = nextest_required.matrix_branches(judge["strategy"]["matrix"]["context"])
-        return {context: nextest_required.context_verdict(context, needs) for context in contexts}
+        _ok, rows = nextest_required.gate_verdict(needs, "success")
+        return {name: (ok, lines) for name, ok, lines in rows}
+
+    def gate(self) -> str:
+        """The `CI required` conclusion branch protection reads; a skipped required check passes."""
+        if not self.job_runs(self.jobs[JUDGE]):
+            return "skipped"
+        return "success" if all(ok for ok, _ in self.verdicts().values()) else "failure"
 
     def job_runs(self, job: dict) -> bool:
         """A job-level `if:`; one without a status function implies success(), as in Actions."""
@@ -873,21 +878,28 @@ class WorkflowWiringTests(unittest.TestCase):
         kept = WorkflowSimulation(HEAVY_RAW, "true", forced={"rust_tests": "skipped"}, rust_tests_skip="false")
         self.assertRed(kept, "Library test sweep (ubuntu-latest)", "Rust tests kept for an include reader passed while skipped")
 
-    def test_only_a_cancelled_run_stops_the_required_context_judge(self) -> None:
-        # A condition-skipped required job counts as passing, and a job timeout reads as `cancelled`.
-        needs = WorkflowSimulation(HEAVY_RAW, "false").jobs[JUDGE]["needs"]
-        self.assertEqual(sorted(set(needs) - {"changes"}), sorted(CONTEXTS_OF))
+    def test_every_need_failure_cancel_or_unexpected_skip_fails_ci_required(self) -> None:
+        # A job timeout reads as `cancelled`; only a skip its filter allows may pass.
+        judge = WorkflowSimulation(HEAVY_RAW, "false").jobs[JUDGE]
+        self.assertEqual(judge["name"], nextest_required.GATE)
+        self.assertEqual(sorted(set(judge["needs"]) - {"changes"}), sorted(CONTEXTS_OF))
+        self.assertEqual(WorkflowSimulation(HEAVY_RAW, "false").gate(), "success")
         for upstream in sorted(CONTEXTS_OF):
             for outcome in ("failure", "skipped", "cancelled"):
                 with self.subTest(upstream=upstream, outcome=outcome):
-                    verdicts = WorkflowSimulation(HEAVY_RAW, "false", forced={upstream: outcome}).verdicts()
-                    self.assertEqual(set(verdicts), set(REQUIRED_CONTEXTS), "a live run skipped a required context")
-                    # dashboard is not selected by HEAVY_RAW, so only its skip is expected.
+                    run = WorkflowSimulation(HEAVY_RAW, "false", forced={upstream: outcome})
+                    verdicts = run.verdicts()
+                    self.assertEqual(set(verdicts), set(REQUIRED_CONTEXTS), "a live run skipped a sub-verdict")
+                    # dashboard is not selected by HEAVY_RAW, so its skip is the allowed path-filter skip.
                     red = set() if (upstream, outcome) == ("dashboard", "skipped") else CONTEXTS_OF[upstream]
                     self.assertEqual({context for context, (ok, _) in verdicts.items() if not ok}, red)
-            with self.subTest(upstream=upstream, run="cancelled"):
-                cancelled = WorkflowSimulation(HEAVY_RAW, "false", forced={upstream: "cancelled"}, run_cancelled=True)
-                self.assertEqual(cancelled.verdicts(), {}, "a cancelled run still published a context")
+                    self.assertEqual(run.gate(), "failure" if red else "success")
+
+    def test_a_cancelled_run_still_runs_ci_required_and_fails_it(self) -> None:
+        for upstream in sorted(CONTEXTS_OF):
+            with self.subTest(upstream=upstream):
+                run = WorkflowSimulation(HEAVY_RAW, "false", forced={upstream: "cancelled"}, run_cancelled=True)
+                self.assertEqual(run.gate(), "failure")
 
     def test_comment_only_gate_requires_exactly_the_workflow_filters(self) -> None:
         jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]

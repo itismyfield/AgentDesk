@@ -195,33 +195,33 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
 - canonical_modules: `scripts/check-ci-runner-hardening.sh` parses `.github/workflows/ci-pr.yml`,
   pins the calculated execution surface of the `jobs.scripts`
   writer-protection/aggregate pair, the nextest jobs (`rust_build`,
-  `rust_tests`, `test_evidence`) and the `required_contexts` judge. The judge
-  matrix is one expression over the PR payload: a same-repository PR (author not
-  Dependabot) gets the single `Required contexts publisher`, which judges the
-  nine branch-protection names with `scripts/ci/nextest_required.py` over
-  `toJSON(needs)` and publishes them as check runs on the PR head; a fork or
-  Dependabot PR gets the nine names as native jobs. For `Script checks` and
-  `relay-authority-contract` the native pin step, or the publisher's pin step
-  whose outcome feeds those two verdicts, first compares the SHA-256 of the
-  judge and of the gate itself, then runs only the verified gate copy, so a
-  skipped or altered gate leaves those contexts red.
+  `rust_tests`, `test_evidence`) and the `required_contexts` judge. The judge is
+  one native job, `CI required`, the only branch-protection check. On every PR
+  event it runs under `if: ${{ always() }}`, so a failed or cancelled need fails
+  it instead of skipping it. Its judge step runs
+  `scripts/ci/nextest_required.py required-gate` over `toJSON(needs)`; each of
+  the nine contexts (`Lint`, `Script checks`, ...) is a sub-verdict printed with
+  its evidence in the log and step summary, and any failed sub-verdict or
+  unjudged need fails the job. The pin step first compares the SHA-256 of the
+  judge and of the gate itself, then runs only the verified gate copy; its
+  outcome feeds the `Script checks` and `relay-authority-contract` sub-verdicts,
+  so a skipped or altered gate fails the job.
 - fixed surfaces: the judge job's `name`, `needs`, job-level `if`, `runs-on`,
-  `permissions`, matrix expression (both branch lists), checkout provenance,
-  both pin steps, the judge step and the publish step are pinned by value and
-  by source bytes (pins normalised), so YAML scalar tags and styles such as
+  `permissions`, checkout provenance, the pin step and the judge step are
+  pinned by value and by source bytes (pins normalised), so YAML scalar tags and styles such as
   `!!str`, `no` or `010` stay in the comparison. Each extra shard job runs
   `./scripts/ci-script-checks.sh` exactly once with the `scripts` aggregate's
   effective execution and its own `SCRIPT_CHECK_SHARD`. Plain
   YAML-boolean-like job IDs fail closed, while quoted `"yes"` remains a valid
-  string job ID. No other job or workflow may render one of the nine names,
-  grant `checks: write` (or `write-all`), or name the `check-runs` API outside
-  `scripts/ci/nextest_required.py`.
+  string job ID. No other job or workflow may render `CI required`, no job may
+  grant `checks: write` (or `write-all`), and no CI file may name the
+  `check-runs` API.
   The wiring table below is the single statement of the recursive `needs`
   closure of the judge and of each member's `needs` and job-level `if`;
   `tests/test_fast_check_ci_wiring.py` requires it to equal `ci-pr.yml`
   exactly. Every member must exist and omit `continue-on-error`, and any edge
   that expands the closure is a review-triggering gate failure.
-  <!-- required-publisher-wiring -->
+  <!-- required-gate-wiring -->
   | job | needs | job-level `if` |
   |---|---|---|
   | `changes` | none | none |
@@ -231,14 +231,14 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
   | `lint` | `changes` | `needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'` |
   | `pg15_owner_proof` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}` |
   | `relay_authority_mutations` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}` |
-  | `required_contexts` | `changes`, `rust_build`, `rust_tests`, `test_evidence`, `lint`, `scripts`, `scripts_guards`, `scripts_contracts`, `dashboard`, `pg15_owner_proof`, `relay_authority_mutations`, `check_fast_cross_os`, `check_fast_cross_os_targets` | `${{ !cancelled() }}` |
+  | `required_contexts` | `changes`, `rust_build`, `rust_tests`, `test_evidence`, `lint`, `scripts`, `scripts_guards`, `scripts_contracts`, `dashboard`, `pg15_owner_proof`, `relay_authority_mutations`, `check_fast_cross_os`, `check_fast_cross_os_targets` | `${{ always() }}` |
   | `rust_build` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}` |
   | `rust_tests` | `changes`, `rust_build` | `${{ !cancelled() && needs.rust_build.result == 'success' }}` |
   | `scripts` | `changes` | `${{ !cancelled() }}` |
   | `scripts_contracts` | `changes` | none |
   | `scripts_guards` | `changes` | none |
   | `test_evidence` | `changes`, `rust_build`, `rust_tests` | `${{ !cancelled() && needs.rust_build.result == 'success' }}` |
-  <!-- /required-publisher-wiring -->
+  <!-- /required-gate-wiring -->
 
 - aggregate execution: the calculator records shell/working-directory
   candidates, environment scopes, `runs-on`, prior recognized file writes, and
@@ -247,16 +247,16 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
   observed indices separately from other execution-surface failures.
 - update procedure: an intentional edit of `scripts/ci/nextest_required.py`
   or of the gate makes the judge's `Script checks` and
-  `relay-authority-contract` contexts red until the matching `pin` line in
-  both `required_contexts` pin steps holds the new `shasum -a 256` digest. A gate edit that
+  `relay-authority-contract` sub-verdicts fail until the matching `pin` line in
+  the `required_contexts` pin step holds the new `shasum -a 256` digest. A gate edit that
   changes a pinned job also needs the in-gate semantic or source-range digest
   the failure message prints. Then rerun the gate and
   `python3 -m unittest tests.test_fast_check_ci_wiring`.
 - tests: `tests/test_fast_check_ci_wiring.py` mutation-tests the judge surface,
-  both matrix branches, the closure `if`s, the publisher uniqueness rule and
-  both digest backstops; `tests/test_nextest_required.py` drives the publisher
-  against a Checks API double; `tests/test_comment_only_ci_gate.py` replays the
-  judge over simulated runs.
+  the closure `if`s, the required-check uniqueness rule and both digest
+  backstops; `tests/test_nextest_required.py` drives `required-gate`;
+  `tests/test_comment_only_ci_gate.py` replays the job-level `if` and the judge
+  over simulated runs.
 - threat model — not covered: branch protection and hosted-runner policy;
   compromise of the runner, checkout action, or hashing tool; a coordinated
   edit of repository-local guards and their pins; or successful-but-different

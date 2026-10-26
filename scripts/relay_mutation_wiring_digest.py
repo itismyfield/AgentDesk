@@ -14,7 +14,7 @@ from pathlib import Path
 
 WORKFLOW = ".github/workflows/ci-pr.yml"
 MUTATION_JOB = "relay_authority_mutations"
-# The judge publishes relay-authority-contract from the mutation job result.
+# The judge's relay-authority-contract verdict reads the mutation job result.
 JUDGE_JOB = "required_contexts"
 # Workflow-level keys every job inherits; absent on both sides compares equal.
 TOP_LEVEL_KEYS = ("env", "defaults", "permissions", "concurrency")

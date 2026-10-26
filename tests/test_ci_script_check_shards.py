@@ -156,22 +156,26 @@ class ScriptChecksJudgeAggregation(unittest.TestCase):
     """Replay the workflow's judge step for Script checks against upstream shard results."""
 
     def run_judge(self, job: dict, results: dict[str, str]) -> str:
-        if job.get("if") != "${{ !cancelled() }}":
+        if job.get("if") != "${{ always() }}":
             raise AssertionError(f"unmodelled judge condition: {job.get('if')}")
-        outputs = {"rust_tests": "true", "rust_tests_skip": "false"}
+        outputs = dict.fromkeys(("rust_tests", "rust_or_policy", "relay_contract", "high_risk_recovery",
+                                 "dashboard", "cross_os_rust"), "true") | {"rust_tests_skip": "false"}
         needs = {name: {"result": results[name], "outputs": outputs if name == "changes" else {}} for name in job["needs"]}
-        step = next(step for step in job["steps"] if step.get("name") == "Judge required context")
+        step = next(step for step in job["steps"] if step.get("name") == "Judge required checks")
         env = {key: str(value) for key, value in step["env"].items()}
         self.assertEqual(env.pop("NEEDS_JSON"), "${{ toJSON(needs) }}")
-        command = step["run"].replace("${{ matrix.context }}", "Script checks")
+        self.assertEqual(env.pop("PINS_OUTCOME"), "${{ steps.pins.outcome }}")
+        command = step["run"]
         if "${{" in command or any("${{" in value for value in env.values()):
             raise AssertionError(f"unmodelled expression in judge step: {step}")
         done = subprocess.run(
             ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", command],
-            cwd=REPO_ROOT, env={**clean_env(), **env, "NEEDS_JSON": json.dumps(needs)},
+            cwd=REPO_ROOT, env={**clean_env(), **env, "NEEDS_JSON": json.dumps(needs), "PINS_OUTCOME": "success"},
             capture_output=True, text=True, timeout=60,
         )
-        return "success" if done.returncode == 0 else "failure"
+        passed = "Script checks: PASS" in done.stdout.splitlines()
+        self.assertTrue(passed or done.returncode != 0, done.stdout)
+        return "success" if passed else "failure"
 
     def test_required_context_passes_only_when_every_shard_succeeds(self) -> None:
         jobs = load_jobs()
@@ -179,7 +183,8 @@ class ScriptChecksJudgeAggregation(unittest.TestCase):
         sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
         import nextest_required
         sys.path.pop(0)
-        self.assertIn("Script checks", nextest_required.matrix_branches(job["strategy"]["matrix"]["context"])[1])
+        self.assertIn("Script checks", nextest_required.CONTEXTS)
+        self.assertEqual(job["name"], nextest_required.GATE)
         shard_jobs = sorted(workflow_shards(jobs))
         self.assertLessEqual(set(shard_jobs), set(job["needs"]))
         baseline = {name: "success" for name in job["needs"]}

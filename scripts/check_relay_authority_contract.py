@@ -84,20 +84,16 @@ def validate_workflow_contract(
         raise ManifestError("workflow verified Rust skip output must fail closed")
     judge = load_relay_authority_job(repo_root, JUDGE_JOB)
     needs = judge.get("needs") if isinstance(judge.get("needs"), list) else []
-    contexts = ((judge.get("strategy") or {}).get("matrix") or {}).get("context") if isinstance(judge.get("strategy"), dict) else None
     sys.path.insert(0, str(Path(__file__).resolve().parent / "ci"))
     import nextest_required as required
-    try:
-        same_repo, fork = required.matrix_branches(contexts)
-    except ValueError:
-        same_repo, fork = None, None
-    # Same-repository PRs: the publisher judges every context; fork and Dependabot PRs: one native job each.
+    # One native job judges every context, the relay one included, and runs even after a failed need.
     if (
-        judge.get("if") != "${{ !cancelled() }}"
+        judge.get("if") != "${{ always() }}"
         or "continue-on-error" in judge
+        or "strategy" in judge
+        or judge.get("name") != required.GATE
         or not set(JUDGE_NEEDS) <= set(needs)
-        or same_repo != [required.PUBLISHER]
-        or fork != list(required.CONTEXTS) or fork.count(RELAY_AUTHORITY_CONTEXT) != 1
+        or RELAY_AUTHORITY_CONTEXT not in required.CONTEXTS
     ):
         raise ManifestError(
             f"workflow jobs.{JUDGE_JOB} must always judge {RELAY_AUTHORITY_CONTEXT} over the Rust tests and mutations"

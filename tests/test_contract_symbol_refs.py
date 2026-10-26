@@ -561,14 +561,14 @@ class WiringTest(unittest.TestCase):
             "ci-pr still grants a branch-name CI escape hatch",
         )
 
-        # The required-context judge reads the forced lint run for Lint and Fast check.
+        # The CI required judge reads the forced lint run for Lint and Fast check.
         judge = yaml.safe_load(workflow)["jobs"]["required_contexts"]
         self.assertIn("lint", judge["needs"])
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "ci"))
         import nextest_required
         sys.path.pop(0)
-        _same_repo, contexts = nextest_required.matrix_branches(judge["strategy"]["matrix"]["context"])
-        self.assertLessEqual({"Lint", "Fast check (ubuntu-latest)"}, set(contexts))
+        self.assertEqual(judge["name"], nextest_required.GATE)
+        self.assertLessEqual({"Lint", "Fast check (ubuntu-latest)"}, set(nextest_required.CONTEXTS))
 
 
 class RelayContractPathFilterTest(unittest.TestCase):

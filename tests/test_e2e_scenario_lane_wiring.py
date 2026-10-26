@@ -69,12 +69,13 @@ class E2eScenarioLaneWiring(unittest.TestCase):
     def test_census_run_remains_required_by_the_always_judge(self) -> None:
         jobs = yaml.safe_load(self.workflow)["jobs"]
         judge = jobs["required_contexts"]
-        self.assertEqual(judge["if"], "${{ !cancelled() }}")
+        self.assertEqual(judge["if"], "${{ always() }}")
         self.assertLessEqual({"rust_build", "rust_tests", "test_evidence"}, set(judge["needs"]))
         sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
         import nextest_required
         sys.path.pop(0)
-        self.assertIn("relay-authority-contract", nextest_required.matrix_branches(judge["strategy"]["matrix"]["context"])[1])
+        self.assertEqual(judge["name"], nextest_required.GATE)
+        self.assertIn("relay-authority-contract", nextest_required.CONTEXTS)
 
     def test_commented_wiring_does_not_count(self) -> None:
         fixture = '# "$PYTHON" -m unittest scripts.e2e.tui_relay.test_fixtures'

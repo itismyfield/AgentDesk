@@ -9,7 +9,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from nextest_required import CONTEXTS
+from nextest_required import CONTEXTS, GATE
 from pr_head_current import pr_head_is_current
 
 
@@ -26,9 +26,9 @@ OTHER_FAILURE = re.compile(
     r"yaml\.(?:scanner|parser|composer|constructor)\.\w+Error:|"
     r"(?:^|[\s/])ld: cannot find "
 )
-# The judge's only step fails solely because a judged job failed. Match job display names
+# The judge step fails solely because a judged job failed. Match job display names
 # against their source, never against log prose; nextest worker logs never parse as known flaky.
-JUDGE_STEP = "Judge required context"
+JUDGE_STEP = "Judge required checks"
 JOB_NAMES = {
     "rust_build": r"Rust tests build and plan", "rust_tests": r"Rust tests \(worker \d+\)",
     "test_evidence": r"Rust tests evidence", "lint": r"Lint runner",
@@ -125,9 +125,22 @@ def judged_failure(context: str, errors: list[str], sources: list[dict]) -> bool
     return failed > 0
 
 
+def gate_failure(errors: list[str], sources: list[dict]) -> bool:
+    """The gate failed only through contexts whose every failed job is a classified source."""
+    if not errors or errors[-1] != "Process completed with exit code 1.":
+        return False
+    groups: dict[str, list[str]] = {}
+    for error in errors[:-1]:
+        context = next((name for name in CONTEXTS if error.startswith(f"{name}: ")), None)
+        if context is None:
+            return False
+        groups.setdefault(context, []).append(error)
+    return bool(groups) and all(judged_failure(name, [*lines, errors[-1]], sources) for name, lines in groups.items())
+
+
 def derived_mirror(job: dict, log: str, sources: list[dict], jobs: list[dict]) -> bool:
     failed_step = next(step for step in job["steps"] if step.get("conclusion") == "failure")
-    judged = job.get("name") in CONTEXTS and failed_step.get("name") == JUDGE_STEP
+    judged = job.get("name") == GATE and failed_step.get("name") == JUDGE_STEP
     contract = MIRRORS.get((job.get("name"), failed_step.get("name")))
     if not judged and not contract:
         return False
@@ -139,7 +152,7 @@ def derived_mirror(job: dict, log: str, sources: list[dict], jobs: list[dict]) -
     if any(OTHER_FAILURE.search(line) or line.startswith("::error") for line in lines):
         return False
     if judged:
-        return judged_failure(job["name"], errors, sources)
+        return gate_failure(errors, sources)
     filter_name, upstream, source_pattern = contract
     if not any(re.fullmatch(source_pattern, source.get("name", "")) for source in sources):
         return False
@@ -175,8 +188,7 @@ def classify_run(repo: str, run_id: str, attempt: int, known: set[str]) -> tuple
     if not failures or any(job.get("conclusion") not in {"failure", "success", "skipped"} for job in jobs):
         return False, "no-op:incomplete-jobs"
     sources, mirrors = [], []
-    # The same-repository publisher is not a mirror: its failure falls through to the unlisted-failure no-op.
-    mirror_jobs = {name for name, _ in MIRRORS} | set(CONTEXTS)
+    mirror_jobs = {name for name, _ in MIRRORS} | {GATE}
     for job in failures:
         steps = job.get("steps") or []
         if sum(step.get("conclusion") == "failure" for step in steps) != 1:

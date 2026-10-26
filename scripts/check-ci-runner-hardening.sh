@@ -11,7 +11,7 @@ error() {
 python3 scripts/ci/nested_libtest.py check || error "nested libtest declarations must pass validation"
 python3 scripts/ci/cargo_test_filters.py || error "main, nightly and Windows warm cargo test commands must not carry a name filter"
 
-readonly REQUIRED_CONTEXTS_JSON='["Lint", "Script checks", "Fast check (ubuntu-latest)", "High-risk recovery", "Dashboard (Node 22)", "Fast targeted tests (ubuntu-latest)", "relay-authority-contract", "Library test sweep (ubuntu-latest)", "Fast check cross OS required context (ubuntu-latest)"]'
+readonly REQUIRED_CHECKS_JSON='["CI required"]'
 readonly REQUIRED_CHECK_MIRROR_SHA256="57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 
 verify_required_check_mirror_hash() {
@@ -36,7 +36,7 @@ validate_pr_debug_envs() {
     return
   fi
 
-  if ! ruby - "$pr_workflow" "$REQUIRED_CONTEXTS_JSON" <<'RUBY'
+  if ! ruby - "$pr_workflow" <<'RUBY'
 require "yaml"
 require "json"
 require "digest"
@@ -234,7 +234,6 @@ def execution_contract(snapshot, expected)
 end
 
 path = ARGV.fetch(0)
-required_contexts = JSON.parse(ARGV.fetch(1))
 gate_sha256 = Digest::SHA256.file("scripts/check-ci-runner-hardening.sh").hexdigest
 begin
   document = YAML.load_file(path)
@@ -319,7 +318,7 @@ unless script_checks_job["needs"] == "changes"
   exit 1
 end
 
-# Every job the nine required contexts read, with the exact if that runs it; the judge
+# Every job the CI required judge reads, with the exact if that runs it; the judge
 # accepts a skip only when the changes outputs say the job was not expected.
 rust_tests_gate = "${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
 built_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
@@ -332,7 +331,7 @@ expected_closure_if = {
   "dashboard" => "needs.changes.outputs.dashboard == 'true'", "pg15_owner_proof" => rust_tests_gate,
   "relay_authority_mutations" => relay_gate,
   "check_fast_cross_os" => cross_os_gate, "check_fast_cross_os_targets" => cross_os_gate,
-  "required_contexts" => "${{ !cancelled() }}",
+  "required_contexts" => "${{ always() }}",
 }
 closure = []
 frontier = ["required_contexts"]
@@ -359,10 +358,6 @@ unless closure.sort == expected_closure_if.keys.sort
 end
 
 judge_sha256 = Digest::SHA256.file("scripts/ci/nextest_required.py").hexdigest
-# Same-repository PRs get the one publisher; fork and Dependabot PRs (read-only token) the nine native names.
-publisher = "Required contexts publisher"
-same_repo_pr = "github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'"
-context_matrix = "${{ fromJSON((#{same_repo_pr}) && '#{JSON.generate([publisher])}' || '#{JSON.generate(required_contexts)}') }}"
 pin_run = <<~SH
        pin() {
          actual="$(sha256sum "$1" | cut -d ' ' -f 1)"
@@ -377,27 +372,19 @@ pin_run = <<~SH
        python3 scripts/check_writer_gate_ci_wiring.py
      SH
 expected_required_job = {
-  "name" => "${{ matrix.context }}",
+  "name" => "CI required",
   "needs" => expected_closure_if.keys - ["required_contexts"],
-  "if" => "${{ !cancelled() }}",
+  "if" => "${{ always() }}",
   "runs-on" => "ubuntu-latest",
   "timeout-minutes" => 15,
-  "permissions" => {"checks" => "write", "contents" => "read"},
-  "strategy" => {"fail-fast" => false, "matrix" => {"context" => context_matrix}},
+  "permissions" => {"contents" => "read"},
   "steps" => [
     {"uses" => "actions/checkout@v4"},
-    {"name" => "Verify pinned judge and CI structure", "if" => "${{ matrix.context == 'Script checks' || matrix.context == 'relay-authority-contract' }}",
+    {"name" => "Verify pinned judge and CI structure", "id" => "pins", "continue-on-error" => true,
      "env" => {"BASH_ENV" => "/dev/null"}, "shell" => "bash", "run" => pin_run},
-    {"name" => "Judge required context", "if" => "${{ matrix.context != '#{publisher}' }}",
-     "env" => {"BASH_ENV" => "/dev/null", "NEEDS_JSON" => "${{ toJSON(needs) }}"},
-     "run" => "python3 scripts/ci/nextest_ci.py required-context \"${{ matrix.context }}\""},
-    {"name" => "Verify pinned judge and CI structure for the publisher", "id" => "pins",
-     "if" => "${{ matrix.context == '#{publisher}' }}", "continue-on-error" => true,
-     "env" => {"BASH_ENV" => "/dev/null"}, "shell" => "bash", "run" => pin_run},
-    {"name" => "Publish required contexts", "if" => "${{ matrix.context == '#{publisher}' }}",
-     "env" => {"BASH_ENV" => "/dev/null", "NEEDS_JSON" => "${{ toJSON(needs) }}", "PINS_OUTCOME" => "${{ steps.pins.outcome }}",
-               "HEAD_SHA" => "${{ github.event.pull_request.head.sha }}", "GH_TOKEN" => "${{ github.token }}"},
-     "run" => "python3 scripts/ci/nextest_ci.py publish-required-contexts"},
+    {"name" => "Judge required checks",
+     "env" => {"BASH_ENV" => "/dev/null", "NEEDS_JSON" => "${{ toJSON(needs) }}", "PINS_OUTCOME" => "${{ steps.pins.outcome }}"},
+     "run" => "python3 scripts/ci/nextest_ci.py required-gate"},
   ],
 }
 unless canonical_yaml(jobs["required_contexts"]) == canonical_yaml(expected_required_job)
@@ -407,7 +394,7 @@ end
 required_key_node = jobs_node.children.each_slice(2).find { |key_node, _| key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == "required_contexts" }&.first
 required_source = required_key_node && raw_job_source(path, required_key_node).gsub(/\b[0-9a-f]{64}\b/, "<sha256>")
 required_source_sha256 = required_source && Digest::SHA256.hexdigest(required_source)
-unless required_source_sha256 == "0403a98121c21c8c1f2310167bba9f8ee1510c5a4c4b893dc7bcfc3081f32f55"
+unless required_source_sha256 == "dc368dd623895b68351f29e8e0c46a21c2b718820cf45d25e74ab657423702a5"
   warn "#{path}: required_contexts source bytes changed (scalar tags/styles and exact step surface are pinned); found #{required_source_sha256 || '<missing>'}"
   exit 1
 end
@@ -1228,18 +1215,18 @@ validate_workflow_entries() {
   done < <(find .github/workflows -type l -print0)
 }
 
-validate_required_context_uniqueness() {
+validate_workflow_job_policy() {
   if ! command -v ruby >/dev/null 2>&1; then
-    error "ruby is required to validate required workflow contexts structurally"
+    error "ruby is required to validate workflow jobs structurally"
     return
   fi
 
   while IFS= read -r -d '' workflow; do
-    if ! ruby - "$workflow" "$pr_workflow" <<'RUBY'
+    if ! ruby - "$workflow" <<'RUBY'
 require "yaml"
 require "json"
 
-path, pr_path = ARGV
+path = ARGV.fetch(0)
 begin
   # Workflow aliases are intentionally unsupported. Rejecting them keeps every
   # audited job definition local and explicit instead of expanding YAML graphs.
@@ -1385,72 +1372,18 @@ unless ambiguous_plain_job_ids.empty?
   warn "#{path}: ambiguous YAML plain job keys must be quoted or renamed: #{rendered_ids}"
   exit 1
 end
-required_context = "Script checks"
-required_context_jobs = []
-unsafe_dynamic_name_jobs = []
-jobs.each do |job_id, job|
-  next unless job.is_a?(Hash)
-
-  name = job["name"]
-  required_context_jobs << job_id.to_s if name.to_s.strip == required_context
-  next unless name.is_a?(String) && name.include?("${{")
-
-  # Do not evaluate Actions expressions. Permit exactly one matrix substitution
-  # whose static prefix/suffix make the required context impossible to render.
-  expression_shape_valid = name.scan("${{").length == 1 && name.scan("}}").length == 1
-  matrix_name = if expression_shape_valid
-    /\A([^{}]*)\$\{\{\s*matrix\.[A-Za-z_][A-Za-z0-9_.-]*\s*\}\}([^{}]*)\z/.match(name)
-  end
-  can_render_required = if matrix_name
-    static_fragments = [matrix_name[1], matrix_name[2]]
-    static_fragments.any? { |fragment| fragment.include?(required_context) } ||
-      (required_context.start_with?(matrix_name[1]) && required_context.end_with?(matrix_name[2]))
-  else
-    true
-  end
-  unsafe_dynamic_name_jobs << job_id.to_s if can_render_required
-end
-if path == pr_path
-  scripts = jobs["scripts"]
-  judge = jobs["required_contexts"]
-  matrix = judge.is_a?(Hash) ? judge.dig("strategy", "matrix", "context") : nil
-  branches = matrix.is_a?(String) &&
-    /\A\$\{\{ fromJSON\(\([^()]+\) && '(\[[^']*\])' \|\| '(\[[^']*\])'\) \}\}\z/.match(matrix)
-  same_repo, fork = branches ? [JSON.parse(branches[1]), JSON.parse(branches[2])] : [[], []]
-  # Only the fork/Dependabot branch may render it; same-repository PRs publish it through the Checks API.
-  unless judge["name"] == "${{ matrix.context }}" && fork.include?(required_context) && !same_repo.include?(required_context)
-    warn "#{path}: required Script checks context must be a fork-branch matrix value of jobs.required_contexts"
-    exit 1
-  end
-  unless scripts.is_a?(Hash) && scripts["name"] != required_context
-    warn "#{path}: jobs.scripts must not publish the required Script checks context"
-    exit 1
-  end
-  if required_context_jobs.any?
-    warn "#{path}: required Script checks context must belong only to jobs.required_contexts"
-    exit 1
-  end
-  unsafe_dynamic_name_jobs.delete("required_contexts")
-elsif required_context_jobs.any?
-  warn "#{path}: must not publish required Script checks context (jobs: #{required_context_jobs.join(', ')})"
-  exit 1
-end
-if unsafe_dynamic_name_jobs.any?
-  warn "#{path}: dynamic job names must not be able to publish required Script checks context (jobs: #{unsafe_dynamic_name_jobs.join(', ')})"
-  exit 1
-end
 RUBY
     then
-      error "$workflow violates required Script checks context uniqueness"
+      error "$workflow violates hosted runner or job ID policy"
     fi
   done < <(workflow_files)
 }
 
-# The nine branch-protection names come only from the required_contexts judge in ci-pr.yml (its matrix
-# or its check runs); any other job, workflow or checks writer could publish a result the judge never saw.
-validate_required_context_publishers() {
+# The branch-protection check name comes only from the required_contexts judge in ci-pr.yml; any other
+# job, workflow or checks writer could publish a result the judge never saw.
+validate_required_check_publishers() {
   if ! command -v ruby >/dev/null 2>&1; then
-    error "ruby is required to validate required context publishers structurally"
+    error "ruby is required to validate required check publishers structurally"
     return
   fi
 
@@ -1459,15 +1392,15 @@ validate_required_context_publishers() {
     workflows+=("$workflow")
   done < <(workflow_files)
 
-  if ! ruby - "$pr_workflow" "$REQUIRED_CONTEXTS_JSON" "${workflows[@]}" <<'RUBY'
+  if ! ruby - "$pr_workflow" "$REQUIRED_CHECKS_JSON" "${workflows[@]}" <<'RUBY'
 require "yaml"
 require "json"
 
 pr_path, contexts_json, *workflow_paths = ARGV
 contexts = JSON.parse(contexts_json)
 
-# Mirrors the Script checks rule: one matrix substitution is allowed only when
-# its static prefix/suffix cannot render the required context.
+# One matrix substitution is allowed only when its static prefix/suffix cannot
+# render the required check name.
 def can_render_context?(name, context)
   return name.strip == context unless name.include?("${{")
 
@@ -1509,32 +1442,31 @@ workflow_paths.each do |path|
     expected = path == pr_path ? ["required_contexts"] : []
     next if publishers == expected
 
-    errors << "#{path}: required #{context} context must be published only by #{pr_path} jobs.required_contexts; publishers: #{publishers.inspect}"
+    errors << "#{path}: required #{context} check must be published only by #{pr_path} jobs.required_contexts; publishers: #{publishers.inspect}"
   end
-  # Check runs carry required names too, so only the judge may hold checks: write.
+  # A check run can carry the required name too, so no job may hold checks: write.
   scopes = {"<workflow>" => document.is_a?(Hash) ? document["permissions"] : nil}
   jobs.each { |job_id, job| scopes[job_id.to_s] = job["permissions"] if job.is_a?(Hash) }
   scopes.each do |scope, permissions|
-    writes_checks = permissions == "write-all" || (permissions.is_a?(Hash) && permissions["checks"] == "write")
-    next unless writes_checks && !(path == pr_path && scope == "required_contexts")
+    next unless permissions == "write-all" || (permissions.is_a?(Hash) && permissions["checks"] == "write")
 
-    errors << "#{path}: #{scope} must not grant checks: write; only #{pr_path} jobs.required_contexts publishes check runs"
+    errors << "#{path}: #{scope} must not grant checks: write; the required check is a native job"
   end
 end
 
 self_path = "scripts/check-ci-runner-hardening.sh"
 (Dir.glob(".github/**/*", File::FNM_DOTMATCH) + Dir.glob("scripts/**/*")).sort.each do |file|
-  next if !File.file?(file) || file.include?("/__pycache__/") || [self_path, "scripts/ci/nextest_required.py"].include?(file)
+  next if !File.file?(file) || file.include?("/__pycache__/") || file == self_path
   next unless File.binread(file).include?("check-runs")
 
-  errors << "#{file}: only scripts/ci/nextest_required.py may call the check-runs API"
+  errors << "#{file}: no CI file may call the check-runs API"
 end
 
 errors.each { |message| warn message }
 exit(errors.empty? ? 0 : 1)
 RUBY
   then
-    error "$pr_workflow must publish every required context only from the required_contexts judge"
+    error "$pr_workflow must publish the required check only from the required_contexts judge"
   fi
 }
 
@@ -1552,8 +1484,8 @@ while IFS= read -r -d '' workflow; do
   fi
 done < <(workflow_files)
 
-validate_required_context_uniqueness
-validate_required_context_publishers
+validate_workflow_job_policy
+validate_required_check_publishers
 
 # Superseded PR heads must release hosted runners immediately. Required
 # contexts remain fail-closed on the newest exact SHA; branch protection never

@@ -10,7 +10,7 @@
 
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
-| **Full tests** | `rust_build` → `rust_tests` 6 worker → `test_evidence` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `rust_build` → `rust_tests` 6 worker → `test_evidence`, 판정은 `required_contexts` (+ `lint` compile/fmt/clippy/policy) | 같은 N + `full_macos` + `full_windows` | Main·nightly는 push·dispatch·schedule마다 PR과 같은 세 job으로 모든 lib 시험을 nextest 한 번에 실행한다(N). hardening이 세 workflow의 세 job을 `needs`·`if`, PR의 base 비교 단계, main의 baseline 업로드만 빼고 같게 고정하고, nightly의 다른 job이 lib 시험을 돌리면 거절한다. PR은 `rust_tests`가 true일 때 N을 실행한다. 각 worker는 자기 PostgreSQL 서비스를 시작한다. Nightly macOS·Windows는 `scripts/ci/nextest-native.sh`로 같은 계획·preflight·실행 기록·감사를 worker 하나에서 거치며, `pg_test_classifier.py`의 non-PG 시험을 계획한다. |
+| **Full tests** | `rust_build` → `rust_tests` 6 worker → `test_evidence` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `rust_build` → `rust_tests` 6 worker → `test_evidence`, 판정은 `required_contexts`(`CI required`) (+ `lint` compile/fmt/clippy/policy) | 같은 N + `full_macos` + `full_windows` | Main·nightly는 push·dispatch·schedule마다 PR과 같은 세 job으로 모든 lib 시험을 nextest 한 번에 실행한다(N). hardening이 세 workflow의 세 job을 `needs`·`if`, PR의 base 비교 단계, main의 baseline 업로드만 빼고 같게 고정하고, nightly의 다른 job이 lib 시험을 돌리면 거절한다. PR은 `rust_tests`가 true일 때 N을 실행한다. 각 worker는 자기 PostgreSQL 서비스를 시작한다. Nightly macOS·Windows는 `scripts/ci/nextest-native.sh`로 같은 계획·preflight·실행 기록·감사를 worker 하나에서 거치며, `pg_test_classifier.py`의 non-PG 시험을 계획한다. |
 | **PostgreSQL tests** | 같은 N의 PG 시험 | 같은 N의 PG 시험 | 같은 N + `postgres_full`(e2e) | N에 PG 시험이 들어 있다. nightly `postgres_full`은 PostgreSQL이 필요한 e2e smoke만 경계 진단과 함께 돈다. PR은 이에 더해 `pg15_owner_proof`가 PostgreSQL 15를 따로 확인한다. |
 | **High-risk recovery** | 같은 N (조건 없음) | N (선택자는 `scripts/ci/targeted-test-selectors.txt`) | 같은 N | main/nightly는 무조건 실행 — #5232 R3 에서 `ci-main.yml`의 path filter를 제거했다. PR은 `rust_tests`와 `high_risk_recovery` 중 하나라도 켜지면 N을 요구한다. |
 
@@ -19,7 +19,7 @@
 **주석 전용 PR.** `ci-pr.yml`의 `changes` job은 `scripts/ci/comment_only_gate.py`로
 PR이 주석만 바꾼 `.rs`(+ 어떤 path filter도 고르지 않는 `*.md`)인지 판정한다. 참이면
 `high_risk_recovery`·`cross_os_rust`·`rust_tests` 출력을 `false`로 내보내
-nextest job·Windows 두 job이 skip되고, 같은 출력을 읽는 `required_contexts` 판정이 green을 게시한다. 단 base·head 트리의 `include!`·`include_str!`·
+nextest job·Windows 두 job이 skip되고, 같은 출력을 읽는 `CI required` 판정은 그 skip을 정상으로 보고 통과한다. 단 base·head 트리의 `include!`·`include_str!`·
 `include_bytes!` 호출이 바뀐 파일을 읽거나 인자를 해석할 수 없어 읽을 수도 있으면
 (`scripts/ci/rust_include_reads.py`) 시험이 그 주석을 보므로 `rust_tests`는 원래 값을 유지해
 nextest job이 돈다. `lint`·Script checks·relay authority·
@@ -174,23 +174,19 @@ lib 시험 identity는 `rust_build`의 nextest list와 소스 인벤토리 대�
 | PostgreSQL tests | 같은 `rust_tests` 실행 | PostgreSQL 환경에서 `cargo nextest run --lib --profile ci` |
 | High-risk recovery | 같은 `rust_tests` 실행 | `cargo nextest run --lib --profile ci high_risk_recovery::` |
 
-### 필수 context 9개의 발행
+### 필수 check `CI required`
 
-`required_contexts`의 matrix는 PR 이벤트 payload로 갈린다. 같은 저장소 PR(작성자가 Dependabot이 아닌)은
-`Required contexts publisher` job 하나가 9개 이름을 `nextest_required.py publish-required-contexts`로 판정하고
-PR head SHA에 check run으로 게시한다. 9개를 먼저 in_progress로 열고, FAIL을 PASS보다 먼저 닫으며, API 오류가
-나면 남은 것을 failure로 닫는다. 같은 이름·head에 더 늦게 시작했거나 시작 시각이 같은 다른 실행의 check run이
-보이면 그 context를 success로 올리지 않는다. fork·Dependabot PR은 토큰이 읽기 전용이라 지금처럼 이름마다 native
-job 하나가 판정한다.
-
-- **publisher만 실패했을 때**: worker 실패가 없으므로 `ci-pr-infra-retry.yml`은 `no-op:no-worker-failure`로 끝난다.
-  known-flaky 재시도도 publisher를 거울 job으로 보지 않아 `no-op:unlisted-failure`로 끝난다(지금 허용 목록은 비어 있다).
-  운영자가 그 실행의 **Re-run failed jobs**로 publisher를 다시 돌린다. 9개 context가 in_progress·failure로 남아 있는
-  동안 머지는 막힌다.
-- **새 SHA로 복구**: 같은 SHA에 publisher의 API check와 native check가 함께 남거나(publisher 도입·되돌리기 직후),
-  옛 실행의 success PATCH가 새 실행보다 늦게 도착했을 수 있으면, 같은 SHA의 Re-run 결과로 머지를 판단하지 않는다.
-  그 PR에 새 커밋(빈 커밋 가능: `git commit --allow-empty`)을 push해 SHA를 바꾸고, 새 실행의 9개 결과로 판단한다.
-  되돌리기 검증도 revert를 포함한 새 실행으로 한다. 옛 run의 Re-run은 원래 SHA와 workflow를 다시 쓴다.
+브랜치 보호의 필수 check는 `ci-pr.yml`의 `required_contexts` job 하나, 이름 `CI required`다.
+모든 PR 이벤트(fork·Dependabot 포함)에서 같은 native job이고, Checks API로 게시하지 않는다.
+- `if: ${{ always() }}`로 돈다. needs 가운데 하나가 failure·cancelled면 `CI required`가 실패한다.
+  `success()` 기본값이면 그 경우 job이 skip되고, 필수 check의 skip은 통과로 읽힌다.
+- 판정은 `nextest_required.py required-gate`가 `toJSON(needs)`로 한다. `Lint`·`Script checks` 등 9개 하위 판정을
+  로그와 step summary에 이름·결과·근거로 남기고, 하나라도 FAIL이면 job이 실패한다. 어느 하위 판정도 읽지 않는
+  needs job이 있어도 실패한다.
+- skip은 그 job을 고르는 `changes` 출력이 false일 때만 통과다(경로 필터 skip). 그 밖의 skip은 실패다.
+- `Script checks`·`relay-authority-contract` 하위 판정은 같은 job의 pin 단계(판정기·hardening sha 대조와 hardening
+  실행) 결과도 본다.
+- 실패한 `CI required`는 그 실행의 **Re-run failed jobs**로 다시 돈다. 실패한 needs job도 함께 다시 돈다.
 
 ## 2. Path Filter Policy
 
@@ -198,7 +194,7 @@ job 하나가 판정한다.
 
 - **Full tests** / **PostgreSQL tests** / **High-risk recovery** 는 main에서 `Rust tests build and plan`(`rust_build`)이 path filter 없이 push·dispatch마다 계획하고 `rust_tests`·`test_evidence`가 이어 실행한다. 이 job들은 `changes` 출력에 의존하지 않으며 `ci-main.yml`에는 `changes` job 자체가 없다. `rust_build`에는 `if:`가 없고 뒤 두 job은 `rust_build` 성공만 조건으로 둔다.
 - 커밋 경로가 gate를 닫지 않는다. 실패·취소·skip된 worker는 `test_evidence`와 run 결론에서 success로 바뀌지 않는다.
-- main/nightly job 이름은 PR 필수 context(`Lint`, `High-risk recovery`, `Dashboard (Node 22)`)와 겹치지 않는다. 워크플로 이름은 check 이름을 구분하지 않아 같은 SHA에 경쟁 게시가 생기므로, `check-ci-runner-hardening.sh`가 트리거와 무관하게 유효 이름(job ID·matrix 접미사 포함)으로 강제한다(#5083).
+- main/nightly job 이름은 PR 필수 check `CI required`와 겹치지 않는다. 워크플로 이름은 check 이름을 구분하지 않아 같은 SHA에 경쟁 게시가 생기므로, `check-ci-runner-hardening.sh`가 트리거와 무관하게 유효 이름(job ID·matrix 접미사 포함)으로 강제한다(#5083).
 
 ### Conditional (`high_risk_recovery` path filter — `ci-pr.yml` 전용)
 
@@ -249,10 +245,10 @@ job 하나가 판정한다.
 ### Script checks 샤드
 
 - PR CI는 `ci-script-checks.sh`의 각 검사를 `if run_check <shard> "<title>"; then … fi`로 `guards`·`contracts`·`cargo` 샤드 중 하나에 고정하고, 샤드마다 별도 잡(`scripts_guards`, `scripts_contracts`, `cargo`는 기존 `scripts`)이 `SCRIPT_CHECK_SHARD`로 자기 샤드만 실행한다. Rust toolchain·캐시는 `cargo` 샤드 잡에만 있다. 새 샤드 잡의 raw job 전체(checkout·setup·install·run, `timeout-minutes: 45`)는 `check-ci-runner-hardening.sh`가 고정한다.
-- 샤드가 없는 검사(`banner`만 연 검사)와 모르는 샤드 이름은 모든 샤드·목록 실행에서 실패한다. `run_check` 블록 밖 최상위 명령은 DEBUG trap이 실행 전에 막지만, 바로 앞 블록을 소유한 샤드에서는 그 블록 안으로 간주돼 실행된다. 다른 샤드와 목록 실행은 실패하므로 보장은 필수 `Script checks` 컨텍스트가 red가 되는 것이다. `SCRIPT_CHECK_LIST=1`은 `shard<TAB>title` 목록만 출력하고, `SCRIPT_CHECK_SHARD` 미설정 로컬 실행은 전 검사를 돈다.
-- 이 가드가 필수 `Script checks`를 red로 만드는 것은 배정 누락·미등록 banner·목록 밖 추가 명령이다. 등록된 검사 본문을 조건으로 건너뛰는 형태(`if run_check … && false; then`, 본문 안 `if false`)는 기계로 막지 않으며 리뷰 대상이다.
+- 샤드가 없는 검사(`banner`만 연 검사)와 모르는 샤드 이름은 모든 샤드·목록 실행에서 실패한다. `run_check` 블록 밖 최상위 명령은 DEBUG trap이 실행 전에 막지만, 바로 앞 블록을 소유한 샤드에서는 그 블록 안으로 간주돼 실행된다. 다른 샤드와 목록 실행은 실패하므로 보장은 `CI required`의 `Script checks` 하위 판정이 FAIL이 되는 것이다. `SCRIPT_CHECK_LIST=1`은 `shard<TAB>title` 목록만 출력하고, `SCRIPT_CHECK_SHARD` 미설정 로컬 실행은 전 검사를 돈다.
+- 이 가드가 `Script checks` 하위 판정(곧 `CI required`)을 FAIL로 만드는 것은 배정 누락·미등록 banner·목록 밖 추가 명령이다. 등록된 검사 본문을 조건으로 건너뛰는 형태(`if run_check … && false; then`, 본문 안 `if false`)는 기계로 막지 않으며 리뷰 대상이다.
 - main push CI(`ci-main.yml`)도 같은 세 샤드를 `Main script checks`(`scripts`, `cargo`)·`Main script checks (guards)`·`Main script checks (contracts)` 잡으로 나눠 병렬로 돈다. 세 잡은 main 전용 env(`GFP_EVENT_NAME`·`GFP_REPOSITORY`·`GFP_CANDIDATE_SHA`, `TEST_LANE_BASELINE_REF=HEAD`)를 똑같이 두고, Rust·업로드는 `cargo` 샤드 잡에만 있다. 배포 게이트는 run 전체 결론이므로 한 샤드라도 실패하면 그 SHA는 배포되지 않는다. `check-ci-runner-hardening.sh`가 잡 집합·env·업로드 위치를, `tests/test_ci_script_check_shards.py`가 샤드 합집합이 전 검사와 같음을 검사한다.
-- 필수 `Script checks` 컨텍스트는 샤드 잡마다 `required-check-mirror.sh`를 한 번씩 실행하므로 한 샤드라도 success가 아니면 실패한다. `tests/test_ci_script_check_shards.py`가 샤드 소유와 미러 집계를 검사한다.
+- `CI required`의 `Script checks` 하위 판정은 세 샤드 잡 결과를 모두 읽으므로 한 샤드라도 success가 아니면 실패한다. `tests/test_ci_script_check_shards.py`가 샤드 소유와 미러 집계를 검사한다.
 - 로컬에서 `python3` 이 3.10 이하이면 `PYTHON=/path/to/python3.11 ./scripts/ci-script-checks.sh` 로 같은 정책을 재현한다. 지원하지 않는 Python 은 check 본문 실행 전에 명확한 오류로 실패해야 한다.
 
 ## 3. High-risk recovery lane test axes

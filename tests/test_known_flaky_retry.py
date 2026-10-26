@@ -25,18 +25,20 @@ UNKNOWN = "suite::new_regression"
 HEAD_SHA = "a" * 40
 
 
-def judge_log(context, failed):
-    """The judge step's real output for `context` when the jobs in `failed` fail and the rest pass."""
-    jobs = [job for group, _ in nextest_required.CONTEXTS[context] for job in group]
+def judge_log(failed):
+    """The `CI required` judge step's real log when the jobs in `failed` fail and every other judged job passes."""
+    jobs = {job for groups in nextest_required.CONTEXTS.values() for group, _ in groups for job in group}
     outputs = {name: "true" for name in ("rust_tests", "rust_or_policy", "relay_contract", "high_risk_recovery",
                                          "dashboard", "rust_tests_skip", "cross_os_rust")}
     outputs["rust_tests_skip"] = "false"
     needs = {"changes": {"result": "success", "outputs": outputs},
              **{job: {"result": "failure" if job in failed else "success"} for job in jobs}}
-    ok, lines = nextest_required.context_verdict(context, needs)
-    assert not ok
-    return "".join(f"2026-10-22T08:57:43.9533985Z ##[error]{context}: {line}\n" for line in lines) + (
-        f"{context}: FAIL\n2026-10-22T08:57:43.9544388Z ##[error]Process completed with exit code 1.\n")
+    done = subprocess.run([sys.executable, str(SCRIPT.parent / "nextest_ci.py"), "required-gate", "--needs-json",
+                           json.dumps(needs), "--summary-out", ""], capture_output=True, text=True,
+                          env={**os.environ, "PINS_OUTCOME": "success"})
+    assert done.returncode == 1, done.stdout
+    lines = [line.replace("::error::", "2026-10-22T08:57:43.9533985Z ##[error]", 1) for line in done.stdout.splitlines()]
+    return "\n".join(lines) + "\n2026-10-22T08:57:43.9544388Z ##[error]Process completed with exit code 1.\n"
 
 
 def rust_log(*names):
@@ -102,11 +104,11 @@ sys.stdout.write((p / file).read_text())
 
     def mirrored_failure(self, **overrides):
         source = {**self.job(901), "name": "Script checks runner (guards)"}
-        judge = {**self.job(902), "name": "Script checks", "steps": [
-            dict(name="Judge required context", conclusion="failure"),
+        judge = {**self.job(902), "name": nextest_required.GATE, "steps": [
+            dict(name="Judge required checks", conclusion="failure"),
         ], **overrides}
         self.jobs(source, judge, {**self.job(903, "success"), "name": "Changed paths"})
-        (self.path / "902.log").write_text(judge_log("Script checks", {"scripts_guards"}))
+        (self.path / "902.log").write_text(judge_log({"scripts_guards"}))
 
     def run_retry(self, attempt=1, command=None, **extra):
         for name in ("calls.jsonl", "output", "summary"):
@@ -162,13 +164,13 @@ sys.stdout.write((p / file).read_text())
         self.assertIn("attempt-cap", out)
         self.assertEqual(calls, [])
 
-    def test_infra_retry_ignores_a_publisher_only_failure(self):
-        # A Checks API outage fails only the publisher; no worker failed, so an operator reruns it.
+    def test_infra_retry_ignores_a_judge_only_failure(self):
+        # A judge failure with no failed worker is no infra evidence; an operator reruns it.
         command = self.infra_command()
         self.jobs({**self.job(900, "success"), "name": "Rust tests (worker 0)"},
-                  {**self.job(901), "name": nextest_required.PUBLISHER,
-                   "steps": [dict(name="Publish required contexts", conclusion="failure")]})
-        (self.path / "901.log").write_text("::error::POST repos/o/r/check-runs: gh exited 1: HTTP 502: Server Error\n")
+                  {**self.job(901), "name": nextest_required.GATE,
+                   "steps": [dict(name="Judge required checks", conclusion="failure")]})
+        (self.path / "901.log").write_text("##[error]CI required: needs job extra is judged by no context\n")
         out, calls = self.run_retry(command=command)
         self.assertIn("decision=no-op:no-worker-failure", out)
         self.assertFalse(any(c[:2] == ["run", "rerun"] for c in calls), calls)
@@ -274,22 +276,19 @@ sys.stdout.write((p / file).read_text())
         self.assertEqual(sum(call[:2] == ["run", "rerun"] for call in calls), 1)
 
     def test_judge_links_each_failed_job_to_its_exact_source(self):
-        for context, failed, source in (("Lint", {"lint"}, "Lint runner"),
-                                        ("relay-authority-contract", {"relay_authority_mutations"},
-                                         "Relay authority mutations (2)")):
-            with self.subTest(context=context):
-                self.mirrored_failure(name=context)
+        # lint fails two contexts at once; each failed context must name a classified source.
+        for failed, source in (({"lint"}, "Lint runner"), ({"relay_authority_mutations"}, "Relay authority mutations (2)")):
+            with self.subTest(failed=failed):
+                self.mirrored_failure()
                 jobs = json.loads((self.path / "jobs.json").read_text())["jobs"]
                 jobs[0]["name"] = source
                 self.jobs(*jobs)
-                (self.path / "902.log").write_text(judge_log(context, failed))
+                (self.path / "902.log").write_text(judge_log(failed))
                 self.assertIn("rerun-requested:known-flaky", self.run_retry()[0])
 
-    def test_publisher_failure_is_never_a_known_flaky_mirror(self):
-        # Same-repository PRs judge every context in the publisher job; its failure is left to an operator rerun.
-        self.mirrored_failure(name=nextest_required.PUBLISHER, steps=[
-            dict(name="Publish required contexts", conclusion="failure"),
-        ])
+    def test_only_the_ci_required_job_is_a_judge_mirror(self):
+        # A job still named after one context is not the judge, so its failure is never derived.
+        self.mirrored_failure(name="Script checks")
         self.assertIn("no-op:unlisted-failure", self.assert_no_retry())
 
     def test_mirror_requires_its_own_classified_failed_source(self):
@@ -320,9 +319,12 @@ sys.stdout.write((p / file).read_text())
             original.replace("Script checks: rust_tests: success", "Lint: rust_tests: success"),
             original.replace("##[error]Script checks: test_evidence: success (expected to run: true)\n", ""),
             original + "##[error]content hash mismatch: expected trusted, found changed\n",
+            original.replace("2026-10-22T08:57:43.9544388Z ##[error]Process completed",
+                             "2026-10-22T08:57:43.9533985Z ##[error]CI required: needs job extra is judged by no context\n"
+                             "2026-10-22T08:57:43.9544388Z ##[error]Process completed"),
             original + "ERROR an independent check failed\n",
             original.replace("##[error]Script checks: scripts_guards", "Script checks: scripts_guards"),
-            judge_log("Script checks", {"scripts_guards", "rust_tests"}),
+            judge_log({"scripts_guards", "rust_tests"}),
             rust_log(KNOWN),
         ):
             with self.subTest(log=log):
@@ -358,10 +360,9 @@ class Parser(unittest.TestCase):
     def test_mirror_contracts_match_the_trusted_workflow(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/ci-pr.yml").read_text())["jobs"]
         judge = jobs["required_contexts"]
-        same_repo, fork = nextest_required.matrix_branches(judge["strategy"]["matrix"]["context"])
-        self.assertEqual((same_repo, fork), ([nextest_required.PUBLISHER], list(nextest_required.CONTEXTS)))
+        self.assertEqual(judge["name"], nextest_required.GATE)
         self.assertEqual([s["run"] for s in judge["steps"] if s.get("name") == retry.JUDGE_STEP],
-                         ['python3 scripts/ci/nextest_ci.py required-context "${{ matrix.context }}"'])
+                         ["python3 scripts/ci/nextest_ci.py required-gate"])
         judged = {job for groups in nextest_required.CONTEXTS.values() for group, _ in groups for job in group}
         self.assertEqual(judged, set(retry.JOB_NAMES))
         for job_id in judged:

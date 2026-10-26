@@ -6,7 +6,7 @@
   audit           per-worker artifacts -> verdict JSON and Markdown summary; any gap is red
   base-diff       compare a plan with the plan of a fixed comparison base SHA; every lost test needs a
                   matching scripts/ci/test-removal-justifications.txt row and every row a matching loss
-  required-context, comparison-base, classify-worker   see nextest_required.py
+  required-gate, comparison-base, classify-worker   see nextest_required.py
 
 Every input format carries a version and is rejected when it does not match; a missing or
 unreadable artifact is a failure, never an empty pass.

@@ -24,7 +24,8 @@ CI_RUNNER_HARDENING_SHA256 = re.search(
 NESTED_CHECKER_STUB = "import sys\nassert sys.argv[1:] == ['check'], 'nested checker must receive check'\n"
 
 MIRROR_IF = "${{ !cancelled() }}"
-MIRROR_IF_LINE = f"    if: {MIRROR_IF}\n"
+JUDGE_IF = "${{ always() }}"
+JUDGE_IF_LINE = f"    if: {JUDGE_IF}\n"
 RUST_REQUIRED_IF = "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
 _LINT_FILTER = (
     "needs.changes.outputs.rust_or_policy == 'true' || "
@@ -67,7 +68,6 @@ UNREACHABLE_RUST_FILES = (
 )
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 WARM_WORKFLOW = REPO_ROOT / ".github/workflows/ci-windows-cache-warm.yml"
-PUBLISHER_LIST = "'[\"Required contexts publisher\"]'"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
 
 
@@ -853,9 +853,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         judge_sha = hashlib.sha256((REPO_ROOT / "scripts/ci/nextest_required.py").read_bytes()).hexdigest()
         self.assertEqual(gate_sha, CI_RUNNER_HARDENING_SHA256)
         judge = jobs["required_contexts"]
-        self.assertEqual(judge["if"], MIRROR_IF)
+        self.assertEqual(judge["if"], JUDGE_IF)
         pin = next(step for step in judge["steps"] if step.get("name") == "Verify pinned judge and CI structure")
-        self.assertEqual(pin["if"], "${{ matrix.context == 'Script checks' || matrix.context == 'relay-authority-contract' }}")
+        self.assertEqual((pin.get("if"), pin["id"], pin["continue-on-error"]), (None, "pins", True))
         self.assertEqual((pin["shell"], pin["env"]), ("bash", {"BASH_ENV": "/dev/null"}))
         self.assertIn(f"pin scripts/ci/nextest_required.py {judge_sha}\n", pin["run"])
         self.assertIn(f"pin scripts/check-ci-runner-hardening.sh {gate_sha}\n", pin["run"])
@@ -1137,41 +1137,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     result.stderr,
                 )
 
-    def test_judge_matrix_branches_on_the_pull_request_payload_only(self) -> None:
-        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
-        import nextest_required
-        judge = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["required_contexts"]
-        matrix = judge["strategy"]["matrix"]["context"]
-        inner = re.fullmatch(r"\$\{\{ fromJSON\((.*)\) \}\}", matrix).group(1)
-        native = list(nextest_required.CONTEXTS)
-        events = {
-            "same-repository PR": ("itismyfield/AgentDesk", "itismyfield", [nextest_required.PUBLISHER]),
-            "fork PR": ("ydkimtrust-svg/AgentDesk", "ydkimtrust-svg", native),
-            "same-repository Dependabot PR": ("itismyfield/AgentDesk", "dependabot[bot]", native),
-            "deleted fork": (None, "someone", native),
-        }
-        steps = {step.get("name"): step.get("if") for step in judge["steps"]}
-        for label, (head_repo, author, expected) in events.items():
-            # Neither upstream results nor the rerunning actor may move a PR between branches.
-            for extra in ({}, {"needs.changes.result": "failure", "github.actor": "operator", "github.run_attempt": "2"}):
-                with self.subTest(event=label, extra=extra):
-                    context = {"github.event.pull_request.head.repo.full_name": head_repo,
-                               "github.repository": "itismyfield/AgentDesk",
-                               "github.event.pull_request.user.login": author, **extra}
-                    self.assertEqual(json.loads(eval_expression(inner, context)), expected)
-            for value in expected:
-                with self.subTest(event=label, context=value):
-                    runs = {name: eval_step_if(condition, {"matrix.context": value}) for name, condition in steps.items()}
-                    publisher = value == nextest_required.PUBLISHER
-                    self.assertEqual(runs["Publish required contexts"], publisher)
-                    self.assertEqual(runs["Verify pinned judge and CI structure for the publisher"], publisher)
-                    self.assertEqual(runs["Judge required context"], not publisher)
-                    self.assertEqual(runs["Verify pinned judge and CI structure"], value in nextest_required.PINNED_CONTEXTS)
-        self.assertNotIn(nextest_required.PUBLISHER, native)
-
     def test_required_judge_job_is_pinned_fail_closed(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
-        import nextest_required
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         judge = job_block(workflow, "required_contexts")
         closure_if = 'required needs closure job "required_contexts" must exist with its exact if'
@@ -1180,28 +1147,22 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "job deleted": ("", None),
             "changes dependency deleted": (judge.replace("      - changes\n", "", 1), None),
             "evidence dependency deleted": (judge.replace("      - test_evidence\n", "", 1), None),
-            "job if deleted": (judge.replace(MIRROR_IF_LINE, "", 1), closure_if),
-            "job if success": (judge.replace(MIRROR_IF_LINE, "    if: success()\n", 1), closure_if),
-            "job if event": (judge.replace(MIRROR_IF_LINE, "    if: ${{ github.event_name == 'push' }}\n", 1), closure_if),
+            "job if deleted": (judge.replace(JUDGE_IF_LINE, "", 1), closure_if),
+            "job if success": (judge.replace(JUDGE_IF_LINE, "    if: success()\n", 1), closure_if),
+            "job if not cancelled": (judge.replace(JUDGE_IF_LINE, "    if: ${{ !cancelled() }}\n", 1), closure_if),
+            "job if event": (judge.replace(JUDGE_IF_LINE, "    if: ${{ github.event_name == 'push' }}\n", 1), closure_if),
             "job continue-on-error injected": (judge.replace("    runs-on: ubuntu-latest\n", "    continue-on-error: true\n    runs-on: ubuntu-latest\n", 1), closure_if),
             "checkout provenance": (judge.replace("      - uses: actions/checkout@v4\n", "      - uses: actions/checkout@v4\n        with:\n          repository: attacker/green-judge\n", 1), None),
             "extra step": (judge.replace("      - uses: actions/checkout@v4\n", "      - uses: actions/checkout@v4\n      - run: printf 'exit 0\\n' > scripts/ci/nextest_required.py\n", 1), None),
-            "judge weakened": (judge.replace('        run: python3 scripts/ci/nextest_ci.py required-context "${{ matrix.context }}"\n', "        run: 'true'\n", 1), None),
-            "context dropped": (judge.replace('"Library test sweep (ubuntu-latest)",', "", 1), exact_judge),
-            "context added by include": (judge.replace("        context: ${{", "        include:\n          - context: Lint\n        context: ${{", 1), exact_judge),
-            "same-repo list renders Lint": (judge.replace(PUBLISHER_LIST, PUBLISHER_LIST[:-2] + ',"Lint"]\'', 1), exact_judge),
-            "same-repo list is the native nine": (judge.replace(PUBLISHER_LIST, "'" + json.dumps(list(nextest_required.CONTEXTS), separators=(",", ":")) + "'", 1), exact_judge),
-            "predicate reads needs": (judge.replace("(github.event.pull_request.head.repo.full_name", "(needs.changes.outputs.rust_tests == 'true' && github.event.pull_request.head.repo.full_name", 1), exact_judge),
-            "predicate reads actor": (judge.replace("github.event.pull_request.user.login", "github.actor", 1), exact_judge),
-            "native pin continue-on-error": (judge.replace("      - name: Verify pinned judge and CI structure\n", "      - name: Verify pinned judge and CI structure\n        continue-on-error: true\n", 1), exact_judge),
-            "publisher pin fails the job": (judge.replace("        continue-on-error: true\n", "", 1), exact_judge),
-            "publish step if deleted": (judge.replace("        if: ${{ matrix.context == 'Required contexts publisher' }}\n        env:\n", "        env:\n", 1), exact_judge),
-            "publish on the merge sha": (judge.replace("HEAD_SHA: ${{ github.event.pull_request.head.sha }}", "HEAD_SHA: ${{ github.sha }}", 1), exact_judge),
+            "judge weakened": (judge.replace("        run: python3 scripts/ci/nextest_ci.py required-gate\n", "        run: 'true'\n", 1), None),
+            "judge step skipped": (judge.replace("      - name: Judge required checks\n", "      - name: Judge required checks\n        if: false\n", 1), exact_judge),
+            "pin step skipped": (judge.replace("        id: pins\n", "        id: pins\n        if: false\n", 1), exact_judge),
+            "pin step fails the job": (judge.replace("        continue-on-error: true\n", "", 1), exact_judge),
             "pin outcome dropped": (judge.replace("          PINS_OUTCOME: ${{ steps.pins.outcome }}\n", "", 1), exact_judge),
-            "judge permissions write-all": (judge.replace("    permissions:\n      checks: write\n      contents: read\n", "    permissions: write-all\n", 1), exact_judge),
-            "job name fixed to Lint": (judge.replace("    name: ${{ matrix.context }}\n", "    name: Lint\n", 1), exact_judge),
-            "backstop scoped away": (judge.replace("matrix.context == 'Script checks' || ", "", 1), None),
-            "stale judge pin": (re.sub(r"(pin scripts/ci/nextest_required\.py )[0-9a-f]{64}", r"\g<1>" + "0" * 64, judge), "required_contexts must retain its exact judge, pins and needs"),
+            "judge permissions checks write": (judge.replace("    permissions:\n      contents: read\n", "    permissions:\n      checks: write\n      contents: read\n", 1), exact_judge),
+            "job name renamed": (judge.replace("    name: CI required\n", "    name: Lint\n", 1), exact_judge),
+            "job split by a matrix": (judge.replace("    timeout-minutes: 15\n", "    timeout-minutes: 15\n    strategy:\n      matrix:\n        part: [a, b]\n", 1), exact_judge),
+            "stale judge pin": (re.sub(r"(pin scripts/ci/nextest_required\.py )[0-9a-f]{64}", r"\g<1>" + "0" * 64, judge), exact_judge),
         }
         for field, value in {
             "defaults": "defaults:\n      run:\n        shell: bash -n {0}",
@@ -1273,7 +1234,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         rust_gate = "${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
         cross_os = "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'"
         expected_if = {
-            "changes": None, "required_contexts": MIRROR_IF, "scripts": MIRROR_IF, "scripts_guards": None, "scripts_contracts": None,
+            "changes": None, "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": None, "scripts_contracts": None,
             "rust_build": rust_gate, "pg15_owner_proof": rust_gate, "rust_tests": n_gate, "test_evidence": n_gate,
             "relay_authority_mutations": RUST_REQUIRED_IF,
             "lint": _LINT_FILTER, "dashboard": "needs.changes.outputs.dashboard == 'true'",
@@ -1304,11 +1265,11 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     result = self.run_hardening_fixture(workflow.replace(job, mutated_job, 1))
                     self.assertNotEqual(result.returncode, 0, result.stderr)
 
-    def test_change_surfaces_wiring_table_is_the_exact_publisher_closure(self) -> None:
+    def test_change_surfaces_wiring_table_is_the_exact_judge_closure(self) -> None:
         jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
         doc = (REPO_ROOT / "docs/agent-maintenance/change-surfaces.md").read_text(encoding="utf-8")
-        blocks = re.findall(r"<!-- required-publisher-wiring -->\n(.*?)\n *<!-- /required-publisher-wiring -->", doc, re.S)
-        self.assertEqual(len(blocks), 1, "change-surfaces.md must hold exactly one publisher wiring table")
+        blocks = re.findall(r"<!-- required-gate-wiring -->\n(.*?)\n *<!-- /required-gate-wiring -->", doc, re.S)
+        self.assertEqual(len(blocks), 1, "change-surfaces.md must hold exactly one judge wiring table")
         rows, frontier = {}, ["required_contexts"]
         while frontier:
             job_id = frontier.pop()
@@ -1329,7 +1290,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_duplicate_required_job_id_is_rejected_before_last_wins_resolution(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         judge = job_block(workflow, "required_contexts")
-        malicious_last = judge.replace("          - Lint\n", "", 1)
+        malicious_last = judge.replace("      - lint\n", "", 1)
         mutated = workflow.replace("  lint:\n", malicious_last + "  lint:\n", 1)
         self.assertNotEqual(mutated, workflow)
         result = self.run_hardening_fixture(mutated)
@@ -1383,37 +1344,40 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
         self.assertEqual(success.returncode, 0, success.stderr)
 
-    def test_required_contexts_are_published_only_by_the_judge(self) -> None:
+    def test_ci_required_is_published_only_by_the_judge(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         baseline = self.run_hardening_fixture(workflow)
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
         rogue = "  rogue:\n    name: {name}\n    runs-on: ubuntu-latest\n{extra}    steps:\n      - run: 'true'\n\n"
-        matrix = "    strategy:\n      matrix:\n        context: [x]\n"
+        matrix = "    strategy:\n      matrix:\n        part: [x]\n"
         main = MAIN_WORKFLOW.read_text(encoding="utf-8")
         cases = (
-            ("PR literal Lint", workflow.replace("  lint:\n", rogue.format(name="Lint", extra="") + "  lint:\n", 1), {}),
-            ("PR literal High-risk recovery", workflow.replace("  lint:\n", rogue.format(name="High-risk recovery", extra="") + "  lint:\n", 1), {}),
-            ("PR matrix expression", workflow.replace("  lint:\n", rogue.format(name="'${{ matrix.context }}'", extra=matrix) + "  lint:\n", 1), {}),
-            ("PR unnamed matrix suffix", workflow.replace("  lint:\n", rogue.format(name="Dashboard", extra=matrix).replace("    name: Dashboard\n", "") .replace("  rogue:", "  Dashboard:") + "  lint:\n", 1), {}),
-            ("main publishes Library test sweep", workflow, {"ci-main.yml": main.replace("\njobs:\n", "\njobs:\n" + rogue.format(name="Library test sweep (ubuntu-latest)", extra=""), 1)}),
-            ("other workflow publishes relay contract", workflow, {"ci-extra.yml": "name: extra\non: push\njobs:\n" + rogue.format(name="relay-authority-contract", extra="")}),
+            ("PR literal", workflow.replace("  lint:\n", rogue.format(name="CI required", extra="") + "  lint:\n", 1), {}),
+            ("PR padded literal", workflow.replace("  lint:\n", rogue.format(name="'CI required '", extra="") + "  lint:\n", 1), {}),
+            ("PR matrix expression", workflow.replace("  lint:\n", rogue.format(name="'${{ matrix.part }}'", extra=matrix) + "  lint:\n", 1), {}),
+            ("PR matrix suffix", workflow.replace("  lint:\n", rogue.format(name="CI required (${{ matrix.part }})", extra=matrix) + "  lint:\n", 1), {}),
+            ("main publishes it", workflow, {"ci-main.yml": main.replace("\njobs:\n", "\njobs:\n" + rogue.format(name="CI required", extra=""), 1)}),
+            ("other workflow publishes it", workflow, {"ci-extra.yml": "name: extra\non: push\njobs:\n" + rogue.format(name="CI required", extra="")}),
         )
         for label, pr, extra in cases:
             with self.subTest(case=label):
                 result = self.run_hardening_fixture(pr, extra_workflows=extra)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
-                self.assertIn("must publish every required context only from the required_contexts judge", result.stderr)
+                self.assertIn("must publish the required check only from the required_contexts judge", result.stderr)
 
-    def test_only_the_judge_may_write_check_runs(self) -> None:
+    def test_no_job_or_file_may_write_check_runs(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         lint = job_block(workflow, "lint")
+        judge = job_block(workflow, "required_contexts")
         gh_post = "gh api -X POST repos/o/r/check-runs -f name=Lint -f head_sha=x\n"
         cases = (
             ("PR lint job checks: write", workflow.replace(lint, lint.replace("    runs-on:", "    permissions:\n      checks: write\n    runs-on:", 1), 1), {}, {}, "lint must not grant checks: write"),
             ("PR top-level write-all", workflow.replace("\njobs:\n", "\npermissions: write-all\n\njobs:\n", 1), {}, {}, "<workflow> must not grant checks: write"),
             ("other workflow checks: write", workflow, {"ci-extra.yml": "name: extra\non: push\npermissions:\n  checks: write\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n"}, {}, "<workflow> must not grant checks: write"),
-            ("workflow step calls check-runs", workflow, {"ci-extra.yml": "name: extra\non: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: " + gh_post}, {}, "ci-extra.yml: only scripts/ci/nextest_required.py may call"),
-            ("another script calls check-runs", workflow, {}, {"scripts/ci/rogue_publish.sh": gh_post}, "rogue_publish.sh: only scripts/ci/nextest_required.py may call"),
+            ("PR judge checks: write", workflow.replace(judge, judge.replace("    permissions:\n      contents: read\n", "    permissions:\n      checks: write\n      contents: read\n", 1), 1), {}, {}, "required_contexts must not grant checks: write"),
+            ("workflow step calls check-runs", workflow, {"ci-extra.yml": "name: extra\non: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: " + gh_post}, {}, "ci-extra.yml: no CI file may call the check-runs API"),
+            ("another script calls check-runs", workflow, {}, {"scripts/ci/rogue_publish.sh": gh_post}, "rogue_publish.sh: no CI file may call the check-runs API"),
+            ("the judge script calls check-runs", workflow, {}, {"scripts/ci/nextest_required.py": "# gh api repos/o/r/check-runs\n"}, "nextest_required.py: no CI file may call the check-runs API"),
         )
         for label, pr, extra, files, reason in cases:
             with self.subTest(case=label):
@@ -1819,11 +1783,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn("pull_request:", pr_workflow)
         self.assertNotIn("workflow_dispatch:", pr_workflow)
         self.assertNotRegex(pr_workflow, r"(?m)^  push:")
-        judge = yaml.safe_load(pr_workflow)["jobs"]["required_contexts"]
         sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
         import nextest_required
-        self.assertEqual(nextest_required.matrix_branches(judge["strategy"]["matrix"]["context"])[1].count("Script checks"), 1)
-        self.assertNotRegex(pr_workflow, r"(?m)^    name: Script checks$")
+        self.assertIn("Script checks", nextest_required.CONTEXTS)
+        self.assertEqual(yaml.safe_load(pr_workflow)["jobs"]["required_contexts"]["name"], nextest_required.GATE)
         self.assertRegex(
             job_block(pr_workflow, "scripts"),
             r"(?m)^          TEST_LANE_BASELINE_REF: HEAD\^1$",
@@ -2186,13 +2149,13 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("triggered only by pull_request", result.stderr)
 
-    def test_hardening_rejects_yaml_manual_duplicate_script_context(self) -> None:
+    def test_hardening_rejects_yaml_manual_duplicate_required_check(self) -> None:
         duplicate = """\
-name: Duplicate required context
+name: Duplicate required check
 on: [push, workflow_dispatch]
 jobs:
   bypass:
-    name: "Script checks "
+    name: "CI required "
     runs-on: ubuntu-latest
     steps:
       - run: true
@@ -2202,7 +2165,7 @@ jobs:
             {"manual-bypass.yaml": duplicate},
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must not publish required Script checks context", result.stderr)
+        self.assertIn("must publish the required check only from the required_contexts judge", result.stderr)
         self.assertIn("manual-bypass.yaml", result.stderr)
 
     def test_hardening_accepts_clean_yaml_workflow(self) -> None:
@@ -2242,13 +2205,13 @@ jobs:
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_hardening_rejects_full_expression_script_context(self) -> None:
+    def test_hardening_rejects_full_expression_required_check(self) -> None:
         workflow = """\
 name: Dynamic bypass
 on: workflow_dispatch
 jobs:
   bypass:
-    name: ${{ 'Script checks' }}
+    name: ${{ 'CI required' }}
     runs-on: ubuntu-latest
     steps:
       - run: true
@@ -2258,16 +2221,16 @@ jobs:
             {"dynamic-bypass.yaml": workflow},
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("dynamic job names must not be able to publish", result.stderr)
+        self.assertIn("must publish the required check only from the required_contexts judge", result.stderr)
         self.assertIn("dynamic-bypass.yaml", result.stderr)
 
-    def test_hardening_rejects_split_expression_script_context(self) -> None:
+    def test_hardening_rejects_split_expression_required_check(self) -> None:
         workflow = """\
 name: Split dynamic bypass
 on: workflow_dispatch
 jobs:
   bypass:
-    name: Script check${{ 's' }}
+    name: CI require${{ 'd' }}
     runs-on: ubuntu-latest
     steps:
       - run: true
@@ -2277,16 +2240,16 @@ jobs:
             {"split-bypass.yml": workflow},
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("dynamic job names must not be able to publish", result.stderr)
+        self.assertIn("must publish the required check only from the required_contexts judge", result.stderr)
         self.assertIn("split-bypass.yml", result.stderr)
 
-    def test_hardening_rejects_matrix_name_with_required_static_context(self) -> None:
+    def test_hardening_rejects_matrix_name_with_required_static_check(self) -> None:
         workflow = """\
 name: Matrix suffix bypass
 on: workflow_dispatch
 jobs:
   bypass:
-    name: Script checks (${{ matrix.os }})
+    name: CI required (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -2299,14 +2262,14 @@ jobs:
             {"matrix-bypass.yml": workflow},
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("dynamic job names must not be able to publish", result.stderr)
+        self.assertIn("must publish the required check only from the required_contexts judge", result.stderr)
         self.assertIn("matrix-bypass.yml", result.stderr)
 
     def test_hardening_rejects_multiple_job_name_expressions(self) -> None:
         names = (
             "${{ matrix.a }}${{ matrix.b }}",
             "${{ matrix.a }} ${{ matrix.b }}",
-            "${{ 'Script' }} ${{ matrix.b }}",
+            "${{ 'CI' }} ${{ matrix.b }}",
             "${{ matrix.a }} ${{ github.event_name }}",
         )
         for index, name in enumerate(names):
@@ -2328,7 +2291,7 @@ jobs:
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(
-                    "dynamic job names must not be able to publish", result.stderr
+                    "must publish the required check only from the required_contexts judge", result.stderr
                 )
                 self.assertIn(filename, result.stderr)
 
@@ -2411,8 +2374,8 @@ jobs:
         judge = job_block(workflow, "required_contexts")
         mutations = job_block(workflow, "relay_authority_mutations")
         cases = (
-            ("plain no is not the false boolean", judge, "      fail-fast: false\n", "      fail-fast: no\n"),
-            ("quoted step name changes the pinned scalar style", judge, "      - name: Publish required contexts\n", '      - name: "Publish required contexts"\n'),
+            ("plain yes is not the true boolean", judge, "        continue-on-error: true\n", "        continue-on-error: yes\n"),
+            ("quoted step name changes the pinned scalar style", judge, "      - name: Judge required checks\n", '      - name: "Judge required checks"\n'),
             ("explicit str tag is not discarded", judge, "          BASH_ENV: /dev/null\n", "          BASH_ENV: !!str /dev/null\n"),
             ("judge timeout leading zero is not decimal 15", judge, "    timeout-minutes: 15\n", "    timeout-minutes: 015\n"),
             ("job timeout leading zero is not decimal 45", mutations, "    timeout-minutes: 45\n", "    timeout-minutes: 055\n"),

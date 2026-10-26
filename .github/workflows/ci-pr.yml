@@ -845,11 +845,10 @@ jobs:
           cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
-  # The nine branch-protection names; each is N AND its own checks, judged by nextest_required.py.
-  # Same-repository PRs judge all nine on one runner and publish them as check runs on the PR head;
-  # fork and Dependabot PRs get a read-only token, so they keep one native job per name.
+  # The one branch-protection check: every context nextest_required.py judges over these needs.
+  # always(): a failed or cancelled need fails it; under success() it would skip, and a skip passes.
   required_contexts:
-    name: ${{ matrix.context }}
+    name: CI required
     needs:
       - changes
       - rust_build
@@ -864,46 +863,16 @@ jobs:
       - relay_authority_mutations
       - check_fast_cross_os
       - check_fast_cross_os_targets
-    if: ${{ !cancelled() }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      checks: write
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        context: ${{ fromJSON((github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') && '["Required contexts publisher"]' || '["Lint","Script checks","Fast check (ubuntu-latest)","High-risk recovery","Dashboard (Node 22)","Fast targeted tests (ubuntu-latest)","relay-authority-contract","Library test sweep (ubuntu-latest)","Fast check cross OS required context (ubuntu-latest)"]') }}
     steps:
       - uses: actions/checkout@v4
-      # Script checks and relay-authority-contract also re-verify the CI structure from pinned gate bytes.
+      # Script checks and relay-authority-contract fold this outcome in, so every verdict still prints.
       - name: Verify pinned judge and CI structure
-        if: ${{ matrix.context == 'Script checks' || matrix.context == 'relay-authority-contract' }}
-        env:
-          BASH_ENV: /dev/null
-        shell: bash
-        run: |
-          pin() {
-            actual="$(sha256sum "$1" | cut -d ' ' -f 1)"
-            if [ "$actual" != "$2" ]; then
-              echo "::error file=$1::content hash mismatch: expected $2, found $actual; review it and update every pin together"
-              exit 1
-            fi
-          }
-          pin scripts/ci/nextest_required.py 36e32491dc011b63a86cbef66df79316dceb930eaead71b96293589030fc3f5d
-          pin scripts/check-ci-runner-hardening.sh a05efe038a695bdcbd2ea51414ce5873330011d1b85dfb2a1d72c2b3b9a1078a
-          scripts/check-ci-runner-hardening.sh
-          python3 scripts/check_writer_gate_ci_wiring.py
-      - name: Judge required context
-        if: ${{ matrix.context != 'Required contexts publisher' }}
-        env:
-          BASH_ENV: /dev/null
-          NEEDS_JSON: ${{ toJSON(needs) }}
-        run: python3 scripts/ci/nextest_ci.py required-context "${{ matrix.context }}"
-      # The publisher folds this outcome into those two verdicts instead of failing before it publishes.
-      - name: Verify pinned judge and CI structure for the publisher
         id: pins
-        if: ${{ matrix.context == 'Required contexts publisher' }}
         continue-on-error: true
         env:
           BASH_ENV: /dev/null
@@ -916,19 +885,16 @@ jobs:
               exit 1
             fi
           }
-          pin scripts/ci/nextest_required.py 36e32491dc011b63a86cbef66df79316dceb930eaead71b96293589030fc3f5d
-          pin scripts/check-ci-runner-hardening.sh a05efe038a695bdcbd2ea51414ce5873330011d1b85dfb2a1d72c2b3b9a1078a
+          pin scripts/ci/nextest_required.py e85dd6104fefd77f5deba1aca46c26df868c45c9b40d0c3fb32ee469b8587405
+          pin scripts/check-ci-runner-hardening.sh 06b4004a462baada234994fbf67a35bf54ef950aa46577cad5e50af0f6b2b3f4
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
-      - name: Publish required contexts
-        if: ${{ matrix.context == 'Required contexts publisher' }}
+      - name: Judge required checks
         env:
           BASH_ENV: /dev/null
           NEEDS_JSON: ${{ toJSON(needs) }}
           PINS_OUTCOME: ${{ steps.pins.outcome }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci/nextest_ci.py publish-required-contexts
+        run: python3 scripts/ci/nextest_ci.py required-gate
 
   pg15_owner_proof:
     name: PostgreSQL 15 owner proof
