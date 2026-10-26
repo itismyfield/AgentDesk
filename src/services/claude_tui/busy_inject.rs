@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
+use crate::services::platform::tmux::pane_dead_is_live;
 use crate::services::tui_input::bounded_tmux::{BoundedTmuxError, run_bounded_tmux};
 
 /// Larger inputs are refused before any tmux call.
@@ -431,8 +432,8 @@ fn modal(capture: &str) -> bool {
 /// deliberately proceeds without C-s.
 pub(in crate::services::claude_tui) fn before_paste(pane: &Pane) -> Result<bool, Veto> {
     if pane
-        .ok(&["display-message", "-p", "-t", pane.target(), "#{pane_id}"])
-        .is_none()
+        .ok(&["display-message", "-p", "-t", pane.target(), "#{pane_dead}"])
+        .is_none_or(|output| !pane_dead_is_live(&output))
     {
         return Err(Veto::PaneUnavailable);
     }

@@ -131,7 +131,7 @@ render() {
   cat "$d/border" "$d/footer"
 }
 case "$2" in
-display-message) echo "$(cat "$d/attached"),$(cat "$d/last"),$(cat "$d/width"),$(cat "$d/height")" ;;
+display-message) for last do :; done; case "$last" in '#{pane_dead}') printf ' 0 \n' ;; *) echo "$(cat "$d/attached"),$(cat "$d/last"),$(cat "$d/width"),$(cat "$d/height")" ;; esac ;;
 capture-pane)
   n=$(($(cat "$d/cap.n" 2>/dev/null || echo 0) + 1)); echo $n > "$d/cap.n"
   [ -f "$d/fail.cap.$n" ] && exit 1
