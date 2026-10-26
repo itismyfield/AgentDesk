@@ -1,6 +1,7 @@
 //! The Claude source check a hook's continuation candidate passes before the pane follows it.
-//! The candidate is the payload's own transcript; its first record and file identity decide, and the
-//! pane's history in the binding log decides whether a session it left may come back.
+//! The candidate is the payload's own transcript; its first record, entrypoint and file identity
+//! decide, and the pane's history in the binding log decides whether a session it left may come
+//! back.
 
 use std::io;
 use std::path::Path;
@@ -334,6 +335,12 @@ impl Candidate<'_> {
         let reclaimable = self.reclaimable(&history);
         let checked = match verdict {
             SourceVerdict::Current => Checked::Bound(pin),
+            // A headless `claude -p` session sharing the project dir is never the pane's source.
+            SourceVerdict::Confirm(source) | SourceVerdict::Rotate(source)
+                if !may_be_tui_transcript(&source.path) =>
+            {
+                refused(SourceRejection::NotTuiTranscript)
+            }
             SourceVerdict::Confirm(source) | SourceVerdict::Rotate(source) => {
                 match source.source_id() {
                     Some(id) => Checked::Verified(id),
@@ -426,8 +433,20 @@ fn refused(rejection: SourceRejection) -> Checked {
         SourceRejection::IdentityUnavailable => "identity_unavailable",
         SourceRejection::Regression => "regression",
         SourceRejection::UnprovenStart => "unproven_start",
+        SourceRejection::NotTuiTranscript => "not_tui_transcript",
     };
     Checked::Refused(AdoptSkip::SourceRejected(rejection), reason)
+}
+
+/// The TUI candidate rule: an interactive entrypoint or none recorded yet; SDK or unreadable fail.
+fn may_be_tui_transcript(path: &Path) -> bool {
+    use crate::services::claude_tui::transcript_tail::{
+        ClaudeTranscriptEntrypoint, claude_transcript_entrypoint,
+    };
+    matches!(
+        claude_transcript_entrypoint(path),
+        ClaudeTranscriptEntrypoint::Interactive | ClaudeTranscriptEntrypoint::NotYetRecorded
+    )
 }
 
 #[cfg(test)]
