@@ -9,7 +9,8 @@ MacBook + Mac mini runtime check.
 
 Nightly workflow: `.github/workflows/ci-nightly.yml`
 
-Job: `multinode_regression`
+Jobs: `rust_build` → `rust_tests` → `test_evidence`, the nextest run of every lib test
+(`server::multinode_regression::` included) that PR and main CI also run.
 
 Coverage:
 

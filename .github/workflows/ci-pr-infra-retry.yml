@@ -38,7 +38,7 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
         run: python3 scripts/ci/known-flaky-rerun.py
 
-      - name: Classify failure and rerun PostgreSQL job
+      - name: Classify failure and rerun infra-failed nextest workers
         if: ${{ !cancelled() && steps.flaky.outputs.handled != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

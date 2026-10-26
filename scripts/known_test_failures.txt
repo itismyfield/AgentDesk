@@ -43,171 +43,17 @@
 # A failure that is NOT listed here fails the lane. That is the point.
 #
 # ---------------------------------------------------------------------------
-# base-red: these fail on origin/main, serially and in parallel, with no
-# AGENTDESK_ROOT_DIR in the environment. They are not caused by widening the
-# lane -- widening is only what made them visible. #5185 isolates them so the
-# widened lane can land; each needs its own fix.
-# ---------------------------------------------------------------------------
-#
-# #5305: The former bare-activity test failed because the legacy PREFIXES omit
-# the current last-tool label. Separately, full v2 panels had a -# header and no
-# marker, so the common probe missed them. Matching last-tool prose or globally
-# stripping -# would broaden classification of answers and is not the repair.
-# The replacement consumes all macro samples through the actual renderer with
-# independent terminal expectations; footer/prose negatives and all six legacy
-# positive shapes preserve the relevant contracts. The obsolete requirement
-# that every current bare label be a legacy prefix is intentionally retired.
-# The replacement and real HTTP drain contract passed fresh native validation;
-# its former exact always entry is retired, not widened or changed to flaky.
-#
-# ---------------------------------------------------------------------------
-# parallel-only: pass under --test-threads=1, fail in the full parallel sweep.
-# Serialising the whole lane would hide them, so they stay listed and the lane
-# stays parallel.
-#
-# Two of the three parallel-only entries the first round of #5185 carried are
-# gone because the defect was fixed rather than ledgered: the promotion-flag
-# race in gateway_lease_recovery_tests and the static-slice cache race in
-# memento::static_slice_cache_tests are now serialised against their own
-# siblings at the source.
-#
-# Every entry in this section is `flaky`, not `always`, and the mode follows
-# from the section's own definition rather than from how often a given machine
-# reproduces it. `always` means "fails deterministically", and its stale check
-# turns a PASSING run into a hard lane failure. A test that fails only when a
-# sibling wins a race has no deterministic verdict to assert: it reproduces on
-# this repository's darwin development machines and would be scheduled
-# differently on a `ubuntu-latest` runner with a different core count. Pinning
-# such a test as `always` would make the lane red on exactly the runs where
-# nothing is wrong, so the isolation carries expiry pressure instead.
-# ---------------------------------------------------------------------------
-# ANCHOR 2026-08-08 -- concurrent_provider_allocations_share_one_epoch was an
-# entry in THIS section and has been moved to the cross-module memo-leak
-# section below. It was removed from here because the section's defining
-# property does not hold for it, and that was measured rather than argued: at
-# origin/main 2cccd3e5f on an arm64 darwin machine it fails 30 of 30 full
-# sweeps of this lane at --test-threads=1. It is not parallel-only, and
-# serialising the lane would not hide it.
-#
-# The hypotheses it accumulated while it sat here are kept in its new reason
-# rather than deleted, so that the same ones are not built a third time. In
-# order: (1) sibling runtime_root_tests publishing the epoch through
-# set_process_generation_for_tests without the shared env lock -- refuted
-# against the code, every caller of that helper holds the lock; (2) an
-# unlocked AGENTDESK_ROOT_DIR writer somewhere under src, supported by a
-# count of unlocked sites that was itself withdrawn twice for having no
-# recorded scan definition. (2) pointed at the right neighbourhood and never
-# reached a writer; the entry stayed CAUSE NOT IDENTIFIED for as long as it
-# sat in this section, which is the cost of a section header standing in for
-# a diagnosis.
-#
-# The entry below is NOT parallel-only: it races against itself and reproduces
-# with `--exact` on an otherwise idle machine. It is listed here because the
-# mode that fits it is `flaky` -- it passed in every archived sweep of this
-# lane and in the review's own five-run sweep, and started losing consistently
-# on one development machine afterwards.
-flaky | server::multinode_regression::multinode_regression_pg_tests::multinode_dispatch_claims_exactly_once_then_reclaims_expired_lease | lane=non-pg-sweep | #5185 | intra-test race, mechanism measured. The test issues two claim_task_dispatches calls under tokio::join! for the same pending dispatch and asserts the two claim exactly one between them. The select uses FOR UPDATE SKIP LOCKED, and capability routing picks ONE preferred owner. Instrumented run: mac-mini-release took the row lock first, was told claim owner is not preferred route owner selected mac-book-release and skipped, and mac-book-release then found nothing because the row was still locked, so the pair claimed zero. Whether the total is one or zero therefore depends on which of the two concurrent claims wins the row lock, not on the fixture. Pre-existing and not introduced by this change: reproduced at HEAD with this branch stashed, and it is absent from every archived sweep transcript. expires=2026-11-06
-#
-# The five members of managed_root_recursion_tests are listed individually
-# rather than as a module prefix. The window is real for every member (each
-# shells out to a real `git worktree add` while platform/tmux.rs:1230 and
-# binary_resolver.rs:1921 replace and restore the process-global PATH), but an
-# id list means a NEW test added to that module is gated rather than inheriting
-# the isolation.
-flaky | services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::dirty_managed_worktree_is_preserved | lane=non-pg-sweep | #5185 | parallel-only Spawn ENOENT on the git binary, which a stable PATH cannot produce intermittently: two call sites replace the process-global PATH and restore it, and a git spawn landing inside that window cannot find the executable. expires=2026-11-06
-flaky | services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::managed_root_child_is_classified_and_worktree_is_not | lane=non-pg-sweep | #5185 | parallel-only Spawn ENOENT on the git binary while a sibling test has the process-global PATH replaced; the same window as the other members of this module. expires=2026-11-06
-flaky | services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::manual_worktree_in_flat_root_is_protected_by_naming | lane=non-pg-sweep | #5185 | parallel-only Spawn ENOENT on the git binary while a sibling test has the process-global PATH replaced; the same window as the other members of this module. expires=2026-11-06
-flaky | services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::terminal_managed_worktree_is_swept_via_recursion | lane=non-pg-sweep | #5185 | parallel-only Spawn ENOENT on the git binary while a sibling test has the process-global PATH replaced; the same window as the other members of this module. expires=2026-11-06
-#
-# The voice PCM harness was isolated as a whole 8-test module in the first
-# round. Only three members have ever been observed failing, so only those
-# three are listed; the other five are now gated like any other test.
-flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_pcm_harness_unattended_e2e | lane=non-pg-sweep | #5185 | parallel-only: the harness asserts against process-global voice flight-event and TTS-playback recorders that parallel siblings write to. Passes under --test-threads=1. expires=2026-11-06
-flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_intake_chime_fires_before_turn_start | lane=non-pg-sweep | #5185 | parallel-only: the harness asserts against process-global voice flight-event and TTS-playback recorders that parallel siblings write to. Passes under --test-threads=1. expires=2026-11-06
-flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_intake_chime_fires_even_when_turn_start_fails | lane=non-pg-sweep | #5185 | parallel-only: the harness asserts against process-global voice flight-event and TTS-playback recorders that parallel siblings write to. Passes under --test-threads=1. expires=2026-11-06
-#
-# ---------------------------------------------------------------------------
-# Newly exposed Linux failures retained by #5217. The jsonl watcher source is
-# unchanged since 31465b184 and neither watcher test was reverified on Linux in
-# this round. The tmux test is not Linux-only: on darwin the hook also fails to
-# create the marker. A local rc=0 without CI is its self-skip, not pass evidence;
-# validation requires CI=1. The hook failure's root cause remains unidentified.
-# ---------------------------------------------------------------------------
-flaky | services::discord::jsonl_watcher::tests::notify_fires_when_file_modified | lane=non-pg-sweep | #5217 | newly exposed on Linux after 31465b184; jsonl_watcher code is unchanged and Linux behavior was not reverified in this round. The lost-wakeup shape remains, but no root cause is claimed or fixed here. expires=2026-11-06
-flaky | services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_create | lane=non-pg-sweep | #5217 | newly exposed on Linux after 31465b184; jsonl_watcher code is unchanged and Linux behavior was not reverified in this round. It retains the same unresolved lost-wakeup shape as its sibling. expires=2026-11-06
-flaky | services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit | lane=non-pg-sweep | #5217 | newly exposed on Linux after 31465b184, but not Linux-only: on darwin the hook also creates no marker. Local rc=0 without CI is the test's self-skip; CI=1 is required and returned rc=101 in this round. Root cause remains unidentified. expires=2026-11-06
-#
-# ---------------------------------------------------------------------------
-# Cross-module memo leak. The two entries below are one defect, measured, and
-# #5251 carries it. allocate_process_generation memoises its result into the
-# process-global TEST_ALLOCATED_PROCESS_GENERATION (runtime_store.rs:216) under
-# cfg(test). restart_lifecycle_characterization_tests fills that memo by
-# building SharedData through the production constructor (shared_data.rs:93)
-# and never clears it. A later allocate_process_generation then returns the
-# memo and performs no durable write, so load_generation() reads 0 from a root
-# nothing ever wrote.
-#
-# The fix is NOT here, and not attempting it here was deliberate: it is a
-# test-code change in the leaking module and this file only registers. #5251
-# names the two sites to close -- the unreset memo, and isolate_runtime_root
-# (runtime_bootstrap.rs:777) in that same module replacing AGENTDESK_ROOT_DIR
-# through a raw set_var with no shared_test_env_lock, which is the exact shape
-# the withdrawn hypotheses in the first entry below were hunting.
-#
-# Both stay `flaky`, and that is measured rather than assumed. The defect is
-# deterministic given an ORDERING, and the lane's ordering is the scheduler's:
-# whether a memo-clearing test lands between the leak and the victim decides
-# the verdict. Green runs are real and numerous, and `always` -- whose stale
-# check turns a passing run into a hard lane failure -- would kill exactly
-# those. Neither entry may be read as `parallel-only`: the first reproduces at
-# --test-threads=1, where no overlap is possible at all.
-# ---------------------------------------------------------------------------
-flaky | services::discord::runtime_store::runtime_root_tests::concurrent_provider_allocations_share_one_epoch | lane=non-pg-sweep | #5251 | cross-module memo leak, MECHANISM MEASURED. Observed at runtime_store.rs:659, assert_eq!(load_generation(), 1) with left 0: the counter file the eight allocator threads should have written is not under this test's own root. It is not there because none of them wrote it. allocate_process_generation short-circuits on the process-global TEST_ALLOCATED_PROCESS_GENERATION (runtime_store.rs:216), which restart_lifecycle_characterization_tests filled through run_bot_build_shared_data (shared_data.rs:93) and never cleared, so all eight threads hand back the memo, the assertion that they agree passes, and the durable write never happens. Measured on darwin: co-selecting that module with the whole runtime_root_tests module at --test-threads=1 fails this test 5 of 5 at de8f3ab51 and 5 of 5 again at 2cccd3e5f, and the full lane at --test-threads=1 fails it 30 of 30 at de8f3ab51 and 5 of 5 at 2cccd3e5f. THAT REFUTES TWO CLAIMS THIS ENTRY USED TO CARRY, and they are named rather than quietly dropped. It read `parallel-only` and it read `Passes under --test-threads=1`; the serial rates above are the direct refutation of the second, and the first followed from it. It also read CAUSE NOT IDENTIFIED, which was honest for as long as the search stayed inside runtime_root_tests. Two hypotheses died on the way there and are kept so they are not built a third time: first, that a sibling runtime_root_test published the epoch through set_process_generation_for_tests without the shared env lock, refuted against the code because every caller of that helper holds it; second, that some unnamed unlocked AGENTDESK_ROOT_DIR writer under src was responsible, supported by a count of unlocked sites that was itself withdrawn twice for having no recorded scan definition. The second was the right neighbourhood and never reached a writer -- isolate_runtime_root (runtime_bootstrap.rs:777), in the very module that leaks the memo, does replace AGENTDESK_ROOT_DIR through a raw set_var with no lock -- but what this failure reproduces through is the memo, not that env write. expires=2026-11-06
-flaky | services::discord::runtime_store::runtime_root_tests::process_generation_allocation_is_monotonic_and_request_preview_is_read_only | lane=non-pg-sweep | #5251 | the same cross-module memo leak as the entry directly above, in a sibling test and with different arithmetic. MECHANISM MEASURED and reproducible on demand. Observed at runtime_store.rs:634, assert_eq!(next_process_generation(), 2) with left 1. next_process_generation() is load_generation() saturating_add 1 (runtime_store.rs:340) and load_generation() returns 0 when the counter file is absent (runtime_store.rs:203), so left 1 says no generation file existed under the tempdir root this test had just installed. The writer is services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests. Its build_shared_with_injected_shutdown_remaining (runtime_bootstrap.rs:788) builds SharedData through the production constructor run_bot_build_shared_data, which calls allocate_process_generation at shared_data.rs:93; under cfg(test) that call memoises its result into the process-global TEST_ALLOCATED_PROCESS_GENERATION (runtime_store.rs:216) and that module never calls set_process_generation_for_tests(None), so the memo outlives it. A later allocate_process_generation short-circuits on the memo and performs no durable write, so line 633 of this test still sees 1 while its own root stays empty and line 634 reads 0. Measured on darwin with the prebuilt lib test binary: selecting that module together with this test alone under --test-threads=1, where no overlap is possible, reproduces the exact panic 3 of 3 at de8f3ab51 and 5 of 5 again at 2cccd3e5f; selecting it with the whole runtime_root_tests module at --test-threads=8 reproduces 30 of 60; this test alone passes 30 of 30 at de8f3ab51 and 5 of 5 at 2cccd3e5f. It is flaky rather than always because the clearing is ordering-dependent and in the real lane the scheduler owns that ordering. Rates in the lane as it actually runs: on darwin 0 of 30 full parallel sweeps, 0 of 35 full sweeps at --test-threads=1 and 0 of 30 isolated runs; on ubuntu-latest 1 of 14 executions. Why this one is rare in the lane while the entry above it is not: in the serial whole-module co-run the memo is cleared by process_epoch_does_not_follow_overlapping_process_counter_advance, which sorts between them, so the earlier sibling eats the leak and this test does not. expires=2026-11-06
-flaky | services::discord::turn_bridge::two_message_panel::tests::reanchor_moves_panel_below_new_answer_and_bumps_generation | lane=non-pg-sweep | #5251 | fails intermittently under full-lane parallel co-selection; passes standalone (re-running the five sweep-failed tests together at --test-threads=1 at d4234073f, this test among the four that passed). CAUSE NOT YET MEASURED for this test, and a first mechanism guess is WITHDRAWN here rather than left standing: it is NOT the #5251 allocate_process_generation memo leak. The reanchor assertion reads status_panel_generation, a per-turn counter, together with panel/inflight state loaded back from the runtime-root file store (status_panel_singleton_store::load; load_inflight_state, which only deserializes via parse_inflight_state_content and never runs InflightTurnState::new). Even where the test does build an InflightTurnState, born_generation comes from process_generation() (runtime_store.rs), which reads TEST_PROCESS_GENERATION/load_generation and never touches TEST_ALLOCATED_PROCESS_GENERATION or allocate_process_generation, so the memo the two entries above reproduce through cannot reach this assertion, and the asserted quantity is a different counter besides. A runtime-root env swap is ALSO ruled out as the mechanism: both call sites of isolate_runtime_root (runtime_bootstrap.rs) acquire the same shared_test_env_lock this test holds (turn_orchestrator test_support::lock_test_env) before swapping AGENTDESK_ROOT_DIR, so a concurrent root repoint cannot occur while this test runs. With both the memo path and the env swap ruled out by code, the mechanism is NOT YET IDENTIFIED; a specific candidate is deliberately not asserted here rather than guessing a third time (two earlier guesses -- the #5251 memo and an unlocked root swap -- were each refuted against the code). This test already exists in origin/main's manifest, so the non-pg-sweep lane (manifest-minus-skips, not diff-based) selects it regardless of this PR; it surfaced here only because CI run 31831216605 hit an interleaving that failed it, as the lane's single unlisted failure. Registered flaky under #5251's umbrella of cross-module runtime-root test flakiness. expires=2026-11-06
-#
-# ---------------------------------------------------------------------------
-# Observed once on ubuntu-latest, in ONE library_sweep execution, and not
-# reproduced on darwin by any arm that was tried. It was `unexpected` in CI PR
-# 31193805625 attempt 1 (job 92917059783, head 56e081371, `unexpected=2`)
-# alongside the second memo-leak entry above, and the re-run of that same
-# commit as attempt 2 passed. Scanning every attempt of every CI PR / CI Main
-# run that carries this job -- 14 executions, the whole life of the job --
-# finds this id in exactly one `failures:` block, that one.
-#
-# It shares the exposing run with the entry above and NOTHING else: that one is
-# diagnosed to a named module and reproduces on demand, this one is not
-# diagnosed at all. Grouping them under one mechanism was considered and
-# rejected, which is why they are two sections rather than one.
-#
-# `flaky` here is the cost asymmetry this file already applies elsewhere, not a
-# measurement: one observation cannot establish determinism, understating loses
-# nothing, and `always` kills green runs.
-# ---------------------------------------------------------------------------
-flaky | voice::receiver::tests::receive_hook_observes_pcm_and_completed_utterance_with_control_channel | lane=non-pg-sweep | #5217 | CAUSE NOT IDENTIFIED. Observed at receiver.rs:1019, assert_eq!(hook.completions, 1) with left 0, while the preceding pcm_frames assertion passed: the frame reached the hook and the completed utterance never did. NOT a member of the process-global recorder family that the three pcm_harness_tests entries above describe, and that similarity was checked and rejected rather than assumed -- those live in services::discord::voice_barge_in and assert against recorders the whole process writes to, whereas this test's MockHook (receiver.rs:917) is a StdArc built inside the test body and reachable from nothing else, so no sibling can move its counters. What IS in the source, offered as a candidate and not as a measurement, is a wall-clock margin of thirty milliseconds: arm_timers (receiver.rs:847) spawns a task at receiver.rs:871 that sleeps utterance_idle, which the test fixture sets to TEST_UTTERANCE_IDLE of 100ms (receiver.rs:30), then flushes the utterance to disk before invoking utterance_completed, while the test awaits TEST_UTTERANCE_FLUSH_WAIT of 130ms (receiver.rs:40) and asserts immediately. Whether a loaded runner can spend that margin on scheduling or on the flush write has not been instrumented, and nothing here establishes that it is what happened. Not reproduced on darwin at de8f3ab51 by any arm that was tried: 0 of 30 full parallel sweeps of this lane, 0 of 35 full sweeps at --test-threads=1, 0 of 30 isolated runs, 0 of 40 runs of the whole voice module at --test-threads=16, and 0 of 60 isolated runs with every core of a 14-core machine saturated by busy loops, which is the arm that would have supported the margin candidate above and did not. Against 1 of 14 executions on ubuntu-latest. Registered rather than fixed because rewriting the test off a sleep-and-assert shape is a source change and this change only registers. expires=2026-11-06
-#
-# ---------------------------------------------------------------------------
 # #[ignore]d tests. These are pinned as a set: the lane fails if a test reports
 # itself ignored without an entry here, and fails if an entry here is no longer
 # reported ignored. `#[ignore]` is otherwise a silent way to keep a lane's
 # selection intact while shrinking what it actually executes.
 # ---------------------------------------------------------------------------
-ignored | cli::discord_thread_create::tests::thread_create_lock_child_process | lane=non-pg-sweep | #5185 | child-process entry point: the parent test re-executes the test binary to run this body, so running it in-process would take the very lock it exists to hold.
-ignored | services::claude_tui::hook_relay::ordered_queue::tests::producer_lock_holder_subprocess_entry | lane=non-pg-sweep | #5185 | child-process entry point: the parent test re-executes the test binary to run this body while holding the producer lock, which cannot be modelled in-process.
-ignored | services::claude_tui::hook_relay::tests::failure_marker_parent_subprocess_entry | lane=non-pg-sweep | #5185 | child-process entry point: the parent test re-executes the test binary to run this body so the relay failure marker is written by a genuinely separate process.
-ignored | services::claude_tui::hook_relay::tests::failure_marker_worker_subprocess_entry | lane=non-pg-sweep | #5185 | child-process entry point: the worker half of the failure-marker pair, executed only by the parent test through a fresh test-binary process.
-ignored | services::claude_tui::hook_relay::tests::non_wait_relay_parent_subprocess_entry | lane=non-pg-sweep | #5185 | child-process entry point: the parent test re-executes the test binary to run this body, and the nested libtest summary it prints is why this lane declares more than one summary line.
-ignored | services::claude_tui::hook_relay::tests::non_wait_relay_worker_subprocess_entry | lane=non-pg-sweep | #5185 | child-process entry point: the worker half of the non-wait relay pair, executed only by the parent test through a fresh test-binary process.
-ignored | services::discord::session_relay_sink::tests::dc1_isolated_scanner_child | lane=non-pg-sweep | #5808 | Isolated child entry executed and asserted by required DC1 parent tests
-ignored | services::discord::outbound::o_writer_io::tests::round_trip_on_an_approved_test_channel | lane=non-pg-sweep | #6325 | posts to a live Discord channel: runs only by hand against an operator-approved test channel (ADK_O_ROUND_TRIP_TOKEN/CHANNEL)
-ignored | services::session_host::herdr::launch_host::real_tests::herdr_real_server_launch_input_bytes_and_refusals | lane=non-pg-sweep | #5340 | needs ADK_TEST_HERDR_BIN: starts and stops its own Herdr 0.9.3 servers under /private/tmp/herdr-093-p9a, so it runs only where that binary is installed.
 ignored | services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real::a_p11_m2_last_pane_close_and_exact_retire | lane=pg | #5340 | needs ADK_TEST_HERDR_BIN, ADK_TEST_HERDR_ROOT and ADK_TEST_HERDR_PIDS: scripts/test_p11_m2_activation.py starts its own Herdr 0.9.3 servers from a scratch copy and judges the witness lines, so it runs only where that binary is installed.
 ignored | services::session_host::herdr_terminate_real_tests::a_p11_m2_confirmation_required_has_no_escalation | lane=pg | #5340 | needs ADK_TEST_HERDR_BIN, ADK_TEST_HERDR_ROOT and ADK_TEST_HERDR_PIDS: scripts/test_p11_m2_activation.py starts its own Herdr 0.9.3 server from a scratch copy and judges the witness lines, so it runs only where that binary is installed.
 ignored | server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_fixture_sandbox_roundtrip_pg | lane=pg | #3827 | requires a local PostgreSQL test server and a sandbox fixture: scripts/e2e/auto-queue-preflight.sh runs it with --ignored for each fixture and writes the preflight report, so the PG lane only sees it reported ignored.
 ignored | db::postgres::test_db_reclaim::tests::pg_reclaim_dry_run | lane=pg | #6122 | manual dry run: it prints what the reclaim sweep would decide on the configured fixture server and drops nothing, so it runs only by hand with `cargo test --lib pg_reclaim_dry_run -- --ignored --nocapture`.
 ignored | db::postgres::test_db_reclaim::tests::pg_reclaim_fresh_process_child | lane=pg | #6122 | helper subprocess for the own-cluster reclaim tests: those parents re-execute the test binary with --ignored --exact to run it, and without their environment it returns before doing anything.
 
-ignored | services::session_host::herdr::launch_host::t19_real_tests::herdr_t19_resume_true_restores_claude_and_codex_as_shells_only | lane=non-pg-sweep | #5340 | Requires ADK_TEST_HERDR_BIN pinned 0.9.3 scratch copy and isolated server HOME/socket; executed explicitly with --ignored --exact by the E acceptance runner.
 ignored | services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::herdr_direct_roundtrip_tests::real_tests::claude_bare_client_roundtrip_retains_execution_and_source_pg | lane=pg | #5340 | Requires approved pinned sandboxed scratch Herdr native client and owned PostgreSQL; executed explicitly with --ignored --exact by the E acceptance runner.
 ignored | services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::t14_composed::real_tests::codex_actual_client_and_executor_keep_one_live_execution_pg | lane=pg | #5340 | Requires approved pinned sandboxed scratch Herdr native client and owned PostgreSQL; executed explicitly with --ignored --exact by the E acceptance runner.
 ignored | server::routes::health_api::db_deadline_tests::amplification_profile_tests::health_amplification_profile | lane=pg | #7236 | 부하 측정의 명시 실행: it drives public and detail health for a 60 s warm-up and a 6-minute window against a pg_throwaway cluster and writes raw samples to ADK_HEALTH_AMP_OUT, so it runs only by its exact name with --ignored for the BASE-versus-candidate comparison.

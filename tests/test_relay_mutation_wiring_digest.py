@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     env: *shared
     steps: [{run: bash scripts/run_relay_authority_mutations.sh}]
-  relay-authority-contract:
+  required_contexts:
     runs-on: ubuntu-latest
     steps: [{run: "true"}]
 """
@@ -49,7 +49,7 @@ jobs:
     env:
       MODE: {value}
     steps: [{{run: bash scripts/run_relay_authority_mutations.sh}}]
-  relay-authority-contract:
+  required_contexts:
     runs-on: ubuntu-latest
     steps: [{{run: "true"}}]
 """
@@ -135,9 +135,8 @@ class WiringDigestTests(unittest.TestCase):
                 self.assertEqual(self.judge(REAL_WORKFLOW, edit(REAL_WORKFLOW, old, new)),
                                  "wiring_changed=true\n")
 
-    def test_mirror_job_edit_runs_the_gate(self) -> None:
-        head = edit(REAL_WORKFLOW, "          UPSTREAM_JOB_NAME: relay_authority_mutations",
-                    "          UPSTREAM_JOB_NAME: relay_authority_targets")
+    def test_judge_job_edit_runs_the_gate(self) -> None:
+        head = edit(REAL_WORKFLOW, "      - relay_authority_mutations", "      - relay_authority_mutations_renamed")
         self.assertEqual(self.judge(REAL_WORKFLOW, head), "wiring_changed=true\n")
 
     def test_anchor_edit_outside_the_relay_job_is_read_through_the_alias(self) -> None:

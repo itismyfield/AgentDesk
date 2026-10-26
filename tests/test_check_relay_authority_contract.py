@@ -1,15 +1,14 @@
-"""Tests for the relay-authority named-target selection-floor gate."""
+"""Tests for the relay-authority named-target selection-floor gate over the nextest list."""
 
 from __future__ import annotations
 
 import contextlib
 import copy
+import functools
 import importlib.util
 import io
 import json
-import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -25,6 +24,8 @@ assert _spec and _spec.loader
 contract = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = contract
 _spec.loader.exec_module(contract)
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "ci"))
+import nextest_required as required  # noqa: E402
 
 
 def active_lane(*, command: list[str] | None = None, minimum: int = 2) -> dict[str, object]:
@@ -45,17 +46,6 @@ def write_workflow(
     *,
     mutation_step: str | None = None,
 ) -> None:
-    commands = [
-        "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- "
-        + " ".join(lane["command"])
-        + " -- --test-threads=1"
-        for lane in lanes
-        if lane.get("status") == "active"
-    ]
-    steps: list[dict[str, object]] = [{
-        "name": contract.RELAY_TARGET_STEP,
-        "run": "\n".join(commands) + "\n",
-    }]
     mutation_steps = (
         [{"name": "Run condition-3 mutations", "run": mutation_step}]
         if mutation_step is not None else []
@@ -65,18 +55,12 @@ def write_workflow(
     workflow.write_text(
         yaml.safe_dump({"jobs": {
             "changes": {"outputs": {"rust_tests_skip": contract.VERIFIED_RUST_SKIP}},
-            contract.RELAY_AUTHORITY_JOB: {
-                "if": "${{ !cancelled() }}",
-                "needs": ["changes", contract.RELAY_AUTHORITY_TARGETS_JOB, contract.RELAY_AUTHORITY_MUTATIONS_JOB],
-                "steps": [{"run": "./scripts/required-check-mirror.sh", "env": {
-                    "CHANGED_PATHS_RESULT": "${{ needs.changes.result }}", "FILTER_NAME": "relay_authority",
-                    "FILTER_OUTPUT": contract.RUST_REQUIRED_OUTPUT, "UPSTREAM_JOB_NAME": job,
-                    "UPSTREAM_RESULT": "${{ needs." + job + ".result }}",
-                }} for job in (contract.RELAY_AUTHORITY_TARGETS_JOB, contract.RELAY_AUTHORITY_MUTATIONS_JOB)],
+            contract.JUDGE_JOB: {
+                "name": required.GATE, "if": "${{ always() }}", "needs": list(contract.JUDGE_NEEDS),
+                "steps": [{"run": "python3 scripts/ci/nextest_ci.py required-gate"}],
             },
-            contract.RELAY_AUTHORITY_TARGETS_JOB: {
-                "needs": ["changes", "lib_test_prepare"], "if": contract.RUST_REQUIRED_IF, "steps": steps,
-            },
+            contract.BUILD_JOB: {"steps": [{"name": "Archive, list, compare and plan",
+                                            "run": "set -euo pipefail\n" + contract.FLOOR_COMMAND + "\n"}]},
             contract.RELAY_AUTHORITY_MUTATIONS_JOB: {
                 "needs": "changes", "if": contract.RUST_REQUIRED_IF,
                 "strategy": {"fail-fast": False, "matrix": {"shard": [0, 1, 2]}},
@@ -89,6 +73,14 @@ def write_workflow(
         }}),
         encoding="utf-8",
     )
+
+
+def write_nextest_list(path: Path, names: list[str], ignored: tuple[str, ...] = ()) -> Path:
+    """An unfiltered `cargo nextest list --message-format json` of one lib binary."""
+    cases = {name: {"ignored": name in ignored, "filter-match": {"status": "matches"}} for name in names}
+    path.write_text(json.dumps({"rust-suites": {"agentdesk": {
+        "binary-id": "agentdesk", "status": "listed", "testcases": cases}}}), encoding="utf-8")
+    return path
 
 
 def manifest_path(
@@ -112,36 +104,28 @@ def manifest_path(
     return temporary, path
 
 
-def isolate_from_runner_artifact(case: unittest.TestCase) -> None:
-    # An inherited ADK_LIB_TEST_ARTIFACT makes run_lane read the runner's binary, not the fixture.
-    environment = mock.patch.dict(os.environ)
-    environment.start()
-    case.addCleanup(environment.stop)
-    os.environ.pop("ADK_LIB_TEST_ARTIFACT", None)
-
-
 class ManifestContract(unittest.TestCase):
     def test_execution_graph_cannot_skip_contract_lanes(self) -> None:
         lanes, _ = contract.load_active_lanes(REPO_ROOT / contract.DEFAULT_MANIFEST)
         original = yaml.safe_load((REPO_ROOT / contract.PR_WORKFLOW).read_text(encoding="utf-8"))
+        judge_needs = original["jobs"][contract.JUDGE_JOB]["needs"]
         mutations = [
-            (contract.RELAY_AUTHORITY_JOB, "if", None),
-            (contract.RELAY_AUTHORITY_JOB, "needs", [contract.RELAY_AUTHORITY_TARGETS_JOB]),
-            (contract.RELAY_AUTHORITY_JOB, "continue-on-error", True),
-            (contract.RELAY_AUTHORITY_TARGETS_JOB, "needs", None),
-            (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", None),
-            (contract.RELAY_AUTHORITY_TARGETS_JOB, "needs", ["changes"]),
-            (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", "false"),
-            (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", "${{ !cancelled() }}"),
-            (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", contract.RUST_REQUIRED_IF.replace("!cancelled() && ", "")),
-            (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", contract.RUST_REQUIRED_IF.replace("!= 'true'", "== 'false'")),
-            (contract.RELAY_AUTHORITY_TARGETS_JOB, "continue-on-error", True),
-            (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "needs", ["changes"]),
-            (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "if", "false"),
-            (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "continue-on-error", True),
+            (contract.JUDGE_JOB, "if", None, "must always judge"),
+            (contract.JUDGE_JOB, "if", "success()", "must always judge"),
+            (contract.JUDGE_JOB, "if", "${{ !cancelled() }}", "must always judge"),
+            (contract.JUDGE_JOB, "name", "relay-authority-contract", "must always judge"),
+            (contract.JUDGE_JOB, "continue-on-error", True, "must always judge"),
+            (contract.JUDGE_JOB, "needs", [need for need in judge_needs if need != contract.RELAY_AUTHORITY_MUTATIONS_JOB], "must always judge"),
+            (contract.JUDGE_JOB, "needs", [need for need in judge_needs if need != "test_evidence"], "must always judge"),
+            (contract.JUDGE_JOB, "strategy", {"fail-fast": False, "matrix": {"context": ["Lint"]}}, "must always judge"),
+            (contract.JUDGE_JOB, "strategy", {"fail-fast": False, "matrix": {"context": list(required.CONTEXTS)}}, "must always judge"),
+            (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "needs", ["changes"], "must use the verified skip"),
+            (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "if", "false", "must use the verified skip"),
+            (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "if", contract.RUST_REQUIRED_IF.replace("!= 'true'", "== 'false'"), "must use the verified skip"),
+            (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "continue-on-error", True, "must use the verified skip"),
         ]
-        for job_id, key, value in mutations:
-            with self.subTest(job=job_id, key=key), tempfile.TemporaryDirectory() as temporary:
+        for job_id, key, value, message in mutations:
+            with self.subTest(job=job_id, key=key, value=value), tempfile.TemporaryDirectory() as temporary:
                 payload = copy.deepcopy(original)
                 job = payload["jobs"][job_id]
                 if value is None:
@@ -152,7 +136,7 @@ class ManifestContract(unittest.TestCase):
                 workflow = root / contract.PR_WORKFLOW
                 workflow.parent.mkdir(parents=True)
                 workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
-                with self.assertRaisesRegex(contract.ManifestError, "must always publish|must use the verified skip"):
+                with self.assertRaisesRegex(contract.ManifestError, message):
                     contract.validate_workflow_contract(root, lanes, True)
 
     def test_verified_skip_output_rejects_missing_or_partial_proofs(self) -> None:
@@ -173,50 +157,25 @@ class ManifestContract(unittest.TestCase):
                     with self.assertRaisesRegex(contract.ManifestError, "Rust skip output must fail closed"):
                         contract.validate_workflow_contract(root, lanes, False)
 
-    def test_publisher_cannot_hide_changed_paths_or_execution_results(self) -> None:
+    def test_build_job_must_run_one_fail_closed_floor_check(self) -> None:
         temporary, path = manifest_path([active_lane()])
         with temporary:
             root = Path(temporary.name)
             workflow = root / contract.PR_WORKFLOW
             original = yaml.safe_load(workflow.read_text(encoding="utf-8"))
-            lanes, _ = contract.load_active_lanes(path, root)
-            for index in (0, 1):
-                for key, value in (("CHANGED_PATHS_RESULT", "success"), ("CHANGED_PATHS_RESULT", ""),
-                                   ("FILTER_OUTPUT", "false"), ("FILTER_OUTPUT", ""),
-                                   ("UPSTREAM_RESULT", "success")):
-                    with self.subTest(index=index, key=key, value=value):
-                        payload = copy.deepcopy(original)
-                        payload["jobs"][contract.RELAY_AUTHORITY_JOB]["steps"][index]["env"][key] = value
-                        workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
-                        with self.assertRaisesRegex(contract.ManifestError, "actual changes and the shared Rust skip filter"):
-                            contract.validate_workflow_contract(root, lanes, False)
-            for name, change in (("missing", lambda steps: steps.pop()),
-                                 ("masked", lambda steps: steps[0].update({"continue-on-error": True})),
-                                 ("conditional", lambda steps: steps[0].update({"if": "false"}))):
+            for name, change in (
+                ("missing", lambda steps: steps.clear()),
+                ("conditional", lambda steps: steps[0].update({"if": "false"})),
+                ("masked", lambda steps: steps[0].update({"continue-on-error": True})),
+                ("other list", lambda steps: steps[0].update({"run": steps[0]["run"].replace("universe.json", "other.json")})),
+                ("duplicated", lambda steps: steps.append(dict(steps[0]))),
+            ):
                 with self.subTest(mutation=name):
                     payload = copy.deepcopy(original)
-                    change(payload["jobs"][contract.RELAY_AUTHORITY_JOB]["steps"])
+                    change(payload["jobs"][contract.BUILD_JOB]["steps"])
                     workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
-                    with self.assertRaisesRegex(contract.ManifestError, "must mirror"):
-                        contract.validate_workflow_contract(root, lanes, False)
-
-    def test_removing_the_changed_paths_mirror_guard_makes_its_cases_red(self) -> None:
-        import types
-        source = SCRIPT.read_text(encoding="utf-8")
-        original = "or any(env.get(key) != value for key, value in expected.items())):"
-        self.assertEqual(source.count(original), 1)
-        weakened = source.replace(original,
-            "or any(env.get(key) != value for key, value in expected.items() if key != 'CHANGED_PATHS_RESULT')):")
-        mutant = types.ModuleType("relay_contract_mirror_mutant")
-        mutant.__file__ = str(SCRIPT)
-        with mock.patch.dict(sys.modules, {mutant.__name__: mutant}):
-            exec(compile(weakened, str(SCRIPT), "exec"), mutant.__dict__)
-            with mock.patch.object(sys.modules[__name__], "contract", mutant):
-                result = unittest.TestResult()
-                ManifestContract("test_publisher_cannot_hide_changed_paths_or_execution_results").run(result)
-        self.assertEqual(result.testsRun, 1)
-        self.assertEqual(result.errors, [])
-        self.assertEqual(len(result.failures), 4)
+                    with self.assertRaisesRegex(contract.ManifestError, "relay floor check on its nextest list"):
+                        contract.load_active_lanes(path, root)
 
     def test_mutation_matrix_and_shard_environment_cannot_drop_rows(self) -> None:
         lanes, _ = contract.load_active_lanes(REPO_ROOT / contract.DEFAULT_MANIFEST)
@@ -239,19 +198,6 @@ class ManifestContract(unittest.TestCase):
                 with self.assertRaisesRegex(contract.ManifestError, "must execute all three|must pass its shard"):
                     contract.validate_workflow_contract(root, lanes, True)
 
-    def test_target_step_cannot_skip_or_mask_command_failure(self) -> None:
-        for key, value in (("if", "false"), ("continue-on-error", True)):
-            with self.subTest(key=key):
-                temporary, path = manifest_path([active_lane()])
-                with temporary:
-                    root = Path(temporary.name)
-                    workflow = root / contract.PR_WORKFLOW
-                    payload = yaml.safe_load(workflow.read_text(encoding="utf-8"))
-                    payload["jobs"][contract.RELAY_AUTHORITY_TARGETS_JOB]["steps"][0][key] = value
-                    workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
-                    with self.assertRaisesRegex(contract.ManifestError, "step must be unconditional and fail closed"):
-                        contract.load_active_lanes(path, root)
-
     def test_checked_in_manifest_declares_active_and_gap_rows(self) -> None:
         lanes, gaps = contract.load_active_lanes(
             REPO_ROOT / "scripts" / "relay_authority_contract_targets.json",
@@ -273,51 +219,22 @@ class ManifestContract(unittest.TestCase):
         self.assertEqual({gap["boundary"] for gap in gaps}, {"T2", "T3", "T5"})
         self.assertTrue(all(lane.minimum > 0 for lane in lanes))
 
-    def test_omitting_either_checked_in_s4_invocation_is_rejected(self) -> None:
-        lanes, _ = contract.load_active_lanes(
-            REPO_ROOT / "scripts" / "relay_authority_contract_targets.json",
-            REPO_ROOT,
-        )
-        s4_lanes = [lane for lane in lanes if lane.name.startswith("t5-s4-")]
-        self.assertEqual(len(s4_lanes), 2)
-        workflow = (REPO_ROOT / contract.PR_WORKFLOW).read_text(encoding="utf-8")
-        for lane in s4_lanes:
-            with self.subTest(lane=lane.name), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                path = root / contract.PR_WORKFLOW
-                path.parent.mkdir(parents=True)
-                command = contract.expected_workflow_command(lane)
-                self.assertEqual(workflow.count(command), 1)
-                path.write_text(workflow.replace(command, ""), encoding="utf-8")
-                with self.assertRaisesRegex(contract.ManifestError, "must exactly match"):
-                    contract.validate_workflow_contract(root, lanes, True)
-
-    def test_s7a_c1_and_native_witnesses_cannot_be_omitted_or_narrowed(self) -> None:
+    def test_omitting_any_checked_in_witness_from_the_run_is_rejected(self) -> None:
         lanes, gaps = contract.load_active_lanes(
             REPO_ROOT / "scripts" / "relay_authority_contract_targets.json",
             REPO_ROOT,
         )
-        selected = [lane for lane in lanes
-                    if lane.name.startswith(("t5-s7a-", "t5-c1-", "t5-native-"))]
-        self.assertEqual(len(selected), 5)
-        self.assertEqual([lane.minimum for lane in selected], [1, 1, 1, 15, 1])
-        self.assertIn("t5-structural-signal-authority-teardown",
-                      {gap["name"] for gap in gaps})
-        job = contract.load_relay_authority_job(REPO_ROOT)
-        self.assertEqual(job["if"], contract.RUST_REQUIRED_IF)
-        self.assertEqual(job["needs"], ["changes", "lib_test_prepare"])
-        workflow = (REPO_ROOT / contract.PR_WORKFLOW).read_text(encoding="utf-8")
+        selected = [lane for lane in lanes if lane.name.startswith(("t5-s4-", "t5-s7a-", "t5-c1-", "t5-native-"))]
+        self.assertEqual(len(selected), 7)
+        self.assertEqual([lane.minimum for lane in selected], [1, 1, 1, 1, 1, 15, 1])
+        self.assertIn("t5-structural-signal-authority-teardown", {gap["name"] for gap in gaps})
+        # One listed test per declared floor unit, so dropping a lane's tests drops it below its floor.
+        names = [f"{lane.command[-1]}::case{index}" for lane in lanes for index in range(lane.minimum)]
+        self.assertEqual([contract.failures_for(contract.select_lane(lane, names)) for lane in lanes], [[]] * len(lanes))
         for lane in selected:
-            command = contract.expected_workflow_command(lane)
-            self.assertEqual(workflow.count(command), 1)
-            for replacement in ("", command.replace(lane.command[-1], "missing::test")):
-                with self.subTest(lane=lane.name, replacement=replacement), tempfile.TemporaryDirectory() as temporary:
-                    root = Path(temporary)
-                    path = root / contract.PR_WORKFLOW
-                    path.parent.mkdir(parents=True)
-                    path.write_text(workflow.replace(command, replacement), encoding="utf-8")
-                    with self.assertRaisesRegex(contract.ManifestError, "must exactly match"):
-                        contract.validate_workflow_contract(root, lanes, True)
+            with self.subTest(lane=lane.name):
+                kept = [name for name in names if not name.startswith(lane.command[-1])]
+                self.assertTrue(contract.failures_for(contract.select_lane(lane, kept)))
 
     def test_condition3_false_rejects_existing_mutation_script(self) -> None:
         temporary, path = manifest_path([active_lane()])
@@ -462,15 +379,6 @@ class ManifestContract(unittest.TestCase):
             with self.assertRaisesRegex(contract.ManifestError, "must not be a symlink"):
                 contract.load_active_lanes(path, repo_root)
 
-    def test_manifest_command_must_match_workflow_command(self) -> None:
-        temporary, path = manifest_path([active_lane()])
-        with temporary:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            payload["lanes"][0]["command"][-1] = "fixture::other"
-            path.write_text(json.dumps(payload), encoding="utf-8")
-            with self.assertRaisesRegex(contract.ManifestError, "must exactly match"):
-                contract.load_active_lanes(path, Path(temporary.name))
-
     def test_unfiltered_command_is_rejected(self) -> None:
         temporary, path = manifest_path([active_lane(command=["cargo", "test", "--lib"])])
         with temporary:
@@ -493,10 +401,6 @@ class ManifestContract(unittest.TestCase):
 
 
 RELAY_C1_LANE = "t5-c1-rowless-terminal-ledger-and-lease"
-CENSUS_COMMAND = (
-    "          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib "
-    "services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1"
-)
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
@@ -526,8 +430,6 @@ def add_undeclared_lane(payload: dict, root: Path) -> None:
     payload["lanes"].append(active_lane(
         command=["cargo", "test", "--lib", "services::discord::inflight"], minimum=1,
     ) | {"name": "new-lane"})
-    replace_once(root / contract.PR_WORKFLOW, CENSUS_COMMAND,
-                 CENSUS_COMMAND + "\n          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::inflight -- --test-threads=1")
 
 
 def drop_entry(path: str):
@@ -556,7 +458,7 @@ class AuthoritySurfaceContract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             copied = {contract.DEFAULT_MANIFEST.as_posix(), contract.CONDITION3_MUTATION_SCRIPT.as_posix(),
-                      contract.PR_WORKFLOW.as_posix(), contract.LIB_TEST_INVENTORY.as_posix()}
+                      contract.PR_WORKFLOW.as_posix()}
             copied |= {item["path"] for item in payload["authority_surface"]}
             copied |= {row["judge"] for row in payload["condition3_mutations"]}
             for relative in copied:
@@ -566,9 +468,27 @@ class AuthoritySurfaceContract(unittest.TestCase):
                 mutate(payload, root)
             (root / contract.DEFAULT_MANIFEST).write_text(json.dumps(payload), encoding="utf-8")
             stdout, stderr = io.StringIO(), io.StringIO()
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            # The copy holds only the declared files, so entry tests resolve against this tree's sources.
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
+                    mock.patch.object(contract, "lib_test_ids", return_value=self.real_test_ids()):
                 rc = contract.main(["--repo-root", str(root), "--check-manifest"])
         return rc, stdout.getvalue() + stderr.getvalue()
+
+    @staticmethod
+    @functools.cache
+    def real_test_ids() -> frozenset[str]:
+        return frozenset(contract.lib_test_ids(REPO_ROOT))
+
+    def test_entry_tests_resolve_only_to_lib_tests_the_linux_build_compiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "Cargo.toml").write_text('[package]\nname = "fixture"\n', encoding="utf-8")
+            (root / "src/lib.rs").write_text(
+                "#[cfg(test)]\nmod tests {\n#[test] fn linux_case() {}\n"
+                "#[cfg(windows)]\n#[test] fn windows_case() {}\n}\n// #[test] fn commented() {}\n",
+                encoding="utf-8")
+            self.assertEqual(contract.lib_test_ids(root), {"tests::linux_case"})
 
     def test_checked_in_surface_passes_the_declaration_check(self) -> None:
         rc, output = self.check()
@@ -591,7 +511,7 @@ class AuthoritySurfaceContract(unittest.TestCase):
              "is not a regular file"),
             ("entry test renamed", set_field("src/services/discord/catch_up.rs", "guards",
                                              ["entry_test:services::discord::catch_up::no_such_test"]),
-             "is not in scripts/lib_test_inventory_manifest.txt"),
+             "is not a linux lib test"),
             ("known gap without an issue", set_field("src/server/routes/health_api.rs", "guards", ["known_gap:5996"]),
              "must cite an issue"),
             ("unknown guard kind", set_field(rowless, "guards", ["reviewed:yes"]), "unknown guard"),
@@ -622,134 +542,67 @@ class AuthoritySurfaceContract(unittest.TestCase):
 
 
 class SelectionContract(unittest.TestCase):
-    def setUp(self) -> None:
-        isolate_from_runner_artifact(self)
+    def test_selection_counts_runnable_names_containing_any_filter(self) -> None:
+        lane = contract.Lane("lane", "T1", "fixture", ("cargo", "test", "--lib", "fixture::a", "fixture::b"), 1)
+        names = ["fixture::a::one", "x::fixture::b::two", "fixture::c::three"]
+        self.assertEqual(contract.select_lane(lane, names).selected, 2)
 
-    def test_list_count_uses_test_ids_not_cargo_summary(self) -> None:
-        output = "a::one: test\na::two: test\n2 tests, 0 benchmarks\n"
-        self.assertEqual(contract.count_test_ids(output), 2)
-
-    def test_zero_selection_is_fatal_even_when_cargo_exits_zero(self) -> None:
+    def test_zero_selection_is_fatal(self) -> None:
         lane = contract.Lane("zero", "T1", "fixture", ("cargo", "test", "--lib", "missing"), 1)
-        result = contract.LaneResult(lane, 0, 0, contract.list_command(lane), "0 tests")
-        self.assertEqual(contract.failures_for(result), [
+        self.assertEqual(contract.failures_for(contract.select_lane(lane, ["fixture::one"])), [
             "selected 0 tests",
             "selected 0 below declared minimum 1",
         ])
 
     def test_selection_below_floor_is_fatal(self) -> None:
         lane = contract.Lane("floor", "T4", "fixture", ("cargo", "test", "--lib", "fixture"), 3)
-        result = contract.LaneResult(lane, 2, 0, contract.list_command(lane), "")
-        self.assertEqual(contract.failures_for(result), [
+        self.assertEqual(contract.failures_for(contract.select_lane(lane, ["fixture::one", "fixture::two"])), [
             "selected 2 below declared minimum 3"
         ])
 
-    def test_run_lane_appends_list_and_removes_agentdesk_root(self) -> None:
-        lane = contract.Lane("lane", "T1", "fixture", ("cargo", "test", "--lib", "fixture"), 1)
-        observed: dict[str, object] = {}
-
-        def runner(command, **kwargs):
-            observed["command"] = command
-            observed["env"] = kwargs["env"]
-            return subprocess.CompletedProcess(command, 0, "fixture::one: test\n", "")
-
-        with mock.patch.dict("os.environ", {"AGENTDESK_ROOT_DIR": "/wrong"}):
-            result = contract.run_lane(lane, REPO_ROOT, runner=runner)
-        self.assertEqual(tuple(observed["command"]), contract.list_command(lane))
-        self.assertNotIn("AGENTDESK_ROOT_DIR", observed["env"])
-        self.assertEqual(result.selected, 1)
-
 
 class FloorGateEndToEnd(unittest.TestCase):
-    """`failures_for` is graded in isolation above. This drives the whole gate --
-    real `run_lane`, real cargo process, real `main` -- so a future refactor that
-    stops feeding the listing into the floor is caught here, not in review."""
+    """Drives `main` over a written nextest list, so a refactor that stops feeding the list into the floor is caught."""
 
-    def setUp(self) -> None:
-        isolate_from_runner_artifact(self)
-
-    def _run_against_listing(self, *, listed: int, minimum: int) -> tuple[int, str, str]:
+    def _run(self, *, listed: int, minimum: int, ignored: int = 0, nextest_list: bool = True) -> tuple[int, str, str]:
         temporary, manifest = manifest_path([active_lane(minimum=minimum)])
         with temporary:
             repo_root = Path(temporary.name)
-            bin_dir = repo_root / "fake-bin"
-            bin_dir.mkdir()
-            cargo = bin_dir / "cargo"
-            listing = "".join(f"fixture::module::t{index}: test\n" for index in range(listed))
-            cargo.write_text(
-                "#!/usr/bin/env bash\nset -euo pipefail\ncat <<'LIST'\n"
-                + listing
-                + f"{listed} tests, 0 benchmarks\n"
-                + "LIST\n",
-                encoding="utf-8",
-            )
-            cargo.chmod(0o755)
+            names = [f"fixture::module::t{index}" for index in range(listed)] + ["other::module::t"]
+            listing = write_nextest_list(repo_root / "universe.json", names, tuple(names[:ignored]))
             stdout, stderr = io.StringIO(), io.StringIO()
-            path = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
-            with mock.patch.dict("os.environ", {"PATH": path}):
-                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                    rc = contract.main([
-                        "--repo-root", str(repo_root),
-                        "--manifest", str(manifest),
-                    ])
+            argv = ["--repo-root", str(repo_root), "--manifest", str(manifest)]
+            argv += ["--nextest-list", str(listing)] if nextest_list else []
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = contract.main(argv)
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def test_listing_below_the_declared_floor_makes_the_gate_red(self) -> None:
-        rc, stdout, stderr = self._run_against_listing(listed=2, minimum=3)
+        rc, stdout, stderr = self._run(listed=2, minimum=3)
         self.assertEqual(rc, 1, stdout + stderr)
-        self.assertIn("selected=2 minimum=3 rc=0", stdout)
+        self.assertIn("selected=2 minimum=3", stdout)
         self.assertIn("selected 2 below declared minimum 3", stderr)
 
     def test_listing_that_meets_the_declared_floor_stays_green(self) -> None:
-        rc, stdout, stderr = self._run_against_listing(listed=3, minimum=3)
+        rc, stdout, stderr = self._run(listed=3, minimum=3)
         self.assertEqual(rc, 0, stdout + stderr)
-        self.assertIn("selected=3 minimum=3 rc=0", stdout)
+        self.assertIn("selected=3 minimum=3", stdout)
         self.assertEqual(stderr, "")
 
-    def test_an_empty_listing_is_red_even_though_cargo_exits_zero(self) -> None:
-        rc, stdout, stderr = self._run_against_listing(listed=0, minimum=1)
+    def test_ignored_tests_do_not_count_toward_the_floor(self) -> None:
+        rc, stdout, stderr = self._run(listed=3, minimum=3, ignored=1)
+        self.assertEqual(rc, 1, stdout + stderr)
+        self.assertIn("selected 2 below declared minimum 3", stderr)
+
+    def test_an_empty_selection_is_red(self) -> None:
+        rc, stdout, stderr = self._run(listed=0, minimum=1)
         self.assertEqual(rc, 1, stdout + stderr)
         self.assertIn("selected 0 tests", stderr)
 
-
-class MainContract(unittest.TestCase):
-    def _run(self, result: contract.LaneResult) -> tuple[int, str, str]:
-        temporary, manifest = manifest_path([active_lane(minimum=result.lane.minimum)])
-        with temporary, mock.patch.object(contract, "run_lane", return_value=result):
-            stdout, stderr = io.StringIO(), io.StringIO()
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                rc = contract.main([
-                    "--repo-root", str(Path(temporary.name)),
-                    "--manifest", str(manifest),
-                ])
-        return rc, stdout.getvalue(), stderr.getvalue()
-
-    def test_zero_selection_main_returns_one(self) -> None:
-        lane = contract.Lane("t1-fixture", "T1", "fixture", ("cargo", "test", "--lib", "missing"), 1)
-        rc, stdout, stderr = self._run(
-            contract.LaneResult(lane, 0, 0, contract.list_command(lane), "0 tests")
-        )
-        self.assertEqual(rc, 1)
-        self.assertIn("selected=0 minimum=1 rc=0", stdout)
-        self.assertIn("selected 0 tests", stderr)
-
-    def test_floor_failure_main_returns_one(self) -> None:
-        lane = contract.Lane("t1-fixture", "T1", "fixture", ("cargo", "test", "--lib", "fixture"), 3)
-        rc, stdout, stderr = self._run(
-            contract.LaneResult(lane, 2, 0, contract.list_command(lane), "")
-        )
-        self.assertEqual(rc, 1)
-        self.assertIn("selected=2 minimum=3", stdout)
-        self.assertIn("below declared minimum 3", stderr)
-
-    def test_clean_selection_main_returns_zero(self) -> None:
-        lane = contract.Lane("t1-fixture", "T1", "fixture", ("cargo", "test", "--lib", "fixture"), 2)
-        rc, stdout, stderr = self._run(
-            contract.LaneResult(lane, 2, 0, contract.list_command(lane), "")
-        )
-        self.assertEqual(rc, 0)
-        self.assertIn("selected=2 minimum=2", stdout)
-        self.assertEqual(stderr, "")
+    def test_a_missing_list_is_a_usage_error_not_a_pass(self) -> None:
+        rc, stdout, stderr = self._run(listed=3, minimum=1, nextest_list=False)
+        self.assertEqual(rc, 2, stdout + stderr)
+        self.assertIn("--nextest-list is required", stderr)
 
 
 if __name__ == "__main__":

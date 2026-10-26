@@ -1,0 +1,4 @@
+# Intended test removals and newly ignored tests against the comparison base, one per line:
+#   <binary-id> <test> | removed|runnable->ignored | <reason>
+# A row must match a loss the base diff reports for this change, and a loss with no row fails.
+# Clear the rows once the change that needed them has landed: they would be stale on the next PR.

@@ -1,0 +1,51 @@
+# Exact test IDs the CI nextest profile may retry once. Everything else runs with retries = 0.
+# nextest_ci.py plan rejects expired, duplicate or stale entries and generates the overrides from here.
+version = 1
+
+[[flaky]]
+scope = "linux-lib"
+binary-id = "agentdesk"
+test = "server::multinode_regression::multinode_regression_pg_tests::multinode_dispatch_claims_exactly_once_then_reclaims_expired_lease"
+issue = "#5185"
+expires = 2026-11-06
+reason = "intra-test race: two concurrent claims under tokio::join! can both skip the row lock; process isolation does not remove it"
+
+[[flaky]]
+scope = "linux-lib"
+binary-id = "agentdesk"
+test = "services::discord::jsonl_watcher::tests::notify_fires_when_file_modified"
+issue = "#5217"
+expires = 2026-11-06
+reason = "lost-wakeup shape in the file watcher on Linux; cause not identified and not process-global"
+
+[[flaky]]
+scope = "linux-lib"
+binary-id = "agentdesk"
+test = "services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_create"
+issue = "#5217"
+expires = 2026-11-06
+reason = "same lost-wakeup shape as notify_fires_when_file_modified"
+
+[[flaky]]
+scope = "linux-lib"
+binary-id = "agentdesk"
+test = "services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit"
+issue = "#5217"
+expires = 2026-11-06
+reason = "tmux hook intermittently creates no marker; cause not identified and not process-global"
+
+[[flaky]]
+scope = "linux-lib"
+binary-id = "agentdesk"
+test = "services::discord::turn_bridge::two_message_panel::tests::reanchor_moves_panel_below_new_answer_and_bumps_generation"
+issue = "#5251"
+expires = 2026-11-06
+reason = "intermittent under parallel co-selection; mechanism not measured, kept until per-process runs show it gone"
+
+[[flaky]]
+scope = "linux-lib"
+binary-id = "agentdesk"
+test = "voice::receiver::tests::receive_hook_observes_pcm_and_completed_utterance_with_control_channel"
+issue = "#5217"
+expires = 2026-11-06
+reason = "completion hook missed once on ubuntu; candidate is the 30ms wall-clock margin, not process-global state"
