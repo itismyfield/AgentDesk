@@ -209,12 +209,11 @@ failure.
 
 ### 5.3 Failure injection in tests
 
-`AGENTDESK_TEST_AGENT_SETUP_FAIL_AFTER=<step>` (env var, `#[cfg(test)]`
-only) forces the named step to return a synthetic failure after applying its
-mutation. This is what the E2E smoke test in
-`src/integration_tests/tests/agents_setup_e2e.rs` uses to verify rollback.
-Steps recognized: `agentdesk_yaml`, `prompt_file`, `workspace_seed`,
-`db_seed`, `skill_mapping`.
+No test injects a step failure today. The `AGENTDESK_TEST_AGENT_SETUP_FAIL_AFTER`
+hook and the E2E smoke test that used it to verify rollback were removed with
+the legacy integration harness, so the rollback path (`finalize_failed_setup`
+in `src/server/routes/agents_setup.rs`) has no automated coverage. Use §5.2 to
+check a rollback by hand.
 
 ---
 

@@ -17,6 +17,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_REL = Path("scripts") / "doc_path_refs_baseline.txt"
+# The baseline only shrinks; lower this as entries get fixed, never raise it.
+BASELINE_MAX_ENTRIES = 0
 EXCLUDED_PREFIXES = ("docs/generated/",)
 # Untracked outputs built inside a checkout. Docs may name them (saying how to
 # build them), but a Markdown link to one is dead on a fresh clone.
@@ -316,9 +318,17 @@ Markers for paths that intentionally do not exist:
   (a declared path that exists is an error);
   <!-- doc-path-refs: external packages/x/ --> for another repo's paths.
 A doc with `deprecated: true` front matter is context only: links are checked.
-Globs and placeholders (*, <x>, {x}, $X, ...) are skipped. Known breakage owned
-by another lane is listed in scripts/doc_path_refs_baseline.txt.
+Globs and placeholders (*, <x>, {x}, $X, ...) are skipped.
+scripts/doc_path_refs_baseline.txt only shrinks (BASELINE_MAX_ENTRIES caps it):
+fix the doc or mark the path instead of adding a line.
 """
+
+
+def _ceiling_error(count: int) -> str:
+    return (
+        f"ERROR: baseline would hold {count} entries; it only shrinks "
+        f"(BASELINE_MAX_ENTRIES = {BASELINE_MAX_ENTRIES}). Fix the doc or mark the path."
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -337,9 +347,12 @@ def main(argv: list[str] | None = None) -> int:
     findings = scan_repo(root)
     if args.write_baseline:
         keys = sorted({f.key() for f in findings if f.reason != ZERO_TEST_REASON})
+        if len(keys) > BASELINE_MAX_ENTRIES:
+            print(_ceiling_error(len(keys)), file=sys.stderr)
+            return 1
         header = (
             "# doc<TAB>ref pairs that scripts/check_doc_path_refs.py reports without failing.\n"
-            "# Only test-run docs awaiting their rewrite belong here; delete lines as they get fixed.\n"
+            "# It only shrinks (BASELINE_MAX_ENTRIES); fix the doc instead of adding a line.\n"
         )
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
         baseline_path.write_text(header + "".join(k + "\n" for k in keys), encoding="utf-8")
@@ -359,6 +372,10 @@ def main(argv: list[str] | None = None) -> int:
     if new:
         print(f"{len(new)} broken doc path reference(s). Fix them as follows.", file=sys.stderr)
         print(RULES, file=sys.stderr)
+    if len(baseline) > BASELINE_MAX_ENTRIES:
+        print(_ceiling_error(len(baseline)), file=sys.stderr)
+        return 1
+    if new:
         return 1
     print(f"doc path refs OK ({len(tolerated)} baseline, {len(stale)} stale)")
     return 0
