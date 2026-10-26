@@ -1,15 +1,14 @@
 {
   "schema": 1,
-  "warnings": 379,
+  "warnings": 342,
   "toolchain": "1.94.1",
   "host": "x86_64-unknown-linux-gnu",
   "rustc_commit": "e408947bfd200af42db322daf0fadfe7e26d3bd1",
   "runner": "Linux",
   "command": "cargo clippy --workspace --all-targets --all-features -- -W clippy::all",
   "observation": {
-    "sha": "f3724fb6366599a9041bcc63d267be668991c799",
-    "run_url": "https://github.com/itismyfield/AgentDesk/actions/runs/40196339581",
-    "artifact_id": 12599978037,
-    "diagnostics_sha256": "8ad32e69eebf1e692067ea8c40344d368f555a9674feabf0c847840e15d10d98"
+    "source": "local WSL observation",
+    "sha": "59428323837079635d0fdf321d872c1e9b31e4b6",
+    "diagnostics_sha256": "2bfa39a15115f8bb28ed3203bcac708316861c4722c68604a3d1296a05a5dda8"
   }
 }

@@ -43,14 +43,15 @@ the gate, never producing a valid zero. Main uploads the observation. The count
 is compiler-emitted diagnostics, not source occurrences or a deduplicated
 cross-target debt estimate.
 
-The warning-total gate uses `scripts/clippy_warning_baseline.json`: **379**
-diagnostics, measured by Ubuntu main CI at
-`f3724fb6366599a9041bcc63d267be668991c799` after the first warning-debt
-reduction (down from 952). The file records the run URL, artifact ID and diagnostics
-digest. The environment is Rust 1.94.1, x86_64 Linux and the staged argv above;
-local Mac totals cannot substitute for it. Both workflows reject warning growth
-and invalid or mismatched observations. The existing required `Lint` mirror
-owns PR enforcement; no required context is added.
+The warning-total gate uses `scripts/clippy_warning_baseline.json`: **342**
+diagnostics, measured locally on WSL at
+`59428323837079635d0fdf321d872c1e9b31e4b6` after reducing the previous 379-warning
+ceiling. The observation records its local WSL source, commit SHA and diagnostics
+digest; it does not claim a CI run or uploaded artifact. The environment remains
+Rust 1.94.1, x86_64 Linux and the staged argv above; local Mac totals cannot
+substitute for it. Main and PR CI measure again and reject warning growth or
+invalid/mismatched observations. The existing required `Lint` mirror owns PR
+enforcement; no required context is added.
 
 Lower the baseline with a valid observation when warning debt decreases.
 Admission compares the committed PR base (main uses its first parent) and
