@@ -655,11 +655,13 @@ mod tests {
     }
 
     /// An idle Claude pane: `status` above the composer box, an empty composer, the bypass footer.
+    #[cfg(unix)]
     fn idle_pane(status: &str) -> String {
         idle_pane_with(status, "\u{276f}\u{a0}")
     }
 
     /// An idle Claude pane whose composer shows `row`.
+    #[cfg(unix)]
     fn idle_pane_with(status: &str, row: &str) -> String {
         let border = "\u{2500}".repeat(60);
         let footer = "  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";
@@ -667,6 +669,7 @@ mod tests {
     }
 
     /// The real follow-up submit over a scripted pane; returns its result and the pane writes.
+    #[cfg(unix)]
     fn submit_follow_up(
         session: &str,
         pane: &str,
@@ -690,6 +693,7 @@ mod tests {
 
     /// A draft-held follow-up goes through the real classifier into the mailbox, stays whole and
     /// unsent at the cap, and after the person recovers the draft gets one kickoff and one submit.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_follow_up_held_by_a_draft_resumes_once_the_draft_is_recovered() {
         use crate::services::claude_tui::composer_lock::{
