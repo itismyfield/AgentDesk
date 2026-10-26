@@ -88,30 +88,9 @@ pub(crate) fn looks_like_explicit_repo_path(raw: &str) -> bool {
 }
 
 fn load_repo_resolution_config() -> Option<(crate::config::Config, PathBuf)> {
-    let explicit = std::env::var_os("AGENTDESK_CONFIG")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-
-    let mut candidates = Vec::new();
-    if let Some(path) = explicit {
-        candidates.push(path);
-    }
-    if let Some(root) = crate::config::runtime_root() {
-        candidates.push(crate::runtime_layout::config_file_path(&root));
-        candidates.push(crate::runtime_layout::legacy_config_file_path(&root));
-    }
-
-    for path in candidates {
-        if !path.is_file() {
-            continue;
-        }
-        if let Ok(config) = crate::config::load_from_path(&path) {
-            let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-            return Some((config, base_dir.to_path_buf()));
-        }
-    }
-
-    None
+    let (config, path) = crate::config::config_path::load_runtime_config_file()?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    Some((config, base_dir.to_path_buf()))
 }
 
 fn configured_repo_dir(repo_id: &str) -> Option<String> {
