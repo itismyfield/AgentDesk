@@ -127,7 +127,7 @@ impl LiveSink {
         .map_err(|e| e.to_string())?
     }
 
-    async fn mailbox_pending(&self, intent: &IntentRef) -> Result<bool, String> {
+    async fn locate(&self, intent: &IntentRef) -> Result<Located, String> {
         if intent.id != format!("{}:{}", intent.source_message, intent.fifo) {
             return Err(
                 "mailbox custody reference must bind its source and queued generation".into(),
@@ -139,7 +139,7 @@ impl LiveSink {
         let channel = ChannelId::new(intent.channel);
         // Drain writes the marker before trimming the queue and requeue writes the queue before
         // deleting the marker, so queue reads around the marker read see an item in transit.
-        let disk = tokio::task::spawn_blocking(move || {
+        let (queued, marker) = tokio::task::spawn_blocking(move || {
             let read =
                 || queue::load_channel_pending_queue_checked(&provider, &token_hash, channel);
             let mut items = read()?.0;
@@ -148,9 +148,8 @@ impl LiveSink {
                 &token_hash,
                 channel,
             )?;
-            items.extend(marker.map(|(item, _)| item));
             items.extend(read()?.0);
-            Ok::<_, String>(items)
+            Ok::<_, String>((items, marker))
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -168,18 +167,41 @@ impl LiveSink {
             .try_snapshot()
             .await
             .map_err(|e| format!("mailbox unavailable: {e:?}"))?;
-        let persisted = disk.iter().any(matches);
         // A drained head is live as the dispatch reservation or the active turn it became.
         let source = poise::serenity_prelude::MessageId::new(intent.source_message);
-        let restored = live.intervention_queue.iter().any(matches)
-            || [live.pending_user_dispatch, live.active_user_message_id].contains(&Some(source))
-            || live.pending_user_dispatch_source_ids.contains(&source)
-            || live.active_absorbed_source_ids.contains(&source);
-        if persisted != restored {
+        Ok(Located {
+            queued: queued.iter().any(matches),
+            marker: marker.is_some_and(|(item, _)| matches(&item)),
+            live: live.intervention_queue.iter().any(matches),
+            dispatching: [live.pending_user_dispatch, live.active_user_message_id]
+                .contains(&Some(source))
+                || live.pending_user_dispatch_source_ids.contains(&source)
+                || live.active_absorbed_source_ids.contains(&source),
+        })
+    }
+
+    /// Present in custody; an unrestored or disagreeing live view is an error, never absence.
+    pub(super) async fn mailbox_pending(&self, intent: &IntentRef) -> Result<bool, String> {
+        let at = self.locate(intent).await?;
+        let persisted = at.queued || at.marker;
+        if persisted != (at.live || at.dispatching) {
             return Err("mailbox custody is not durably restored; retry recovery".into());
         }
         Ok(persisted)
     }
+
+    /// Waiting in both queues and not claimed by a drain or turn, so returning it moves nothing.
+    pub(super) async fn returnable(&self, intent: &IntentRef) -> Result<bool, String> {
+        let at = self.locate(intent).await?;
+        Ok(at.queued && at.live && !at.marker && !at.dispatching)
+    }
+}
+
+struct Located {
+    queued: bool,
+    marker: bool,
+    live: bool,
+    dispatching: bool,
 }
 
 #[async_trait::async_trait]

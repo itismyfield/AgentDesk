@@ -12,11 +12,14 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from check_test_target_integrity import (
-    _attribute_span,
-    _rust_tokens,
-    collect_static_tests,
-    load_lib_inventory_manifest,
+sys.path.insert(0, str(Path(__file__).resolve().parent / "ci"))
+from rust_test_sources import (  # noqa: E402
+    PLATFORMS,
+    attribute_span as _attribute_span,
+    default_features,
+    platform_split,
+    rust_tokens as _rust_tokens,
+    walk,
 )
 
 
@@ -53,7 +56,7 @@ class OwnerSpec:
 @dataclass(frozen=True)
 class ProofPlan:
     repo_root: Path
-    manifest: str
+    platform: str
     pass_prefix: str
     gate: GateSpec
     owners: tuple[OwnerSpec, ...]
@@ -123,7 +126,7 @@ def _identity(plan: ProofPlan) -> str:
     governed-source change and restore wholly within one child window is not
     detected and is outside this engine's guarantee.
     """
-    paths = [plan.manifest, "src/lib.rs", plan.gate.parent_source, plan.gate.child_source]
+    paths = ["Cargo.toml", "src/lib.rs", plan.gate.parent_source, plan.gate.child_source]
     paths += [value for owner in plan.owners for value in (owner.parent_source, owner.owner_source)]
     digest = hashlib.sha256()
     for value in sorted(set(paths)):
@@ -171,6 +174,8 @@ def _family_ids(values: set[str] | frozenset[str], family: str) -> set[str]:
 def _validate_spec(plan: ProofPlan) -> None:
     if not plan.repo_root.is_dir():
         _fail(f"repository root is not a directory: {plan.repo_root}")
+    if plan.platform not in PLATFORMS:
+        _fail(f"platform must be one of {sorted(PLATFORMS)}: {plan.platform}")
     if not SEGMENT.fullmatch(plan.pass_prefix):
         _fail("pass prefix must be one Rust-style identifier")
     gate = plan.gate
@@ -221,13 +226,13 @@ def seal(plan: ProofPlan) -> SealedProof:
     """Validate the complete graph, then commit an independent execution tuple."""
     before = _plan_digest(plan)
     _validate_spec(plan)
-    manifest_path = _path(plan, plan.manifest, "manifest")
     try:
-        manifest_ids = load_lib_inventory_manifest(manifest_path)
+        features = default_features(plan.repo_root)
     except (OSError, ValueError) as error:
-        _fail(f"manifest identity is invalid: {error}")
-    crate = plan.repo_root / "src/lib.rs"
-    inventory = collect_static_tests(crate, plan.repo_root)
+        _fail(f"Cargo.toml features are unreadable: {error}")
+    inventory = walk(plan.repo_root / "src/lib.rs", plan.repo_root)
+    # Two oracles: every declaration the sources reach, and what the target platform compiles.
+    compiled_ids = platform_split(inventory, PLATFORMS[plan.platform], features)[0]
     gate_parent = _path(plan, plan.gate.parent_source, "gate parent")
     gate_child = _path(plan, plan.gate.child_source, "gate child")
     gate_count = _module_count(gate_parent, plan.gate.module_ident)
@@ -238,7 +243,7 @@ def seal(plan: ProofPlan) -> SealedProof:
         for owner in plan.owners:
             residue |= _path(plan, owner.owner_source, f"owner {owner.key} source").exists()
             residue |= bool(_family_ids(set(inventory.tests), owner.owner_family))
-            residue |= bool(_family_ids(manifest_ids, owner.owner_family))
+            residue |= bool(_family_ids(compiled_ids, owner.owner_family))
         if residue or plan.gate.policy == "required":
             _fail(f"gate {plan.gate.key} is absent but required or has residue")
         absent = tuple(AbsentCleanExpectation(owner.key) for owner in plan.owners if owner.policy == "optional")
@@ -252,20 +257,20 @@ def seal(plan: ProofPlan) -> SealedProof:
         source = _path(plan, owner.owner_source, f"owner {owner.key} source")
         count = _module_count(parent, owner.module_ident)
         static_family = _family_ids(set(inventory.tests), owner.owner_family)
-        manifest_family = _family_ids(manifest_ids, owner.owner_family)
+        compiled_family = _family_ids(compiled_ids, owner.owner_family)
         expected = set(owner.ids)
-        relevant_duplicates = {item[0] for item in inventory.duplicate_tests if item[0] in expected}
+        relevant_duplicates = {test_id for test_id in expected if len(inventory.tests.get(test_id, ())) > 1}
         if count == 0 and owner.policy == "optional":
-            if source.exists() or static_family or manifest_family:
+            if source.exists() or static_family or compiled_family:
                 _fail(f"optional owner {owner.key} is absent with residue")
             absent.append(AbsentCleanExpectation(owner.key))
             continue
         if count != 1 or not source.is_file():
             _fail(f"owner {owner.key} is not active exactly once")
-        if static_family != expected or manifest_family != expected or relevant_duplicates:
-            _fail(f"owner {owner.key} inventory/manifest closure differs from its immutable IDs")
+        if static_family != expected or compiled_family != expected or relevant_duplicates:
+            _fail(f"owner {owner.key} inventory/{plan.platform} closure differs from its immutable IDs")
         for test_id in owner.ids:
-            site = inventory.tests.get(test_id, "").rsplit(":", 1)[0]
+            site = inventory.tests[test_id][0][0].rsplit(":", 1)[0]
             if re.match(r"^[A-Za-z]:", site):
                 _fail(f"inventory source site must not be a drive path: {site}")
             site = _relative(site.replace("\\", "/"), "inventory source site")
@@ -339,7 +344,7 @@ def run(plan: ProofPlan) -> ProofResult:
     if _plan_digest(plan) != digest or result.execution_ids != sealed.execution_ids:
         _fail("proof plan or transactional execution tuple changed")
     if _identity(plan) != sealed.identity:
-        _fail("sealed source/manifest/inventory identity changed during execution")
+        _fail("sealed source/inventory identity changed during execution")
     for text in transcripts:
         print(text, end="" if text.endswith("\n") else "\n")
     for record in pass_records:
@@ -355,7 +360,7 @@ def parse_cli(argv: list[str] | None = None) -> ProofPlan:
     subparsers = parser.add_subparsers(dest="command", required=True)
     command = subparsers.add_parser("run")
     command.add_argument("--repo-root", required=True)
-    command.add_argument("--manifest", required=True)
+    command.add_argument("--platform", required=True, choices=sorted(PLATFORMS))
     command.add_argument("--pass-prefix", required=True)
     command.add_argument("--gate", nargs=5, required=True, metavar=("KEY", "PARENT", "MODULE", "CHILD", "POLICY"))
     command.add_argument("--owner", nargs=7, action="append", required=True, metavar=("KEY", "GATE", "PARENT", "MODULE", "SOURCE", "FAMILY", "POLICY"))
@@ -367,7 +372,7 @@ def parse_cli(argv: list[str] | None = None) -> ProofPlan:
     owners = tuple(OwnerSpec(*values, tuple(ids.pop(values[0], ()))) for values in args.owner)
     if ids:
         parser.error(f"owner IDs reference unknown keys: {', '.join(sorted(ids))}")
-    return ProofPlan(Path(args.repo_root).resolve(), args.manifest, args.pass_prefix, GateSpec(*args.gate), owners)
+    return ProofPlan(Path(args.repo_root).resolve(), args.platform, args.pass_prefix, GateSpec(*args.gate), owners)
 
 
 def main(argv: list[str] | None = None) -> int:

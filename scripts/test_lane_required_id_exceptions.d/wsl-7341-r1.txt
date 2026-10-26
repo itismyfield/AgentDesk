@@ -1,1 +1,0 @@
-config::runtime_root_guard::test_process | helper-module | #7341 | expires=2026-11-07 | Marks test processes before libtest starts threads; runtime_root_tests and integration children verify its inherited marker.

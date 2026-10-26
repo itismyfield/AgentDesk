@@ -379,6 +379,38 @@ pub(crate) fn socket_peer_pid(_stream: &std::os::unix::net::UnixStream) -> Optio
     None
 }
 
+/// The audit token of the process behind a connection as the kernel reads it now: its pid and
+/// exec generation, which changes on every exec of that pid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PeerToken {
+    pub pid: u32,
+    pub version: u32,
+    pub raw: [u32; 8],
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn socket_peer_token(stream: &std::os::unix::net::UnixStream) -> Option<PeerToken> {
+    use std::os::fd::AsRawFd;
+    let mut raw = [0u32; 8];
+    let mut len = std::mem::size_of_val(&raw) as libc::socklen_t;
+    // SAFETY: LOCAL_PEERTOKEN writes one 32-byte audit_token_t into `raw`; the length is checked.
+    let read = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERTOKEN,
+            raw.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    // audit_token_t keeps the pid in val[5] and the pid version in val[7].
+    (read == 0 && len as usize == std::mem::size_of_val(&raw) && raw[5] > 0).then_some(PeerToken {
+        pid: raw[5],
+        version: raw[7],
+        raw,
+    })
+}
+
 /// The pid and start of the process that accepted this connection.
 #[cfg(unix)]
 pub(crate) fn socket_peer(

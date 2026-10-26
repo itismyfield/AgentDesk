@@ -5,7 +5,7 @@ use crate::services::session_host::policy::consent::{
     ConsentKey, ConsentStore, IntentRef, Preview, Question,
 };
 
-// UserDefault cannot decode through the file validator until activation; supply the approved projection directly.
+// Supplies the approved projection directly so these cases need no approval files.
 struct Approved(BootSessionHosts);
 impl super::super::ApprovalStore for Approved {
     fn load(&self) -> super::super::Loaded {

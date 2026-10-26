@@ -6,8 +6,8 @@ use super::super::router::{IntakeDeps, IntakeOrigin, dispatch_skill_intake};
 use super::super::{Context, Error, auto_restore_session, check_auth, mailbox_has_active_turn};
 use crate::services::provider::ProviderKind;
 
-// Keep provider-specific skill wording in one helper so /skill, /cc, !skill,
-// and !cc stay aligned.
+// Keep provider-specific skill wording in one helper so /skill, !skill and
+// !cc stay aligned.
 
 pub(in crate::services::discord) fn build_provider_skill_prompt(
     provider: &ProviderKind,
@@ -105,7 +105,7 @@ pub(in crate::services::discord) fn build_provider_skill_prompt(
     }
 }
 
-/// Autocomplete handler for /skill and /cc skill names
+/// Autocomplete handler for /skill skill names
 async fn autocomplete_skill<'a>(
     ctx: Context<'a>,
     partial: &'a str,
@@ -181,7 +181,7 @@ async fn run_skill_slash_command(
             match current_path {
                 Some(path) => ctx.say(format!("`{}`", path)).await?,
                 None => {
-                    ctx.say("No active session. Use `/start <path>` first.")
+                    ctx.say("No active session. Set a workspace in agentdesk.yaml.")
                         .await?
                 }
             };
@@ -288,7 +288,7 @@ async fn run_skill_slash_command(
     };
 
     if !has_session {
-        ctx.say("No active session. Use `/start <path>` first.")
+        ctx.say("No active session. Set a workspace in agentdesk.yaml.")
             .await?;
         return Ok(());
     }
@@ -355,18 +355,6 @@ pub(in crate::services::discord) async fn cmd_skill(
     #[description = "Additional arguments for the skill"] args: Option<String>,
 ) -> Result<(), Error> {
     run_skill_slash_command(ctx, "/skill", skill, args).await
-}
-
-/// /cc <skill> [args] — Legacy alias for /skill
-#[poise::command(slash_command, rename = "cc")]
-pub(in crate::services::discord) async fn cmd_cc(
-    ctx: Context<'_>,
-    #[description = "Skill name"]
-    #[autocomplete = "autocomplete_skill"]
-    skill: String,
-    #[description = "Additional arguments for the skill"] args: Option<String>,
-) -> Result<(), Error> {
-    run_skill_slash_command(ctx, "/cc", skill, args).await
 }
 
 #[cfg(all(test, unix))]

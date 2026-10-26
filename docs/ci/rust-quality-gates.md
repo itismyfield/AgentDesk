@@ -6,11 +6,14 @@ repository is already clippy-clean.
 ## Entrypoints
 
 - `just check`: local aggregate for `just fmt-check`, staged clippy,
-  `cargo check --workspace --all-features --all-targets`, the existing
-  non-Postgres test subset, and the targeted `ClaudeBinary` compile-fail
-  doctest guard.
-- `just test-postgres`: existing PostgreSQL test lane for CI jobs with a
-  Postgres service.
+  `cargo check --workspace --all-features --all-targets` and `just test`.
+- `just test`: the CI nextest run, `cargo nextest run --lib --profile ci`, over every
+  lib test; the PostgreSQL ones need a dedicated test server.
+- `just test-non-pg`: without PostgreSQL, the lib tests the source PG classifier leaves
+  out through the native CI path, then every non-lib test and the `ClaudeBinary`
+  compile-fail doctests.
+- `just test-postgres`: every lib test against an explicit
+  `POSTGRES_TEST_DATABASE_URL_BASE` server.
 - `just lint-strict`: target end state, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`. This is intentionally not wired into required
   CI yet.
@@ -34,10 +37,10 @@ the gate, never producing a valid zero. Main uploads the observation. The count
 is compiler-emitted diagnostics, not source occurrences or a deduplicated
 cross-target debt estimate.
 
-The warning-total gate uses `scripts/clippy_warning_baseline.json`: **952**
+The warning-total gate uses `scripts/clippy_warning_baseline.json`: **379**
 diagnostics, measured by Ubuntu main CI at
-`1e9603a630ff9ec6d654ad69945a4229d4ae9ee0` and reproduced in the two preceding
-main observations. The file records the run URL, artifact ID and diagnostics
+`f3724fb6366599a9041bcc63d267be668991c799` after the first warning-debt
+reduction (down from 952). The file records the run URL, artifact ID and diagnostics
 digest. The environment is Rust 1.94.1, x86_64 Linux and the staged argv above;
 local Mac totals cannot substitute for it. Both workflows reject warning growth
 and invalid or mismatched observations. The existing required `Lint` mirror
@@ -72,27 +75,26 @@ production-only, test-aware, or repo-wide before adding hard gates.
 
 ## Non-Postgres Test Scope
 
-`just test-non-pg` keeps a targeted non-Postgres subset for local `just check`.
-CI no longer runs it: on `main` push and dispatch, `ci-main.yml` plans the
-full adjudicated library sweep and runs `full_non_pg` as four parallel shards,
-each with its own PostgreSQL service. The job needs `sweep_shards` and
-`lib_test_prepare` and runs under `!cancelled()`. An `always()` aggregate
-requires every shard to succeed and retains `Full tests (ubuntu-latest)`.
-PR `library_sweep` uses the same partitioner on its existing selected or full
-set and retains its required mirror. Counter union checks preserve the exact
-filter-plus-replay population, declared ignored IDs share shards with runnable
-IDs, and each leg checks `SWEEP_SHARD_TOTAL` against its planned count before
-execution. Exact-ID adjudication still rejects missing IDs and zero execution.
+`just test-non-pg` runs the classifier's non-PG lib tests locally the way the native
+nightly does. CI does not call it: on `main` push and dispatch, every nightly, and on PRs whose
+`rust_tests` filter is on, `rust_build` archives the lib tests and plans every listed test
+over six `rust_tests` workers, each with its own PostgreSQL service, and
+`test_evidence` audits that every planned test ran. PR, main and nightly keep the same
+three jobs; `scripts/check-ci-runner-hardening.sh` allows them to differ only in
+`needs`, `if`, the PR base comparison and the main `nextest-baseline` upload.
 
 The `lint` job runs fmt, clippy, the policy JS tests, the non-lib side of the
 recipe's `--all-targets` lines (`--bins --test '*'`), and the `ClaudeBinary`
-compile-fail doctests. The nightly macOS and Windows lanes run their
-`--all-targets` non-Postgres sweeps. Main and PR PG matrices use the numeric
-shard count from `PG_SHARD_COUNT` (currently eight), plus a separate `continuity` leg. Numeric
-legs run only their PG selection; continuity runs its existing recipe once
-with `PG_INCLUDE_SHARD` removed. Selected PRs schedule only numeric shards
-containing selected IDs, plus continuity, while preserving the existing PG
-and continuity populations.
+compile-fail doctests. The nightly macOS and Windows lanes run
+`scripts/ci/nextest-native.sh`: native source compare, plan, preflight, run
+record and audit on one worker. They plan the non-PG lib tests that
+`scripts/ci/pg_test_classifier.py` selects, then run the non-lib targets with
+`cargo test` and the non-Postgres skips.
+
+The macOS-only `herdr_loaded_image_macos_` tests compile on no PR runner.
+`scripts/ci/herdr_loaded_image_macos_ids.txt` lists them and a static test pins it
+to the macOS source inventory. A local Mac run checks that exactly those ran:
+`python3 scripts/run_test_lane.py --lane macos-loaded-image --expected-ids scripts/ci/herdr_loaded_image_macos_ids.txt -- env -u AGENTDESK_ROOT_DIR cargo test --lib herdr_loaded_image_macos_ -- --test-threads=1`.
 
 A broader sweep was attempted with:
 
@@ -119,13 +121,17 @@ Ubuntu lint jobs (PR `Lint runner`, main `Main lint`) are the authoritative form
 full workspace gates until remaining Unix-only tmux tests are made portable or
 cfg-guarded.
 `ci-nightly.yml` has the same Windows boundary today: its Windows lane runs
-default-feature `cargo test --all-targets`.
-`ci-main.yml` `windows_cache_warm` builds the same Windows compile on every
-`main` push (`cargo check --workspace --all-targets` and `cargo test --lib
---no-run`, no tests run) and saves the registry and sccache entries the PR
-Windows jobs restore. It is advisory (`continue-on-error`) and not a required
-context; `scripts/check-ci-runner-hardening.sh` keeps its env, setup steps and
-rust-cache inputs equal to the PR Windows jobs so both hash to the same keys.
+default-feature lib tests through nextest and the other targets with `cargo test`.
+`ci-windows-cache-warm.yml` `windows_cache_warm` builds the same Windows compile
+when a `main` push changes `Cargo.lock`, `Cargo.toml`, `rust-toolchain.toml` or
+the cargo config, and once a day inside the 7-day cache eviction window
+(`cargo check --workspace --all-targets` and `cargo test --lib --no-run`, no
+tests run). It saves the registry and sccache entries the PR Windows jobs
+restore. A day without a warm only slows those jobs; it never decides them. It
+is advisory (`continue-on-error`) and not a required context;
+`scripts/check-ci-runner-hardening.sh` keeps its env, setup steps and
+rust-cache inputs equal to the PR Windows jobs so both hash to the same keys,
+and rejects a second warm job in `ci-main.yml`.
 
 ### Local Windows GNU compile check from macOS
 

@@ -231,7 +231,7 @@ fn consent_bulk_inventory_distinguishes_absence_unknown_newer_and_corruption() {
     for (bytes, expected) in [
         (b"{".to_vec(), "consent_snapshot_corrupt"),
         (
-            br#"{"schema":3,"future":true}"#.to_vec(),
+            br#"{"schema":4,"future":true}"#.to_vec(),
             "consent_snapshot_newer",
         ),
     ] {

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -14,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 REL = Path("scripts/ci/nested_libtest_declarations.json")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from rust_lex import CODE, COMMENT, LITERAL, StripState, lex_segments
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rust_test_sources as sources
 
 MODES = {"inherited", "null", "captured", "file", "piped"}
 ID = re.compile(r"\w+(?:::\w+)+\Z")
@@ -128,8 +129,7 @@ def functions(text: str) -> tuple[dict, list[int]]:
 
 
 def own_attributes(text: str, function_start: int) -> list[list[str]]:
-    from check_test_target_integrity import _rust_tokens
-    tokens = _rust_tokens(text)
+    tokens = sources.rust_tokens(text)
     cursor = next(index for index, token in enumerate(tokens) if token.start == function_start) - 1
     while cursor >= 0 and tokens[cursor].value in {"async", "unsafe", "const", "pub"}:
         cursor -= 1
@@ -198,25 +198,15 @@ def names_child(compact: str, text: str, name: str) -> bool:
 
 
 def check(root: Path, path: Path | None = None) -> list[str]:
-    from check_test_target_integrity import collect_static_tests, load_lib_inventory_manifest
-    from check_test_lane_coverage import load_non_pg_filter_replay, load_non_pg_skip_args
-    from check_pg_test_lane_membership import pg_test_shard
-    from run_test_lane import derive_expected_selection, parse_ledger
     children = declarations(root, path)
-    manifest = load_lib_inventory_manifest(root / "scripts/lib_test_inventory_manifest.txt")
-    runtime, errors = derive_expected_selection(root / "scripts/lib_test_inventory_manifest.txt", "linux", [])
-    ignored, ignored_by_lane = set(), {}
-    for lane in ("pg", "non-pg-sweep"):
-        entries, problems = parse_ledger(root / "scripts/known_test_failures.txt", lane, datetime.date.today())
-        errors.extend(problems)
-        ignored_by_lane[lane] = {entry.pattern for entry in entries if entry.mode == "ignored"}
-        ignored.update(ignored_by_lane[lane])
+    inventory = sources.walk(root / "src/lib.rs", root)
+    linux = sources.platform_split(inventory, "linux", sources.default_features(root))[0]
+    errors = []
     calls, declared = source_calls(root), {}
-    static = collect_static_tests(root / "src/lib.rs", root)
     for child in children:
         name, source = child["id"], root / child["source"]
         bounds, _ = functions(source.read_text())
-        if static.tests.get(name, "").rsplit(":", 1)[0] != child["source"]:
+        if child["source"] not in {site.rsplit(":", 1)[0] for site, _ in inventory.tests.get(name, ())}:
             errors.append(f"child inventory source differs from declaration: {name}")
         definitions = [item for item in bounds.values() if item["function"] == name.rsplit("::", 1)[1]]
         if len(definitions) != 1:
@@ -227,10 +217,8 @@ def check(root: Path, path: Path | None = None) -> list[str]:
                 errors.append(f"child definition is not ignored: {name}")
             if child["platform"] == "windows" and ["cfg", "(", "windows", ")"] not in attributes:
                 errors.append(f"excluded child lacks cfg(windows): {name}")
-        if child["platform"] == "linux" and name not in manifest:
+        if child["platform"] == "linux" and name not in linux:
             errors.append(f"child absent from inventory: {name}")
-        if (name in runtime or child["parents"]) and name not in ignored:
-            errors.append(f"child absent from ignored ledger: {name}")
         actual_parents = set()
         for call in child["calls"]:
             if call["stdout"] != "inherited":
@@ -240,11 +228,12 @@ def check(root: Path, path: Path | None = None) -> list[str]:
             for owner in owners.values():
                 if owner["function"] == call["function"]:
                     site = f"{call['source']}:{call_text[:owner['start']].count(chr(10)) + 1}"
-                    actual_parents.update(test for test, location in static.tests.items() if location == site)
+                    actual_parents.update(test for test, found in inventory.tests.items()
+                                          if any(location == site for location, _ in found))
         if set(child["parents"]) != actual_parents:
             errors.append(f"declared parents do not match inherited test call owners: {name}")
         for parent in child["parents"]:
-            if parent not in manifest:
+            if parent not in inventory.tests:
                 errors.append(f"parent absent from inventory: {parent}")
         for call in child["calls"]:
             key = call["source"], call["function"]
@@ -263,19 +252,6 @@ def check(root: Path, path: Path | None = None) -> list[str]:
     for key in sorted(calls.keys() | declared.keys()):
         if calls.get(key) != declared.get(key):
             errors.append(f"nested subprocess source audit differs: {key}: actual={calls.get(key)} declared={declared.get(key)}")
-    skips = load_non_pg_skip_args(root)[1::2]
-    pg = {name for name in runtime if any(skip in name for skip in skips)}
-    replay = set(load_non_pg_filter_replay(root))
-    sweep = (set(runtime) - pg) | replay
-    for parent, child in inherited_pairs(root, path):
-        lanes = (["pg"] if parent in pg else []) + (["non-pg-sweep"] if parent in sweep else [])
-        for lane in lanes:
-            if child not in ignored_by_lane[lane]:
-                errors.append(f"inherited child is not ignored in its parent's lane {lane}: {child}")
-        if parent in pg and (child not in pg or pg_test_shard(parent) != pg_test_shard(child)):
-            errors.append(f"inherited PG child is outside its parent's numeric shard: {parent} -> {child}")
-        if parent in sweep and (child not in sweep or (parent in replay) != (child in replay)):
-            errors.append(f"inherited sweep child is outside its parent's judged/replay harness: {parent} -> {child}")
     return errors
 
 

@@ -91,13 +91,18 @@ pub(super) fn read(
             return Err("channel context belongs to another host/root".into());
         }
         names.insert(candidate.tmux_session.clone());
-        if candidate.execution_nonce != target.nonce
-            && (candidate.created_at >= context.created_at
-                || !events.iter().any(|event| {
+        if candidate.execution_nonce != target.nonce {
+            // A newer pane incarnation accounts for an older launch that never bound.
+            let accounted = candidate.created_at < context.created_at
+                && (events.iter().any(|event| {
                     event.execution_nonce.as_deref() == Some(candidate.execution_nonce.as_str())
-                }))
-        {
-            return Err("prepared or unaccounted launch context".into());
+                }) || matches!(
+                    binding_context::observe_spawn_nonce_marker(&candidate.tmux_session),
+                    binding_context::SpawnNonceMarker::Known(nonce) if nonce != candidate.execution_nonce
+                ));
+            if !accounted {
+                return Err("prepared or unaccounted launch context".into());
+            }
         }
     }
     for name in &host.live {

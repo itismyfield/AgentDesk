@@ -1,0 +1,92 @@
+name: CI Windows cache warm
+
+# Dependency compile inputs change only with the lock, manifest, toolchain or cargo config;
+# the daily run keeps the entries inside the 7-day cache eviction window.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - .cargo/config.toml
+      - .cargo/config
+      - .github/workflows/ci-windows-cache-warm.yml
+  schedule:
+    - cron: "30 16 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-windows-cache-warm
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_CACHE_SIZE: 10G
+  SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_GHA_RW_MODE: READ_WRITE
+
+jobs:
+  # Warms the shared cargo registry cache and the Windows sccache entries that
+  # the ci-pr.yml `check_fast_cross_os*` jobs restore.
+  windows_cache_warm:
+    name: Windows cache warm (windows-latest)
+    runs-on: windows-latest
+    # Advisory: a warm miss only slows the PR Windows jobs, it never decides them.
+    continue-on-error: true
+    # Step deadlines fail with a timeout log; reserve setup/post time to avoid job cancellation.
+    timeout-minutes: 120
+    env:
+      # rust-cache and sccache both hash CARGO_* env; keep the PR Windows job env.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Same compile as the PR `cargo check` job.
+      - name: cargo check
+        timeout-minutes: 40
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: cargo check --workspace --all-targets
+
+      # Builds the lib test binary the PR exact-targets runner filters; runs nothing.
+      - name: Build lib test binary
+        timeout-minutes: 40
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: cargo test --lib --no-run
+
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats || true

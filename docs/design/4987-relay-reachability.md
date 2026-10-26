@@ -1,6 +1,6 @@
 # 릴레이 도달(reachability) 기반 판정 모델 재설계
 
-<!-- doc-path-refs: removed scripts/relay_watchdog.py -->
+<!-- doc-path-refs: removed scripts/relay_watchdog.py scripts/check_test_lane_coverage.py scripts/test_lane_coverage_baseline.txt -->
 <!-- doc-path-refs: proposed src/services/discord/health/reachability/reconfirm.rs -->
 
 > 2026-10-04 운영자 결정으로 out-of-band 감시와 외부 verdict 인테이크는

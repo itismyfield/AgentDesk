@@ -819,16 +819,7 @@ mod tests {
         );
     }
 
-    // #4979 S5: PG tests live below `*_pg_tests` so `just test-postgres` selects
-    // them through its `_pg` filter while the five pure tests remain in this
-    // parent module. The nested `#[cfg(test)]` is compile-time redundant but
-    // load-bearing: `check_test_lane_coverage.py` assigns each test fn to the
-    // innermost `cfg(test)` module. Removing it would assign these tests to the
-    // parent `…::tests`, which neither curated invocation fully covers: non-PG
-    // skips the marked tests while the PG filter excludes the five pure siblings.
-    // The enforced naming contract is only that the normalized path contains
-    // `_pg`, `pg_`, or `postgres`; the `*_pg_tests` suffix itself is a human
-    // convention.
+    // PG-backed tests of the delivery guard; the five pure tests stay in the parent module.
     #[cfg(test)]
     mod delivery_journal_pg_tests {
         use super::*;

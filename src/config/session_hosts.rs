@@ -179,10 +179,33 @@ pub(crate) fn validate(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>
 
 fn validate_effective(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>> {
     let channels = projected_channels(&config.session_hosts)?;
+    let adapter = crate::services::session_host::policy::peer::SUPPORTED;
+    user_default_platform(config, adapter)?;
     for &channel in channels.keys() {
         bound_as_tui(config, CHANNELS_KEY, channel, &["claude", "codex"])?;
     }
     Ok(channels)
+}
+
+/// A user_default endpoint this node may execute needs a loaded-image adapter here; an endpoint
+/// of another node is judged by that node's own boot validation.
+fn user_default_platform(config: &Config, adapter: bool) -> Result<()> {
+    if adapter {
+        return Ok(());
+    }
+    let local = config.cluster.instance_id.as_deref().map(str::trim);
+    let local = local.filter(|id| !id.is_empty());
+    for (key, endpoint) in &config.session_hosts.herdr.endpoints {
+        // An unknown node id cannot prove the endpoint runs elsewhere.
+        let remote = local.is_some_and(|id| id != endpoint.execution_node.trim());
+        ensure!(
+            endpoint.mode != EndpointMode::UserDefault || remote,
+            "session_hosts.herdr.endpoints.{key}.mode: user_default needs a loaded-image \
+             adapter on its execution node and this platform has none; keep legacy_dedicated \
+             (이 플랫폼 미지원)"
+        );
+    }
+    Ok(())
 }
 
 fn projected_channels(hosts: &SessionHostsConfig) -> Result<BTreeMap<u64, ChannelEndpoint>> {
@@ -190,11 +213,6 @@ fn projected_channels(hosts: &SessionHostsConfig) -> Result<BTreeMap<u64, Channe
     for (key, endpoint) in &herdr.endpoints {
         let at = format!("session_hosts.herdr.endpoints.{key}");
         let filled = |value: &str| !value.trim().is_empty();
-        ensure!(
-            endpoint.mode != EndpointMode::UserDefault,
-            "{at}.mode: user_default support pieces have not landed; keep the existing \
-             legacy_dedicated endpoint until support is complete (지원 조각 미착지)"
-        );
         ensure!(
             filled(key),
             "session_hosts.herdr.endpoints has an empty key"
@@ -323,7 +341,7 @@ pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) ->
 pub(crate) fn with_boot_migration<R>(read: impl FnOnce(Option<&BootMigration>) -> R) -> R {
     #[cfg(test)]
     if FORCED.with(|forced| forced.borrow().is_some()) {
-        return read(None);
+        return FORCED_MIGRATION.with(|forced| read(forced.borrow().as_ref()));
     }
     read(BOOT_MIGRATION.get())
 }
@@ -348,11 +366,24 @@ pub(crate) fn local_node() -> Option<String> {
 #[cfg(test)]
 thread_local! {
     static FORCED: std::cell::RefCell<Option<BootSessionHosts>> = const { std::cell::RefCell::new(None) };
+    static FORCED_MIGRATION: std::cell::RefCell<Option<BootMigration>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Replaces the boot section on this thread until dropped.
 #[cfg(test)]
-pub(crate) struct ForcedSessionHosts(Option<BootSessionHosts>);
+pub(crate) struct ForcedSessionHosts(Option<BootSessionHosts>, Option<BootMigration>);
+
+/// Installs a real selection's hosts and migration metadata on this thread until dropped.
+#[cfg(all(test, unix))]
+pub(crate) fn force_selected_for_test(
+    selection: migration::HostsBootSelection,
+) -> ForcedSessionHosts {
+    let (hosts, metadata) = selection.into_parts();
+    ForcedSessionHosts(
+        FORCED.with(|forced| forced.replace(Some(hosts))),
+        FORCED_MIGRATION.with(|forced| forced.replace(Some(metadata))),
+    )
+}
 
 #[cfg(test)]
 pub(crate) fn force_for_test(
@@ -390,7 +421,10 @@ pub(crate) fn force_for_test(
         channels,
         local_node: local_node.map(str::to_owned),
     };
-    ForcedSessionHosts(FORCED.with(|forced| forced.replace(Some(boot))))
+    ForcedSessionHosts(
+        FORCED.with(|forced| forced.replace(Some(boot))),
+        FORCED_MIGRATION.with(|forced| forced.take()),
+    )
 }
 
 /// Fixes `channels` as the boot section of this whole process; only an isolated child may call it.
@@ -425,9 +459,14 @@ impl ForcedSessionHosts {
 impl Drop for ForcedSessionHosts {
     fn drop(&mut self) {
         FORCED.with(|forced| *forced.borrow_mut() = self.0.take());
+        FORCED_MIGRATION.with(|forced| *forced.borrow_mut() = self.1.take());
     }
 }
 
 #[cfg(test)]
 #[path = "session_hosts_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_hosts/user_default_validator_tests.rs"]
+mod user_default_validator_tests;

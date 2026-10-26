@@ -117,6 +117,35 @@ fn same_dir(requested: &Path, reported: Option<&str>) -> bool {
     reported == requested || std::fs::canonicalize(requested).is_ok_and(|real| real == reported)
 }
 
+/// The policy's view of the server behind `socket`, read through `transport`; no I/O until used.
+fn peer_source(socket: &Path, transport: &Arc<HerdrSocketTransport>) -> Arc<dyn PeerSource> {
+    let (hello, witness) = (transport.clone(), transport.clone());
+    let source = SocketPeerSource::new(
+        socket.into(),
+        move || hello.hello().map_err(|_| Unverified::Peer),
+        move || witness.server_witness().map_err(|_| Unverified::Peer),
+    );
+    #[cfg(target_os = "macos")]
+    let source = {
+        let generation = transport.clone();
+        source.with_generation(move || {
+            generation
+                .peer_generation()
+                .map_err(|_| Unverified::Changed)
+        })
+    };
+    Arc::new(source)
+}
+
+/// The same peer source a launch host gives consent, for a one-off read-only probe of `socket`.
+pub(crate) fn probe_source(socket: &Path) -> Result<Arc<dyn PeerSource>, String> {
+    let endpoint = HerdrEndpoint::new("probe", "probe", socket, "probe")
+        .map_err(|error| format!("herdr probe socket {}: {error:?}", socket.display()))?;
+    let transport =
+        HerdrSocketTransport::new(&endpoint, HerdrSocketConfig::default(), LineJsonFraming);
+    Ok(peer_source(socket, &Arc::new(transport)))
+}
+
 impl SocketHerdrLaunchHost {
     /// No I/O: every call dials its own connection.
     pub(crate) fn new(endpoints: Vec<HerdrEndpoint>, config: HerdrSocketConfig) -> Self {
@@ -130,15 +159,7 @@ impl SocketHerdrLaunchHost {
         let endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)> = endpoints;
         let sources = endpoints
             .iter()
-            .map(|(endpoint, transport)| {
-                let hello = transport.clone();
-                let witness = transport.clone();
-                Arc::new(SocketPeerSource::new(
-                    endpoint.socket_path().into(),
-                    move || hello.hello().map_err(|_| Unverified::Peer),
-                    move || witness.server_witness().map_err(|_| Unverified::Peer),
-                )) as Arc<dyn PeerSource>
-            })
+            .map(|(endpoint, transport)| peer_source(endpoint.socket_path(), transport))
             .collect();
         let grants = GrantCache::restored(super::policy::boot_grants::prepared());
         Self {

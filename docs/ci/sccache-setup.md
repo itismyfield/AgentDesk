@@ -201,9 +201,8 @@ harness assignment/clearing sites:
 | `.github/workflows/ci-main.yml:22-25` | Workflow env: `RUSTC_WRAPPER=sccache`, size `10G`, GHA enabled, GHA mode `READ_WRITE`. |
 | `.github/workflows/ci-nightly.yml:20-23` | Same workflow env defaults as `ci-main.yml`. |
 | `.github/workflows/ci-pr.yml:23-28` | Same wrapper, size, and GHA enablement; GHA mode is `READ_ONLY` for PRs and `READ_WRITE` otherwise. |
-| `.github/workflows/ci-pr.yml:919-920`, `.github/workflows/ci-pr.yml:997-998` | Hosted macOS jobs write empty `RUSTC_WRAPPER` and `SCCACHE_GHA_ENABLED` to `$GITHUB_ENV`. |
+| `.github/workflows/ci-pr.yml:504-505`, `.github/workflows/ci-pr.yml:579-580` | Hosted macOS jobs write empty `RUSTC_WRAPPER` and `SCCACHE_GHA_ENABLED` to `$GITHUB_ENV`. |
 | `.github/workflows/ci-nightly.yml:108-109` | Hosted macOS job writes the same empty pair to `$GITHUB_ENV`. |
-| `.github/workflows/ci-macos-trusted.yml:61-62` | Hosted macOS job writes the same empty pair to `$GITHUB_ENV`. |
 | `scripts/run_relay_authority_mutations.sh:204` | Mutation build command unsets `RUSTC_WRAPPER` with `env -u`. |
 
 Search hits in `tests/` and the dry observer's fixture environment

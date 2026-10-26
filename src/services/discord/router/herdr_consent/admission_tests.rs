@@ -160,7 +160,9 @@ async fn legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_
     let held = hold_live(
         &deps,
         submission(8_916_099, IntakeOrigin::LiveMessage),
-        Err("unpolled frame contract".into()),
+        Err(refusal::Code::Missing.of()(
+            "unpolled frame contract".into(),
+        )),
     );
     let frame = std::mem::size_of_val(&held);
     assert!(
@@ -656,45 +658,6 @@ async fn consent_persistence_failure_retains_live_payload_without_success_or_car
         (disk[0].message_id.get(), disk[0].text.as_str()),
         (8_916_060, "expanded prompt 8916060"),
         "consent_failed_persistence_retains_original_replay_payload_contract"
-    );
-}
-
-#[test]
-fn full_binding_validator_keeps_user_default_unreachable() {
-    let mut config: crate::config::Config = serde_json::from_value(serde_json::json!({
-        "server": {}, "cluster": {"instance_id": "test-node"},
-        "agents": [{"id":"fixture", "name":"fixture", "channels":{"claude":{"id":"41","runtime":"tui"}}}],
-        "session_hosts":{"herdr":{"endpoints":{"one":{"execution_node":"test-node",
-            "socket_path":"/fixture/herdr.sock","herdr_home":"/fixture/herdr","herdr_session":"agentdesk"}},
-            "channels":{"41":"one"}}}
-    })).unwrap();
-    assert!(
-        crate::config::validate_config(&config).is_ok(),
-        "consent_validator_complete_legacy_fixture_contract"
-    );
-    config
-        .session_hosts
-        .herdr
-        .endpoints
-        .get_mut("one")
-        .unwrap()
-        .mode = EndpointMode::UserDefault;
-    let calls = crate::services::herdr_launch::admissions_on_this_thread();
-    let result = crate::config::validate_config(&config);
-    assert!(
-        result.is_err(),
-        "consent_validator_user_default_stays_unreachable_contract"
-    );
-    let error = result.unwrap_err().to_string();
-    assert!(
-        error.contains("session_hosts.herdr.endpoints.one.mode")
-            && error.contains("지원 조각 미착지"),
-        "consent_validator_rejects_exact_feature_guard_contract: {error}"
-    );
-    assert_eq!(
-        crate::services::herdr_launch::admissions_on_this_thread(),
-        calls,
-        "consent_validator_admission_reached_zero_contract"
     );
 }
 

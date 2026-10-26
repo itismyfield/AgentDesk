@@ -3,15 +3,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FOCUSED_COMMAND = "cargo test --lib discord_thread_create -- --test-threads=1"
 
 
 class DiscordThreadCreateCiWiringTests(unittest.TestCase):
-    def test_required_ubuntu_recipe_runs_focused_suite_once(self) -> None:
-        justfile = (ROOT / "justfile").read_text(encoding="utf-8")
-        self.assertEqual(justfile.count(FOCUSED_COMMAND), 1)
-        self.assertNotIn("cargo test --lib cli::discord_thread_create", justfile)
-
     def test_pr_windows_job_is_compile_only(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-pr.yml").read_text(encoding="utf-8")
         self.assertNotIn("Discord thread-create cross-process lock", workflow)
@@ -20,16 +14,19 @@ class DiscordThreadCreateCiWiringTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci-nightly.yml").read_text(
             encoding="utf-8"
         )
-        marker = "      - name: Discord thread-create cross-process lock\n"
-        start = workflow.index(marker)
-        end = workflow.index("\n      - name:", start + len(marker))
-        step = workflow[start:end]
-        self.assertIn(f"run: {FOCUSED_COMMAND}", step)
-        self.assertNotIn("--lib cli::discord_thread_create", step)
+        # The native run plans every non-PG Windows lib test, the thread-create lock tests included.
+        job = workflow[workflow.index("  full_windows:\n") :]
+        job = job[: job.index("\n  rust_build:\n")]
+        self.assertNotIn("Discord thread-create cross-process lock", job)
+        self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', job.split("    steps:\n", 1)[0])
+        self.assertIn('CARGO_PROFILE_TEST_DEBUG: "0"', job.split("    steps:\n", 1)[0])
+        marker = "      - name: Compare and run non-PG lib tests\n"
+        start = job.index(marker)
+        end = job.index("\n      - name:", start + len(marker))
+        step = job[start:end]
+        self.assertIn("run: bash scripts/ci/nextest-native.sh windows windows-lib pg-classifier", step)
         self.assertNotIn("continue-on-error", step)
         self.assertIn("BASH_ENV: /dev/null", step)
-        self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', step)
-        self.assertIn('CARGO_PROFILE_TEST_DEBUG: "0"', step)
 
     def test_whole_job_guard_tracks_compile_only_pr_lane(self) -> None:
         guard = (ROOT / "scripts/check-ci-runner-hardening.sh").read_text(encoding="utf-8")

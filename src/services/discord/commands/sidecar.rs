@@ -1,8 +1,7 @@
 use poise::CreateReply;
 
 use super::super::sidecar_interaction::{
-    SIDECAR_DEFAULT_MAC, build_sidecar_components, list_sidecar_devices_on,
-    remember_sidecar_pending,
+    build_sidecar_components, list_sidecar_devices_on, remember_sidecar_pending, sidecar_local_mac,
 };
 use super::super::{Context, Error, check_auth};
 
@@ -19,8 +18,9 @@ pub(in crate::services::discord) async fn cmd_sidecar(ctx: Context<'_>) -> Resul
 
     // Start with the host Mac pre-selected and its device list; selecting a
     // different Mac re-queries that Mac and re-renders the device dropdown.
-    let devices = list_sidecar_devices_on(SIDECAR_DEFAULT_MAC).await;
-    let components = build_sidecar_components(&devices, Some(SIDECAR_DEFAULT_MAC), None);
+    let local_mac = sidecar_local_mac();
+    let devices = list_sidecar_devices_on(local_mac).await;
+    let components = build_sidecar_components(&devices, Some(local_mac), None);
 
     let posted = ctx
         .send(
@@ -35,6 +35,6 @@ pub(in crate::services::discord) async fn cmd_sidecar(ctx: Context<'_>) -> Resul
         .into_message()
         .await?;
 
-    remember_sidecar_pending(posted.id, user_id, Some(SIDECAR_DEFAULT_MAC.to_string()));
+    remember_sidecar_pending(posted.id, user_id, Some(local_mac.to_string()));
     Ok(())
 }
