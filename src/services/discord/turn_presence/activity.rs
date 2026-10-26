@@ -338,7 +338,10 @@ async fn read_now(
     // Decided before the Unbound read, which resets the watch a Bound judgment builds on.
     #[cfg(unix)]
     let bound = match bound {
-        None => unbound::herdr_bound::admitted(shared, provider, channel).await,
+        None => match unbound::herdr_bound::admitted(shared, provider, channel).await {
+            None => unbound::live::inflight_bound::admitted(shared, provider, channel).await,
+            herdr => herdr,
+        },
         bound => bound,
     };
     #[cfg(unix)]

@@ -765,6 +765,8 @@ pub(in crate::services::discord::turn_presence::activity) struct Stamp {
 }
 #[path = "canonical_target.rs"]
 mod canonical_target;
+#[path = "inflight_bound.rs"]
+pub(in crate::services::discord::turn_presence::activity) mod inflight_bound;
 #[path = "legacy_divergence.rs"]
 mod legacy_divergence;
 #[path = "live_ownership.rs"]
