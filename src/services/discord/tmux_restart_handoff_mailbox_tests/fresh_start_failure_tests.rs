@@ -18,9 +18,8 @@ use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 const NAME: &str = "adk-t05-claude-fresh-fail";
 const MESSAGE: u64 = 77_501;
 
-/// A tmux in front of `FakeTmux` that reports a version and makes a new session present
-/// without running it, plus a Claude CLI that resolves. With a `screen` file it also answers the
-/// managed pre-read with that screen and fails the paste after the fence, recording `sends`.
+/// A tmux before `FakeTmux` that reports a version, makes a new session present and resolves a
+/// Claude CLI; it answers the pre-paste read with `screen` and records `sends`.
 fn launchable_tmux() -> (tempfile::TempDir, Vec<crate::config::TestEnvVarGuard>) {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -41,7 +40,8 @@ fn launchable_tmux() -> (tempfile::TempDir, Vec<crate::config::TestEnvVarGuard>)
              case \"$1\" in display-message) for a do last=\"$a\"; done; \
              [ \"$last\" = '#{{pane_id}}' ] && {{ echo %1; exit 0; }} ;; \
              capture-pane) cat \"$d/screen\"; exit 0 ;; load-buffer|delete-buffer) exit 0 ;; \
-             paste-buffer|send-keys) echo \"$1\" >> \"$d/sends\"; [ \"$1\" = send-keys ]; exit $? ;; \
+             paste-buffer|send-keys) echo \"$1\" >> \"$d/sends\"; \
+             [ \"$1\" = send-keys ] || [ ! -f \"$d/paste_fails\" ]; exit $? ;; \
              esac; fi\nfor a do case \"$a\" in -V) echo 'tmux 3.5a'; exit 0 ;; \
              new-session) echo \"$*\" >> '{fake}/calls'; rm -f '{fake}/missing'; exit 0 ;; \
              esac; done\nexec '{fake}/tmux' \"$@\"\n"
@@ -88,7 +88,6 @@ fn fail_fresh_turn(
         .unwrap_or_else(|p| p.into_inner());
     let _spy = SpyGuard::install(SpyState {
         captures: std::iter::repeat_n(Some(ready), 64).collect(),
-        fail_send: uncertain.then(|| (0, Err("send-keys failed".to_string()))),
         ..SpyState::default()
     });
     let clearance = cleared(NAME);
@@ -238,8 +237,10 @@ async fn run_case(
     let tmux = FakeTmux::install(NAME);
     tmux.mark_missing();
     let (launch, _launch_env) = launchable_tmux();
+    // The A-plan reads the pane once before its paste, so this fixture answers that read.
+    std::fs::write(launch.path().join("screen"), ready_screen()).unwrap();
     if uncertain {
-        std::fs::write(launch.path().join("screen"), ready_screen()).unwrap();
+        std::fs::write(launch.path().join("paste_fails"), "").unwrap();
     }
     let _probe = FreshTmuxProbe::new();
     let workspace = tempfile::tempdir().unwrap();

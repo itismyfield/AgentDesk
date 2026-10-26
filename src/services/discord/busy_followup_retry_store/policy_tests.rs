@@ -156,9 +156,7 @@ async fn rewatch(
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn idle_capped_head_release_rereads_stale_view_and_repeated_hold_does_not_block_forever() {
     use crate::services::claude_tui::busy_inject::StashChannelGuard;
-    use crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::{
-        events, renderer, view,
-    };
+    use crate::services::claude_tui::input::submission::tests::{events, renderer, view};
     use crate::services::discord::turn_bridge::followup_requeue::draft_release::idle_release_pending;
     use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -231,9 +229,7 @@ async fn idle_capped_head_release_rereads_stale_view_and_repeated_hold_does_not_
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn idle_order_boundary_preserves_general_legacy_busy_and_non_target_caps() {
     use crate::services::claude_tui::busy_inject::StashChannelGuard;
-    use crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::{
-        events, renderer,
-    };
+    use crate::services::claude_tui::input::submission::tests::{events, renderer};
     use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::after_shared_test_env_lock();

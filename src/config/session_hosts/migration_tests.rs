@@ -973,20 +973,6 @@ async fn migration_no_pool_only_blocks_changes_to_herdr_channels() {
     );
     assert!(store.saved.borrow().is_empty());
 
-    let mut guarded = old.clone();
-    guarded.config.claude_guard_channels.insert(42);
-    let store = Store::new(Some(old.clone()));
-    let selected = select(guarded.clone(), &store, &PgRows(None), &NoHoldStore, false)
-        .await
-        .into_hosts();
-    assert_eq!(
-        Projection::of(&selected),
-        Projection::of(&guarded),
-        "guard-only migration needs no database"
-    );
-    assert_eq!(reason(&selected), None);
-    assert_eq!(&*store.saved.borrow(), &[Projection::of(&guarded)]);
-
     let candidate = remap(old.clone(), "/fixture/new.sock");
     let store = Store::new(Some(old.clone()));
     let selected = select(candidate, &store, &PgRows(None), &NoHoldStore, false)

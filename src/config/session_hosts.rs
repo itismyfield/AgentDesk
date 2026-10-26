@@ -1,9 +1,9 @@
-//! `session_hosts`: the channels a Herdr endpoint runs, and the Claude channels selected for
-//! the guarded submission canary. Read once at boot; an empty section changes nothing.
+//! `session_hosts`: the channels a Herdr endpoint runs. Read once at boot; an empty section
+//! changes nothing.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Once, OnceLock};
 
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,9 @@ use super::Config;
 use crate::services::provider_hosting::channel_effective_tui_request;
 
 const CHANNELS_KEY: &str = "session_hosts.herdr.channels";
-const CLAUDE_GUARD_KEY: &str = "session_hosts.claude_guard_channels";
+// The removed Claude submit guard list: an old config or env may still name it.
+const RETIRED_GUARD_KEY: &str = "session_hosts.claude_guard_channels";
+const RETIRED_GUARD_ENV: &str = "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS";
 
 pub(crate) mod approval_store;
 pub(crate) mod migration;
@@ -38,14 +40,33 @@ impl EndpointMode {
 pub struct SessionHostsConfig {
     #[serde(default, skip_serializing_if = "HerdrSection::is_empty")]
     pub herdr: HerdrSection,
-    /// Claude TUI channels selected for the guarded submission canary.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub claude_guard_channels: BTreeSet<u64>,
+    /// Accepted only so an old config still boots; its value is never read.
+    #[serde(default, rename = "claude_guard_channels", skip_serializing)]
+    pub(crate) retired_guard: RetiredKey,
 }
 
 impl SessionHostsConfig {
     pub fn is_empty(&self) -> bool {
-        self.herdr.is_empty() && self.claude_guard_channels.is_empty()
+        self.herdr.is_empty()
+    }
+}
+
+/// Whether a retired key was present; any value it held is skipped unread.
+#[derive(Debug, Clone, Copy, Default, Eq)]
+pub(crate) struct RetiredKey(bool);
+
+// Adding or removing an ignored key changes no hosting, so it is never a restart-required edit.
+impl PartialEq for RetiredKey {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<'de> Deserialize<'de> for RetiredKey {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer).map(|_| Self(true))
     }
 }
 
@@ -98,72 +119,34 @@ pub(crate) struct BootSessionHosts {
     local_node: Option<String>,
 }
 
-const GUARD_ENV: &str = "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS";
-type GuardOverride = std::result::Result<Option<BTreeSet<u64>>, String>;
-static GUARD_INPUT: OnceLock<GuardOverride> = OnceLock::new();
-static LOGGED_SELECTION: Mutex<Option<(&'static str, BTreeSet<u64>)>> = Mutex::new(None);
+static RETIRED_WARNING: Once = Once::new();
 
-fn read_guard_input() -> Result<Option<BTreeSet<u64>>> {
-    let value = std::env::var_os(GUARD_ENV)
-        .map(|raw| {
-            raw.into_string()
-                .map_err(|_| anyhow::anyhow!("{GUARD_ENV}: invalid UTF-8"))
-        })
-        .transpose()?;
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let mut ids = BTreeSet::new();
-    if !value.is_empty() {
-        for raw in value.split(',') {
-            let raw = raw.trim();
-            ensure!(
-                !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()),
-                "{GUARD_ENV}: invalid channel id"
-            );
-            let id = raw.parse::<u64>()?;
-            ensure!(id != 0, "{GUARD_ENV}: 0 is not a channel id");
-            ids.insert(id);
-        }
-    }
-    Ok(Some(ids))
-}
-
-// Config loading validates before install; both stages use this same frozen startup input.
-fn normalized(config: &Config) -> Result<(Config, &'static str)> {
-    let ids = GUARD_INPUT.get_or_init(|| read_guard_input().map_err(|error| error.to_string()));
-    let ids = ids.as_ref().map_err(|error| anyhow::anyhow!("{error}"))?;
+// Config loading validates before install; both stages use this same resolution.
+fn normalized(config: &Config) -> Result<Config> {
     let mut effective = config.clone();
     user_default::resolve(&mut effective, || {
         std::env::var_os("HOME").map(PathBuf::from)
     })?;
-    let source = match ids {
-        None => "yaml",
-        Some(ids) => {
-            effective
-                .session_hosts
-                .claude_guard_channels
-                .clone_from(ids);
-            if ids.is_empty() { "env-empty" } else { "env" }
-        }
-    };
-    Ok((effective, source))
+    Ok(effective)
 }
 
 impl BootSessionHosts {
     pub(crate) fn from_config(config: &Config) -> Result<Self> {
-        let (effective, source) = normalized(config)?;
+        let effective = normalized(config)?;
         let channels = validate_effective(&effective)?;
-        let selection = (
-            source,
-            effective.session_hosts.claude_guard_channels.clone(),
-        );
-        let mut logged = LOGGED_SELECTION.lock().unwrap_or_else(|e| e.into_inner());
-        if logged.as_ref() != Some(&selection) {
-            tracing::info!(source, channels = ?effective.session_hosts.claude_guard_channels, policy = "idle-only", "Claude submit guard boot selection");
-            *logged = Some(selection);
+        let yaml = effective.session_hosts.retired_guard.0;
+        let env = std::env::var_os(RETIRED_GUARD_ENV).is_some();
+        if yaml || env {
+            RETIRED_WARNING.call_once(|| {
+                tracing::warn!(
+                    key = RETIRED_GUARD_KEY,
+                    env_name = RETIRED_GUARD_ENV,
+                    yaml,
+                    env,
+                    "retired Claude submit guard setting ignored; remove it"
+                );
+            });
         }
-        drop(logged);
         let local_node = effective.cluster.instance_id.as_deref().map(str::trim);
         Ok(Self {
             config: effective.session_hosts.clone(),
@@ -187,25 +170,17 @@ impl BootSessionHosts {
     pub(crate) fn config(&self) -> &SessionHostsConfig {
         &self.config
     }
-
-    pub(crate) fn claude_guarded(&self, channel: u64) -> bool {
-        self.config.claude_guard_channels.contains(&channel)
-    }
 }
 
 /// Every endpoint complete with absolute paths, every channel a registered TUI on a known endpoint.
 pub(crate) fn validate(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>> {
-    let (effective, _) = normalized(config)?;
-    validate_effective(&effective)
+    validate_effective(&normalized(config)?)
 }
 
 fn validate_effective(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>> {
     let channels = projected_channels(&config.session_hosts)?;
     for &channel in channels.keys() {
         bound_as_tui(config, CHANNELS_KEY, channel, &["claude", "codex"])?;
-    }
-    for &channel in &config.session_hosts.claude_guard_channels {
-        bound_as_tui(config, CLAUDE_GUARD_KEY, channel, &["claude"])?;
     }
     Ok(channels)
 }
@@ -264,14 +239,6 @@ fn projected_channels(hosts: &SessionHostsConfig) -> Result<BTreeMap<u64, Channe
             "{CHANNELS_KEY}: channel {channel} is listed twice"
         );
     }
-    // A guarded channel is a tmux Claude TUI; a Herdr channel never gets a tmux session.
-    for &channel in &hosts.claude_guard_channels {
-        ensure!(channel != 0, "{CLAUDE_GUARD_KEY}: 0 is not a channel id");
-        ensure!(
-            !channels.contains_key(&channel),
-            "{CLAUDE_GUARD_KEY}: channel {channel} runs on Herdr"
-        );
-    }
     Ok(channels)
 }
 
@@ -310,9 +277,7 @@ pub(crate) struct BootMigration {
 
 impl BootMigration {
     pub(crate) fn restart_required(&self, config: &Config) -> bool {
-        normalized(config).map_or(true, |(effective, _)| {
-            self.candidate != effective.session_hosts
-        })
+        normalized(config).map_or(true, |effective| self.candidate != effective.session_hosts)
     }
 
     pub(crate) fn candidate(&self) -> &SessionHostsConfig {
@@ -367,11 +332,6 @@ pub(crate) fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
     with_boot(|boot| boot.and_then(|boot| boot.herdr_endpoint(channel)).cloned())
 }
 
-/// Whether the channel is selected for the Claude guarded submission canary; `None` never is.
-pub(crate) fn claude_guarded(channel: Option<u64>) -> bool {
-    channel.is_some_and(|channel| with_boot(|boot| boot.is_some_and(|b| b.claude_guarded(channel))))
-}
-
 /// Every Herdr-configured channel id as text, for SQL that must leave their rows alone.
 pub(crate) fn configured_channel_ids() -> Vec<String> {
     let ids = |boot: &BootSessionHosts| boot.channels().keys().map(u64::to_string).collect();
@@ -399,15 +359,6 @@ pub(crate) fn force_for_test(
     local_node: Option<&str>,
     channels: &[(u64, &str)],
 ) -> ForcedSessionHosts {
-    force_with_claude_guard_for_test(local_node, channels, &[])
-}
-
-#[cfg(test)]
-pub(crate) fn force_with_claude_guard_for_test(
-    local_node: Option<&str>,
-    channels: &[(u64, &str)],
-    claude_guard: &[u64],
-) -> ForcedSessionHosts {
     let endpoint = |execution_node: &str| ChannelEndpoint {
         key: format!("{execution_node}-endpoint"),
         execution_node: execution_node.to_owned(),
@@ -419,10 +370,7 @@ pub(crate) fn force_with_claude_guard_for_test(
         .iter()
         .map(|(channel, node)| (*channel, endpoint(node)))
         .collect();
-    let mut config = SessionHostsConfig {
-        claude_guard_channels: claude_guard.iter().copied().collect(),
-        ..SessionHostsConfig::default()
-    };
+    let mut config = SessionHostsConfig::default();
     for (channel, endpoint) in &channels {
         let written = EndpointConfig {
             mode: EndpointMode::LegacyDedicated,

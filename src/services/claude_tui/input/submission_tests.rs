@@ -1,5 +1,4 @@
 use super::*;
-use crate::services::claude_tui::host_input::LegacyTmuxGate;
 use crate::services::claude_tui::submission_fence::{
     PreSubmitPersistenceRefused, SubmissionFence, with_scope,
 };
@@ -57,12 +56,14 @@ impl ScriptedTmux {
         let dir = tempfile::tempdir().unwrap();
         let script = r#"#!/bin/sh
 d='@D@'
+echo "$*" >> "$d/argv"
 case "$2" in
 display-message) echo 1 ;;
 capture-pane) cat "$d/screen" ;;
 load-buffer|paste-buffer|send-keys)
   n=$(cat "$d/sent" 2>/dev/null || echo 0); echo $((n + 1)) > "$d/sent"
   for last do :; done
+  [ "$2" != load-buffer ] || cp "$last" "$d/body"
   case "$2" in load-buffer) key=load ;; paste-buffer) key=paste ;; *) key=$last ;; esac
   echo "$key" >> "$d/sends"
   if [ -f "$d/row" ]; then
@@ -112,11 +113,42 @@ exit 0
     pub(crate) fn phases(&self) -> Vec<String> {
         events_in(&self.dir.path().join("phases"))
     }
+
+    /// The text of the last loaded paste buffer.
+    pub(crate) fn body(&self) -> String {
+        fs::read_to_string(self.dir.path().join("body")).unwrap_or_default()
+    }
+
+    /// The subcommands run against `session`'s pane, in order.
+    pub(crate) fn pane_calls(&self, session: &str) -> Vec<String> {
+        let target = format!("={session}:");
+        events_in(&self.dir.path().join("argv"))
+            .into_iter()
+            .filter(|argv| argv.split(' ').any(|arg| arg == target))
+            .filter_map(|argv| argv.split(' ').nth(1).map(str::to_string))
+            .collect()
+    }
+
+    pub(crate) fn clear(&self) {
+        for file in ["argv", "sends", "sent", "body"] {
+            let _ = fs::remove_file(self.dir.path().join(file));
+        }
+    }
 }
 
 fn events_in(file: &Path) -> Vec<String> {
     let text = fs::read_to_string(file).unwrap_or_default();
     text.lines().map(str::to_string).collect()
+}
+
+fn request(session: &str) -> Request<'_> {
+    Request {
+        session,
+        prompt: PROMPT,
+        text: PROMPT,
+        cancel: None,
+        timing: &FAST,
+    }
 }
 
 struct Authority {
@@ -243,6 +275,101 @@ while True:
     }
     root
 }
+/// A composer showing `body` at the prompt, as the frame renderer draws it.
+pub(crate) fn screen(body: &str) -> String {
+    format!(
+        "{}\n❯\u{a0}{}\n{}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+        "─".repeat(160),
+        body.replace('\n', "\n  "),
+        "─".repeat(160)
+    )
+}
+
+/// A real pane that draws `before`, records the first payload of `frame`'s length, then draws
+/// `own`; each Enter is counted and draws `after`. Returns the pane id.
+pub(crate) fn frame_renderer(
+    f: &Fixture,
+    name: &str,
+    frame: &str,
+    before: &str,
+    own: &str,
+    after: &str,
+) -> String {
+    let root = f.root.path().join(name);
+    fs::create_dir(&root).unwrap();
+    for (file, content) in [
+        ("expected", frame),
+        ("before", before),
+        ("own", own),
+        ("after", after),
+    ] {
+        fs::write(root.join(file), content).unwrap();
+    }
+    let script = f.root.path().join("frame-renderer.py");
+    fs::write(
+        &script,
+        r#"import os, pathlib, select, sys, tty
+tty.setraw(0)
+root = pathlib.Path(sys.argv[1])
+def render(name):
+    os.write(1, ('\x1b[?2004h\x1b[2J\x1b[1;1H' + (root / name).read_text().replace('\n', '\r\n')).encode())
+render('before')
+(root / 'ready').write_text('ready')
+pending = b''
+payload = False
+while True:
+    if not select.select([0], [], [], .01)[0]:
+        continue
+    chunk = os.read(0, 65536)
+    with (root / 'received').open('ab') as out:
+        out.write(chunk)
+    pending += chunk
+    if not payload:
+        expected = (root / 'expected').read_bytes()
+        pasted = pending.startswith(b'\x1b[200~')
+        size = len(expected) + (12 if pasted else 0)
+        if len(pending) < size:
+            continue
+        sent, pending = pending[:size], pending[size:]
+        (root / 'frame').write_bytes(sent[6:-6] if pasted else sent)
+        (root / 'kind').write_text('paste' if pasted else 'literal')
+        with (root / 'payloads').open('ab') as out:
+            out.write(b'x')
+        payload = True
+        render('own')
+    for byte in pending:
+        if byte == 13:
+            with (root / 'enters').open('ab') as out:
+                out.write(b'x')
+            render('after')
+    pending = b''
+"#,
+    )
+    .unwrap();
+    let command = format!("python3 {} {}", quote(&script), quote(&root));
+    let pane = f.tmux(&[
+        "new-session",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-s",
+        name,
+        "-x",
+        "160",
+        "-y",
+        "40",
+        &command,
+    ]);
+    f.tmux(&["set-window-option", "-t", &pane, "window-size", "manual"]);
+    f.wait_ready(name);
+    wait("frame-renderer", || {
+        f.tmux(&["capture-pane", "-p", "-t", &pane])
+            .contains("bypass permissions")
+    });
+    pane
+}
+
 pub(crate) fn events(root: &Path) -> Vec<String> {
     fs::read_to_string(root.join("events"))
         .unwrap_or_default()
@@ -370,10 +497,10 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
             });
             let result = guarded_outcome::with_owner(Some(attempt.clone()), || {
                 with_scope(Some(attempt.clone()), || {
-                    input::send_prompt_with_readiness(
+                    crate::services::claude_tui::input::send_prompt_with_readiness(
                         &name,
                         PROMPT,
-                        input::PromptReadinessKind::FreshTurn,
+                        PromptReadinessKind::FreshTurn,
                         Some(&token),
                     )
                 })
@@ -406,23 +533,12 @@ fn idle_sends_the_same_sequence_without_receipt_or_restore_verdicts() {
         let authority = Authority {
             admitted: Cell::new(true),
         };
-        let target = InputTarget::legacy_tmux(&name);
-        let request = Request {
-            target: &target,
-            gate: &LegacyTmuxGate,
-            prompt: PROMPT,
-            cancel: None,
-            timing: &FAST,
-        };
-        assert_eq!(
-            run(Some(&authority), true, &request),
-            Some(InputRun::Applied)
-        );
+        let request = request(&name);
+        assert_eq!(run(&authority, true, &request), InputRun::Applied);
         wait("one Enter", || events(&root).len() == 3);
         assert_eq!(events(&root), ["C-s", "paste", "Enter"]);
         assert_eq!(fs::read_to_string(root.join("body")).unwrap(), PROMPT);
         assert!(!composer_lock::draft_guarded(&name));
-        assert_eq!(guarded_outcome::held(&name), None);
     }
 }
 
@@ -456,19 +572,12 @@ fn idle_menu_blocks_every_key_and_empty_or_unread_never_stashes() {
         let authority = Authority {
             admitted: Cell::new(true),
         };
-        let target = InputTarget::legacy_tmux(name);
-        let request = Request {
-            target: &target,
-            gate: &LegacyTmuxGate,
-            prompt: PROMPT,
-            cancel: None,
-            timing: &FAST,
-        };
-        let got = run(Some(&authority), allowed, &request);
+        let request = request(&name);
+        let got = run(&authority, allowed, &request);
         if expected.is_empty() {
-            assert!(matches!(got, Some(InputRun::Refused(_))));
+            assert!(matches!(got, InputRun::Refused(_)));
         } else {
-            assert_eq!(got, Some(InputRun::Applied));
+            assert_eq!(got, InputRun::Applied);
             wait("idle Enter", || events(&root).len() == expected.len());
         }
         assert_eq!(events(&root), expected);
@@ -490,28 +599,18 @@ fn idle_fence_and_revoked_authority_precede_every_key() {
     }
     let f = Fixture::new();
     let root = renderer(&f, "idle-fence", "normal");
-    let target = InputTarget::legacy_tmux("idle-fence");
-    let request = Request {
-        target: &target,
-        gate: &LegacyTmuxGate,
-        prompt: PROMPT,
-        cancel: None,
-        timing: &FAST,
-    };
+    let request = request("idle-fence");
     let authority = Authority {
         admitted: Cell::new(false),
     };
     assert!(matches!(
-        run(Some(&authority), true, &request),
-        Some(InputRun::Refused(_))
+        run(&authority, true, &request),
+        InputRun::Refused(_)
     ));
     authority.admitted.set(true);
-    let got = with_scope(Some(Arc::new(Fence)), || {
-        run(Some(&authority), true, &request)
-    });
-    assert_eq!(got, Some(refused(Refusal::SubmissionFence)));
+    let got = with_scope(Some(Arc::new(Fence)), || run(&authority, true, &request));
+    assert_eq!(got, refused(Refusal::SubmissionFence));
     assert!(events(&root).is_empty());
-    assert_eq!(run(None, true, &request), None);
 }
 
 #[test]
@@ -540,14 +639,7 @@ esac
         "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
     )
     .unwrap();
-    let target = InputTarget::legacy_tmux("scripted-idle");
-    let request = Request {
-        target: &target,
-        gate: &LegacyTmuxGate,
-        prompt: PROMPT,
-        cancel: None,
-        timing: &FAST,
-    };
+    let request = request("scripted-idle");
     let authority = Authority {
         admitted: Cell::new(true),
     };
@@ -565,11 +657,11 @@ esac
         fs::write(dir.path().join("before"), before).unwrap();
         fs::write(dir.path().join("calls"), "").unwrap();
         fs::write(dir.path().join("events"), "").unwrap();
-        let result = run(Some(&authority), allowed, &request);
+        let result = run(&authority, allowed, &request);
         if expected.is_empty() {
-            assert!(matches!(result, Some(InputRun::Refused(_))));
+            assert!(matches!(result, InputRun::Refused(_)));
         } else {
-            assert_eq!(result, Some(InputRun::Applied));
+            assert_eq!(result, InputRun::Applied);
         }
         assert_eq!(events(dir.path()), expected);
         assert_eq!(
@@ -586,19 +678,116 @@ esac
     fs::write(dir.path().join("events"), "").unwrap();
     fs::write(&transcript, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n").unwrap();
     assert!(observe_claude_jsonl_turn_state(&transcript).is_busy());
-    assert_eq!(
-        run(Some(&authority), true, &request),
-        Some(InputRun::Applied)
-    );
+    assert_eq!(run(&authority, true, &request), InputRun::Applied);
     assert_eq!(events(dir.path()), ["paste", "Enter"]);
 
     fs::write(dir.path().join("calls"), "").unwrap();
     fs::write(dir.path().join("events"), "").unwrap();
     let contended = composer_lock::with_composer_mutation_lock("scripted-idle", || {
-        run(Some(&authority), true, &request)
+        run(&authority, true, &request)
     });
-    assert_eq!(contended, Some(refused(Refusal::WriterContended)));
+    assert_eq!(contended, refused(Refusal::WriterContended));
     assert_eq!(fs::read_to_string(dir.path().join("calls")).unwrap(), "");
     assert!(events(dir.path()).is_empty());
     assert!(!composer_lock::draft_guarded("scripted-idle"));
+}
+
+/// Every Claude entry, inside a managed attempt or not, on a channel outside the stash list takes
+/// the one submission: one pre-paste read, the paste behind the draft and one Enter, and nothing
+/// goes through the legacy transport.
+#[test]
+fn every_entry_on_an_unlisted_channel_takes_the_one_submission() {
+    use crate::services::claude_tui::busy_inject::StashChannelGuard;
+    use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
+    use crate::services::claude_tui::input as entry;
+    use crate::services::claude_tui::submission_fence::IdleStashContext;
+    const IDLE: &str = include_str!("../../../../tests/fixtures/tui_input/claude-2.1.293-idle.txt");
+    const CHANNEL: u64 = 6_899_990;
+    struct Attempt(String);
+    impl SubmissionFence for Attempt {
+        fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
+            panic!("the managed attempt claims through its idle fence")
+        }
+        fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
+            None
+        }
+        fn idle_stash_context(&self) -> Option<IdleStashContext> {
+            Some(IdleStashContext {
+                channel: CHANNEL,
+                target: self.0.clone(),
+                available: true,
+            })
+        }
+        fn idle_stash_admits(&self, target: &str) -> bool {
+            target == self.0
+        }
+        fn claim_idle_stash(&self, _: &str) -> Result<(), PreSubmitPersistenceRefused> {
+            Ok(())
+        }
+    }
+    type Entry = fn(&str) -> Result<(), String>;
+    let entries: [(&str, Entry); 4] = [
+        ("fresh", |s| {
+            entry::send_prompt_with_readiness(s, PROMPT, PromptReadinessKind::FreshTurn, None)
+                .map_err(SubmissionError::into_legacy)
+        }),
+        ("followup", |s| {
+            entry::send_prompt_with_readiness(s, PROMPT, PromptReadinessKind::Followup, None)
+                .map_err(SubmissionError::into_legacy)
+        }),
+        ("warm", |s| {
+            entry::send_warm_followup_owned(s, PROMPT, None).map_err(SubmissionError::into_legacy)
+        }),
+        ("steering", |s| entry::inject_steering_prompt(s, PROMPT)),
+    ];
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _listed = StashChannelGuard::new(CHANNEL + 1);
+    let tmux = ScriptedTmux::new(&view("draft", false));
+    for managed in [false, true] {
+        for (label, send) in entries {
+            let session = format!("one-path-{label}-{managed}");
+            tmux.clear();
+            let spy = SpyGuard::install(SpyState {
+                captures: std::iter::repeat_n(Some(IDLE.to_string()), 64).collect(),
+                ..SpyState::default()
+            });
+            let result = if managed {
+                with_scope(Some(Arc::new(Attempt(session.clone()))), || send(&session))
+            } else {
+                send(&session)
+            };
+            assert_eq!(result, Ok(()), "{label} managed={managed}");
+            assert_eq!(
+                tmux.sends(),
+                ["load", "paste", "Enter"],
+                "{label} {managed}"
+            );
+            assert_eq!(tmux.body(), PROMPT, "{label} managed={managed}");
+            let pane = tmux.pane_calls(&session);
+            let pre_paste = pane
+                .iter()
+                .position(|call| call == "display-message")
+                .unwrap();
+            assert_eq!(
+                pane[pre_paste..],
+                [
+                    "display-message",
+                    "capture-pane",
+                    "paste-buffer",
+                    "send-keys"
+                ],
+                "{label} managed={managed}: one pre-paste read, none after a key"
+            );
+            assert!(
+                !spy.calls()
+                    .iter()
+                    .any(|call| ["literal:", "load:", "paste:", "keys:"]
+                        .iter()
+                        .any(|write| call.starts_with(write))),
+                "{label} managed={managed}: legacy writes {:?}",
+                spy.calls()
+            );
+            assert!(!composer_lock::draft_guarded(&session));
+        }
+    }
 }
