@@ -90,8 +90,7 @@ python3 scripts/generate_inventory_docs.py
 ```
 
 The generator reads giant-file issue state from the checked-in
-`scripts/giant_file_issue_metadata.json` snapshot. **Refresh that snapshot at
-least every 30 days** with:
+`scripts/giant_file_issue_metadata.json` snapshot. Refresh stale planning information when useful with:
 
 ```bash
 python3 scripts/refresh_giant_file_issue_metadata.py
@@ -99,10 +98,8 @@ git add scripts/giant_file_issue_metadata.json
 git commit -m "chore(ci): refresh giant-file issue snapshot"
 ```
 
-**Snapshots older than 30 days are fatal** — CI will fail with a ParseError
-until the snapshot is manually re-verified and refreshed. This ensures the
-gate does not silently pass stale issue state; operators must actively confirm
-GitHub-checked-in state matches at least once per month.
+Snapshots older than 30 days warn. Stale issue state, overdue deadlines and
+missing planning fields do not require bookkeeping changes for CI to pass.
 
 Manually maintained (not emitted by `generate_inventory_docs.py`):
 
@@ -146,21 +143,15 @@ path that is intentionally gone or not yet created with `(removed)` /
 
 ## Maintainability Hard Gates
 
-CI runs `python3 scripts/audit_maintainability.py --check` and blocks on these
-four checks:
-
-- `new_direct_discord_send_outside_allowed_exclusion`
-  (`direct_discord_sends`) — no direct Discord send/edit call outside the
-  outbound dispatcher baseline.
-- `new_runtime_sqlite_or_legacy_db_reference` (`legacy_sqlite_refs`) — no new
-  runtime SQLite or legacy DB reference outside the compat/migration paths.
-- `new_source_of_truth_alias_write` (`source_of_truth_alias_writes`) — no new
-  write to an alias path from `docs/source-of-truth.md`.
-- `new_giant_file_without_change_surface_doc` (`giant_files`) — no production
-  Rust file at or above 1000 lines unless `change-surfaces.md` names it.
-
-`route_srp_violations`, `manual_json_row_mapping`, and
-`limit_clamp_duplication` intentionally remain warning-only.
+CI runs `python3 scripts/audit_maintainability.py --check`. Operational rules
+such as direct Discord writes, runtime SQLite references and source-of-truth
+alias writes retain their configured error gates. Giant size growth, threshold
+crossings, and missing change-surface documentation produce warnings. Growth
+warnings include the file and raw delta in CI/prepush logs and PR step summaries.
+No giant admission, decomposition deadline, or numeric growth allowance is needed.
+Review a split when introducing an independent responsibility; existing cohesive
+responsibilities may grow for fixes and clarification. The hotfile check also
+warns on raw growth for every tracked file, regardless of production line count.
 
 For new tuple-style JSON route handlers, prefer the light helpers in
 `crate::utils::api` for common simple responses and API query bounds:

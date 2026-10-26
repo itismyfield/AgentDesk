@@ -8,7 +8,7 @@ use super::settled_frontier::SettledFrontier;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TextCommandEvidence {
-    /// Not a `!` text command; recovery is unchanged.
+    /// Not a text command; recovery is unchanged.
     NotCommand,
     /// Live intake recorded the command or this bot replied to it: it was consumed.
     Consumed,
@@ -44,9 +44,10 @@ pub(super) fn text_command_evidence(
     }
 }
 
-/// The live intake's command test: `!` after an optional leading `<@id>` / `<@!id>`.
+/// The live intake's command test: a text command word after an optional leading
+/// `<@id>` / `<@!id>`. Other `!` text is chat.
 pub(in crate::services::discord) fn is_text_command(text: &str) -> bool {
-    without_leading_mention(text).starts_with('!')
+    crate::services::discord::commands::match_text_command(without_leading_mention(text)).is_some()
 }
 
 /// Seals the frontier before a command whose handling cannot be read and

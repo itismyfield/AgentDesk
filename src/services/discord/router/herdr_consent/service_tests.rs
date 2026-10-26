@@ -93,26 +93,23 @@ async fn legacy_actual_component_text_and_startup_preserve_results_without_conse
         "Legacy entrypoints must not make new Discord requests"
     );
     for text in ["!unknown", "!herdr consent retry"] {
-        let mut permit = None;
-        let result = crate::services::discord::commands::handle_text_command_with_uploads(
+        let result = crate::services::discord::commands::handle_text_command(
             &ctx,
             &message,
             &data,
             message.channel_id,
             text,
-            &[],
-            &mut permit,
         )
         .await;
         assert!(
-            matches!(result, Ok(true)),
-            "Legacy text entry must retain the base unknown-command result"
+            matches!(result, Ok(false)),
+            "Legacy text entry leaves the retry and other `!` text to chat"
         );
     }
     assert_eq!(
         state.local_note_posts.load(Ordering::SeqCst),
-        2,
-        "Legacy retry and the base unknown command must each send exactly one ordinary denial reply"
+        0,
+        "Legacy text entry answers neither the retry nor other `!` text"
     );
     assert_eq!(
         STORE_READS.load(Ordering::SeqCst),
@@ -655,15 +652,12 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
         voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
         voice_config,
     };
-    let mut permit = None;
-    let retry_result = crate::services::discord::commands::handle_text_command_with_uploads(
+    let retry_result = crate::services::discord::commands::handle_text_command(
         &ctx,
         &message,
         &data,
         message.channel_id,
         &message.content,
-        &[],
-        &mut permit,
     )
     .await;
     assert!(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import io
+from contextlib import redirect_stderr
 import subprocess
 import sys
 import unittest
@@ -168,6 +170,18 @@ class RefreshGiantFileIssueMetadataTest(unittest.TestCase):
             unchanged["ratchets"],
             {"closed_deadline_entries": 0, "transition_list_entries": 0},
         )
+
+    def test_missing_or_unknown_planning_issue_warns_without_blocking_refresh(self) -> None:
+        payload = {"issues": [], "ratchets": {"closed_deadline_entries": 0,
+                                            "transition_list_entries": 0}}
+        entries = [{"file": "src/a.rs"}, {"file": "src/b.rs", "decompose_issue": "#123"}]
+        err = io.StringIO()
+        with redirect_stderr(err):
+            refreshed = REFRESH.lower_ratchet_baselines(payload, entries, set(),
+                                                        {"src/a.rs": 1200, "src/b.rs": 1200})
+        self.assertEqual(refreshed["ratchets"], payload["ratchets"])
+        self.assertIn("WARNING: giant-file registry: src/a.rs", err.getvalue())
+        self.assertIn("WARNING: giant-file registry: src/b.rs", err.getvalue())
 
     def test_refresh_fails_closed_on_invalid_live_state(self) -> None:
         live = subprocess.CompletedProcess(

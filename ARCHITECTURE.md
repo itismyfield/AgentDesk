@@ -1110,8 +1110,6 @@ src/
 │   │   │   │   ├── reconstruct.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── text_commands/
-│   │   │   │   ├── command_dispatch_contract_tests/
-│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── clear_http_overlap_tests.rs
 │   │   │   │   ├── clear_refusal_reply_tests.rs
 │   │   │   │   └── native_stop.rs
@@ -1131,7 +1129,6 @@ src/
 │   │   │   ├── model_ui.rs
 │   │   │   ├── node.rs
 │   │   │   ├── receipt.rs
-│   │   │   ├── recovery_ops.rs
 │   │   │   ├── restart.rs
 │   │   │   ├── session.rs
 │   │   │   ├── sidecar.rs
@@ -2236,6 +2233,7 @@ src/
 │   │   │   │   ├── prompt_identity_e2e_tests/
 │   │   │   │   │   ├── herdr_direct_actual_client_tests.rs
 │   │   │   │   │   └── herdr_direct_roundtrip_tests.rs
+│   │   │   │   ├── agent_text_command_e2e_tests.rs
 │   │   │   │   ├── busy_inject_e2e_tests.rs
 │   │   │   │   ├── busy_inject_thread_e2e_tests.rs
 │   │   │   │   ├── busy_inject_turn_mode_e2e_tests.rs
@@ -3857,7 +3855,6 @@ src/
 │   ├── session_resume.rs
 │   ├── session_selector_validity.rs
 │   ├── settings.rs
-│   ├── shell_guard.rs
 │   ├── stale_turn_reconciler.rs
 │   ├── task_completion_v1.rs
 │   ├── terminal_status_formatting.rs

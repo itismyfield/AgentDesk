@@ -123,14 +123,12 @@ impl Fixture {
     async fn command_as(&self, data: &Data, id: u64, text: &str) -> String {
         let message = discord_mock::user_message(id, text);
         let before = self.calls.lock().unwrap().len();
-        let handled = crate::services::discord::commands::handle_text_command_with_uploads(
+        let handled = crate::services::discord::commands::handle_text_command(
             &self.ctx,
             &message,
             data,
             message.channel_id,
             text,
-            &[],
-            &mut None,
         )
         .await;
         assert!(matches!(handled, Ok(true)), "{text}: {handled:?}");

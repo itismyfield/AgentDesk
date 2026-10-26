@@ -265,7 +265,7 @@ mod launch_env_tests {
 #[cfg(unix)]
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
 
-/// Global runtime debug flag — set by COKACDIR_DEBUG=1 at startup or toggled by the `!debug` text command.
+/// Global runtime debug flag — set by COKACDIR_DEBUG=1 at startup.
 static DEBUG_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Initialize debug flag from environment variable (call once at startup).
@@ -276,13 +276,6 @@ pub fn init_debug_from_env() {
     if enabled {
         DEBUG_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-}
-
-/// Toggle debug mode at runtime. Returns the new state.
-pub fn toggle_debug() -> bool {
-    let prev = DEBUG_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
-    DEBUG_ENABLED.store(!prev, std::sync::atomic::Ordering::Relaxed);
-    !prev
 }
 
 /// Debug logging helper — active when DEBUG_ENABLED is true.

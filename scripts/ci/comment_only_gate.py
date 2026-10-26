@@ -29,7 +29,7 @@ JUDGE = REPO_ROOT / "scripts" / "check_comment_only_change.py"
 SHA = re.compile(r"^[0-9a-f]{40}$")
 MARKDOWN_STATUSES = {"A", "M", "D", "R", "C"}
 REQUIRED_FILTERS = {"dashboard", "high_risk_recovery", "rust_or_policy", "rust_compile",
-                    "relay_contract", "cross_os_rust", "win32_build_token"}
+                    "relay_contract", "cross_os_rust", "win32_build_token", "script_check_files"}
 PROTECTED_FILTERS = {"dashboard", "relay_contract", "win32_build_token"}
 SUMMARY_LINE_LIMIT = 200
 # str.splitlines() boundaries other than LF and CRLF; the judge rejoins split lines with LF.

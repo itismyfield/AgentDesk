@@ -377,7 +377,7 @@ async fn plain_text_bytes_and_unregistered_command_routes_stay_unchanged_pg() {
     let channel = 7_196_106;
     let (shared, pane) = seeded_runtime(channel, None).await;
     let _gate = test_support::open_gate(channel);
-    for (n, text) in ["!unregistered", "DISPATCH: task", "/meeting task"]
+    for (n, text) in ["!pwd", "DISPATCH: task", "/meeting task"]
         .into_iter()
         .enumerate()
     {

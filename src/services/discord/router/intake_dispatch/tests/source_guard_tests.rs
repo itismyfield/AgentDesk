@@ -9,7 +9,6 @@ pub(super) const GATEWAY: &str = include_str!("../../../gateway.rs");
 pub(super) const DISCORD_MOD: &str = include_str!("../../../mod.rs");
 pub(super) const QUEUE_KICKOFF: &str = include_str!("../../../queue_dispatch/kickoff.rs");
 pub(super) const SKILL: &str = include_str!("../../../commands/skill.rs");
-pub(super) const TEXT_COMMANDS: &str = include_str!("../../../commands/text_commands.rs");
 pub(super) const WORKER_BODY: &str = include_str!("../../message_handler/intake_turn.rs");
 pub(super) const WORKER_ENTRY: &str =
     include_str!("../../message_handler/intake_turn/worker_entry.rs");
@@ -17,19 +16,14 @@ pub(super) const MESSAGE_HANDLER: &str = include_str!("../../message_handler.rs"
 
 pub(super) type Sources<'a> = [(&'static str, &'a str)];
 
-pub(super) const PRODUCERS: [(&str, &str); 6] = [
+pub(super) const PRODUCERS: [(&str, &str); 5] = [
     ("intake_gate", INTAKE_GATE),
     ("gateway", GATEWAY),
     ("discord_mod", DISCORD_MOD),
     ("queue_kickoff", QUEUE_KICKOFF),
     ("skill", SKILL),
-    ("text_commands", TEXT_COMMANDS),
 ];
-pub(super) const DISPATCHERS: [(&str, &str); 3] = [
-    ("intake_gate", INTAKE_GATE),
-    ("skill", SKILL),
-    ("text_commands", TEXT_COMMANDS),
-];
+pub(super) const DISPATCHERS: [(&str, &str); 2] = [("intake_gate", INTAKE_GATE), ("skill", SKILL)];
 pub(super) const QUEUED: [(&str, &str, &str); 2] = [
     ("gateway", GATEWAY, "drain_dispatched_queue_markers("),
     (
@@ -38,10 +32,9 @@ pub(super) const QUEUED: [(&str, &str, &str); 2] = [
         "start_and_drain_kickoff_markers(",
     ),
 ];
-const CENTRAL_DISPATCH: [(&str, &str, usize); 3] = [
+const CENTRAL_DISPATCH: [(&str, &str, usize); 2] = [
     ("intake_gate", "dispatch_text_intake(", 1),
     ("skill", "dispatch_skill_intake(", 2),
-    ("text_commands", "dispatch_skill_intake(", 1),
 ];
 const WORKER_BANS: [&str; 4] = [
     "dispatch_text_intake(",
