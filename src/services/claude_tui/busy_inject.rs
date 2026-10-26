@@ -43,7 +43,6 @@ use crate::services::tui_input::bounded_tmux::{BoundedTmuxError, run_bounded_tmu
 /// Larger inputs are refused before any tmux call.
 pub(crate) const MAX_INPUT_BYTES: usize = 64 * 1024;
 const CAPTURE_SCROLLBACK: &str = "-80";
-const VETOED: &str = "agentdesk-busy-inject-vetoed";
 
 /// Why nothing reached the pane; the caller may queue the input instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,65 +328,6 @@ impl Pane {
         })
     }
 
-    pub(crate) fn generation(&self) -> Option<Generation> {
-        self.state().map(|state| state.generation)
-    }
-
-    /// Keeps the non-stash callers' no-attached-client contract.
-    pub(crate) fn guarded(
-        &self,
-        g0: &Generation,
-        size: Option<(usize, usize)>,
-        command: &str,
-    ) -> Guard {
-        let attached = 0;
-        let vetoed = format!(
-            "display-message -p -t '{}' '{VETOED} #{{session_attached}} #{{session_last_attached}}'",
-            self.target
-        );
-        let mut condition = format!(
-            "#{{&&:#{{==:#{{session_attached}},{attached}}},#{{==:#{{session_last_attached}},{}}}}}",
-            g0.last
-        );
-        if let Some((width, height)) = size {
-            let sized = format!(
-                "#{{&&:#{{==:#{{pane_width}},{width}}},#{{==:#{{pane_height}},{height}}}}}"
-            );
-            condition = format!("#{{&&:{condition},{sized}}}");
-        }
-        let args = [
-            "if-shell",
-            "-F",
-            "-t",
-            &self.target,
-            &condition,
-            command,
-            &vetoed,
-        ];
-        let Some(out) = self.ok(&args) else {
-            return Guard::Failed;
-        };
-        // A sized guard with the same generation can only have failed its size comparison.
-        match out.trim().strip_prefix(VETOED).map(str::trim) {
-            None if out.trim().is_empty() => Guard::Applied,
-            None => Guard::Failed,
-            Some(rest) => {
-                let mut fields = rest.split_whitespace();
-                match fields.next().map(str::parse::<u32>) {
-                    Some(Ok(count))
-                        if count == attached
-                            && size.is_some()
-                            && fields.next().unwrap_or("") == g0.last =>
-                    {
-                        Guard::Resized
-                    }
-                    Some(Ok(_)) => Guard::Vetoed,
-                    _ => Guard::Gone,
-                }
-            }
-        }
-    }
-
     pub(crate) fn capture(&self) -> Option<String> {
         self.ok(&[
             "capture-pane",
@@ -399,15 +339,6 @@ impl Pane {
             CAPTURE_SCROLLBACK,
         ])
     }
-}
-
-pub(crate) enum Guard {
-    Applied,
-    Vetoed,
-    /// Only a sized guard: the pane is no longer the size the command was planned for.
-    Resized,
-    Gone,
-    Failed,
 }
 
 /// Attach count and last attach second; a change between two reads means a person could type.
