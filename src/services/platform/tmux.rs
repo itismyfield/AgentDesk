@@ -889,26 +889,26 @@ fn parse_ps_etime(raw: &str) -> Option<std::time::Duration> {
     ))
 }
 
+pub(in crate::services) fn pane_dead_is_live(output: &str) -> bool {
+    output.trim() == "0"
+}
+
 /// Check if a session has any live (non-dead) panes.
 pub fn has_live_pane(session_name: &str) -> bool {
-    if !has_session(session_name) {
-        return false;
-    }
-    tmux_output([
-        "list-panes",
-        "-t",
-        &exact_target(session_name),
-        "-F",
-        "#{pane_dead}",
-    ])
-    .ok()
-    .filter(|o| o.status.success())
-    .map(|o| {
-        String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .any(|line| line.trim() == "0")
-    })
-    .unwrap_or(false)
+    has_session(session_name)
+        && tmux_output([
+            "list-panes",
+            "-t",
+            &exact_target(session_name),
+            "-F",
+            "#{pane_dead}",
+        ])
+        .is_ok_and(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(pane_dead_is_live)
+        })
 }
 
 /// #4489 introduced three-state liveness of a tmux session's panes and the
