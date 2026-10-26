@@ -288,7 +288,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         expected = (
             "nextest run --lib --profile ci --no-tests fail -E "
             "test(=services::discord::health::turn_deliver::inject::queued_reconcile::"
-            "unsupported_file_identity_refuses_transcript_proof)"
+            "mismatched_file_identity_refuses_transcript_proof)"
         )
         success = self.run_fixture(runner=True)
         self.assertEqual(success.result.returncode, 0, success.result.stderr)

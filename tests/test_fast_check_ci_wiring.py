@@ -522,8 +522,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
             runs,
             [
                 ("check_fast_cross_os", "cargo check --workspace --all-targets"),
-                ("check_fast_cross_os_targets", "./scripts/ci/run-writer-namespace-windows-targets.sh"),
                 ("check_fast_cross_os_targets", "taiki-e/install-action@v2"),
+                ("check_fast_cross_os_targets", "./scripts/ci/run-writer-namespace-windows-targets.sh"),
                 ("check_fast_cross_os_targets",
                  "set -euo pipefail\n"
                  "cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json\n"
@@ -531,11 +531,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
             ],
         )
         # The Windows list must come from the Windows runner, with the pinned nextest.
-        install, compare = targets["steps"][len(setup) + 1 : len(setup) + 3]
+        install, writer, compare = targets["steps"][len(setup) : len(setup) + 3]
         self.assertEqual(install["with"], {"tool": "cargo-nextest@0.9.149"})
         self.assertEqual((install["if"], compare["if"]), ("runner.os == 'Windows'", "runner.os == 'Windows'"))
         self.assertNotIn("continue-on-error", compare)
-        writer = targets["steps"][len(setup)]
         self.assertEqual(writer["name"], "Writer namespace exact Windows targets")
         self.assertEqual(writer["if"], "runner.os == 'Windows'")
         self.assertEqual(writer["timeout-minutes"], 60)
@@ -564,6 +563,23 @@ class FastCheckCiWiringTests(unittest.TestCase):
             )
             for mutated in mutations:
                 self.assertNotEqual(self.run_hardening_fixture(mutated).returncode, 0)
+
+    def test_windows_nextest_consumers_follow_its_single_install(self) -> None:
+        steps = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"][
+            "check_fast_cross_os_targets"
+        ]["steps"]
+        installs = [index for index, step in enumerate(steps) if step.get("name") == "Install cargo-nextest"]
+        self.assertEqual(len(installs), 1)
+        consumers = []
+        for index, step in enumerate(steps):
+            command = step.get("run", "")
+            scripts = re.findall(r"\./(scripts/[\w/.-]+\.sh)\b", command)
+            bodies = [command, *((REPO_ROOT / script).read_text(encoding="utf-8") for script in scripts)]
+            if any(re.search(r"\bcargo\s+nextest\b", body) for body in bodies):
+                consumers.append(index)
+                with self.subTest(step=step.get("name")):
+                    self.assertGreater(index, installs[0], "nextest consumer must follow its install in this job")
+        self.assertEqual(len(consumers), 2)
 
     def test_cross_os_derived_selectors_match_source(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

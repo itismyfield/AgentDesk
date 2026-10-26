@@ -599,6 +599,12 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Install cargo-nextest
+        if: runner.os == 'Windows'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.149
+
       - name: Writer namespace exact Windows targets
         if: runner.os == 'Windows'
         # Healthy runs took 24-46 min on 2026-10-15/16 and three PRs were cut at 45.
@@ -609,12 +615,6 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: ./scripts/ci/run-writer-namespace-windows-targets.sh
-
-      - name: Install cargo-nextest
-        if: runner.os == 'Windows'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.149
 
       # Every test the sources declare for Windows must be in the Windows lib test binary's list.
       - name: Compare Windows Rust test sources with the nextest list
@@ -886,7 +886,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py e85dd6104fefd77f5deba1aca46c26df868c45c9b40d0c3fb32ee469b8587405
-          pin scripts/check-ci-runner-hardening.sh 06b4004a462baada234994fbf67a35bf54ef950aa46577cad5e50af0f6b2b3f4
+          pin scripts/check-ci-runner-hardening.sh 2a0cd74b2c9236e64568627e0aba1086f89c07c301a8c0d309a31d0e72d74009
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks

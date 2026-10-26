@@ -109,7 +109,7 @@ fn confirmed_author_history_preserves_all_ten_idle_recovery_regressions() {
     let root = crate::config::runtime_root().unwrap();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(names)
-        .args(["--exact", "--nocapture"])
+        .args(["--exact", "--nocapture", "--test-threads=1"])
         .env("ADK_TEST_FRAME_LEDGER_PATH", &ledger)
         .env("AGENTDESK_ROOT_DIR", &root)
         .env("AGENTDESK_CONFIG", root.join("config/agentdesk.yaml"))

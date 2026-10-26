@@ -39,4 +39,4 @@ readonly runtime_store="src/services/discord/runtime_store.rs"
   || exit
 # Keep the Windows-only transcript refusal executable in the required PR job.
 exec cargo nextest run --lib --profile ci --no-tests fail \
-  -E 'test(=services::discord::health::turn_deliver::inject::queued_reconcile::unsupported_file_identity_refuses_transcript_proof)'
+  -E 'test(=services::discord::health::turn_deliver::inject::queued_reconcile::mismatched_file_identity_refuses_transcript_proof)'
