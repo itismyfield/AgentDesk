@@ -685,7 +685,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "18f738247b0c02b9cac5cd225bcb4ce366c733f7378d1b6aaa1c4cc38706ba9a",
+    "job_timeout_minutes" => 100, "job_sha256" => "dad6d5b4c9c44754f640fec13d168f622e1df8be2723654af2a0e5643eb0d4b0",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -701,7 +701,7 @@ targets = {
           '--archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \\',
           "--rust-version 1.94.1 --nextest-version \"$(cargo nextest --version | awk 'NR==1 {print $2}')\" \\",
           "--target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \\",
-          '--build-option CARGO_PROFILE_TEST_DEBUG=0 --output "$NEXTEST_DIR/plan"',
+          '--build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan"',
           'python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"',
         ],
         "timeout_minutes" => 45, "env" => {"BASH_ENV" => "/dev/null"},
@@ -1110,7 +1110,10 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
   errors << "main #{job_id} must keep needs #{needs.inspect} and if #{gate.inspect}" unless main_job["needs"] == needs && main_job["if"] == gate
   errors << "main #{job_id} must equal the PR job apart from needs, if and the role step" unless role_free.(main_job, "Upload nextest baseline") == role_free.(pr_job, "Compare tests with the comparison base")
   nightly_job = nightly_jobs[job_id]
-  errors << "nightly #{job_id} must equal the main job apart from the baseline upload" unless nightly_job.is_a?(Hash) && nightly_job == role_free.(main_job, "Upload nextest baseline").merge(main_job.slice("needs", "if"))
+  expected_nightly = role_free.(main_job, "Upload nextest baseline").merge(main_job.slice("needs", "if"))
+  # Nightly keeps the strict retry policy: its plan differs from main only in that argument.
+  expected_nightly = JSON.parse(JSON.generate(expected_nightly).gsub("--retry-mode all-once", "--retry-mode policy"))
+  errors << "nightly #{job_id} must equal the main job apart from the baseline upload and --retry-mode policy" unless nightly_job.is_a?(Hash) && nightly_job == expected_nightly
 end
 main_baseline = Array(main_jobs.dig("rust_build", "steps")).select { |step| step.is_a?(Hash) && step["name"] == "Upload nextest baseline" }
 errors << "main rust_build must upload the plan as nextest-baseline for 14 days, exactly once" unless main_baseline == [baseline_upload]
