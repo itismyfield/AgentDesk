@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use poise::serenity_prelude::UserId;
 
-use super::super::super::tick_mailboxes::enumerations_for_tests;
 use super::o_stall_tests::{Captured, watcher};
 use super::*;
 use crate::services::provider::CancelToken;
+use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 
 /// How long the test waits for a pass before calling it hung.
 const HUNG: Duration = Duration::from_secs(120);
@@ -67,12 +67,16 @@ async fn a_tick_enumerates_each_runtime_mailbox_set_once() {
             .register(provider.as_str().to_string(), shared)
             .await;
     }
-    let before = enumerations_for_tests();
-    run_stall_watchdog_pass(&registry, &provider).await;
-    assert_eq!(enumerations_for_tests() - before, 2, "one per runtime");
+    let before = ChannelMailboxRegistry::enumerations_for_tests();
     run_stall_watchdog_pass(&registry, &provider).await;
     assert_eq!(
-        enumerations_for_tests() - before,
+        ChannelMailboxRegistry::enumerations_for_tests() - before,
+        2,
+        "one per runtime"
+    );
+    run_stall_watchdog_pass(&registry, &provider).await;
+    assert_eq!(
+        ChannelMailboxRegistry::enumerations_for_tests() - before,
         4,
         "a tick never reuses the last one"
     );
@@ -148,4 +152,85 @@ async fn an_unanswering_mailbox_is_unknown_not_idle() {
         );
     }
     assert_eq!(unreachable_warns(&logs, channel), 1, "{logs}");
+}
+
+/// A due watcher respawn retry of a channel whose actor did not answer this tick neither waits
+/// on the actor nor spends the retry's budget, and the next answering tick retries it.
+#[tokio::test(start_paused = true)]
+async fn a_due_retry_skips_a_channel_whose_actor_did_not_answer() {
+    let _absence = watcher_respawn::lock_watcher_absence_for_test().await;
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let tempdir = tempfile::tempdir().expect("runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        tempdir.path(),
+    );
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(7_333_721);
+    let registry = HealthRegistry::new();
+    let shared = discord::make_shared_data_for_tests();
+    registry
+        .register(provider.as_str().to_string(), shared.clone())
+        .await;
+    shared.mailboxes.insert_silent_for_test(channel);
+    let due = chrono::Utc::now().timestamp();
+    watcher_respawn::seed_due_absence_for_test(&provider, channel, due);
+
+    let (logs, outcomes) = passes(&registry, &provider, 1).await;
+    let (_, took) = outcomes[0];
+    assert!(
+        took >= Duration::from_secs(10) && took < Duration::from_secs(20),
+        "the enumeration's deadline only: {took:?}"
+    );
+    assert_eq!(unreachable_warns(&logs, channel), 1, "{logs}");
+    assert_eq!(
+        watcher_respawn::retry_trace_for_test(&provider, channel),
+        ([0, 0], Some((0, due))),
+        "no read or reclaim, and the entry stays due with its budget"
+    );
+
+    shared.mailboxes.remove_fixture_for_test(channel);
+    run_stall_watchdog_pass(&registry, &provider).await;
+    let (counts, _) = watcher_respawn::retry_trace_for_test(&provider, channel);
+    watcher_respawn::clear_watcher_absence(&provider, channel);
+    assert_eq!(counts[0], 1, "an answering tick retries the channel");
+}
+
+/// An actor that answers the enumeration and then blocks costs a due retry one deadline and
+/// none of its budget.
+#[tokio::test(start_paused = true)]
+async fn a_due_retry_of_an_actor_blocked_after_the_enumeration_ends_at_its_deadline() {
+    let _absence = watcher_respawn::lock_watcher_absence_for_test().await;
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let tempdir = tempfile::tempdir().expect("runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        tempdir.path(),
+    );
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(7_333_731);
+    let registry = HealthRegistry::new();
+    let shared = discord::make_shared_data_for_tests();
+    registry
+        .register(provider.as_str().to_string(), shared.clone())
+        .await;
+    shared.mailboxes.handle(channel);
+    let _barrier = shared.mailboxes.install_health_barrier_for_test(channel);
+    let due = chrono::Utc::now().timestamp();
+    watcher_respawn::seed_due_absence_for_test(&provider, channel, due);
+
+    let (logs, outcomes) = passes(&registry, &provider, 1).await;
+    let (_, took) = outcomes[0];
+    let trace = watcher_respawn::retry_trace_for_test(&provider, channel);
+    watcher_respawn::clear_watcher_absence(&provider, channel);
+    assert!(
+        took >= Duration::from_secs(10) && took < Duration::from_secs(20),
+        "one 10 s deadline: {took:?}"
+    );
+    assert_eq!(unreachable_warns(&logs, channel), 1, "{logs}");
+    assert_eq!(
+        trace,
+        ([1, 0], Some((0, due))),
+        "the read is cut at the deadline before any reclaim or charge"
+    );
 }

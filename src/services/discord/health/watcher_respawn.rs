@@ -60,7 +60,7 @@ use absence_state::{WatcherAbsenceKey, WatcherAbsenceState, respawn_backoff_secs
 mod idle_relay_absence;
 mod live_bridge_guard;
 pub(super) use live_bridge_guard::complete_force_clean_watcher_recovery;
-pub(in crate::services::discord) use live_bridge_guard::retry_pending_watcher_respawn;
+use live_bridge_guard::retry_pending_watcher_respawn;
 
 use idle_relay_absence::observe_routable_unwatched_tui_sessions;
 
@@ -251,7 +251,7 @@ pub(super) async fn sweep_and_retry_absences(
     // evidence and this one steps aside (see `observed_on_this_tick`).
     observe_routable_unwatched_tui_sessions(provider, runtimes, watcher_derived, now_unix_secs)
         .await;
-    retry_pending_watcher_respawns(registry, provider, runtimes, now_unix_secs).await;
+    retry_pending_watcher_respawns(registry, provider, tick, now_unix_secs).await;
 }
 
 /// Re-attempt a respawn for every channel still tracked as watcher-absent whose
@@ -273,13 +273,16 @@ pub(super) async fn sweep_and_retry_absences(
 pub(super) async fn retry_pending_watcher_respawns(
     registry: &HealthRegistry,
     provider: &ProviderKind,
-    runtimes: &[Arc<SharedData>],
+    tick: &TickMailboxes,
     now_unix_secs: i64,
 ) -> usize {
     let mut attempted = 0usize;
     for channel_id in pending_absent_channels(provider) {
-        if retry_pending_watcher_respawn(registry, provider, runtimes, channel_id, now_unix_secs)
-            .await
+        // An actor that did not answer this tick keeps its entry, attempts and due time.
+        if tick.is_unknown(channel_id) {
+            continue;
+        }
+        if retry_pending_watcher_respawn(registry, provider, tick, channel_id, now_unix_secs).await
         {
             attempted += 1;
         }
@@ -707,10 +710,11 @@ fn pending_absent_channels(provider: &ProviderKind) -> Vec<ChannelId> {
 async fn retry_pending_watcher_respawn_admitted(
     registry: &HealthRegistry,
     provider: &ProviderKind,
-    runtimes: &[Arc<SharedData>],
+    tick: &TickMailboxes,
     channel_id: ChannelId,
     now_unix_secs: i64,
 ) -> bool {
+    let runtimes = tick.runtimes();
     let owner = runtime_owning_watcher(runtimes, channel_id);
     if owner.is_some() {
         // A runtime already owns a live watcher — nothing to respawn. Clear the
@@ -735,13 +739,15 @@ async fn retry_pending_watcher_respawn_admitted(
     let snapshot_runtime = runtimes.first().cloned();
     let snapshot = match snapshot_runtime.as_ref() {
         Some(snapshot_runtime) => {
-            registry
-                .snapshot_watcher_state_for_shared(
-                    provider,
-                    snapshot_runtime.clone(),
-                    channel_id.get(),
-                )
+            match tick
+                .watcher_state(registry, snapshot_runtime.clone(), channel_id)
                 .await
+            {
+                WatcherRead::Observed(snapshot) => Some(*snapshot),
+                WatcherRead::Gone => None,
+                // Unanswered by the deadline: no attempt this tick and nothing charged.
+                WatcherRead::Unknown => return false,
+            }
         }
         None => None,
     };
@@ -1492,7 +1498,7 @@ mod tests {
         retry_pending_watcher_respawns(
             &registry,
             &provider,
-            &runtimes,
+            &TickMailboxes::enumerate(&provider, runtimes.clone()).await,
             1_000_000 + WATCHER_ABSENCE_DEADMAN_SECS as i64 + 100,
         )
         .await;
@@ -1594,7 +1600,13 @@ mod tests {
         // Empty registry ⇒ `rebind_inflight` returns `None` ⇒ respawn reports
         // failure (no spawn). The absence MUST survive for the next tick.
         let registry = HealthRegistry::new();
-        retry_pending_watcher_respawns(&registry, &provider, &runtimes, now).await;
+        retry_pending_watcher_respawns(
+            &registry,
+            &provider,
+            &TickMailboxes::enumerate(&provider, runtimes.clone()).await,
+            now,
+        )
+        .await;
 
         assert!(
             WATCHER_ABSENCE.contains_key(&WatcherAbsenceKey::new(&provider, channel)),
@@ -1605,7 +1617,13 @@ mod tests {
         // A second tick re-attempts the respawn against the still-live absence
         // (it was never stranded). Presence is still false, snapshot still None,
         // so the entry persists for continued retry rather than being lost.
-        retry_pending_watcher_respawns(&registry, &provider, &runtimes, now + 1).await;
+        retry_pending_watcher_respawns(
+            &registry,
+            &provider,
+            &TickMailboxes::enumerate(&provider, runtimes.clone()).await,
+            now + 1,
+        )
+        .await;
         assert!(
             WATCHER_ABSENCE.contains_key(&WatcherAbsenceKey::new(&provider, channel)),
             "the absence survives across retries until respawn succeeds or a \
@@ -1918,7 +1936,14 @@ mod tests {
         // `>=`, not `==`: the count is process-wide and sibling tests share the
         // absence map.
         assert!(
-            retry_pending_watcher_respawns(&registry, &provider, &runtimes, t0).await >= 1,
+            retry_pending_watcher_respawns(
+                &registry,
+                &provider,
+                &TickMailboxes::enumerate(&provider, runtimes.clone()).await,
+                t0
+            )
+            .await
+                >= 1,
             "the armed channel must reach the respawn path"
         );
         assert_eq!(
@@ -1927,7 +1952,13 @@ mod tests {
             "the failed respawn must be charged to this channel"
         );
 
-        retry_pending_watcher_respawns(&registry, &provider, &runtimes, t0).await;
+        retry_pending_watcher_respawns(
+            &registry,
+            &provider,
+            &TickMailboxes::enumerate(&provider, runtimes.clone()).await,
+            t0,
+        )
+        .await;
         assert_eq!(
             failed_attempts(&provider, channel),
             Some(1),
@@ -1936,7 +1967,7 @@ mod tests {
         retry_pending_watcher_respawns(
             &registry,
             &provider,
-            &runtimes,
+            &TickMailboxes::enumerate(&provider, runtimes.clone()).await,
             t0 + WATCHER_RESPAWN_BACKOFF_BASE_SECS as i64 - 1,
         )
         .await;
@@ -1948,7 +1979,7 @@ mod tests {
         retry_pending_watcher_respawns(
             &registry,
             &provider,
-            &runtimes,
+            &TickMailboxes::enumerate(&provider, runtimes.clone()).await,
             t0 + WATCHER_RESPAWN_BACKOFF_BASE_SECS as i64,
         )
         .await;
@@ -1989,7 +2020,8 @@ mod tests {
         let mut attempts = 0usize;
         for step in 0..(2 * WATCHER_RESPAWN_MAX_ATTEMPTS as i64) {
             let now = t0 + step * WATCHER_RESPAWN_BACKOFF_CEILING_SECS as i64;
-            if retry_pending_watcher_respawn(&registry, &provider, &runtimes, channel, now).await {
+            let tick = TickMailboxes::enumerate(&provider, runtimes.clone()).await;
+            if retry_pending_watcher_respawn(&registry, &provider, &tick, channel, now).await {
                 attempts += 1;
             }
         }
@@ -2512,6 +2544,46 @@ mod tests {
 #[cfg(test)]
 static RESPAWN_TEST_COUNTS: LazyLock<dashmap::DashMap<u64, [usize; 2]>> =
     LazyLock::new(dashmap::DashMap::new);
+
+/// Retries `channel` on a tick of its own, for tests outside the watchdog pass.
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) async fn retry_pending_watcher_respawn_for_tests(
+    registry: &HealthRegistry,
+    provider: &ProviderKind,
+    runtimes: &[Arc<SharedData>],
+    channel_id: ChannelId,
+    now_unix_secs: i64,
+) -> bool {
+    let tick = TickMailboxes::enumerate(provider, runtimes.to_vec()).await;
+    retry_pending_watcher_respawn(registry, provider, &tick, channel_id, now_unix_secs).await
+}
+
+/// Seeds an absence due at `now_unix_secs` and zeroes the channel's retry counters.
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::health) fn seed_due_absence_for_test(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    now_unix_secs: i64,
+) {
+    WATCHER_ABSENCE.insert(
+        WatcherAbsenceKey::new(provider, channel),
+        WatcherAbsenceState::newly_absent(now_unix_secs),
+    );
+    RESPAWN_TEST_COUNTS.insert(channel.get(), [0, 0]);
+}
+
+/// The retry's snapshot reads and reclaims for `channel`, then its absence's attempts and due time.
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::health) fn retry_trace_for_test(
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> ([usize; 2], Option<(u32, i64)>) {
+    let counts = *RESPAWN_TEST_COUNTS.get(&channel.get()).unwrap();
+    let absence = WATCHER_ABSENCE
+        .get(&WatcherAbsenceKey::new(provider, channel))
+        .map(|state| (state.failed_attempts, state.next_attempt_unix_secs));
+    (counts, absence)
+}
 
 #[cfg(test)]
 pub(in crate::services::discord) fn seed_live_bridge_respawn_test(channel: ChannelId) {

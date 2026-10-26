@@ -200,7 +200,7 @@ async fn a_registered_claude_original_keeps_the_watchdog_tick_from_respawning() 
         retry_pending_watcher_respawns(
             &fx.registry,
             &PROVIDER,
-            std::slice::from_ref(&fx.shared),
+            &TickMailboxes::enumerate(&PROVIDER, vec![fx.shared.clone()]).await,
             t0 + 30
         )
         .await,
@@ -300,12 +300,8 @@ async fn a_respawn_admitted_first_holds_the_original_start_until_it_ends() {
         let t0 = chrono::Utc::now().timestamp();
         fx.arm_idle_absence(t0);
         let (reached, resume) = respawn_gap::arm(fx.channel.get());
-        let retry = retry_pending_watcher_respawns(
-            &fx.registry,
-            &PROVIDER,
-            std::slice::from_ref(&fx.shared),
-            t0,
-        );
+        let tick = TickMailboxes::enumerate(&PROVIDER, vec![fx.shared.clone()]).await;
+        let retry = retry_pending_watcher_respawns(&fx.registry, &PROVIDER, &tick, t0);
         let start = tokio::sync::Notify::new();
         let original = async {
             start.notified().await;
@@ -373,10 +369,10 @@ async fn a_concurrent_respawn_leaves_the_absence_and_its_budget_alone() {
         .failed_attempts = 2;
     let held = discord::live_bridge::try_respawn_recovery(&PROVIDER, fx.channel.get()).unwrap();
     assert!(held.is_guarded());
-    let runtimes = std::slice::from_ref(&fx.shared);
+    let tick = TickMailboxes::enumerate(&PROVIDER, vec![fx.shared.clone()]).await;
 
     assert_eq!(
-        retry_pending_watcher_respawns(&fx.registry, &PROVIDER, runtimes, t0).await,
+        retry_pending_watcher_respawns(&fx.registry, &PROVIDER, &tick, t0).await,
         0
     );
     assert_eq!(fx.counts(), [0, 0]);
@@ -388,7 +384,7 @@ async fn a_concurrent_respawn_leaves_the_absence_and_its_budget_alone() {
 
     drop(held);
     assert_eq!(
-        retry_pending_watcher_respawns(&fx.registry, &PROVIDER, runtimes, t0).await,
+        retry_pending_watcher_respawns(&fx.registry, &PROVIDER, &tick, t0).await,
         1
     );
     assert_eq!(fx.failed_attempts(), Some(3));
