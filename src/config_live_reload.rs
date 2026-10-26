@@ -841,9 +841,9 @@ mod tests {
         );
     }
 
-    /// #5750 — `server.auth_token` is `#[serde(skip_serializing)]`, so the
-    /// serialized-equality comparison in `section_changed` cannot see it appear
-    /// or disappear. A write-back that dropped the token from disk therefore
+    /// #5750 — `server.auth_token` is `#[serde(skip_serializing)]`, so a
+    /// serialized-equality comparison cannot see it appear or disappear. A
+    /// write-back that dropped the token from disk therefore
     /// reloaded as "applied, no restart required" while the `/ws` gate went
     /// open. Rotation must also flag the boot-bound HTTP middleware.
     #[test]

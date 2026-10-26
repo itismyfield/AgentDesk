@@ -213,11 +213,6 @@ fn every_config_field_is_classified_exactly_once() {
                 field.class.as_str()
             ));
         }
-        if let Detect::Via(target) = field.detect
-            && !rows.contains(&target)
-        {
-            problems.push(format!("{row} reports via unknown {target}"));
-        }
     }
     for leaf in &leaves {
         let covering = rows
@@ -253,6 +248,45 @@ fn reader_columns_name_existing_files() {
             field.reader
         );
     }
+}
+
+/// The committed `docs/config-reload-classes.md`.
+fn render_markdown() -> String {
+    let mut out = String::from(
+        "# Config Reload Classes\n\n\
+         <!-- Generated from src/config/reload_classes/table.rs; do not edit by hand. -->\n\
+         <!-- Regenerate: ADK_WRITE_RELOAD_CLASSES_DOC=1 cargo test --lib config::reload_classes:: -->\n\n\
+         When an edit to `agentdesk.yaml` takes effect. Config hot reload stores every\n\
+         valid edit in the live snapshot, but only `live` fields act on it. A change to a\n\
+         `restart` or `seeded-at-boot` field logs one WARN line naming the field.\n\n\
+         - `live`: read from the live snapshot (or disk) at use time.\n\
+         - `restart`: captured at boot or on first access; restart to apply.\n\
+         - `seeded-at-boot`: copied into the DB/kv at boot, and runtime readers read that\n  \
+           copy; restart to re-seed.\n\n\
+         `*` stands for any map key or list item.\n\n\
+         | Field | Class | Read or captured by |\n|---|---|---|\n",
+    );
+    for field in FIELDS {
+        out.push_str(&format!(
+            "| `{}` | {} | {} |\n",
+            field.path,
+            field.class.as_str(),
+            field.reader
+        ));
+    }
+    out.push_str(
+        "\n## Files outside `agentdesk.yaml`\n\n\
+         | File | Class | Read or captured by |\n|---|---|---|\n",
+    );
+    for file in FILES {
+        out.push_str(&format!(
+            "| `{}` | {} | {} |\n",
+            file.path,
+            file.class.as_str(),
+            file.reader
+        ));
+    }
+    out
 }
 
 #[test]

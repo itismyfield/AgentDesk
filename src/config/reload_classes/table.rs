@@ -204,7 +204,7 @@ pub const FIELDS: &[FieldReload] = &[
     row("memory.mcp.access_key_env", Live, "`src/runtime_layout/mod.rs` load_memory_backend (load_from_path per call) via services/memory/memento.rs:runtime_config"),
     row("prompt_manifest_retention", Restart, "`src/db/prompt_manifests/retention.rs` install_retention_config (OnceLock set from bootstrap::initialize)"),
     custom("tui_o.writer.channels", Restart, Detect::Custom(detect::tui_o_writer_channels), "`src/services/tui_o/channel_policy.rs` install (BOOT OnceLock; bootstrap::install_boot_snapshots)"),
-    custom("tui_o.writer.all_tui", Restart, Detect::Via("tui_o.writer.channels"), "`src/services/tui_o/channel_policy.rs` install (BOOT OnceLock; bootstrap::install_boot_snapshots)"),
+    custom("tui_o.writer.all_tui", Restart, Detect::Covered, "`src/services/tui_o/channel_policy.rs` install (BOOT OnceLock; bootstrap::install_boot_snapshots)"),
     custom("tui_o.writer.late_adopt", Restart, Detect::Custom(detect::tui_o_writer_late_adopt), "`src/services/tui_o/channel_policy.rs` install (BOOT OnceLock; bootstrap::install_boot_snapshots) (late_adopt_capable)"),
     custom("tui_o.writer.dormant_channels", Restart, Detect::Custom(detect::tui_o_writer_dormant_channels), "`src/services/tui_o/channel_policy.rs` install (BOOT OnceLock; bootstrap::install_boot_snapshots)"),
     row("tui_o.tool_cards.enabled", Live, "`src/services/tui_o/store/tool_card_switch.rs` global_enabled (current())"),
