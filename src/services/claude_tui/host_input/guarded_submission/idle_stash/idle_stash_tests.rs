@@ -58,7 +58,7 @@ impl ScriptedTmux {
         let script = r#"#!/bin/sh
 d='@D@'
 case "$2" in
-display-message) echo 1 ;;
+display-message) for last do :; done; case "$last" in '#{pane_dead}') echo 0 ;; *) echo 1 ;; esac ;;
 capture-pane) cat "$d/screen" ;;
 load-buffer|paste-buffer|send-keys)
   n=$(cat "$d/sent" 2>/dev/null || echo 0); echo $((n + 1)) > "$d/sent"
@@ -524,6 +524,7 @@ fn scripted_idle_pre_capture_selects_stash_once_without_later_io_checks() {
 d='@D@'
 echo "$2" >> "$d/calls"
 case "$2" in
+display-message) echo 0 ;;
 capture-pane) cat "$d/before" ;;
 load-buffer) for last do :; done; cp "$last" "$d/body" ;;
 paste-buffer) echo paste >> "$d/events" ;;

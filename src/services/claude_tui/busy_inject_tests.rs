@@ -92,6 +92,7 @@ echo "$*" >> "$d/log"
 [ -f "$d/fail.$2" ] && exit 1
 case "$2" in
 display-message)
+  for last do :; done; [ "$last" = '#{pane_dead}' ] && { printf ' 0 \n'; exit 0; }
   # A bare count gets a never-attached generation and a roomy pane.
   a=$(next attach); case "$a" in *,*) echo "$a" ;; *) echo "$a,,200,50" ;; esac ;;
 capture-pane) next cap ;;

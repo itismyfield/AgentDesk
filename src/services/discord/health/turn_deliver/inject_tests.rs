@@ -33,7 +33,7 @@ const FAKE_TMUX: &str = r##"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
 case "$2" in
-display-message) echo "$(cat "$d/attach"),,$(cat "$d/size" 2>/dev/null || echo 80,24)" ;;
+display-message) for last do :; done; case "$last" in '#{pane_dead}') printf ' 0 \n' ;; *) echo "$(cat "$d/attach"),,$(cat "$d/size" 2>/dev/null || echo 80,24)" ;; esac ;;
 capture-pane)
   if [ -f "$d/hold" ]; then
     rm -f "$d/hold"; touch "$d/at_hold"; i=0

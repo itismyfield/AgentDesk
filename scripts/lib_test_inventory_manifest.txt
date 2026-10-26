@@ -7074,6 +7074,7 @@ services::discord::router::intake_gate::busy_inject::payload_tests::one_attachme
 services::discord::router::intake_gate::busy_inject::payload_tests::pane_veto_hands_back_one_normal_busy_queue_payload_with_uploads_pg
 services::discord::router::intake_gate::busy_inject::payload_tests::plain_text_bytes_and_unregistered_command_routes_stay_unchanged_pg
 services::discord::router::intake_gate::busy_inject::payload_tests::retained_bundle_files_outlive_preparation_and_confirm_as_normal_input_chunks_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::unavailable_pane_hands_back_without_losing_discord_input_pg
 services::discord::router::intake_gate::busy_inject::tests::the_gate_opens_only_on_all_or_a_readable_channel_list
 services::discord::router::intake_gate::command_recognition_tests::command_outcomes_end_before_restore_and_preserve_upload_conditions
 services::discord::router::intake_gate::gate::tests::boundary_keeps_alert_rejection_and_admits_unmarked_announce_handoff
