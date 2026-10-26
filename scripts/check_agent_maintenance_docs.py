@@ -390,7 +390,7 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
             Finding(
                 "warning",
                 "docs/generated/module-inventory.md",
-                "module inventory is missing or empty; cannot verify frozen giant surfaces.",
+                "module inventory is missing or empty; cannot verify giant review entries.",
             )
         ]
     if not change_surfaces.is_file():
@@ -411,7 +411,7 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
             path = match.group("path")
             actual = inventory.get(path)
             if actual is None:
-                # Missing freeze entries are stale documentation, including tests.
+                # Missing review entries are stale documentation, including tests.
                 on_disk = (repo_root / path).is_file()
                 is_test_path = path.endswith("_tests.rs") or path.rsplit("/", 1)[-1] in {
                     "tests.rs",
@@ -424,7 +424,7 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
                             rel_doc,
                             (
                                 f"{path} is a test file (excluded from the "
-                                "production module inventory); reword the freeze "
+                                "production module inventory); reword the giant review "
                                 "entry to remove the test-file path."
                             ),
                             line_no,
@@ -436,14 +436,14 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
                             "warning",
                             rel_doc,
                             (
-                                f"{path} is frozen but is "
+                                f"{path} is a giant review entry but is "
                                 + (
                                     "not a production module in "
                                     "docs/generated/module-inventory.md"
                                     if on_disk
                                     else "missing from disk (deleted or renamed)"
                                 )
-                                + "; remove the ghost freeze entry."
+                                + "; remove the stale giant review entry."
                             ),
                             line_no,
                         )
@@ -458,7 +458,7 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
                         (
                             f"{path} now has {actual} production lines "
                             f"(< {GIANT_FILE_THRESHOLD}); it is no longer a giant "
-                            "file. Remove the ghost freeze entry from "
+                            "file. Remove the stale giant review entry from "
                             "change-surfaces.md."
                         ),
                         line_no,
@@ -572,7 +572,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--line-count-gate",
         action="store_true",
-        help="compatibility option; frozen giant documentation drift is warning-only",
+        help="compatibility option; giant review entry drift is warning-only",
     )
     parser.add_argument(
         "--migration-0093-rollout-gate",

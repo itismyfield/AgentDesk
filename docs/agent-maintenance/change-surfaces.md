@@ -72,9 +72,10 @@
   Giant entries below describe review surfaces, with the generated inventory
   providing current measurements. Retired registrations produce planning warnings.
 - `do_not_edit_without_migration_plan` columns below mean: even though the
-  named active migrations still need coordination with their owner. Giant
-  classification alone does not impose a migration or extraction requirement;
-  explain behavioral changes and preserve the documented domain invariants.
+  file builds and runs, the scheduled migration owner will roll back ad-hoc
+  additions. If you must change behaviour there, scope it to a single bugfix
+  AND link the migration issue in the PR description.
+  Giant classification alone does not impose a migration or extraction requirement.
 - `active_callsite_coverage` only applies to surfaces with a parallel canonical
   path already implemented (e.g. Discord outbound v3). For pre-migration giant
   files (no canonical replacement yet), the column is `n/a`.
@@ -82,9 +83,9 @@
   `docs/generated/giant-file-registry.md` before using their measurements; both
   are gitignored checkout-local views. Crossing 1000 production lines warns and
   does not require registration, an admission event, or an extraction to pass CI.
-  Namespace size findings are also warnings. The separate hotfile gate still
-  blocks raw growth for tracked files below the production giant threshold;
-  production giants in that table emit warnings. Operational guard checks and
+  Namespace size findings are also warnings. The hotfile check warns on raw
+  growth for every tracked file, including files below the production giant
+  threshold. Operational guard checks and
   generated-source parsing retain their own failure contracts.
 
 ### CI lib-test identity inventory pin
@@ -1752,10 +1753,9 @@ time for diagnostics; neither is a stored approval value.
     the content/status/terminal arms to `stream_loop/content_arms.rs`. The root
     now retains the cancel gates, ready-frame drain, runtime-handoff delegation,
     stream/status ticks, and long-running placeholder state wiring. Its #4230
-    giant registry entry was retired after S8, so the giant-file rule is not what
-    binds here — the `[namespace_size_caps]` entry is, and the file is AT that
-    cap with zero headroom. See "At-cap surfaces" under Read This First for the
-    measurement and for why the next change of any size has to extract first).
+    giant registry entry was retired after S8. Its `[namespace_size_caps]`
+    reference of 979 raw lines is a warning signal; review a split only when
+    adding an independent responsibility).
   - `src/services/discord/turn_view_reconciler.rs` was decomposed in #4712 D5:
     the root retains reconciler state and transition coordination, while
     `turn_view_reconciler/api.rs`, `apply.rs`, `resolution.rs`, and `store.rs`

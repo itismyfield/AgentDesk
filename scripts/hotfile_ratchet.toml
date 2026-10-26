@@ -1,7 +1,7 @@
 # Raw line references for tracked Discord hotfiles.
-# Production giants (>=1000 production lines) warn on growth without a size cap.
-# Other hotfiles keep the comparison-SHA raw growth gate; exports use this table.
-# Giant reference changes are advisory and need no admission or decomposition issue.
+# Every tracked file warns on raw growth without a size cap.
+# Git compares against the immutable base; exports use this reference table.
+# Reference changes are advisory and need no admission or decomposition issue.
 
 [hotfile_ratchet]
 # #4175 moved tombstone, drain, and sweep production into child modules.

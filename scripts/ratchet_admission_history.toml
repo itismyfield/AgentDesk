@@ -1,6 +1,13 @@
 # Advisory admission history. Missing history, issue fields, and chronology warn.
-# Giant references impose no growth limit or admission requirement.
-# Hotfile cap increases still fail for files below 1000 production lines.
+# Giant and hotfile references impose no growth limit or admission requirement.
+# Append-only event schema (schema_version = 1):
+#   ratchet = "giant_file_ratchet" or "hotfile_ratchet"
+#   file = repo-relative path
+#   old_cap = positive prior reference count
+#   new_cap = positive current reference count, greater than old_cap
+#   decompose_issue = positive integer issue number (no leading '#')
+#   count = previous admission count for this file across both ratchets + 1
+# Schema and append-only history drift produce advisory warnings.
 
 schema_version = 1
 

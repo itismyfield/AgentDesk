@@ -150,8 +150,8 @@ crossings, and missing change-surface documentation produce warnings. Growth
 warnings include the file and raw delta in CI/prepush logs and PR step summaries.
 No giant admission, decomposition deadline, or numeric growth allowance is needed.
 Review a split when introducing an independent responsibility; existing cohesive
-responsibilities may grow for fixes and clarification. The separate hotfile gate
-still blocks growth for tracked files below 1000 production lines.
+responsibilities may grow for fixes and clarification. The hotfile check also
+warns on raw growth for every tracked file, regardless of production line count.
 
 For new tuple-style JSON route handlers, prefer the light helpers in
 `crate::utils::api` for common simple responses and API query bounds:

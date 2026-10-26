@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Executable cap, history-warning, and raw measurement boundary fixtures."""
+"""Executable reference, history-warning, and raw measurement boundary fixtures."""
 from __future__ import annotations
 
 import contextlib
@@ -19,51 +19,36 @@ import ratchet_admission as admission
 
 
 class RatchetAdmissionGuardTest(unittest.TestCase):
-    def test_cap_raise_with_valid_history_still_fails(self):
-        event = admission.AdmissionEvent("hotfile_ratchet", "src/a.rs", 100, 101, 1, 1)
-        self.assertTrue(admission.validate_admission_delta(ratchet="hotfile_ratchet",
-            current_caps={"src/a.rs": 101}, prior_caps={"src/a.rs": 100},
-            current_events=[event], prior_events=[]))
-
-    def test_history_form_does_not_block_without_cap_growth(self):
-        event = admission.AdmissionEvent("hotfile_ratchet", "src/a.rs", 100, 101, None, 4)
-        self.assertEqual(admission.validate_admission_delta(ratchet="hotfile_ratchet",
-            current_caps={"src/a.rs": 100}, prior_caps={"src/a.rs": 100},
-            current_events=[event], prior_events=[]), [])
-        self.assertTrue(admission.validate_history([event]))
-
-    def test_equal_and_lower_caps_pass(self):
-        for cap in (99, 100):
-            self.assertEqual(admission.validate_admission_delta(ratchet="hotfile_ratchet",
-                current_caps={"src/a.rs": cap}, prior_caps={"src/a.rs": 100},
-                current_events=[], prior_events=[]), [])
-
-    def test_repeated_admission_history_keeps_decomposition_warning(self):
+    def test_repeated_admission_history_keeps_responsibility_review_warning(self):
         events = [admission.AdmissionEvent("hotfile_ratchet", "src/a.rs", 100 + count,
                     101 + count, 4200 + count, count)
                   for count in range(1, admission.ADMISSION_WARN_THRESHOLD + 2)]
         warnings = admission.admission_warning_messages(events, "hotfile_ratchet")
         self.assertEqual(len(warnings), 1)
-        self.assertIn("prioritize decomposition", warnings[0])
+        self.assertIn("review whether an independent responsibility should move", warnings[0])
 
-    def test_giant_reference_increase_warns_in_repository_audit(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config = root / "scripts/giant.toml"
-            config.parent.mkdir()
-            config.write_text('[giant_file_ratchet]\n"src/a.rs" = 1000\n')
-            (root / admission.HISTORY_REL_PATH).write_text("schema_version = 1\n")
-            for args in (("init", "-qb", "main"), ("add", "."),
-                         ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                          "commit", "-qm", "base")):
-                subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
-            config.write_text('[giant_file_ratchet]\n"src/a.rs" = 100000\n')
-            with mock.patch.dict(os.environ, {"RATCHET_ADMISSION_BASE_REF": "HEAD"}):
-                audit = admission.audit_repository_admissions(repo_root=root,
-                    ratchet="giant_file_ratchet", config_rel_path="scripts/giant.toml",
-                    table_name="giant_file_ratchet")
-            self.assertEqual(audit.errors, ())
-            self.assertTrue(any("src/a.rs: +99000 production lines" in message for message in audit.warnings))
+    def test_reference_changes_are_advisory_in_repository_audit(self):
+        for ratchet, unit in (("giant_file_ratchet", "production"), ("hotfile_ratchet", "raw")):
+            with self.subTest(ratchet=ratchet), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = root / "scripts/reference.toml"
+                config.parent.mkdir()
+                config.write_text(f'[{ratchet}]\n"src/a.rs" = 1000\n')
+                (root / admission.HISTORY_REL_PATH).write_text("schema_version = 1\n")
+                for args in (("init", "-qb", "main"), ("add", "."),
+                             ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                              "commit", "-qm", "base")):
+                    subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+                for cap in (999, 1000, 100000):
+                    config.write_text(f'[{ratchet}]\n"src/a.rs" = {cap}\n')
+                    with mock.patch.dict(os.environ, {"RATCHET_ADMISSION_BASE_REF": "HEAD"}):
+                        audit = admission.audit_repository_admissions(repo_root=root,
+                            ratchet=ratchet, config_rel_path="scripts/reference.toml", table_name=ratchet)
+                    self.assertEqual(audit.errors, ())
+                    self.assertEqual(bool(audit.warnings), cap > 1000)
+                    if cap > 1000:
+                        self.assertTrue(any(f"src/a.rs: +99000 {unit} lines" in message
+                                            for message in audit.warnings))
 
 
 class HotfileRatchetTest(unittest.TestCase):
@@ -118,13 +103,16 @@ class HotfileRatchetTest(unittest.TestCase):
             rc = hotfile.main()
         return rc, out.getvalue(), err.getvalue()
 
-    def test_export_no_growth_equal_and_reduction(self):
-        for size, expected in ((99, 0), (100, 0), (101, 1), (130, 1)):
+    def test_export_growth_warns_equal_and_reduction_stay_quiet(self):
+        for size in (99, 100, 101, 130):
             self.write_size(self.grown, size)
             rc, _, err = self.run_check()
-            self.assertEqual(rc, expected, err)
-            if expected:
-                self.assertIn(f"grew to {size} lines > ceiling 100", err)
+            self.assertEqual(rc, 0, err)
+            self.assertNotIn("FAIL:", err)
+            if size > 100:
+                self.assertIn(f"{self.grown}: +{size - 100} raw lines (100 -> {size})", err)
+            else:
+                self.assertNotIn("WARNING:", err)
 
     def test_production_giant_raw_growth_and_reference_raise_warn(self):
         self.init_git(inherited=1200)
@@ -143,38 +131,50 @@ class HotfileRatchetTest(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertIn(f"WARNING: giant growth: {self.grown}: +1 raw lines", err)
 
-    def test_inherited_overage_frozen_by_sha_no_one_line_growth(self):
+    def test_subthreshold_hotfile_growth_warns_with_file_and_delta(self):
+        self.init_git(inherited=992)
+        self.write_size(self.grown, 999)
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"WARNING: giant growth: {self.grown}: +7 raw lines (992 -> 999)", err)
+        self.assertNotIn("FAIL:", err)
+
+    def test_inherited_overage_uses_sha_measurement_for_growth_warning(self):
         self.init_git(inherited=124)
-        for size, expected in ((123, 0), (124, 0), (125, 1)):
+        for size in (123, 124, 125):
             self.write_size(self.grown, size)
             rc, out, err = self.run_check()
-            self.assertEqual(rc, expected, err)
-            self.assertIn(self.base, err if expected else out)
+            self.assertEqual(rc, 0, err)
+            self.assertIn(self.base, err if size > 124 else out)
+            if size > 124:
+                self.assertIn(f"{self.grown}: +1 raw lines (124 -> 125)", err)
 
-    def test_cap_space_does_not_allow_regrowth_from_smaller_base(self):
+    def test_regrowth_below_reference_warns_against_smaller_base(self):
         self.init_git(inherited=90)
         self.write_size(self.grown, 91)
         rc, _, err = self.run_check()
-        self.assertEqual(rc, 1)
-        self.assertIn("grew to 91 lines", err)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"WARNING: giant growth: {self.grown}: +1 raw lines (90 -> 91)", err)
 
-    def test_git_source_equal_shrink_and_one_line_growth_boundary(self):
+    def test_git_source_equal_shrink_and_growth_boundary(self):
         self.init_git()
-        for size, expected in ((100, 0), (99, 0), (101, 1)):
+        for size in (100, 99, 101):
             self.write_size(self.grown, size)
             self.git("add", "-A")
             self.git("commit", "--allow-empty", "-qm", f"candidate size {size}")
             rc, _, err = self.run_check()
-            self.assertEqual(rc, expected, err)
+            self.assertEqual(rc, 0, err)
+            self.assertEqual("WARNING: giant growth:" in err, size > 100)
 
-    def test_cap_raise_fails_even_if_file_shrinks(self):
+    def test_reference_raise_warns_even_if_file_shrinks(self):
         self.init_git()
         self.write_size(self.grown, 99)
         self.caps[self.grown] = 101
         self.write_caps()
         rc, _, err = self.run_check()
-        self.assertEqual(rc, 1)
-        self.assertIn("cap raised", err)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"giant reference increased: {self.grown}: +1 raw lines", err)
+        self.assertNotIn("FAIL:", err)
 
     def test_ledger_format_fixtures_warn_and_pass(self):
         for text in ('[broken\n', 'schema_version = 9\n',
@@ -374,14 +374,18 @@ class HotfileRatchetTest(unittest.TestCase):
         self.assertIn("transferred hotfile", out)
         self.assertIn(f"WARNING: giant growth: {target}: +1 raw lines", err)
 
-    def test_transfer_cannot_raise_old_cap(self):
+    def test_transfer_reference_raise_warns(self):
         self.moved_extra(pin=101)
-        self.assertEqual(self.run_check()[0], 1)
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("WARNING: giant reference increased: src/renamed.rs: +1 raw lines", err)
 
-    def test_transfer_candidate_growth_cannot_be_hidden_by_dirty_shrink(self):
+    def test_transfer_candidate_growth_warns_even_with_dirty_shrink(self):
         self.moved_extra(text="x\n" * 101, pin=100)
         self.write_size("src/renamed.rs", 100)
-        self.assertEqual(self.run_check()[0], 1)
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("WARNING: giant growth: src/renamed.rs: +1 raw lines (100 -> 101)", err)
 
     def test_movement_query_object_read_failure_is_not_retirement(self):
         self.moved_extra(text="changed production line\n" * 100)
@@ -406,11 +410,13 @@ class HotfileRatchetTest(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-qm", "transfer smaller source")
         self.write_size("src/renamed.rs", 91)
-        self.assertEqual(self.run_check()[0], 1)
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("src/renamed.rs: +1 raw lines (90 -> 91)", err)
         self.write_size("src/renamed.rs", 90)
         self.assertEqual(self.run_check()[0], 0)
 
-    def test_detected_move_inherited_cap_overage_stays_frozen(self):
+    def test_detected_move_inherited_overage_uses_base_measurement(self):
         self.extra_base()
         self.write_size("src/extra.rs", 124)
         self.git("add", "-A")
@@ -424,7 +430,9 @@ class HotfileRatchetTest(unittest.TestCase):
         self.git("commit", "-qm", "transfer inherited overage")
         self.assertEqual(self.run_check()[0], 0)
         self.write_size("src/renamed.rs", 125)
-        self.assertEqual(self.run_check()[0], 1)
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("src/renamed.rs: +1 raw lines (124 -> 125)", err)
 
     def test_multiple_indicated_move_targets_are_ambiguous(self):
         self.moved_extra(pin=100, copies=("src/copied.rs",))

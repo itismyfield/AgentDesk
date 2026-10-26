@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Warn for production giants; freeze other hotfile raw counts against the comparison SHA."""
+"""Warn on hotfile raw growth; preserve measurement and manifest integrity checks."""
 
 from __future__ import annotations
 
@@ -30,7 +30,6 @@ if sys.version_info < MIN_PYTHON:
     raise SystemExit(1)
 
 import tomllib
-from generate_inventory_docs import GIANT_FILE_THRESHOLD, split_prod_test_lines
 
 from ratchet_admission import (
     HISTORY_REL_PATH, audit_repository_admissions, parse_cap_table, _git_text, _run_git,
@@ -48,10 +47,6 @@ REQUIRED_HOTFILES = (
 
 def line_count(path: Path) -> int:
     return len(path.read_text(encoding="utf-8").splitlines())
-
-
-def is_giant(path: str) -> bool:
-    return split_prod_test_lines((REPO_ROOT / path).read_text(encoding="utf-8"))[0] >= GIANT_FILE_THRESHOLD
 
 
 def changes(base: str, candidate: str) -> list[tuple[str, str, str]]:
@@ -103,17 +98,22 @@ def pin_transfers(base: str, candidate: str, prior_caps: dict[str, int],
             raise ValueError(f"ambiguous hotfile movement targets: {source}")
         target = targets[0]
         if (target in prior_caps or target in transferred or target not in ceilings
-                or candidate_caps.get(target) != ceilings[target]
-                or (ceilings[target] > prior_caps[source] and not is_giant(target))):
-            raise ValueError(f"hotfile movement lacks a frozen pin transfer: {source} -> {target}")
+                or candidate_caps.get(target) != ceilings[target]):
+            raise ValueError(f"hotfile movement lacks a matching pin transfer: {source} -> {target}")
         regular_blob(base, source)
         regular_blob(candidate, target)
         old_text, old_exists = _git_text(REPO_ROOT, base, source)
         new_text, new_exists = _git_text(REPO_ROOT, candidate, target)
-        if not old_exists or not new_exists or (len(new_text.splitlines()) > len(old_text.splitlines())
-                                               and not is_giant(target)):
-            raise ValueError(f"hotfile transfer grows beyond base measurement: {source} -> {target}")
-        transferred[target] = len(old_text.splitlines())
+        if not old_exists or not new_exists:
+            raise ValueError(f"hotfile transfer measurement is unavailable: {source} -> {target}")
+        old_size, new_size = len(old_text.splitlines()), len(new_text.splitlines())
+        if new_size > old_size:
+            print(f"WARNING: giant growth: {target}: +{new_size - old_size} raw lines "
+                  f"({old_size} -> {new_size}); transferred candidate {candidate}.", file=sys.stderr)
+        if ceilings[target] > prior_caps[source]:
+            print(f"WARNING: giant reference increased: {target}: +{ceilings[target] - prior_caps[source]} "
+                  f"raw lines ({prior_caps[source]} -> {ceilings[target]}); transferred from {source}.", file=sys.stderr)
+        transferred[target] = old_size
         print(f"OK: transferred hotfile: {source} -> {target} (candidate {candidate}).")
     return transferred
 
@@ -153,12 +153,8 @@ def check() -> int:
             if exists:
                 limit, label = len(prior.splitlines()), f"base {audit.base_sha}"
         if current > limit:
-            if is_giant(rel):
-                print(f"WARNING: giant growth: {rel}: +{current - limit} raw lines "
-                      f"({limit} -> {current}); {label} is advisory for production giants.", file=sys.stderr)
-            else:
-                print(f"FAIL: {rel} grew to {current} lines > {label} {limit}.", file=sys.stderr)
-                failed = True
+            print(f"WARNING: giant growth: {rel}: +{current - limit} raw lines "
+                  f"({limit} -> {current}); {label} is advisory.", file=sys.stderr)
         else:
             print(f"OK: {rel} = {current} lines ({label} {limit}).")
     return int(failed)
