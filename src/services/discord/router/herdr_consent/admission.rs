@@ -7,6 +7,11 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::session_host::policy::{LocalChecker, ProofCache};
 use consent::{ConsentKey, IntentRef, Preview, Question, workflow::Request};
+use refusal::Code;
+pub(in crate::services::discord) use refusal::Refusal;
+
+#[path = "admission_refusal.rs"]
+mod refusal;
 
 #[derive(Debug, Clone)]
 pub(in crate::services::discord) struct Hold {
@@ -22,7 +27,7 @@ pub(in crate::services::discord::router) async fn check(
     deps: &IntakeDeps<'_>,
     provider: &ProviderKind,
     request: &IntakeRequest,
-) -> Option<Result<Hold, String>> {
+) -> Option<Result<Hold, Refusal>> {
     let configured = endpoint(request.channel_id.get())?;
     // Existing routing owns remote custody; only its execution-node worker observes policy.
     if session_hosts::local_node().as_deref() != Some(configured.execution_node.as_str()) {
@@ -30,7 +35,9 @@ pub(in crate::services::discord::router) async fn check(
     }
     match Box::pin(assess(deps, provider, request, configured)).await {
         Ok(None) => None,
-        other => Some(other.and_then(|hold| hold.ok_or("consent assessment missing".into()))),
+        other => Some(other.and_then(|hold| {
+            hold.ok_or_else(|| Code::Missing.of()("consent assessment missing".into()))
+        })),
     }
 }
 
@@ -39,9 +46,9 @@ async fn assess(
     provider: &ProviderKind,
     request: &IntakeRequest,
     configured: HerdrLaunchEndpoint,
-) -> Result<Option<Hold>, String> {
-    require_local(&configured)?;
-    let records = records().await?;
+) -> Result<Option<Hold>, Refusal> {
+    require_local(&configured).map_err(Code::RemoteGateway.of())?;
+    let records = records().await.map_err(Code::ConsentStore.of())?;
     let mut previous_hold = None;
     for consent in records.iter().filter(|record| {
         record.provider == provider.as_str()
@@ -49,7 +56,8 @@ async fn assess(
             && record.key.socket == std::path::Path::new(&configured.socket_addr)
             && record.key.named_session == configured.herdr_session
     }) {
-        let sink = custody::LiveSink::new(deps.shared.clone(), provider.clone(), &consent.key)?;
+        let sink = custody::LiveSink::new(deps.shared.clone(), provider.clone(), &consent.key)
+            .map_err(Code::Custody.of())?;
         let mut unreleased = Vec::new();
         for intent in consent.unresolved_intents().iter().filter(|intent| {
             intent.channel == request.channel_id.get()
@@ -59,7 +67,7 @@ async fn assess(
                         .iter()
                         .any(|id| id.get() == intent.source_message))
         }) {
-            if !sink.released(intent).await? {
+            if !sink.released(intent).await.map_err(Code::Custody.of())? {
                 unreleased.push(intent.clone());
             }
         }
@@ -84,7 +92,7 @@ async fn assess(
         .shared
         .pg_pool
         .as_ref()
-        .ok_or("herdr admission row unavailable; preserve input")?;
+        .ok_or_else(|| Code::HostedRow.of()("herdr admission row unavailable".into()))?;
     let channel = request.channel_id.get().to_string();
     use crate::db::dispatched_session_canonical_identity::{
         CanonicalSessionIdentity, SessionIdentityKind,
@@ -105,21 +113,25 @@ async fn assess(
                 return Ok(None);
             }
             HostedRecord::Unknown(_) => {
-                return Err("unknown hosted execution; preserve input".into());
+                return Err(Code::HostedRow.of()("unknown hosted execution".into()));
             }
             _ => {}
         },
         HostedLookup::Missing => {}
-        other => return Err(format!("herdr admission row unverified: {other:?}")),
+        other => {
+            return Err(Code::HostedRow.of()(format!(
+                "herdr admission row: {other:?}"
+            )));
+        }
     }
     if let Some(held) = previous_hold {
         return Ok(Some(held));
     }
-    let source = peer(&configured)?;
+    let source = peer(&configured).map_err(Code::PeerSource.of())?;
     static PROOFS: std::sync::OnceLock<ProofCache> = std::sync::OnceLock::new();
     let proofs = PROOFS.get_or_init(ProofCache::default);
     let checked = proofs.next_restart(source.clone(), &LocalChecker).await;
-    crate::services::session_host::policy::diagnostics::record(
+    let observation = crate::services::session_host::policy::diagnostics::record(
         std::path::Path::new(&configured.socket_addr),
         proofs,
         &checked,
@@ -127,7 +139,11 @@ async fn assess(
     if checked.is_ok() {
         return Ok(None);
     }
-    let prepared = preview::prepare(source, 1).await?;
+    let observation = &observation;
+    let refuse = |code: Code| move |detail: String| code.of()(detail).observed(observation);
+    let prepared = preview::prepare(source, 1)
+        .await
+        .map_err(refuse(Code::Preview))?;
     let key = ConsentKey {
         node: configured.execution_node,
         socket: configured.socket_addr.into(),
@@ -137,7 +153,8 @@ async fn assess(
         config: prepared.logical().into(),
         target: prepared.target().into(),
     }
-    .normalized()?;
+    .normalized()
+    .map_err(refuse(Code::Preview))?;
     let previous = records.into_iter().find(|record| record.key == key);
     let mut token = prepared.token;
     if let Some(previous) = previous {
@@ -146,7 +163,7 @@ async fn assess(
             token.revision = token
                 .revision
                 .checked_add(1)
-                .ok_or("consent revision exhausted")?;
+                .ok_or_else(|| refuse(Code::Preview)("consent revision exhausted".into()))?;
         }
     }
     let owner = deps
@@ -155,12 +172,12 @@ async fn assess(
         .read()
         .await
         .owner_user_id
-        .ok_or("configure an owner before herdr consent")?;
+        .ok_or_else(|| refuse(Code::Owner)("configure an owner before herdr consent".into()))?;
     let bot = deps
         .http
         .get_current_user()
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| refuse(Code::DiscordIdentity)(e.to_string()))?
         .id
         .get();
     Ok(Some(Hold {
@@ -301,13 +318,14 @@ pub(in crate::services::discord::router) async fn restore_then_register(
     deps: &IntakeDeps<'_>,
     provider: &ProviderKind,
     request: &IntakeRequest,
-    hold: Result<Hold, String>,
+    hold: Result<Hold, Refusal>,
     restore: impl std::future::Future<Output = super::super::IntakeExecution> + Send,
 ) -> super::super::IntakeExecution {
     let outcome = Box::pin(restore).await;
     if outcome == super::super::IntakeExecution::Deferred {
         let registered = async {
-            let hold = hold?;
+            let hold =
+                hold.map_err(|refusal| format!("{}: {}", refusal.code(), refusal.detail()))?;
             let intents = mailbox_intents(deps, provider, request).await?;
             // Backstop still restores the original head and lease, but repeats no card/store effect.
             let already_held = intents
@@ -330,7 +348,7 @@ pub(in crate::services::discord::router) async fn restore_then_register(
 pub(in crate::services::discord::router) fn hold_live<'a, 'b: 'a>(
     deps: &'a IntakeDeps<'b>,
     mut submission: IntakeSubmission,
-    hold: Result<Hold, String>,
+    hold: Result<Hold, Refusal>,
 ) -> impl std::future::Future<Output = Result<(), Error>> + Send + 'a {
     Box::pin(async move {
         let uploads = super::super::intake_dispatch::turn_mode_uploads(
@@ -348,53 +366,49 @@ pub(in crate::services::discord::router) fn hold_live<'a, 'b: 'a>(
                 "herdr consent durable custody unavailable; checkpoint remains unread".into(),
             );
         }
+        // A slash command posts its error text, so only the refusal's public form leaves here.
         let hold = match hold {
             Ok(hold) => hold,
-            Err(error) if explicit => {
-                notify_unverified(deps, &request, &error).await;
-                return Err(error.into());
-            }
-            Err(error) => {
-                tracing::warn!(%error, "queued consent input remains held");
-                return Err(error.into());
+            Err(refusal) => {
+                let (code, detail) = (refusal.code(), refusal.detail());
+                tracing::warn!(code, detail, explicit, "consent input remains held");
+                if explicit {
+                    notify_unverified(deps, &request, &refusal).await;
+                }
+                return Err(refusal.to_string().into());
             }
         };
         register_mailbox(deps, &provider, &request, hold, explicit)
             .await
-            .map_err(Into::into)
+            .map_err(|detail| {
+                let refusal = Code::Record.of()(detail);
+                tracing::warn!(detail = refusal.detail(), "consent hold record unverified");
+                refusal.to_string().into()
+            })
     })
 }
 
 /// A held input with no consent card names its cause once per original source and cause.
-async fn notify_unverified(deps: &IntakeDeps<'_>, request: &IntakeRequest, error: &str) {
+async fn notify_unverified(deps: &IntakeDeps<'_>, request: &IntakeRequest, refusal: &Refusal) {
     let (channel, source) = (request.channel_id, request.user_msg_id);
-    let socket = endpoint(channel.get()).map_or_else(String::new, |e| e.socket_addr);
-    let observed =
-        crate::services::session_host::policy::diagnostics::snapshot(std::path::Path::new(&socket));
-    let reason = observed["reason"].as_str().unwrap_or("not_observed");
-    let action = observed["action"].as_str().unwrap_or("");
-    let detail: String = error.chars().take(300).collect();
-    let notice = format!(
-        "herdr 사용자 서버를 검증하지 못해 이 입력을 보류했습니다. 원 입력은 보존됨(대기열에 남아 있음).\n원인: {reason}\n조치: {action}\n세부: {detail}"
-    );
-    // The hold error joins the reason so a different refusal behind the same reason is still shown.
     if let Err(notice_error) =
         crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
             deps.http.clone(),
             deps.shared.clone(),
             channel,
             source,
-            &notice,
+            &refusal.notice(),
             format!(
                 "herdr-consent-unverified:{}:{}",
                 channel.get(),
                 source.get()
             ),
-            format!("{reason}|{error}"),
+            refusal.semantic(),
         )
         .await
     {
-        tracing::warn!(%notice_error, %error, "unverified consent hold notice failed");
+        let code = refusal.code();
+        tracing::warn!(%notice_error, code, "unverified consent hold notice failed");
     }
 }
 
@@ -415,9 +429,10 @@ pub(in crate::services::discord::router) async fn worker(
     let mut recording = false;
     let result = async {
         let hold = held?;
+        let handoff = |detail: &str| Code::Record.of()(detail.into());
         let row = proof
             .as_ref()
-            .ok_or("consent requires an exact before-effects worker handoff")?
+            .ok_or_else(|| handoff("consent requires an exact before-effects worker handoff"))?
             .row();
         let intent = IntentRef {
             store: "intake_outbox".into(),
@@ -431,21 +446,29 @@ pub(in crate::services::discord::router) async fn worker(
             .shared
             .pg_pool
             .as_ref()
-            .ok_or("worker custody database unavailable")?;
+            .ok_or_else(|| handoff("worker custody database unavailable"))?;
         #[cfg(test)]
         tests::before_record().await;
         // Any record attempt may have published; only earlier failures retain rollback authority.
         recording = true;
-        let consent = hold.record(vec![intent.clone()]).await?;
+        let consent = hold
+            .record(vec![intent.clone()])
+            .await
+            .map_err(Code::Record.of())?;
         crate::db::intake_outbox::consent_handoff::hold_before_effects(
             pool,
-            proof.take().ok_or("before-effects authority missing")?,
+            proof
+                .take()
+                .ok_or_else(|| handoff("before-effects authority missing"))?,
             &store(),
             &consent,
             &intent,
         )
-        .await?;
-        hold.effect(deps, provider, consent, false).await
+        .await
+        .map_err(Code::Record.of())?;
+        hold.effect(deps, provider, consent, false)
+            .await
+            .map_err(Code::Card.of())
     }
     .await;
     if let Err(error) = result {
@@ -462,14 +485,21 @@ pub(in crate::services::discord::router) async fn worker(
                 }
             }
         }
-        tracing::warn!(%error, ?row_id, rearmed, "worker consent keeps original payload deferred");
-        let detail = if rearmed {
+        let (code, detail) = (error.code(), error.detail());
+        tracing::warn!(
+            code,
+            detail,
+            ?row_id,
+            rearmed,
+            "worker consent keeps original payload deferred"
+        );
+        let state = if rearmed {
             "Pending; same original input will be checked again"
         } else {
             "Spawned; original input preserved; consent recovery requires inspection"
         };
         if !rearmed && let Some(row) = row_id {
-            let notice = format!("worker 입력 보류: row {row} ({detail}): {error}");
+            let notice = format!("worker 입력 보류: row {row} ({state}): {error}");
             if let Err(notice_error) = crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
                 deps.http.clone(), deps.shared.clone(), request.channel_id, request.user_msg_id,
                 &notice, format!("herdr-consent-worker:{row}"), format!("held:{rearmed}"),
@@ -482,7 +512,7 @@ pub(in crate::services::discord::router) async fn worker(
 }
 
 #[derive(Debug)]
-pub(in crate::services::discord::router) struct QueuedHold(pub Result<Hold, String>);
+pub(in crate::services::discord::router) struct QueuedHold(pub Result<Hold, Refusal>);
 impl std::fmt::Display for QueuedHold {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("consent awaits original head restoration")

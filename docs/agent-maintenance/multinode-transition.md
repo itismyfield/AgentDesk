@@ -616,8 +616,8 @@
 
 ## Tests Required Before Enablement
 
-- Two-node nightly regression (#884): CI runs `multinode_regression::` plus
-  merge-gate policy tests nightly; the physical MacBook + Mac mini smoke
+- Two-node nightly regression (#884): every PR, main and nightly nextest run includes
+  `multinode_regression::` and the merge-gate policy tests; the physical MacBook + Mac mini smoke
   procedure lives in `docs/agent-maintenance/multinode-two-node-smoke.md`.
 - Worker heartbeat expiry (#876/#879): start a worker with provider and MCP
   capabilities, stop heartbeats, and assert new work is not routed to it after

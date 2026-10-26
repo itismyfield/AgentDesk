@@ -46,7 +46,7 @@
       "judge": "src/services/discord/tmux_watcher_registry_restore_tests.rs"
     }
   ],
-  "authority_surface_comment": "Relay authority paths, each with the guards that protect it: a fixed mutation row, a named target lane run on every PR, a production entry test, or a known gap citing its issue. check_relay_authority_contract.py --check-manifest requires every path to exist, every guard to resolve (row file, active lane, test id in scripts/lib_test_inventory_manifest.txt, #issue), and every mutation row and active lane to be declared. Authority cannot be decided from a path pattern, so new authority files are added here by review.",
+  "authority_surface_comment": "Relay authority paths, each with the guards that protect it: a fixed mutation row, a named target lane run on every PR, a production entry test, or a known gap citing its issue. check_relay_authority_contract.py --check-manifest requires every path to exist, every guard to resolve (row file, active lane, a lib test the linux build compiles, #issue), and every mutation row and active lane to be declared. Authority cannot be decided from a path pattern, so new authority files are added here by review.",
   "authority_surface": [
     {
       "path": "src/services/discord/session_relay_sink/terminal_handoff.rs",

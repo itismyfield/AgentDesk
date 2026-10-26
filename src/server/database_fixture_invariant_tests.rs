@@ -13,12 +13,8 @@
 //! something a lane can schedule. Reading the fixture sources costs nothing,
 //! needs no server, and fails loudly the moment the fallback comes back.
 //!
-//! This module is intentionally named without a lane token so it runs in every
-//! lane, including the PG-less ones the fallback used to endanger. It must stay
-//! free of the fixture seed identifiers that
-//! `scripts/check_pg_test_lane_membership.py` scans for, or the classifier will
-//! read it as a database-dependent test and schedule it out of exactly the
-//! lanes it is meant to protect.
+//! It must stay free of the fixture seed identifiers `scripts/ci/pg_test_classifier.py` scans for, or
+//! the native non-PG runs it is meant to protect would leave it out as a database-dependent test.
 
 #[cfg(test)]
 mod tests {
