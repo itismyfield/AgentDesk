@@ -18,9 +18,8 @@ use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 const NAME: &str = "adk-t05-claude-fresh-fail";
 const MESSAGE: u64 = 77_501;
 
-/// A tmux before `FakeTmux` that reports a version, makes a new session present and resolves a
-/// Claude CLI; it answers the pre-paste read with `screen`, records `sends`, and with
-/// `die_after_enter` marks the fake's pane dead once the submit Enter has gone.
+/// A tmux before `FakeTmux` that launches a Claude TUI, answers the pre-paste read with `screen`,
+/// records `sends`, and with `die_after_enter` kills the fake's pane after the submit Enter.
 fn launchable_tmux() -> (tempfile::TempDir, Vec<crate::config::TestEnvVarGuard>) {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::var_os("PATH").unwrap_or_default();
