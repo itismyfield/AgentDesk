@@ -305,29 +305,6 @@ impl Pane {
             .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    pub(crate) fn state(&self) -> Option<PaneState> {
-        let out = self.ok(&[
-            "display-message",
-            "-p",
-            "-t",
-            &self.target,
-            "#{session_attached},#{session_last_attached},#{pane_width},#{pane_height}",
-        ])?;
-        let mut fields = out.trim_end_matches('\n').split(',');
-        let attached = fields.next()?.parse().ok()?;
-        // Never-attached sessions report an empty value, else epoch seconds. A reply without it is
-        // read as empty, which any past attach breaks, and its unknown size keeps the stash off.
-        let last = fields.next().unwrap_or_default().to_string();
-        if !last.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        let mut size = || fields.next().and_then(|field| field.parse::<usize>().ok());
-        Some(PaneState {
-            generation: Generation { attached, last },
-            size: size().zip(size()),
-        })
-    }
-
     pub(crate) fn capture(&self) -> Option<String> {
         self.ok(&[
             "capture-pane",
@@ -339,19 +316,6 @@ impl Pane {
             CAPTURE_SCROLLBACK,
         ])
     }
-}
-
-/// Attach count and last attach second; a change between two reads means a person could type.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Generation {
-    pub(crate) attached: u32,
-    pub(crate) last: String,
-}
-
-pub(crate) struct PaneState {
-    pub(crate) generation: Generation,
-    /// Columns and rows, which decide whether Claude folds or wraps a paste.
-    pub(crate) size: Option<(usize, usize)>,
 }
 
 fn modal(capture: &str) -> bool {
@@ -418,12 +382,6 @@ pub(crate) fn at_offsets<T>(
         }
     }
     None
-}
-
-pub(crate) fn unix_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
 }
 
 fn inject_locked(
