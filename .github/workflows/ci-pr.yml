@@ -1,10 +1,8 @@
 name: CI PR
-
 on:
   # PR-only: no push/dispatch run may publish `Script checks`. The judge uses !cancelled(): on run cancel
   # it never starts or is cancelled; a timed-out upstream still judges red.
   pull_request:
-
 concurrency:
   # A PR number is unique inside the base repository, unlike `head_ref`: two
   # forks can use the same source branch name and must never cancel each other.
@@ -353,6 +351,8 @@ jobs:
               - 'src/services/discord/runtime_store.rs'
               - 'src/services/discord/session_idle_cleanup.rs'
               - 'src/services/discord/settings/**'
+              - 'src/services/discord/status_panel_orphan_store_tests.rs'
+              - 'src/services/discord/status_panel_singleton_store.rs'
               - 'src/services/discord/task_notification_delivery/**'
               - 'src/services/discord/task_supervisor.rs'
               - 'src/services/discord/terminal_delivery_custody/**'

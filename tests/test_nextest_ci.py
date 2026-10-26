@@ -644,6 +644,8 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
                     "scripts/ci/nextest-native.sh", "scripts/ci/pg_test_classifier.py", "scripts/ci/nextest-retry-policy.toml"):
             (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / rel, self.repo / rel)
+        # This fixture's synthetic tests have no relationship to checkout-specific removal rows.
+        (self.repo / "scripts/ci/test-removal-justifications.txt").write_text("")
         (self.repo / "Cargo.toml").write_text('[package]\nname = "agentdesk"\n')
         (self.repo / "src").mkdir()
         self.base_sha = self.commit(self.LIB, "base")

@@ -29,10 +29,14 @@ readonly runtime_store="src/services/discord/runtime_store.rs"
   --owner-id worker_recovery \
     server::worker_recovery::windows_contract::tests::first_fatal_exit_persists_ledger_and_exits \
   || exit
-exec "$interpreter" "$engine" run --repo-root "$root" --platform windows \
+"$interpreter" "$engine" run --repo-root "$root" --platform windows \
   --pass-prefix DIR_FSYNC_WINDOWS_TARGET \
   --gate discord src/services/mod.rs discord src/services/discord/mod.rs optional \
   --owner runtime_store discord src/services/discord/mod.rs runtime_store "$runtime_store" \
     services::discord::runtime_store::windows_contract::tests required \
   --owner-id runtime_store \
-    services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing
+    services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing \
+  || exit
+# Keep the Windows-only transcript refusal executable in the required PR job.
+exec cargo nextest run --lib --profile ci --no-tests fail \
+  -E 'test(=services::discord::health::turn_deliver::inject::queued_reconcile::unsupported_file_identity_refuses_transcript_proof)'

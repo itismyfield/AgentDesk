@@ -395,3 +395,28 @@ impl Want {
 #[cfg(test)]
 #[path = "queued_reconcile_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[test]
+fn unsupported_file_identity_refuses_transcript_proof() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transcript.jsonl");
+    std::fs::write(&path, "{}\n").unwrap();
+    assert_eq!(file_id(&std::fs::metadata(&path).unwrap()), None);
+    let want = Want {
+        key: (path.clone(), (0, 0), 1, 1),
+        from: 0,
+        lead: String::new(),
+        source: String::new(),
+        author: String::new(),
+        text: String::new(),
+        nonce: None,
+        session_id: String::new(),
+        after_us: None,
+    };
+    assert!(
+        want.search().is_none(),
+        "a synthetic identity is no file proof"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"{}\n");
+}
