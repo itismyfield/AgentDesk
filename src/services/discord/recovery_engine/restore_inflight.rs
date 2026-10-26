@@ -68,12 +68,12 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         shared.restart.recovery_started_at.elapsed(),
     );
     if states.is_empty() {
-        replay_decision::resume_pg_only(shared.pg_pool.as_ref(), provider.as_str()).await;
+        replay_decision::spawn_pg_only(shared.pg_pool.as_ref(), provider.as_str());
         return;
     }
 
     Box::pin(restore_inflight_states(http, shared, provider, states)).await;
-    replay_decision::resume_pg_only(shared.pg_pool.as_ref(), provider.as_str()).await;
+    replay_decision::spawn_pg_only(shared.pg_pool.as_ref(), provider.as_str());
 }
 
 pub(in crate::services::discord) async fn restore_inflight_states(

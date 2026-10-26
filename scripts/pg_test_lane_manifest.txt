@@ -2111,6 +2111,7 @@ services::discord::recovery_engine::restore_inflight::kickoff_identity_tests::ow
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::p3_restart_backfills_old_withheld_without_readopting_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::p5_empty_boot_scan_has_one_read_and_no_effect_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::p5_off_boot_pg_only_resumes_without_an_execution_permit_pg
+services::discord::recovery_engine::restore_inflight::replay_hold_tests::p5_off_boot_scan_error_does_not_block_reconcile_and_resumes_notice_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::p5_off_legacy_lookup_error_retries_until_authority_returns_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::recovery_history_retry_reads_the_canonical_fence_before_and_after_http_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::recovery_malformed_notice_retains_raw_episode_and_has_a_healthy_control_pg

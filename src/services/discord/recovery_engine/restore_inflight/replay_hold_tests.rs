@@ -792,6 +792,7 @@ async fn recovery_pg_only_restart_paginates_without_an_execution_permit_pg() {
         for _ in 0..2 {
             restore_inflight_turns(&discord.http, &shared, &ProviderKind::Claude).await;
         }
+        wait_for_notices(&pool, 65).await;
         let counts: (i64, i64) = sqlx::query_as("SELECT COUNT(*), COUNT(DISTINCT replay_preserved -> 'stale_replay_notice' ->> 'outbox_id') FROM intake_outbox WHERE replay_disposition='withheld'")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(counts, (65, 65));
@@ -1207,6 +1208,7 @@ async fn p5_off_boot_pg_only_resumes_without_an_execution_permit_pg() {
         for _ in 0..2 {
             restore_inflight_turns(&discord.http, &shared, &ProviderKind::Claude).await;
         }
+        wait_for_notices(&pool, 65).await;
         let counts: (i64, i64) = sqlx::query_as("SELECT COUNT(*), COUNT(DISTINCT replay_preserved -> 'stale_replay_notice' ->> 'outbox_id') FROM intake_outbox WHERE replay_disposition='withheld'")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(counts, (65, 65));
@@ -1308,6 +1310,13 @@ async fn p5_empty_boot_scan_has_one_read_and_no_effect_pg() {
     );
     let before = crate::services::discord::replay_policy::activation::reads(&key);
     restore_inflight_turns(&discord.http, &shared, &ProviderKind::Claude).await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while crate::services::discord::replay_policy::activation::reads(&key) == before {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the observed scan must run");
     assert_eq!(
         crate::services::discord::replay_policy::activation::reads(&key) - before,
         1
@@ -1319,6 +1328,85 @@ async fn p5_empty_boot_scan_has_one_read_and_no_effect_pg() {
         .await
         .unwrap();
     assert_eq!(count, 0);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn p5_off_boot_scan_error_does_not_block_reconcile_and_resumes_notice_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = fixture().await;
+    let state = row(7_330_518, "no-running-host".into());
+    assert!(
+        !crate::services::discord::replay_policy::activation::requested(
+            &state.channel_id.to_string()
+        )
+    );
+    let id = receipt(&pool, &state, "withheld").await;
+    let shared = shared_on(&pool).await;
+    let discord = o_cut_recorder::start(state.channel_id).await;
+    let key = format!(
+        "scan:claude:{}",
+        pool.connect_options().get_database().unwrap()
+    );
+    let before = crate::services::discord::replay_policy::activation::reads(&key);
+    sqlx::query("ALTER TABLE intake_outbox RENAME TO p5_boot_unavailable")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let restored = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests(
+            &discord.http,
+            &shared,
+            &ProviderKind::Claude,
+        ),
+    )
+    .await;
+    let retried_while_unavailable =
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while crate::services::discord::replay_policy::activation::reads(&key) < before + 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+    sqlx::query("ALTER TABLE p5_boot_unavailable RENAME TO intake_outbox")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        restored
+            .expect("notice scan must not hold the boot reconcile barrier")
+            .is_empty()
+    );
+    retried_while_unavailable.expect("the hidden table must cause an actual scan retry");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let notified: bool = sqlx::query_scalar(
+                "SELECT replay_preserved -> 'stale_replay_notice' IS NOT NULL FROM intake_outbox WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if notified {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the observed scan must retry and supplement its notice after PG returns");
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_outbox WHERE reason_code='stale_replay_withheld'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    assert!(shared.core.lock().await.sessions.is_empty());
+    assert_eq!(shared.tmux_watchers.len(), 0);
+    assert!(discord.calls().into_iter().all(|call| is_root_probe(&call)));
     pool.close().await;
     db.drop().await;
 }
@@ -1413,4 +1501,23 @@ fn is_root_probe(call: &o_cut_recorder::Call) -> bool {
         let _ = call;
         false
     }
+}
+
+async fn wait_for_notices(pool: &sqlx::PgPool, expected: i64) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM message_outbox WHERE reason_code='stale_replay_withheld'",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if count >= expected {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("all durable notices must settle after the boot returns");
 }

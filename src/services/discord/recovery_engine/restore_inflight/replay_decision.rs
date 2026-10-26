@@ -64,7 +64,20 @@ pub(super) async fn resume(
     .is_ok()
 }
 
-pub(super) async fn resume_pg_only(pool: Option<&sqlx::PgPool>, provider: &str) {
+pub(super) fn spawn_pg_only(pool: Option<&sqlx::PgPool>, provider: &str) {
+    let Some(pool) = pool.cloned() else {
+        return;
+    };
+    let provider = provider.to_owned();
+    crate::services::discord::task_supervisor::spawn_observed(
+        "replay_pg_only_notice",
+        async move {
+            resume_pg_only(Some(&pool), &provider).await;
+        },
+    );
+}
+
+async fn resume_pg_only(pool: Option<&sqlx::PgPool>, provider: &str) {
     let Some(pool) = pool else {
         return;
     };

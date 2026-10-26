@@ -370,6 +370,20 @@ async fn p5_null_unfinished_identity_and_withheld_only_pagination_pg() {
         )
         .await;
     }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM message_outbox")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if count >= 70 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the asynchronous boot scan must settle every held notice");
     let counts:(i64,i64)=sqlx::query_as("SELECT count(*),count(DISTINCT replay_preserved #>> '{stale_replay_notice,outbox_id}') FROM intake_outbox WHERE replay_disposition='withheld'").fetch_one(&pool).await.unwrap();
     assert_eq!(counts, (70, 70));
     let unproved:i64=sqlx::query_scalar("SELECT count(*) FROM intake_outbox WHERE replay_disposition IN ('started_unclassified','startup_failed_no_effect') AND replay_owner_incarnation IS NULL AND replay_episode_nonce IS NULL AND replay_preserved='{\"old\":true}'::jsonb").fetch_one(&pool).await.unwrap();
