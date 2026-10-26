@@ -54,17 +54,18 @@ jobs:
       # The judge permits unrelated-path skips and rejects unexpected skips.
       cross_os_rust: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.cross_os_rust }}
       win32_build_token: ${{ steps.filter.outputs.win32_build_token }}
+      script_check_files: ${{ steps.filter.outputs.script_check_files_files }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Detect changed areas
         id: filter
         uses: dorny/paths-filter@v3
         with:
           list-files: json
           filters: |
+            script_check_files: ['*', '*/**']
             dashboard:
               - '.nvmrc'
               - 'dashboard/**'
@@ -422,7 +423,6 @@ jobs:
               - 'defaults.json'
               - 'routines/**'
             win32_build_token: ['scripts/build_token.py', 'scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
-
       - name: Comment-only gate
         id: comment_only
         continue-on-error: true
@@ -433,7 +433,6 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           FILTER_OUTPUTS: ${{ toJSON(steps.filter.outputs) }}
         run: python3 scripts/ci/comment_only_gate.py
-
   # The required `Dashboard (Node 22)` context is published by dashboard_required_context.
   dashboard:
     name: Dashboard (Node 22) runner
@@ -886,7 +885,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py e85dd6104fefd77f5deba1aca46c26df868c45c9b40d0c3fb32ee469b8587405
-          pin scripts/check-ci-runner-hardening.sh 06b4004a462baada234994fbf67a35bf54ef950aa46577cad5e50af0f6b2b3f4
+          pin scripts/check-ci-runner-hardening.sh 1d72e60ee5185681da84af34281023c065cff3fbca4044edc1b510127d4c54c1
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1075,8 +1074,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       # Keep Rust available for the lib inventory fallback.
+
       - name: Install Rust toolchain for lib inventory
         uses: dtolnay/rust-toolchain@master
         with:
@@ -1105,7 +1104,6 @@ jobs:
       # Install PyYAML for independent workflow-shape test oracles.
       - name: Install script-test Python deps
         run: python3 -m pip install --disable-pip-version-check pyyaml
-
       - name: Large file guard
         shell: bash
         run: |
@@ -1121,10 +1119,8 @@ jobs:
             fi
           done < <(git ls-files -z)
           exit "$failed"
-
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck zsh
-
       # Check aggregate wiring independently so deleting an aggregate gate still fails.
       - name: Protect writer gate aggregate wiring (#5308)
         timeout-minutes: 10
@@ -1133,7 +1129,6 @@ jobs:
           python3 scripts/check_writer_gate_ci_wiring.py
           python3 -m unittest tests.test_writer_gate_ci_wiring
           scripts/check-ci-runner-hardening.sh
-
       - name: Run script checks
         shell: bash
         run: ./scripts/ci-script-checks.sh
@@ -1153,9 +1148,10 @@ jobs:
           # synthetic merge first parent is the exact immutable base snapshot.
           TEST_LANE_BASELINE_REF: HEAD^1
           SCRIPT_CHECK_SHARD: cargo
+          SCRIPT_CHECK_CHANGES_RESULT: ${{ needs.changes.result }}
+          SCRIPT_CHECK_CHANGED_FILES: ${{ needs.changes.outputs.script_check_files }}
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-
       - name: Production PR cap
         shell: bash
         run: bash scripts/pr_cap_check.sh
@@ -1163,13 +1159,11 @@ jobs:
           PR_CAP_CI: "1"
           PR_CAP_MODE: ${{ vars.PR_CAP_MODE || 'enforce' }}
           BASH_ENV: /dev/null
-
       - name: Upload giant-file progress evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           path: target/giant-file-progress/evidence.json
-
       # Keep high-value relay ratchets as explicit named steps as well as in the
       # aggregate script suite so their failure surface is immediately visible.
       - name: Hotfile LOC ratchet (always, #3565)
@@ -1198,6 +1192,7 @@ jobs:
   scripts_guards:
     name: Script checks runner (guards)
     needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -1230,10 +1225,13 @@ jobs:
           GFP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           TEST_LANE_BASELINE_REF: HEAD^1
           SCRIPT_CHECK_SHARD: guards
+          SCRIPT_CHECK_CHANGES_RESULT: ${{ needs.changes.result }}
+          SCRIPT_CHECK_CHANGED_FILES: ${{ needs.changes.outputs.script_check_files }}
 
   scripts_contracts:
     name: Script checks runner (contracts)
     needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -1266,6 +1264,8 @@ jobs:
           GFP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           TEST_LANE_BASELINE_REF: HEAD^1
           SCRIPT_CHECK_SHARD: contracts
+          SCRIPT_CHECK_CHANGES_RESULT: ${{ needs.changes.result }}
+          SCRIPT_CHECK_CHANGED_FILES: ${{ needs.changes.outputs.script_check_files }}
 
   relay_authority_mutations:
     name: Relay authority mutations (${{ matrix.shard }})
