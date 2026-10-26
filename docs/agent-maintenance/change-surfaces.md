@@ -2458,7 +2458,7 @@ need not match ordinary LoC churn.
   before asynchronous Discord delivery; #4536 keeps idle grace ranges pending
   until a generation-scoped confirmed delivery commits the durable frontier).
 
-Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
+Decomposed below the giant-file threshold (retired giant entry; bugfix-scoped but
 normal test growth is allowed): `src/services/cluster/stream_relay.rs` (#4623:
 typed terminal resolutions moved to `stream_relay/terminal_resolution.rs`),
 `src/services/analytics.rs`,
@@ -2475,7 +2475,7 @@ typed terminal resolutions moved to `stream_relay/terminal_resolution.rs`),
 delivery/store authority moved to `task_notification_delivery/`).
 (#3038 S2: 1054 -> 954 after the session-override bookkeeping helpers
 moved verbatim to `discord/shared_state.rs` next to
-`SessionOverrideState`; still ratcheted at 954 in the frozen baseline).
+`SessionOverrideState`; historical size reference 954, with no current giant growth cap).
 `src/services/session_backend.rs` left this list in #3344 (997 -> 1023 prod
 LoC after the shared terminal-usage provenance helper) but #3405 brought it
 back under the threshold (1023 -> 393 prod LoC) by splitting two verbatim
