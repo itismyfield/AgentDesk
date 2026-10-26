@@ -81,6 +81,20 @@ impl Fixture {
         .map(|item| item.message_id.get())
         .collect()
     }
+    /// Every original source still in durable custody, including ones merged into an earlier item.
+    fn held_sources(&self) -> Vec<u64> {
+        crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+            &ProviderKind::Claude,
+            &self.shared.token_hash,
+            ChannelId::new(discord_mock::CHANNEL_ID),
+        )
+        .unwrap()
+        .0
+        .iter()
+        .flat_map(|item| item.source_message_queued_generations())
+        .map(|source| source.message_id.get())
+        .collect()
+    }
     fn notices(&self) -> usize {
         self.state.local_note_posts.load(Ordering::SeqCst)
     }
@@ -252,7 +266,7 @@ async fn consent_store_refusal_reaches_discord_as_a_stable_code_without_runtime_
         );
         f.assert_no_runtime_path(&notice);
         f.assert_no_runtime_path(&reply);
-        assert!(f.queued().contains(&source), "{case}: custody kept");
+        assert!(f.held_sources().contains(&source), "{case}: custody kept");
     }
     // Another marker names another file; the same cause stays one notice for the same source.
     f.interrupt_store('c');
