@@ -654,8 +654,7 @@ pub(crate) fn codex_rehydrated_scan_offset(tmux: &str, rollout_path: &Path) -> u
             let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
             state.handoff_by_tmux.entry(key).or_insert(TimedValue {
                 value,
-                // Windows cannot date an Instant before boot; the fallback to now delays the publish,
-                // extending the expiry by up to `age`.
+                // Windows cannot date an Instant before boot; the fallback extends expiry by up to `age`.
                 recorded_at: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
             });
             tracing::info!(tmux, held, "restored a Codex handoff holding inputs");
