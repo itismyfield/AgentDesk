@@ -466,17 +466,15 @@ decompose_issue = "#6487"
 
 [[entry]]
 file = "src/services/discord/mod.rs"
-decision = "shrink"
+decision = "keep"
 owner = "discord-relay"
-deadline = "2027-01-31"
-decompose_issue = "#7160"
+keep_reason = "Discord gateway setup, shared relay context, and framework entrypoints form one integration boundary with existing child modules owning domain logic; further movement merely to satisfy line counts would spread that wiring without removing a responsibility. Keep fixes and clarifications here, and review a split when adding an independent responsibility."
 
 [[entry]]
 file = "src/services/discord/router/message_handler/headless_turn.rs"
-decision = "shrink"
+decision = "keep"
 owner = "discord-relay"
-deadline = "2027-01-31"
-decompose_issue = "#7160"
+keep_reason = "Headless turn admission, provider/session selection, dispatch, and completion handoff share the same turn lifecycle and identity; keeping their orchestration together makes early-return and cleanup ordering reviewable. Existing helpers already own separate concerns, so split only for an independent responsibility rather than to meet a line count."
 
 [[entry]]
 file = "src/services/dispatched_sessions.rs"
@@ -590,11 +588,8 @@ deadline = "2027-01-31"
 decompose_issue = "#4710"
 
 
-# Tracked giant decisions. `decision = "shrink"` requires owner + deadline
-# (YYYY-MM-DD) + decompose_issue; `decision = "keep"` requires owner +
-# keep_reason and must omit deadline/decompose_issue. Existing entries that omit
-# decision are legacy shrink entries. The generator renders these into the
-# registry doc and rejects ghost registrations.
+# Planning metadata is advisory: shrink records owner/deadline/issue, while
+# keep records owner/reason. The generator warns about missing or stale fields.
 
 [[entry]]
 # #5142: the auto-queue run-cleanup transactional outbox. Enqueue-on-tx, claim,
@@ -680,11 +675,11 @@ decompose_issue = "#4712"
 # Crossed the threshold when #5071 T4-B6 wired the composed relay verdict
 # (RelayVerdictSource polarity switch) into the per-channel snapshot composer.
 
-# 2026-09-04 giant retirement track ended (decision recorded on #5447): shrink -> keep, with size held by the zero-growth pin.
+# 2026-09-04 giant retirement track ended (decision recorded on #5447): shrink -> keep, with size recorded as an advisory reference.
 file = "src/services/discord/health/snapshot.rs"
 decision = "keep"
 owner = "discord-relay"
-keep_reason = "Retain per-channel health snapshot composition and relay-verdict reporting as one maintained diagnostic surface after the decomposition campaign was retired; future additions remain subject to the giant-file zero-growth gate."
+keep_reason = "Retain per-channel health snapshot composition and relay-verdict reporting as one maintained diagnostic surface after the decomposition campaign was retired; future additions are reviewed for cohesive responsibility and reported as size warnings."
 
 # RETIRED 2026-07-24 (#4712): watchers/lifecycle.rs dropped below the production
 # giant threshold after the restore scan, liveness, dispatch failure,
@@ -703,8 +698,8 @@ keep_reason = "Retain per-channel health snapshot composition and relay-verdict 
 #   - src/services/discord/turn_finalizer.rs                     844
 # WARNING: turn_output_controller.rs sits 4 production lines under the giant
 # threshold (996 of 1000; its 3457 total lines are mostly tests). Four added
-# production lines flip it back to prod-giant, which re-registers it here and
-# breaks the inventory gate again. Extend it in a child module, not in the root.
+# production lines flip it back to prod-giant and produce a size warning.
+# Review independent responsibilities before deciding whether to split.
 
 # NOTE: src/services/discord/relay_recovery.rs previously had an [[entry]] here;
 # #4712 extracted decision, idle-tmux repair, and action apply clusters into

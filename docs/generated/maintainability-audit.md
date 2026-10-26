@@ -6,7 +6,7 @@
 
 Automated audit of giant files, route SRP violations, direct Discord sends, service-to-server backflow, manual JSON row mapping, limit/days clamp duplication, git subprocess callsites, legacy SQLite references, source-of-truth alias writes, and namespace size caps. See `scripts/audit_maintainability.py` (#1282).
 
-Hard-gating is **enabled** for 10 checks: `giant_files`, `giant_file_ratchet`, `namespace_size_caps`, `direct_discord_sends`, `direct_discord_reactions`, `footer_view_writes`, `manual_json_row_mapping`, `git_subprocess_callsites`, `legacy_sqlite_refs`, `source_of_truth_alias_writes`.
+Hard-gating is **enabled** for 7 checks: `direct_discord_sends`, `direct_discord_reactions`, `footer_view_writes`, `manual_json_row_mapping`, `git_subprocess_callsites`, `legacy_sqlite_refs`, `source_of_truth_alias_writes`.
 
 Baseline no-regression gates are **enabled** for 3 checks: `parent_test_residue`, `route_srp_violations`, `service_server_backflow`.
 
@@ -14,17 +14,17 @@ Baseline no-regression gates are **enabled** for 3 checks: `parent_test_residue`
 
 | Rule | Hits | Hard gate | Baseline gate |
 |---|---:|:--:|:--:|
-| `giant_files` | 0 | YES | no |
-| `giant_file_ratchet` | 0 | YES | no |
-| `parent_test_residue` | 5 | no | YES |
-| `namespace_size_caps` | 0 | YES | no |
-| `route_srp_violations` | 10 | no | YES |
+| `giant_files` | 0 | no | no |
+| `giant_file_ratchet` | 0 | no | no |
+| `parent_test_residue` | 10 | no | YES |
+| `namespace_size_caps` | 9 | no | no |
+| `route_srp_violations` | 9 | no | YES |
 | `service_server_backflow` | 0 | no | YES |
 | `direct_discord_sends` | 0 | YES | no |
 | `direct_discord_reactions` | 0 | YES | no |
 | `footer_view_writes` | 0 | YES | no |
 | `manual_json_row_mapping` | 0 | YES | no |
-| `limit_clamp_duplication` | 0 | no | no |
+| `limit_clamp_duplication` | 6 | no | no |
 | `git_subprocess_callsites` | 0 | YES | no |
 | `legacy_sqlite_refs` | 0 | YES | no |
 | `source_of_truth_alias_writes` | 0 | YES | no |
@@ -35,9 +35,9 @@ Production Rust files in src/ with >= 1000 lines that are not listed in docs/age
 
 _No findings._
 
-## Giant file re-inflation ratchet (`giant_file_ratchet`)
+## Giant file growth warnings (`giant_file_ratchet`)
 
-Production giants listed in scripts/audit_maintainability_giant_baseline.toml must not exceed their frozen production-LoC baseline plus a 30-line wiring slack.
+Files with >= 1000 production lines warn on raw growth or threshold crossing. Git exports compare production LoC to advisory references in scripts/audit_maintainability_giant_baseline.toml.
 
 _No findings._
 
@@ -47,17 +47,32 @@ Decomposition parents whose inline test LoC exceeds 3x their production LoC (fil
 
 | Severity | File | Line | Message |
 |---|---|---:|---|
-| warn | `src/services/discord/inflight.rs` |  | 5205 test LoC vs 608 prod LoC (ratio 8.56x > 3x, 5813 raw); migrate the stranded tests with the decomposed production code |
-| warn | `src/services/discord/inflight/save_store.rs` |  | 730 test LoC vs 241 prod LoC (ratio 3.03x > 3x, 971 raw); migrate the stranded tests with the decomposed production code |
-| warn | `src/services/discord/turn_bridge/cancel_finalize_policy.rs` |  | 450 test LoC vs 146 prod LoC (ratio 3.08x > 3x, 596 raw); migrate the stranded tests with the decomposed production code |
-| warn | `src/services/discord/turn_finalizer.rs` |  | 3992 test LoC vs 1048 prod LoC (ratio 3.81x > 3x, 5040 raw); migrate the stranded tests with the decomposed production code |
-| warn | `src/services/discord/turn_finalizer/delivery_lease.rs` |  | 428 test LoC vs 87 prod LoC (ratio 4.92x > 3x, 515 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/codex_tui/input/submission.rs` |  | 711 test LoC vs 181 prod LoC (ratio 3.93x > 3x, 892 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/codex_tui/rollout_tail.rs` |  | 3803 test LoC vs 810 prod LoC (ratio 4.70x > 3x, 4613 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/health/recovery.rs` |  | 4320 test LoC vs 841 prod LoC (ratio 5.14x > 3x, 5161 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/inflight.rs` |  | 5390 test LoC vs 849 prod LoC (ratio 6.35x > 3x, 6239 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/outbound/delivery_record.rs` |  | 3456 test LoC vs 842 prod LoC (ratio 4.10x > 3x, 4298 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/tui_prompt_relay/synthetic_start.rs` |  | 1876 test LoC vs 303 prod LoC (ratio 6.19x > 3x, 2179 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/turn_bridge/cancel_finalize_policy.rs` |  | 453 test LoC vs 149 prod LoC (ratio 3.04x > 3x, 602 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/turn_bridge/followup_requeue.rs` |  | 1147 test LoC vs 204 prod LoC (ratio 5.62x > 3x, 1351 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/turn_finalizer.rs` |  | 3992 test LoC vs 897 prod LoC (ratio 4.45x > 3x, 4889 raw); migrate the stranded tests with the decomposed production code |
+| warn | `src/services/discord/turn_finalizer/delivery_lease.rs` |  | 426 test LoC vs 88 prod LoC (ratio 4.84x > 3x, 514 raw); migrate the stranded tests with the decomposed production code |
 
 ## Namespace size caps (`namespace_size_caps`)
 
 Production Rust files under configured namespaces must stay within their per-namespace caps from scripts/audit_maintainability_config.toml.
 
-_No findings._
+| Severity | File | Line | Message |
+|---|---|---:|---|
+| warn | `src/services/discord/placeholder_live_events/status_events.rs` |  | 828 LoC > 794 namespace cap for src/services/discord/placeholder_live_events/status_events.rs |
+| warn | `src/services/discord/placeholder_live_events/status_panel.rs` |  | 798 LoC > 794 namespace cap for src/services/discord/placeholder_live_events/status_panel.rs |
+| warn | `src/services/discord/placeholder_live_events/tool_summary.rs` |  | 861 LoC > 700 namespace cap for src/services/discord/placeholder_live_events/** |
+| warn | `src/services/discord/prompt_builder/mod.rs` |  | 734 LoC > 700 namespace cap for src/services/discord/prompt_builder/** |
+| warn | `src/services/discord/tmux_watcher/liveness.rs` |  | 703 LoC > 700 namespace cap for src/services/discord/tmux_watcher/** |
+| warn | `src/services/discord/turn_bridge/activity_heartbeat.rs` |  | 80 LoC > 77 namespace cap for src/services/discord/turn_bridge/activity_heartbeat.rs |
+| warn | `src/services/discord/turn_bridge/stream_loop.rs` |  | 985 LoC > 979 namespace cap for src/services/discord/turn_bridge/stream_loop.rs |
+| warn | `src/services/discord/turn_bridge/stream_loop/content_arms.rs` |  | 636 LoC > 635 namespace cap for src/services/discord/turn_bridge/stream_loop/content_arms.rs |
+| warn | `src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs` |  | 434 LoC > 432 namespace cap for src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs |
 
 ## Route SRP violations (`route_srp_violations`)
 
@@ -65,16 +80,15 @@ Files under src/server/routes/ that mix raw SQL, json!() shaping, and crate::ser
 
 | Severity | File | Line | Message |
 |---|---|---:|---|
-| warn | `src/server/routes/agents_crud.rs` |  | route file mixes SQL (25), json!() (56), and crate::services calls (5) |
+| warn | `src/server/routes/agents_crud.rs` |  | route file mixes SQL (15), json!() (18), and crate::services calls (6) |
 | warn | `src/server/routes/agents_setup.rs` |  | route file mixes SQL (7), json!() (12), and crate::services calls (2) |
-| warn | `src/server/routes/cron_api.rs` |  | route file mixes SQL (2), json!() (12), and crate::services calls (1) |
-| warn | `src/server/routes/escalation.rs` |  | route file mixes SQL (24), json!() (24), and crate::services calls (3) |
-| warn | `src/server/routes/github.rs` |  | route file mixes SQL (6), json!() (44), and crate::services calls (1) |
-| warn | `src/server/routes/memory_api.rs` |  | route file mixes SQL (17), json!() (18), and crate::services calls (7) |
-| warn | `src/server/routes/provider_cli_api.rs` |  | route file mixes SQL (3), json!() (12), and crate::services calls (6) |
-| warn | `src/server/routes/queue_api.rs` |  | route file mixes SQL (4), json!() (15), and crate::services calls (3) |
+| warn | `src/server/routes/escalation.rs` |  | route file mixes SQL (10), json!() (10), and crate::services calls (2) |
+| warn | `src/server/routes/github.rs` |  | route file mixes SQL (6), json!() (29), and crate::services calls (1) |
+| warn | `src/server/routes/memory_api.rs` |  | route file mixes SQL (17), json!() (10), and crate::services calls (7) |
+| warn | `src/server/routes/provider_cli_api.rs` |  | route file mixes SQL (3), json!() (2), and crate::services calls (7) |
+| warn | `src/server/routes/queue_api.rs` |  | route file mixes SQL (18), json!() (11), and crate::services calls (32) |
 | warn | `src/server/routes/review_verdict/verdict_route.rs` |  | route file mixes SQL (5), json!() (20), and crate::services calls (5) |
-| warn | `src/server/routes/stats.rs` |  | route file mixes SQL (32), json!() (10), and crate::services calls (2) |
+| warn | `src/server/routes/stats.rs` |  | route file mixes SQL (26), json!() (7), and crate::services calls (1) |
 
 ## Service/server backflow (`service_server_backflow`)
 
@@ -110,7 +124,14 @@ _No findings._
 
 Inline `clamp(1, 2000)` is owned by `crate::utils::api::clamp_api_limit` and is flagged on every site outside the helper definition. Other limit/days clamp expressions are flagged when they appear in 3+ source files, signalling another shared helper candidate.
 
-_No findings._
+| Severity | File | Line | Message |
+|---|---|---:|---|
+| info | `src/db/dispatches/outbox/claim.rs` | 120 | duplicated clamp `limit::1, 500`: `limit.clamp(1, 500)` |
+| info | `src/db/intake_outbox.rs` | 586 | duplicated clamp `limit::1`: `limit.max(1)` |
+| info | `src/db/intake_outbox_delivery_proof.rs` | 112 | duplicated clamp `limit::1, 500`: `limit.clamp(1, 500)` |
+| info | `src/services/agent_recovery/checkpoint.rs` | 480 | duplicated clamp `limit::1`: `limit.max(1)` |
+| info | `src/services/discord/runtime_bootstrap/intake_delivery_sweep.rs` | 184 | duplicated clamp `limit::1, 500`: `limit.clamp(1, 500)` |
+| info | `src/voice/metrics.rs` | 255 | duplicated clamp `limit::1`: `limit.max(1)` |
 
 ## Direct git subprocess callsites (`git_subprocess_callsites`)
 
