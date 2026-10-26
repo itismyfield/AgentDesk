@@ -92,7 +92,7 @@ pub(in crate::services::discord) async fn handle_text_command(
             let _ = msg.reply(&ctx.http, reply).await;
             return Ok(true);
         }
-        Some(TextCommandMatch::ConsentRetry) | None => return Ok(false),
+        Some(TextCommandMatch::HerdrConsent) | None => return Ok(false),
     };
 
     match command {

@@ -107,8 +107,9 @@ pub(in crate::services::discord) enum TextCommandMatch {
     Kept(TextCommand),
     /// A removed name and its replacement slash command, if any.
     Retired(&'static str, Option<&'static str>),
-    /// The router's owner-only `!herdr consent retry`, in the exact form it accepts.
-    ConsentRetry,
+    /// The router's owner-only `!herdr consent retry` and `!herdr consent return`, in the
+    /// exact forms it accepts.
+    HerdrConsent,
 }
 
 /// Reads a message, leading bot mention already stripped, as a text command by its
@@ -125,7 +126,9 @@ pub(in crate::services::discord) fn match_text_command(text: &str) -> Option<Tex
     {
         return Some(TextCommandMatch::Retired(name, *replacement));
     }
-    (first == "!herdr" && words.eq(["consent", "retry"])).then_some(TextCommandMatch::ConsentRetry)
+    let rest: Vec<&str> = words.collect();
+    (first == "!herdr" && matches!(rest.as_slice(), ["consent", "retry" | "return"]))
+        .then_some(TextCommandMatch::HerdrConsent)
 }
 
 /// Outcome of evaluating the command policy.
@@ -303,8 +306,10 @@ mod command_policy_tests {
             ("!stop\nplease", Some(Kept(TextCommand::Stop))),
             ("!pwd", Some(Retired("!pwd", Some("/pwd")))),
             ("!shell ls", Some(Retired("!shell", None))),
-            ("!herdr consent retry", Some(ConsentRetry)),
+            ("!herdr consent retry", Some(HerdrConsent)),
             ("!herdr consent retry now", None),
+            ("!herdr consent return", Some(HerdrConsent)),
+            ("!herdr consent return now", None),
             ("!herdr", None),
             ("!clearall", None),
             ("!Clear", None),
@@ -317,5 +322,12 @@ mod command_policy_tests {
         for (text, expected) in cases {
             assert_eq!(match_text_command(text), expected, "{text:?}");
         }
+        // The live intake routes by this test; a consent return read as chat would reach the
+        // provider instead of the return hook.
+        assert!(
+            crate::services::discord::catch_up::handled_command::is_text_command(
+                "<@1> !herdr consent return"
+            )
+        );
     }
 }
