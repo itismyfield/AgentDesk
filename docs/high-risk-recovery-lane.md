@@ -8,16 +8,17 @@
 
 | Layer | Responsibility | Primary code path | Stable command |
 | --- | --- | --- | --- |
-| `unit` | 파일 단위 직렬화/저장 규약, mailbox state, handoff roundtrip | `src/services/discord/inflight.rs`, `src/services/discord/handoff.rs`, `src/services/discord/channel_mailbox.rs` | 모듈별 `cargo test --bin agentdesk <filter>` |
+| `unit` | 파일 단위 직렬화/저장 규약, mailbox state, handoff roundtrip | `src/services/discord/inflight.rs`, `src/services/discord/handoff.rs`, `src/services/discord/channel_mailbox.rs` | 모듈별 `cargo test --lib <module::path>` (예: `cargo test --lib services::discord::inflight::`) |
 | `state-transition integration` | DB + policy engine + dispatch 상태 전이 | `src/integration_tests.rs` | 기본 gate: `cargo test --all-targets` |
-| `failure-recovery` | restart / reconcile / outbox delivery / delayed-worker recovery 경계 | `src/integration_tests/tests/high_risk_recovery.rs` | `cargo test --bin agentdesk high_risk_recovery::` |
+| `failure-recovery` | restart / reconcile / outbox delivery / delayed-worker recovery 경계 | `src/high_risk_recovery.rs` | `cargo test --lib high_risk_recovery::` |
 
 ## Recovery Lane Commands
 
-- 전체 recovery gate: `cargo test --bin agentdesk high_risk_recovery::`
-- restart / boot reconcile: `cargo test --bin agentdesk high_risk_recovery::failure_recovery::`
-- outbox delivery boundary: `cargo test --bin agentdesk high_risk_recovery::outbox_boundary::`
-- delayed worker / watchdog: `cargo test --bin agentdesk high_risk_recovery::delayed_worker::`
+- 전체 recovery gate: `cargo test --lib high_risk_recovery::` (CI lane의 나머지 선택자는 아래 Notes 참고)
+- restart / boot reconcile: `cargo test --lib -- high_risk_recovery::boot_reconcile high_risk_recovery::restart_recovery`
+- outbox delivery boundary: `cargo test --lib -- high_risk_recovery::runtime_reconcile_auto_queue_pending_delivery_orphans_requeues_notify_outbox_pg services::dispatches::outbox_queue:: services::dispatches::outbox_claiming::`
+- delayed worker / watchdog: `cargo test --lib -- services::discord::health::recovery::self_watchdog services::hang_forensics::tests services::dispatch_watchdog::tests`
+- 테스트는 모두 lib에 있다. `--bin agentdesk`로 돌리면 0개가 돌고 성공으로 끝나므로 쓰지 않는다. 실행 수가 0이면(`running 0 tests`) 통과가 아니라 실패로 본다.
 
 ## Curated Scenarios
 

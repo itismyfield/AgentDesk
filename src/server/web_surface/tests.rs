@@ -315,3 +315,6 @@ async fn enforce_covers_dashboard_static_entry_and_websocket_route() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[path = "browser_guard_tests.rs"]
+mod browser_guard_tests;
