@@ -699,7 +699,7 @@ esac
 }
 
 /// Every Claude entry, managed or not, on a channel outside the stash list takes one pre-paste
-/// read, a paste behind the draft and one Enter; nothing goes through the legacy transport.
+/// read, a paste behind the draft and one Enter, and long lines arrive whole.
 #[test]
 fn every_entry_on_an_unlisted_channel_takes_the_one_submission() {
     use crate::services::claude_tui::busy_inject::StashChannelGuard;
@@ -730,69 +730,80 @@ fn every_entry_on_an_unlisted_channel_takes_the_one_submission() {
             Ok(())
         }
     }
-    type Entry = fn(&str) -> Result<(), String>;
+    type Entry = fn(&str, &str) -> Result<(), String>;
     let entries: [(&str, Entry); 4] = [
-        ("fresh", |s| {
-            entry::send_prompt_with_readiness(s, PROMPT, PromptReadinessKind::FreshTurn, None)
+        ("fresh", |s, p| {
+            entry::send_prompt_with_readiness(s, p, PromptReadinessKind::FreshTurn, None)
                 .map_err(SubmissionError::into_legacy)
         }),
-        ("followup", |s| {
-            entry::send_prompt_with_readiness(s, PROMPT, PromptReadinessKind::Followup, None)
+        ("followup", |s, p| {
+            entry::send_prompt_with_readiness(s, p, PromptReadinessKind::Followup, None)
                 .map_err(SubmissionError::into_legacy)
         }),
-        ("warm", |s| {
-            entry::send_warm_followup_owned(s, PROMPT, None).map_err(SubmissionError::into_legacy)
+        ("warm", |s, p| {
+            entry::send_warm_followup_owned(s, p, None).map_err(SubmissionError::into_legacy)
         }),
-        ("steering", |s| entry::inject_steering_prompt(s, PROMPT)),
+        ("steering", |s, p| entry::inject_steering_prompt(s, p)),
+    ];
+    // Each long line wraps over 15 to 22 composer rows at 80 columns.
+    let bodies = [
+        PROMPT.to_string(),
+        "가".repeat(533),
+        "가".repeat(800),
+        format!("{}가", "가 ".repeat(399)),
     ];
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _listed = StashChannelGuard::new(CHANNEL + 1);
     let tmux = ScriptedTmux::new(&view("draft", false));
-    for managed in [false, true] {
-        for (label, send) in entries {
-            let session = format!("one-path-{label}-{managed}");
-            tmux.clear();
-            let spy = SpyGuard::install(SpyState {
-                captures: std::iter::repeat_n(Some(IDLE.to_string()), 64).collect(),
-                ..SpyState::default()
-            });
-            let result = if managed {
-                with_scope(Some(Arc::new(Attempt(session.clone()))), || send(&session))
-            } else {
-                send(&session)
-            };
-            assert_eq!(result, Ok(()), "{label} managed={managed}");
-            assert_eq!(
-                tmux.sends(),
-                ["load", "paste", "Enter"],
-                "{label} {managed}"
-            );
-            assert_eq!(tmux.body(), PROMPT, "{label} managed={managed}");
-            let pane = tmux.pane_calls(&session);
-            let pre_paste = pane
-                .iter()
-                .position(|call| call == "display-message")
-                .unwrap();
-            assert_eq!(
-                pane[pre_paste..],
-                [
-                    "display-message",
-                    "capture-pane",
-                    "paste-buffer",
-                    "send-keys"
-                ],
-                "{label} managed={managed}: one pre-paste read, none after a key"
-            );
-            assert!(
-                !spy.calls()
+    for (n, body) in bodies.iter().enumerate() {
+        for managed in [false, true] {
+            for (label, send) in entries {
+                let session = format!("one-path-{label}-{managed}-{n}");
+                tmux.clear();
+                let spy = SpyGuard::install(SpyState {
+                    captures: std::iter::repeat_n(Some(IDLE.to_string()), 64).collect(),
+                    ..SpyState::default()
+                });
+                let result = if managed {
+                    with_scope(Some(Arc::new(Attempt(session.clone()))), || {
+                        send(&session, body)
+                    })
+                } else {
+                    send(&session, body)
+                };
+                assert_eq!(result, Ok(()), "{label} managed={managed}");
+                assert_eq!(
+                    tmux.sends(),
+                    ["load", "paste", "Enter"],
+                    "{label} {managed}"
+                );
+                assert_eq!(tmux.body(), *body, "{label} managed={managed} body={n}");
+                let pane = tmux.pane_calls(&session);
+                let pre_paste = pane
                     .iter()
-                    .any(|call| ["literal:", "load:", "paste:", "keys:"]
+                    .position(|call| call == "display-message")
+                    .unwrap();
+                assert_eq!(
+                    pane[pre_paste..],
+                    [
+                        "display-message",
+                        "capture-pane",
+                        "paste-buffer",
+                        "send-keys"
+                    ],
+                    "{label} managed={managed}: one pre-paste read, none after a key"
+                );
+                assert!(
+                    !spy.calls()
                         .iter()
-                        .any(|write| call.starts_with(write))),
-                "{label} managed={managed}: legacy writes {:?}",
-                spy.calls()
-            );
-            assert!(!composer_lock::draft_guarded(&session));
+                        .any(|call| ["literal:", "load:", "paste:", "keys:"]
+                            .iter()
+                            .any(|write| call.starts_with(write))),
+                    "{label} managed={managed}: legacy writes {:?}",
+                    spy.calls()
+                );
+                assert!(!composer_lock::draft_guarded(&session));
+            }
         }
     }
 }
