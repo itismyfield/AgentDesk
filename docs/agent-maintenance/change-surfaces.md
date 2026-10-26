@@ -1847,9 +1847,8 @@ time for diagnostics; neither is a stored approval value.
     process-local metadata store and `announce_meta/durable.rs` owns the durable
     PostgreSQL announcement and handoff persistence helpers. Both modules remain
     below the production giant threshold.
-  - `src/services/discord/{commands/text_commands.rs,
-    discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines).
+  - `src/services/discord/{discord_config_audit.rs, router/intake_gate.rs}`
+    (both 1000+ production lines).
 - active_callsite_coverage: n/a.
 - invariants: watcher single-owner per #1222; placeholder lifecycle invariants
   per #1112; `/api/inflight/rebind` is the only path that synthesises an
@@ -2634,7 +2633,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/codex.rs`
 - `src/services/codex_tmux_wrapper.rs`
 - `src/services/codex_tui/input.rs`
-- `src/services/discord/commands/text_commands.rs`
 - `src/services/discord/health/snapshot.rs`
 - `src/services/discord/mod.rs`
 - `src/services/discord/recovery_engine/restore_inflight.rs`

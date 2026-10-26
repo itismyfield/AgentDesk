@@ -1,23 +1,9 @@
-//! Discord text-command risk policy (see issue #1005).
+//! Discord command risk tiers and the agent text commands.
 //!
-//! Commands are classified into risk tiers. High-risk tiers (shell execution,
-//! tool grants, runtime control) are gated behind owner identity and — for the
-//! most dangerous ones — an explicit opt-in. The goal is to keep
-//! `allow_all_users=true` usable for ordinary chat while preventing non-owners
-//! from pivoting the bot into a remote shell or runtime kill switch.
-//!
-//! Surface:
-//! - `CommandRisk` — enum of tiers.
-//! - `command_risk` — `(command, arg1) → CommandRisk` lookup.
-//! - `PolicyDecision` / `evaluate_policy` — authorization outcome helpers.
-//! - `high_risk_enabled_via_env` — explicit opt-in via
-//!   `AGENTDESK_DISCORD_HIGH_RISK_ENABLED=1`.
-//! - `risk_tier_summary_for_help` — string surface for `!help` output.
-//!
-//! The policy deliberately lives outside `text_commands.rs` so it can be unit
-//! tested without standing up Discord wiring.
+//! High-risk tiers need the bot owner even with `allow_all_users=true`, plus an opt-in for shells.
+//! `match_text_command` reads `!clear`, `!restart`, `!stop` and the removed text names.
 
-/// Coarse risk tier for a Discord text command.
+/// Coarse risk tier for a Discord command.
 ///
 /// Ordering (low → high) reflects the amount of trust required:
 /// `ReadOnly < Mutating < ShellOrToolGrant < CredentialSystem`.
@@ -26,8 +12,8 @@ pub(in crate::services::discord) enum CommandRisk {
     /// Inspection-only commands. Safe for any authorized chat user.
     ReadOnly,
     /// Changes per-channel session state but cannot escape the sandbox.
-    /// Includes session resets (`clear`, `deletesession`), in-flight turn
-    /// cancellation (`stop`), and channel-scoped tmux respawn (`restart`).
+    /// Includes session resets (`clear`), in-flight turn cancellation
+    /// (`stop`), and channel-scoped tmux respawn (`restart`).
     Mutating,
     /// Executes shell commands or grants new tool capabilities to the model.
     /// Equivalent to RCE on the host — owner only, explicit opt-in.
@@ -54,232 +40,92 @@ impl CommandRisk {
     }
 }
 
-/// Look up the risk tier for a command name plus first argument.
-///
-/// `arg1` is consulted for commands that branch on operation (e.g. `!allowed
-/// +Bash` is a tool grant, `!allowed -Bash` revokes one; both are
-/// `ShellOrToolGrant`). Unknown commands default to `Mutating` — safe because
-/// the dispatcher is responsible for rejecting truly unknown names.
-pub(in crate::services::discord) fn command_risk(cmd: &str, _arg1: &str) -> CommandRisk {
-    TextCommandId::from_str(cmd).map_or(CommandRisk::Mutating, TextCommandId::risk)
-}
-
-/// Known text names, including policy-only names whose text surface is unavailable.
-/// The actual dispatcher exhaustively matches these IDs, never arbitrary text.
+/// Session controls kept as text because agents cannot run slash commands; each
+/// runs the same handler as its slash twin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TextCommandId {
-    Help,
-    Pwd,
-    Health,
-    Status,
-    Inflight,
-    Queue,
-    Metrics,
-    AllowedTools,
-    Sessions,
-    Receipt,
-    Usage,
-    Start,
-    Down,
-    Cc,
-    Skill,
-    Meeting,
-    Model,
-    Fast,
-    Goals,
+pub(in crate::services::discord) enum TextCommand {
     Clear,
-    DeleteSession,
-    Stop,
     Restart,
-    Debug,
-    Vc,
-    Shell,
-    Allowed,
-    DeadlockRecover,
-    MachineFlip,
-    StuckPrRebase,
-    AllowAll,
-    AddUser,
-    RemoveUser,
+    Stop,
 }
+
+/// Agent text commands with their `/help` line.
+pub(super) const TEXT_COMMANDS: [(&str, TextCommand, &str); 3] = [
+    (
+        "!clear",
+        TextCommand::Clear,
+        "`!clear` — Clear AI conversation history",
+    ),
+    (
+        "!restart",
+        TextCommand::Restart,
+        "`!restart` — Restart the provider session",
+    ),
+    (
+        "!stop",
+        TextCommand::Stop,
+        "`!stop` — Stop current AI request",
+    ),
+];
+
+/// Removed text command names, each with the registered slash command that replaces it.
+const RETIRED_TEXT_COMMANDS: [(&str, Option<&str>); 30] = [
+    ("!help", Some("/help")),
+    ("!pwd", Some("/pwd")),
+    ("!health", Some("/health")),
+    ("!status", Some("/status")),
+    ("!inflight", Some("/inflight")),
+    ("!queue", Some("/queue")),
+    ("!usage", Some("/usage")),
+    ("!receipt", Some("/usage")),
+    ("!skill", Some("/skill")),
+    ("!cc", Some("/skill")),
+    ("!model", Some("/model")),
+    ("!fast", Some("/fast")),
+    ("!goals", Some("/goals")),
+    ("!allowall", Some("/allowall")),
+    ("!vc", Some("/voice")),
+    ("!metrics", None),
+    ("!allowedtools", None),
+    ("!sessions", None),
+    ("!start", None),
+    ("!down", None),
+    ("!meeting", None),
+    ("!deletesession", None),
+    ("!debug", None),
+    ("!shell", None),
+    ("!allowed", None),
+    ("!deadlock-recover", None),
+    ("!machine-flip", None),
+    ("!stuck-pr-rebase", None),
+    ("!adduser", None),
+    ("!removeuser", None),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TextCommandSurface {
-    Implemented,
-    Unavailable,
+pub(in crate::services::discord) enum TextCommandMatch {
+    Kept(TextCommand),
+    /// A removed name and its replacement slash command, if any.
+    Retired(&'static str, Option<&'static str>),
+    /// The router's owner-only `!herdr consent retry`, in the exact form it accepts.
+    ConsentRetry,
 }
 
-/// Text command registration: name, dispatch ID and `!help` line. Unavailable
-/// names have no help line.
-pub(super) const TEXT_COMMANDS: &[(&str, TextCommandId, &str)] = {
-    use TextCommandId::*;
-    &[
-        ("!help", Help, "`!help` — Show this help"),
-        ("!pwd", Pwd, "`!pwd` — Show current working directory"),
-        ("!health", Health, "`!health` — Show runtime health summary"),
-        (
-            "!status",
-            Status,
-            "`!status` — Show this channel session status",
-        ),
-        (
-            "!inflight",
-            Inflight,
-            "`!inflight` — Show saved inflight turn state",
-        ),
-        ("!queue", Queue, "`!queue [all]` — Show pending queue"),
-        ("!metrics", Metrics, "`!metrics [date]` — Show turn metrics"),
-        (
-            "!allowedtools",
-            AllowedTools,
-            "`!allowedtools` — Show currently allowed tools",
-        ),
-        ("!sessions", Sessions, ""),
-        ("!receipt", Receipt, ""),
-        ("!usage", Usage, ""),
-        (
-            "!start",
-            Start,
-            "`!start <path>` — Start session at directory",
-        ),
-        ("!down", Down, ""),
-        ("!cc", Cc, "`!cc <skill>` — Legacy alias for `!skill`"),
-        ("!skill", Skill, "`!skill <skill>` — Run a provider skill"),
-        (
-            "!meeting",
-            Meeting,
-            "`!meeting [start] <agenda>|stop|status` — Run a round-table meeting",
-        ),
-        ("!model", Model, ""),
-        ("!fast", Fast, ""),
-        ("!goals", Goals, ""),
-        ("!clear", Clear, "`!clear` — Clear AI conversation history"),
-        ("!deletesession", DeleteSession, ""),
-        ("!stop", Stop, "`!stop` — Stop current AI request"),
-        ("!restart", Restart, ""),
-        ("!debug", Debug, "`!debug` — Toggle debug logging"),
-        (
-            "!vc",
-            Vc,
-            "`!vc join|leave` — Join or leave your voice channel",
-        ),
-        (
-            "!shell",
-            Shell,
-            "`!shell <command>` — Run shell command directly",
-        ),
-        (
-            "!allowed",
-            Allowed,
-            "`!allowed +name|-name` — Add or remove a tool (e.g. `!allowed +Bash`)",
-        ),
-        (
-            "!deadlock-recover",
-            DeadlockRecover,
-            "`!deadlock-recover [env]` — Restart the local dcserver and reap orphans",
-        ),
-        (
-            "!machine-flip",
-            MachineFlip,
-            "`!machine-flip <peer>` — Redeploy locally, then deploy the peer",
-        ),
-        (
-            "!stuck-pr-rebase",
-            StuckPrRebase,
-            "`!stuck-pr-rebase [label]` — Rebuild and push open PRs with the label",
-        ),
-        (
-            "!allowall",
-            AllowAll,
-            "`!allowall on|off|status` — Allow everyone or restrict to authorized users",
-        ),
-        (
-            "!adduser",
-            AddUser,
-            "`!adduser <user_id>` — Allow a user to use the bot",
-        ),
-        (
-            "!removeuser",
-            RemoveUser,
-            "`!removeuser <user_id>` — Remove a user's access",
-        ),
-    ]
-};
-
-impl TextCommandId {
-    pub(super) fn from_str(name: &str) -> Option<Self> {
-        TEXT_COMMANDS
-            .iter()
-            .find(|(registered, ..)| *registered == name)
-            .map(|(_, id, _)| *id)
+/// Reads a message, leading bot mention already stripped, as a text command by its
+/// first word; anything else is ordinary chat.
+pub(in crate::services::discord) fn match_text_command(text: &str) -> Option<TextCommandMatch> {
+    let mut words = text.split_whitespace();
+    let first = words.next()?;
+    if let Some((_, command, _)) = TEXT_COMMANDS.iter().find(|(name, ..)| *name == first) {
+        return Some(TextCommandMatch::Kept(*command));
     }
-
-    pub(super) fn risk(self) -> CommandRisk {
-        use TextCommandId::*;
-        match self {
-            Help | Pwd | Health | Status | Inflight | Queue | Metrics | AllowedTools | Sessions
-            | Receipt | Usage => CommandRisk::ReadOnly,
-            Start | Down | Cc | Skill | Meeting | Model | Fast | Goals | Clear | DeleteSession
-            | Stop | Restart | Debug | Vc => CommandRisk::Mutating,
-            Shell | Allowed | DeadlockRecover | MachineFlip | StuckPrRebase => {
-                CommandRisk::ShellOrToolGrant
-            }
-            AllowAll | AddUser | RemoveUser => CommandRisk::CredentialSystem,
-        }
+    if let Some((name, replacement)) = RETIRED_TEXT_COMMANDS
+        .iter()
+        .find(|(name, _)| *name == first)
+    {
+        return Some(TextCommandMatch::Retired(name, *replacement));
     }
-
-    pub(super) fn text_surface(self) -> TextCommandSurface {
-        use TextCommandId::*;
-        match self {
-            // `!down` would attach any host file for every authorized user.
-            Sessions | Receipt | Usage | Down | Model | Fast | Goals | DeleteSession | Restart => {
-                TextCommandSurface::Unavailable
-            }
-            Help | Pwd | Health | Status | Inflight | Queue | Metrics | AllowedTools | Start
-            | Cc | Skill | Meeting | Clear | Stop | Debug | Vc | Shell | Allowed
-            | DeadlockRecover | MachineFlip | StuckPrRebase | AllowAll | AddUser | RemoveUser => {
-                TextCommandSurface::Implemented
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TextCommandSelection {
-    Dispatch(TextCommandId),
-    Unknown,
-    Unavailable,
-    PolicyDenied(PolicyDecision),
-}
-
-impl TextCommandSelection {
-    pub(super) fn denial_message(self, cmd: &str) -> Option<String> {
-        match self {
-            Self::Dispatch(_) => None,
-            Self::Unknown | Self::Unavailable => Some(
-                "Unknown or unavailable text command. Use `!help` for supported commands.".into(),
-            ),
-            Self::PolicyDenied(decision) => decision.denial_message(cmd),
-        }
-    }
-}
-
-/// Pure production selection: availability precedes authorization. No I/O or env reads.
-pub(super) fn select_text_command(
-    classified: Option<TextCommandId>,
-    is_owner: bool,
-    high_risk_enabled: bool,
-) -> TextCommandSelection {
-    let Some(id) = classified else {
-        return TextCommandSelection::Unknown;
-    };
-    if id.text_surface() == TextCommandSurface::Unavailable {
-        return TextCommandSelection::Unavailable;
-    }
-    match evaluate_policy(id.risk(), is_owner, high_risk_enabled) {
-        PolicyDecision::Allow => TextCommandSelection::Dispatch(id),
-        denial => TextCommandSelection::PolicyDenied(denial),
-    }
+    (first == "!herdr" && words.eq(["consent", "retry"])).then_some(TextCommandMatch::ConsentRetry)
 }
 
 /// Outcome of evaluating the command policy.
@@ -342,7 +188,7 @@ pub(in crate::services::discord) fn high_risk_enabled_via_env() -> bool {
         .unwrap_or(false)
 }
 
-/// Risk tier of every registered slash command, mirroring the text tiers.
+/// Risk tier of every registered slash command.
 pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
     use CommandRisk::*;
     &[
@@ -383,7 +229,7 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
         .map_or(CommandRisk::Mutating, |(_, risk)| *risk)
 }
 
-/// Short multi-line block for `!help` and `/help`, listing the slash commands of
+/// Short multi-line block for `/help`, listing the slash commands of
 /// each tier in [`SLASH_COMMAND_RISKS`]; tiers without one are left out.
 pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled: bool) -> String {
     let shell_state = if high_risk_enabled {
@@ -421,42 +267,6 @@ pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled
     lines.join("\n")
 }
 
-/// `!help` body generated from [`TEXT_COMMANDS`], grouped by risk tier.
-/// The handler still owns provider/env reads and message delivery.
-pub(super) fn text_command_help(provider_name: &str, risk_block: &str) -> String {
-    let mut lines = vec![
-        "**AgentDesk Discord Bot**".to_string(),
-        format!("Manage server files & chat with {provider_name}."),
-        format!("Each channel gets its own independent {provider_name} session."),
-        format!("Any other message is sent to {provider_name}; send a file/photo to upload it."),
-        "Slash commands are listed by `/help`.".to_string(),
-    ];
-    let sections = [
-        (CommandRisk::ReadOnly, "**Inspect**"),
-        (CommandRisk::Mutating, "**Session**"),
-        (
-            CommandRisk::ShellOrToolGrant,
-            "**Shell & Tools** (owner only, opt-in)",
-        ),
-        (
-            CommandRisk::CredentialSystem,
-            "**User Management** (owner only)",
-        ),
-    ];
-    for (risk, title) in sections {
-        lines.push(String::new());
-        lines.push(title.to_string());
-        for (_, id, help) in TEXT_COMMANDS {
-            if id.risk() == risk && id.text_surface() == TextCommandSurface::Implemented {
-                lines.push((*help).to_string());
-            }
-        }
-    }
-    lines.push(String::new());
-    lines.push(risk_block.to_string());
-    lines.join("\n")
-}
-
 #[cfg(test)]
 mod command_policy_tests {
     use super::*;
@@ -467,140 +277,45 @@ mod command_policy_tests {
         assert!(!slash_command_risk("/cancel-queued").is_high_risk());
     }
 
-    fn registered_cases() -> [(CommandRisk, TextCommandSurface, &'static str); 6] {
-        use CommandRisk::*;
-        use TextCommandSurface::*;
-        [
-            (
-                ReadOnly,
-                Implemented,
-                "!help !pwd !health !status !inflight !queue !metrics !allowedtools",
-            ),
-            (ReadOnly, Unavailable, "!sessions !receipt !usage"),
-            (
-                Mutating,
-                Implemented,
-                "!start !cc !skill !meeting !clear !stop !debug !vc",
-            ),
-            (
-                Mutating,
-                Unavailable,
-                "!down !model !fast !goals !deletesession !restart",
-            ),
-            (
-                ShellOrToolGrant,
-                Implemented,
-                "!shell !allowed !deadlock-recover !machine-flip !stuck-pr-rebase",
-            ),
-            (
-                CredentialSystem,
-                Implemented,
-                "!allowall !adduser !removeuser",
-            ),
-        ]
-    }
-
+    /// A removed text name points only at a slash command the bot still registers.
     #[test]
-    fn registered_surface_and_principal_matrix_preserves_exact_ids() {
-        use CommandRisk::*;
-        use TextCommandSelection::*;
-        let mut ids = Vec::new();
-        let mut unavailable = 0;
-        for (risk, surface, names) in registered_cases() {
-            for name in names.split_whitespace() {
-                let id = TextCommandId::from_str(name).expect("registered text name");
-                assert!(!ids.contains(&id), "each name has its own dispatch ID");
-                ids.push(id);
-                assert_eq!(id.risk(), risk, "{name}");
-                assert_eq!(command_risk(name, ""), risk);
-                assert_eq!(id.text_surface(), surface, "{name}");
-                unavailable += usize::from(surface == TextCommandSurface::Unavailable);
-                for owner in [false, true] {
-                    for enabled in [false, true] {
-                        let expected = if surface == TextCommandSurface::Unavailable {
-                            Unavailable
-                        } else {
-                            match (risk, owner, enabled) {
-                                (ShellOrToolGrant | CredentialSystem, false, _) => {
-                                    PolicyDenied(PolicyDecision::DenyNotOwner)
-                                }
-                                (ShellOrToolGrant, true, false) => {
-                                    PolicyDenied(PolicyDecision::DenyNotEnabled)
-                                }
-                                _ => Dispatch(id),
-                            }
-                        };
-                        assert_eq!(select_text_command(Some(id), owner, enabled), expected);
-                    }
-                }
-            }
-        }
-        assert_eq!(ids.len(), 33);
-        assert_eq!(unavailable, 9);
-    }
-
-    #[test]
-    fn unknown_selection_is_denied_for_every_principal() {
-        for name in ["", "neutral text", "!not-registered"] {
-            assert_eq!(TextCommandId::from_str(name), None);
-            for owner in [false, true] {
-                for enabled in [false, true] {
-                    let result = select_text_command(None, owner, enabled);
-                    assert_eq!(result, TextCommandSelection::Unknown);
-                    assert!(result.denial_message(name).is_some());
-                }
+    fn retired_text_names_point_at_registered_slash_commands() {
+        let registered: std::collections::BTreeSet<String> =
+            crate::services::discord::runtime_bootstrap::run_bot_build_slash_commands()
+                .iter()
+                .map(|command| format!("/{}", command.name))
+                .collect();
+        for (name, replacement) in RETIRED_TEXT_COMMANDS {
+            if let Some(slash) = replacement {
+                assert!(registered.contains(slash), "{name} -> {slash}");
             }
         }
     }
 
-    /// A text command that still has a registered slash twin keeps its tier.
+    /// The first word decides: an exact kept or removed name is a command, and
+    /// any other `!` text, near misses included, is chat.
     #[test]
-    fn common_registered_slash_surfaces_keep_the_same_risk() {
-        let mut compared = 0;
-        for (risk, _, names) in registered_cases() {
-            for name in names.split_whitespace() {
-                let slash = format!("/{}", &name[1..]);
-                if SLASH_COMMAND_RISKS
-                    .iter()
-                    .any(|(registered, _)| *registered == slash)
-                {
-                    assert_eq!(slash_command_risk(&slash), risk, "{slash}");
-                    compared += 1;
-                }
-            }
+    fn only_exact_command_words_are_text_commands() {
+        use TextCommandMatch::*;
+        let cases = [
+            ("!clear", Some(Kept(TextCommand::Clear))),
+            ("!restart now", Some(Kept(TextCommand::Restart))),
+            ("!stop\nplease", Some(Kept(TextCommand::Stop))),
+            ("!pwd", Some(Retired("!pwd", Some("/pwd")))),
+            ("!shell ls", Some(Retired("!shell", None))),
+            ("!herdr consent retry", Some(ConsentRetry)),
+            ("!herdr consent retry now", None),
+            ("!herdr", None),
+            ("!clearall", None),
+            ("!Clear", None),
+            ("! clear", None),
+            ("!", None),
+            ("!안녕", None),
+            ("hello !clear", None),
+            ("", None),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(match_text_command(text), expected, "{text:?}");
         }
-        assert_eq!(compared, 15);
-    }
-
-    #[test]
-    fn help_formatter_preserves_provider_and_risk_placeholders() {
-        let help = text_command_help("fixture-provider", "fixture-risk");
-        assert_eq!(help.matches("fixture-provider").count(), 3);
-        assert!(help.ends_with("fixture-risk"));
-    }
-
-    /// Every implemented text command, and nothing else, has a `!help` line;
-    /// unavailable names stay out of the help.
-    #[test]
-    fn text_registration_and_help_name_the_same_commands() {
-        let help = text_command_help("fixture-provider", "");
-        let listed: std::collections::BTreeSet<&str> = help
-            .lines()
-            .filter_map(|line| line.strip_prefix('`'))
-            .filter(|rest| rest.starts_with('!'))
-            .map(|rest| &rest[..rest.find([' ', '`']).unwrap_or(rest.len())])
-            .collect();
-        let mut implemented = std::collections::BTreeSet::new();
-        for (name, id, line) in TEXT_COMMANDS {
-            assert_eq!(TextCommandId::from_str(name), Some(*id), "{name}");
-            let available = id.text_surface() == TextCommandSurface::Implemented;
-            assert_eq!(!line.is_empty(), available, "{name} help line");
-            if available {
-                assert!(line.starts_with(&format!("`{name}")), "{name}: {line}");
-                implemented.insert(*name);
-            }
-        }
-        assert_eq!(listed, implemented);
-        assert_eq!(implemented.len(), 24);
     }
 }

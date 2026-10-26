@@ -98,7 +98,8 @@ grandfathered_baseline_paths = [
   # longer a prod-giant, so it is removed from the frozen baseline as well as
   # `grandfathered` (win-locked: a re-expanded diagnostics cannot be
   # re-grandfathered — it would have to land as a full [[entry]] or shrink).
-  "src/services/discord/commands/text_commands.rs",
+  # commands/text_commands.rs dropped to about 100 prod LoC in #6487 when the
+  # `!` tier shrank to three commands; removed from the frozen baseline.
   # health.rs was decomposed in #3038 Phase A (2293 prod LoC -> 402-line module
   # root + 6 sub-1000-LoC directory modules under health/); no longer a
   # prod-giant. Removed from the frozen baseline as well as `grandfathered`
@@ -451,12 +452,9 @@ owner = "server-runtime"
 deadline = "2027-01-31"
 decompose_issue = "#4710"
 
-[[entry]]
-file = "src/services/discord/commands/text_commands.rs"
-decision = "shrink"
-owner = "discord-relay"
-deadline = "2027-01-31"
-decompose_issue = "#6487"
+# RETIRED 2026-10-26 (#6487): text_commands.rs dropped below the production
+# giant threshold when the `!` text tier shrank to `!clear`/`!restart`/`!stop`.
+# Remove the [[entry]] to avoid a ghost registration.
 
 # RETIRED 2026-07-24 (#4712): meeting_orchestrator.rs dropped below the
 # production giant threshold after cohesive selection, lifecycle, meeting-round,

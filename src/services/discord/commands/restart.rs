@@ -6,7 +6,8 @@ use crate::services::discord::admin_host_guard::ManagedReset;
 use crate::services::provider::ProviderKind;
 
 use super::super::{
-    Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_has_active_turn,
+    Context, Data, Error, SharedData, check_auth, mailbox_cancel_active_turn,
+    mailbox_has_active_turn,
 };
 
 const RESTART_SEED_PROMPT: &str = "안녕하세요. 세션 재시작 완료.";
@@ -129,30 +130,30 @@ fn build_restart_response(
         .join("\n")
 }
 
-async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
-    let channel_id = ctx.channel_id();
+async fn start_restart_seed_turn(
+    serenity_ctx: &serenity::Context,
+    data: &Data,
+    channel_id: serenity::ChannelId,
+    command_name: &'static str,
+) -> RestartSeedStatus {
     let channel_name_hint = {
-        let data = ctx.data().shared.core.lock().await;
-        data.sessions
+        let core = data.shared.core.lock().await;
+        core.sessions
             .get(&channel_id)
             .and_then(|session| session.channel_name.clone())
     };
     let metadata = serde_json::json!({
-        "command": "/restart",
-        "provider": ctx.data().provider.as_str(),
+        "command": command_name,
+        "provider": data.provider.as_str(),
     });
 
     retry_restart_seed(|| async {
         super::super::router::start_headless_turn(
-            (
-                ctx.serenity_context(),
-                &ctx.data().shared,
-                &ctx.data().token,
-            ),
+            (serenity_ctx, &data.shared, &data.token),
             channel_id,
             RESTART_SEED_PROMPT,
-            "/restart",
-            Some("/restart"),
+            command_name,
+            Some(command_name),
             Some(metadata.clone()),
             channel_name_hint.clone(),
         )
@@ -253,6 +254,61 @@ where
     }
 }
 
+/// The restart `/restart` and `!restart` share once the sender is authorized; every
+/// reply goes through `say`.
+async fn restart_channel<Say, SayFut>(
+    serenity_ctx: &serenity::Context,
+    data: &Data,
+    channel_id: serenity::ChannelId,
+    user_name: &str,
+    command_name: &'static str,
+    say: Say,
+) -> Result<(), Error>
+where
+    Say: Fn(String) -> SayFut,
+    SayFut: std::future::Future<Output = Result<(), Error>>,
+{
+    log_command_received!(channel_id.get(), user_name, command_name);
+    say("♻ 세션 재시작 중...".into()).await?;
+
+    let action = resolve_restart_action(&data.shared, channel_id).await;
+    let (shared, provider) = (&data.shared, &data.provider);
+    let warn = || say("⚠ 진행 중 턴 1회 손실 가능 — 안전하게 중단합니다.".into());
+    let restarted = restart_managed_session(
+        &serenity_ctx.http,
+        shared,
+        provider,
+        channel_id,
+        command_name,
+        warn,
+    );
+    let tmux_name = match restarted.await? {
+        Ok(tmux_name) => tmux_name,
+        Err(reason) => {
+            say(format!("♻ 세션을 재시작하지 않았어요: {reason}")).await?;
+            return Ok(());
+        }
+    };
+
+    let seed_status = start_restart_seed_turn(serenity_ctx, data, channel_id, command_name).await;
+    say(build_restart_response(
+        provider,
+        &action,
+        tmux_name.as_deref(),
+        &seed_status,
+    ))
+    .await?;
+    log_info_event!(
+        "discord_restart_triggered",
+        channel_id = channel_id.get(),
+        user_name = %user_name,
+        command = %command_name,
+        provider = provider.as_str(),
+        status = ?seed_status,
+    );
+    Ok(())
+}
+
 async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
@@ -262,50 +318,34 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
     if !super::enforce_slash_command_policy(&ctx, command_name).await? {
         return Ok(());
     }
+    let say = |text: String| async move { ctx.say(text).await.map(|_| ()).map_err(Error::from) };
+    let serenity_ctx = ctx.serenity_context();
+    restart_channel(
+        serenity_ctx,
+        ctx.data(),
+        ctx.channel_id(),
+        user_name,
+        command_name,
+        say,
+    )
+    .await
+}
 
-    {
-        log_command_received!(ctx.channel_id().get(), user_name, command_name);
-        ctx.say("♻ 세션 재시작 중...").await?;
-
-        let channel_id = ctx.channel_id();
-        let action = resolve_restart_action(&ctx.data().shared, channel_id).await;
-        let http = ctx.serenity_context().http.clone();
-        let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
-        let warn = || async {
-            ctx.say("⚠ 진행 중 턴 1회 손실 가능 — 안전하게 중단합니다.")
-                .await
-                .map(|_| ())
-                .map_err(Error::from)
-        };
-        let restarted =
-            restart_managed_session(&http, shared, provider, channel_id, command_name, warn);
-        let tmux_name = match restarted.await? {
-            Ok(tmux_name) => tmux_name,
-            Err(reason) => {
-                ctx.say(format!("♻ 세션을 재시작하지 않았어요: {reason}"))
-                    .await?;
-                return Ok(());
-            }
-        };
-
-        let seed_status = start_restart_seed_turn(&ctx).await;
-        ctx.say(build_restart_response(
-            &ctx.data().provider,
-            &action,
-            tmux_name.as_deref(),
-            &seed_status,
-        ))
-        .await?;
-        log_info_event!(
-            "discord_restart_triggered",
-            channel_id = channel_id.get(),
-            user_name = %user_name,
-            command = %command_name,
-            provider = ctx.data().provider.as_str(),
-            status = ?seed_status,
-        );
-        Ok(())
-    }
+/// `!restart`, the agents' `/restart`: intake has already authorized the sender, and
+/// each reply answers the command message.
+pub(super) async fn run_text_restart(
+    ctx: &serenity::Context,
+    msg: &serenity::Message,
+    data: &Data,
+    channel_id: serenity::ChannelId,
+) -> Result<(), Error> {
+    let say = |text: String| async move {
+        msg.reply(&ctx.http, text)
+            .await
+            .map(|_| ())
+            .map_err(Error::from)
+    };
+    restart_channel(ctx, data, channel_id, &msg.author.name, "!restart", say).await
 }
 
 /// Restart the current provider session immediately.
