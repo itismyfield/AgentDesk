@@ -397,13 +397,13 @@ async fn s1e_historical_host_traces_survive_current_absence_pg() {
     }
 }
 
-struct Pause {
-    at: usize,
-    count: AtomicUsize,
-    entered: tokio::sync::Notify,
-    resume: tokio::sync::Notify,
+pub(super) struct Pause {
+    pub(super) at: usize,
+    pub(super) count: AtomicUsize,
+    pub(super) entered: tokio::sync::Notify,
+    pub(super) resume: tokio::sync::Notify,
 }
-static PAUSES: std::sync::LazyLock<Mutex<BTreeMap<u64, Arc<Pause>>>> =
+pub(super) static PAUSES: std::sync::LazyLock<Mutex<BTreeMap<u64, Arc<Pause>>>> =
     std::sync::LazyLock::new(Default::default);
 pub(super) async fn after_files(channel: u64) {
     let pause = lock(&PAUSES).get(&channel).cloned();
@@ -414,7 +414,7 @@ pub(super) async fn after_files(channel: u64) {
         }
     }
 }
-struct PauseGuard(u64);
+pub(super) struct PauseGuard(pub(super) u64);
 impl Drop for PauseGuard {
     fn drop(&mut self) {
         lock(&PAUSES).remove(&self.0);

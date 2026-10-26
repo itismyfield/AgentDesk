@@ -1,13 +1,28 @@
 //! A local tmux channel's own in-flight session, found before any watcher claims it.
 use super::*;
 
+/// An admitted session and the pinned Unbound inputs that admitted it.
+pub(in crate::services::discord::turn_presence::activity) struct Admission {
+    pub(in crate::services::discord::turn_presence::activity) name: String,
+    snapshot: Snapshot,
+    namespace: Observation,
+}
+
+impl Admission {
+    /// Whether the inputs that admitted the session still read the same, rechecked as the Unbound
+    /// read rechecks its absence before publication.
+    pub(in crate::services::discord::turn_presence::activity) async fn current(&self) -> bool {
+        Box::pin(self.snapshot.revalidate(&self.namespace)).await
+    }
+}
+
 /// The tmux session this channel's in-flight turn runs in once both pinned Unbound snapshots name
 /// it alone, resolve its sessions row as the channel's and see it live; `None` keeps the Unbound read.
 pub(in crate::services::discord::turn_presence::activity) async fn admitted(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
-) -> Option<String> {
+) -> Option<Admission> {
     // Only an in-flight row can admit, so a quiet channel skips the second collection.
     if !matches!(
         inflight::load_inflight_state_read_only_result(provider, channel.get()),
@@ -25,7 +40,12 @@ pub(in crate::services::discord::turn_presence::activity) async fn admitted(
     if !snapshot.same_inputs(&next) {
         return None;
     }
-    snapshot.inflight_session(shared, &namespace.inventory)
+    let name = snapshot.inflight_session(shared, &namespace.inventory)?;
+    Some(Admission {
+        name,
+        snapshot,
+        namespace,
+    })
 }
 
 impl Snapshot {
@@ -47,14 +67,10 @@ impl Snapshot {
             && self.exact == self.canonical
             && self.scope(shared).result == Scope::Hold("inflight_present")
             && live.iter().any(|session| session == name)
-            && owners
-                .get(name)
-                .is_some_and(|owner| owner.is_none_or(|owner| owner == channel))
+            && ownership.admits(name, channel)
             && !live
                 .iter()
-                .any(|session| session != name && owners.get(session) == Some(&Some(channel)))
-            && !ownership.local_conflict(name)
-            && ownership.nonces_valid(std::iter::once(name));
+                .any(|session| session != name && owners.get(session) == Some(&Some(channel)));
         own.then(|| name.to_owned())
     }
 }
