@@ -990,3 +990,121 @@ async fn exact_retry_refuses_a_different_request_before_begin_pg() {
     pool.close().await;
     fixture.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn p4_off_terminal_paths_keep_legacy_and_restored_hold_results_pg() {
+    use super::replay_admission as admission;
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::discord::replay_policy as policy;
+    use crate::services::provider::{CancelToken, ProviderKind};
+    use policy::live::{Activity, RawTap};
+
+    let (db, pool) = setup().await;
+    let token = CancelToken::new();
+    let dormant = admission::dormant_start("7330414").expect("off supplies no permit");
+    assert!(dormant.receipt_id().is_none());
+    dormant
+        .spend(
+            &EffectTarget::ProviderStart {
+                provider: "claude".into(),
+                channel: "7330414".into(),
+            },
+            "unchanged",
+            &token,
+        )
+        .unwrap();
+    let tap = RawTap::for_token(Some(&token));
+    assert!(!tap.active(), "off cannot claim an observation seal");
+    for seen in [
+        Seen::Activity(Activity::Output),
+        Seen::Broken,
+        Seen::StdoutEof,
+        Seen::Exited { waited: true },
+        Seen::StderrDrained,
+    ] {
+        tap.see(seen);
+    }
+    assert!(
+        token.replay_attempt().is_none(),
+        "terminal take needs a spent permit"
+    );
+    let mut state = InflightTurnState::new(
+        ProviderKind::Claude,
+        7330414,
+        None,
+        7,
+        7330415,
+        7330416,
+        "original".into(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    for store in [Some(&pool), None] {
+        assert!(policy::ordinary_outcome(store, &token, &state).await);
+        assert!(policy::error_is_ordinary(store, &token, &state, true).await);
+        assert!(matches!(
+            policy::stale_resume(store, &token, &state).await,
+            policy::StaleResume::Legacy
+        ));
+    }
+    for held in [false, true] {
+        let key = if held { "off-held" } else { "off-unclassified" };
+        let input = request(key, &[key]);
+        let context = active(&pool);
+        let candidate = admitted(preflight_source(&context, &input).await);
+        let permit = prepare_effect_start(&context, &input, candidate, projection(None), None)
+            .await
+            .unwrap();
+        let attempt = permit.attempt();
+        state.replay_receipt_id = Some(attempt.receipt_id());
+        if held {
+            write::withhold(
+                &pool,
+                attempt,
+                "old preserved hold",
+                &serde_json::json!({"body":"kept"}),
+            )
+            .await
+            .unwrap();
+        }
+        let before: (String, serde_json::Value) = sqlx::query_as(
+            "SELECT replay_disposition, replay_preserved FROM intake_outbox WHERE id=$1",
+        )
+        .bind(attempt.receipt_id())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for store in [Some(&pool), None] {
+            assert!(!policy::ordinary_outcome(store, &token, &state).await);
+            assert!(!policy::error_is_ordinary(store, &token, &state, true).await);
+            assert!(matches!(
+                policy::stale_resume(store, &token, &state).await,
+                policy::StaleResume::Hold
+            ));
+        }
+        let after: (String, serde_json::Value) = sqlx::query_as(
+            "SELECT replay_disposition, replay_preserved FROM intake_outbox WHERE id=$1",
+        )
+        .bind(attempt.receipt_id())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, before, "restored custody cannot mint a live attempt");
+        assert!(token.replay_attempt().is_none());
+    }
+    let notices: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM message_outbox WHERE reason_code='stale_replay_withheld'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        notices, 0,
+        "off cannot reach the new live hold/notice branch"
+    );
+    pool.close().await;
+    db.drop().await;
+}

@@ -272,10 +272,13 @@ impl LiveAttempt {
             }
         }
         let mut attempt = lock(&self.attempt);
-        if self.verdict().is_some() || (terminal && self.stale()) {
+        let observation = lock(&self.observation).clone();
+        if self.verdict().is_some()
+            || (terminal && self.stale() && observation.no_effect_evidence().is_some())
+        {
             return None;
         }
-        Some((attempt.take()?, lock(&self.observation).clone()))
+        Some((attempt.take()?, observation))
     }
 
     #[cfg(test)]

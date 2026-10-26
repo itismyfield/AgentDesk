@@ -79,11 +79,10 @@ async fn classify_terminal(
     if let Some(verdict) = token.replay_attempt().and_then(|live| live.verdict()) {
         return verdict == Verdict::Ordinary;
     }
-    let unmatched_stale = token.replay_attempt().is_some_and(|live| live.stale());
-    let Some((pool, live, attempt, observation)) = decide_live(pool, token, !unmatched_stale).await
-    else {
+    let Some((pool, live, attempt, observation)) = decide_live(pool, token, true).await else {
         return false;
     };
+    let unmatched_stale = live.stale();
     let ordinary = match (unmatched_stale, observation.terminal_evidence()) {
         (false, Some(evidence)) => write::classify_normal(pool, &attempt, &evidence)
             .await

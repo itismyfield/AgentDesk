@@ -71,6 +71,7 @@ pub(in crate::services::discord::turn_bridge) async fn retry_stale_resume(
                     String::new(),
                     Some(retry),
                 );
+                state.auto_retry.queued = true;
             }
             state.full_response.clear();
         }
