@@ -94,16 +94,14 @@ async fn assert_no_local_only_completion_event(
     window: std::time::Duration,
 ) {
     let deadline = tokio::time::Instant::now() + window;
-    loop {
-        match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Err(_) => return,
-            Ok(Ok(event)) => panic!(
-                "local-only halves must not publish a completion event; received phase={:?}, turn_id={:?}, channel_id={}",
-                event.phase, event.turn_id, event.channel_id
-            ),
-            Ok(Err(error)) => {
-                panic!("local-only completion receiver must remain open; recv error={error:?}")
-            }
+    match tokio::time::timeout_at(deadline, rx.recv()).await {
+        Err(_) => (),
+        Ok(Ok(event)) => panic!(
+            "local-only halves must not publish a completion event; received phase={:?}, turn_id={:?}, channel_id={}",
+            event.phase, event.turn_id, event.channel_id
+        ),
+        Ok(Err(error)) => {
+            panic!("local-only completion receiver must remain open; recv error={error:?}")
         }
     }
 }

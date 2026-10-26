@@ -17,21 +17,26 @@ repository is already clippy-clean.
 
 ## Current Staging
 
-`Cargo.toml` configures nine Clippy denies: `dbg_macro`, `todo`,
-`unimplemented`, `await_holding_lock`, `drop_non_drop`, `large_enum_variant`, `result_large_err`,
-`too_many_arguments` and `type_complexity`. The authoritative staged command is
+`Cargo.toml` configures eleven deny entries: the `correctness` group and ten
+individual lints, `dbg_macro`, `todo`, `unimplemented`, `await_holding_lock`,
+`drop_non_drop`, `mistyped_literal_suffixes`, `large_enum_variant`,
+`result_large_err`, `too_many_arguments` and `type_complexity`.
+The authoritative staged command is
 `cargo clippy --workspace --all-targets --all-features -- -W clippy::all`.
-The trailing group level overrides the Cargo levels of six group-member denies;
-five remain warnings.
+The trailing group level lowers the Cargo levels of group-member denies;
+the four structural complexity lints remain warnings.
 
 Effective denies for lib/bin under the staged command: `dbg_macro`, `todo`,
-`unimplemented` and `drop_non_drop`.
+`unimplemented`, `await_holding_lock`, `drop_non_drop`, `mistyped_literal_suffixes`
+and the `correctness` group.
 
-The first three are outside `clippy::all`. For `drop_non_drop`, `src/lib.rs` and
-`src/main.rs` redeclare `#![deny(clippy::drop_non_drop)]` as a crate attribute,
-which keeps it denied under this argv. These attributes cover the lib/bin
+The first three are outside `clippy::all`. For the other entries, `src/lib.rs`
+and `src/main.rs` redeclare crate-level `#![deny(clippy::<lint>)]` attributes,
+which keep them denied under this argv. These attributes cover the lib/bin
 crates, including their unit tests; separate integration-test crates are not
-covered by those attributes. Configured Cargo deny entries alone must not be
+covered by those attributes. The library retains existing individual correctness
+allows for `absurd_extreme_comparisons` and `overly_complex_bool_expr`; the group
+deny does not remove them. Configured Cargo deny entries alone must not be
 mistaken for effective hard gates under this argv.
 
 Main and PR lint run this same invocation once, adding only Cargo's JSON output

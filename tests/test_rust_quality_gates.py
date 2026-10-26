@@ -92,9 +92,10 @@ class QualityWiringTest(unittest.TestCase):
         import tomllib
         lints = tomllib.loads((ROOT / "Cargo.toml").read_text())["lints"]["clippy"]
         doc = (ROOT / "docs/ci/rust-quality-gates.md").read_text()
-        self.assertEqual(sum(v == "deny" for v in lints.values()), 9)
+        self.assertEqual(sum((v.get("level") if isinstance(v, dict) else v) == "deny"
+                             for v in lints.values()), 11)
         for lint, level in lints.items():
-            if level == "deny":
+            if (level.get("level") if isinstance(level, dict) else level) == "deny":
                 self.assertIn("`" + lint + "`", doc)
 
     def test_effective_group_denies_have_crate_attributes(self):
@@ -107,7 +108,8 @@ class QualityWiringTest(unittest.TestCase):
         self.assertEqual(len(paragraphs), 1)
         effective = set(re.findall(r"`([a-z_]+)`", paragraphs[0]))
         lints = tomllib.loads((ROOT / "Cargo.toml").read_text())["lints"]["clippy"]
-        self.assertLessEqual(effective, {lint for lint, level in lints.items() if level == "deny"})
+        self.assertLessEqual(effective, {lint for lint, level in lints.items()
+                                         if (level.get("level") if isinstance(level, dict) else level) == "deny"})
         group_members = effective - {"dbg_macro", "todo", "unimplemented"}
         self.assertTrue(group_members, "document the effective group-member deny")
         for filename in ("src/lib.rs", "src/main.rs"):
