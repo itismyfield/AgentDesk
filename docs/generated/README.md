@@ -27,9 +27,10 @@ about the generated report or its generator.
   policy applies to the committed markdown report freshness, not to new
   maintainability violations.
 - `scripts/generate_inventory_docs.py` is still allowed to hard-fail on
-  source-of-truth invariants such as giant-file registry drift, missing required
-  registry metadata, or top-level architecture map parse errors. Those are not
-  generic generated-doc markdown freshness failures.
+  unreadable source inputs, malformed registry documents, or top-level
+  architecture map parse errors. Giant registration, owner/deadline/issue
+  fields and size growth are warnings, including newly crossing the giant
+  threshold. Those planning warnings do not require a repair commit.
 - `env-reference.md` and `cli-reference.md` are the exception: README links to
   them in place of hand-written tables, so `scripts/ci-script-checks.sh`
   regenerates both (`scripts/generate_env_reference.py`,

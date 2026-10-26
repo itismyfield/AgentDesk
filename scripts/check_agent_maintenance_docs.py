@@ -9,7 +9,7 @@ surfaces. This script keeps that authority explicit:
 * referenced commits are ancestors of the current checkout when the header is
   commit-anchored;
 * PRs that touch guarded code paths also touch the matching maintenance page;
-* frozen ``change-surfaces.md`` paths are checked against the generated module
+* giant review paths in ``change-surfaces.md`` are checked against the generated module
   inventory for current giant-surface integrity.
 
 Warnings do not fail the script. Errors fail unless ``--warning-only`` is
@@ -51,10 +51,9 @@ MODULE_INVENTORY_ROW_RE = re.compile(
     r"^\|\s*`[^`]+`\s*\|\s*`(?P<path>[^`]+\.rs)`\s*\|"
     r"\s*(?P<lines>\d+)\s*\|\s*(?P<prod>\d+)\s*\|\s*(?P<test>\d+)\s*\|"
 )
-# `` `path` (frozen giant surface …) `` — count-free frozen-entry shorthand.
-# The explicit marker keeps these entries distinct from ordinary path references.
+# Count-free review markers include the legacy wording for older pages.
 CHANGE_SURFACE_SHORTHAND_RE = re.compile(
-    r"`(?P<path>src/[^`]+\.rs)`\s*\(frozen giant surface\b"
+    r"`(?P<path>src/[^`]+\.rs)`\s*\((?:frozen giant|giant review) surface\b"
 )
 GIANT_FILE_THRESHOLD = 1000
 MIGRATION_0093_PATH = (
@@ -367,9 +366,9 @@ def check_doc_touch_rules(changed_files: set[str]) -> list[Finding]:
 def parse_module_inventory(path: Path) -> dict[str, int]:
     """Map each production module path to its *production* LoC.
 
-    change-surfaces.md freezes modules by their review surface, which is the
+    change-surfaces.md identifies modules by their review surface, which is the
     production line count (excluding `#[cfg(test)] mod` blocks). The inventory's
-    ``Prod`` column is the authority for frozen giant-surface integrity (#3036).
+    ``Prod`` column is the authority for giant review-surface integrity.
     """
 
     inventory: dict[str, int] = {}

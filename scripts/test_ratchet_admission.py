@@ -46,6 +46,25 @@ class RatchetAdmissionGuardTest(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("prioritize decomposition", warnings[0])
 
+    def test_giant_reference_increase_warns_in_repository_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "scripts/giant.toml"
+            config.parent.mkdir()
+            config.write_text('[giant_file_ratchet]\n"src/a.rs" = 1000\n')
+            (root / admission.HISTORY_REL_PATH).write_text("schema_version = 1\n")
+            for args in (("init", "-qb", "main"), ("add", "."),
+                         ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                          "commit", "-qm", "base")):
+                subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+            config.write_text('[giant_file_ratchet]\n"src/a.rs" = 100000\n')
+            with mock.patch.dict(os.environ, {"RATCHET_ADMISSION_BASE_REF": "HEAD"}):
+                audit = admission.audit_repository_admissions(repo_root=root,
+                    ratchet="giant_file_ratchet", config_rel_path="scripts/giant.toml",
+                    table_name="giant_file_ratchet")
+            self.assertEqual(audit.errors, ())
+            self.assertTrue(any("src/a.rs: +99000 production lines" in message for message in audit.warnings))
+
 
 class HotfileRatchetTest(unittest.TestCase):
     def setUp(self):
@@ -106,6 +125,23 @@ class HotfileRatchetTest(unittest.TestCase):
             self.assertEqual(rc, expected, err)
             if expected:
                 self.assertIn(f"grew to {size} lines > ceiling 100", err)
+
+    def test_production_giant_raw_growth_and_reference_raise_warn(self):
+        self.init_git(inherited=1200)
+        self.write_size(self.grown, 1201)
+        self.caps[self.grown] = 1201
+        self.write_caps()
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"WARNING: giant growth: {self.grown}: +1 raw lines", err)
+        self.assertIn(f"giant reference increased: {self.grown}", err)
+
+    def test_tracked_hotfile_crossing_production_giant_threshold_warns(self):
+        self.init_git(inherited=999)
+        self.write_size(self.grown, 1000)
+        rc, _, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"WARNING: giant growth: {self.grown}: +1 raw lines", err)
 
     def test_inherited_overage_frozen_by_sha_no_one_line_growth(self):
         self.init_git(inherited=124)
@@ -319,6 +355,24 @@ class HotfileRatchetTest(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertIn("transferred hotfile: src/extra.rs -> src/renamed.rs", out)
         self.assertNotIn("retired hotfile: src/extra.rs", out)
+
+    def test_giant_pin_transfer_allows_growth_and_reference_change(self):
+        source, target = "src/extra.rs", "src/renamed.rs"
+        self.caps[source] = 1200
+        self.write_caps()
+        self.write_size(source, 1200)
+        self.init_git()
+        self.git("mv", source, target)
+        self.write_size(target, 1201)
+        del self.caps[source]
+        self.caps[target] = 1201
+        self.write_caps()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "move cohesive giant")
+        rc, out, err = self.run_check()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("transferred hotfile", out)
+        self.assertIn(f"WARNING: giant growth: {target}: +1 raw lines", err)
 
     def test_transfer_cannot_raise_old_cap(self):
         self.moved_extra(pin=101)

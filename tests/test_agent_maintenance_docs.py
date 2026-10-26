@@ -444,13 +444,13 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
 
         self.assertEqual(result, 0)
 
-    def test_warns_on_count_free_frozen_entry(self) -> None:
+    def test_warns_on_count_free_review_entry(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._setup(
                 root,
                 "| `services::foo` | `src/services/foo.rs` | 4000 | 64 | 3936 |  |",
-                "- `src/services/foo.rs` (frozen giant surface) — provider adapter.\n",
+                "- `src/services/foo.rs` (giant review surface) — provider adapter.\n",
             )
             findings = CHECKER.check_change_surface_line_counts(root)
 

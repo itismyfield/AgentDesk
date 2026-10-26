@@ -948,7 +948,7 @@ class RegistryValidationTest(MetadataWarningAssertions, unittest.TestCase):
         self.assertIn("deadline", str(ctx.exception))
 
     def test_grandfather_swap_in_outside_baseline_warns(self) -> None:
-        # Planning warns about baseline swaps; the size gate rejects new giants.
+        # Planning and newly measured giant files both warn.
         modules = [
             self._module("src/b.rs", 1500, giant=True),
         ]
@@ -1674,6 +1674,25 @@ src/c.rs
             GEN.load_giant_file_registry = orig_registry
             GEN.load_giant_file_closed_issue_transition_list = orig_transition_list
             GEN.load_giant_file_issue_ratchets = orig_ratchets
+
+
+class RemainingDiscordGiantDecisionsTest(unittest.TestCase):
+    def test_remaining_discord_owners_have_specific_keep_decisions(self):
+        _, entries, _ = GEN.load_giant_file_registry()
+        by_path = {entry["file"]: entry for entry in entries}
+        for path, responsibility in (
+            ("src/services/discord/mod.rs", "gateway"),
+            ("src/services/discord/router/message_handler/headless_turn.rs", "lifecycle"),
+        ):
+            entry = by_path[path]
+            self.assertEqual(entry["decision"], "keep")
+            self.assertIn(responsibility, entry["keep_reason"])
+            self.assertNotIn("deadline", entry)
+            self.assertNotIn("decompose_issue", entry)
+        retired = "src/services/discord_config_audit.rs"
+        self.assertNotIn(retired, by_path)
+        production, _ = GEN.split_prod_test_lines((REPO_ROOT / retired).read_text())
+        self.assertLess(production, GEN.GIANT_FILE_THRESHOLD)
 
 
 if __name__ == "__main__":
