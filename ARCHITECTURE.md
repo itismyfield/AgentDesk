@@ -136,6 +136,7 @@ src/
 │   ├── runtime_root_tests.rs
 │   ├── runtime_settings.rs
 │   ├── runtime_validation.rs
+│   ├── server_surface.rs
 │   ├── session_hosts.rs
 │   ├── session_hosts_tests.rs
 │   ├── test_env.rs
@@ -602,6 +603,9 @@ src/
 │   │   ├── config_read.rs
 │   │   └── config_read_tests.rs
 │   ├── web_surface/
+│   │   ├── browser_guard.rs
+│   │   ├── browser_guard_tests.rs
+│   │   ├── host_allowlist.rs
 │   │   ├── peer_filter.rs
 │   │   └── tests.rs
 │   ├── worker_registry/
