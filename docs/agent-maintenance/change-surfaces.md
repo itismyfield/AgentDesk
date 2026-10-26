@@ -64,6 +64,8 @@
   `target/giant-file-progress/evidence.json`. Size references, owner/deadline/issue
   fields, registration and planning counts are advisory. Unreadable inputs,
   malformed documents and invalid Git provenance still fail measurement.
+  Daily deadline reports also warn on partial planning coverage; unavailable
+  inputs remain errors.
 - Existing responsibilities may grow for bug fixes and clarification. Review a
   split when adding an independent responsibility; line counts alone neither
   require a split nor define completion. There is no numeric growth allowance.

@@ -259,6 +259,21 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(f"WARNING: giant growth: {GIANT}: +1 raw lines", result.stderr)
 
+    def test_missing_deadline_and_issue_warn_without_bookkeeping(self):
+        registry = (self.repo / "scripts/giant_file_registry.toml").read_text()
+        registry = "\n".join(line for line in registry.splitlines()
+                             if not line.startswith(("deadline=", "decompose_issue="))) + "\n"
+        env = self.candidate({"scripts/giant_file_registry.toml": registry})
+        for command in ([sys.executable, "scripts/giant_file_progress.py"],
+                        [sys.executable, "scripts/generate_inventory_docs.py", "--check"],
+                        ["sh", "-c", PREPUSH_SEQUENCE]):
+            with self.subTest(command=command):
+                result = self.command_at(self.repo, command, env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("WARNING: giant-file registry:", result.stderr)
+                self.assertIn("shrink deadline ''", result.stderr)
+                self.assertIn("decompose_issue ''", result.stderr)
+
     def test_same_expired_fixture_still_rejects_generated_document_drift(self):
         path = "docs/generated/route-inventory.md"
         self.put_at(self.repo, path, (self.repo / path).read_text() + "drift\n")
@@ -278,9 +293,15 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         # Use checked-in planning inputs with small measured files, keeping the test cheap.
         registry = (ROOT / "scripts/giant_file_registry.toml").read_text()
         entries = tomllib.loads(registry)["entry"]
+        def overdue(entry):
+            try:
+                return date.fromisoformat(entry.get("deadline", "")) < date.fromisoformat(EVALUATION_DATE)
+            except (TypeError, ValueError):
+                return False
+
         expected = [entry for entry in entries
                     if entry.get("decision", "shrink") == "shrink"
-                    and date.fromisoformat(entry["deadline"]) < date.fromisoformat(EVALUATION_DATE)]
+                    and overdue(entry)]
         for entry in entries:
             path = self.repo / entry["file"]
             content = path.read_text() if path.exists() else ""
@@ -313,7 +334,7 @@ class DeadlineEntrypointsTest(unittest.TestCase):
                 warning_lines = [line for line in result.stderr.splitlines()
                                  if line.startswith(OVERDUE_PREFIX)]
                 for entry in expected:
-                    self.assertTrue(any(all(str(entry[key]) in line for key in
+                    self.assertTrue(any(all(str(entry.get(key, "")) in line for key in
                                              ("file", "deadline", "decompose_issue"))
                                         for line in warning_lines), result.stderr)
 
