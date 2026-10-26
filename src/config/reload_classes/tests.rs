@@ -376,6 +376,10 @@ fn changes_are_reported_per_field_and_skip_live_fields() {
         changed(|c| c.github.repos.push("o/r".into())),
         ["github.repos"]
     );
+    assert_eq!(
+        changed(|c| c.server.browser_guard = crate::config::BrowserGuardMode::Enforce),
+        ["server.browser_guard"]
+    );
     // A section written out at its default compares equal to an absent one.
     assert!(changed(|c| c.tui_o = Some(Default::default())).is_empty());
 }

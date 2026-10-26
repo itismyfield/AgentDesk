@@ -11,9 +11,8 @@
 //!
 //! ## What is live vs. restart-required
 //!
-//! [`crate::config::reload_classes::FIELDS`] classifies every field. A changed
-//! `restart` or `seeded-at-boot` field is still stored in the snapshot, but
-//! [`restart_required_changes`] reports it and the watcher logs one WARN line.
+//! [`crate::config::reload_classes::FIELDS`] classifies every field. A changed `restart` or
+//! `seeded-at-boot` field is stored anyway; [`restart_required_changes`] names it in a WARN.
 //!
 //! The whole-`Config` value is NOT threaded through every reader — instead this
 //! follows the existing global-runtime-setter precedent
@@ -841,11 +840,8 @@ mod tests {
         );
     }
 
-    /// #5750 — `server.auth_token` is `#[serde(skip_serializing)]`, so a
-    /// serialized-equality comparison cannot see it appear or disappear. A
-    /// write-back that dropped the token from disk therefore
-    /// reloaded as "applied, no restart required" while the `/ws` gate went
-    /// open. Rotation must also flag the boot-bound HTTP middleware.
+    /// `server.auth_token` is `skip_serializing`, so serialized equality cannot see it appear,
+    /// vanish or rotate; it is compared directly as the HTTP and `/ws` gates hold the boot copy.
     #[test]
     fn restart_required_changes_detects_server_auth_token_presence_flip() {
         let mut old = Config::default();

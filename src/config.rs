@@ -86,9 +86,8 @@ pub struct Config {
     /// Channels run on a Herdr endpoint; restart-required, empty by default.
     #[serde(default, skip_serializing_if = "SessionHostsConfig::is_empty")]
     pub session_hosts: SessionHostsConfig,
-    /// When true (default), the server watches the on-disk config file and swaps a
-    /// validated edit into the live snapshot; an invalid edit keeps the running config.
-    /// Which fields act on the swap is listed in `reload_classes::FIELDS`.
+    /// When true (default), a validated edit to the config file replaces the live snapshot;
+    /// an invalid edit keeps it. `reload_classes::FIELDS` lists which fields act on the swap.
     #[serde(default = "default_true")]
     pub config_hot_reload: bool,
 }

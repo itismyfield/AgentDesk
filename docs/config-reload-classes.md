@@ -21,6 +21,7 @@ valid edit in the live snapshot, but only `live` fields act on it. A change to a
 | `server.auth_token` | restart | `src/server/routes/auth.rs` auth_middleware (AppState.config Arc built in server::run) |
 | `server.allow_insecure_nonloopback_bind` | restart | `src/server/mod.rs` run (bind_host decision) |
 | `server.peer_filter` | restart | `src/server/web_surface.rs` router (PeerFilter::new(state.config.server.peer_filter)) |
+| `server.browser_guard` | restart | `src/server/web_surface.rs` router (BrowserGuard::new copies the mode into the HTTP layer and DashboardAccess) |
 | `discord.bots.*.token` | restart | `src/cli/dcserver.rs` handle_dcserver (load_discord_bot_launch_configs -> one run_bot per token) |
 | `discord.bots.*.description` | live | `src/services/discord/agentdesk_config.rs` load_discord_bot_configs (no daemon reader) |
 | `discord.bots.*.provider` | restart | `src/services/discord/settings/read.rs` load_bot_settings (run_bot -> SharedData.settings) |
