@@ -1724,6 +1724,7 @@ src/
 │   │   │   ├── herdr_consent/
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_notice_tests.rs
+│   │   │   │   ├── admission_refusal.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── custody_tests.rs

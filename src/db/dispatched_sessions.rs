@@ -1388,36 +1388,8 @@ mod selector_cleanup_tests {
         .expect("upsert selector session"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
     }
 
-    // #4979 S6: session-authority PG tests live below `*_pg_tests` so
-    // `just test-postgres` selects them through its `_pg` filter. That filter
-    // is a substring match on the whole test path, not a module-scope rule —
-    // seven of these tests already carried `_pg` in their own fn names and so
-    // were selected before the move; the module marker is what now covers the
-    // rest.
-    //
-    // Two edits could undo this, and they are protected very differently.
-    // Measured rc, not inferred:
-    //
-    //   1. Renaming the module away from the marker (`…_pg_tests` →
-    //      `…_tests`), keeping the `#[cfg(test)]`:
-    //        membership rc=1  (PG test-lane manifest drift)
-    //        coverage   rc=1  (2 newly uncovered modules)
-    //      Regenerating the manifest silences membership — new rule1/rule2 debt
-    //      is warn-only during the #5071 T0 rollout — but coverage still fails,
-    //      because the renamed nested module becomes a *new* uncovered module
-    //      rather than folding back into the parent. So the marker is well
-    //      guarded; the coverage gate is the signal that survives a regen.
-    //
-    //   2. Removing the nested `#[cfg(test)]` alone:
-    //        membership rc=0, coverage rc=0
-    //      This is harmless for lane selection — the path still contains the
-    //      marker — and the gates stay green because the tests fold back into
-    //      the parent, which `test_lane_coverage_baseline.txt` already carries
-    //      as uncovered debt. So unlike the sibling slices (#5088 S3, #5092 S5)
-    //      where the parent is genuinely covered, this attribute is NOT
-    //      load-bearing here; it is defence-in-depth for when that parent debt
-    //      is repaid. Do not copy a "removing this breaks the gate" claim out
-    //      of this file without checking whether the parent is baselined.
+    // Session-authority tests backed by PostgreSQL; native non-PG runs leave them out because
+    // their bodies reach a PG fixture.
     #[cfg(test)]
     mod session_authority_pg_tests {
         use super::*;

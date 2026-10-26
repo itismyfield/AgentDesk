@@ -1,3 +1,0 @@
-# Existing logical Rust cfg(test) modules not fully selected by test-non-pg or
-# PR-targeted cargo-test invocations. Keep sorted. A candidate baseline must be
-# a subset of its immutable comparison snapshot, so entries may only shrink.

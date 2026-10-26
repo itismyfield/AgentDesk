@@ -415,6 +415,7 @@ if run_check guards "PR infrastructure failure rerun classifier (#4392/#5207)"; 
 # the discriminating matrix and proves drift detection actually discriminates.
 ./scripts/ci/infra-failure-rerun.sh --self-test
 "$PYTHON" -m unittest tests.test_known_flaky_retry
+"$PYTHON" -m unittest tests.test_nextest_ci tests.test_nextest_required
 bash scripts/main-ci-triage.sh --self-test
 
 # Nightly notification contract (#6006).
@@ -488,47 +489,24 @@ if run_check contracts "Giant deadline warning reporter contract"; then
 "$PYTHON" -m unittest -v tests.test_report_giant_deadlines
 fi
 
-if run_check contracts "Rust test-lane coverage ratchet (#4846/#4910)"; then
-if [[ -z "${TEST_LANE_BASELINE_REF:-}" ]]; then
-  echo "ERROR: TEST_LANE_BASELINE_REF must name an immutable comparison snapshot" >&2
-  exit 1
-fi
-"$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
-"$PYTHON" -m unittest tests.test_test_lane_coverage
-"$PYTHON" -m unittest tests.test_lane_source_parity tests.test_lane_activation
-"$PYTHON" -m unittest tests.test_required_id_exception_fragments
+if run_check contracts "Nested libtest declarations"; then
+"$PYTHON" -m unittest tests.test_nested_libtest
 fi
 
-if run_check contracts "PR test selection plan (main runs every lane in full)"; then
-"$PYTHON" -m unittest tests.test_test_selection tests.test_nested_libtest
+if run_check contracts "Unfiltered cargo test in main, nightly and Windows warm"; then
+"$PYTHON" -m unittest tests.test_cargo_test_filters
 fi
 
-if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
-# Zero-match cargo is green; verify selectors and the shared compiled oracle.
-# Mutation tests retain the static/compiled and artifact fallback contracts.
-"$PYTHON" scripts/check_test_target_integrity.py --enforce
-"$PYTHON" -m unittest tests.test_check_test_target_integrity
-"$PYTHON" -m unittest tests.test_target_empty_identity tests.test_lib_test_artifact tests.test_lib_test_inventory_sharing tests.test_lib_inventory_fixture_environment
-AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure.sh lib-inventory -- "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
-"$PYTHON" -m unittest tests.test_non_pg_test_filter
+# The PostgreSQL 15 owner proof runs its exact ids through lib-test-artifact.py and run_test_lane.py.
+if run_check cargo "Shared lib test artifact and PG15 lane gate"; then
+"$PYTHON" -m unittest tests.test_lib_test_artifact tests.test_run_test_lane
 fi
 
-if run_check contracts "PostgreSQL test-lane membership gate (#4979, enforced)"; then
-# The default mode also verifies the generated `pg_db` region of ci-pr.yml
-# against the manifest, so a new PG source path fails here rather than
-# skipping the PG lane on its own PR.
-"$PYTHON" scripts/check_pg_test_lane_membership.py --baseline-ref "$TEST_LANE_BASELINE_REF"
-# #6014: regenerate and demand an empty diff. The check above proves the region
-# is derivable; this proves the COMMITTED workflow is the derived one, and that
-# regenerating an in-sync tree is a no-op.
-"$PYTHON" scripts/check_pg_test_lane_membership.py --write-pg-db-paths
-git diff --exit-code HEAD -- .github/workflows/ci-pr.yml
-"$PYTHON" -m unittest tests.test_check_pg_test_lane_membership
-fi
-
-if run_check contracts "Shared CI shell lexer tests"; then
-# The test-target and PG lane gates read workflow shell through this one lexer.
-"$PYTHON" -m unittest tests.test_ci_shell_lex
+if run_check contracts "Rust test source wiring and PG classification"; then
+# Every reached test is in the single nextest run; an unlinked test file, unknown cfg or unreadable include fails.
+"$PYTHON" scripts/ci/rust_test_sources.py check
+# The native-OS split needs every PG test classified; an unanalyzable test fails instead of running as non-PG.
+"$PYTHON" scripts/ci/pg_test_classifier.py classify --json-out "$(mktemp)"
 fi
 
 if run_check contracts "D4-B acceptance manifest (#5340)"; then
@@ -549,10 +527,6 @@ if run_check contracts "Process-global Mutex<()> poison-recovery gate (#5185)"; 
 # panics were PoisonError). A rule that only exists as prose is #5003.
 "$PYTHON" scripts/check_test_mutex_poison_recovery.py
 "$PYTHON" -m unittest tests.test_check_test_mutex_poison_recovery
-fi
-
-if run_check contracts "Flaky-retry verdict fixtures (dormant)"; then
-"$PYTHON" -m unittest tests.test_lane_retry_verdict
 fi
 
 if run_check contracts "Test ROOT file-reference policy"; then
@@ -641,10 +615,6 @@ if run_check contracts "Portable deployable path lint"; then
   tests.test_portable_docs_examples \
   tests.test_operator_init_portable \
   tests.test_portable_operator_migration
-fi
-
-if run_check contracts "CI macOS Trusted Rust path filter"; then
-"$PYTHON" -m unittest tests.test_macos_trusted_rust_filter
 fi
 
 if run_check contracts "Legacy restart replay activation validator (#5925)"; then

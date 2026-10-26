@@ -1,1 +1,0 @@
-services::session_forwarding::trusted_target::loopback_seam | helper-module | #6772 | expires=2027-10-23 | admits one registered loopback socket per thread for the forwarding tests; its own tests sit in the sibling loopback_seam_tests

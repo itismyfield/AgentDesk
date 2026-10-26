@@ -105,7 +105,11 @@ impl LocalAdmissionPermit {
 #[derive(Debug)]
 pub(crate) enum IntakeAdmission {
     #[cfg(unix)]
-    ConsentHeld(Box<Result<super::herdr_consent::admission::Hold, String>>),
+    ConsentHeld(
+        Box<
+            Result<super::herdr_consent::admission::Hold, super::herdr_consent::admission::Refusal>,
+        >,
+    ),
     Local(LocalAdmissionPermit),
     Forwarded {
         target_instance_id: String,

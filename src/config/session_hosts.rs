@@ -200,15 +200,9 @@ pub(crate) fn validate(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>
 }
 
 fn validate_effective(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>> {
-    for (key, endpoint) in &config.session_hosts.herdr.endpoints {
-        ensure!(
-            endpoint.mode != EndpointMode::UserDefault,
-            "session_hosts.herdr.endpoints.{key}.mode: user_default support pieces have not \
-             landed; keep the existing legacy_dedicated endpoint until support is complete \
-             (지원 조각 미착지)"
-        );
-    }
     let channels = projected_channels(&config.session_hosts)?;
+    let adapter = crate::services::session_host::policy::peer::SUPPORTED;
+    user_default_platform(config, adapter)?;
     for &channel in channels.keys() {
         bound_as_tui(config, CHANNELS_KEY, channel, &["claude", "codex"])?;
     }
@@ -216,6 +210,27 @@ fn validate_effective(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>>
         bound_as_tui(config, CLAUDE_GUARD_KEY, channel, &["claude"])?;
     }
     Ok(channels)
+}
+
+/// A user_default endpoint this node may execute needs a loaded-image adapter here; an endpoint
+/// of another node is judged by that node's own boot validation.
+fn user_default_platform(config: &Config, adapter: bool) -> Result<()> {
+    if adapter {
+        return Ok(());
+    }
+    let local = config.cluster.instance_id.as_deref().map(str::trim);
+    let local = local.filter(|id| !id.is_empty());
+    for (key, endpoint) in &config.session_hosts.herdr.endpoints {
+        // An unknown node id cannot prove the endpoint runs elsewhere.
+        let remote = local.is_some_and(|id| id != endpoint.execution_node.trim());
+        ensure!(
+            endpoint.mode != EndpointMode::UserDefault || remote,
+            "session_hosts.herdr.endpoints.{key}.mode: user_default needs a loaded-image \
+             adapter on its execution node and this platform has none; keep legacy_dedicated \
+             (이 플랫폼 미지원)"
+        );
+    }
+    Ok(())
 }
 
 fn projected_channels(hosts: &SessionHostsConfig) -> Result<BTreeMap<u64, ChannelEndpoint>> {

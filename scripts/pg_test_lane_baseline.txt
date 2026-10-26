@@ -1,5 +1,0 @@
-# Existing PostgreSQL lane debt. Sections and entries are sorted; debt may only shrink.
-[rule1]
-[rule2]
-[rule3]
-[rule4]
