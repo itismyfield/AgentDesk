@@ -1,12 +1,14 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -387,10 +389,47 @@ class InstallBootstrapPortableTests(unittest.TestCase):
         if sys.platform != "darwin":
             self.write_executable(fakebin / "chflags", "exit 0\n")
         curl_body = r"""
-import json, os, pathlib, shutil, subprocess, sys
+import json, os, pathlib, re, shutil, subprocess, sys
 args = sys.argv[1:]
+
+def readiness_delayed(kind):
+    delay = int(os.environ.get("FIXTURE_" + kind.upper() + "_DELAY", "0"))
+    counter = pathlib.Path(os.environ["TMPDIR"]) / ("readiness-" + kind)
+    count = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(count))
+    return count <= delay
+
+
+def health_payload(detail=False):
+    payload = {"status": "healthy"}
+    if os.environ.get("FIXTURE_HEALTH_503"):
+        payload = {"status": "unhealthy", "reason": "no_providers_registered"}
+    if detail:
+        payload["boot_incarnation"] = "fixture-boot-" + pathlib.Path(os.environ["FIXTURE_LAUNCH_COUNT"]).read_text().strip()
+    print(json.dumps(payload, separators=(",", ":")))
+    if os.environ.get("FIXTURE_HEALTH_503") and any(
+            arg in ("--fail", "--fail-with-body") or arg.startswith("-") and not arg.startswith("--") and "f" in arg
+            for arg in args):
+        sys.exit(22)
+
 request = " ".join(args)
-if "releases/latest" in request:
+if "raw.githubusercontent.com/" in request:
+    url = next(arg for arg in args if arg.startswith("https://raw.githubusercontent.com/"))
+    matched = re.fullmatch(r"https://raw[.]githubusercontent[.]com/example/AgentDesk/([0-9a-f]{40})/scripts/(install_runtime_assets[.]py|runtime-assets[.]txt)", url)
+    if not matched:
+        sys.stderr.write("support URL must use one immutable commit: " + url + "\n")
+        sys.exit(90)
+    with pathlib.Path(os.environ["FIXTURE_SUPPORT_LOG"]).open("a") as stream:
+        stream.write(url + "\n")
+    name = matched.group(2)
+    if os.environ.get("FAIL_INSTALL_SUPPORT") == name:
+        sys.exit(22)
+    source = pathlib.Path(os.environ["FIXTURE_SUPPORT_ROOT"]) / "scripts" / name
+    if "-o" in args:
+        shutil.copyfile(source, args[args.index("-o") + 1])
+    else:
+        sys.stdout.write(source.read_text())
+elif "releases/latest" in request:
     if os.environ["FIXTURE_MODE"] == "source":
         sys.exit(22)
     print(json.dumps({"tag_name": "v1.0.0"}))
@@ -398,10 +437,15 @@ elif "/api/health/detail" in request:
     counter = pathlib.Path(os.environ["FIXTURE_LAUNCH_COUNT"])
     if not counter.exists():
         sys.exit(22)
-    print(json.dumps({"boot_incarnation": "fixture-boot-" + counter.read_text().strip()}))
+    if readiness_delayed("boot"):
+        sys.exit(22)
+    health_payload(detail=True)
 elif "/api/health" in request:
-    print(json.dumps({"status": "healthy"}, separators=(",", ":")))
+    health_payload()
 elif "/api/policies" in request:
+    if readiness_delayed("policies"):
+        print(json.dumps({"policies": []}))
+        sys.exit(0)
     # This API double resolves real fixture requires; it is not the QuickJS loader.
     root = pathlib.Path(os.environ["AGENTDESK_INSTALL_DIR"]).resolve() / "policies"
     program = r'''const path = require('path');
@@ -424,6 +468,12 @@ console.log(JSON.stringify(rows));'''
     if os.environ.get("WRONG_POLICY_ROOT"):
         for policy in policies:
             policy["file"] = "/other-runtime/policies/" + policy["name"] + ".js"
+    if os.environ.get("FIXTURE_RESTART_AFTER_POLICIES"):
+        marker = pathlib.Path(os.environ["TMPDIR"]) / "policy-restart"
+        if not marker.exists():
+            counter = pathlib.Path(os.environ["FIXTURE_LAUNCH_COUNT"])
+            counter.write_text(str(int(counter.read_text()) + 1))
+            marker.touch()
     print(json.dumps({"policies": policies}))
 elif "-o" in args:
     shutil.copyfile(os.environ["FIXTURE_ARCHIVE"], args[args.index("-o") + 1])
@@ -443,6 +493,8 @@ else:
             "FIXTURE_ARCHIVE": str(temp / "release.tar.gz"),
             "FIXTURE_LAUNCH_COUNT": str(temp / "launch-count"),
             "FIXTURE_FAILURE_LOG": str(temp / "injected-failure"),
+            "FIXTURE_SUPPORT_LOG": str(temp / "support-requests"),
+            "FIXTURE_SUPPORT_ROOT": str(ROOT),
         })
         return temp, runtime, fixture, env
 
@@ -478,9 +530,15 @@ else:
         """.replace("VERSION", version))
         with tarfile.open(env["FIXTURE_ARCHIVE"], "w:gz") as archive:
             archive.add(fixture, arcname="agentdesk-darwin-aarch64",
-                        filter=lambda info: None if ".git" in Path(info.name).parts else info)
+                        filter=lambda info: None if ".git" in Path(info.name).parts or (
+                            env.get("FIXTURE_LEGACY_ARTIFACT") and Path(info.name).name in
+                            ("install_runtime_assets.py", "runtime-assets.txt")) else info)
         script = Path(env["TMPDIR"]) / "installer-snapshot.sh"
-        script.write_bytes(INSTALL_SCRIPT.read_bytes())
+        script_text = INSTALL_SCRIPT.read_text(encoding="utf-8")
+        if env.get("FIXTURE_READINESS_TIMEOUT"):
+            script_text = re.sub(r"(?m)^(READINESS_TIMEOUT_SECONDS=)[0-9]+$",
+                                 r"\g<1>" + env["FIXTURE_READINESS_TIMEOUT"], script_text)
+        script.write_text(script_text, encoding="utf-8")
         return subprocess.run(["/bin/bash", str(script)], cwd=ROOT, env=env, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
 
@@ -597,7 +655,8 @@ else:
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         binary = runtime / "bin/agentdesk"
         old_bytes, old_flags = binary.read_bytes(), binary.stat().st_flags
-        failed = self.install_fixture(fixture, {**env, "KEEP_BOOT_INCARNATION": "1"}, "two")
+        failed = self.install_fixture(fixture, {**env, "KEEP_BOOT_INCARNATION": "1",
+                                               "FIXTURE_READINESS_TIMEOUT": "1"}, "two")
         self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
         self.assertNotIn("Installation Complete", failed.stdout)
         self.assertEqual(binary.read_bytes(), old_bytes)
@@ -608,9 +667,116 @@ else:
         for bad in ({"MISSING_INSTALL_POLICY": "timeouts"}, {"WRONG_POLICY_ROOT": "1"}):
             with self.subTest(bad=bad):
                 _, runtime, fixture, env = self.installer_sandbox("release")
-                failed = self.install_fixture(fixture, {**env, **bad})
+                failed = self.install_fixture(fixture, {**env, **bad, "FIXTURE_READINESS_TIMEOUT": "1"})
                 self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
                 self.assertNotIn("Installation Complete", failed.stdout)
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("node"), "macOS flags and Node required")
+    def test_onboarding_503_is_ready_after_policy_registration(self):
+        for mode in ("source", "release"):
+            with self.subTest(mode=mode):
+                _, runtime, fixture, env = self.installer_sandbox(mode)
+                result = self.install_fixture(fixture, {**env, "FIXTURE_HEALTH_503": "1"})
+                self.assert_installed_fixture(runtime, result)
+                self.assertTrue((runtime / "bin/agentdesk").stat().st_flags & 2)
+                print("ONBOARDING_503", mode, "binary_exists=true flags=2")
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("node"), "macOS flags and Node required")
+    def test_readiness_waits_for_new_boot_and_policy_registration(self):
+        for mode in ("source", "release"):
+            with self.subTest(mode=mode):
+                _, runtime, fixture, env = self.installer_sandbox(mode)
+                started = time.monotonic()
+                result = self.install_fixture(fixture, {**env, "FIXTURE_HEALTH_503": "1",
+                    "FIXTURE_BOOT_DELAY": "2", "FIXTURE_POLICIES_DELAY": "3",
+                    "FIXTURE_READINESS_TIMEOUT": "8"})
+                self.assert_installed_fixture(runtime, result)
+                self.assertLess(time.monotonic() - started, 12)
+                for kind, required in (("boot", 3), ("policies", 4)):
+                    count = int((Path(env["TMPDIR"]) / ("readiness-" + kind)).read_text())
+                    self.assertGreaterEqual(count, required, kind)
+                self.assertTrue((runtime / "bin/agentdesk").stat().st_flags & 2)
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("node"), "macOS flags and Node required")
+    def test_readiness_rechecks_boot_after_policy_response(self):
+        _, runtime, fixture, env = self.installer_sandbox("release")
+        result = self.install_fixture(fixture, {**env, "FIXTURE_RESTART_AFTER_POLICIES": "1",
+            "FIXTURE_READINESS_TIMEOUT": "8"})
+        self.assert_installed_fixture(runtime, result)
+        self.assertGreaterEqual(int((Path(env["TMPDIR"]) / "readiness-policies").read_text()), 2)
+        self.assertEqual(Path(env["FIXTURE_LAUNCH_COUNT"]).read_text().strip(), "2")
+        self.assertTrue((runtime / "bin/agentdesk").stat().st_flags & 2)
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("node"), "macOS flags and Node required")
+    def test_readiness_timeout_retains_first_binary_and_restores_previous(self):
+        for mode in ("source", "release"):
+            with self.subTest(mode=mode):
+                _, runtime, fixture, env = self.installer_sandbox(mode)
+                timeout_env = {**env, "MISSING_INSTALL_POLICY": "timeouts", "FIXTURE_READINESS_TIMEOUT": "1"}
+                started = time.monotonic()
+                failed = self.install_fixture(fixture, timeout_env)
+                self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+                self.assertNotIn("Installation Complete", failed.stdout)
+                self.assertLess(time.monotonic() - started, 6)
+                binary = runtime / "bin/agentdesk"
+                self.assertTrue(binary.is_file(), failed.stdout + failed.stderr)
+                self.assertEqual(binary.read_bytes(), (fixture / "agentdesk").read_bytes())
+                self.assertTrue(binary.stat().st_flags & 2)
+                previous = binary.read_bytes()
+                failed_again = self.install_fixture(fixture, timeout_env, "two")
+                self.assertNotEqual(failed_again.returncode, 0, failed_again.stdout + failed_again.stderr)
+                self.assertNotIn("Installation Complete", failed_again.stdout)
+                self.assertEqual(binary.read_bytes(), previous)
+                self.assertTrue(binary.stat().st_flags & 2)
+                print("READINESS_TIMEOUT", mode, "first_retained=true previous_restored=true flags=2")
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("node"), "macOS flags and Node required")
+    def test_legacy_release_uses_pinned_support_and_preserves_operator_files(self):
+        _, runtime, fixture, env = self.installer_sandbox("release")
+        env = {**env, "FIXTURE_LEGACY_ARTIFACT": "1", "FIXTURE_HEALTH_503": "1"}
+        self.assert_installed_fixture(runtime, self.install_fixture(fixture, env))
+        with tarfile.open(env["FIXTURE_ARCHIVE"]) as archive:
+            names = archive.getnames()
+        for name in ("install_runtime_assets.py", "runtime-assets.txt"):
+            self.assertFalse(any(Path(path).name == name for path in names))
+        protected = {
+            "policies/auto-queue.js": (runtime / "policies/auto-queue.js").read_text() + "// operator edit\n",
+            "policies/operator.js": "operator policy\n",
+            "routines/default.yaml": "operator routine\n",
+            "config/agentdesk.yaml": "operator config\n",
+            "credentials/token": "operator credential\n",
+            "workspaces/user/notes.txt": "operator workspace\n",
+        }
+        for relative, content in protected.items():
+            path = runtime / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        before = (runtime / "bin/agentdesk").read_bytes()
+        self.assert_installed_fixture(runtime, self.install_fixture(fixture, env, "two"))
+        self.assertNotEqual((runtime / "bin/agentdesk").read_bytes(), before)
+        self.assertTrue((runtime / "bin/agentdesk").stat().st_flags & 2)
+        for relative, content in protected.items():
+            self.assertEqual((runtime / relative).read_text(), content, relative)
+        requests = Path(env["FIXTURE_SUPPORT_LOG"]).read_text().splitlines()
+        self.assertEqual({url.rsplit("/", 1)[1] for url in requests},
+                         {"runtime-assets.txt", "install_runtime_assets.py"})
+        self.assertEqual(len({url.split("/")[-3] for url in requests}), 1)
+        print("LEGACY_RELEASE", "first=true reinstall=true pinned_support=true flags=2")
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("node"), "macOS flags and Node required")
+    def test_support_fetch_failure_preserves_existing_binary(self):
+        for name in ("install_runtime_assets.py", "runtime-assets.txt"):
+            with self.subTest(name=name):
+                _, runtime, fixture, env = self.installer_sandbox("release")
+                self.assert_installed_fixture(runtime, self.install_fixture(fixture, env))
+                binary = runtime / "bin/agentdesk"
+                previous, previous_flags = binary.read_bytes(), binary.stat().st_flags
+                failed = self.install_fixture(fixture, {**env, "FIXTURE_LEGACY_ARTIFACT": "1",
+                    "FAIL_INSTALL_SUPPORT": name}, "two")
+                self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+                self.assertNotIn("Installation Complete", failed.stdout)
+                self.assertEqual(binary.read_bytes(), previous)
+                self.assertEqual(binary.stat().st_flags, previous_flags)
 
     def write_executable(self, path: Path, body: str) -> None:
         path.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + textwrap.dedent(body).lstrip(), encoding="utf-8")

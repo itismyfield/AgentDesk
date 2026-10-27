@@ -24,6 +24,10 @@ INSTALL_PORT="${AGENTDESK_INSTALL_PORT:-}"
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 CONFIG_PATH="$INSTALL_DIR/config/agentdesk.yaml"
 LEGACY_CONFIG_PATH="$INSTALL_DIR/agentdesk.yaml"
+INSTALL_SUPPORT_REF="a7182f11c9b2d3be48cfbf5cc1d527fafc022ea9"
+INSTALL_SUPPORT_HELPER_SHA256="e9fd618c9739c2065554bba1bb833e7b54e919d6064ce857e1ec241a005c1f45"
+INSTALL_SUPPORT_CONTRACT_SHA256="6e908a118af50d8952931936900173f783ce0eaae5ef9790c01f0a78ec672934"
+READINESS_TIMEOUT_SECONDS=60
 
 # Read defaults from defaults.json if available (single source of truth)
 _read_default() {
@@ -196,6 +200,40 @@ BINARY_REPLACED=0
 OLD_BINARY_PRESENT=0
 OLD_BINARY_LOCKED=0
 INSTALL_COMMITTED=0
+INSTALL_SUPPORT_DIR=""
+
+verify_install_support() {
+  python3 -c '
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+try:
+    valid = all(hashlib.sha256((root / name).read_bytes()).hexdigest() == digest
+                for name, digest in zip(("install_runtime_assets.py", "runtime-assets.txt"), sys.argv[2:]))
+except OSError:
+    valid = False
+sys.exit(0 if valid else 1)
+' "$1" "$INSTALL_SUPPORT_HELPER_SHA256" "$INSTALL_SUPPORT_CONTRACT_SHA256"
+}
+
+prepare_install_support() {
+  local installer="${BASH_SOURCE[0]:-}" local_support="" name
+  INSTALL_SUPPORT_DIR="$INSTALL_SCRATCH/installer-support"
+  mkdir -p "$INSTALL_SUPPORT_DIR"
+  if [ -n "$installer" ]; then
+    local_support=$(cd "$(dirname "$installer")" && pwd -P)
+  fi
+  if [ -n "$local_support" ] && verify_install_support "$local_support"; then
+    cp "$local_support/install_runtime_assets.py" "$INSTALL_SUPPORT_DIR/"
+    cp "$local_support/runtime-assets.txt" "$INSTALL_SUPPORT_DIR/"
+  else
+    for name in install_runtime_assets.py runtime-assets.txt; do
+      curl -fSL --connect-timeout 10 --max-time 30 \
+        "https://raw.githubusercontent.com/$REPO/$INSTALL_SUPPORT_REF/scripts/$name" \
+        -o "$INSTALL_SUPPORT_DIR/$name" || fail "Cannot fetch installer support: $name"
+    done
+  fi
+  verify_install_support "$INSTALL_SUPPORT_DIR" || fail "Installer support checksum mismatch"
+}
 
 finish_install() {
   local status="$?" target="$INSTALL_DIR/bin/agentdesk"
@@ -215,8 +253,8 @@ finish_install() {
         chflags uchg "$target" || status=1
       fi
     elif [ "$BINARY_REPLACED" = 1 ] && [ -f "$target" ]; then
-      chflags nouchg "$target" || status=1
-      rm -f "$target" || status=1
+      chflags uchg "$target" || status=1
+      warn "Installed binary retained after incomplete setup: $target"
     fi
   fi
   if [ -n "$INSTALL_STAGE" ]; then
@@ -242,7 +280,8 @@ install_runtime() {
   chmod +x "$INSTALL_STAGE/agentdesk"
   sign_binary_with_fallback "$INSTALL_STAGE/agentdesk"
   "$INSTALL_STAGE/agentdesk" --version
-  python3 "$source/scripts/install_runtime_assets.py" "$source" "$INSTALL_DIR"
+  python3 "$INSTALL_SUPPORT_DIR/install_runtime_assets.py" "$source" "$INSTALL_DIR" \
+    --contract "$INSTALL_SUPPORT_DIR/runtime-assets.txt"
   if [ -d "$source/dashboard/dist" ]; then
     mkdir -p "$INSTALL_DIR/dashboard/dist"
     cp -R "$source/dashboard/dist/." "$INSTALL_DIR/dashboard/dist/"
@@ -262,8 +301,9 @@ install_runtime() {
 }
 
 verify_installed_policies() {
-  local response
-  response=$(curl -fsS --max-time 5 \
+  local response timeout="$1"
+  [ "$timeout" -gt 0 ] || return 1
+  response=$(curl -fsS --max-time "$timeout" \
     -H "Origin: http://${DEFAULT_LOOPBACK}:$INSTALL_PORT" \
     "http://${DEFAULT_LOOPBACK}:$INSTALL_PORT/api/policies") || return 1
   python3 -c '
@@ -279,8 +319,9 @@ for name in ("auto-queue", "timeouts", "kanban-rules"):
 }
 
 read_boot_incarnation() {
-  local response
-  response=$(curl -sS --max-time 5 \
+  local response timeout="${1:-5}"
+  [ "$timeout" -gt 0 ] || return 1
+  response=$(curl -sS --max-time "$timeout" \
     -H "Origin: http://${DEFAULT_LOOPBACK}:$INSTALL_PORT" \
     "http://${DEFAULT_LOOPBACK}:$INSTALL_PORT/api/health/detail") || return 1
   python3 -c '
@@ -290,6 +331,26 @@ if not isinstance(value, str) or not value:
     sys.exit(1)
 print(value)
 ' <<< "$response"
+}
+
+wait_for_installed_policies() {
+  local deadline=$((SECONDS + READINESS_TIMEOUT_SECONDS)) current after remaining
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$((deadline - SECONDS))
+    if current=$(read_boot_incarnation "$remaining" 2>/dev/null) \
+      && [ "$current" != "$PREVIOUS_BOOT_INCARNATION" ]; then
+      remaining=$((deadline - SECONDS))
+      if [ "$remaining" -gt 0 ] && verify_installed_policies "$remaining" 2>/dev/null; then
+        remaining=$((deadline - SECONDS))
+        if [ "$remaining" -gt 0 ] && after=$(read_boot_incarnation "$remaining" 2>/dev/null) \
+          && [ "$current" = "$after" ] && [ "$SECONDS" -lt "$deadline" ]; then
+          return 0
+        fi
+      fi
+    fi
+    [ "$SECONDS" -ge "$deadline" ] || sleep 1
+  done
+  return 1
 }
 
 emit_launchd_plist() {
@@ -367,6 +428,8 @@ fi
 trap finish_install EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+INSTALL_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-install.XXXXXX")
+prepare_install_support
 
 # ── Download latest release ───────────────────────────────────────────────────
 ARTIFACT="agentdesk-${OS}-${ARCH}"
@@ -396,7 +459,6 @@ if [ -z "$LATEST_TAG" ]; then
     fail "git is required for source build"
   fi
 
-  INSTALL_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-install.XXXXXX")
   TMPDIR_BUILD="$INSTALL_SCRATCH/source"
   info "Cloning repository..."
   git clone --depth 1 "https://github.com/$REPO.git" "$TMPDIR_BUILD"
@@ -439,7 +501,6 @@ else
   DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST_TAG/${ARTIFACT}.tar.gz"
   info "Downloading $LATEST_TAG..."
 
-  INSTALL_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-install.XXXXXX")
   TMPDIR_DL="$INSTALL_SCRATCH"
 
   if ! curl -fSL "$DOWNLOAD_URL" -o "$TMPDIR_DL/${ARTIFACT}.tar.gz"; then
@@ -523,25 +584,12 @@ sleep 1
 xattr -d com.apple.quarantine "$PLIST_PATH" 2>/dev/null || true
 
 # Start
-if launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST_PATH" 2>/dev/null; then
-  sleep 3
-
-  # Health check
-  if curl -sf --max-time 5 "http://${DEFAULT_LOOPBACK}:$INSTALL_PORT/api/health" | grep -q '"status":"healthy"'; then
-    ok "AgentDesk is running on port $INSTALL_PORT"
-  else
-    fail "Service health check failed. Check logs: $INSTALL_DIR/logs/"
-  fi
-else
+if ! launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST_PATH" 2>/dev/null; then
   fail "launchd bootstrap failed. Check logs: $INSTALL_DIR/logs/"
 fi
 
-CURRENT_BOOT_INCARNATION=$(read_boot_incarnation) || fail "Cannot verify the started AgentDesk process"
-if [ "$CURRENT_BOOT_INCARNATION" = "$PREVIOUS_BOOT_INCARNATION" ]; then
-  fail "AgentDesk process did not restart; refusing stale policy registration"
-fi
-verify_installed_policies || fail "Required policies failed to load. Check logs: $INSTALL_DIR/logs/"
-ok "Required policies registered: auto-queue, timeouts, kanban-rules"
+wait_for_installed_policies || fail "Could not verify a new AgentDesk process and required policies within ${READINESS_TIMEOUT_SECONDS}s. Check logs: $INSTALL_DIR/logs/"
+ok "AgentDesk API and required policies are ready on port $INSTALL_PORT"
 INSTALL_COMMITTED=1
 
 # ── Open browser ──────────────────────────────────────────────────────────────
