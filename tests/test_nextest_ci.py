@@ -809,6 +809,7 @@ class NativeScript(ScriptRepo):
 
     LIB = "mod m {\n#[test]\nfn a() {}\n#[test]\nfn health_b() {}\n#[test]\nfn health_pg_c() {}\n}\n"
     CARGO = """#!/bin/sh
+echo "$*" >> "$NATIVE_CARGO_LOG"
 case "$2" in
   --version) echo "cargo-nextest 0.9.149" ;;
   archive) while [ "$1" != --archive-file ]; do shift; done; echo bytes > "$2" ;;
@@ -820,7 +821,7 @@ esac
 
     def setUp(self):
         super().setUp()
-        (self.bin / "rustc").write_text("#!/bin/sh\necho 'host: aarch64-apple-darwin'\n")
+        (self.bin / "rustc").write_text("#!/bin/sh\nprintf 'host: %s\\n' \"$NATIVE_TARGET\"\n")
         (self.bin / "rustc").chmod(0o755)
         self.write("native-list.json", nextest_list(["m::a", "m::health_b", "m::health_pg_c"]))
         # The real exemptions name repository tests; this tree has none of them.
@@ -829,16 +830,22 @@ esac
         start = text.index("EXEMPT = {")
         classifier.write_text(text[:start] + "EXEMPT = {}\n_UNUSED_EXEMPT = {" + text[start + len("EXEMPT = {"):])
 
-    def native(self, ran, exit_code=0):
+    def native(self, ran, exit_code=0, phase=None, reset=True, platform="macos"):
+        import shutil
         self.write("junit.xml", junit([(n, "", 0.1) for n in ran]))
         temp = self.dir / "runner"
-        self.sp.run(["rm", "-rf", str(temp)], check=True)
-        temp.mkdir()
+        if reset:
+            shutil.rmtree(temp, ignore_errors=True)
+            temp.mkdir()
         env = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(temp),
                "GITHUB_WORKSPACE": str(self.repo), "GITHUB_STEP_SUMMARY": str(self.dir / "summary.md"),
                "NATIVE_LIST": str(self.dir / "native-list.json"), "NATIVE_JUNIT": str(self.dir / "junit.xml"),
-               "NATIVE_EXIT": str(exit_code), "GITHUB_RUN_ID": "9"}
-        done = self.sp.run(["bash", "scripts/ci/nextest-native.sh", "macos", "macos-lib", "pg-classifier"],
+               "NATIVE_EXIT": str(exit_code), "GITHUB_RUN_ID": "9", "NATIVE_CARGO_LOG": str(temp / "cargo.log"),
+               "NATIVE_TARGET": "x86_64-pc-windows-msvc" if platform == "windows" else "aarch64-apple-darwin"}
+        command = ["bash", "scripts/ci/nextest-native.sh", platform, f"{platform}-lib", "pg-classifier"]
+        if phase is not None:
+            command.append(phase)
+        done = self.sp.run(command,
                            cwd=self.repo, env=env, capture_output=True, text=True)
         plan = temp / "nextest/plan/plan.json"
         tests = [t[1] for t in json.loads(plan.read_text())["workers"][0]["tests"]] if plan.exists() else None
@@ -864,6 +871,60 @@ esac
         rc, out, _ = self.native(["m::a", "m::health_b", "m::health_pg_c"], exit_code=100)
         self.assertEqual(rc, 1, out)
         self.assertIn("nextest exited 100", out)
+
+    def test_prepare_then_run_uses_the_same_plan_on_both_native_platforms(self):
+        for platform in ("macos", "windows"):
+            with self.subTest(platform=platform):
+                rc, out, tests = self.native(["m::a", "m::health_b", "m::health_pg_c"],
+                                             phase="prepare", platform=platform)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(tests, ["m::a", "m::health_b", "m::health_pg_c"])
+                directory = self.dir / "runner/nextest"
+                files = ("plan/plan.json", "plan/worker-0.toml", "results/worker-0/worker.json")
+                prepared = {name: (directory / name).read_bytes() for name in files}
+                self.assertFalse((directory / "results/worker-0/exit-code").exists())
+                self.assertFalse((directory / "verdict.json").exists())
+                rc, out, _ = self.native(tests, phase="run", reset=False, platform=platform)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(prepared, {name: (directory / name).read_bytes() for name in files})
+                verdict = json.loads((directory / "verdict.json").read_text())
+                self.assertEqual((verdict["verdict"], verdict["totals"]["executed"]), ("pass", 3))
+                calls = (self.dir / "runner/cargo.log").read_text().splitlines()
+                for operation in ("archive", "list", "run"):
+                    self.assertEqual(sum(line.startswith(f"nextest {operation} ") for line in calls), 1)
+
+    def test_prepare_without_run_fails_execution_audit(self):
+        rc, out, _ = self.native(["m::a", "m::health_b", "m::health_pg_c"], phase="prepare")
+        self.assertEqual(rc, 0, out)
+        directory = self.dir / "runner/nextest"
+        verdict = nci.audit(nci.load_plan(directory / "plan/plan.json"), directory / "results")
+        self.assertEqual((verdict["verdict"], verdict["totals"]["executed"]), ("fail", 0))
+        self.assertLessEqual({"missing-exit-code", "missing-junit"}, {p["kind"] for p in verdict["problems"]})
+
+    def test_run_without_prepared_plan_fails_before_starting_tests(self):
+        rc, out, _ = self.native(["m::a", "m::health_b", "m::health_pg_c"], phase="run")
+        self.assertNotEqual(rc, 0, out)
+        self.assertFalse((self.dir / "runner/cargo.log").exists())
+
+    def test_run_rechecks_the_archive_across_the_step_boundary(self):
+        tests = ["m::a", "m::health_b", "m::health_pg_c"]
+        rc, out, _ = self.native(tests, phase="prepare")
+        self.assertEqual(rc, 0, out)
+        (self.dir / "runner/nextest/lib-tests.tar.zst").write_bytes(b"changed between steps")
+        rc, out, _ = self.native(tests, phase="run", reset=False)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("archive digest differs", out)
+        self.assertFalse(any(line.startswith("nextest run ")
+                             for line in (self.dir / "runner/cargo.log").read_text().splitlines()))
+
+    def test_split_run_still_fails_when_a_planned_test_did_not_run(self):
+        rc, out, _ = self.native(["m::a", "m::health_b", "m::health_pg_c"], phase="prepare")
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = self.native(["m::a", "m::health_b"], phase="run", reset=False)
+        self.assertNotEqual(rc, 0, out)
+        verdict = json.loads((self.dir / "runner/nextest/verdict.json").read_text())
+        self.assertEqual((verdict["verdict"], verdict["totals"]["planned"], verdict["totals"]["executed"]),
+                         ("fail", 3, 2))
 
 
 class RustSources(unittest.TestCase):
