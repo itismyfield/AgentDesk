@@ -367,7 +367,50 @@ mod tests {
                 .fetch_one(pool.as_ref())
                 .await
                 .unwrap();
-        assert_eq!(saved, serde_json::to_value(artifact).unwrap());
+        assert_eq!(saved, serde_json::to_value(&artifact).unwrap());
+        let changed_message = crate::services::message_outbox::OutboxMessage {
+            content: "changed answer",
+            ..message
+        };
+        let changed_artifact = origin.seal(changed_message.content);
+        let reused = enqueue_headless_outbox_with_origin(
+            &pool,
+            changed_message,
+            Some(MessageId::new(90001)),
+            &ProviderKind::Claude,
+            2,
+            None,
+            (true, Some(&changed_artifact)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reused,
+            crate::services::message_outbox::OutboxEnqueueOutcome::Enqueued { id }
+        );
+        let stored: (String, serde_json::Value) =
+            sqlx::query_as("SELECT content,output_origin FROM message_outbox WHERE id=$1")
+                .bind(id)
+                .fetch_one(pool.as_ref())
+                .await
+                .unwrap();
+        assert_eq!(stored, (message.content.to_string(), saved));
+        let mut wrong = serde_json::to_value(&artifact).unwrap();
+        wrong["origin"]["nonce"] = serde_json::json!("different-episode");
+        let wrong: output::Artifact = serde_json::from_value(wrong).unwrap();
+        assert!(
+            enqueue_headless_outbox_with_origin(
+                &pool,
+                message,
+                Some(MessageId::new(90001)),
+                &ProviderKind::Claude,
+                2,
+                None,
+                (true, Some(&wrong)),
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[test]

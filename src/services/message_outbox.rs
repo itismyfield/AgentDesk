@@ -293,7 +293,7 @@ pub(crate) async fn enqueue_outbox_with_origin_on_tx(
          ON CONFLICT (dedupe_key)
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO UPDATE SET dedupe_expires_at = NULL
-           WHERE message_outbox.output_origin IS NOT DISTINCT FROM excluded.output_origin
+           WHERE (message_outbox.output_origin->'origin') IS NOT DISTINCT FROM (excluded.output_origin->'origin')
          RETURNING id",
     )
     .bind(message.target)
@@ -376,7 +376,7 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_origin(
          ON CONFLICT (dedupe_key)
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key
-          WHERE message_outbox.output_origin IS NOT DISTINCT FROM excluded.output_origin
+          WHERE (message_outbox.output_origin->'origin') IS NOT DISTINCT FROM (excluded.output_origin->'origin')
          RETURNING id",
     )
     .bind(message.target)
