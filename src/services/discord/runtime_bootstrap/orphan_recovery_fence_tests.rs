@@ -103,3 +103,68 @@ async fn orphan_recovery_clears_stale_links_and_requeues_pending_dispatches_pg()
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_orphan_boot_keeps_protected_dispatch_notify_fenced_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    crate::db::replay_disposition::tests::apply_test_mutant(&pool).await;
+    let mut dispatches = Vec::new();
+    for (n, state) in [
+        "withheld",
+        "started_unclassified",
+        "startup_failed_no_effect",
+        "legacy",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dispatch = format!("p3-orphan-dispatch-{n}");
+        let agent = format!("p3-orphan-agent-{n}");
+        crate::db::agents::insert_agent_channels_for_tests(&pool, &agent, None, None).await;
+        card_and_dispatch(&pool, &agent, &dispatch, "pending").await;
+        if state != "legacy" {
+            let receipt:i64=sqlx::query_scalar("INSERT INTO intake_outbox(target_instance_id,forwarded_by_instance_id,channel_id,user_msg_id,user_text,provider,status,replay_only,replay_disposition,replay_source_message_ids,request_owner_id,turn_kind,agent_id,replay_preserved)
+                VALUES('worker','leader',$1,$1,'original','claude','unknown',TRUE,'registered_not_started',ARRAY[$1],'7','standard','agent','{}'::jsonb) RETURNING id")
+                .bind(format!("p3-orphan-{n}")).fetch_one(&pool).await.unwrap();
+            sqlx::query("UPDATE task_dispatches SET replay_receipt_id=$2 WHERE id=$1")
+                .bind(&dispatch)
+                .bind(receipt)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE intake_outbox SET replay_disposition='started_unclassified' WHERE id=$1",
+            )
+            .bind(receipt)
+            .execute(&pool)
+            .await
+            .unwrap();
+            if state != "started_unclassified" {
+                sqlx::query("UPDATE intake_outbox SET replay_disposition=$2 WHERE id=$1")
+                    .bind(receipt)
+                    .bind(state)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        }
+        dispatches.push((dispatch, state));
+    }
+    let path = crate::cli::agentdesk_runtime_root()
+        .unwrap()
+        .join("runtime/dcserver.pid");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, "1").unwrap();
+    recover_orphan_pending_dispatches_once(Some(&pool)).await;
+    for (dispatch, state) in dispatches {
+        assert_eq!(
+            notified(&pool, &dispatch).await.1,
+            state == "legacy",
+            "{state}: protected boot rearm must stay zero, healthy control one"
+        );
+    }
+    pool.close().await;
+    db.drop().await;
+}

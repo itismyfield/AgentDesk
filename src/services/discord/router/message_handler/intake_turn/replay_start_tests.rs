@@ -77,7 +77,11 @@ mod kickoff_tests {
         let runtime_root = runtime_store::agentdesk_root().expect("temporary runtime root");
         let config = crate::runtime_layout::config_file_path(&runtime_root);
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(&config, "server: {}\ndata: {dir: data}\nagents: []\n").unwrap();
+        std::fs::write(
+            &config,
+            "server: {}\ndata: {dir: data}\nagents: []\nproviders: {claude: {runtime: pipe}}\n",
+        )
+        .unwrap();
         let config_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_CONFIG",
             &config,
@@ -86,8 +90,9 @@ mod kickoff_tests {
             "ADK_INTAKE_ROUTING_MODE",
             std::ffi::OsStr::new("disabled"),
         );
-        let boot = serde_json::from_value(serde_json::json!({"server": {}, "agents": []})).unwrap();
+        let boot = serde_json::from_value(serde_json::json!({"server": {}, "agents": [], "providers": {"claude": {"runtime": "pipe"}}})).unwrap();
         crate::services::tui_o::channel_policy::install(&boot).unwrap();
+        crate::services::provider_hosting::install_provider_hosting_config(&boot);
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let version: String = sqlx::query_scalar("SELECT version()")
@@ -1877,8 +1882,9 @@ type Answer = Arc<dyn Fn(&axum::http::Method, &str) -> Option<serde_json::Value>
 
 async fn host_with(channels: &[ChannelId], answer: Answer) -> Host {
     let root = crate::config::TestRuntimeRootGuard::new();
-    let boot = serde_json::from_value(serde_json::json!({"server": {}, "agents": []})).unwrap();
+    let boot = serde_json::from_value(serde_json::json!({"server": {}, "agents": [], "providers": {"claude": {"runtime": "pipe"}}})).unwrap();
     crate::services::tui_o::channel_policy::install(&boot).unwrap();
+    crate::services::provider_hosting::install_provider_hosting_config(&boot);
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let api = Recorder::start_with(answer).await;

@@ -2,3 +2,4 @@
 #   <binary-id> <test> | removed|runnable->ignored | <reason>
 # A row must match a loss the base diff reports for this change, and a loss with no row fails.
 # Clear the rows once the change that needed them has landed: they would be stale on the next PR.
+agentdesk services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::dormant_replay_lookup_failure_keeps_the_legacy_hold_at_the_gateway_pg | removed | renamed to producer_off_lookup_failure_keeps_gateway_custody_until_recovery_pg; preserves explicit producer-off coverage and checks durable custody and recovery under the always-on receipt consumer

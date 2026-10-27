@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "pre_emit_guard/replay.rs"]
+mod replay;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -293,6 +296,9 @@ pub(super) async fn run_pre_emit_guard(
     // Detect stale session resume failure in watcher output
     let is_stale_resume = stale_resume_detected;
     if is_stale_resume {
+        if replay::blocked(context).await {
+            return PreEmitGuardOutcome::ContinueWatcherLoop;
+        }
         clear_provider_overload_retry_state(channel_id);
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
