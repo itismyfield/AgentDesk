@@ -38,7 +38,7 @@ pub fn extract_codex_rollout_user_prompt_with_entry_id(
     {
         return None;
     }
-    if is_codex_shell_command_record(payload) {
+    if is_codex_shell_command_record(payload) || is_codex_context_record(payload) {
         return None;
     }
     let prompt = reject_synthetic_tui_user_prompt(extract_message_content_text(payload)?)?;
@@ -57,15 +57,28 @@ pub fn extract_codex_rollout_user_prompt_with_evidence(
 /// Codex records a `!cmd` run as a user message whose every item is the shell's; typed text
 /// with the same body names `user.text` (or nothing, on older writers) and stays an input.
 fn is_codex_shell_command_record(payload: &Value) -> bool {
-    payload
+    codex_content_item_kinds(payload)
+        .is_some_and(|mut kinds| kinds.all(|kind| kind == Some("shell.user_command")))
+}
+
+/// Codex writes its AGENTS.md instructions and environment as a user message before the prompt.
+/// Named item kinds decide; a writer that names none is known by the exact text shape.
+pub(crate) fn is_codex_context_record(payload: &Value) -> bool {
+    const CONTEXT: [&str; 2] = ["agents_md.instructions", "environments.environment_context"];
+    let text = extract_message_content_text(payload).unwrap_or_default();
+    let context = match codex_content_item_kinds(payload) {
+        Some(mut kinds) => kinds.all(|kind| kind.is_some_and(|kind| CONTEXT.contains(&kind))),
+        None => is_codex_agents_md_prompt(&text),
+    };
+    context || is_environment_context_prompt(&text)
+}
+
+fn codex_content_item_kinds(payload: &Value) -> Option<impl Iterator<Item = Option<&str>>> {
+    let kinds = payload
         .pointer("/internal_chat_message_metadata_passthrough/content_item_kinds")
         .and_then(Value::as_array)
-        .is_some_and(|kinds| {
-            !kinds.is_empty()
-                && kinds
-                    .iter()
-                    .all(|kind| kind.as_str() == Some("shell.user_command"))
-        })
+        .filter(|kinds| !kinds.is_empty())?;
+    Some(kinds.iter().map(Value::as_str))
 }
 
 fn extract_codex_rollout_entry_id(json: &Value, payload: &Value) -> Option<String> {
