@@ -1,6 +1,8 @@
 //! Pastes one external human input into a hosted Claude TUI composer; nothing here enqueues.
 //! One pre-paste capture chooses an optional stash; a short settle precedes one Enter.
 
+#[cfg(unix)]
+mod epoch;
 mod ownership;
 pub(crate) use ownership::{
     ComposerOwner, composer_owner, composer_owner_in_session, draft_sighting,
@@ -329,6 +331,10 @@ pub(in crate::services::claude_tui) fn before_paste(
     pane: &Pane,
     stash_allowed: bool,
 ) -> Result<bool, Veto> {
+    #[cfg(unix)]
+    if epoch::observe(pane.target().trim_start_matches('=').trim_end_matches(':')).is_err() {
+        return Err(Veto::PaneUnavailable);
+    }
     if pane
         .ok(&["display-message", "-p", "-t", pane.target(), "#{pane_dead}"])
         .is_none_or(|output| !pane_dead_is_live(&output))

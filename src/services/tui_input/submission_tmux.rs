@@ -76,7 +76,9 @@ impl SubmissionTmux {
 impl InputTransport for SubmissionTmux {
     fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
         let target = format!("={session}:");
-        self.run(&["send-keys", "-t", &target, "-l", "--", text])
+        super::writer_lease::content("tmux", session, || {
+            self.run(&["send-keys", "-t", &target, "-l", "--", text])
+        })
     }
 
     fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String> {
@@ -100,7 +102,7 @@ impl InputTransport for SubmissionTmux {
             args.push("-d");
         }
         args.extend(["-b", buffer, "-t", &target]);
-        self.run(&args)
+        super::writer_lease::content("tmux", session, || self.run(&args))
     }
 
     fn send_keys(&mut self, session: &str, keys: &[HostKey]) -> Result<Output, String> {

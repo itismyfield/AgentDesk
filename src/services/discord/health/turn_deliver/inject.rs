@@ -3,9 +3,12 @@
 //! Herdr pane's gate (`herdr`) or, once enabled, `codex_tui::busy_inject`.
 
 mod catch_up_race;
+#[cfg(all(test, unix))]
+mod first_input;
 mod herdr;
 mod names;
 mod queued_owner;
+mod queued_provider;
 mod queued_reconcile;
 mod queued_support;
 
@@ -117,8 +120,13 @@ pub(crate) enum Origin {
 
 impl Origin {
     pub(crate) fn queued_head_ready(provider: &ProviderKind, channel: ChannelId) -> bool {
+        let supported = *provider == ProviderKind::Claude;
+        #[cfg(test)]
+        let supported = supported
+            || (test_hook::codex_enabled(channel.get())
+                && queued_provider::QueuedProvider::select(provider, channel.get()).is_some());
         !cfg!(windows)
-            && *provider == ProviderKind::Claude
+            && supported
             && mode(channel.get()) != InjectMode::Off
             && queued_head_enabled(channel.get())
     }

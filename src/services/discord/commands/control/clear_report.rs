@@ -18,6 +18,7 @@ const TRANSITION_BUSY: &str = "진행 중이던 세션 작업이 끝나기를 �
 const HERDR_TRANSITION_BUSY: &str = "진행 중인 세션 작업의 완료를 확인하지 못했어요.";
 const END_UNCONFIRMED: &str = "이전 세션 프로세스의 종료를 확인하지 못했어요.";
 const COUNT_UNKNOWN: &str = "대기 메시지 수를 확인하지 못했어요.";
+const QUEUE_READ_ONLY: &str = "입력 보관 파일은 읽기 전용이라 비우지 않았어요. 원문을 보존했으며 호환되는 복구 도구로 확인해야 해요.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ExecutionCleanup {
@@ -45,6 +46,7 @@ impl ClearReport {
     /// One line naming every cause, or none when the clear left nothing behind.
     pub(in crate::services::discord) fn warning(&self) -> Option<String> {
         let saved = match (self.failed.is_empty(), self.retried.is_empty()) {
+            _ if self.failed.contains(&"queue_read_only") => Some(QUEUE_READ_ONLY),
             (false, _) if self.execution.is_some() => Some(HERDR_CLEANUP_UNCONFIRMED),
             (false, _) => Some(RETRY_FAILED),
             (true, false) => Some(RETRY_LANDED),
@@ -63,6 +65,9 @@ impl ClearReport {
 
     /// The cleared notice, the discarded count, and the warning line under them.
     pub(in crate::services::discord) fn reply(&self) -> String {
+        if self.failed.contains(&"queue_read_only") {
+            return self.warning().unwrap_or_default();
+        }
         let count = match &self.discarded {
             Some(ids) => format!("대기 메시지 {}건을 비웠어요.", ids.len()),
             None => COUNT_UNKNOWN.to_string(),
@@ -234,6 +239,23 @@ mod clear_count_tests;
 #[cfg(test)]
 #[path = "herdr_report_tests.rs"]
 mod herdr_report_tests;
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+    #[test]
+    fn read_only_clear_reports_preserved_original_instead_of_retry_or_success() {
+        let report = ClearReport {
+            failed: vec!["queue_read_only"],
+            ..Default::default()
+        };
+        assert_eq!(report.reply(), format!("⚠️ {QUEUE_READ_ONLY}"));
+        assert_eq!(report.warning(), Some(format!("⚠️ {QUEUE_READ_ONLY}")));
+        let mut report = report;
+        report.stop_unconfirmed = true;
+        assert!(report.reply().contains(STOP_UNCONFIRMED));
+    }
+}
 
 #[cfg(all(test, unix))]
 #[path = "consent_clear_tests.rs"]

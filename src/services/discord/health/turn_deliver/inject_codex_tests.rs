@@ -44,6 +44,8 @@ counter.write_text(str(number))
 row = f"native-user-{number}"
 (d / "receipt.id").write_text(row)
 body = (d / "buffer").read_text()
+if (d / "defer.receipt").exists():
+    sys.exit(0)
 response = {"type": "response_item", "payload": {"type": "message", "role": "user",
     "content": [{"type": "input_text", "text": body}],
     "internal_chat_message_metadata_passthrough": {"turn_id": "turn-open"}}}
@@ -54,6 +56,7 @@ with (d / "rollout.jsonl").open("a") as stream:
     for record in (response, completed):
         stream.write(json.dumps(record) + "\n")
 PY
+    [ -f "$d/fail.enter" ] && exit 1
     ;;
   esac ;;
 esac
@@ -90,9 +93,9 @@ fn steerable() -> String {
 
 /// A scripted Codex pane over `rollout`, its row/binding and a per-channel mode/program override.
 /// This does not force the Codex capability.
-struct CodexPane {
-    dir: tempfile::TempDir,
-    channel: u64,
+pub(super) struct CodexPane {
+    pub(super) dir: tempfile::TempDir,
+    pub(super) channel: u64,
 }
 
 impl CodexPane {
@@ -141,11 +144,11 @@ impl CodexPane {
         pane
     }
 
-    fn session(&self) -> String {
+    pub(super) fn session(&self) -> String {
         ProviderKind::Codex.build_tmux_session_name(&format!("inject-{}", self.channel))
     }
 
-    fn path(&self, name: &str) -> PathBuf {
+    pub(super) fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
     }
 
@@ -168,7 +171,7 @@ impl CodexPane {
     }
 
     /// Paste and Enter commands the server applied.
-    fn keys(&self) -> String {
+    pub(super) fn keys(&self) -> String {
         let keys = fs::read_to_string(self.path("keys")).unwrap_or_default();
         let first = keys
             .lines()
@@ -475,6 +478,586 @@ async fn an_enabled_codex_channel_steers_the_open_turn_quietly_pg() {
     assert_eq!(
         (draft.keys(), queued),
         (String::new(), vec!["status?".to_string()])
+    );
+}
+
+pub(super) struct QueuedCodex {
+    _db: crate::db::auto_queue::test_support::TestPostgresDb,
+    pub(super) shared: std::sync::Arc<crate::services::discord::SharedData>,
+    pub(super) pane: CodexPane,
+    pub(super) head: crate::services::turn_orchestrator::Intervention,
+}
+
+#[path = "inject_codex_v2_tests.rs"]
+mod v2_tests;
+
+impl QueuedCodex {
+    pub(super) async fn new(channel: u64) -> Self {
+        use crate::services::turn_orchestrator::{Intervention, InterventionMode};
+        use poise::serenity_prelude::{MessageId, UserId};
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool));
+        let native = format!("queued-codex-{channel}");
+        let meta = record(serde_json::json!({"type":"session_meta", "payload":{
+            "id":native, "cwd":"/tmp"}}));
+        let pane = CodexPane::new(
+            channel,
+            &(meta + &steerable()),
+            RuntimeHandoffKind::CodexTui,
+        );
+        let mut binding =
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&pane.session())
+                .unwrap();
+        binding.session_id = Some(native);
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&pane.session(), binding);
+        test_hook::enable_codex(channel);
+        test_hook::set_queued_head(channel, true);
+        let head = Intervention {
+            author_id: UserId::new(1),
+            author_is_bot: false,
+            message_id: MessageId::new(channel * 100),
+            queued_generation: 0,
+            source_message_ids: vec![MessageId::new(channel * 100)],
+            source_message_queued_generations: vec![
+                crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
+                    MessageId::new(channel * 100),
+                    0,
+                ),
+            ],
+            source_text_segments: Vec::new(),
+            text: "status?".into(),
+            mode: InterventionMode::Soft,
+            created_at: std::time::Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        };
+        let result = crate::services::discord::mailbox_enqueue_intervention(
+            &shared,
+            &ProviderKind::Codex,
+            ChannelId::new(channel),
+            head,
+        )
+        .await;
+        assert!(result.enqueued && result.persistence_error.is_none());
+        let head = crate::services::discord::mailbox_snapshot(&shared, ChannelId::new(channel))
+            .await
+            .intervention_queue
+            .remove(0);
+        assert!(crate::services::turn_orchestrator::prefix::eligible(&head));
+        Self {
+            _db: db,
+            shared,
+            pane,
+            head,
+        }
+    }
+
+    async fn attempt(&self) -> InjectAttempt {
+        let request = HumanInputRequest {
+            channel_id: ChannelId::new(self.pane.channel),
+            provider: ProviderKind::Codex,
+            text: self.head.text.clone(),
+            author_id: 1,
+            source: "queued".into(),
+            metadata: None,
+            channel_name_hint: None,
+        };
+        let origin = inject::Origin::QueuedHead {
+            expected: crate::services::turn_orchestrator::QueueIdentity::of(&self.head),
+            parent: None,
+            gate: |_, _| true,
+        };
+        super::inject_human_input(&self.shared, &request, origin).await
+    }
+
+    fn persistence(&self) -> crate::services::turn_orchestrator::QueuePersistenceContext {
+        crate::services::discord::queue_persistence_context(
+            &self.shared,
+            &ProviderKind::Codex,
+            ChannelId::new(self.pane.channel),
+        )
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_codex_real_entry_settles_native_receipt_once_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = QueuedCodex::new(7_272_101).await;
+    assert!(matches!(f.attempt().await, InjectAttempt::Injected { .. }));
+    assert_eq!(f.pane.keys(), "paste-buffer+send-keys");
+    let mailbox = f.shared.mailbox(ChannelId::new(f.pane.channel));
+    assert!(mailbox.snapshot().await.intervention_queue.is_empty());
+    let replay = crate::services::discord::mailbox_enqueue_intervention(
+        &f.shared,
+        &ProviderKind::Codex,
+        ChannelId::new(f.pane.channel),
+        f.head.clone(),
+    )
+    .await;
+    assert!(
+        !replay.enqueued,
+        "settled source identity cannot be queued again"
+    );
+    assert_eq!(f.pane.keys(), "paste-buffer+send-keys");
+}
+
+impl QueuedCodex {
+    pub(super) fn disk_path(&self) -> PathBuf {
+        crate::services::discord::runtime_store::discord_pending_queue_root()
+            .unwrap()
+            .join("codex")
+            .join(self.persistence().token_hash)
+            .join(format!("{}.json", self.pane.channel))
+    }
+
+    fn disk(&self) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(self.disk_path()).unwrap()).unwrap()
+    }
+
+    fn request(&self) -> HumanInputRequest {
+        HumanInputRequest {
+            channel_id: ChannelId::new(self.pane.channel),
+            provider: ProviderKind::Codex,
+            text: self.head.text.clone(),
+            author_id: 1,
+            source: "queued".into(),
+            metadata: None,
+            channel_name_hint: None,
+        }
+    }
+
+    fn origin(&self) -> inject::Origin {
+        inject::Origin::QueuedHead {
+            expected: crate::services::turn_orchestrator::QueueIdentity::of(&self.head),
+            parent: None,
+            gate: |_, _| true,
+        }
+    }
+
+    /// An Enter whose result tmux could not report is a real unconfirmed effect.
+    async fn leave_unknown(&self) {
+        self.pane.set("defer.receipt", "");
+        self.pane.set("fail.enter", "");
+        let attempt = self.attempt().await;
+        assert!(
+            matches!(
+                attempt,
+                InjectAttempt::Unconfirmed {
+                    detail: "queued_settle_unknown",
+                    ..
+                }
+            ),
+            "the actor retains an unconfirmed effect as Unknown: {attempt:?}"
+        );
+        assert_eq!(self.disk()["head_injection"]["phase"], "unknown");
+        assert_eq!(self.pane.keys(), "paste-buffer+send-keys");
+    }
+
+    async fn restart(&mut self) {
+        self.shared = crate::services::discord::make_shared_data_for_tests_with_storage(
+            self.shared.pg_pool.clone(),
+        );
+        let restored = self
+            .shared
+            .mailbox(ChannelId::new(self.pane.channel))
+            .hydrate_pending_queue_from_disk_or_refused(self.persistence())
+            .await
+            .expect("the replacement actor accepts restoration");
+        assert!(restored.persistence_error.is_none(), "{restored:?}");
+        assert_eq!(restored.queue_len_after, 1);
+    }
+
+    fn late_receipt(&self) -> String {
+        let body = fs::read_to_string(self.pane.path("buffer")).unwrap();
+        record(serde_json::json!({"type":"event_msg", "payload":{
+            "type":"item_completed", "turn_id":TURN, "item":{
+                "type":"UserMessage", "id": self.pane.receipt_id(),
+                "content":[{"type":"text", "text":body, "text_elements":[]}]}}}))
+    }
+
+    fn append(&self, text: &str) {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(self.pane.path("rollout.jsonl"))
+            .unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_codex_unknown_restart_waits_for_complete_receipt_without_retyping_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let mut f = QueuedCodex::new(7_272_102).await;
+    f.leave_unknown().await;
+    let mut disk = f.disk();
+    disk["head_injection"]["phase"] = serde_json::json!("may_have_sent");
+    fs::write(f.disk_path(), disk.to_string()).unwrap();
+    f.restart().await;
+    assert_eq!(
+        f.disk()["head_injection"]["phase"],
+        "unknown",
+        "restart must preserve the possibly sent attempt before any retry"
+    );
+    let calls = f.pane.tmux_calls();
+    assert_eq!(
+        f.attempt().await,
+        InjectAttempt::HandbackFailed("queued_head_unknown")
+    );
+    assert_eq!(f.disk()["head_injection"]["phase"], "unknown");
+    let before = fs::read(f.disk_path()).unwrap();
+    let receipt = f.late_receipt();
+    f.append(receipt.trim_end_matches('\n'));
+    assert_eq!(
+        f.attempt().await,
+        InjectAttempt::HandbackFailed("queued_head_unknown")
+    );
+    assert_eq!(fs::read(f.disk_path()).unwrap(), before);
+    assert_eq!(
+        f.pane.tmux_calls(),
+        calls,
+        "Unknown never re-enters the pane"
+    );
+    f.append("\n");
+    assert_eq!(
+        f.attempt().await,
+        InjectAttempt::NotSent("queued_head_reconciled")
+    );
+    assert_eq!(
+        f.pane.tmux_calls(),
+        calls,
+        "receipt reconciliation never types"
+    );
+    assert!(
+        f.shared
+            .mailbox(ChannelId::new(f.pane.channel))
+            .snapshot()
+            .await
+            .intervention_queue
+            .is_empty()
+    );
+    assert!(f.disk()["head_injection"].is_null());
+    assert_eq!(f.disk()["terminal_identities"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_codex_v2_compat_clear_keeps_original_and_marker_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = QueuedCodex::new(7_272_201).await;
+    let original = f.disk()[0].clone();
+    let snapshot = serde_json::json!({
+        "version": 2, "items": [], "head_injection": null,
+        "retained_inputs": [{
+            "input": {"identity": {"primary": original["message_id"],
+                "queued_generation": original["queued_generation"],
+                "sources": [{"message_id": original["message_id"],
+                    "queued_generation": original["queued_generation"]}]},
+                "original": original, "phase": "unknown", "attempt": null,
+                "payload": null, "confirmation_deadline_ms": 30_000},
+            "reason": {"kind": "unconfirmed"},
+            "notice": {"kind": "unconfirmed", "enqueued": false}}],
+        "terminal_identities": []});
+    let bytes = serde_json::to_vec_pretty(&snapshot).unwrap();
+    fs::write(f.disk_path(), &bytes).unwrap();
+    let marker = f.disk_path().with_extension("dispatch");
+    fs::write(&marker, b"held dispatch bytes").unwrap();
+    let calls = f.pane.tmux_calls();
+    let _ = f.attempt().await;
+    assert_eq!(
+        f.pane.tmux_calls(),
+        calls,
+        "V2 read-only entry must not type"
+    );
+    assert_eq!(fs::read(f.disk_path()).unwrap(), bytes);
+    let cleared = f
+        .shared
+        .mailbox(ChannelId::new(f.pane.channel))
+        .clear(f.persistence())
+        .await;
+    assert_eq!(
+        fs::read(f.disk_path()).unwrap(),
+        bytes,
+        "A24: compatibility clear must preserve retained original bytes"
+    );
+    assert_eq!(
+        fs::read(marker).unwrap(),
+        b"held dispatch bytes",
+        "A24: read-only refusal precedes dispatch marker removal"
+    );
+    assert!(cleared.persistence.count_unknown);
+    assert!(cleared.discarded_message_ids.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_codex_proof_filters_recorded_identity_before_receipt_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let mut f = QueuedCodex::new(7_272_202).await;
+    f.leave_unknown().await;
+    f.append(&f.late_receipt());
+    let original = f.disk();
+    let calls = f.pane.tmux_calls();
+    for field in ["session_id", "transcript", "file"] {
+        let mut changed = original.clone();
+        changed["head_injection"]["attempt"][field] = match field {
+            "file" => serde_json::json!([0, 1]),
+            _ => serde_json::json!("different-recorded-identity"),
+        };
+        fs::write(f.disk_path(), changed.to_string()).unwrap();
+        f.restart().await;
+        let before = fs::read(f.disk_path()).unwrap();
+        assert_eq!(
+            f.attempt().await,
+            InjectAttempt::HandbackFailed("queued_head_unknown"),
+            "Recorded::matches must reject only the changed {field}"
+        );
+        assert_eq!(fs::read(f.disk_path()).unwrap(), before);
+    }
+    fs::write(f.disk_path(), original.to_string()).unwrap();
+    f.restart().await;
+    assert_eq!(
+        f.attempt().await,
+        InjectAttempt::NotSent("queued_head_reconciled"),
+        "the same complete receipt proves the unmodified recorded identity"
+    );
+    assert_eq!(f.pane.tmux_calls(), calls, "proof checks must never retype");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_codex_receipt_rejects_session_file_and_legacy_attempt_mismatch_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let mut f = QueuedCodex::new(7_272_103).await;
+    f.leave_unknown().await;
+    f.append(&f.late_receipt());
+    let binding =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&f.pane.session())
+            .unwrap();
+    let mut changed = binding.clone();
+    changed.session_id = Some("another-native-session".into());
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&f.pane.session(), changed);
+    let calls = f.pane.tmux_calls();
+    assert_eq!(
+        f.attempt().await,
+        InjectAttempt::HandbackFailed("queued_head_unknown")
+    );
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&f.pane.session(), binding);
+    let original = fs::read(f.pane.path("rollout.jsonl")).unwrap();
+    fs::rename(f.pane.path("rollout.jsonl"), f.pane.path("original.jsonl")).unwrap();
+    fs::write(f.pane.path("rollout.jsonl"), &original).unwrap();
+    assert_eq!(
+        f.attempt().await,
+        InjectAttempt::HandbackFailed("queued_head_unknown")
+    );
+    fs::rename(f.pane.path("original.jsonl"), f.pane.path("rollout.jsonl")).unwrap();
+    let mut disk = f.disk();
+    disk["head_injection"]
+        .as_object_mut()
+        .unwrap()
+        .remove("attempt");
+    fs::write(f.disk_path(), disk.to_string()).unwrap();
+    f.restart().await;
+    assert_eq!(
+        f.attempt().await,
+        InjectAttempt::HandbackFailed("queued_head_unknown")
+    );
+    assert_eq!(f.pane.tmux_calls(), calls);
+    assert_eq!(f.disk()["items"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_codex_same_owner_serializes_two_inputs_across_effect_pg() {
+    use crate::services::turn_orchestrator::{QueueIdentity, SourceMessageQueuedGeneration};
+    use poise::serenity_prelude::MessageId;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = QueuedCodex::new(7_272_104).await;
+    let channel = ChannelId::new(f.pane.channel);
+    let mut second = f.head.clone();
+    second.message_id = MessageId::new(f.head.message_id.get() + 1);
+    second.source_message_ids = vec![second.message_id];
+    second.source_message_queued_generations =
+        vec![SourceMessageQueuedGeneration::user_instruction(
+            second.message_id,
+            second.queued_generation,
+        )];
+    second.source_text_segments.clear();
+    second.text = "second input".into();
+    let sent = crate::services::discord::mailbox_enqueue_intervention(
+        &f.shared,
+        &ProviderKind::Codex,
+        channel,
+        second,
+    )
+    .await;
+    assert!(sent.enqueued && sent.persistence_error.is_none());
+    let second = f
+        .shared
+        .mailbox(channel)
+        .snapshot()
+        .await
+        .intervention_queue[1]
+        .clone();
+    let (reached, resume) = test_hook::park_queued(f.pane.channel, "may_have_sent");
+    let (shared, request, origin) = (f.shared.clone(), f.request(), f.origin());
+    let first =
+        tokio::spawn(async move { super::inject_human_input(&shared, &request, origin).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), reached.notified())
+        .await
+        .unwrap();
+    assert_eq!(f.disk()["head_injection"]["phase"], "may_have_sent");
+    assert!(
+        f.disk()["head_injection"]["attempt"]["offset"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(
+        f.pane.tmux_calls(),
+        0,
+        "attempt is durable before any pane I/O"
+    );
+    let mut request = f.request();
+    request.text = second.text.clone();
+    let second_origin = inject::Origin::QueuedHead {
+        expected: QueueIdentity::of(&second),
+        parent: None,
+        gate: |_, _| true,
+    };
+    assert_eq!(
+        super::inject_human_input(&f.shared, &request, second_origin).await,
+        InjectAttempt::NotSent("transition_busy")
+    );
+    resume.notify_one();
+    assert!(matches!(
+        first.await.unwrap(),
+        InjectAttempt::Injected { .. }
+    ));
+    let queue = f
+        .shared
+        .mailbox(channel)
+        .snapshot()
+        .await
+        .intervention_queue;
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].message_id, second.message_id);
+    let _ = fs::remove_file(f.pane.path("pasted"));
+    let second_origin = inject::Origin::QueuedHead {
+        expected: QueueIdentity::of(&second),
+        parent: None,
+        gate: |_, _| true,
+    };
+    assert!(matches!(
+        super::inject_human_input(&f.shared, &request, second_origin).await,
+        InjectAttempt::Injected { .. }
+    ));
+    assert_eq!(
+        f.pane.keys(),
+        "paste-buffer+send-keys+paste-buffer+send-keys"
+    );
+    assert!(
+        f.shared
+            .mailbox(channel)
+            .snapshot()
+            .await
+            .intervention_queue
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_codex_preserves_each_gate_and_live_discord_catchup_scope_pg() {
+    use poise::serenity_prelude::MessageId;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = QueuedCodex::new(7_272_105).await;
+    test_hook::set_queued_head(f.pane.channel, false);
+    assert_eq!(f.attempt().await, InjectAttempt::NotSent("queued_gate_off"));
+    test_hook::set_queued_head(f.pane.channel, true);
+    test_hook::set(f.pane.channel, InjectMode::Off, f.pane.path("tmux"));
+    assert_eq!(f.attempt().await, InjectAttempt::NotSent("queued_gate_off"));
+    test_hook::clear(f.pane.channel);
+    test_hook::set(f.pane.channel, InjectMode::All, f.pane.path("tmux"));
+    test_hook::set_queued_head(f.pane.channel, true);
+    assert_eq!(f.attempt().await, InjectAttempt::NotSent("queued_gate_off"));
+    test_hook::enable_codex(f.pane.channel);
+    let guard = crate::services::discord::inject_disposition::claim_source(
+        &ProviderKind::Codex,
+        f.head.message_id,
+        std::time::Instant::now(),
+    )
+    .unwrap();
+    let live = inject::Origin::Discord {
+        message: MessageId::new(f.head.message_id.get()),
+        handback: Box::new((f.head.clone(), "queued-codex-live".into())),
+        name: "system".into(),
+        guard,
+    };
+    assert_eq!(
+        super::inject_human_input(&f.shared, &f.request(), live).await,
+        InjectAttempt::NotSent("queue_nonempty")
+    );
+    assert_eq!(f.pane.tmux_calls(), 0);
+    assert_eq!(
+        f.disk().as_array().unwrap().len(),
+        1,
+        "live input did not reserve a queued attempt"
+    );
+}
+
+#[test]
+fn queued_codex_production_origin_gate_stays_closed_without_cfg_test() {
+    let source = include_str!("inject.rs");
+    let origin = source
+        .split_once("impl Origin {")
+        .unwrap()
+        .1
+        .split_once("/// Tests never read the process env")
+        .unwrap()
+        .0;
+    let dir = tempfile::tempdir().unwrap();
+    let probe = format!(
+        r#"
+#[derive(PartialEq, Eq)]
+enum ProviderKind {{ Claude, Codex }}
+#[derive(Clone, Copy)]
+struct ChannelId(u64);
+impl ChannelId {{ fn get(self) -> u64 {{ self.0 }} }}
+#[derive(PartialEq, Eq)]
+enum InjectMode {{ Off, All }}
+fn mode(_: u64) -> InjectMode {{ InjectMode::All }}
+fn queued_head_enabled(_: u64) -> bool {{ true }}
+struct Origin;
+impl Origin {{{origin}
+fn main() {{
+    let channel = ChannelId(7272);
+    assert!(Origin::queued_head_ready(&ProviderKind::Claude, channel));
+    assert!(!Origin::queued_head_ready(&ProviderKind::Codex, channel),
+        "production Codex queued gate must stay closed even with mode and queued gate open");
+    assert!(!Origin::queued_head_gate_enabled(&ProviderKind::Codex, channel, None, |_, _| true));
+}}
+"#
+    );
+    let path = dir.path().join("gate.rs");
+    let binary = dir.path().join("gate");
+    fs::write(&path, probe).unwrap();
+    let compiled = std::process::Command::new("rustc")
+        .args(["--edition=2024", "--crate-name=queued_gate_probe"])
+        .arg(&path)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "non-test gate probe must compile: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let result = std::process::Command::new(binary).output().unwrap();
+    assert!(
+        result.status.success(),
+        "cfg(not(test)) gate failed: {}",
+        String::from_utf8_lossy(&result.stderr)
     );
 }
 

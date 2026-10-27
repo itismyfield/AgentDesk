@@ -1,13 +1,61 @@
-//! Proof, read from the bound Claude transcript alone, that a queued head left Unknown was taken:
-//! one exact enqueue of its frame, the absorbed removal of it and the human queued command both name.
+//! Consumes an Unknown head only when its provider's bound native transcript proves it was taken.
+//! Claude's legacy proof still requires the exact enqueue, absorbed removal and human command.
+#[cfg(test)]
+pub(super) fn v2_record_matches(
+    attempt: &serde_json::Value,
+    target: &super::Target,
+    provider: super::queued_provider::QueuedProvider,
+    kind: &crate::services::provider::ProviderKind,
+) -> bool {
+    let Ok(meta) = std::fs::metadata(&target.transcript) else {
+        return false;
+    };
+    let Some((dev, ino)) = file_id(&meta) else {
+        return false;
+    };
+    let bound = target
+        .binding
+        .as_ref()
+        .and_then(|binding| binding.4.as_deref());
+    let Some(session) = provider.session(&target.transcript, bound) else {
+        return false;
+    };
+    let source = &attempt["source"];
+    attempt["provider"] == kind.as_str()
+        && attempt["target"]["owner"] == target.session
+        && source["kind"] == "existing"
+        && source["session_id"] == session
+        && source["transcript"] == target.transcript.display().to_string()
+        && source["file"] == serde_json::json!([dev, ino])
+        && source["offset"]
+            .as_u64()
+            .is_some_and(|offset| offset <= meta.len())
+}
+#[cfg(test)]
+impl crate::services::turn_orchestrator::ChannelMailboxHandle {
+    pub(crate) async fn v2_settle_exact(
+        &self,
+        identity: serde_json::Value,
+        delivered: bool,
+        now: u64,
+    ) -> Result<(), String> {
+        self.v2_request(move |slot| {
+            let key = serde_json::from_value(identity).map_err(|e| e.to_string())?;
+            slot.as_mut()
+                .ok_or("V2 not adopted")?
+                .settle(&key, delivered, now)
+        })
+        .await
+    }
+}
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use super::queued_provider::QueuedProvider;
 use super::queued_support::RECONCILED;
 use super::{HumanInputRequest, InjectAttempt, SharedData, channel_name, live_tui_session};
-use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject;
 use crate::services::tui_input::human_frame::{self, Mode};
 use crate::services::turn_orchestrator::{
@@ -28,8 +76,8 @@ fn file_id(_: &std::fs::Metadata) -> Option<FileId> {
     None
 }
 
-/// Consumes the channel's Unknown head, with no pane input, when its transcript proves Claude took
-/// it. `None` leaves any other head, and an Unknown one without that proof, to the ordinary owner.
+/// Consumes an Unknown head on provider proof alone, without pane input.
+/// Without that proof, the ordinary owner still sees the Unknown barrier.
 pub(super) async fn mend(
     shared: &Arc<SharedData>,
     request: &HumanInputRequest,
@@ -53,10 +101,14 @@ pub(super) async fn mend(
         file: attempt.file,
         offset: attempt.offset,
     });
-    let want = Want::of(channel, &head.identity, &head.original, recorded, &bound)?;
-    let proof = tokio::task::spawn_blocking(move || want.search())
-        .await
-        .ok()??;
+    let provider = QueuedProvider::select(&request.provider, channel.get())?;
+    let (identity, original, transcript) =
+        (head.identity.clone(), head.original.clone(), bound.clone());
+    let proof = tokio::task::spawn_blocking(move || {
+        provider.proof(channel, &identity, &original, recorded, &transcript)
+    })
+    .await
+    .ok()??;
     #[cfg(test)]
     super::test_hook::before_queued(channel.get(), "mend_commit").await;
     if bound_transcript(shared, request).await.as_ref() != Some(&bound) {
@@ -96,23 +148,24 @@ pub(super) async fn mend(
     Some(InjectAttempt::NotSent(RECONCILED))
 }
 
-/// The transcript the channel's live Claude pane is bound to now.
+/// The native transcript the channel's live provider pane is bound to now.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Bound {
-    session: String,
-    path: PathBuf,
-    file: FileId,
-    session_id: String,
+pub(super) struct Bound {
+    pub(super) session: String,
+    pub(super) path: PathBuf,
+    pub(super) file: FileId,
+    pub(super) session_id: String,
 }
 
 async fn bound_transcript(shared: &SharedData, request: &HumanInputRequest) -> Option<Bound> {
     let read = crate::services::discord::inflight::load_inflight_state_read_only;
     let row = read(&request.provider, request.channel_id.get());
     let named = channel_name(shared, request.channel_id).await;
-    let runtime = RuntimeHandoffKind::ClaudeTui;
+    let provider = QueuedProvider::select(&request.provider, request.channel_id.get())?;
+    let runtime = provider.runtime();
     let (session, path) = live_tui_session(shared, request, runtime, row.as_ref(), named)?;
     let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&session)?;
-    let session_id = transcript_session(&path, binding.session_id.as_deref())?;
+    let session_id = provider.session(&path, binding.session_id.as_deref())?;
     let file = file_id(&std::fs::metadata(&path).ok()?)?;
     Some(Bound {
         session,
@@ -134,12 +187,12 @@ pub(super) fn transcript_session(path: &Path, bound: Option<&str>) -> Option<Str
 }
 
 /// The paste a head recorded before it could start.
-struct Recorded {
-    nonce: String,
-    transcript: String,
-    session_id: String,
-    file: FileId,
-    offset: u64,
+pub(super) struct Recorded {
+    pub(super) nonce: String,
+    pub(super) transcript: String,
+    pub(super) session_id: String,
+    pub(super) file: FileId,
+    pub(super) offset: u64,
 }
 
 /// Where a search may resume per transcript and head: no line before it names the head's source.
@@ -179,10 +232,10 @@ struct Seen {
     stamp_us: Option<i64>,
 }
 
-struct Proof {
-    nonce: String,
-    session: String,
-    offset: u64,
+pub(super) struct Proof {
+    pub(super) nonce: String,
+    pub(super) session: String,
+    pub(super) offset: u64,
 }
 
 impl Want {
@@ -196,10 +249,7 @@ impl Want {
         let (nonce, from, after_us) = match recorded {
             // Only the paste's own transcript file and session can hold its record.
             Some(recorded) => {
-                if recorded.transcript != bound.path.display().to_string()
-                    || recorded.file != bound.file
-                    || recorded.session_id != bound.session_id
-                {
+                if !recorded.matches(bound) {
                     return None;
                 }
                 (Some(recorded.nonce), recorded.offset, None)
@@ -390,6 +440,24 @@ impl Want {
             offset: enqueue.offset,
         })
     }
+}
+
+impl Recorded {
+    pub(super) fn matches(&self, bound: &Bound) -> bool {
+        self.transcript == bound.path.display().to_string()
+            && self.file == bound.file
+            && self.session_id == bound.session_id
+    }
+}
+
+pub(super) fn claude_proof(
+    channel: ChannelId,
+    identity: &QueueIdentity,
+    original: &PendingQueueItem,
+    recorded: Option<Recorded>,
+    bound: &Bound,
+) -> Option<Proof> {
+    Want::of(channel, identity, original, recorded, bound)?.search()
 }
 
 #[cfg(test)]
