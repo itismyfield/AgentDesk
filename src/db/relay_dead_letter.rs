@@ -399,8 +399,8 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            !validated,
-            "existing rows await a separate validation migration"
+            validated,
+            "existing rows must be validated after head migrations"
         );
 
         let id = insert(&pool, &terminal_row("state contract"))
