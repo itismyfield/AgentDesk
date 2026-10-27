@@ -127,6 +127,7 @@ impl Reader {
 }
 
 pub struct Sources<B> {
+    pub(crate) replayed: super::ReplaySummary,
     channel: u64,
     provider: ShadowProvider,
     bindings: Arc<B>,
@@ -319,6 +320,7 @@ impl<B: BindingEvents> Sources<B> {
             names: Names::new(provider),
             clear_notice: crate::services::tui_o::store::clear_end::subscribe(channel),
             clear_due: false,
+            replayed: super::ReplaySummary::default(),
             reader_config: None,
             last_wall: None,
             validation: None,

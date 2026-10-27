@@ -729,6 +729,7 @@ async fn a_v2_codex_spool_resumes_under_the_current_version_without_reposting_a_
         "exercise a split body and a pending body"
     );
     assert_eq!(writer.deliver(&owed.pop_front().unwrap()).await, Step::Done);
+    let expected_owed = owed.clone();
     drop((sources, writer));
     let written = segments(&harness);
     for segment in &written {
@@ -736,10 +737,10 @@ async fn a_v2_codex_spool_resumes_under_the_current_version_without_reposting_a_
     }
     let (mut sources, mut writer, mut deriver, mut owed) = resume_codex(&harness, bindings);
     assert_eq!(
-        payloads(&owed),
-        expected,
-        "v2 frames derive the same pieces"
+        owed, expected_owed,
+        "v2 frames retain every unposted piece with its exact key/index"
     );
+    assert_eq!(sources.replayed.posted, 1);
     while let Some(item) = owed.pop_front() {
         assert_eq!(writer.deliver(&item).await, Step::Done);
     }

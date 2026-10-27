@@ -102,6 +102,12 @@ struct RecordingOwe {
 }
 
 impl Owe for RecordingOwe {
+    fn finish_replay(
+        &mut self,
+        _: &crate::services::tui_o::store::ledger::LedgerState,
+    ) -> crate::services::tui_o::writer::ReplaySummary {
+        crate::services::tui_o::writer::ReplaySummary::default()
+    }
     fn owe(&mut self, source: &SourceId, record: &CapturedRecord, derived: Vec<Derived>) {
         self.records
             .push((source.clone(), record.start, record.end));
