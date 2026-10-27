@@ -1,7 +1,7 @@
 # Intended test removals and newly ignored tests against the comparison base, one per line:
 #   <binary-id> <test> | removed|runnable->ignored | <reason>
 # A row must match a loss the base diff reports for this change, and a loss with no row fails.
-# Clear the rows once the change that needed them has landed: they would be stale on the next PR.
+# Rows for tests absent from base and head only warn after landing; clear them in any later PR.
 agentdesk services::discord::prompt_builder::layer_rendering::bucket_cadence_tests::bucket_rollover_causes_miss_then_refill | removed | The Agent Performance prompt cache, day bucket and counters are retired; rendered_system_prompts_omit_agent_performance_with_quality_data_pg verifies the new prompt contract.
 agentdesk services::discord::prompt_builder::layer_rendering::bucket_cadence_tests::day_bucket_increments_at_utc_midnight_only | removed | The Agent Performance prompt cache, day bucket and counters are retired; rendered_system_prompts_omit_agent_performance_with_quality_data_pg verifies the new prompt contract.
 agentdesk services::discord::prompt_builder::layer_rendering::bucket_cadence_tests::metrics_counters_track_hits_and_misses | removed | The Agent Performance prompt cache, day bucket and counters are retired; rendered_system_prompts_omit_agent_performance_with_quality_data_pg verifies the new prompt contract.
