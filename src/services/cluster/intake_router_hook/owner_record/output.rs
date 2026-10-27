@@ -117,13 +117,16 @@ pub(crate) async fn enqueue_on_tx(
 impl EffectGuard {
     /// Move this future, including its guard, into any task that owns the raw request.
     pub(crate) async fn run<T>(mut self, request: impl Future<Output = T>) -> Result<T, String> {
+        if self.0.is_none() {
+            return Ok(request.await);
+        }
         let result = tokio::time::timeout(std::time::Duration::from_secs(60), request)
             .await
             .map_err(|e| e.to_string())?;
-        if let Some(tx) = self.0.take() {
-            if let Err(error) = tx.rollback().await {
-                tracing::warn!(%error,"output ACK retained after guard release failed");
-            }
+        if let Some(tx) = self.0.take()
+            && let Err(error) = tx.rollback().await
+        {
+            tracing::warn!(%error,"output ACK retained after guard release failed");
         }
         Ok(result)
     }
@@ -152,7 +155,11 @@ pub(crate) async fn source_artifact(
     payload: &str,
 ) -> Result<Option<Artifact>, String> {
     let Some(pool) = pool else {
-        return Ok(None);
+        return if delivery.is_some() {
+            Err("original output PG unavailable".into())
+        } else {
+            Ok(None)
+        };
     };
     let rows: Vec<Origin> = sqlx::query_as(
         "SELECT d.id AS delivery,d.provider,d.channel_id AS channel,d.owner_instance_id AS executor,d.owner_generation AS generation,r.id AS receipt,r.replay_episode_nonce AS nonce,r.replay_owner_incarnation AS incarnation,r.replay_preserved #> '{projection,binding}' AS binding FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.provider=$1 AND d.channel_id=$2 AND (($3::bigint IS NOT NULL AND d.id=$3) OR ($3 IS NULL AND (d.user_msg_id=$4 OR $4=ANY(r.replay_source_message_ids)))) AND r.replay_disposition IN ('started_unclassified','classified_normal','withheld')")

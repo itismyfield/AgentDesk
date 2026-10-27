@@ -689,7 +689,12 @@ where
         origin,
         body: ctx.body,
     };
-    deliver_turn_output(&guarded, ctx).await
+    match deliver_turn_output_inner(&guarded, ctx, None).await {
+        RevalidatedDeliveryOutcome::Delivery(outcome) => outcome,
+        RevalidatedDeliveryOutcome::AlreadyCommittedAfterEditFailure { .. } => {
+            unreachable!("no fallback callback")
+        }
+    }
 }
 
 /// Keep fresh-send routing in the controller owner; ordinary transport lives in the child.
@@ -721,6 +726,58 @@ where
     G: TurnGateway + ?Sized,
     L: DeliveryLease + ?Sized,
 {
+    if matches!(&ctx.plan, OutputPlan::NoOp) || ctx.body.is_empty() {
+        return RevalidatedDeliveryOutcome::Delivery(DeliveryOutcome::Skipped);
+    }
+    use crate::services::cluster::intake_router_hook::owner_record::output;
+    let (scope, origin) = if let Some(pool) = gateway.output_pool() {
+        let Some(provider) = gateway.bot_owner_provider() else {
+            return RevalidatedDeliveryOutcome::Delivery(DeliveryOutcome::Unknown {
+                fell_back: false,
+            });
+        };
+        let origin = match output::source_artifact(
+            Some(pool),
+            provider.as_str(),
+            &ctx.channel_id.get().to_string(),
+            &ctx.turn.user_msg_id.to_string(),
+            None,
+            ctx.body,
+        )
+        .await
+        {
+            Ok(origin) => origin,
+            Err(error) => {
+                tracing::warn!(%error,"original controller output held");
+                return RevalidatedDeliveryOutcome::Delivery(DeliveryOutcome::Unknown {
+                    fell_back: false,
+                });
+            }
+        };
+        (
+            Some(output::Scope {
+                pool: pool.clone(),
+                provider: provider.as_str().into(),
+            }),
+            origin,
+        )
+    } else {
+        (None, None)
+    };
+    let guarded = transport::OriginGateway {
+        inner: gateway,
+        scope,
+        origin: origin.as_ref(),
+        body: ctx.body,
+    };
+    deliver_turn_output_inner(&guarded, ctx, fallback_revalidation).await
+}
+
+async fn deliver_turn_output_inner<L: DeliveryLease + ?Sized>(
+    gateway: &dyn TurnGateway,
+    ctx: TurnOutputCtx<'_, L>,
+    fallback_revalidation: Option<&(dyn Fn() -> bool + Send + Sync)>,
+) -> RevalidatedDeliveryOutcome {
     if matches!(&ctx.plan, OutputPlan::SendFresh { .. }) {
         return RevalidatedDeliveryOutcome::Delivery(fresh_send::deliver(gateway, ctx).await);
     }
@@ -1015,6 +1072,7 @@ mod tests {
         for chunks in [true, false] {
             let (_db, pool, origin) = fixture(if chunks { "7336904" } else { "7336905" }).await;
             let artifact = origin.seal("answer");
+            assert_eq!(crate::services::cluster::intake_router_hook::owner_record::output::source_artifact(Some(&pool),"claude",if chunks {"7336904"} else {"7336905"},"90001",None,"answer").await.unwrap(),Some(artifact));
             let single = _db.single_pool().await;
             let channel = ChannelId::new(if chunks { 7336904 } else { 7336905 });
             for stale in [false, true] {
@@ -1022,10 +1080,11 @@ mod tests {
                     revoke(&pool, &origin).await;
                 }
                 let lease = Arc::new(RecordingLease::new(channel));
-                let gateway = ObservingGateway::new(
+                let mut gateway = ObservingGateway::new(
                     lease.clone() as Arc<dyn DeliveryLease + Send + Sync>,
                     true,
                 );
+                gateway.source_pool = Some(single.clone());
                 let controller = PlaceholderController::default();
                 let msg = MessageId::new(700);
                 if !chunks {
@@ -1056,10 +1115,10 @@ mod tests {
                     );
                     true
                 };
-                let outcome = deliver_turn_output_with_origin(
+                let outcome = deliver_turn_output(
                     &gateway,
                     TurnOutputCtx {
-                        turn: turn_key(channel),
+                        turn: TurnKey::new(channel, 90001, 1),
                         lease_key: Some(lease_key(channel)),
                         owner: RelayOwnerKind::Watcher,
                         holder: LeaseHolder::Watcher { instance_id: 1 },
@@ -1089,9 +1148,6 @@ mod tests {
                         heartbeat: None,
                         body_claim: None,
                     },
-                    Some(&single),
-                    "claude",
-                    Some(&artifact),
                 )
                 .await;
                 let deletes = gateway.delete_calls.load(Ordering::SeqCst);
@@ -1105,6 +1161,22 @@ mod tests {
                         outcome,
                         DeliveryOutcome::Delivered { .. } | DeliveryOutcome::FreshDelivered { .. }
                     ));
+                    let artifact = origin.seal("answer");
+                    let guarded = transport::OriginGateway {
+                        inner: &gateway,
+                        scope: Some(crate::services::cluster::intake_router_hook::owner_record::output::Scope {
+                            pool: single.clone(),
+                            provider: "claude".into(),
+                        }),
+                        origin: Some(&artifact),
+                        body: "answer",
+                    };
+                    assert!(guarded.send_message(channel, "answer").await.is_err());
+                    assert!(guarded.edit_message(channel, msg, "answer").await.is_err());
+                    assert!(guarded.delete_message(channel, msg).await.is_err());
+                    assert_eq!(gateway.send_step.load(Ordering::SeqCst), 0);
+                    assert_eq!(gateway.delete_calls.load(Ordering::SeqCst), 0);
+                    assert!(!gateway.post_send_await_seen.load(Ordering::SeqCst));
                 } else {
                     assert!(calls > 0);
                     assert_eq!(
@@ -1285,6 +1357,7 @@ mod tests {
     /// the lease BEFORE the inline commit, and the post-send `edit_message`
     /// await observes it AFTER.
     struct ObservingGateway {
+        source_pool: Option<sqlx::PgPool>,
         /// Shared with the controller (same object) so a gateway await reads the
         /// exact lease state the controller is driving. Held behind the
         /// `DeliveryLease` trait so the recorder-wrapping `RecordingLease` and
@@ -1341,6 +1414,7 @@ mod tests {
     impl ObservingGateway {
         fn new(lease: Arc<dyn DeliveryLease + Send + Sync>, transport_ok: bool) -> Self {
             Self {
+                source_pool: None,
                 lease,
                 clock: Arc::new(AtomicUsize::new(1)),
                 committed_at_send: AtomicBool::new(false),
@@ -1437,6 +1511,9 @@ mod tests {
     }
 
     impl TurnGateway for ObservingGateway {
+        fn output_pool(&self) -> Option<&sqlx::PgPool> {
+            self.source_pool.as_ref()
+        }
         fn send_message<'a>(
             &'a self,
             _c: ChannelId,
@@ -1605,7 +1682,7 @@ mod tests {
             false
         }
         fn bot_owner_provider(&self) -> Option<ProviderKind> {
-            None
+            self.source_pool.as_ref().map(|_| ProviderKind::Claude)
         }
     }
 

@@ -2508,12 +2508,14 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/codex_tui/input.rs`
 - `src/services/discord/health/snapshot.rs`
 - `src/services/discord/mod.rs`
+- `src/services/discord/outbound/turn_output_controller.rs`
 - `src/services/discord/recovery_engine/restore_inflight.rs`
 - `src/services/discord/router/intake_gate.rs`
 - `src/services/discord/router/message_handler/headless_turn.rs`
 - `src/services/discord/router/message_handler/intake_turn.rs`
 - `src/services/discord/standby_relay.rs`
 - `src/services/discord/tmux_watcher.rs`
+- `src/services/discord/turn_bridge/terminal_controller_cutover.rs`
 - `src/services/dispatches/discord_delivery/orchestration.rs`
 - `src/services/dispatches/outbox_route.rs`
 - `src/services/gemini.rs`
@@ -2527,5 +2529,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/routines/discord_log.rs`
 - `src/services/routines/store.rs`
 - `src/services/tmux_common.rs`
+- `src/services/tui_o/writer/deliver.rs`
 - `src/services/turn_orchestrator.rs`
 <!-- END GENERATED: GIANT PATHS -->

@@ -298,9 +298,6 @@ impl OutboundTarget {
 /// without nullable columns.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DiscordOutboundMessage {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) output_origin:
-        Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     pub(crate) idempotency: OutboundDeliveryId,
     /// Raw message body; length policy is applied by the deliver impl.
     pub(crate) content: String,
@@ -333,7 +330,6 @@ impl DiscordOutboundMessage {
         policy: DiscordOutboundPolicy,
     ) -> Self {
         Self {
-            output_origin: None,
             idempotency: OutboundDeliveryId::new(correlation_id, semantic_event_id),
             content: content.into(),
             target,

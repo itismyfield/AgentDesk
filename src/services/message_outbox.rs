@@ -32,6 +32,15 @@ pub(crate) struct OutboxMessage<'a> {
     pub session_key: Option<&'a str>,
 }
 
+fn encoded_output_origin(
+    origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+) -> Result<Option<serde_json::Value>, OutboxEnqueueError> {
+    origin
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| OutboxEnqueueError::Database(sqlx::Error::Encode(Box::new(error))))
+}
+
 #[derive(Debug)]
 pub(crate) enum OutboxEnqueueError {
     SourceNotAllowed { source: String },
@@ -298,7 +307,7 @@ pub(crate) async fn enqueue_outbox_with_origin_on_tx(
     .bind(content_type)
     .bind(data)
     .bind(notice)
-    .bind(origin.map(|origin| serde_json::to_value(origin).expect("origin serializes")))
+    .bind(encoded_output_origin(origin)?)
     .fetch_one(&mut **tx)
     .await
     .map_err(Into::into)
@@ -381,7 +390,7 @@ pub(crate) async fn enqueue_outbox_pg_with_exact_origin(
     .bind(content_type)
     .bind(data)
     .bind(notice)
-    .bind(origin.map(|origin| serde_json::to_value(origin).expect("origin serializes")))
+    .bind(encoded_output_origin(origin)?)
     .fetch_one(pool)
     .await?;
     Ok(OutboxEnqueueOutcome::Enqueued { id })
@@ -551,7 +560,7 @@ async fn enqueue_outbox_pg_on_tx_with_ttl_origin(
     .bind(content_type)
     .bind(data)
     .bind(notice)
-    .bind(origin.map(|origin| serde_json::to_value(origin).expect("origin serializes")))
+    .bind(encoded_output_origin(origin)?)
     .fetch_optional(&mut **tx)
     .await?)
 }

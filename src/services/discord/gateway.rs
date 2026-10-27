@@ -53,6 +53,10 @@ fn watcher_classified_error_string(error: &(dyn std::error::Error + 'static)) ->
 
 #[allow(dead_code)]
 pub(super) trait TurnGateway: Send + Sync {
+    fn output_pool(&self) -> Option<&sqlx::PgPool> {
+        None
+    }
+
     fn send_message<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -556,6 +560,10 @@ fn next_headless_message_id() -> MessageId {
 }
 
 impl TurnGateway for DiscordGateway {
+    fn output_pool(&self) -> Option<&sqlx::PgPool> {
+        self.shared.pg_pool.as_ref()
+    }
+
     fn send_notice_once<'a>(
         &'a self,
         channel_id: ChannelId,

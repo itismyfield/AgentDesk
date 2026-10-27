@@ -878,7 +878,9 @@ src/
 │   │   ├── intake_router_hook/
 │   │   │   ├── owner_record/
 │   │   │   │   ├── custody.rs
-│   │   │   │   └── input_start.rs
+│   │   │   │   ├── input_start.rs
+│   │   │   │   ├── output.rs
+│   │   │   │   └── output_tests.rs
 │   │   │   ├── agent_execution_node_tests.rs
 │   │   │   ├── attachment_tests.rs
 │   │   │   ├── capacity_tests.rs
