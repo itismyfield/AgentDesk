@@ -698,7 +698,10 @@ async fn start_gated_sync(
     let (github, entered, release) = ScriptedGitHub::gated([answer]);
     let pool = pool.clone();
     let task = tokio::spawn(async move { sync(&pool, &[], &github).await });
-    entered.notified().await;
+    // Without a GitHub read there is nothing to hold back; fail rather than wait forever.
+    tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+        .await
+        .expect("the sync never read the linked issue from GitHub");
     (task, release)
 }
 
