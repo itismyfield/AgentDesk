@@ -127,7 +127,8 @@ impl UnitDeriver {
                             .pointer("/payload/is_error")
                             .or_else(|| value.pointer("/payload/isError"))
                             .and_then(serde_json::Value::as_bool)
-                            .filter(|failed| *failed),
+                            .filter(|failed| *failed)
+                            .or_else(|| code_mode_exec_failed(&value)),
                     };
                     out.extend(self.unit(unit_key, content, meta, failed));
                 }
@@ -291,4 +292,13 @@ impl UnitDeriver {
         out.extend(work);
         out
     }
+}
+
+// Code-mode `exec` reports only the script's outcome; a completed script may still hold a
+// failed command, so only a script failure decides the card result.
+fn code_mode_exec_failed(value: &serde_json::Value) -> Option<bool> {
+    let output = value.pointer("/payload/output/0/text")?.as_str()?;
+    (value.pointer("/payload/type")?.as_str()? == "custom_tool_call_output"
+        && output.lines().next()? == "Script failed")
+        .then_some(true)
 }

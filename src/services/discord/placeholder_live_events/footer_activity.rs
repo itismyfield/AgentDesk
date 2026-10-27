@@ -16,7 +16,13 @@ impl PlaceholderLiveEvents {
         let render = |display| {
             let mut candidate = snapshot.clone();
             candidate.tool_activity_display = display;
-            let panel = render_status_panel(candidate, provider, time.clone(), anchor.clone());
+            let panel = status_panel::render_status_panel_for(
+                candidate,
+                provider,
+                time.clone(),
+                anchor.clone(),
+                true,
+            );
             super::super::single_message_panel::compose_footer_status_block(indicator, &panel)
         };
         let summary = render(self.tool_activity_display);
