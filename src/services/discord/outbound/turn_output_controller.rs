@@ -3632,3 +3632,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod raw_request_tests;

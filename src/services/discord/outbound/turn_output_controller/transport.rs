@@ -330,13 +330,23 @@ impl<G: TurnGateway + ?Sized> OriginGateway<'_, G> {
         raw: impl FnOnce() -> F,
     ) -> Result<T, String> {
         use crate::services::cluster::intake_router_hook::owner_record::output;
+        if self.inner.has_raw_output_boundaries() {
+            return crate::services::discord::outbound::raw_output::scope(
+                self.scope.clone(),
+                self.origin,
+                self.body,
+                raw(),
+            )
+            .await;
+        }
         let hold = output::acquire(
             self.scope.as_ref(),
             &channel.get().to_string(),
             self.body,
             self.origin,
         )
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
         hold.run(raw()).await?
     }
 }

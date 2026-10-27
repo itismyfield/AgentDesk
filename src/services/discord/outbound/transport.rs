@@ -39,8 +39,7 @@ pub(crate) async fn post_serenity_message_with_nonce(
         );
     }
     crate::services::discord::rate_limit_wait(shared, channel_id).await;
-    channel_id
-        .send_message(http, message)
+    super::raw_output::request(channel_id, channel_id.send_message(http, message))
         .await
         .map(|message| message.id.get().to_string())
 }

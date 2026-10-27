@@ -46,15 +46,22 @@ pub(crate) struct Scope {
     pub(crate) provider: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AcquireError {
+    #[error("{0}")]
+    Withheld(&'static str),
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
 #[must_use]
 pub(crate) struct EffectGuard(Option<Transaction<'static, Postgres>>);
 
-async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, String> {
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
     sqlx::query("SET LOCAL idle_in_transaction_session_timeout='65s'")
         .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
     Ok(tx)
 }
 
@@ -64,35 +71,46 @@ impl Scope {
         channel: &str,
         payload: &str,
         artifact: Option<&Artifact>,
-    ) -> Result<EffectGuard, String> {
+    ) -> Result<EffectGuard, AcquireError> {
         let id = OwnerIdentity::new(&self.provider, channel);
+        if let Some(artifact) = artifact {
+            let o = &artifact.origin;
+            if o.provider != id.provider()
+                || o.channel != id.raw_channel_id()
+                || artifact.payload_hash != hash(payload)
+                || !o.binding.is_object()
+                || o.delivery <= 0
+                || o.receipt <= 0
+                || o.generation < 0
+                || o.executor.trim().is_empty()
+                || o.nonce.trim().is_empty()
+                || o.incarnation.trim().is_empty()
+            {
+                return Err(AcquireError::Withheld(
+                    "output origin scope or payload changed",
+                ));
+            }
+        }
         let mut tx = begin(&self.pool).await?;
-        custody::lock(&mut tx, &id)
-            .await
-            .map_err(|e| e.to_string())?;
+        custody::lock(&mut tx, &id).await?;
         match artifact {
             Some(artifact) => {
                 let o = &artifact.origin;
-                if o.provider != id.provider()
-                    || o.channel != id.raw_channel_id()
-                    || artifact.payload_hash != hash(payload)
-                    || !o.binding.is_object()
-                {
-                    return Err("output origin scope or payload changed".into());
-                }
                 let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id JOIN intake_session_owners o ON o.provider=d.provider AND o.raw_channel_id=d.channel_id AND o.owner_instance_id=d.owner_instance_id AND o.generation=d.owner_generation AND o.status='active' WHERE d.id=$1 AND d.provider=$2 AND d.channel_id=$3 AND d.routing_state='admitted' AND d.owner_instance_id=$4 AND d.owner_generation=$5 AND r.id=$6 AND r.replay_episode_nonce=$7 AND r.replay_owner_incarnation=$8 AND r.replay_disposition IN ('started_unclassified','classified_normal') AND r.replay_preserved #> '{projection,binding}'=$9::jsonb)")
                     .bind(o.delivery).bind(&o.provider).bind(&o.channel).bind(&o.executor)
                     .bind(o.generation).bind(o.receipt).bind(&o.nonce).bind(&o.incarnation)
-                    .bind(&o.binding).fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
+                    .bind(&o.binding).fetch_one(&mut *tx).await?;
                 if !valid {
-                    return Err("output owner or original source revoked".into());
+                    return Err(AcquireError::Withheld(
+                        "output owner or original source revoked",
+                    ));
                 }
             }
             None => {
                 let managed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND routing_receipt_id IS NOT NULL)")
-                    .bind(id.provider()).bind(id.raw_channel_id()).fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
+                    .bind(id.provider()).bind(id.raw_channel_id()).fetch_one(&mut *tx).await?;
                 if managed {
-                    return Err("managed output has no origin stamp".into());
+                    return Err(AcquireError::Withheld("managed output has no origin stamp"));
                 }
             }
         }
@@ -143,10 +161,10 @@ pub(crate) async fn acquire(
     channel: &str,
     payload: &str,
     artifact: Option<&Artifact>,
-) -> Result<EffectGuard, String> {
+) -> Result<EffectGuard, AcquireError> {
     match scope {
         Some(scope) => scope.acquire(channel, payload, artifact).await,
-        None if artifact.is_some() => Err("stamped output has no owner PG scope".into()),
+        None if artifact.is_some() => Err(AcquireError::Database(sqlx::Error::PoolClosed)),
         None => Ok(EffectGuard(None)),
     }
 }
@@ -176,7 +194,10 @@ pub(crate) async fn source_artifact(
     Ok(rows.into_iter().next().map(|origin| origin.seal(payload)))
 }
 
-pub(crate) async fn acquire_unstamped(pool: &PgPool, channel: &str) -> Result<EffectGuard, String> {
+pub(crate) async fn acquire_unstamped(
+    pool: &PgPool,
+    channel: &str,
+) -> Result<EffectGuard, AcquireError> {
     use crate::services::provider::ProviderKind;
     let mut tx = begin(pool).await?;
     // Old rows cannot name a provider; serialize with every supported owner namespace.
@@ -192,14 +213,12 @@ pub(crate) async fn acquire_unstamped(pool: &PgPool, channel: &str) -> Result<Ef
     .map(|provider| OwnerIdentity::new(provider.as_str(), channel));
     identities.sort_unstable_by_key(OwnerIdentity::advisory_key);
     for identity in &identities {
-        custody::lock(&mut tx, identity)
-            .await
-            .map_err(|e| e.to_string())?;
+        custody::lock(&mut tx, identity).await?;
     }
     let managed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox WHERE channel_id=$1 AND routing_receipt_id IS NOT NULL)")
-        .bind(channel).fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
+        .bind(channel).fetch_one(&mut *tx).await?;
     if managed {
-        Err("managed output has no origin stamp".into())
+        Err(AcquireError::Withheld("managed output has no origin stamp"))
     } else {
         Ok(EffectGuard(Some(tx)))
     }

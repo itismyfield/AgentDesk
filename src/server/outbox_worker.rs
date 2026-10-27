@@ -158,3 +158,6 @@ pub(crate) mod origin_fixture {
         assert!(mock.posts().is_empty());
     }
 }
+
+#[cfg(test)]
+mod guard_retry_pg_tests;

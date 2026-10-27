@@ -517,12 +517,14 @@ pub(super) async fn enqueue_headless_delivery(
             pool: pool.clone(),
             provider: provider.as_str().into(),
         });
-        let guard =
-            output::acquire(scope.as_ref(), &channel_id.get().to_string(), content, None).await?;
-        guard
-            .run(send_long_message_raw(&http, channel_id, content, shared))
-            .await?
-            .map_err(|error| format!("headless direct delivery failed: {error}"))?;
+        crate::services::discord::outbound::raw_output::scope(
+            scope,
+            None,
+            content,
+            send_long_message_raw(&http, channel_id, content, shared),
+        )
+        .await
+        .map_err(|error| format!("headless direct delivery failed: {error}"))?;
         Ok(())
     };
     run_headless_direct_fallback(suppress_for_cancel, || direct_fallback).await

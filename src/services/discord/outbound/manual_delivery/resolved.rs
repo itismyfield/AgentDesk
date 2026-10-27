@@ -77,7 +77,10 @@ async fn send_resolved_with_origin<C: ManualOutboundClient>(
     };
     let guard = match guard {
         Ok(guard) => guard,
-        Err(error) => return ("409 Conflict", error),
+        Err(output::AcquireError::Withheld(reason)) => return ("409 Conflict", reason.into()),
+        Err(output::AcquireError::Database(error)) => {
+            return ("503 Service Unavailable", error.to_string());
+        }
     };
     let send_result = match guard
         .run(deliver_manual_notification(client, dedup, notification))

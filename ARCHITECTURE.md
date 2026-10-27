@@ -438,6 +438,7 @@ src/
 │   ├── outbox_worker/
 │   │   ├── attachment_pg_tests.rs
 │   │   ├── claim.rs
+│   │   ├── guard_retry_pg_tests.rs
 │   │   └── session_notice_pg_tests.rs
 │   ├── rate_limit_sync/
 │   │   └── backoff.rs
@@ -1521,6 +1522,7 @@ src/
 │   │   │   ├── turn_output_controller/
 │   │   │   │   ├── fresh_send.rs
 │   │   │   │   ├── fresh_send_tests.rs
+│   │   │   │   ├── raw_request_tests.rs
 │   │   │   │   └── transport.rs
 │   │   │   ├── completed_turn_ledger.rs
 │   │   │   ├── confirmation.rs
@@ -1538,6 +1540,7 @@ src/
 │   │   │   ├── o_writer_repost_io.rs
 │   │   │   ├── o_writer_repost_io_tests.rs
 │   │   │   ├── policy.rs
+│   │   │   ├── raw_output.rs
 │   │   │   ├── reaction_control.rs
 │   │   │   ├── receipt_index.rs
 │   │   │   ├── result.rs
