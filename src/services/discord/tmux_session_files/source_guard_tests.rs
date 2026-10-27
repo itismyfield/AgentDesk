@@ -7,12 +7,13 @@ use crate::test_support::CommentForgery;
 const CLAUDE: &str = include_str!("../../claude.rs");
 const CODEX: &str = include_str!("../../codex.rs");
 const CODEX_ABSENCE: &str = include_str!("../../codex/absence_launch.rs");
+const CODEX_FIRST_INPUT: &str = include_str!("../../codex/tui_session_launch/first_input.rs");
 const QWEN: &str = include_str!("../../qwen.rs");
 
-/// Each provider's sources with its expected prepared-spawn count; Codex spans two files.
+/// Each provider's sources with its expected prepared-spawn count; Codex spans three files.
 const PROVIDERS: [(&str, &[&str], usize); 3] = [
     ("claude", &[CLAUDE], 1),
-    ("codex", &[CODEX, CODEX_ABSENCE], 1),
+    ("codex", &[CODEX, CODEX_ABSENCE, CODEX_FIRST_INPUT], 1),
     ("qwen", &[QWEN], 0),
 ];
 

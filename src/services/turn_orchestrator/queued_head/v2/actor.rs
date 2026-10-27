@@ -1,0 +1,39 @@
+use super::super::{ChannelMailboxHandle, ChannelMailboxMsg, HeadMsg};
+use super::*;
+
+type Action = Box<dyn FnOnce(&mut Option<Owner>) + Send>;
+pub(crate) struct Message(Action);
+impl Message {
+    pub(crate) fn run(self, owner: &mut Option<Owner>) {
+        (self.0)(owner);
+    }
+    pub(crate) fn refuse(self) {
+        drop(self);
+    }
+}
+
+impl ChannelMailboxHandle {
+    pub(crate) async fn v2_adopt(&self, path: PathBuf, namespace: String) -> Result<(), String> {
+        self.v2_request(move |slot| {
+            *slot = Some(Owner::adopt(path, namespace)?);
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn v2_request<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Option<Owner>) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        self.request(move |reply| {
+            let msg = Message(Box::new(move |owner| {
+                let _ = reply.send(f(owner));
+            }));
+            ChannelMailboxMsg::Injection(super::super::super::injected_inputs::InjectionMsg::Head(
+                HeadMsg::V2(msg),
+            ))
+        })
+        .await
+        .map_err(|_| "mailbox unreachable".to_string())?
+    }
+}

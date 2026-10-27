@@ -20,6 +20,7 @@ use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::git::{GitCommand, GitCommandError};
 use crate::services::observability::session_inventory::derive_visual_status;
 use crate::services::pipeline_override::{PipelineOverrideError, PipelineOverrideService};
+use crate::utils::input_validation::validate_agent_id;
 
 // ── Query / Body structs ─────────────────────────────────────────
 
@@ -237,6 +238,7 @@ fn git_command_error_detail(error: &GitCommandError) -> String {
 }
 
 fn resolve_agent_prompt_path(agent_id: &str, provider: Option<&str>) -> Option<PathBuf> {
+    validate_agent_id(agent_id).ok()?;
     let runtime_root = crate::config::runtime_root()?;
     let config = crate::services::discord::agentdesk_config::load_agent_setup_config(&runtime_root)
         .ok()
@@ -421,6 +423,9 @@ pub(super) async fn create_agent(
     State(state): State<AppState>,
     Json(body): Json<CreateAgentBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let mut body = body;
+    body.id = body.id.trim().to_string();
+    validate_agent_id(&body.id).map_err(AppError::bad_request)?;
     if let Some(pool) = state.pg_pool_ref() {
         let (discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx) =
             merged_channel_values(
@@ -747,6 +752,7 @@ pub(super) async fn duplicate_agent(
     Json(body): Json<DuplicateAgentBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let new_agent_id = body.new_agent_id.trim().to_string();
+    validate_agent_id(&new_agent_id).map_err(AppError::bad_request)?;
     let Some(channel_id) = clean_optional_text(body.channel_id.clone()) else {
         return Err(AppError::bad_request("channel_id is required"));
     };

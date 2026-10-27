@@ -47,6 +47,7 @@ mod control;
 mod foreign_row;
 mod goal_lifecycle;
 mod headless_turn;
+pub(in crate::services::discord) mod input_payload;
 mod intake_turn;
 mod latency_spans;
 mod pre_admission_control;
@@ -335,7 +336,7 @@ mod turn_mark_admission_tests;
 pub(in crate::services::discord) mod codex_resume_companion_queue_tests;
 
 mod turn_context;
-use turn_context::TurnContext;
+use input_payload::TurnContext;
 pub(super) use turn_context::render_input_chunks;
 
 #[cfg(test)]
