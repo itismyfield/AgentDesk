@@ -163,6 +163,7 @@ fn admit_codex_terminal_range_in_root(
         &path,
         (local, baseline),
         fresh,
+        can_deliver_directly,
         (result, canonical, session),
         ((start, end), generation, None),
     )
@@ -173,6 +174,7 @@ fn persist_terminal_range(
     path: &Path,
     states: (&mut InflightTurnState, &mut InflightTurnState),
     mut fresh: InflightTurnState,
+    can_deliver_directly: bool,
     frame: (&str, PathBuf, &str),
     source: ((u64, u64), i64, Option<(u64, u64)>),
 ) -> Result<TuiTerminalRange, GuardedSaveOutcome> {
@@ -180,8 +182,72 @@ fn persist_terminal_range(
     let (result, canonical, session) = frame;
     let (range, generation, source_file_identity) = source;
     let canonical = canonical.display().to_string();
+    #[cfg(test)]
+    let crash_after_admission = std::env::var("ADK_7453_CRASH_CHANNEL")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        == Some(fresh.channel_id);
+    #[cfg(test)]
+    if crash_after_admission {
+        assert_eq!(
+            (local.full_response.len(), local.response_sent_offset),
+            (13, 6),
+            "unsaved local precondition"
+        );
+        assert_eq!(
+            (fresh.full_response.len(), fresh.response_sent_offset),
+            (6, 6),
+            "durable precondition"
+        );
+    }
+    let body_ownership = crate::services::discord::turn_bridge::stream_body_ownership_peek(
+        ChannelId::new(fresh.channel_id),
+        &fresh,
+        can_deliver_directly,
+    );
+    #[cfg(test)]
+    crate::services::discord::turn_bridge::record_stream_test_event(
+        fresh.channel_id,
+        format!("admission-peek={body_ownership:?}"),
+    );
+    let preserve_progress = !matches!(body_ownership, Ok(false));
+    if preserve_progress {
+        if !InflightTurnIdentity::from_state(&fresh).matches_state(local)
+            || fresh.turn_nonce != local.turn_nonce
+            || fresh.runtime_kind != local.runtime_kind
+            || (fresh.output_path != local.output_path
+                && local
+                    .output_path
+                    .as_deref()
+                    .and_then(|path| std::fs::canonicalize(path).ok())
+                    .as_deref()
+                    != Some(Path::new(&canonical)))
+            || !fresh.same_coordinate_source(local)
+            || !StreamRelayAuthority::from_state(local).bridge_owns_relay()
+        {
+            return Err(GuardedSaveOutcome::AuthorityPinned);
+        }
+        for state in [&fresh, &*local] {
+            if state.response_sent_offset > state.full_response.len()
+                || !state
+                    .full_response
+                    .is_char_boundary(state.response_sent_offset)
+            {
+                return Err(GuardedSaveOutcome::AuthorityPinned);
+            }
+        }
+        // Preserve stream coordinates and unsaved local text with the source cursor atomically.
+        let (body, frontier) = super::stamp_merge::merge_forward_response_progress(
+            (&fresh.full_response, fresh.response_sent_offset),
+            (&local.full_response, local.response_sent_offset),
+        )
+        .ok_or(GuardedSaveOutcome::AuthorityPinned)?;
+        fresh.full_response = body;
+        fresh.response_sent_offset = frontier;
+    } else {
+        fresh.full_response = result.to_string();
+    }
     fresh.output_path = Some(canonical.clone());
-    fresh.full_response = result.to_string();
     fresh.last_offset = range.1;
     fresh.tui_terminal_source_file_identity = source_file_identity;
     fresh.tui_terminal_generation_mtime_ns = Some(generation);
@@ -194,12 +260,28 @@ fn persist_terminal_range(
     .map_err(|_| GuardedSaveOutcome::IoError)?
     .ok_or(GuardedSaveOutcome::AuthorityPinned)?;
     baseline.clone_from(&persisted);
+    if preserve_progress {
+        local.full_response.clone_from(&persisted.full_response);
+        local.response_sent_offset = persisted.response_sent_offset;
+    }
     local.output_path.clone_from(&persisted.output_path);
     local.session_id.clone_from(&persisted.session_id);
     local.tui_terminal_source_file_identity = persisted.tui_terminal_source_file_identity;
     local.tui_terminal_generation_mtime_ns = persisted.tui_terminal_generation_mtime_ns;
     local.last_offset = persisted.last_offset;
     local.save_generation = persisted.save_generation;
+    #[cfg(test)]
+    crate::services::discord::turn_bridge::record_stream_test_event(
+        persisted.channel_id,
+        format!(
+            "admission-body={:?}/{}",
+            persisted.full_response, persisted.response_sent_offset
+        ),
+    );
+    #[cfg(test)]
+    if crash_after_admission {
+        std::process::exit(73);
+    }
     Ok(TuiTerminalRange {
         retained_codex_terminal: false,
         parked: None,
@@ -664,6 +746,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn codex_terminal_range_cold_admission_and_exit_owner_5264() {
+        if !crate::services::tui_o::cutover::test_override::in_empty_list_process(concat!(
+            module_path!(),
+            "::codex_terminal_range_cold_admission_and_exit_owner_5264"
+        )) {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
         let root = inflight_runtime_root().unwrap();

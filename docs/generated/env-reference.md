@@ -12,13 +12,14 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 131
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 132
 - Platform and third-party variables: 30
 
 ## AgentDesk variables
 
 | Variable | Defined at | Description |
 |---|---|---|
+| `ADK_7453_CRASH_CHANNEL` | `src/services/discord/inflight/save_store/identity_gate/runtime_stamp.rs` |  |
 | `ADK_API_URL` | `src/cli/monitoring.rs` | This module's api_base() prefers ADK_API_URL over AGENTDESK_API_URL — the hint must match that order. |
 | `ADK_B3B2_MUTANT` | `src/services/discord/inflight.rs` |  |
 | `ADK_BUSY_INJECT` | `src/services/discord/health/turn_deliver/inject.rs` | `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read once per process: `external` or `all` opens it for any turn holder… |
