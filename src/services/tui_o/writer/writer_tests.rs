@@ -353,6 +353,41 @@ fn unit(native_key: &str) -> UnitKey {
     }
 }
 
+pub(crate) async fn post_codex_records_for_test(channel: u64, raw: &str) -> (Vec<String>, String) {
+    let harness = Harness::build_channel(channel, |_| Vec::new());
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    let mut deriver =
+        UnitDeriver::new(channel, ShadowProvider::Codex).with_turn_summary(pieces::SummaryInputs {
+            turn_marks: Default::default(),
+            disposed: Default::default(),
+            context_window: None,
+        });
+    let mut start = 0;
+    for line in raw.lines() {
+        let end = start + line.len() as u64 + 1;
+        let record = CapturedRecord {
+            start,
+            end,
+            line: line.as_bytes().to_vec(),
+        };
+        for item in deriver.derive(&record) {
+            assert_eq!(writer.deliver(&item).await, Step::Done);
+        }
+        start = end;
+    }
+    let ledger = std::fs::read_to_string(
+        harness
+            ._runtime
+            .path()
+            .join("o_store")
+            .join(channel.to_string())
+            .join("ledger.jsonl"),
+    )
+    .unwrap();
+    (harness.port.posts(), ledger)
+}
+
 fn piece(native_key: &str, payload: &str) -> Derived {
     Derived::Piece(PieceWork {
         unit_key: unit(native_key),

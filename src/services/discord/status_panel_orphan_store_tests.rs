@@ -446,6 +446,7 @@ fn owned_pending_bind_fixture(
 
 /// Makes `dir` read-only and returns its permissions to restore; a fault that does not
 /// take effect (running as root) fails the test instead of passing it vacuously.
+#[cfg(unix)]
 fn make_read_only(dir: &Path) -> fs::Permissions {
     let original = fs::metadata(dir).expect("store dir").permissions();
     let mut read_only = original.clone();
@@ -462,7 +463,7 @@ fn make_read_only(dir: &Path) -> fs::Permissions {
 fn checked_pending_bind_removal_reports_only_proven_store_states() {
     let provider = ProviderKind::Claude;
     let (channel_id, panel_id) = (5_708_201, 5_708_202);
-    type Fault = fn(&Path, &Path) -> Option<fs::Permissions>;
+    type Fault = fn(&Path, &Path) -> Option<Box<dyn FnOnce()>>;
     let invalid_utf8: Fault = |file, _| {
         let mut bytes = fs::read(file).expect("pending bind file");
         bytes.push(0xFF);
@@ -473,19 +474,37 @@ fn checked_pending_bind_removal_reports_only_proven_store_states() {
         fs::write(file, "[{\"id\": 5708202, \"kind\": \"pending_").expect("corrupt file");
         None
     };
-    let read_only_dir: Fault = |_, dir| Some(make_read_only(dir));
+    #[cfg(unix)]
+    let deny_write: Fault = |_, dir| {
+        let original = make_read_only(dir);
+        let dir = dir.to_path_buf();
+        Some(Box::new(move || {
+            fs::set_permissions(dir, original).expect("restore store dir");
+        }))
+    };
+    #[cfg(windows)]
+    let deny_write: Fault = |file, _| {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_SHARE_READ permits the store read but denies replacement and deletion.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(file)
+            .expect("hold store file without write/delete sharing");
+        Some(Box::new(move || drop(held)))
+    };
     let cases: [(&str, Fault, bool, PendingBindCheckError); 4] = [
         ("read", invalid_utf8, false, PendingBindCheckError::Read),
         ("parse", corrupt, false, PendingBindCheckError::Parse),
         (
             "last-record delete",
-            read_only_dir,
+            deny_write,
             false,
             PendingBindCheckError::Write,
         ),
         (
             "atomic write",
-            read_only_dir,
+            deny_write,
             true,
             PendingBindCheckError::Write,
         ),
@@ -509,8 +528,8 @@ fn checked_pending_bind_removal_reports_only_proven_store_states() {
             panel_id,
             &identity,
         );
-        if let Some(original) = restore {
-            fs::set_permissions(&dir, original).expect("restore store dir");
+        if let Some(restore) = restore {
+            restore();
         }
         let still_on_disk = String::from_utf8_lossy(&fs::read(&file).unwrap_or_default())
             .contains(&panel_id.to_string());

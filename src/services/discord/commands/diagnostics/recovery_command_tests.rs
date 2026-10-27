@@ -83,10 +83,19 @@ async fn status_shows_complete_session_cwd_and_missing_transcript() {
 async fn status_transcript_probe_checks_metadata_for_large_missing_and_directory_paths() {
     let root = tempfile::tempdir().unwrap();
     let transcript = root.path().join("large.jsonl");
-    std::fs::File::create(&transcript)
-        .unwrap()
-        .set_len(32 * 1024 * 1024 * 1024)
-        .unwrap();
+    let file = std::fs::File::create(&transcript).unwrap();
+    // Windows allocates set_len's full size unless the file is marked sparse first.
+    #[cfg(windows)]
+    {
+        let result = std::process::Command::new("fsutil")
+            .args(["sparse", "setflag"])
+            .arg(&transcript)
+            .output()
+            .expect("mark the test transcript sparse");
+        assert!(result.status.success(), "sparse flag failed: {result:?}");
+    }
+    file.set_len(32 * 1024 * 1024 * 1024).unwrap();
+    drop(file);
     let mut state = crate::services::discord::inflight::InflightTurnState::new(
         ProviderKind::Claude,
         648_503,

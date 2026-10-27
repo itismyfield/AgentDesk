@@ -1,4 +1,3 @@
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -226,105 +225,7 @@ pub struct DiscordBotLaunchConfig {
 }
 
 fn config_path_for_write() -> Option<PathBuf> {
-    let explicit = std::env::var_os("AGENTDESK_CONFIG")
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty());
-    let runtime_root = crate::config::runtime_root();
-    let cwd = std::env::current_dir().ok();
-    let home_dir = dirs::home_dir();
-
-    Some(resolve_config_path_for_write(
-        explicit,
-        runtime_root,
-        cwd,
-        home_dir,
-    ))
-}
-
-fn resolve_config_path_for_write(
-    explicit: Option<PathBuf>,
-    runtime_root: Option<PathBuf>,
-    cwd: Option<PathBuf>,
-    home_dir: Option<PathBuf>,
-) -> PathBuf {
-    if let Some(path) = explicit {
-        if path.exists() {
-            return path;
-        }
-
-        let mut candidates = Vec::new();
-        if let Some(root) = runtime_root.as_ref() {
-            let canonical = runtime_layout::config_file_path(root);
-            let legacy = runtime_layout::legacy_config_file_path(root);
-            if path == legacy {
-                candidates.push(canonical);
-            } else if path == canonical {
-                candidates.push(legacy);
-            }
-        }
-
-        if path.file_name() == Some(OsStr::new("agentdesk.yaml")) {
-            if let Some(parent) = path.parent() {
-                if parent.file_name() == Some(OsStr::new("config")) {
-                    if let Some(root) = parent.parent() {
-                        let legacy = root.join("agentdesk.yaml");
-                        if legacy != path {
-                            candidates.push(legacy);
-                        }
-                    }
-                } else {
-                    let canonical = parent.join("config").join("agentdesk.yaml");
-                    if canonical != path {
-                        candidates.push(canonical);
-                    }
-                }
-            }
-        }
-
-        if let Some(candidate) = candidates.into_iter().find(|candidate| candidate.exists()) {
-            return candidate;
-        }
-        return path;
-    }
-
-    if let Some(root) = runtime_root.as_ref() {
-        for path in [
-            runtime_layout::config_file_path(root),
-            runtime_layout::legacy_config_file_path(root),
-        ] {
-            if path.exists() {
-                return path;
-            }
-        }
-    }
-
-    if let Some(dir) = cwd.as_ref() {
-        for path in [
-            dir.join("config").join("agentdesk.yaml"),
-            dir.join("agentdesk.yaml"),
-        ] {
-            if path.exists() {
-                return path;
-            }
-        }
-    }
-
-    if let Some(home) = home_dir.as_ref() {
-        let release_root = home.join(".adk").join("release");
-        for path in [
-            runtime_layout::config_file_path(&release_root),
-            runtime_layout::legacy_config_file_path(&release_root),
-        ] {
-            if path.exists() {
-                return path;
-            }
-        }
-    }
-
-    runtime_root
-        .map(|root| runtime_layout::config_file_path(&root))
-        .or_else(|| cwd.map(|dir| dir.join("config").join("agentdesk.yaml")))
-        .unwrap_or_else(|| PathBuf::from("config").join("agentdesk.yaml"))
+    Some(crate::config::resolved_config_path())
 }
 
 fn resolved_config_bot_name(config: &crate::config::Config, token: &str) -> Option<String> {

@@ -404,27 +404,9 @@ fn migrate_legacy_credential_entries(legacy: &Path, canonical: &Path) -> Result<
 }
 
 fn load_memory_backend_from_yaml(root: &Path) -> Option<MemoryBackendConfig> {
-    for path in [config_file_path(root), legacy_config_file_path(root)] {
-        if !path.is_file() {
-            continue;
-        }
-
-        match crate::config::load_from_path(&path) {
-            Ok(config) => {
-                if let Some(memory) = config.memory {
-                    return Some(memory_backend_from_config(memory));
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "  [memory] Warning: failed to parse '{}' for memory config: {error}",
-                    path.display()
-                );
-            }
-        }
-    }
-
-    None
+    let path = crate::config::config_path::config_path_in(root);
+    let config = crate::config::config_path::load_config_file(&path).ok()??;
+    config.memory.map(memory_backend_from_config)
 }
 
 fn memory_backend_from_config(config: crate::config::MemoryConfig) -> MemoryBackendConfig {

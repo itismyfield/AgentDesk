@@ -633,8 +633,7 @@ struct PeerSourceFingerprint {
 fn peer_source_paths() -> Vec<std::path::PathBuf> {
     let mut paths = Vec::new();
     if let Some(root) = crate::config::runtime_root() {
-        paths.push(crate::runtime_layout::config_file_path(&root));
-        paths.push(crate::runtime_layout::legacy_config_file_path(&root));
+        paths.push(crate::config::config_path::config_path_in(&root));
         paths.push(crate::runtime_layout::role_map_path(&root));
         paths.push(crate::runtime_layout::org_schema_path(&root));
     }
