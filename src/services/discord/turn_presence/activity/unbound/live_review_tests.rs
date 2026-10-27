@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 mod collection_publication_tests;
 #[path = "effect_read_defer_tests.rs"]
 mod effect_read_defer_tests;
+#[path = "session_hosts_reload_tests.rs"]
+mod session_hosts_reload_tests;
 
 pub(in crate::services::discord::turn_presence::activity) struct Rig {
     pub(in crate::services::discord::turn_presence::activity) shared: Arc<SharedData>,
@@ -45,7 +47,8 @@ impl Rig {
             owner_node: "test-node".into(),
             runtime_root: self.root.path().display().to_string(),
         };
-        let boot = BootSessionHosts::from_config(&self.config).unwrap();
+        let boot =
+            crate::config::session_hosts::BootSessionHosts::from_config(&self.config).unwrap();
         let endpoint = boot.herdr_endpoint(self.channel.get()).unwrap();
         let mut execution = record(&owner, "retired", HostedState::Retired);
         execution.location = Some(HostedLocation {
