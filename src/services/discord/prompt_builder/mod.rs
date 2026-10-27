@@ -246,7 +246,7 @@ pub(super) fn build_system_prompt_with_manifest(
          This delivers the file directly to the user's Discord channel.\n\
          Do NOT tell the user to use /down — use the command above instead.\n\n\
          When referencing files in your text, include the specific path (e.g. \"mod.rs:2700\"). \
-         The user sees one-line tool cards but not tool output, so put the results they need in your text.\n\n\
+         The user sees tool cards, not tool output; put needed results in your text.\n\n\
          Discord formatting rules:\n\
          - Use inline `code` for short references. Reserve code blocks for actual code snippets.\n\
          - Keep messages concise and scannable on mobile. Prefer short paragraphs and bullet points.\n\
