@@ -138,14 +138,12 @@ fn registrations() -> Result<Vec<RegisteredChannelBinding>, String> {
         }
     }
     let root = crate::config::runtime_root().ok_or("runtime root unavailable")?;
-    for path in [
-        crate::runtime_layout::config_file_path(&root),
-        crate::runtime_layout::legacy_config_file_path(&root),
-    ] {
-        let Some(bytes) = read_optional(Some(path))? else {
-            continue;
-        };
-        let disk: Config = serde_yaml::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let path = crate::config::config_path::config_path_in(&root);
+    if let Some(bytes) = read_optional(Some(path.clone()))? {
+        let disk: Config = serde_yaml::from_slice(&bytes).map_err(|error| {
+            crate::config::config_path::warn_unloadable(&path, format_args!("{error}"));
+            error.to_string()
+        })?;
         for agent in &disk.agents {
             for (key, channel) in agent.channels.iter() {
                 if crate::services::provider::intern_provider_id(key).is_none() {
@@ -173,7 +171,6 @@ fn registrations() -> Result<Vec<RegisteredChannelBinding>, String> {
                 );
             }
         }
-        break;
     }
     Ok(bindings.into_values().collect())
 }

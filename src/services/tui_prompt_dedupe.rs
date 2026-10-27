@@ -22,6 +22,7 @@ use chrono::{DateTime, Utc};
 
 mod synthetic_prompt;
 use self::synthetic_prompt::{
+    is_codex_agents_md_prompt, is_environment_context_prompt,
     is_synthetic_tui_user_prompt_for_provider, reject_synthetic_claude_user_prompt,
     reject_synthetic_tui_user_prompt,
 };

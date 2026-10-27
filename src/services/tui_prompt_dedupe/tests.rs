@@ -2216,6 +2216,76 @@ fn ignores_codex_rollout_environment_context_user_message() {
     assert_eq!(extract_codex_rollout_user_prompt(&json), None);
 }
 
+fn codex_user_record(texts: &[&str], kinds: Option<&[&str]>) -> serde_json::Value {
+    let content: Vec<_> = texts
+        .iter()
+        .map(|text| serde_json::json!({ "type": "input_text", "text": text }))
+        .collect();
+    let mut payload = serde_json::json!({ "type": "message", "role": "user", "content": content });
+    if let Some(kinds) = kinds {
+        payload["internal_chat_message_metadata_passthrough"] =
+            serde_json::json!({ "content_item_kinds": kinds });
+    }
+    serde_json::json!({ "type": "response_item", "payload": payload })
+}
+
+/// Codex writes AGENTS.md instructions with its environment as a user record before the prompt;
+/// only that exact record is context, never a typed input that looks like it.
+#[test]
+fn codex_agents_md_context_record_is_not_a_user_prompt() {
+    let agents =
+        "# AGENTS.md instructions\n\n<INSTRUCTIONS>\n# Global\n\n- dummy rule\n</INSTRUCTIONS>";
+    let nested =
+        "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>\nnested rule\n</INSTRUCTIONS>";
+    let env = "<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>";
+    let typed = "[User: tester (ID: 1)] first prompt after clear";
+    let (doc, ctx, text) = (
+        "agents_md.instructions",
+        "environments.environment_context",
+        "user.text",
+    );
+    let context = [
+        // Named items decide even where the text shape alone would not.
+        (vec![agents, env], Some(vec![doc, ctx])),
+        (vec![agents, nested, env], Some(vec![doc, doc, ctx])),
+        // Writers without item kinds are known by the exact text shape.
+        (vec![agents, env], None),
+        (vec![nested], None),
+    ];
+    for (texts, kinds) in context {
+        let record = codex_user_record(&texts, kinds.as_deref());
+        assert_eq!(extract_codex_rollout_user_prompt(&record), None, "{record}");
+    }
+    let joined = format!("{agents}\n{env}");
+    let inputs = [
+        (vec![typed], Some(vec![text])),
+        (vec![joined.as_str()], Some(vec![text])),
+        (vec![agents, typed], Some(vec![doc, text])),
+        (vec![agents, env, typed], None),
+        (vec![agents, "and my question"], None),
+        (
+            vec!["# AGENTS.md instructions\n\nplease review my AGENTS.md"],
+            None,
+        ),
+        (
+            vec!["# AGENTS.md instructions\n<INSTRUCTIONS>\nx\n</INSTRUCTIONS>"],
+            None,
+        ),
+        (
+            vec!["# AGENTS.md instructions for\n\n<INSTRUCTIONS>\nx\n</INSTRUCTIONS>"],
+            None,
+        ),
+    ];
+    for (texts, kinds) in inputs {
+        let record = codex_user_record(&texts, kinds.as_deref());
+        assert_eq!(
+            extract_codex_rollout_user_prompt(&record),
+            Some(texts.join("\n")),
+            "{record}"
+        );
+    }
+}
+
 #[test]
 fn codex_and_qwen_keep_claude_interrupt_text_as_user_prompt() {
     let marker = "[Request interrupted by user]";

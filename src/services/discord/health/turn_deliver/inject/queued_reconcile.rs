@@ -463,3 +463,61 @@ pub(super) fn claude_proof(
 #[cfg(test)]
 #[path = "queued_reconcile_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn mismatched_file_identity_refuses_transcript_proof() {
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transcript.jsonl");
+    let source = "discord:6813460:9100094081725135881";
+    let session = "47d7dbe8-0c1a-4b2e-9f3d-6a5b4c3d2e1f";
+    let nonce = "d286a43b";
+    let body = human_frame::inject(source, "200", "ann", nonce, "status?");
+    let records = [
+        json!({"type": "queue-operation", "operation": "enqueue",
+            "sessionId": session, "content": body}),
+        json!({"type": "queue-operation", "operation": "remove",
+            "sessionId": session, "content": body, "reason": "absorbed_mid_turn",
+            "commandUuid": "cmd", "deliveryId": "del"}),
+        json!({"type": "attachment", "sessionId": session,
+            "attachment": {"type": "queued_command", "prompt": body,
+                "source_uuid": "cmd", "delivery_id": "del", "commandMode": "prompt",
+                "origin": {"kind": "human"}, "humanTurn": true}}),
+    ];
+    let transcript = records.map(|record| format!("{record}\n")).concat();
+    std::fs::write(&path, &transcript).unwrap();
+    let actual = file_id(&std::fs::metadata(&path).unwrap());
+    let different = actual
+        .map(|(device, inode)| (device, inode.wrapping_add(1)))
+        .unwrap_or((0, 0));
+    assert_ne!(actual, Some(different));
+    let want = Want {
+        key: (path.clone(), different, 1, 1),
+        from: 0,
+        lead: String::new(),
+        source: source.into(),
+        author: "200".into(),
+        text: "status?".into(),
+        nonce: Some(nonce.into()),
+        session_id: session.into(),
+        after_us: None,
+    };
+    let mut offset = 0;
+    let seen: Vec<_> = transcript
+        .lines()
+        .filter_map(|line| {
+            let record = want.record(line, offset);
+            offset += line.len() as u64 + 1;
+            record
+        })
+        .collect();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(want.decide(&seen).unwrap().nonce, nonce);
+    assert!(
+        want.search().is_none(),
+        "a complete proof chain cannot authorize a different transcript identity"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), transcript);
+}

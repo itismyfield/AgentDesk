@@ -107,6 +107,8 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── config/
+│   ├── config_path/
+│   │   └── tests.rs
 │   ├── reload_classes/
 │   │   ├── detect.rs
 │   │   ├── table.rs
@@ -132,6 +134,7 @@ src/
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
 │   ├── cluster_role.rs
+│   ├── config_path.rs
 │   ├── disk_write.rs
 │   ├── late_live_reload_tests.rs
 │   ├── peer_filter.rs
@@ -2131,7 +2134,8 @@ src/
 │   │   │   └── turn_lifecycle.rs
 │   │   ├── tmux_output_stream/
 │   │   │   ├── tests/
-│   │   │   │   └── compact_summary_tests.rs
+│   │   │   │   ├── compact_summary_tests.rs
+│   │   │   │   └── section_replay_tests.rs
 │   │   │   ├── native_codex.rs
 │   │   │   └── provider_output_guard_tests.rs
 │   │   ├── tmux_placeholder_suppression/

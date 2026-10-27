@@ -164,21 +164,11 @@ pub(crate) fn scan_legacy_sources(root: &Path) -> LegacySourceScan {
 }
 
 pub(crate) fn load_runtime_config(root: &Path) -> Result<LoadedRuntimeConfig, String> {
-    let canonical = runtime_layout::config_file_path(root);
-    let legacy = runtime_layout::legacy_config_file_path(root);
-    let path = if canonical.is_file() || !legacy.is_file() {
-        canonical
-    } else {
-        legacy
-    };
-
-    let existed = path.is_file();
-    let mut config = if existed {
-        crate::config::load_from_path(&path)
-            .map_err(|err| format!("Failed to load config '{}': {err:#}", path.display()))?
-    } else {
-        Config::default()
-    };
+    let path = crate::config::config_path::config_path_in(root);
+    let loaded = crate::config::config_path::load_config_file(&path)
+        .map_err(|err| format!("Failed to load config '{}': {err:#}", path.display()))?;
+    let existed = loaded.is_some();
+    let mut config = loaded.unwrap_or_default();
 
     precheck_voice_alias_collisions(&mut config)?;
 
@@ -371,13 +361,7 @@ fn resolve_bot_token(bot_name: &str, bot: &BotConfig) -> Option<String> {
 }
 
 fn write_runtime_config(root: &Path, config: &Config) -> Result<(), String> {
-    let canonical = runtime_layout::config_file_path(root);
-    let legacy = runtime_layout::legacy_config_file_path(root);
-    let path = if canonical.is_file() || !legacy.is_file() {
-        canonical
-    } else {
-        legacy
-    };
+    let path = crate::config::config_path::config_path_in(root);
     crate::config::save_to_path(&path, config)
         .map_err(|err| format!("Failed to write config '{}': {err}", path.display()))
 }

@@ -1,10 +1,8 @@
 name: CI PR
-
 on:
   # PR-only: no push/dispatch run may publish `Script checks`. The judge uses !cancelled(): on run cancel
   # it never starts or is cancelled; a timed-out upstream still judges red.
   pull_request:
-
 concurrency:
   # A PR number is unique inside the base repository, unlike `head_ref`: two
   # forks can use the same source branch name and must never cancel each other.
@@ -355,6 +353,8 @@ jobs:
               - 'src/services/discord/runtime_store.rs'
               - 'src/services/discord/session_idle_cleanup.rs'
               - 'src/services/discord/settings/**'
+              - 'src/services/discord/status_panel_orphan_store_tests.rs'
+              - 'src/services/discord/status_panel_singleton_store.rs'
               - 'src/services/discord/task_notification_delivery/**'
               - 'src/services/discord/task_supervisor.rs'
               - 'src/services/discord/terminal_delivery_custody/**'
@@ -599,6 +599,12 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Install cargo-nextest
+        if: runner.os == 'Windows'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.149
+
       - name: Writer namespace exact Windows targets
         if: runner.os == 'Windows'
         # Healthy runs took 24-46 min on 2026-10-15/16 and three PRs were cut at 45.
@@ -609,12 +615,6 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: ./scripts/ci/run-writer-namespace-windows-targets.sh
-
-      - name: Install cargo-nextest
-        if: runner.os == 'Windows'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.149
 
       # Every test the sources declare for Windows must be in the Windows lib test binary's list.
       - name: Compare Windows Rust test sources with the nextest list
@@ -886,7 +886,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py e85dd6104fefd77f5deba1aca46c26df868c45c9b40d0c3fb32ee469b8587405
-          pin scripts/check-ci-runner-hardening.sh c15a4803b9cd8c0c7ee2ed41e3f8fbe514f1be545e7de92383c7b9e3ddb142ba
+          pin scripts/check-ci-runner-hardening.sh 9a93cd17ebed6be70ab7cbed01d94ad0727961c6c1c37c7e5711438c318f9f12
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks

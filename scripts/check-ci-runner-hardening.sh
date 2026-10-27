@@ -775,7 +775,7 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "bc15b089191e1d1234060197410f90e4d3a9cf0bce533d35bddb700cfc21159b",
+    "job_sha256" => "e7c2d6080345a730efa6def33cced471dc6096257d125f10c92eef59d34d0876",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
