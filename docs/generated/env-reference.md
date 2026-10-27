@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 132
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 131
 - Platform and third-party variables: 30
 
 ## AgentDesk variables
@@ -112,7 +112,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_KAKAO_LANDING_URL` | `src/services/kakao.rs` |  |
 | `AGENTDESK_KAKAO_TOKEN_STORE_DIR` | `src/services/kakao.rs`, `src/services/kakao/token_store.rs` | Offline settings probe. |
 | `AGENTDESK_MEETING_SELECTION_TIMEOUT_SECS` | `src/services/discord/meeting_orchestrator/selection_runtime.rs` |  |
-| `AGENTDESK_MEMENTO_HOOK` | `src/cli/utils.rs` | #2655: marker key that identifies AgentDesk-managed hook entries in a Claude Code `settings.json`. |
 | `AGENTDESK_MEMORY_MERGE_SKILL` | `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR` | `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_N2B_TEST_MUTATION` | `src/services/claude_tui/source_verify.rs`, `src/services/discord/turn_presence/activity/unbound/binding_metadata.rs`, `src/services/tui_o/writer/binding.rs` | Test-only switch naming the one rule a mutation run disables. |
@@ -167,7 +166,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `GEMINI_CLIENT_ID` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
 | `GEMINI_CLIENT_SECRET` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs` |  |
-| `HOME` | `src/cli/doctor/orchestrator.rs`, `src/cli/herdr.rs`, `src/cli/utils.rs`, `src/config/session_hosts.rs`, `src/services/discord/sidecar_interaction.rs`, `src/services/mcp_config.rs`, `src/services/observability/events.rs`, `src/services/operator_connectors.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` | Absolute socket path; defaults to $HOME/.config/herdr/herdr.sock |
+| `HOME` | `src/cli/doctor/orchestrator.rs`, `src/cli/herdr.rs`, `src/config/session_hosts.rs`, `src/services/discord/sidecar_interaction.rs`, `src/services/mcp_config.rs`, `src/services/observability/events.rs`, `src/services/operator_connectors.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` | Absolute socket path; defaults to $HOME/.config/herdr/herdr.sock |
 | `HOSTNAME` | `src/server/outbox_worker.rs`, `src/services/scheduled_messages.rs`, `src/services/tmux_common.rs` |  |
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs`, `src/services/stream_json_cli/dialects/agy.rs` |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs`, `src/services/maintenance/jobs/memento_consolidation.rs` |  |
