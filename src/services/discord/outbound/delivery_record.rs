@@ -59,7 +59,7 @@ use std::sync::atomic::Ordering;
 use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
 
-use super::completed_turn_ledger::{self, append_completed_episode, append_completed_turn};
+use super::completed_turn_ledger::{self, append_completed_episode};
 use super::turn_output_controller::DeliveryOutcome;
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
@@ -256,7 +256,12 @@ pub(in crate::services::discord) fn record_pinned_delivery_metadata(
         body,
         source.generation_mtime_ns,
     );
-    append_completed_turn(&provider, source.delivery_channel_id, user_msg_id);
+    append_completed_episode(
+        &provider,
+        source.delivery_channel_id,
+        user_msg_id,
+        Some(source.turn_nonce.as_str()).filter(|nonce| !nonce.is_empty()),
+    );
 }
 /// Remove the whole record (turn-end GC). `true` if a file was removed.
 /// Test-only: no production GC path calls it.
@@ -4257,7 +4262,7 @@ mod tests {
     }
 
     /// Without exact same-episode provenance the nonce is `None`: another turn's pin,
-    /// a row on another range, an unknown generation, and the pinned sink.
+    /// a row on another range, or an unknown generation. A pinned source proves its nonce.
     #[cfg(unix)]
     #[test]
     fn unproven_provenance_records_no_nonce_6035() {
@@ -4293,6 +4298,10 @@ mod tests {
         let (_, receipt) = exact_delivery_fixture(&ProviderKind::Claude, tmux, "ep-n", (0, 64),
             generation, (sink, sink), 603_597);
         record_pinned_delivery_metadata(&receipt.source, "answer", user);
-        assert_eq!(ledger_rows(sink), [(user, None)], "pinned sink");
+        assert_eq!(
+            ledger_rows(sink),
+            [(user, Some("ep-n".to_string()))],
+            "pinned source"
+        );
     }
 }

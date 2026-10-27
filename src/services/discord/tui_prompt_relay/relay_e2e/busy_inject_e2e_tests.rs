@@ -434,6 +434,22 @@ async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
     let channel = ChannelId::new(CHANNEL_ID);
     // The turn already running started live on an earlier message, which moved the checkpoint.
     let (earlier, answer) = (fresh_id(), fresh_id());
+    let persistence = crate::services::discord::queue_persistence_context(
+        &rt.h.shared,
+        &ProviderKind::Claude,
+        channel,
+    );
+    rt.h.shared.mailbox(channel).finish_turn(persistence).await;
+    assert!(
+        crate::services::discord::mailbox_try_start_turn(
+            &rt.h.shared,
+            channel,
+            Arc::new(CancelToken::new()),
+            serenity::UserId::new(USER_ID),
+            MessageId::new(earlier)
+        )
+        .await
+    );
     let advance = crate::services::discord::advance_last_message_checkpoint;
     advance(
         &rt.h.shared,
@@ -472,6 +488,63 @@ async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
     assert_eq!(
         observed,
         (vec!["status?".to_string()], Some(message), true, vec![])
+    );
+}
+
+/// An unclaimed handback lost during teardown remains recoverable without dispatch evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handed_back_message_without_scanner_retirement_is_recovered_pg() {
+    let busy = busy().await;
+    let rt = &busy.rt;
+    rt.hold_mailbox().await;
+    busy.pane.menu();
+    let channel = ChannelId::new(CHANNEL_ID);
+    let (earlier, answer) = (fresh_id(), fresh_id());
+    let persistence = crate::services::discord::queue_persistence_context(
+        &rt.h.shared,
+        &ProviderKind::Claude,
+        channel,
+    );
+    rt.h.shared.mailbox(channel).finish_turn(persistence).await;
+    assert!(
+        crate::services::discord::mailbox_try_start_turn(
+            &rt.h.shared,
+            channel,
+            Arc::new(CancelToken::new()),
+            serenity::UserId::new(USER_ID),
+            MessageId::new(earlier)
+        )
+        .await
+    );
+    crate::services::discord::advance_last_message_checkpoint(
+        &rt.h.shared,
+        &ProviderKind::Claude,
+        channel,
+        MessageId::new(earlier),
+    );
+    let message = fresh_id();
+    rt.h.deliver_user_message(message, "status?").await.unwrap();
+    let handed = rt.queue().await;
+    assert!(!disposition::dispatched::read(&ProviderKind::Claude, channel).contains(&message));
+    crate::services::discord::mailbox_clear_channel(&rt.h.shared, &ProviderKind::Claude, channel)
+        .await;
+    rt.hold_mailbox().await;
+    rt.h.seed_channel_history(&[
+        (earlier, "earlier", false),
+        (answer, "answer", true),
+        (message, "status?", false),
+    ]);
+    rt.h.run_catch_up().await;
+    let recovered = rt.queue().await;
+    let settled = crate::services::discord::outbound::completed_turn_ledger::settled_user_msg_ids(
+        &ProviderKind::Claude,
+        CHANNEL_ID,
+    );
+    assert!(!settled.contains(&message));
+    rt.finish().await;
+    assert_eq!(
+        (handed, recovered),
+        (vec!["status?".to_string()], vec!["status?".to_string()])
     );
 }
 

@@ -19,7 +19,7 @@ fn ready_pane() -> String {
     )
 }
 
-fn managed_row(channel: u64) -> (InflightTurnState, ManagedSubmission) {
+pub(super) fn managed_row(channel: u64) -> (InflightTurnState, ManagedSubmission) {
     let mut state = InflightTurnState::new(
         ProviderKind::Claude,
         channel,
@@ -41,7 +41,7 @@ fn managed_row(channel: u64) -> (InflightTurnState, ManagedSubmission) {
     (state, submission)
 }
 
-fn durable_phase(channel: u64) -> Option<SubmissionPhase> {
+pub(super) fn durable_phase(channel: u64) -> Option<SubmissionPhase> {
     super::super::load_inflight_state(&ProviderKind::Claude, channel)
         .expect("row survives")
         .managed_submission
@@ -81,7 +81,7 @@ fn cg_b2c_guarded_owner_rearms_pending_after_an_applied_input() {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Entry {
+pub(super) enum Entry {
     Fresh,
     Warm,
 }
@@ -95,10 +95,10 @@ fn submit(entry: Entry, channel: u64, prompt: &str) -> Result<(), String> {
     }
 }
 
-struct Run {
-    result: Result<(), String>,
+pub(super) struct Run {
+    pub(super) result: Result<(), String>,
     /// Each pane write with the durable managed phase it met.
-    sends: Vec<(String, String)>,
+    pub(super) sends: Vec<(String, String)>,
 }
 
 /// Drives the real input entry inside `submission`'s scope: readiness reads the host spy, and
@@ -132,7 +132,7 @@ fn run_on(
     Run { result, sends }
 }
 
-fn run(
+pub(super) fn run(
     entry: Entry,
     channel: u64,
     prompt: &str,

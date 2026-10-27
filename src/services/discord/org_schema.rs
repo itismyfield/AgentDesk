@@ -7,8 +7,7 @@ use serde::Deserialize;
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::org_schema_path;
 use super::settings::{
-    MemoryConfigOverride, PeerAgentInfo, RegisteredChannelBinding, RoleBinding,
-    resolve_memory_settings,
+    MemoryConfigOverride, RegisteredChannelBinding, RoleBinding, resolve_memory_settings,
 };
 use crate::services::agent_identity::{self, identity_from_parts, identity_label};
 use crate::services::provider::ProviderKind;
@@ -702,7 +701,6 @@ pub(super) fn resolve_role_binding(
         model,
         reasoning_effort: None,
         peer_agents_enabled,
-        quality_feedback_injection_enabled: true,
         auth_profile,
         memory,
     })
@@ -741,39 +739,6 @@ pub(super) fn load_shared_prompt_path() -> Option<String> {
             let legacy = root.join("_shared.md");
             legacy.exists().then(|| legacy.display().to_string())
         })
-}
-
-pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
-    let Some(schema) = load_org_schema() else {
-        return Vec::new();
-    };
-
-    let mut result = Vec::new();
-    for (role_id, def) in &schema.agents {
-        let provider = def
-            .provider
-            .as_deref()
-            .and_then(ProviderKind::from_str)
-            .unwrap_or(ProviderKind::Unsupported("unknown".into()));
-        let identity = identity_from_parts(
-            role_id,
-            def.display_name.clone(),
-            provider.clone(),
-            def.model.clone(),
-            def.auth_profile.as_deref(),
-        );
-        result.push(PeerAgentInfo {
-            role_id: role_id.clone(),
-            display_name: def.display_name.clone(),
-            keywords: def.keywords.clone().unwrap_or_default(),
-            provider: Some(provider),
-            identity_label: identity_label(&identity),
-        });
-    }
-
-    // Sort by role_id for stable ordering
-    result.sort_by(|a, b| a.role_id.cmp(&b.role_id));
-    result
 }
 
 pub(super) fn load_meeting_config() -> Option<MeetingConfig> {

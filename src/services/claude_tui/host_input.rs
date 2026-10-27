@@ -2,8 +2,6 @@
 //! pane mutation, and typed outcomes. A confirmed tmux session takes keys; a recorded
 //! Herdr pane takes them only through its own gate.
 
-use std::process::Output;
-
 use super::input::{
     POST_LITERAL_SETTLE, POST_PASTE_BUFFER_SETTLE, PROMPT_READY_CANCELLED_ERROR,
     PromptReadinessKind, TuiInputAction, ensure_tmux_success, literal_action_needs_post_settle,
@@ -19,6 +17,7 @@ use crate::services::session_host::{
     ResolvedSessionTarget, TargetHost, TmuxHost, herdr_endpoints,
 };
 use crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal;
+use std::process::Output;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InputTarget {
@@ -175,7 +174,7 @@ struct TmuxInput;
 
 impl InputTransport for TmuxInput {
     fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
-        tmux::send_literal(session, text)
+        TmuxHost.send_literal(session, text)
     }
 
     fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String> {
@@ -188,7 +187,7 @@ impl InputTransport for TmuxInput {
         buffer: &str,
         delete: bool,
     ) -> Result<Output, String> {
-        tmux::paste_buffer(session, buffer, delete)
+        TmuxHost.paste_buffer(session, buffer, delete)
     }
 
     fn send_keys(&mut self, session: &str, keys: &[HostKey]) -> Result<Output, String> {

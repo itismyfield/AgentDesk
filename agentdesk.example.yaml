@@ -1,8 +1,9 @@
 server:
   port: 8791
   host: "0.0.0.0"
-  # Peers outside loopback, Tailscale (100.64.0.0/10) and private LAN ranges:
-  # off = no filter, log = warn only (default), enforce = 403.
+  # Peers outside loopback and Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48):
+  # off = no filter, log = warn only (default), enforce = 403 for public peers.
+  # Private LAN peers are still served but logged with peer_class=private_lan.
   # peer_filter: log
 
 cluster:
@@ -260,6 +261,7 @@ agents:
   # channels through the announce bot and emits the ids to paste in.
   # The orchestrator drives fan-out by `send-to-agent` to each worker.
   - id: adk-claude-pipe-e2e
+    peer_directory: false
     name: "ADK Claude pipe E2E"
     name_ko: "ADK Claude pipe E2E"
     provider: claude
@@ -274,6 +276,7 @@ agents:
     department: devsecops
 
   - id: adk-claude-tui-e2e
+    peer_directory: false
     name: "ADK Claude tui E2E"
     name_ko: "ADK Claude tui E2E"
     provider: claude
@@ -290,6 +293,7 @@ agents:
   # claude-tui's tmux worker; adk-claude-tui-e2e above serves claude-herdr once
   # its channel is mapped under session_hosts.herdr.
   - id: adk-claude-tui-2-e2e
+    peer_directory: false
     name: "ADK Claude tui (tmux) E2E"
     name_ko: "ADK Claude tui (tmux) E2E"
     provider: claude
@@ -304,6 +308,7 @@ agents:
     department: devsecops
 
   - id: adk-codex-pipe-e2e
+    peer_directory: false
     name: "ADK Codex pipe E2E"
     name_ko: "ADK Codex pipe E2E"
     provider: codex
@@ -318,6 +323,7 @@ agents:
     department: devsecops
 
   - id: adk-codex-tui-e2e
+    peer_directory: false
     name: "ADK Codex tui E2E"
     name_ko: "ADK Codex tui E2E"
     provider: codex
@@ -332,6 +338,7 @@ agents:
     department: devsecops
 
   - id: adk-e2e-orchestrator
+    peer_directory: false
     name: "ADK E2E Orchestrator"
     name_ko: "ADK E2E 오케스트레이터"
     provider: claude

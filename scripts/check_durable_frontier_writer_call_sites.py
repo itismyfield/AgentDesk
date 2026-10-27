@@ -298,19 +298,15 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
         "src/services/discord/session_relay_sink/task_notification_context.rs": 1,
     },
     # -- store 2: completed-turn ledger --------------------------------------
-    # 3 -> 2 in #5071 T1 S7: the recovery path no longer appends the
-    # completed-turn ledger itself. Both remaining sites are the funnel's own --
-    # the unknown-generation branch and the post-persist branch -- which is the
-    # ordering (D5) the slice was about.
-    # The post-persist branch now calls `append_completed_episode`; the
-    # pinned-metadata sink calls this directly -- still 2.
+    # The unknown-generation branch lacks a pinned episode.
     "append_completed_turn": {
-        "src/services/discord/outbound/delivery_record.rs": 2,
+        "src/services/discord/outbound/delivery_record.rs": 1,
     },
-    # The funnel's post-persist branch and the nonce-less wrapper.
+    # Confirmed metadata and actual NoRange/headless delivery preserve captured episodes.
     "append_completed_episode": {
         "src/services/discord/outbound/completed_turn_ledger.rs": 1,
-        "src/services/discord/outbound/delivery_record.rs": 1,
+        "src/services/discord/outbound/delivery_record.rs": 2,
+        "src/services/discord/turn_bridge/terminal_outcome_delivery.rs": 1,
     },
     # The claim-side merged-head alias, written before the claim reports.
     "record_merged_alias": {

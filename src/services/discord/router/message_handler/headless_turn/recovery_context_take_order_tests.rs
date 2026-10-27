@@ -121,7 +121,6 @@ fn actual_headless_assembly_selects_only_all_and_headless_shared_sections() {
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: false,
-        quality_feedback_injection_enabled: false,
         auth_profile: "default".to_string(),
         memory: Default::default(),
     };

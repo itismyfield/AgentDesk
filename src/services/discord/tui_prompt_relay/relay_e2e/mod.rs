@@ -513,6 +513,21 @@ impl RelayE2eHarness {
             .map(|entry| *entry)
     }
 
+    pub(super) fn seed_scanner_checkpoint(&self, after: u64) {
+        let path = self
+            .root
+            .path()
+            .join("runtime/last_message")
+            .join(PROVIDER_KEY)
+            .join(format!("{}.sweep.json", self.channel_id.get()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let progress = serde_json::json!({
+            "version": 1, "provider": PROVIDER_KEY, "channel_id": self.channel_id.get(),
+            "after": after, "origin": "observed_frontier",
+        });
+        std::fs::write(path, progress.to_string()).unwrap();
+    }
+
     pub(super) fn subscribe_completions(&self) -> Receiver<TurnCompletionEvent> {
         subscribe_turn_completion_events(&self.shared)
     }
