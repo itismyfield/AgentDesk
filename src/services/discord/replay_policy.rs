@@ -1,6 +1,7 @@
 //! Decisions for a protected attempt's stale resume or terminal: keep the legacy path, retry the
 //! exact attempt once, classify it as ordinary, or hold it.
 
+pub(crate) mod activation;
 pub(crate) mod live;
 #[cfg(all(test, unix))]
 mod live_tests;
@@ -9,12 +10,21 @@ pub(crate) mod permit;
 mod permit_tests;
 #[cfg(test)]
 mod policy_tests;
+pub(crate) mod recovery;
 
 use crate::db::replay_disposition::write::{self, ExactAttempt, NoEffectAck};
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::provider::CancelToken;
 use live::{LiveAttempt, RawObservation, Verdict};
 use sqlx::PgPool;
+
+/// Admission and restart recovery compare the same process owner incarnation.
+static INCARNATION: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+
+pub(crate) fn incarnation() -> &'static str {
+    &INCARNATION
+}
 
 #[derive(Debug)]
 pub(crate) enum ReplayDecision {
@@ -28,32 +38,63 @@ pub(crate) enum ReplayDecision {
 }
 
 /// Decides a stale attempt; anything short of committed no-effect evidence withholds.
-pub(crate) async fn decide_stale(
+pub(in crate::services::discord) async fn decide_stale(
     pool: &PgPool,
     attempt: Option<ExactAttempt>,
     observation: &RawObservation,
+    capture: Option<&InflightTurnState>,
 ) -> ReplayDecision {
     let Some(attempt) = attempt else {
         return ReplayDecision::NotApplicable;
     };
-    if let Some(evidence) = observation.no_effect_evidence() {
+    if attempt.retry_of().is_none()
+        && let Some(evidence) = observation.no_effect_evidence()
+    {
         return match write::classify_no_effect(pool, attempt, &evidence).await {
             Ok(ack) => ReplayDecision::AllowStartupRetry(RetryPermit::from_no_effect(ack)),
             Err(_) => ReplayDecision::WithholdReplay { persisted: false },
         };
     }
-    let persisted = withhold(pool, &attempt, observation.hold_reason()).await;
+    let reason = if attempt.retry_of().is_some() {
+        "startup retry budget exhausted"
+    } else {
+        observation.hold_reason()
+    };
+    let persisted = withhold(pool, &attempt, reason, capture).await;
     ReplayDecision::WithholdReplay { persisted }
 }
 
-async fn withhold(pool: &PgPool, attempt: &ExactAttempt, reason: &str) -> bool {
-    let preserved = serde_json::json!({ "hold": { "nonce": attempt.nonce(), "reason": reason } });
-    write::withhold(pool, attempt, reason, &preserved)
-        .await
-        .inspect_err(|error| {
-            tracing::warn!(receipt = attempt.receipt_id(), %error, "replay hold was not committed")
-        })
-        .is_ok()
+async fn withhold(
+    pool: &PgPool,
+    attempt: &ExactAttempt,
+    reason: &str,
+    capture: Option<&InflightTurnState>,
+) -> bool {
+    let mut preserved = serde_json::json!({
+        "hold": { "nonce": attempt.nonce(), "reason": reason },
+    });
+    if let Some(capture) = capture {
+        let Ok(snapshot) = serde_json::to_value(capture) else {
+            tracing::warn!(
+                receipt = attempt.receipt_id(),
+                "replay capture could not be preserved"
+            );
+            return false;
+        };
+        preserved["recovery_snapshot"] = snapshot;
+    }
+    write::withhold_and_notify(
+        pool, attempt, reason, &preserved,
+        crate::db::replay_disposition::hold_notice::NoticeRouting {
+            bot: "notify",
+            session_key: capture.and_then(|state| state.session_key.as_deref()),
+        },
+    )
+    .await
+    .inspect_err(|error| {
+        tracing::warn!(receipt = attempt.receipt_id(), %error, "replay hold and notice were not committed")
+    })
+    .is_ok()
 }
 
 /// The right to prepare one exact retry of a committed no-effect nonce.
@@ -62,16 +103,27 @@ pub(crate) struct RetryPermit {
     receipt_id: i64,
     previous_nonce: String,
     next_nonce: String,
+    abandonment: Abandonment,
 }
 
 impl RetryPermit {
     pub(crate) fn from_no_effect(ack: NoEffectAck) -> Self {
-        let (receipt_id, previous_nonce) = ack.into_parts();
+        let (receipt_id, previous_nonce, proof, pool) = ack.into_parts();
+        let next_nonce = uuid::Uuid::new_v4().to_string();
+        let next_proof = proof.successor(&next_nonce);
         Self {
             receipt_id,
             previous_nonce,
-            next_nonce: uuid::Uuid::new_v4().to_string(),
+            next_nonce,
+            abandonment: Abandonment {
+                pool,
+                proofs: vec![proof, next_proof],
+            },
         }
+    }
+
+    pub(crate) fn abandonment(&self) -> Abandonment {
+        self.abandonment.clone()
     }
 
     pub(crate) fn receipt_id(&self) -> i64 {
@@ -224,145 +276,57 @@ pub(crate) fn claim_legacy_retry(channel_id: u64, message_id: u64) -> bool {
     }
 }
 
-/// Takes the token's live attempt for its one decision; a protected turn without one decides nothing.
-async fn decide_live<'a>(
-    pool: Option<&'a PgPool>,
-    token: &'a CancelToken,
-) -> Option<(&'a PgPool, &'a LiveAttempt, ExactAttempt, RawObservation)> {
-    let live = token.replay_attempt()?.as_ref();
-    let Some(pool) = pool else {
-        live.settle(Verdict::Held);
-        return None;
-    };
-    let (attempt, observation) = live.take_for_decision(READER_SETTLE).await?;
-    Some((pool, live, attempt, observation))
-}
+mod decision;
+pub(in crate::services::discord) use decision::{
+    error_is_ordinary, hold_recovery, ordinary_outcome, stale_resume,
+};
 
-/// Decides a stale resume: the legacy retry for a legacy or ordinary turn, and for a protected
-/// one an exact retry only on committed no-effect evidence from its own live attempt.
-pub(in crate::services::discord) async fn stale_resume(
-    pool: Option<&PgPool>,
-    token: &CancelToken,
-    inflight: &InflightTurnState,
-) -> StaleResume {
-    if ordinary_allowed(token, inflight) {
-        return StaleResume::Legacy;
-    }
-    let legacy_raced = bar_legacy_retry(inflight);
-    let Some((pool, live, attempt, observation)) = decide_live(pool, token).await else {
-        return StaleResume::Hold;
-    };
-    let receipt = attempt.receipt_id();
-    if legacy_raced {
-        withhold(pool, &attempt, "legacy retry claimed the request").await;
-        live.settle(Verdict::Held);
-        return StaleResume::Hold;
-    }
-    match decide_stale(pool, Some(attempt), &observation).await {
-        ReplayDecision::AllowStartupRetry(retry) => {
-            live.settle(Verdict::Retried);
-            StaleResume::Exact(retry)
+/// Non-executable custody follows a refusal even after the start right moved to a gateway.
+#[derive(Clone)]
+pub(crate) struct Abandonment {
+    pool: PgPool,
+    proofs: Vec<write::HoldProof>,
+}
+impl Abandonment {
+    pub(crate) fn new(pool: &PgPool, proof: write::HoldProof) -> Self {
+        Self {
+            pool: pool.clone(),
+            proofs: vec![proof],
         }
-        decision => {
-            live.settle(Verdict::Held);
-            if matches!(
-                decision,
-                ReplayDecision::WithholdReplay { persisted: false }
-            ) {
-                tracing::warn!(
-                    receipt,
-                    "stale protected attempt held without a committed hold"
-                );
+    }
+    pub(crate) async fn abandon(&self, reason: &str) {
+        loop {
+            let mut retry = false;
+            for proof in &self.proofs {
+                match proof.abandon(&self.pool).await {
+                    Ok(()) => return,
+                    Err(write::WriteError::CasMiss) => {}
+                    Err(error) => {
+                        retry = true;
+                        tracing::warn!(%error, reason, "unstarted custody settlement will retry");
+                    }
+                }
             }
-            StaleResume::Hold
+            if !retry {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
+    pub(crate) fn schedule(self, reason: &'static str) {
+        crate::services::discord::task_supervisor::spawn_observed(
+            "replay_unstarted_hold",
+            async move {
+                self.abandon(reason).await;
+            },
+        );
+    }
 }
 
-/// Classifies a protected attempt's terminal from a complete observation with exactly one
-/// provider terminal; anything else holds.
-async fn classify_terminal(
-    pool: Option<&PgPool>,
-    token: &CancelToken,
-    inflight: &InflightTurnState,
-) -> bool {
-    if !protected(token, inflight) {
-        return true;
+impl std::fmt::Debug for Abandonment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Abandonment")
+            .field("proofs", &self.proofs)
+            .finish_non_exhaustive()
     }
-    if let Some(verdict) = token.replay_attempt().and_then(|live| live.verdict()) {
-        return verdict == Verdict::Ordinary;
-    }
-    if token.replay_attempt().is_some_and(|live| live.stale()) {
-        return false;
-    }
-    let Some((pool, live, attempt, observation)) = decide_live(pool, token).await else {
-        return false;
-    };
-    let ordinary = match observation.terminal_evidence() {
-        Some(evidence) => write::classify_normal(pool, &attempt, &evidence)
-            .await
-            .inspect_err(|error| {
-                tracing::warn!(receipt = attempt.receipt_id(), kind = ?evidence.kind(), %error,
-                    "ordinary terminal was not classified; the request stays held")
-            })
-            .is_ok(),
-        None => {
-            withhold(pool, &attempt, observation.hold_reason()).await;
-            false
-        }
-    };
-    live.settle(if ordinary {
-        Verdict::Ordinary
-    } else {
-        Verdict::Held
-    });
-    ordinary
-}
-
-/// Whether a provider error may take the ordinary recovery, presentation and reset path; a
-/// protected stale resume is left to the stale-resume decision.
-pub(in crate::services::discord) async fn error_is_ordinary(
-    pool: Option<&PgPool>,
-    token: &CancelToken,
-    inflight: &InflightTurnState,
-    stale_resume: bool,
-) -> bool {
-    if stale_resume && !ordinary_allowed(token, inflight) {
-        token.replay_attempt().inspect(|live| live.mark_stale());
-        bar_legacy_retry(inflight);
-        return false;
-    }
-    ordinary_outcome(pool, token, inflight).await
-}
-
-/// Whether ordinary completion, failure and session effects may run: always for a legacy turn,
-/// and for a protected one once its terminal is classified ordinary.
-pub(in crate::services::discord) async fn ordinary_outcome(
-    pool: Option<&PgPool>,
-    token: &CancelToken,
-    inflight: &InflightTurnState,
-) -> bool {
-    let ordinary = classify_terminal(pool, token, inflight).await;
-    if !ordinary {
-        bar_legacy_retry(inflight);
-    }
-    ordinary
-}
-
-/// Holds a protected request at a recovery sentinel, which is never no-effect evidence; returns
-/// whether the request was held.
-pub(in crate::services::discord) async fn hold_recovery(
-    pool: Option<&PgPool>,
-    token: &CancelToken,
-    inflight: &InflightTurnState,
-) -> bool {
-    if ordinary_allowed(token, inflight) {
-        return false;
-    }
-    bar_legacy_retry(inflight);
-    if let Some((pool, live, attempt, _)) = decide_live(pool, token).await {
-        withhold(pool, &attempt, "recovery sentinel after start").await;
-        live.settle(Verdict::Held);
-    }
-    true
 }

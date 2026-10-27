@@ -52,10 +52,12 @@ fn spawn_retry(
             }
             Some(retry) => {
                 let receipt = retry.permit.receipt_id();
+                let unstarted = retry.permit.abandonment();
                 let handoff = gateway
                     .schedule_exact_retry_with_history(channel_id, retry)
                     .await;
                 if handoff == crate::services::discord::replay_policy::ExactHandoff::Refused {
+                    unstarted.abandon("exact retry handoff refused").await;
                     tracing::warn!(
                         channel_id = channel_id.get(),
                         receipt,
@@ -96,61 +98,9 @@ pub(super) struct StaleRetryState<'a> {
 
 /// Runs the legacy reset and history retry, or a protected request's decision: an exact retry
 /// defers every reset to its next start, and a held request keeps its body and session.
-pub(super) async fn retry_stale_resume(point: StaleRetry<'_>, state: StaleRetryState<'_>) {
-    use crate::services::discord::replay_policy::{self, StaleResume};
-    let pool = point.shared.pg_pool.as_ref();
-    match replay_policy::stale_resume(pool, point.cancel_token, state.inflight_state).await {
-        StaleResume::Legacy => {
-            let reset = reset_session_for_auto_retry(
-                point.shared,
-                point.channel_id,
-                point.cancel_token,
-                point.adk_session_key,
-                state.new_session_id,
-                state.new_raw_provider_session_id,
-                state.inflight_state,
-                point.reason,
-            )
-            .await;
-            // Retry with history only for an anchored user message whose session was cleared.
-            if let Some(user_msg_id) = state.auto_retry.queue(reset, point.user_msg_id) {
-                spawn_retry_with_history_with_release(
-                    point.gateway.clone(),
-                    point.channel_id,
-                    user_msg_id,
-                    point.user_text.to_string(),
-                );
-            }
-            state.full_response.clear();
-        }
-        StaleResume::Exact(permit) => {
-            if let Some(user_msg_id) = point.user_msg_id {
-                let inflight = &state.inflight_state;
-                let retry = crate::services::discord::replay_policy::ExactRetry {
-                    user_message_id: user_msg_id,
-                    sources: inflight
-                        .source_message_ids
-                        .iter()
-                        .map(|&id| MessageId::new(id))
-                        .collect(),
-                    request_owner: UserId::new(inflight.request_owner_user_id),
-                    text: point.user_text.to_string(),
-                    reply_context: inflight.followup_reply_context.clone(),
-                    permit,
-                };
-                spawn_retry(
-                    point.gateway.clone(),
-                    point.channel_id,
-                    user_msg_id,
-                    String::new(),
-                    Some(retry),
-                );
-            }
-            state.full_response.clear();
-        }
-        StaleResume::Hold => {}
-    }
-}
+#[path = "retry_state/replay.rs"]
+mod replay;
+pub(super) use replay::retry_stale_resume;
 
 pub(super) fn clear_local_session_state(
     new_session_id: &mut Option<String>,
