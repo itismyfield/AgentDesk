@@ -171,7 +171,6 @@ const PATH_OWNERS: &[(&str, &str)] = &[
         "reads both layouts as migration input",
     ),
     ("src/cli/migrate/apply.rs", "writes the migrated file"),
-    ("src/cli/dcserver.rs", "not converted yet"),
     (
         "src/services/discord/turn_presence/activity/unbound/live.rs",
         "not converted yet",

@@ -332,15 +332,7 @@ pub fn dcserver_instance_pids() -> Vec<u32> {
 }
 
 pub fn instance_agentdesk_config_path() -> Option<PathBuf> {
-    agentdesk_runtime_root().map(|root| {
-        let canonical = crate::runtime_layout::config_file_path(&root);
-        let legacy = crate::runtime_layout::legacy_config_file_path(&root);
-        if canonical.is_file() || !legacy.is_file() {
-            canonical
-        } else {
-            legacy
-        }
-    })
+    agentdesk_runtime_root().map(|root| crate::config::config_path::config_path_in(&root))
 }
 
 pub fn dcserver_stdout_log_path() -> Option<PathBuf> {
@@ -996,7 +988,7 @@ pub fn handle_dcserver(token: Option<String>) {
         } else {
             let fallback_path = settings_path
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("config").join("agentdesk.yaml"));
+                .unwrap_or_else(crate::config::resolved_config_path);
             crate::services::discord_config_audit::LoadedRuntimeConfig {
                 config: config::load_graceful(),
                 existed: fallback_path.is_file(),
