@@ -4,11 +4,14 @@ import contextlib
 import importlib.util
 import io
 import json
+import ntpath
 import os
 from pathlib import Path
+import posixpath
 import random
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -1262,6 +1265,39 @@ mod tests {
         self.assertEqual(problems, [])
         self.assertIn("h::tests::via_child", pg)
 
+    def test_impl_helpers_follow_pg_references_and_preserve_local_item_boundaries(self):
+        self.tree({"src/lib.rs": "#[cfg(test)]\nmod fixtures;\n",
+                   "src/fixtures.rs": """fn open() { TestPostgresDb::new(); }
+struct Rig;
+impl Rig { fn new() -> Self { open(); Rig } }
+struct Relaunched;
+impl Relaunched { fn new() -> Self { Rig::new(); Relaunched } }
+impl Relaunched { fn name() -> &'static str { "fixture" } }
+fn plain() {}
+struct Aliased;
+impl Aliased {
+    fn new() { use self::open as call; call(); }
+    fn other() { use self::plain as call; call(); }
+}
+struct Pure;
+impl Pure {
+    fn new() -> Self {
+        fn unused() { open(); }
+        impl Nested { fn unused() { TestPostgresDb::new(); } }
+        Pure
+    }
+}
+#[test]
+fn via_impl() { Relaunched::new(); }
+#[test]
+fn via_method_import() { Aliased::new(); }
+#[test]
+fn pure() { Pure::new(); }
+"""})
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertEqual(set(pg), {"fixtures::via_impl", "fixtures::via_method_import"})
+
     def test_a_call_through_a_reexport_reaches_the_pg_helper(self):
         self.tree({"src/lib.rs": "mod db;\nmod support;\nmod r;\n",
                    "src/r.rs": "mod inner;\n#[cfg(test)]\npub(crate) use inner::exact_tests::shared_pg;\n"
@@ -1334,6 +1370,46 @@ mod tests {
         self.assertNotIn("u::tests::opaque", pg)
         self.assertEqual(len(problems), 1)
         self.assertIn("unresolved-self-exec: src/u.rs:4: u::tests::opaque", problems[0])
+
+    def test_local_self_exec_ids_use_the_same_paths_on_every_host(self):
+        self.tree({"src/lib.rs": "#[cfg(test)]\nmod local;\n#[cfg(test)]\nmod foreign;\n",
+                   "src/local.rs": """fn run(test: &str) {
+    std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact", test]).output();
+}
+#[test]
+fn literal_parent() { run("child"); }
+#[test]
+fn concat_parent() { run(concat!(module_path!(), "::child")); }
+#[test]
+fn format_parent() { run(&format!("{}::{}", module_path!(), "child")); }
+#[test]
+fn pure_parent() { run("pure_child"); }
+#[test]
+fn child() { TestPostgresDb::new(); }
+#[test]
+fn pure_child() {}
+#[test]
+fn opaque() { run(&pick()); }
+""",
+                   "src/foreign.rs": "#[test]\nfn child() {}\n#[test]\nfn pure_child() { TestPostgresDb::new(); }\n"})
+        inventory = pgc.rust_test_sources.lib_inventory(self.root)
+        expected = {"local::child", "local::literal_parent", "local::concat_parent",
+                    "local::format_parent", "foreign::pure_child"}
+        for normalizer in (posixpath.normpath, ntpath.normpath):
+            for separator in ("/", "\\"):
+                with self.subTest(host=normalizer.__module__, separator=separator):
+                    sites = {name: [(site.replace("src/", "src/../src/").replace("/", separator), cfg)
+                                    for site, cfg in declarations]
+                             for name, declarations in inventory.tests.items()}
+                    host_os = SimpleNamespace(path=SimpleNamespace(normpath=normalizer, relpath=os.path.relpath))
+                    with mock.patch.object(pgc, "os", host_os), \
+                            mock.patch.object(pgc.rust_test_sources, "lib_inventory",
+                                              return_value=SimpleNamespace(tests=sites, modules=inventory.modules)):
+                        pg, problems = pgc.classify(self.root, exempt={})
+                    self.assertEqual(set(pg), expected)
+                    self.assertEqual(len(problems), 1)
+                    self.assertIn("unresolved-self-exec: src/local.rs:", problems[0])
+                    self.assertIn("local::opaque re-runs", problems[0])
 
     def cli(self, *argv):
         err = io.StringIO()

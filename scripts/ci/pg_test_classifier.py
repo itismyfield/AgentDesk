@@ -16,6 +16,7 @@ from functools import lru_cache
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import sys
 from typing import Iterable
@@ -340,6 +341,21 @@ def _mask_nested_items(
     return "".join(masked)
 
 
+def _impl_method_bodies(body: str, counter: list[int] | None = None) -> list[str]:
+    """Collect method bodies, retaining calls but masking block-local items."""
+    methods: list[str] = []
+    end = 0
+    for match in _FN.finditer(body):
+        if match.start() < end:
+            continue
+        opening = _function_body_opening(body, match.end())
+        if opening is None:
+            continue
+        end = _matching_brace(body, opening, counter) + 1
+        methods.append(_mask_nested_items(body[opening:end], counter))
+    return methods
+
+
 def _transitive_closure(
     referenced: set[tuple[tuple[str, ...], str, str]],
     seeded: set[tuple[tuple[str, ...], str, str]],
@@ -476,8 +492,9 @@ def discover_pg_inventory(
     inventory = rust_test_sources.lib_inventory(repo_root)
     declared_tests = set(inventory.tests)
     item_bodies: dict[tuple[tuple[str, ...], str, str], str] = {}
+    impl_methods: dict[tuple[tuple[str, ...], str, str], list[str]] = {}
     # Unstripped item text and file, read only for the test IDs a self-exec names.
-    item_raw: dict[tuple[tuple[str, ...], str, str], tuple[str, str]] = {}
+    item_raw: dict[tuple[tuple[str, ...], str, str], list[tuple[str, str]]] = {}
     seeded: set[tuple[tuple[str, ...], str, str]] = set()
     records: list[tuple[str, str, tuple[str, ...], str, str, int]] = []
     use_aliases: dict[tuple[str, ...], dict[str, tuple[str, ...]]] = {}
@@ -576,7 +593,7 @@ def discover_pg_inventory(
             key = (module, match.group("name"), "fn")
             body = _edge_boundary(clean, opening, brace_counter)
             item_bodies[key] = body
-            item_raw[key] = (source[opening:opening + len(body)], rel)
+            item_raw[key] = [(source[opening:opening + len(body)], rel)]
             if seed_match(body):
                 seeded.add(key)
 
@@ -603,9 +620,11 @@ def discover_pg_inventory(
             body = _edge_boundary(clean, opening, brace_counter)
             module = logical_at(*_scope_at(match.start(), ranges))
             key = (module, match.group(1), "impl")
-            item_bodies[key] = body
-            item_raw[key] = (source[opening:opening + len(body)], rel)
-            if seed_match(body):
+            methods = _impl_method_bodies(body, brace_counter)
+            impl_methods.setdefault(key, []).extend(methods)
+            item_bodies[key] = "\n".join(impl_methods[key])
+            item_raw.setdefault(key, []).append((source[opening:opening + len(body)], rel))
+            if any(seed_match(method) for method in methods):
                 seeded.add(key)
 
         for match in _CONST.finditer(clean):
@@ -618,7 +637,7 @@ def discover_pg_inventory(
                 continue
             key = (logical_at(*_scope_at(match.start(), ranges)), match.group("name"), "const")
             item_bodies[key] = clean[match.start():end + 1]
-            item_raw[key] = (source[match.start():end + 1], rel)
+            item_raw[key] = [(source[match.start():end + 1], rel)]
 
         for match in _ATTR_FN.finditer(clean):
             if not _TEST_ATTR.search(match.group("attrs")):
@@ -750,11 +769,10 @@ def discover_pg_inventory(
 
     edges: dict[tuple[tuple[str, ...], str, str], set[tuple[tuple[str, ...], str, str]]] = {}
     for key, body in item_bodies.items():
-        if key[2] != "fn":
+        if key[2] not in {"fn", "impl"}:
             continue
-        edges[key] = body_references(
-            key[0], _mask_nested_items(body, brace_counter)
-        )
+        bodies = impl_methods[key] if key[2] == "impl" else [_mask_nested_items(body, brace_counter)]
+        edges[key] = {target for caller_body in bodies for target in body_references(key[0], caller_body)}
 
     def reached_items(referenced) -> set[tuple[tuple[str, ...], str, str]]:
         seen, frontier = set(), set(referenced)
@@ -769,7 +787,7 @@ def discover_pg_inventory(
     files_of: dict[str, set[str]] = {}
     by_last: dict[str, set[str]] = {}
     for test_id, sites in inventory.tests.items():
-        files_of[test_id] = {os.path.normpath(site.rpartition(":")[0]) for site, _cfg in sites}
+        files_of[test_id] = {posixpath.normpath(site.rpartition(":")[0].replace("\\", "/")) for site, _cfg in sites}
         by_last.setdefault(test_id.rpartition("::")[2], set()).add(test_id)
 
     def named_tests(literal: str, files: set[str]) -> set[str]:
@@ -790,7 +808,7 @@ def discover_pg_inventory(
         direct = any(pattern.search(visible_body) for pattern in SEED_PATTERNS)
         referenced = body_references(module, visible_body)
         indirect = _transitive_closure(referenced, seeded, edges)
-        reach = [item_raw[key] for key in reached_items(referenced) if key in item_raw]
+        reach = [text for key in reached_items(referenced) for text in item_raw.get(key, ())]
         texts = [(raw, path), *reach]
         if _SELF_EXEC.search(visible_body) or any(_SELF_EXEC.search(strip_rust(text)) for text, _ in reach):
             if any('"--exact"' in text for text, _ in texts):
