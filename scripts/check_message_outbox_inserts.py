@@ -9,6 +9,7 @@ from pathlib import Path
 
 INSERT = re.compile(r"INSERT\s+INTO\s+message_outbox\b", re.IGNORECASE)
 CANONICAL = {
+    Path("src/db/replay_disposition/hold_notice/outbox.rs"),
     Path("src/services/message_outbox.rs"),
     Path("src/services/message_outbox_circuit_authority.rs"),
     Path("src/services/message_outbox_recovery.rs"),

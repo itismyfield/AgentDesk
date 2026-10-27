@@ -28,6 +28,10 @@ mod runtime_handoff_loop;
 mod single_message_footer;
 mod skill_usage;
 mod stale_resume;
+pub(in crate::services::discord) fn is_stale_resume_error(message: &str, stderr: &str) -> bool {
+    stale_resume::stream_error_has_stale_resume_error(message, stderr)
+}
+
 mod status_panel;
 mod stream_loop;
 #[cfg(test)]
@@ -445,7 +449,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut status_panel_generation = inflight_state.status_panel_generation;
         inflight_state.long_running_placeholder_active = false;
         let (mut resumed_placeholder_clear_applied, mut entry_was_rowless) = (false, false);
-
         let anchor_text = super::formatting::build_processing_status_block(SPINNER[0]).to_string();
         if let Err(notice) = bridge_entry_persist::establish_bridge_entry_authority(
             bridge_entry_persist::BridgeEntryAuthorityContext {
@@ -510,7 +513,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             )
             .await;
         }
-
         if shared_owned.ui.placeholder_live_events_enabled || shared_owned.ui.status_panel_v2_enabled {
             if single_message_panel_footer_mode {
                 supersede_bridge_footer(shared_owned.as_ref(), channel_id, footer_owner).await;
@@ -522,7 +524,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 shared_owned.ui.placeholder_live_events.clear_channel(channel_id);
             }
         }
-
         if single_message_panel_footer_mode {
             // #3560: authority is proven before touching the old Discord panel.
             migrate_separate_status_panel_to_footer(
@@ -533,7 +534,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             .await;
             status_panel_msg_id = None;
         }
-
         maybe_create_bridge_separate_status_panel_response(
             shared_owned.ui.two_message_panel_enabled,
             single_message_panel_footer_mode,

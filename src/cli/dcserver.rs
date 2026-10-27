@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 use std::os::unix::io::AsRawFd;
 
 use crate::config;
@@ -836,6 +836,7 @@ pub fn handle_restart_dcserver(
     Ok(())
 }
 
+pub(crate) mod replay_recovery;
 pub(crate) mod startup;
 use startup::raise_fd_soft_limit;
 
@@ -878,36 +879,16 @@ pub fn handle_dcserver(token: Option<String>) {
         std::process::exit(1);
     }
 
-    // Single-instance guard via flock — prevents race conditions
     #[cfg(unix)]
-    let _lock_file = {
-        let lock_path = agentdesk_runtime_root()
-            .map(|r| r.join("runtime/dcserver.lock"))
-            .unwrap_or_else(|| PathBuf::from("/tmp/agentdesk-dcserver.lock"));
-        let f = match fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("Failed to open lock file {:?}: {}", lock_path, e);
-                std::process::exit(1);
-            }
-        };
-        let ret = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if ret != 0 {
-            eprintln!(
-                "  ✗ Another dcserver is already running (lock held on {:?}). Exiting.",
-                lock_path
-            );
-            std::process::exit(1);
-        }
-        // Write our PID into the lock file
-        let _ = write_dcserver_lock_pid(&f);
-        f // keep File open — dropping it releases the lock
-    };
+    let singleton = replay_recovery::Singleton::acquire(agentdesk_runtime_root().as_deref())
+        .unwrap_or_else(|error| {
+            eprintln!("  ✗ {error}");
+            std::process::exit(1)
+        });
+    #[cfg(unix)]
+    let replay_restart = singleton.recovery_root();
+    #[cfg(not(unix))]
+    let replay_restart = None;
 
     // Also kill any stale processes (e.g. orphaned without lock)
     kill_existing_dcserver_processes();
@@ -1307,6 +1288,7 @@ pub fn handle_dcserver(token: Option<String>) {
                         placeholder_live_events_enabled,
                         status_panel_v2_enabled,
                         two_message_panel_enabled,
+                        replay_restart: replay_restart.clone(),
                     },
                 )
                 .await;
@@ -1385,6 +1367,7 @@ pub fn handle_dcserver(token: Option<String>) {
                     let live_events_enabled = placeholder_live_events_enabled;
                     let status_panel_v2 = status_panel_v2_enabled;
                     let two_message_panel = two_message_panel_enabled;
+                    let replay_restart = replay_restart.clone();
                     tasks.push(tokio::spawn(async move {
                         services::discord::run_bot(
                             &config.token,
@@ -1402,6 +1385,7 @@ pub fn handle_dcserver(token: Option<String>) {
                                 placeholder_live_events_enabled: live_events_enabled,
                                 status_panel_v2_enabled: status_panel_v2,
                                 two_message_panel_enabled: two_message_panel,
+                                replay_restart,
                             },
                         )
                         .await;

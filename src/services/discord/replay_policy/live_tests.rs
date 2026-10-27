@@ -317,6 +317,7 @@ async fn decision_wakes_on_a_fact_recorded_after_its_check_pg() {
     let live = LiveAttempt::new(start(&pool, "barrier").await);
     live.record(Seen::StdoutEof);
     live.record(Seen::StderrDrained);
+    live.fixture_pending();
     live.after_check
         .lock()
         .unwrap()

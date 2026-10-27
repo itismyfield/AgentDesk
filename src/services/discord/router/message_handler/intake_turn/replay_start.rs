@@ -5,12 +5,15 @@ use crate::db::replay_disposition::write::CanonicalInput;
 use crate::services::discord::replay_policy;
 use crate::services::discord::replay_policy::permit::EffectTarget;
 use crate::services::discord::router::intake_dispatch::replay_admission::{
-    self as admission, PreparedEffectProjection, ReplayAdmissionContext, ReplayStart, StartStop,
+    self as admission, PreparedEffectProjection, ReplayStart, StartStop,
 };
+
+pub(in crate::services::discord::router::message_handler) mod common;
 
 /// What the turn's start registers besides the inflight request itself.
 pub(super) struct StartRequest<'a> {
     pub(super) provider: &'a ProviderKind,
+    pub(super) remote: bool,
     pub(super) channel_id: ChannelId,
     pub(super) agent_id: Option<&'a str>,
     pub(super) reply_context: Option<&'a str>,
@@ -48,24 +51,6 @@ async fn admit(
 ) -> Result<(ReplayStart, bool), StartStop> {
     let channel = request.channel_id.get().to_string();
     let continuation = replay_policy::take_continuation();
-    if continuation.is_none()
-        && let Some(start) = admission::dormant_start(&channel)
-    {
-        return Ok((start, false));
-    }
-    let Some(pool) = shared.pg_pool.as_ref() else {
-        return Err(StartStop::Deferred("no replay store".into()));
-    };
-    let inflight_store = super::super::super::super::inflight::load_inflight_state;
-    if inflight_store(request.provider, request.channel_id.get()).is_some() {
-        return Err(StartStop::Deferred(
-            "another turn's owner holds the channel".into(),
-        ));
-    }
-    let instance =
-        crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
-    let ctx = ReplayAdmissionContext::production(pool, &instance, admission::incarnation())
-        .for_channel(&channel);
     let uploads: Vec<String> = request
         .uploads
         .iter()
@@ -102,22 +87,22 @@ async fn admit(
         }),
         session_key: request.session_key.map(str::to_string),
     };
-    let exact = continuation.is_some();
-    let start = admission::admit_start(&ctx, &input, projection, continuation).await?;
-    inflight.replay_receipt_id = start.receipt_id();
-    if !exact {
-        return Ok((start, false));
-    }
-    replay_policy::continuation_started();
-    let mut core = shared.core.lock().await;
-    let reset = || {
-        if let Some(session) = core.sessions.get_mut(&request.channel_id) {
-            session.clear_provider_session();
-        }
-        inflight.session_id = None;
-    };
-    let start = start.exact_reset(reset).map_err(|_| StartStop::Consumed)?;
-    Ok((start, true))
+    let scope = super::super::provider_dispatch::replay_scope::selected(
+        request.provider,
+        request.channel_id.get(),
+        request.remote,
+        inflight.tmux_session_name.as_deref(),
+    );
+    common::begin(
+        shared,
+        request.provider,
+        inflight,
+        input,
+        projection,
+        continuation,
+        scope,
+    )
+    .await
 }
 
 /// Settles a start that did not happen: a consumed request releases its claim, a deferred one
