@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import package_release as packaging
 import verify_release_artifacts as verification
+import install_runtime_assets as runtime_assets
 
 
 class ReleasePackagingTests(unittest.TestCase):
@@ -29,6 +31,10 @@ class ReleasePackagingTests(unittest.TestCase):
         for name, text in {
             "Cargo.toml": '[package]\nname="agentdesk"\nversion="1.2.3"\n',
             "policies/default-pipeline.yaml": "stages: []\n",
+            "policies/lib/shared.js": "module.exports = { enabled: true };\n",
+            "policies/timeouts/default.js": "module.exports = 30;\n",
+            "policies/auto-queue.capabilities.yaml": "allow: []\n",
+            "routines/queue.js": "module.exports = {};\n",
             "scripts/queue-stability-batch.sh": "#!/bin/sh\nexit 0\n",
             "scripts/_defaults.sh": "# defaults\n",
             "migrations/postgres/0001_initial.sql": "SELECT 1;\n",
@@ -36,6 +42,15 @@ class ReleasePackagingTests(unittest.TestCase):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
+        for relative in runtime_assets.runtime_assets(ROOT):
+            path = self.root / relative
+            if relative in {"policies", "routines", "skills", "scripts/launchd-migrated"} or (ROOT / relative).is_dir():
+                path = path / "contract-fixture.dat"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text("runtime fixture\n", encoding="utf-8")
+        for relative in ("scripts/runtime-assets.txt", "scripts/install_runtime_assets.py"):
+            shutil.copyfile(ROOT / relative, self.root / relative)
         for args in [["init", "-q"], ["add", "."],
                      ["-c", "user.name=Release Test", "-c", "user.email=release@example.invalid", "commit", "-qm", "fixture"]]:
             subprocess.run(["git", "-C", str(self.root), *args], check=True, capture_output=True)
@@ -154,6 +169,78 @@ class ReleasePackagingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside"):
             packaging.copy_file(outside, self.output / "leak", self.root)
         self.assertFalse(self.output.exists())
+
+    def install_assets(self, source, destination):
+        result = subprocess.run(
+            [sys.executable, str(source / "scripts/install_runtime_assets.py"), str(source), str(destination)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def test_source_and_release_install_every_packaged_contract_asset(self):
+        archive = packaging.package(self.root, self.binary("darwin"), "aarch64-apple-darwin", self.output)
+        release = Path(self.temp.name) / "unpacked"
+        prefix = "agentdesk-darwin-aarch64/"
+        for name, content in self.read_archive(archive).items():
+            path = release / name.removeprefix(prefix)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        expected = set(packaging.git(self.root, "ls-files", "-z", "--", *runtime_assets.runtime_assets(self.root)).split("\0")) - {""}
+        for source in (self.root, release):
+            with self.subTest(source=source):
+                destination = Path(self.temp.name) / (source.name + "-install")
+                self.install_assets(source, destination)
+                ledger = json.loads((destination / "runtime/install-assets.json").read_text())
+                self.assertEqual(set(ledger), expected)
+                for relative in expected:
+                    self.assertEqual((destination / relative).read_bytes(), (source / relative).read_bytes())
+                self.assertFalse((destination / "policies/operator-local.yaml").exists())
+
+    def test_reinstall_updates_owned_assets_and_preserves_operator_files_and_links(self):
+        destination = Path(self.temp.name) / "install"
+        private = {
+            "config/agentdesk.yaml": "operator config",
+            "credentials/token": "operator credential",
+            "workspaces/example/file": "operator workspace",
+            "policies/default-pipeline.yaml": "operator override",
+            "policies/operator.js": "operator policy",
+            "routines/operator.js": "operator routine",
+        }
+        for relative, content in private.items():
+            path = destination / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self.install_assets(self.root, destination)
+        edited = destination / "routines/queue.js"
+        edited.write_text("operator edit")
+        private["routines/queue.js"] = "operator edit"
+        owned = "policies/lib/shared.js"
+        (self.root / owned).write_text("module.exports = { updated: true };\n")
+        (self.root / "routines/queue.js").write_text("upstream change")
+        outside = Path(self.temp.name) / "outside"
+        outside.mkdir()
+        (outside / "default.js").write_text("operator symlink target")
+        timeout = destination / "policies/timeouts"
+        shutil.rmtree(timeout)
+        timeout.symlink_to(outside, target_is_directory=True)
+        result = self.install_assets(self.root, destination)
+        self.assertIn("Preserved operator asset", result.stdout)
+        self.assertEqual((destination / owned).read_bytes(), (self.root / owned).read_bytes())
+        for relative, content in private.items():
+            self.assertEqual((destination / relative).read_text(), content)
+        self.assertTrue(timeout.is_symlink())
+        self.assertEqual((outside / "default.js").read_text(), "operator symlink target")
+        ledger = destination / "runtime/install-assets.json"
+        saved = ledger.read_bytes()
+        ledger.unlink()
+        ledger.symlink_to(outside / "ledger")
+        failure = subprocess.run([sys.executable, str(self.root / "scripts/install_runtime_assets.py"),
+                                  str(self.root), str(destination)], capture_output=True, text=True)
+        self.assertNotEqual(failure.returncode, 0)
+        self.assertIn("ledger is linked", failure.stderr)
+        self.assertFalse((outside / "ledger").exists())
+        self.assertTrue(saved)
 
 
 if __name__ == "__main__":
