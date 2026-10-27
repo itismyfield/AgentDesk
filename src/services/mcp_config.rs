@@ -617,23 +617,7 @@ fn current_home_dir() -> Option<PathBuf> {
 }
 
 fn load_runtime_config() -> Option<Config> {
-    let explicit = std::env::var_os("AGENTDESK_CONFIG")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-
-    let mut candidates = Vec::new();
-    if let Some(path) = explicit {
-        candidates.push(path);
-    }
-    if let Some(root) = crate::config::runtime_root() {
-        candidates.push(crate::runtime_layout::config_file_path(&root));
-        candidates.push(crate::runtime_layout::legacy_config_file_path(&root));
-    }
-
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .and_then(|path| crate::config::load_from_path(&path).ok())
+    crate::config::config_path::load_runtime_config_file().map(|(config, _)| config)
 }
 
 fn load_codex_sync_state_from_path(path: &Path) -> CodexMcpSyncState {
