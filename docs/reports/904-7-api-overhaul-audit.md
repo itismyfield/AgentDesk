@@ -65,7 +65,7 @@ Added: `callsites_migrated_off_legacy_api_paths_1069` in `src/server/routes/rout
 Run:
 
 ```bash
-cargo test --bin agentdesk callsites_migrated_off_legacy_api_paths_1069
+# (removed) callsites_migrated_off_legacy_api_paths_1069 no longer exists; no lib test replaces it.
 ```
 
 Result on this branch: **passing** (cargo test: 1 passed, 2482 filtered out).

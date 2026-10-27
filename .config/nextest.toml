@@ -1,6 +1,7 @@
 # nextest profiles for the library test suite.
 # CI workers do not read this file directly: scripts/ci/nextest_ci.py plan copies it per worker,
-# swaps profile.ci default-filter for the worker's exact IDs and appends the retry allowlist.
+# swaps profile.ci default-filter for the worker's exact IDs and sets retries: one retry for every
+# test under --retry-mode all-once (PR, main), or the retry allowlist overrides under policy (nightly).
 
 [profile.default]
 retries = 0
@@ -19,7 +20,7 @@ shared-fixture = { max-threads = 1 }
 [profile.ci]
 default-filter = "all()"
 retries = 0
-# A retry pass outside the allowlist overrides fails the run.
+# A retry pass outside the allowlist overrides fails the run; all-once plans set retries = 1 and pass.
 flaky-result = "fail"
 fail-fast = false
 test-threads = 1

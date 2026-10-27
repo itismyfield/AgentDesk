@@ -107,6 +107,10 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── config/
+│   ├── reload_classes/
+│   │   ├── detect.rs
+│   │   ├── table.rs
+│   │   └── tests.rs
 │   ├── runtime_root_guard/
 │   │   ├── process_tests.rs
 │   │   └── test_process.rs
@@ -132,12 +136,14 @@ src/
 │   ├── late_live_reload_tests.rs
 │   ├── peer_filter.rs
 │   ├── readers_live_reload_tests.rs
+│   ├── reload_classes.rs
 │   ├── retired_relay_tests.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_root_guard.rs
 │   ├── runtime_root_tests.rs
 │   ├── runtime_settings.rs
 │   ├── runtime_validation.rs
+│   ├── server_surface.rs
 │   ├── session_hosts.rs
 │   ├── session_hosts_tests.rs
 │   ├── test_env.rs
@@ -610,6 +616,9 @@ src/
 │   │   ├── config_read.rs
 │   │   └── config_read_tests.rs
 │   ├── web_surface/
+│   │   ├── browser_guard.rs
+│   │   ├── browser_guard_tests.rs
+│   │   ├── host_allowlist.rs
 │   │   ├── peer_filter.rs
 │   │   └── tests.rs
 │   ├── worker_registry/

@@ -81,8 +81,8 @@ class Fixture(unittest.TestCase):
 
     def run_cli(self, *argv):
         """rc and stderr; an uncaught exception is reported as rc "crash" so contracts fail by assertion."""
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+        err, self.out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(self.out):
             try:
                 rc = nci.main([str(a) for a in argv])
             except Exception as exc:  # noqa: BLE001
@@ -90,13 +90,14 @@ class Fixture(unittest.TestCase):
         return rc, err.getvalue()
 
     def plan(self, names, workers=2, ignored=(), timings=None, out="plan", policy=None,
-             order=None, today="2026-10-24", base="base.toml", build=None, sha=SHA):
+             order=None, today="2026-10-24", base="base.toml", build=None, sha=SHA, mode=None):
         self.write("list.json", nextest_list(names, ignored, order))
         policy = policy or ("policy.toml" if FLAKY in names else "empty.toml")
         argv = ["plan", "--universe", self.dir / "list.json", "--archive", self.archive,
                 "--workers", workers, "--sha", sha, "--scope", "linux-lib", "--run-id", "7",
                 "--base-config", self.dir / base, "--retry-policy", self.dir / policy,
                 "--today", today, "--output", self.dir / out]
+        argv += ["--retry-mode", mode] if mode else []
         build = BUILD if build is None else build
         argv += [x for key, value in build.items() for x in ([key, value] if value is not None else [])]
         for n, path in enumerate(timings or []):
@@ -250,6 +251,20 @@ class Plan(Fixture):
             self.assertEqual(retry, [{"filter": f"binary_id(={BIN}) & (test(={FLAKY}))",
                                       "retries": 1, "flaky-result": "pass"}])
             self.assertEqual((ci["retries"], ci["test-threads"], ci["flaky-result"]), (0, 1, "fail"))
+        self.assertEqual(plan["retry_mode"], "policy")
+
+    def test_all_once_config_retries_every_test_once_and_passes_flaky(self):
+        plan = self.plan_ok(self.NAMES, workers=2, mode="all-once")
+        self.assertEqual((plan["retry_mode"], len(plan["retry_policy"])), ("all-once", 1))
+        import tomllib
+        for w in plan["workers"]:
+            cfg = tomllib.loads((self.dir / f"plan/worker-{w['index']}.toml").read_text())["profile"]
+            ci = cfg["ci"]
+            selected = {s.split(")")[0] for s in ci["default-filter"].split("test(=")[1:]}
+            self.assertEqual(selected, {t[1] for t in w["tests"]})
+            self.assertEqual((ci["retries"], ci["flaky-result"], ci["test-threads"]), (1, "pass", 1))
+            self.assertEqual([o for o in ci["overrides"] if "retries" in o or "flaky-result" in o], [])
+            self.assertEqual(cfg["default"]["retries"], 0)
 
     def test_base_config_may_not_carry_retries(self):
         self.write("bad.toml", BASE_CONFIG + '\n[[profile.ci.overrides]]\nfilter = "all()"\nretries = 2\n')
@@ -426,6 +441,7 @@ class Audit(Fixture):
                                                   "seconds": 0.5, "total_attempt_seconds": 0.6,
                                                   "issue": "#1", "expires": "2026-12-31"}])
         self.assertIn(f"| `{BIN} {FLAKY}` | 2 | 0.5 | 0.6 | #1 |", (self.dir / "summary.md").read_text())
+        self.assertIn(f"::warning title=FLAKY tests passed only on retry (1)::{BIN} {FLAKY}\n", self.out.getvalue())
 
     def test_exhausted_retry_is_red(self):
         i = self.flaky_worker
@@ -446,6 +462,41 @@ class Audit(Fixture):
         body = '<flakyFailure time="0.1"/><flakyFailure time="0.1"/>'
         self.worker_artifacts(self.p, overrides={i: self.cases_for(i, **{FLAKY: body})})
         rc, verdict, _ = self.audit()
+        self.assertEqual((rc, self.kinds(verdict)), (1, {"retry-over-limit"}))
+
+
+class AuditAllOnce(Fixture):
+    """PR and main plans: any test may pass on its one retry, and is named as FLAKY."""
+    NAMES = ["m::a", "m::b", "m::c", "m::d", FLAKY]
+
+    def setUp(self):
+        super().setUp()
+        self.p = self.plan_ok(self.NAMES, workers=2, mode="all-once")
+
+    def with_bodies(self, **bodies):
+        overrides = {w["index"]: [(t[1], bodies.get(t[1].replace("::", "_"), ""), 0.5) for t in w["tests"]]
+                     for w in self.p["workers"]}
+        self.worker_artifacts(self.p, overrides=overrides)
+        return self.audit()
+
+    def test_retry_pass_of_any_test_is_green_counted_once_and_annotated(self):
+        rc, verdict, _ = self.with_bodies(m_a='<flakyFailure time="0.1"/>', m_c='<flakyFailure time="0.2"/>')
+        self.assertEqual((rc, verdict["verdict"], verdict["retry_mode"]), (0, "pass", "all-once"))
+        self.assertEqual((verdict["totals"]["executed"], verdict["totals"]["passed"]), (5, 5))
+        self.assertEqual(verdict["totals"]["retry_pass"], 2)
+        self.assertEqual([(r["id"], r["attempts"], r["issue"]) for r in verdict["retry_pass"]],
+                         [(f"{BIN} m::a", 2, None), (f"{BIN} m::c", 2, None)])
+        self.assertIn(f"| `{BIN} m::a` | 2 | 0.5 | 0.6 | - | - |", (self.dir / "summary.md").read_text())
+        self.assertIn(f"::warning title=FLAKY tests passed only on retry (2)::{BIN} m::a%0A{BIN} m::c\n",
+                      self.out.getvalue())
+
+    def test_failure_on_both_attempts_is_still_red(self):
+        rc, verdict, _ = self.with_bodies(m_a='<failure/><rerunFailure time="0.1"/>')
+        self.assertEqual((rc, self.kinds(verdict), verdict["retry_pass"]), (1, {"retry-exhausted"}, []))
+        self.assertNotIn("::warning", self.out.getvalue())
+
+    def test_more_than_one_retry_is_still_red(self):
+        rc, verdict, _ = self.with_bodies(m_a='<flakyFailure time="0.1"/><flakyFailure time="0.1"/>')
         self.assertEqual((rc, self.kinds(verdict)), (1, {"retry-over-limit"}))
 
 

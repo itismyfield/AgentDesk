@@ -62,8 +62,9 @@ write**로 내보내고, 그 stdout은 모든 테스트 스레드와 상속받�
 `test <id> ... ` 조각을 `finditer`로 훑은 뒤 조각 사이 구간의 **맨 앞 또는 맨
 끝**에서만 판정을 인정한다(경로 중간의 `ok`는 판정이 아니다).
 
+<!-- doc-path-refs: external library/test/ -->
 한 줄에 이름이 둘 이상 미결로 남을 때의 LIFO 귀속은 **증명이 아니라 선택**이다.
-rust 1.94 `library/test/src/formatters/pretty.rs`는 병렬 모드에서 콘솔 스레드
+rust 1.94 `library/test/src/formatters/pretty.rs`(rust-lang/rust 저장소)는 병렬 모드에서 콘솔 스레드
 하나가 이름과 판정을 연달아 쓴다는 것만 보장하며, 그래서 **한 libtest
 프로세스는 이름을 둘 미결로 둘 수 없다**. `test A ... test B ... ok`는 부모와
 중첩 자식이 상속 stdout을 공유할 때만 나오고, 그 경우 두 가지 순서가 **바이트
@@ -253,7 +254,7 @@ lib 시험 identity는 `rust_build`의 nextest list와 소스 인벤토리 대�
 
 ## 3. High-risk recovery lane test axes
 
-`#1011`/`#974` 감사로그는 release gate 의 high-risk recovery lane 이 아래 **4 축**을 회귀 방지선으로 유지해야 한다고 명시한다. 레거시 SQLite 기반 `src/integration_tests/tests/high_risk_recovery.rs` 시나리오 하네스는 #3035 Phase 1 에서 제거되었으며, PG-only 회귀 보호는 `src/high_risk_recovery.rs` 로 이전된다. 아래 시나리오 매트릭스(`failure_recovery` / `outbox_boundary` / `delayed_worker` / `idle_session_cleanup` 축)는 제거된 레거시 하네스 기준 기록이며 PG 스위트 재매핑은 후속 Phase 에서 진행한다. 축별 대표 시나리오는 [`docs/high-risk-recovery-lane.md`](../high-risk-recovery-lane.md#release-gate-축-매핑) 참고.
+`#1011`/`#974` 감사로그는 release gate 의 high-risk recovery lane 이 아래 **4 축**을 회귀 방지선으로 유지해야 한다고 명시한다. 레거시 SQLite 기반 `src/integration_tests/tests/high_risk_recovery.rs` (삭제됨) 시나리오 하네스는 #3035 Phase 1 에서 제거되었으며, PG-only 회귀 보호는 `src/high_risk_recovery.rs` 로 이전된다. 아래 시나리오 매트릭스(`failure_recovery` / `outbox_boundary` / `delayed_worker` / `idle_session_cleanup` 축)는 제거된 레거시 하네스 기준 기록이며 PG 스위트 재매핑은 후속 Phase 에서 진행한다. 축별 대표 시나리오는 [`docs/high-risk-recovery-lane.md`](../high-risk-recovery-lane.md#release-gate-축-매핑) 참고.
 
 | Axis | What it guards | Representative scenarios (cargo test filters) |
 | --- | --- | --- |
