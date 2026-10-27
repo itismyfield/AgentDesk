@@ -108,7 +108,8 @@ impl<T: HerdrTransport> HerdrHost<T> {
     /// Content passes the owner fence first; a refused write sends nothing.
     fn mutate_content(&self, pane: &str, request: HerdrRequest) -> Result<HostMutation, HostError> {
         let mut sent = None;
-        let fence = crate::services::tui_input::writer_lease::content("herdr", pane, || {
+        let physical = format!("{}#{pane}", self.endpoint.socket_path().display());
+        let fence = crate::services::tui_input::writer_lease::content("herdr", &physical, || {
             sent = Some(self.mutate(pane, request));
             Ok(())
         });

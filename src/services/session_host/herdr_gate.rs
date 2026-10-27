@@ -463,11 +463,15 @@ impl HerdrTarget {
     /// Content passes the owner fence first; a refused write drops its judgment unsent.
     fn send_content(&self, request: HerdrRequest) -> Result<HostMutation, HostError> {
         let mut sent = None;
-        let fence =
-            crate::services::tui_input::writer_lease::content("herdr", &self.0.pane, || {
-                sent = Some(self.send_pinned(request));
-                Ok(())
-            });
+        let physical = format!(
+            "{}#{}",
+            self.0.endpoint.socket_path().display(),
+            self.0.pane
+        );
+        let fence = crate::services::tui_input::writer_lease::content("herdr", &physical, || {
+            sent = Some(self.send_pinned(request));
+            Ok(())
+        });
         match (fence, sent) {
             (Ok(()), Some(sent)) => sent,
             _ => {
