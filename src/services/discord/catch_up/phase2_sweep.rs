@@ -273,6 +273,10 @@ async fn recover_messages<A: CatchUpDiscordApi + ?Sized>(
     // Iterate in reverse (oldest first) for chronological queue order
     for msg in unanswered_slice.iter().rev() {
         let mid = msg.id.get();
+        if scan_progress::read(provider, channel_id).is_some_and(|after| mid <= after) {
+            progress.stats.skipped += 1;
+            continue;
+        }
         let age_secs = match phase2_pre_gate(
             msg,
             current_bot_user_id,
@@ -359,7 +363,9 @@ async fn recover_messages<A: CatchUpDiscordApi + ?Sized>(
             }
             CatchUpClassificationDecision::Determinate(CatchUpClassification::TooOld) => {
                 if !progress.frontier.can_durably_settle(mid)
-                    || !record_exhausted_hold_expiry(api, shared, phase2_prior, msg)
+                    || record_exhausted_hold_expiry(api, shared, phase2_prior, msg)
+                        .await
+                        .is_none()
                 {
                     progress.frontier.seal(mid);
                     break;

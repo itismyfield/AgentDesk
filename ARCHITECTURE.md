@@ -1026,6 +1026,8 @@ src/
 │   │   │   ├── policy.rs
 │   │   │   └── policy_tests.rs
 │   │   ├── catch_up/
+│   │   │   ├── frontier_sweep_tests/
+│   │   │   │   └── scanner_progress_tests.rs
 │   │   │   ├── absorbed_active_tests.rs
 │   │   │   ├── api.rs
 │   │   │   ├── claim_cas_tests.rs
@@ -1041,6 +1043,7 @@ src/
 │   │   │   ├── handled_command.rs
 │   │   │   ├── handled_command_tests.rs
 │   │   │   ├── held_range.rs
+│   │   │   ├── i7441_tests.rs
 │   │   │   ├── injected_catch_up_tests.rs
 │   │   │   ├── merged_alias_tests.rs
 │   │   │   ├── phase1_sweep.rs
@@ -1048,6 +1051,7 @@ src/
 │   │   │   ├── phase2_age_tests.rs
 │   │   │   ├── phase2_sweep.rs
 │   │   │   ├── retry_state.rs
+│   │   │   ├── scan_progress.rs
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
 │   │   │   └── too_old_drop_pg_tests.rs
@@ -2474,7 +2478,8 @@ src/
 │   │   │   │   │   ├── provider_failure_tests.rs
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
-│   │   │   │   │   └── rowless_receipt_tests.rs
+│   │   │   │   │   ├── rowless_receipt_tests.rs
+│   │   │   │   │   └── settled_delivery_tests.rs
 │   │   │   │   ├── empty_response_recovery/
 │   │   │   │   │   ├── guidance.rs
 │   │   │   │   │   └── handler.rs

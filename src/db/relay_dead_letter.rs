@@ -2,15 +2,11 @@
 //! the silent message-loss vectors (catch-up "too old" drop + intervention-queue
 //! capacity-overflow evict). Preserves dropped content for operator recovery.
 //!
-//! All recording is FIRE-AND-FORGET: a dead-letter write must never block or
-//! fail the origin path (the message was already lost — failing to record it
-//! must not compound the loss). Hot-path callers use [`record_detached`], which
-//! runs the INSERT on a detached `tokio::spawn` so even a PG pool at its
-//! acquire-timeout (3s, `db::postgres`) cannot stall the catch-up loop /
-//! queue-exit feedback / outbox drain (#4260 dual-review r1, codex#1).
+//! Hot-path callers use [`record_detached`]. Catch-up awaits bounded durable
+//! recording before retiring an input from its scanner frontier.
 //!
 //! Retention (#4260 dual-review r1, opus#2): the table is self-maintaining —
-//! after each successful detached insert, the same spawned task best-effort
+//! after each successful recording, a spawned task best-effort
 //! DELETEs rows older than [`RETENTION_DAYS`], so no separate maintenance job
 //! is needed and the table cannot grow unboundedly.
 //!
@@ -74,6 +70,61 @@ pub(crate) async fn insert(
     pool: &PgPool,
     record: &RelayDeadLetterRecord,
 ) -> Result<i64, sqlx::Error> {
+    insert_with_outcome(pool, record).await.map(|(id, _)| id)
+}
+
+async fn insert_with_outcome(
+    pool: &PgPool,
+    record: &RelayDeadLetterRecord,
+) -> Result<(i64, bool), sqlx::Error> {
+    if record.kind == KIND_CATCH_UP_TOO_OLD
+        && let Some(message_id) = record.message_id.as_deref()
+    {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout = '3s'")
+            .execute(&mut *tx)
+            .await?;
+        let key = format!(
+            "{}:{}{}:{}",
+            record.channel_id.len(),
+            record.channel_id,
+            message_id.len(),
+            message_id
+        );
+        sqlx::query("SELECT pg_advisory_xact_lock(7441, hashtext($1))")
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
+        // A separate statement takes a fresh snapshot after the preceding writer commits.
+        let existing: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM relay_dead_letter
+             WHERE kind=$1 AND channel_id=$2 AND message_id=$3 ORDER BY id LIMIT 1",
+        )
+        .bind(&record.kind)
+        .bind(&record.channel_id)
+        .bind(message_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let id = match existing {
+            Some(id) => id,
+            None => insert_on(&mut tx, record).await?,
+        };
+        tx.commit().await?;
+        return Ok((id, existing.is_none()));
+    }
+    let mut connection = pool.acquire().await?;
+    insert_on(&mut connection, record)
+        .await
+        .map(|id| (id, true))
+}
+
+async fn insert_on(
+    connection: &mut sqlx::PgConnection,
+    record: &RelayDeadLetterRecord,
+) -> Result<i64, sqlx::Error> {
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO relay_dead_letter
             (kind, channel_id, author_id, message_id, content, reason)
@@ -86,9 +137,50 @@ pub(crate) async fn insert(
     .bind(record.message_id.as_deref())
     .bind(&record.content)
     .bind(&record.reason)
-    .fetch_one(pool)
+    .fetch_one(connection)
     .await?;
     Ok(id)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TooOldRecordOutcome {
+    Inserted,
+    Existing,
+}
+
+/// A missing pool or failed commit cannot retire an unpreserved catch-up input.
+pub(crate) async fn record_too_old(
+    pool: Option<&PgPool>,
+    record: RelayDeadLetterRecord,
+) -> Option<TooOldRecordOutcome> {
+    let pool = pool?;
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        insert_with_outcome(pool, &record),
+    )
+    .await
+    {
+        Ok(Ok((_, inserted))) => {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                if let Err(error) = prune_expired(&pool).await {
+                    tracing::warn!(
+                        "[dlq] failed to prune expired relay dead-letter rows (best-effort): {error}"
+                    );
+                }
+            });
+            Some(if inserted {
+                TooOldRecordOutcome::Inserted
+            } else {
+                TooOldRecordOutcome::Existing
+            })
+        }
+        result => {
+            tracing::warn!(kind = %record.kind, channel_id = %record.channel_id,
+                error = ?result, "[dlq] catch-up input not durably preserved; retaining scanner frontier");
+            None
+        }
+    }
 }
 
 /// Best-effort retention sweep: DELETE rows older than [`RETENTION_DAYS`].
@@ -534,7 +626,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("count rows");
-        assert_eq!(count, 3, "two explicit inserts + one detached insert");
+        assert_eq!(count, 2, "detached TooOld reuses the explicit row");
 
         // Retention (#4260 dual r1 opus#2): age one row past the horizon; the
         // next detached record must sweep it within the same spawned task.
@@ -562,7 +654,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("count remaining rows");
-        assert_eq!(remaining, 3, "fresh rows survive the sweep (+1 new insert)");
+        assert_eq!(remaining, 2, "fresh rows survive the sweep (+1 new insert)");
 
         pool.close().await;
         pg_db.drop().await;

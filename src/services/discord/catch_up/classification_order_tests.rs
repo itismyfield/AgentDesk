@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use poise::serenity_prelude as serenity;
 
 use super::api::{CatchUpFetchCursor, CatchUpFetchRequest};
+#[path = "i7441_tests.rs"]
+pub(in crate::services::discord) mod i7441_tests;
 use super::settled_frontier::SettledFrontier;
 use super::{
     CATCH_UP_RETRY_DEFERRED_REARM_LIMIT, CatchUpClassification, CatchUpClassificationDecision,
@@ -653,6 +655,15 @@ fn write_checkpoint(
     std::fs::create_dir_all(path.parent().expect("last-message provider dir"))
         .expect("create last-message provider dir");
     std::fs::write(path, checkpoint.to_string()).expect("write last-message checkpoint");
+    let progress = serde_json::json!({
+        "version": 1, "provider": provider.as_str(), "channel_id": channel_id.get(),
+        "after": checkpoint, "origin": "observed_frontier",
+    });
+    std::fs::write(
+        checkpoint_path(root, provider, channel_id).with_extension("sweep.json"),
+        progress.to_string(),
+    )
+    .expect("seed scanner checkpoint");
 }
 
 fn checkpoint_path(
@@ -699,6 +710,7 @@ struct TestCatchUpApi {
     dead_letters: Arc<Mutex<Vec<crate::db::relay_dead_letter::RelayDeadLetterRecord>>>,
     announce_resolution: UtilityBotUserIdResolution,
     notify_resolution: UtilityBotUserIdResolution,
+    fail_dead_letter: bool,
 }
 
 impl TestCatchUpApi {
@@ -712,6 +724,7 @@ impl TestCatchUpApi {
             dead_letters: Arc::new(Mutex::new(Vec::new())),
             announce_resolution: UtilityBotUserIdResolution::Unconfigured,
             notify_resolution: UtilityBotUserIdResolution::Unconfigured,
+            fail_dead_letter: false,
         }
     }
 
@@ -799,16 +812,23 @@ impl CatchUpDiscordApi for TestCatchUpApi {
     ) {
     }
 
-    fn record_too_old_dead_letter(
+    async fn record_too_old_dead_letter(
         &self,
         pool: Option<&sqlx::PgPool>,
         record: crate::db::relay_dead_letter::RelayDeadLetterRecord,
-    ) -> Option<tokio::task::JoinHandle<()>> {
+    ) -> Option<crate::db::relay_dead_letter::TooOldRecordOutcome> {
         self.dead_letters
             .lock()
             .expect("dead-letter capture lock")
             .push(record.clone());
-        crate::db::relay_dead_letter::record_detached(pool, record)
+        if self.fail_dead_letter {
+            return None;
+        }
+        if pool.is_some() {
+            crate::db::relay_dead_letter::record_too_old(pool, record).await
+        } else {
+            Some(crate::db::relay_dead_letter::TooOldRecordOutcome::Inserted)
+        }
     }
 
     async fn utility_bot_user_ids(

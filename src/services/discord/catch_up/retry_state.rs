@@ -331,10 +331,8 @@ pub(super) fn try_channel_scan(
         .or_insert((false, None));
     if slot.1.is_none()
         && handed_retry.is_some_and(|retry| {
-            shared
-                .last_message_ids
-                .get(&channel_id)
-                .is_some_and(|live| *live > retry.checkpoint)
+            super::scan_progress::read(&shared.provider, channel_id)
+                .is_some_and(|progress| progress > retry.checkpoint)
                 && shared
                     .catch_up_retry_pending
                     .get(&channel_id)
@@ -464,39 +462,48 @@ pub(in crate::services::discord) fn take_catch_up_retry_checkpoint_after_queue_d
     retry
 }
 
-pub(super) fn record_exhausted_hold_expiry<A: super::api::CatchUpDiscordApi + ?Sized>(
+pub(super) async fn record_exhausted_hold_expiry<A: super::api::CatchUpDiscordApi + ?Sized>(
     api: &A,
     shared: &SharedData,
     prior: Option<CatchUpRetryState>,
     message: &poise::serenity_prelude::Message,
-) -> bool {
-    let Some(prior) = prior else {
-        return false;
-    };
+) -> Option<crate::db::relay_dead_letter::TooOldRecordOutcome> {
+    let prior = prior?;
     let claimed = shared
         .catch_up_retry_pending
         .get(&message.channel_id)
         .is_some_and(|entry| *entry == prior && entry.deferred_rearms == HOLD_IDLE);
     if !claimed {
-        return false;
+        return None;
     }
-    let _ = api.record_too_old_dead_letter(
-        shared.pg_pool.as_ref(),
-        crate::db::relay_dead_letter::RelayDeadLetterRecord {
-            kind: crate::db::relay_dead_letter::KIND_CATCH_UP_TOO_OLD.to_string(),
-            channel_id: message.channel_id.to_string(),
-            author_id: Some(message.author.id.get().to_string()),
-            message_id: Some(message.id.to_string()),
-            content: message.content.trim().to_string(),
-            reason: "exhausted catch-up hold expired at 24h TTL".to_string(),
-        },
-    );
+    let recorded = api
+        .record_too_old_dead_letter(
+            shared.pg_pool.as_ref(),
+            crate::db::relay_dead_letter::RelayDeadLetterRecord {
+                kind: crate::db::relay_dead_letter::KIND_CATCH_UP_TOO_OLD.to_string(),
+                channel_id: message.channel_id.to_string(),
+                author_id: Some(message.author.id.get().to_string()),
+                message_id: Some(message.id.to_string()),
+                content: message.content.trim().to_string(),
+                reason: "exhausted catch-up hold expired at 24h TTL".to_string(),
+            },
+        )
+        .await;
+    let recorded = recorded?;
+    if !shared
+        .catch_up_retry_pending
+        .get(&message.channel_id)
+        .is_some_and(|entry| *entry == prior && entry.deferred_rearms == HOLD_IDLE)
+    {
+        return None;
+    }
     tracing::warn!(
         channel_id = message.channel_id.get(),
         message_id = message.id.get(),
+        newly_recorded = recorded == crate::db::relay_dead_letter::TooOldRecordOutcome::Inserted,
         "catch-up exhausted hold expired at 24h TTL; message preserved in TooOld DLQ"
     );
-    true
+    Some(recorded)
 }
 
 /// `/clear` also drops the pending retry and lifts the checkpoint past the cleared ids,
@@ -529,6 +536,12 @@ pub(in crate::services::discord) fn discard_cleared_backlog(
     let discarded = cleared.discarded_message_ids.iter().map(|id| id.get());
     if let Some(newest) = discarded.filter(real).max() {
         advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
+        super::scan_progress::advance(
+            provider,
+            channel_id,
+            newest,
+            super::scan_progress::Origin::ExplicitDiscard,
+        );
     }
 }
 

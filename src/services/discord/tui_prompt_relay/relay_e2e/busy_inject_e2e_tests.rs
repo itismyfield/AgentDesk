@@ -423,10 +423,7 @@ async fn a_vetoed_paste_hands_the_message_back_ahead_of_input_sent_meanwhile_pg(
     );
 }
 
-/// A handed-back message the queue then ran is not replayed by the next catch-up sweep, though
-/// no completed-turn record names it, as a tui_o turn leaves none.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
+async fn handed_back_message_after_dispatch(observe_dispatch: bool) {
     let busy = busy().await;
     let rt = &busy.rt;
     rt.hold_mailbox().await;
@@ -441,6 +438,19 @@ async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
         channel,
         MessageId::new(earlier),
     );
+    let progress_dir = crate::services::discord::runtime_store::last_message_root()
+        .unwrap()
+        .join("claude");
+    std::fs::create_dir_all(&progress_dir).unwrap();
+    let progress = serde_json::json!({
+        "version": 1, "provider": "claude", "channel_id": CHANNEL_ID,
+        "after": earlier, "origin": "observed_frontier",
+    });
+    std::fs::write(
+        progress_dir.join(format!("{CHANNEL_ID}.sweep.json")),
+        progress.to_string(),
+    )
+    .unwrap();
     let message = fresh_id();
     rt.h.deliver_user_message(message, "status?").await.unwrap();
     let handed = rt.queue().await;
@@ -458,6 +468,14 @@ async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
     let start = crate::services::discord::mailbox_try_start_turn;
     let started = start(&rt.h.shared, channel, token, user, MessageId::new(message)).await;
     drop(taken);
+    if observe_dispatch {
+        rt.h.seed_channel_history(&[
+            (earlier, "earlier", false),
+            (answer, "answer", true),
+            (message, "status?", false),
+        ]);
+        rt.h.run_catch_up().await;
+    }
     mailbox.finish_turn(persistence()).await;
     // Another turn holds the channel, so a sweep that recovers the message can only queue it.
     rt.hold_mailbox().await;
@@ -468,11 +486,35 @@ async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
     ]);
     rt.h.run_catch_up().await;
     let observed = (handed, ran, started, rt.queue().await);
+    let settled = crate::services::discord::outbound::completed_turn_ledger::settled_user_msg_ids(
+        &ProviderKind::Claude,
+        CHANNEL_ID,
+    );
+    assert!(
+        !settled.contains(&message),
+        "dispatch retirement is not completed delivery"
+    );
     rt.finish().await;
+    let expected = if observe_dispatch {
+        vec![]
+    } else {
+        vec!["status?".to_string()]
+    };
     assert_eq!(
         observed,
-        (vec!["status?".to_string()], Some(message), true, vec![])
+        (vec!["status?".to_string()], Some(message), true, expected)
     );
+}
+
+/// A scan observes active dispatch before the turn ends, so later scans need no completion entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
+    handed_back_message_after_dispatch(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handed_back_message_without_scanner_retirement_is_recovered_pg() {
+    handed_back_message_after_dispatch(false).await;
 }
 
 /// A handback whose four writes all fail ends the message with the owner's resend notice: it is
