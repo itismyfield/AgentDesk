@@ -49,6 +49,7 @@ impl FrontierEvidence {
 fn of_arm(arm: RecoveryKnownIdArm) -> FrontierEvidence {
     match arm {
         RecoveryKnownIdArm::ActiveTurn
+        | RecoveryKnownIdArm::Dispatched
         | RecoveryKnownIdArm::InjectedObserved
         | RecoveryKnownIdArm::InjectedUnconfirmed => FrontierEvidence::Dispatched,
         RecoveryKnownIdArm::Queued

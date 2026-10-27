@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod agent_input_tests;
 pub mod agents;
 mod agents_crud;
 mod agents_setup;

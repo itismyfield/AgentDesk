@@ -171,3 +171,42 @@ fn read_capture(mut output: Output, geometry: &Geometry) -> Option<String> {
 mod protocol_tests;
 #[cfg(test)]
 pub(crate) mod transport_tests;
+
+#[cfg(unix)]
+impl PaneIdentity {
+    pub(crate) fn epoch_fields(&self) -> [String; 5] {
+        [
+            self.server_pid.clone(),
+            self.session.clone(),
+            self.window.clone(),
+            self.pane.clone(),
+            self.pane_pid.clone(),
+        ]
+    }
+    pub(crate) fn observe(session: &str) -> Option<Self> {
+        let out = SubmissionTmux
+            .run(&[
+                "display-message",
+                "-p",
+                "-t",
+                &format!("={session}:"),
+                "#{pid} #{session_id} #{window_id} #{pane_id} #{pane_pid}",
+            ])
+            .ok()?;
+        if !out.status.success() || !out.stderr.is_empty() {
+            return None;
+        }
+        let text = String::from_utf8(out.stdout).ok()?;
+        let fields: Vec<_> = text.split_ascii_whitespace().collect();
+        let [server, s, w, p, pid] = fields.as_slice() else {
+            return None;
+        };
+        Some(Self {
+            server_pid: positive_pid(server)?,
+            session: identity(s, '$')?,
+            window: identity(w, '@')?,
+            pane: identity(p, '%')?,
+            pane_pid: positive_pid(pid)?,
+        })
+    }
+}

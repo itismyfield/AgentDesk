@@ -77,6 +77,7 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
                     "  [{ts}] ⚠ catch-up phase2: failed to fetch recent messages for channel {channel_id}: {e}"
                 );
                 if e.contains("Missing Access") || e.contains("Unknown Channel") {
+                    scan_progress::remove(provider, channel_id);
                     if let Some(path) = candidate.checkpoint_path.as_ref() {
                         let _ = fs::remove_file(path);
                     }
@@ -111,10 +112,18 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         let (mut known_arms, mut existing_ids) = recovery_known_arms_and_ids(&mailbox);
         // Phase 1's ledger consult, re-read per channel. A Settled outcome
         // skips (no enqueue): an answered message is never re-surfaced.
+        #[cfg(unix)]
+        super::super::outbound::completed_turn_ledger::o_pending::project(
+            shared,
+            provider,
+            channel_id.get(),
+        )
+        .await;
         let ledger = settled_ledger_consult::read(provider, channel_id);
         let settled_ids = ledger.settle(&mailbox, &mut known_arms, &mut existing_ids);
         let injected = inject_disposition::scan_view(provider);
         injected.merge(&mut known_arms, &mut existing_ids);
+        channel_scan.merge_dispatched(&mut known_arms, &mut existing_ids);
         injected.log_hits(
             "phase2",
             channel_id,
@@ -273,6 +282,10 @@ async fn recover_messages<A: CatchUpDiscordApi + ?Sized>(
     // Iterate in reverse (oldest first) for chronological queue order
     for msg in unanswered_slice.iter().rev() {
         let mid = msg.id.get();
+        if scan_progress::read(provider, channel_id).is_some_and(|after| mid <= after) {
+            progress.stats.skipped += 1;
+            continue;
+        }
         let age_secs = match phase2_pre_gate(
             msg,
             current_bot_user_id,
@@ -359,7 +372,9 @@ async fn recover_messages<A: CatchUpDiscordApi + ?Sized>(
             }
             CatchUpClassificationDecision::Determinate(CatchUpClassification::TooOld) => {
                 if !progress.frontier.can_durably_settle(mid)
-                    || !record_exhausted_hold_expiry(api, shared, phase2_prior, msg)
+                    || record_exhausted_hold_expiry(api, shared, phase2_prior, msg)
+                        .await
+                        .is_none()
                 {
                     progress.frontier.seal(mid);
                     break;

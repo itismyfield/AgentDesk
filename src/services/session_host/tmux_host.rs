@@ -7,6 +7,7 @@ use super::model::{
 };
 use super::traits::InteractiveSessionHost;
 use crate::services::platform::tmux;
+use crate::services::tui_input::writer_lease;
 
 /// Thin adapter over `platform::tmux`, which stays the only tmux binary caller
 /// and owns its per-platform behaviour.
@@ -40,6 +41,20 @@ impl TmuxHost {
     pub(crate) fn send_host_keys(&self, session: &str, keys: &[HostKey]) -> Result<Output, String> {
         let names: Vec<&str> = keys.iter().map(|key| tmux_key_name(*key)).collect();
         tmux::send_keys(session, &names)
+    }
+
+    /// Literal text behind the owner content fence; unheld targets run main's command.
+    pub(crate) fn send_literal(&self, session: &str, text: &str) -> Result<Output, String> {
+        writer_lease::content("tmux", session, || tmux::send_literal(session, text))
+    }
+
+    pub(crate) fn paste_buffer(
+        &self,
+        s: &str,
+        buffer: &str,
+        delete: bool,
+    ) -> Result<Output, String> {
+        writer_lease::content("tmux", s, || tmux::paste_buffer(s, buffer, delete))
     }
 
     pub(crate) fn liveness_within(
@@ -98,7 +113,7 @@ impl InteractiveSessionHost for TmuxHost {
         session: HostSessionRef<'_>,
         text: &str,
     ) -> Result<HostMutation, HostError> {
-        map_output(tmux::send_literal(session.legacy_name()?, text))
+        map_output(self.send_literal(session.legacy_name()?, text))
     }
 
     fn send_keys(

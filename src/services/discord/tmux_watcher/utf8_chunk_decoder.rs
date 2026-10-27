@@ -109,6 +109,16 @@ fn read_watcher_source_chunk_from_file(file: std::fs::File, offset: u64) -> Sour
     .read()
 }
 
+pub(super) fn o_evidence_source(
+    authority: super::loop_poll_prologue::WatcherSourceAuthority,
+    mixed: bool,
+) -> Option<(u64, u64)> {
+    match (mixed, authority.source_file) {
+        (false, SourceFileIdentity::Unix { dev, ino }) => Some((dev, ino)),
+        _ => None,
+    }
+}
+
 pub(super) fn authority_for_decoded_text(
     authority: super::loop_poll_prologue::WatcherSourceAuthority,
     mixed: bool,
@@ -218,7 +228,7 @@ mod source_epoch_read_tests {
         let first = source_authority_for_read(base, &session, Some(witness), old_id); let known = first.source_stamp;
         let legacy = source_authority_for_read(first, &session, None, new_id); assert_eq!((legacy.source_stamp, legacy.generation_mtime_ns, legacy.reset_incarnation), (None, 77, 9));
         let next = source_authority_for_read(legacy, &session, Some(witness), new_id); assert_ne!(known, next.source_stamp);
-        let mixed = authority_for_decoded_text(next, true); assert_eq!((mixed.source_stamp, mixed.generation_mtime_ns, mixed.reset_incarnation), (None, 77, 9));
+        let mixed = authority_for_decoded_text(next, true); assert_eq!(o_evidence_source(mixed, true), None); assert_eq!(mixed.source_file, next.source_file); let mut forwarded = super::super::supervisor_relay::SupervisorFrameSourceAuthority::from(mixed); forwarded.producer = Some(7); assert_eq!(forwarded.read_source().unwrap().file, new_id); assert_eq!((mixed.source_stamp, mixed.generation_mtime_ns, mixed.reset_incarnation), (None, 77, 9));
         let mut decoder = Utf8ChunkDecoder::default(); let bytes = "안".as_bytes(); assert!(!decoder.decode(&bytes[..1], 0).mixed_read_provenance); assert!(decoder.decode(&bytes[1..], 1).mixed_read_provenance);
     }
 }

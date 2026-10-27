@@ -253,10 +253,15 @@ impl Drop for Case {
 // Same production executor and hook receiver as the shared turn fixture, using the boot endpoint
 // alias for N2 as well as N1 recovery. The first launch's two sends remain in the rig's history.
 fn fresh_turn(case: &Case, prompt: &str) -> (Arc<Launcher>, Started) {
+    fresh_turn_first_read(case, prompt, &[PROVIDER])
+}
+
+/// `fresh_turn` whose first pane read, the attach's, lists `first` in the foreground.
+fn fresh_turn_first_read(case: &Case, prompt: &str, first: &[u32]) -> (Arc<Launcher>, Started) {
     let fx = &case.fx;
     fx.rig.exists(SHELL, true);
     fx.rig.exists(PROVIDER, true);
-    fx.rig.foreground(&[PROVIDER]);
+    fx.rig.foreground_then(first, &[PROVIDER]);
     let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
     let endpoint = HerdrLaunchEndpoint {
         execution_node: endpoint.execution_node,

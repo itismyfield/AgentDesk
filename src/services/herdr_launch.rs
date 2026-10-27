@@ -2,6 +2,7 @@
 //! Durable Pending and user-default grants precede create; retries only probe.
 
 pub(crate) mod policy;
+mod prepared;
 pub(crate) mod retired_hold;
 
 use crate::config::session_hosts::EndpointMode;
@@ -431,48 +432,20 @@ pub(crate) async fn launch_herdr_session(
         return Err(retire_unsent(pool, &owner, &nonce, error).await);
     }
 
-    let (witness, created, sent_at) = if let Some(permit) = create_permit {
-        let grant = permit.grant(&nonce);
-        if let Err(detail) = host.grants().save(grant.clone()).await {
-            return Err(retire_unsent(
-                pool,
-                &owner,
-                &nonce,
-                HerdrLaunchError::GrantUnavailable(detail),
-            )
-            .await);
-        }
-        host.remember_grant(grant);
-        let witness = permit.witness().clone();
-        let request = UserDefaultCreateRequest {
-            endpoint: endpoint.clone(),
-            label: owner.logical_key.clone(),
-            cwd: command.cwd,
-            command: command.command,
-            permit,
-        };
-        let sent_at = SystemTime::now();
-        let created =
-            on_blocking_thread(&host, move |host| host.create_user_default(&request)).await;
-        (witness, created, sent_at)
-    } else {
-        // Repeat E7 immediately before the legacy create, preserving its original ordering.
-        let Some(restore_off_witness) = restore_off_witness(&host, &endpoint).await else {
-            let error = HerdrLaunchError::NotSent(RESTORE_RESUME_NOT_OFF.into());
-            return Err(retire_unsent(pool, &owner, &nonce, error).await);
-        };
-        let witness = restore_off_witness.clone();
-        let request = HerdrCreateRequest {
-            endpoint: endpoint.clone(),
-            label: owner.logical_key.clone(),
-            cwd: command.cwd,
-            command: command.command,
-            restore_off_witness,
-        };
-        let sent_at = SystemTime::now();
-        let created = on_blocking_thread(&host, move |host| host.create(&request)).await;
-        (witness, created, sent_at)
-    };
+    let prepared::Created {
+        witness,
+        created,
+        sent_at,
+    } = prepared::create(
+        pool,
+        &owner,
+        &nonce,
+        &endpoint,
+        command,
+        &host,
+        create_permit,
+    )
+    .await?;
     let indeterminate = |detail: String| HerdrLaunchOutcome::Indeterminate {
         execution_nonce: nonce.clone(),
         detail,

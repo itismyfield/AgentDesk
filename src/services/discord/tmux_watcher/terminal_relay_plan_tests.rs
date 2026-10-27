@@ -512,6 +512,7 @@ const GENERATION_MTIME_NS: i64 = 1_758_000_000_000_000_000;
 /// delivered.
 fn orphan_facts() -> OrphanTerminalFrameFacts<'static> {
     OrphanTerminalFrameFacts {
+        o_tail_covered: None,
         denial: Some(SoftTerminalAuthorityDenial::TurnStartOutsideFrame),
         watcher_direct_fallback_requested: true,
         watcher_direct_fallback_authorized: false,
@@ -548,6 +549,7 @@ fn a_frame_with_no_denial_requires_no_record_5941() {
     // Authority was never refused, so this is not the loss seam: a row here
     // inflates `D` past the §I17 `D <= N+` audit bound.
     let facts = OrphanTerminalFrameFacts {
+        o_tail_covered: None,
         denial: None,
         ..orphan_facts()
     };
@@ -848,6 +850,18 @@ fn the_call_site_operands_the_dead_letter_row_cannot_show_stay_pinned_5941() {
         .expect("the call must terminate")
         .0;
 
+    assert!(
+        call_site.contains("&orphan_facts,"),
+        "the recorder must receive the populated facts"
+    );
+    let facts = source
+        .split_once("let mut orphan_facts = orphan_terminal_frame::OrphanTerminalFrameFacts {")
+        .expect("the plan must populate the orphan facts")
+        .1
+        .split_once("\n        };")
+        .expect("the facts initializer must terminate")
+        .0;
+
     for operand in [
         "watcher_resend_committed,",
         "placeholder_msg_id,",
@@ -855,16 +869,16 @@ fn the_call_site_operands_the_dead_letter_row_cannot_show_stay_pinned_5941() {
         "duplicate_guard_refused_body: direct_terminal_response_decision",
     ] {
         assert!(
-            call_site.contains(operand),
-            "the seam must be fed `{operand}` from the frame being lost: {call_site}"
+            facts.contains(operand),
+            "the seam must be fed `{operand}` from the frame being lost: {facts}"
         );
     }
 
     // #5978 P1-1: the routed flag ANDs in the authorization this seam has already denied,
     // which makes the duplicate conjunct unfalsifiable while every test above stays green.
     assert!(
-        !call_site.contains("direct_terminal_response_refused_duplicate"),
-        "the duplicate conjunct must read the RAW guard verdict, not the routed flag: {call_site}"
+        !facts.contains("direct_terminal_response_refused_duplicate"),
+        "the duplicate conjunct must read the RAW guard verdict, not the routed flag: {facts}"
     );
 
     // The WARN and the counter MOVED with the seam — not duplicated, not
@@ -1042,6 +1056,7 @@ pub(super) async fn admitted_losses_under_root(
     let full_response = format!("{}{LOST_BODY}", "x".repeat(SENT_PREFIX));
     let tool_state = WatcherToolState::new();
     let context = TerminalRelayPlanContext {
+        evidence_source: None,
         http: &http,
         shared: &shared,
         channel_id: channel,

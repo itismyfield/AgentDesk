@@ -89,14 +89,14 @@ async fn production_sweep_too_old_drops_leave_no_outbox_notice_pg() {
                     .fetch_one(&pool)
                     .await
                     .expect("count dead letters");
-                if count == (index + 1) as i64 {
+                if count == if index < 2 { 1 } else { 2 } {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("detached DLQ producer must finish");
+        .expect("durable DLQ producer must finish");
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
             .fetch_one(&pool)
             .await
@@ -110,7 +110,6 @@ async fn production_sweep_too_old_drops_leave_no_outbox_notice_pg() {
     assert_eq!(
         records,
         [
-            (first_id, "첫 사용자 요청", 410),
             (first_id, "첫 사용자 요청", 410),
             (second_id, "새 사용자 요청", 400),
         ]

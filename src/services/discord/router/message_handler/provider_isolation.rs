@@ -117,6 +117,9 @@ pub(super) fn prelaunch_runtime_kind_for_managed_session(
     None
 }
 
+/// Tmux name, output path, input FIFO and start offset seeded into a new inflight row.
+pub(super) type RuntimeSeed = (Option<String>, Option<String>, Option<String>, u64);
+
 /// Seeds the durable inflight runtime fields before runtime handoff binds the
 /// provider-owned transcript path.
 fn prelaunch_inflight_runtime_seed_from_paths(
@@ -190,30 +193,102 @@ fn exact_codex_tui_raw_seed(
     .then(|| (marker_path.display().to_string(), end))
 }
 
-/// #5264 PR-B: read the marker and the binding under ONE hold of the per-tmux source
-/// authority, the compound pair #5299 established.
-///
-/// What this buys, precisely: the marker, the binding, and the file length are drawn from a
-/// single install generation, so the seed can never be a mix of A's marker with B's binding
-/// or with a length taken across an atomic install. Read separately, those three could
-/// straddle a compound install performed under the authority by #5299's writers.
-///
-/// What it does NOT buy, stated because an earlier revision of this comment claimed it: the
-/// read-then-use gap is still open. The authority is released when this returns, and the
-/// caller persists the seed afterwards with no revalidation, so a writer that installs a new
-/// source after this call still leaves the turn seeded from the previous one. Closing that
-/// would require constructing and persisting the seed inside the same hold.
-fn observed_codex_tui_raw_seed(tmux_name: &str) -> Option<(String, u64)> {
-    crate::services::tmux_common::with_tmux_source_authority(tmux_name, |authority| {
-        let marker = crate::services::codex_tui::session::read_codex_tui_rollout_marker(
-            authority.session(),
+/// An exact Codex raw seed and the rollout source it was read from, rechecked before the row is saved.
+#[derive(Debug, Clone)]
+pub(super) struct CodexRawSeed {
+    tmux: String,
+    path: String,
+    end: u64,
+    session_id: String,
+}
+
+fn codex_seed_inputs(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+) -> Option<(
+    crate::services::codex_tui::session::CodexTuiRolloutMarker,
+    crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+)> {
+    let marker =
+        crate::services::codex_tui::session::read_codex_tui_rollout_marker(authority.session())?;
+    let binding =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+            authority,
         )?;
-        let binding =
-            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
-                authority,
-            )?;
-        exact_codex_tui_raw_seed(&marker, &binding)
+    Some((marker, binding))
+}
+
+/// Reads marker, binding and file length under one source-authority hold, so the seed never mixes
+/// two installs; `save_intake_inflight` rechecks that source before the row is written.
+fn observed_codex_tui_raw_seed(tmux_name: &str) -> Option<CodexRawSeed> {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_name, |authority| {
+        let (marker, binding) = codex_seed_inputs(authority)?;
+        let (path, end) = exact_codex_tui_raw_seed(&marker, &binding)?;
+        Some(CodexRawSeed {
+            tmux: tmux_name.to_string(),
+            path,
+            end,
+            session_id: marker.session_id?.trim().to_string(),
+        })
     })
+}
+
+/// Whether the marker and binding still name the seed's rollout and session; offsets may advance.
+fn codex_seed_still_installed(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    seed: &CodexRawSeed,
+) -> bool {
+    let Some((marker, binding)) = codex_seed_inputs(authority) else {
+        return false;
+    };
+    let names_seed = |path: &std::path::Path| {
+        std::fs::canonicalize(path).is_ok_and(|path| path.display().to_string() == seed.path)
+    };
+    let same_session = |id: Option<&str>| id.map(str::trim) == Some(seed.session_id.as_str());
+    binding.runtime_kind == RuntimeHandoffKind::CodexTui
+        && same_session(marker.session_id.as_deref())
+        && same_session(binding.session_id.as_deref())
+        && names_seed(&marker.rollout_path)
+        && names_seed(std::path::Path::new(&binding.output_path))
+}
+
+/// Saves the intake row. A Codex raw seed is rechecked under the source authority, taken inside
+/// the row's sidecar lock as terminal admission does; a replaced source falls back to the wrapper end.
+pub(super) fn save_intake_inflight(
+    seed: Option<&CodexRawSeed>,
+    state: &mut InflightTurnState,
+) -> Result<(), super::super::super::inflight::CreateNewInflightError> {
+    use super::super::super::inflight;
+    let Some(seed) = seed else {
+        return inflight::save_inflight_state_create_new(state);
+    };
+    inflight::save_inflight_state_create_new_fenced(state, |state, publish| {
+        crate::services::tmux_common::with_tmux_source_authority(&seed.tmux, |authority| {
+            if !codex_seed_still_installed(authority, seed) {
+                fall_back_to_wrapper_end(state, seed);
+            }
+            publish(state)
+        })
+    })
+}
+
+fn fall_back_to_wrapper_end(state: &mut InflightTurnState, seed: &CodexRawSeed) {
+    let (output_path, input_fifo_path) = tmux_runtime_paths(&seed.tmux);
+    let (_, path, _, end) = prelaunch_inflight_runtime_seed_from_paths(
+        &seed.tmux,
+        output_path,
+        input_fifo_path,
+        true,
+        Some(RuntimeHandoffKind::CodexTui),
+        None,
+    );
+    tracing::warn!(
+        tmux_session_name = %seed.tmux,
+        replaced_rollout = %seed.path,
+        "codex raw seed source was replaced before the inflight row was saved; seeding the wrapper end"
+    );
+    state.output_path = path;
+    state.last_offset = end;
+    state.turn_start_offset = Some(end);
 }
 
 pub(super) fn prelaunch_inflight_runtime_seed(
@@ -221,7 +296,7 @@ pub(super) fn prelaunch_inflight_runtime_seed(
     remote_profile_is_none: bool,
     tmux_session_name: Option<&str>,
     prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
-) -> (Option<String>, Option<String>, Option<String>, u64) {
+) -> (RuntimeSeed, Option<CodexRawSeed>) {
     seed_runtime(
         provider,
         remote_profile_is_none,
@@ -258,6 +333,7 @@ pub(super) fn prelaunch_inflight_runtime_seed_without_codex_raw(
         prelaunch_runtime_kind,
         false,
     )
+    .0
 }
 
 fn seed_runtime(
@@ -266,7 +342,7 @@ fn seed_runtime(
     tmux_session_name: Option<&str>,
     prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
     allow_codex_raw: bool,
-) -> (Option<String>, Option<String>, Option<String>, u64) {
+) -> (RuntimeSeed, Option<CodexRawSeed>) {
     #[cfg(unix)]
     {
         if remote_profile_is_none
@@ -282,14 +358,17 @@ fn seed_runtime(
                 && prelaunch_runtime_kind == Some(RuntimeHandoffKind::CodexTui))
             .then_some(tmux_name)
             .and_then(observed_codex_tui_raw_seed);
-            return prelaunch_inflight_runtime_seed_from_paths(
+            let seed = prelaunch_inflight_runtime_seed_from_paths(
                 tmux_name,
                 output_path,
                 input_fifo_path,
                 session_exists,
                 prelaunch_runtime_kind,
-                codex_raw_seed,
+                codex_raw_seed
+                    .as_ref()
+                    .map(|raw| (raw.path.clone(), raw.end)),
             );
+            return (seed, codex_raw_seed);
         }
     }
     #[cfg(not(unix))]
@@ -302,7 +381,7 @@ fn seed_runtime(
             allow_codex_raw,
         );
     }
-    (None, None, None, 0)
+    ((None, None, None, 0), None)
 }
 
 #[cfg(unix)]
@@ -813,6 +892,9 @@ pub(super) async fn reset_provider_session_after_worktree_isolation(
 #[cfg(all(test, unix))]
 #[path = "provider_isolation_host_tests.rs"]
 mod host_tests;
+#[cfg(all(test, unix))]
+#[path = "provider_isolation_seed_save_tests.rs"]
+mod seed_save_tests;
 #[cfg(test)]
 #[path = "provider_isolation_source_guard_tests.rs"]
 mod source_guard_tests;

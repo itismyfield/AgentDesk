@@ -19,6 +19,7 @@ pub(super) mod race_loss;
 pub(super) mod replay_start;
 mod retry_prompt;
 mod runtime_transition;
+pub(in crate::services::discord) mod session_preparation;
 mod stale_dispatch_guard;
 mod voice_intake;
 mod worker_entry;
@@ -246,24 +247,7 @@ pub(super) async fn handle_text_message(
             return Ok(IntakeExecution::Executed);
         }
         let is_voice_announcement = voice_announcement.is_some();
-        let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
-            let mut context = format!("voice_utterance_id: {}", announcement.utterance_id);
-            if let Some(started_at) = announcement.started_at.as_deref() {
-                context.push_str(&format!("\nvoice_started_at: {started_at}"));
-            }
-            if let Some(completed_at) = announcement.completed_at.as_deref() {
-                context.push_str(&format!("\nvoice_completed_at: {completed_at}"));
-            }
-            if let Some(samples_written) = announcement.samples_written {
-                context.push_str(&format!("\nvoice_samples_written: {samples_written}"));
-            }
-            crate::voice::prompt::voice_bridge_prompt(
-                &announcement.transcript,
-                &announcement.language,
-                announcement.verbose_progress,
-                Some(&context),
-            )
-        });
+        let voice_prompt_text = voice_announcement.as_ref().map(voice_intake::prompt);
         // #2266: keep the original Discord author (the announce bot, for a voice-transcript announcement) so the race-loss enqueue path can
         // attribute the queued `Intervention` to the announce bot. When the
         // queued turn later re-enters `handle_text_message` via the
@@ -1084,72 +1068,20 @@ pub(super) async fn handle_text_message(
         } else {
             sanitized_input
         };
-        if session_id.is_none() {
-            if force_fresh_provider_session {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ↻ Skipping DB provider session restore for channel {} due to /goal fresh session request",
-                    channel_id.get()
-                );
-            } else if session_was_cleared {
-                session_strategy_reason = "session_cleared_by_user";
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ↻ Skipping DB provider session restore for channel {} due to prior /clear",
-                    channel_id.get()
-                );
-            } else if dispatch_reset_provider_state || dispatch_recreate_tmux {
-                session_strategy_reason = dispatch_reset_lifecycle_code(
-                    dispatch_reset_provider_state,
-                    dispatch_recreate_tmux,
-                );
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ↻ Skipping DB provider session restore for dispatch reset_provider_state={} recreate_tmux={}",
-                    dispatch_reset_provider_state,
-                    dispatch_recreate_tmux
-                );
-            } else if let Some(ref key) = adk_session_key {
-                let restored = super::super::super::adk_session::fetch_provider_session_id(
-                    key,
-                    &provider,
-                    shared.api_port,
-                )
-                .await;
-                if let Some(restored_session_id) = restored {
-                    session_strategy_reason = "db_provider_session_restored";
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] ↻ Restored provider session_id from DB for {}",
-                        key
-                    );
-                    let mut data = shared.core.lock().await;
-                    if let Some(session) = data.sessions.get_mut(&channel_id) {
-                        session.restore_provider_session(Some(restored_session_id.clone()));
-                        memento_context_loaded = session.memento_context_loaded;
-                    }
-                    session_id = Some(restored_session_id);
-                } else if let Some((recovered, recovered_memento_context_loaded)) =
-                    restore_live_tui_provider_session_from_binding(
-                        shared,
-                        channel_id,
-                        &provider,
-                        tmux_session_name.as_deref(),
-                        Some(key),
-                    )
-                    .await
-                {
-                    session_strategy_reason = "live_tui_runtime_binding_restored";
-                    memento_context_loaded = recovered_memento_context_loaded;
-                    session_id = Some(recovered);
-                } else {
-                    session_strategy_reason = "no_cached_provider_session";
-                    session_id = None;
-                }
-            } else {
-                session_strategy_reason = "session_key_unavailable";
-            }
-        }
+        super::input_payload::restore_session(
+            shared, &provider, channel_id,
+            super::input_payload::SessionRestore {
+                session_id: &mut session_id,
+                memento_context_loaded: &mut memento_context_loaded,
+                reason: &mut session_strategy_reason,
+                force_fresh: force_fresh_provider_session,
+                cleared: session_was_cleared,
+                reset: dispatch_reset_provider_state,
+                recreate: dispatch_recreate_tmux,
+                session_key: adk_session_key.as_deref(),
+                tmux: tmux_session_name.as_deref(),
+            },
+        ).await;
         let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
 
         // #1332: probe turn liveness BEFORE posting any placeholder so a queued
@@ -1516,7 +1448,7 @@ pub(super) async fn handle_text_message(
             session_retry_context.as_ref(),
         )
         .await;
-        let materialized_uploads = crate::services::cluster::attachment_transfer::materialize::prepare(
+        let materialized_uploads = super::input_payload::prepare_uploads(
             &pending_uploads,
             shared.pg_pool.as_ref(),
         )
@@ -1696,7 +1628,7 @@ pub(super) async fn handle_text_message(
         )
         .await;
 
-        let (inflight_tmux_name, inflight_output_path, inflight_input_fifo, mut inflight_offset) =
+        let ((inflight_tmux_name, inflight_output_path, inflight_input_fifo, mut inflight_offset), codex_seed) =
             prelaunch_inflight_runtime_seed(
                 &provider,
                 remote_profile.is_none(),
@@ -1704,11 +1636,6 @@ pub(super) async fn handle_text_message(
                 prelaunch_runtime_kind,
             );
         let watcher_tmux_name = inflight_tmux_name.clone();
-        let watcher_output_path = prelaunch_watcher_output_path(
-            inflight_tmux_name.as_deref(),
-            inflight_output_path.as_deref(),
-            prelaunch_runtime_kind,
-        );
         #[cfg(unix)]
         let mut recapture_offset_after_busy_wait = false;
         // #2416: compute claude_tui busy-followup diagnostic with a wait+retry step.
@@ -2152,10 +2079,17 @@ pub(super) async fn handle_text_message(
             Err(false) => return Err("original bridge start deferred; retry enqueue refused".into()),
         };
         inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
-        let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);
+        let row = save_intake_inflight(codex_seed.as_ref(), &mut inflight_state);
         if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {
             return Ok(IntakeExecution::deferred(channel_id));
         }
+        // A replaced Codex source is saved as the wrapper end; the watcher follows the saved row.
+        inflight_offset = inflight_state.last_offset;
+        let watcher_output_path = prelaunch_watcher_output_path(
+            watcher_tmux_name.as_deref(),
+            inflight_state.output_path.as_deref(),
+            prelaunch_runtime_kind,
+        );
 
         if preserve_queued_view {
             tv_start_current_with_attempt(shared, http, channel_id, user_msg_id, "queued_replay_input_started")

@@ -78,7 +78,8 @@ MANUAL_CLASSIFICATION = [
     # (zero production and zero test callers) was deleted with its funnel call.
     # The nonce-provenance tests' `bridge_delivery` helper adds one: 11 -> 12 blind.
     ("src/services/discord/outbound/delivery_record.rs", "shadow_mirror_delivered_frontier", 2, 12),
-    ("src/services/discord/outbound/delivery_record.rs", "append_completed_turn", 2, 2),
+    ("src/services/discord/outbound/delivery_record.rs", "append_completed_turn", 1, 1),
+    ("src/services/discord/outbound/delivery_record.rs", "append_completed_episode", 2, 2),
     # #5071 T1 S7. Hand-verified: the recovery file's `#[cfg(test)] mod tests`
     # opens at the end of the file, and the ONE production spelling of the new
     # funnel entry point sits in `record_durable_frontier`. Both numbers pin the
