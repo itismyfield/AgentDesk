@@ -1518,6 +1518,7 @@ _cleanup_on_exit() {
     if [ -n "${DEPLOY_MKDIR_LOCK_DIR:-}" ] && [ -d "$DEPLOY_MKDIR_LOCK_DIR" ]; then
         rm -rf "$DEPLOY_MKDIR_LOCK_DIR" 2>/dev/null || true
     fi
+    [ -z "${AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR:-}" ] || _cleanup_peer_binary
     _emit_terminal_deploy_marker "$status"
     _finalize_detached_helper "$status"
 }
@@ -1916,6 +1917,160 @@ _wait_for_peer_deploy_verdict() {
     done
 }
 
+_peer_binary_platform() {
+    [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || return 1
+    printf 'arch=arm64\n'
+    (cd "$REPO" && rustc -vV) || return 1
+    sw_vers -productVersion || return 1
+    xcrun --show-sdk-version || return 1
+    printf 'deployment_target=%s\n' "${MACOSX_DEPLOYMENT_TARGET:-default}"
+}
+
+_peer_binary_signature() {
+    local details
+    codesign --verify --strict "$1" 2>/dev/null || return 1
+    details="$(codesign -dvv "$1" 2>&1)" || return 1
+    printf '%s\n' "$details" | grep -q '^CDHash=.' || return 1
+    printf '%s\n' "$details" | grep -q '^Identifier=.' || return 1
+    printf '%s\n' "$details" | grep -E '^(Identifier=|CDHash=|Authority=|Signature=)'
+}
+
+_verify_peer_binary() {
+    local directory="$1" sha="$2" platform signature
+    platform="$(_peer_binary_platform)" || return 1
+    signature="$(_peer_binary_signature "$directory/agentdesk")" || return 1
+    python3 - "$directory" "$sha" "$platform" "$signature" "$DEPLOY_BUILD_PROFILE" <<'PY'
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+directory, sha, platform, signature, profile = sys.argv[1:]
+binary = Path(directory) / 'agentdesk'
+try:
+    manifest = json.loads((Path(directory) / 'manifest.json').read_text())
+    for field, expected in [('format', 1), ('source_sha', sha), ('platform', platform),
+                            ('profile', profile), ('signature', signature),
+                            ('size', binary.stat().st_size)]:
+        if manifest[field] != expected:
+            raise ValueError(field)
+    digest = hashlib.sha256()
+    with binary.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    if digest.hexdigest() != manifest['sha256']:
+        raise ValueError('SHA256')
+    if not os.access(binary, os.X_OK):
+        raise ValueError('executable bit')
+    subprocess.run([str(binary), 'build-info'], check=True, timeout=30,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+    print(f'[peer-binary] verification failed: {error}', file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+_cleanup_peer_binary() {
+    local directory="${AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR:-}"
+    case "$directory" in
+        "$ADK_REL/bin/.peer-transfer."??????)
+            [ "${directory%/*}" = "$ADK_REL/bin" ] || return 0
+            [ ! -L "$directory" ] || return 0
+            rm -f "$directory/agentdesk" "$directory/manifest.json" 2>/dev/null || true
+            rmdir "$directory" 2>/dev/null || true
+            ;;
+    esac
+}
+
+_select_peer_binary() {
+    PEER_BINARY_ACCEPTED=0
+    [ -n "${AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR:-}" ] || return 0
+    local head started="$SECONDS"
+    head="$(git -C "$REPO" rev-parse HEAD)" || head=""
+    if [ "${DEPLOY_PEER_INVOCATION:-0}" = 1 ] && [ -n "$head" ] \
+        && [ "$head" = "${DEPLOY_TARGET_SHA:-}" ] \
+        && _verify_peer_binary "$AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR" "$head"; then
+        SOURCE_BINARY="$AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR/agentdesk"
+        PEER_BINARY_ACCEPTED=1
+        echo "✓ [peer-binary] verified; using signed release binary (source=$head)"
+    else
+        echo "▸ [peer-binary] fallback: verification failed; building on peer"
+        _cleanup_peer_binary
+    fi
+    echo "▸ [timing] phase=peer-verify seconds=$((SECONDS - started)) accepted=$PEER_BINARY_ACCEPTED"
+}
+
+_prepare_peer_binary() {
+    local peer="$1" remote_cd="$2" peer_root="$3" sha="$4"
+    local platform remote_platform signature local_dir remote_dir command started="$SECONDS" rc=0
+    PEER_BINARY_ENV=""
+    PEER_BINARY_FAILURE="artifact unavailable"
+    [ -x "${DEPLOY_PEER_BINARY_SOURCE:-}" ] && [ "${DEPLOY_BUILT_SOURCE_SHA:-}" = "$sha" ] || return 1
+    PEER_BINARY_FAILURE="platform/toolchain probe failed or changed since build"
+    platform="$(_peer_binary_platform)" || return 1
+    [ -n "${DEPLOY_BINARY_PLATFORM:-}" ] && [ "$platform" = "$DEPLOY_BINARY_PLATFORM" ] || return 1
+    command="${remote_cd} && $(declare -f _peer_binary_platform)
+REPO=\"\$PWD\"
+_peer_binary_platform"
+    remote_platform="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$command")")" || return 1
+    PEER_BINARY_FAILURE="platform/toolchain mismatch"
+    [ "$platform" = "$remote_platform" ] || return 1
+    echo "▸ [timing] phase=peer-compatibility peer=$peer seconds=$((SECONDS - started))"
+    PEER_BINARY_FAILURE="local signature or manifest failed"
+    signature="$(_peer_binary_signature "$DEPLOY_PEER_BINARY_SOURCE")" || return 1
+    local_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-peer-manifest.XXXXXX")" || return 1
+    if ! python3 - "$DEPLOY_PEER_BINARY_SOURCE" "$local_dir/manifest.json" "$sha" "$platform" "$signature" "$DEPLOY_BUILD_PROFILE" <<'PY'
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+binary, output, sha, platform, signature, profile = sys.argv[1:]
+digest = hashlib.sha256()
+with open(binary, 'rb') as stream:
+    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+        digest.update(chunk)
+manifest = dict(format=1, source_sha=sha, sha256=digest.hexdigest(),
+                size=Path(binary).stat().st_size, signature=signature,
+                platform=platform, profile=profile)
+subprocess.run([binary, 'build-info'], check=True, timeout=30,
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+Path(output).write_text(json.dumps(manifest) + '\n')
+print(f"▸ [peer-binary] source={sha} sha256={manifest['sha256']} size={manifest['size']}")
+PY
+    then
+        rm -f "$local_dir/manifest.json"
+        rmdir "$local_dir" 2>/dev/null || true
+        return 1
+    fi
+    PEER_BINARY_FAILURE="transfer failed"
+    command="mkdir -p $(printf '%q' "$peer_root/bin") && mktemp -d $(printf '%q' "$peer_root/bin/.peer-transfer.XXXXXX")"
+    if remote_dir="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$command")")" \
+        && [[ "$remote_dir" == "$peer_root/bin/.peer-transfer."?????? ]]; then
+        started="$SECONDS"
+        scp -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$DEPLOY_PEER_BINARY_SOURCE" "$peer:$remote_dir/agentdesk" \
+            && scp -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$local_dir/manifest.json" "$peer:$remote_dir/manifest.json" || rc=$?
+        echo "▸ [timing] phase=peer-transfer peer=$peer seconds=$((SECONDS - started)) rc=$rc"
+        if [ "$rc" = 0 ]; then
+            PEER_BINARY_ENV="AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR=$(printf '%q' "$remote_dir")"
+        else
+            command="$(declare -f _cleanup_peer_binary)
+ADK_REL=$(printf '%q' "$peer_root")
+AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR=$(printf '%q' "$remote_dir")
+_cleanup_peer_binary"
+            ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$command")" || true
+        fi
+    else
+        rc=1
+    fi
+    rm -f "$local_dir/manifest.json"
+    rmdir "$local_dir" 2>/dev/null || true
+    [ "$rc" = 0 ]
+}
+
 _deploy_to_one_peer() {
     local peer="$1"
     shift
@@ -1929,7 +2084,8 @@ _deploy_to_one_peer() {
     local peer_log_path
     local peer_manifest_path
     local remote_deploy_command
-    env_prelude="$(_deploy_peer_env_prelude)"
+    local peer_started="$SECONDS" verdict_rc=0
+    env_prelude="$(_deploy_peer_env_prelude) AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR="
     expected_repo_head="$(git -C "$REPO" rev-parse HEAD)"
     if [ "$#" -gt 0 ]; then
         quoted_args=$(printf ' %q' "$@")
@@ -2010,8 +2166,6 @@ echo \"\$port\"")"'')"; then
     fi
     peer_log_path="$peer_adk_rel/logs/deploy-release.cluster-${expected_repo_head}.$$.log"
     peer_manifest_path="$peer_adk_rel/runtime/release-source.json"
-    # The child builds the checkout the cd above selected and pre-synced, whatever the peer login env says.
-    remote_deploy_command="${remote_cd_command} && AGENTDESK_REPO_DIR=\"\$PWD\" ${env_prelude} AGENTDESK_DEPLOY_LOG=$(printf '%q' "$peer_log_path") bash scripts/deploy-release.sh${quoted_args}"
 
     # Operator-private routines are excluded from the repo (.gitignore:50), so the
     # peer's own `git fetch` above cannot deliver them. Push them before the peer
@@ -2028,6 +2182,16 @@ echo \"\$port\"")"'')"; then
         fi
     fi
 
+    if [ -n "${DEPLOY_PEER_BINARY_SOURCE:-}" ]; then
+        if _prepare_peer_binary "$peer" "$remote_cd_command" "$peer_adk_rel" "$expected_repo_head"; then
+            env_prelude="$env_prelude $PEER_BINARY_ENV"
+        else
+            echo "▸ [peer-binary] fallback: $PEER_BINARY_FAILURE; building on peer $peer"
+        fi
+    fi
+    # The child builds the checkout the cd above selected and pre-synced, whatever the peer login env says.
+    remote_deploy_command="${remote_cd_command} && AGENTDESK_REPO_DIR=\"\$PWD\" ${env_prelude} AGENTDESK_DEPLOY_LOG=$(printf '%q' "$peer_log_path") bash scripts/deploy-release.sh${quoted_args}"
+
     PEER_LEG_LAUNCHED=1
     echo "▸ [peer:$peer] Running deploy-release.sh..."
     if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$remote_deploy_command")"; then
@@ -2037,7 +2201,9 @@ echo \"\$port\"")"'')"; then
 
     echo "▸ [peer:$peer] deploy launched; waiting for observed verdict..."
     _wait_for_peer_deploy_verdict \
-        "$peer" "$peer_log_path" "$peer_manifest_path" "$peer_health_port" "$expected_repo_head"
+        "$peer" "$peer_log_path" "$peer_manifest_path" "$peer_health_port" "$expected_repo_head" || verdict_rc=$?
+    echo "▸ [timing] phase=peer-total peer=$peer seconds=$((SECONDS - peer_started)) rc=$verdict_rc"
+    return "$verdict_rc"
 }
 
 _deploy_to_all_peers() {
@@ -2321,6 +2487,7 @@ export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:
 export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-}")
 export AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE:-}")
 export AGENTDESK_CODESIGN_KEYCHAIN_NAME=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_NAME:-}")
+export AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR=$(printf '%q' "${AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR:-}")
 export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
 export AGENTDESK_DEPLOY_FAST=$(printf '%q' "${AGENTDESK_DEPLOY_FAST:-0}")
 export AGENTDESK_DEPLOY_SKIP_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}")
@@ -2388,6 +2555,7 @@ if _self_hosted_release_session; then
 fi
 
 _acquire_release_deploy_lock "$@"
+DEPLOY_RUN_STARTED="$SECONDS"
 
 # #4255: resource-contention pre-flight — refuse (or, with the force hatch,
 # warn) BEFORE any expensive build work when the machine is already saturated by
@@ -2487,7 +2655,11 @@ fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ -n "$(_schema_order_peers)" ]; then
     DEPLOY_BUILT_SOURCE_SHA="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
 fi
-if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
+echo "▸ [timing] phase=release-preflight seconds=$((SECONDS - DEPLOY_RUN_STARTED))"
+BINARY_PHASE_STARTED="$SECONDS"
+DEPLOY_BINARY_PLATFORM="$(_peer_binary_platform)" || DEPLOY_BINARY_PLATFORM=""
+_select_peer_binary
+if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "$PEER_BINARY_ACCEPTED" != 1 ]; then
     # Cap token wait duration by the deploy-lock wait; this is not a shared absolute deadline.
     # An explicit operator override still wins.
     export ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS="${ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS:-$DEPLOY_LOCK_TIMEOUT_SECS}"
@@ -2515,8 +2687,12 @@ if _binary_would_revert_o_ledger "$SOURCE_BINARY"; then
 fi
 
 # Rebuild dashboard so deploy never ships a stale dist.
+echo "▸ [timing] phase=release-binary seconds=$((SECONDS - BINARY_PHASE_STARTED)) transferred=$PEER_BINARY_ACCEPTED"
+DASHBOARD_PHASE_STARTED="$SECONDS"
 echo "▸ Building dashboard..."
 (cd "$REPO/dashboard" && npm run build --silent)
+echo "▸ [timing] phase=dashboard-build seconds=$((SECONDS - DASHBOARD_PHASE_STARTED))"
+STAGING_PHASE_STARTED="$SECONDS"
 
 # Re-resolve after fresh build (source path may have changed).
 if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
@@ -2664,7 +2840,7 @@ fi
 # macro) or code changes, leading to runtime migration-mismatch errors. Opt out
 # with AGENTDESK_DEPLOY_SKIP_FRESHNESS=1 when intentional (e.g. bisecting, or
 # when AGENTDESK_DEPLOY_BINARY points at a validated artifact from elsewhere).
-if [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] && [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
+if [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] && [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "$PEER_BINARY_ACCEPTED" != 1 ]; then
     HEAD_EPOCH=$(git -C "$REPO" log -1 --format=%ct 2>/dev/null || echo 0)
     BIN_EPOCH=$(stat -f %m "$SOURCE_BINARY" 2>/dev/null || stat -c %Y "$SOURCE_BINARY" 2>/dev/null || echo 0)
     if [ "$BIN_EPOCH" -lt "$HEAD_EPOCH" ]; then
@@ -2758,6 +2934,10 @@ cp "$SOURCE_BINARY" "$STAGED_BINARY"
 chmod +x "$STAGED_BINARY"
 xattr -d com.apple.provenance "$STAGED_BINARY" 2>/dev/null || true
 sign_binary_with_fallback "$STAGED_BINARY"
+_cleanup_peer_binary
+DEPLOY_PEER_BINARY_SOURCE="$STAGED_BINARY"
+echo "▸ [timing] phase=release-staging seconds=$((SECONDS - STAGING_PHASE_STARTED))"
+ACTIVATION_PHASE_STARTED="$SECONDS"
 _clean_release_build_cache_after_staging
 
 # ── Fail-closed PostgreSQL tunnel migration (#4378) ───────────────────────────
@@ -3343,6 +3523,7 @@ STAGED_BINARY=""
 # ANY non-zero exit before DEPLOY_OK (set on the success path) restores the
 # last-known-good backup and restarts the service — see _rollback_release_binary.
 ROLLBACK_ARMED=1
+DEPLOY_PEER_BINARY_SOURCE="$REL_BINARY"
 # Swap policies with nothing fallible since promotion, so rollback and fail-forward see one generation.
 _swap_policy_generation "$ADK_REL" "$POLICIES_STAGED"
 POLICIES_STAGED=""
@@ -3522,6 +3703,7 @@ fi
 
 # Health check (server health + dashboard availability)
 REL_PORT="$(_resolve_release_server_port)"
+HEALTH_PHASE_STARTED="$SECONDS"
 echo "▸ Waiting for release health on :${REL_PORT}..."
 REL_HEALTHY=false
 # #4348 Defect 1: the trailing `1` opts the DEPLOY readiness gate into treating a
@@ -3549,6 +3731,8 @@ fi
 # to roll back with no .prev, and a hiccup in a non-critical step (lock, manifest)
 # must never tear down a healthy, health-confirmed binary.
 DEPLOY_OK=1
+echo "▸ [timing] phase=release-health seconds=$((SECONDS - HEALTH_PHASE_STARTED))"
+echo "▸ [timing] phase=release-activation seconds=$((SECONDS - ACTIVATION_PHASE_STARTED))"
 # #5147: ship the .dSYM next to the promoted binary. `sample` (which the
 # self-watchdog runs to capture hang dumps) and `atos` look for
 # `<binary>.dSYM` in the binary's own directory before falling back to
@@ -4583,6 +4767,7 @@ turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did n
     return 0
 }
 
+SMOKE_PHASE_STARTED="$SECONDS"
 # >>> BEGIN smoke-disposition region (#5244)
 echo "▸ Running post-deploy functional smoke (#4262)..."
 # INVARIANT: the ENTIRE smoke block is fail-open. We are past DEPLOY_OK, so a
@@ -4638,6 +4823,7 @@ else
     _report_post_deploy_smoke_failure || true
 fi
 # <<< END smoke-disposition region (#5244)
+echo "▸ [timing] phase=smoke seconds=$((SECONDS - SMOKE_PHASE_STARTED))"
 
 # >>> BEGIN retired-relay-watchdog cleanup
 # Retire an old installation after a successful deploy; an absent job is a no-op.
@@ -4664,5 +4850,6 @@ _write_release_source_manifest
 # transcript carries NO terminal marker, which is the truth — there is no verdict
 # yet. A refused peer exits non-zero and the EXIT trap prints DEPLOY FAILED instead.
 _finish_cluster_stage "$@" || exit 1
+echo "▸ [timing] phase=deploy-total seconds=$((SECONDS - DEPLOY_RUN_STARTED))"
 
 echo "═══ Deploy Complete ═══"
