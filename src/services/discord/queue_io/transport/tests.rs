@@ -316,11 +316,15 @@ async fn rest_queue_routing_failed_lookup_uses_one_consistent_failure_snapshot()
         );
         assert_eq!(
             failed,
-            if hint == Some(true) {
-                Ok(())
-            } else {
-                Err(settings::BotChannelRoutingGuardFailure::ProviderMismatch)
-            }
+            settings::validate_bot_channel_routing_with_provider_channel(
+                &settings,
+                &ProviderKind::Claude,
+                ChannelId::new(42002),
+                None,
+                None,
+                hint.unwrap_or(false),
+            ),
+            "failed reads must preserve the configured unknown-channel and DM policy"
         );
         assert_eq!(partial_count.for_channel(42002), 1);
         assert_eq!(failed_count.for_channel(42002), 1);
