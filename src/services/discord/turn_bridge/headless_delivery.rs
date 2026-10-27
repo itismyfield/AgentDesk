@@ -288,6 +288,9 @@ pub(super) async fn enqueue_headless_delivery(
         content,
         cancel_token,
     } = arguments.into_runtime_arguments();
+    if should_suppress_headless_delivery_for_cancel(cancel_token) {
+        return HeadlessDeliveryOutcome::Cancelled;
+    }
     let output_origin =
         match crate::services::cluster::intake_router_hook::owner_record::output::source_artifact(
             shared.pg_pool.as_ref(),

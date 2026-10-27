@@ -515,7 +515,7 @@ async fn output_origin_o_request_keeps_guard_after_writer_waiter_aborts_pg() {
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut bytes = vec![0; 8192];
-        socket.read(&mut bytes).await.unwrap();
+        assert!(socket.read(&mut bytes).await.unwrap() > 0);
         observed.fetch_add(1, Ordering::SeqCst);
         socket
             .write_all(

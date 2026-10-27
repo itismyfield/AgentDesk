@@ -22,7 +22,7 @@ pub(crate) struct Origin {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Artifact {
-    origin: Origin,
+    origin: Box<Origin>,
     payload_hash: String,
 }
 
@@ -34,7 +34,7 @@ impl Origin {
     /// Called when the output artifact is created, never by a recovery sender.
     pub(crate) fn seal(&self, payload: &str) -> Artifact {
         Artifact {
-            origin: self.clone(),
+            origin: Box::new(self.clone()),
             payload_hash: hash(payload),
         }
     }
