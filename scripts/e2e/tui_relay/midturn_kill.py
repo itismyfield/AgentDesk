@@ -74,6 +74,17 @@ def validate_arguments(parser, args) -> None:
         args.reset_before_each = False
 
 
+def hold_prompt(ok: str, late: str) -> str:
+    """Early marker, then a long shell command; Codex skipped the shared E-18 wording and ended the turn."""
+    return (f"E2E {SCENARIO_ID} long-running turn fixture. Run it exactly; skipping the command fails the test.\n"
+            f"1. Send a short progress update that is exactly: {ok}\n"
+            "2. Then call your shell/terminal command tool and run this command, waiting until it exits "
+            f"(about {HOLD_SECONDS} seconds is intended):\n"
+            f"   python3 -c \"import time; time.sleep({HOLD_SECONDS})\"\n"
+            f"3. Only after the command exits, reply exactly: {late}\n"
+            f"Do not write {late} before the command exits.")
+
+
 def scenario(run_id: str) -> dict[str, Any]:
     tag = run_id[:12]
     ok, late = f"[E2E:MK:{tag}:BEFORE]", f"[E2E:MK:{tag}:AFTER]"
@@ -84,7 +95,7 @@ def scenario(run_id: str) -> dict[str, Any]:
         "report_marker_counts": [ok, late, following],
         "steps": [
             {"preflight_e2e_channel": {}},
-            {"send_provider_hold_prompt": {"ok_marker": ok, "late_marker": late, "hold_seconds": HOLD_SECONDS}},
+            {"send_prompt": hold_prompt(ok, late)},
             {"wait_for_provider_hold_state": {"ok_marker": ok, "late_marker": late, "timeout_s": 240, "poll_interval_s": 1}},
             {"identify_provider_process": {}},
             {"kill_provider_process": {"ok_marker": ok}},

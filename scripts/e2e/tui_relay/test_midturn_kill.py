@@ -350,7 +350,8 @@ class DriverRun(HostCase):
         rows, ids = [], iter(range(10, 1000))
         scenario = midturn_kill.scenario("r" * 32)
         step = {key: value for item in scenario["steps"] for key, value in item.items()}
-        ok, nxt = step["send_provider_hold_prompt"]["ok_marker"], step["send_prompt"].rsplit(" ", 1)[-1]
+        ok = step["wait_for_provider_hold_state"]["ok_marker"]
+        nxt = [s["send_prompt"] for s in scenario["steps"] if "send_prompt" in s][-1].rsplit(" ", 1)[-1]
         held = []
 
         def add(content):
