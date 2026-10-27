@@ -512,6 +512,7 @@ const GENERATION_MTIME_NS: i64 = 1_758_000_000_000_000_000;
 /// delivered.
 fn orphan_facts() -> OrphanTerminalFrameFacts<'static> {
     OrphanTerminalFrameFacts {
+        o_tail_covered: None,
         denial: Some(SoftTerminalAuthorityDenial::TurnStartOutsideFrame),
         watcher_direct_fallback_requested: true,
         watcher_direct_fallback_authorized: false,
@@ -548,6 +549,7 @@ fn a_frame_with_no_denial_requires_no_record_5941() {
     // Authority was never refused, so this is not the loss seam: a row here
     // inflates `D` past the §I17 `D <= N+` audit bound.
     let facts = OrphanTerminalFrameFacts {
+        o_tail_covered: None,
         denial: None,
         ..orphan_facts()
     };
@@ -1042,6 +1044,7 @@ pub(super) async fn admitted_losses_under_root(
     let full_response = format!("{}{LOST_BODY}", "x".repeat(SENT_PREFIX));
     let tool_state = WatcherToolState::new();
     let context = TerminalRelayPlanContext {
+        evidence_source: None,
         http: &http,
         shared: &shared,
         channel_id: channel,

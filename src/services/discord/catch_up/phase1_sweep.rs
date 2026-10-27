@@ -124,6 +124,13 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         let known_snapshot = mailbox_snapshot(shared, channel_id).await;
         let (mut known_arms, mut existing_ids) = recovery_known_arms_and_ids(&known_snapshot);
         // The completed-turn ledger prevents DLQ for delivered ids and restores absorbed arms.
+        #[cfg(unix)]
+        super::super::outbound::completed_turn_ledger::o_pending::project(
+            shared,
+            provider,
+            channel_id.get(),
+        )
+        .await;
         let ledger = settled_ledger_consult::read(provider, channel_id);
         let settled_ids = ledger.settle(&known_snapshot, &mut known_arms, &mut existing_ids);
         let injected = inject_disposition::scan_view(provider);

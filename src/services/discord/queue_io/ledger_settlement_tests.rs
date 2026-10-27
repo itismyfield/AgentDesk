@@ -1015,3 +1015,76 @@ async fn clock_sample_delay_cannot_backdate_a_new_episode() {
         );
     }
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn i7441b_real_late_settle_open_preserves_requeued_input_and_us_boundary() {
+    use crate::services::discord::outbound::o_delivery_evidence::tests::Fixture;
+    use crate::services::tui_o::repost::dispatch::RepostWriter;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    tokio::time::pause();
+    let mut f = Fixture::new_mode(744181, ProviderKind::Claude, &["late body"], true).await;
+    tokio::time::resume();
+    let (_http, _http_guard) = f.http().await;
+    let shared = make_shared_data_for_tests();
+    let channel = ChannelId::new(f.row.channel_id);
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        f.row.channel_id,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    completed_turn_ledger::o_pending::capture(&ProviderKind::Claude, &f.row);
+    let posted_ms = MessageId::new(f.port.messages.lock().unwrap()[0].id)
+        .created_at()
+        .timestamp_millis() as u64;
+    let mut copy = queued(f.row.user_msg_id, "requeued body");
+    copy.source_message_queued_generations[0].enqueued_at_epoch_us = Some(posted_ms * 1000 + 1);
+    let original = copy.source_message_queued_generations.clone();
+    enqueue(&shared, channel, copy).await;
+    f.reopen_after_post_crash();
+    f.port
+        .uncertain
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::pause();
+    assert!(RepostWriter::settle_open(&mut f.writer).await);
+    tokio::time::resume();
+    let projection_time = chrono::Utc::now().timestamp_millis() as u64;
+    assert!(projection_time > posted_ms);
+    completed_turn_ledger::o_pending::project(&shared, &ProviderKind::Claude, channel.get()).await;
+    assert_eq!(
+        completed_turn_ledger::settled_commit_ms_by_user_msg_id(
+            &ProviderKind::Claude,
+            channel.get()
+        )[&f.row.user_msg_id],
+        posted_ms
+    );
+    let result = actor_take(&shared, channel).await;
+    assert!(result.queue_exit_events.is_empty());
+    let item = result.intervention.unwrap();
+    assert_eq!(item.message_id.get(), f.row.user_msg_id);
+    assert_eq!(item.source_message_queued_generations.len(), original.len());
+    assert_eq!(
+        item.source_message_queued_generations[0].queued_generation,
+        original[0].queued_generation
+    );
+    assert_eq!(
+        item.source_message_queued_generations[0].enqueued_at_epoch_us,
+        original[0].enqueued_at_epoch_us
+    );
+    // Equality and the next microsecond survive; an earlier enqueue is retired.
+    for (delta, retired) in [(0_i64, false), (-1, true)] {
+        let next = make_shared_data_for_tests();
+        let next_channel = ChannelId::new(channel.get() + 1 + delta.unsigned_abs());
+        std::fs::copy(
+            completed_turn_ledger::ledger_path(&ProviderKind::Claude, channel.get()).unwrap(),
+            completed_turn_ledger::ledger_path(&ProviderKind::Claude, next_channel.get()).unwrap(),
+        )
+        .unwrap();
+        let mut item = queued(f.row.user_msg_id, "boundary");
+        item.source_message_queued_generations[0].enqueued_at_epoch_us =
+            Some((posted_ms * 1000).checked_add_signed(delta).unwrap());
+        enqueue(&next, next_channel, item).await;
+        let taken = actor_take(&next, next_channel).await;
+        assert_eq!(taken.intervention.is_none(), retired);
+    }
+}

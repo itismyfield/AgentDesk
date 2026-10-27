@@ -1449,6 +1449,9 @@ src/
 │   │   │   ├── bounded_cache_file.rs
 │   │   │   └── claude.rs
 │   │   ├── outbound/
+│   │   │   ├── completed_turn_ledger/
+│   │   │   │   ├── o_pending.rs
+│   │   │   │   └── o_pending_tests.rs
 │   │   │   ├── confirmation/
 │   │   │   │   └── terminal_notice_tests.rs
 │   │   │   ├── delivery_obligation/
@@ -1497,6 +1500,9 @@ src/
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── o_delivery_evidence.rs
+│   │   │   ├── o_delivery_evidence_tests.rs
+│   │   │   ├── o_delivery_manifest.rs
 │   │   │   ├── o_writer_io.rs
 │   │   │   ├── o_writer_late_tmux_tests.rs
 │   │   │   ├── o_writer_legacy.rs
@@ -1677,6 +1683,7 @@ src/
 │   │   │   ├── manual_rebind_override.rs
 │   │   │   ├── o_cut_recorder.rs
 │   │   │   ├── o_recovery_cut_tests.rs
+│   │   │   ├── o_settlement_tests.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
 │   │   │   ├── producer_resume.rs
@@ -2154,6 +2161,7 @@ src/
 │   │   │   ├── o_capsule_origin_tests.rs
 │   │   │   ├── o_delegated_arm.rs
 │   │   │   ├── o_delegated_watcher_tests.rs
+│   │   │   ├── o_evidence_tests.rs
 │   │   │   ├── o_seed_install_tests.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
@@ -2491,6 +2499,7 @@ src/
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── delivery_epilogue_tests.rs
 │   │   │   │   ├── empty_response_recovery.rs
+│   │   │   │   ├── foreign_o_settlement_tests.rs
 │   │   │   │   ├── foreign_terminal_handoff.rs
 │   │   │   │   ├── prompt_too_long_guidance.rs
 │   │   │   │   ├── queue_retry_silence.rs
@@ -3424,6 +3433,7 @@ src/
 │   │   │   ├── codex_end_tests.rs
 │   │   │   ├── codex_provenance.rs
 │   │   │   ├── codex_provenance_tests.rs
+│   │   │   ├── delivery_evidence.rs
 │   │   │   ├── durable.rs
 │   │   │   ├── ledger.rs
 │   │   │   ├── ledger_lock_tests.rs

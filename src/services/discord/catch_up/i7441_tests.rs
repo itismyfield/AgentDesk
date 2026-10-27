@@ -353,3 +353,125 @@ async fn i7441_awaited_too_old_existing_prunes_retention_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn i7441b_pending_is_retried_only_at_next_eligible_projection_pg() {
+    use crate::services::discord::outbound::o_delivery_evidence::tests::Fixture;
+    let root = scoped_runtime_root();
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7441b_quiet",
+        "O pending eligibility",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    let f = Fixture::new(744108, ProviderKind::Claude, &["answer"]).await;
+    let (_http, _http_guard) = f.http().await;
+    let shared = super::super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allow_all_users = true;
+    }
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        f.row.channel_id,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    completed_turn_ledger::o_pending::capture(&ProviderKind::Claude, &f.row);
+    let pending = f
+        .root
+        .join("runtime/discord_pending_o_deliveries/claude")
+        .join(format!("{}.json", f.row.channel_id));
+    let stored = std::fs::read(&pending).unwrap();
+    let messages = f.port.messages.lock().unwrap().clone();
+    f.port.messages.lock().unwrap().clear();
+    let channel = ChannelId::new(f.row.channel_id);
+    let input = MessageId::new(f.row.user_msg_id);
+    write_checkpoint(root.path(), &ProviderKind::Claude, channel, input.get() - 1);
+    let api = TestCatchUpApi::new(vec![discord_message(
+        channel, input, HUMAN_ID, false, "input",
+    )]);
+    run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &ProviderKind::Claude)).await;
+    assert_eq!(api.dead_letters.lock().unwrap().len(), 1);
+    assert!(completed_turn_ledger::read_ledger(&ProviderKind::Claude, channel.get()).is_none());
+    assert_eq!(std::fs::read(&pending).unwrap(), stored);
+    let reads = f.get_calls.load(Ordering::SeqCst);
+    assert!(reads > 0);
+    let after = super::super::scan_progress::read(&ProviderKind::Claude, channel).unwrap();
+    assert!(
+        after >= input.get(),
+        "A retirement remains independent of pending"
+    );
+    *f.port.messages.lock().unwrap() = messages;
+    let bot = message_id_with_age(2, Duration::from_secs(2));
+    let quiet = TestCatchUpApi::new(Vec::new()).with_phase2_messages(vec![discord_message(
+        channel,
+        bot,
+        CURRENT_BOT_ID,
+        true,
+        "bot response",
+    )]);
+    run_catch_up_sweep(CatchUpDeps::new(&quiet, &shared, &ProviderKind::Claude)).await;
+    assert_eq!(
+        f.get_calls.load(Ordering::SeqCst),
+        reads,
+        "quiet branches do not reach the projection hook"
+    );
+    assert_eq!(std::fs::read(&pending).unwrap(), stored);
+    assert!(completed_turn_ledger::read_ledger(&ProviderKind::Claude, channel.get()).is_none());
+    let fresh = message_id_with_age(3, Duration::from_secs(1));
+    let next = TestCatchUpApi::new(vec![discord_message(
+        channel,
+        fresh,
+        HUMAN_ID,
+        false,
+        "next input",
+    )]);
+    run_catch_up_sweep(CatchUpDeps::new(&next, &shared, &ProviderKind::Claude)).await;
+    assert!(f.get_calls.load(Ordering::SeqCst) > reads);
+    assert!(
+        completed_turn_ledger::read_ledger(&ProviderKind::Claude, channel.get())
+            .unwrap()
+            .settled_ids()
+            .contains(&input.get())
+    );
+    assert_eq!(
+        serde_json::from_slice::<Vec<serde_json::Value>>(&std::fs::read(&pending).unwrap())
+            .unwrap()
+            .len(),
+        0
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[cfg(unix)]
+pub(in crate::services::discord) async fn assert_aged_o_unsettled(
+    root: &std::path::Path,
+    shared: &Arc<super::super::SharedData>,
+    channel: ChannelId,
+    input: MessageId,
+) {
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(OWNER_ID);
+        settings.allow_all_users = true;
+    }
+    write_checkpoint(root, &ProviderKind::Claude, channel, input.get() - 1);
+    let api = TestCatchUpApi::new(vec![discord_message(
+        channel,
+        input,
+        HUMAN_ID,
+        false,
+        "unproven input",
+    )]);
+    run_catch_up_sweep(CatchUpDeps::new(&api, shared, &ProviderKind::Claude)).await;
+    assert!(
+        !api.dead_letters.lock().unwrap().is_empty(),
+        "unproven aged input remains TooOld"
+    );
+    assert!(
+        !completed_turn_ledger::settled_user_msg_ids(&ProviderKind::Claude, channel.get())
+            .contains(&input.get())
+    );
+}

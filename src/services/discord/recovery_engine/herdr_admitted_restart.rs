@@ -136,6 +136,7 @@ impl AdmittedRestartTerminal {
             row = taken;
         }
         if o_body {
+            super::super::outbound::completed_turn_ledger::o_pending::capture(provider, &row);
             // Nothing is sent for O's body; an Aborted still shows its stop as a reply.
             let reply = crate::services::discord::turn_bridge::before_start_stop::send_stop_reply;
             if self.kind() == NativeTerminalKind::Aborted

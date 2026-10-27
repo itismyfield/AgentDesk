@@ -115,6 +115,11 @@ pub(super) fn authority_for_decoded_text(
 ) -> super::loop_poll_prologue::WatcherSourceAuthority {
     super::loop_poll_prologue::WatcherSourceAuthority {
         source_stamp: (!mixed).then_some(authority.source_stamp).flatten(),
+        source_file: if mixed {
+            SourceFileIdentity::Unavailable
+        } else {
+            authority.source_file
+        },
         ..authority
     }
 }

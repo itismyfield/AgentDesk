@@ -12,6 +12,7 @@ pub(super) struct TerminalRelayPlanContext<'a> {
     pub(super) channel_id: serenity::ChannelId,
     pub(super) watcher_provider: &'a ProviderKind,
     pub(super) tmux_session_name: &'a String,
+    pub(super) evidence_source: Option<(u64, u64)>,
     pub(super) output_path: &'a String,
     pub(super) inflight_before_relay: &'a Option<InflightTurnState>,
     pub(super) cached_relay_producer: &'a Option<RelayProducer>,
@@ -275,11 +276,38 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                 inflight_before_relay.as_ref(),
                 &tmux_session_name,
             );
-        let session_bound_relay_owns_terminal_delivery =
+        // Leave 100ms inside the 10s budget for the final terminal decision.
+        let evidence_deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_millis(9900);
+        let o_evidence = async {
+            let file = context.evidence_source?;
+            if !relay_decision.should_direct_send || current_response.is_empty() {
+                return None;
+            }
+            crate::services::discord::outbound::o_delivery_evidence::tail(
+                http,
+                shared,
+                crate::services::discord::outbound::o_delivery_evidence::Frame {
+                    provider: watcher_provider,
+                    channel: channel_id,
+                    path: std::path::Path::new(output_path),
+                    file,
+                    range: (
+                        data_start_offset,
+                        terminal_event_consumed_offset(current_offset, all_data),
+                    ),
+                    body: full_response,
+                    sent: response_sent_offset,
+                },
+                evidence_deadline,
+            )
+            .await
+        };
+        let ack_delivery = async {
             if session_bound_terminal_delivery_attempted {
                 let ack_outcome = wait_for_session_bound_relay_delivery_ack(
                     all_data_session_bound_relay_ack.as_ref(),
-                    std::time::Duration::from_secs(10),
+                    evidence_deadline.saturating_duration_since(tokio::time::Instant::now()),
                 )
                 .await;
                 let ack_outcome = session_bound_ack_outcome_after_resolve_time_mirror_check(
@@ -303,7 +331,10 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                 delivered
             } else {
                 false
-            };
+            }
+        };
+        let (session_bound_relay_owns_terminal_delivery, o_tail_covered) =
+            tokio::join!(ack_delivery, o_evidence);
         let prompt_anchor_present = prompt_anchor_present_before_relay;
         let ssh_direct_pending = prompt_anchor_present
             || crate::services::tui_prompt_dedupe::is_ssh_direct_observation_pending(
@@ -601,6 +632,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
             channel_id,
             watcher_provider,
             &orphan_terminal_frame::OrphanTerminalFrameFacts {
+                o_tail_covered: o_tail_covered.as_ref(),
                 denial: soft_terminal_authority_denial,
                 watcher_direct_fallback_requested,
                 watcher_direct_fallback_authorized,

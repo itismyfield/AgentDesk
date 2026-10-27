@@ -79,6 +79,16 @@ pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
     mut state: TerminalOutcomeDeliveryState,
 ) -> TerminalOutcomeDeliveryOutput {
+    #[cfg(unix)]
+    if !ctx.cancelled && !ctx.transport_error && !ctx.is_prompt_too_long && !ctx.recovery_retry {
+        let mut captured = state.inflight_state.clone();
+        captured.full_response = state.full_response.clone();
+        #[cfg(unix)]
+        super::super::outbound::completed_turn_ledger::o_pending::capture(
+            &state.provider,
+            &captured,
+        );
+    }
     let claude_tui_followup_busy_readiness_timeout =
         bridge_claude_tui_followup_busy_readiness_timeout(
             &state.provider,

@@ -826,7 +826,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
 
         let terminal_relay_plan_outcome = {
+            let evidence_source = match source_authority.source_file {
+                crate::services::cluster::stream_relay::SourceFileIdentity::Unix { dev, ino } => {
+                    Some((dev, ino))
+                }
+                _ => None,
+            };
             let terminal_relay_plan_context = TerminalRelayPlanContext {
+                evidence_source,
                 http: &http,
                 shared: &shared,
                 channel_id,
@@ -2511,3 +2518,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 mod tests;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use self::tests::streaming_harness_tests::cancel_for_test;
+
+#[cfg(test)]
+#[path = "tmux_watcher/o_evidence_tests.rs"]
+pub(in crate::services::discord) mod o_evidence_tests;

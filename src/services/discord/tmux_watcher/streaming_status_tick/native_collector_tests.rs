@@ -604,6 +604,7 @@ fn native_collector_case(test_name: &str, mode: u8) {
         }
         let before_relay = load_inflight_state(&fx.provider, fx.channel.get());
         let context = TerminalRelayPlanContext {
+            evidence_source: None,
             http: &rec.http,
             shared: &shared,
             channel_id: fx.channel,

@@ -15,6 +15,10 @@ pub(in crate::services::discord) mod delivery_obligation;
 pub(in crate::services::discord) mod delivery_record; // #3089 B0
 pub(crate) mod manual_delivery;
 pub(crate) mod message;
+#[cfg(unix)]
+pub(in crate::services::discord) mod o_delivery_evidence;
+#[cfg(unix)]
+mod o_delivery_manifest;
 pub(crate) mod o_writer_io;
 pub(in crate::services::discord) mod o_writer_legacy;
 pub(crate) mod policy;
