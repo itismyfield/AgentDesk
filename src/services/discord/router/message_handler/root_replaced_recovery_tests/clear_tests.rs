@@ -743,3 +743,38 @@ fn legacy_discarded(case: &Case, report: &ClearReport) {
         );
     });
 }
+
+#[test]
+fn rr_public_clear_then_next_input_attaches_past_a_vanished_pane_child_pg() {
+    let case = Case::launched("rr-clear-next");
+    let _intake = IntakeGate::configure(&case);
+    let report = clear(&case);
+    assert!(
+        !report.reply().contains("정리하지 못했어요"),
+        "{}",
+        report.reply()
+    );
+    assert_eq!(case.fx.row(), Some(HostedState::Retired));
+    // A SessionStart hook child is listed in the pane's foreground and exits before its parent is read.
+    let vanished = PROVIDER + 11;
+    let (launcher, started) =
+        super::fresh_turn_first_read(&case, "다음 입력", &[PROVIDER, vanished]);
+    let HostedRecord::Known(next) = case.fx.record() else {
+        panic!("Bound N2")
+    };
+    assert_eq!(next.state, HostedState::Bound);
+    assert_ne!(next.execution_nonce, case.nonce);
+    assert_eq!(
+        launcher.nonces.lock().unwrap().as_slice(),
+        std::slice::from_ref(&next.execution_nonce)
+    );
+    let source =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(case.fx.logical())
+            .unwrap();
+    assert_eq!(source.session_id.as_deref(), Some(started.session.as_str()));
+    assert_eq!(
+        case.fx.rig.sends().len(),
+        4,
+        "N2 takes one paste and one Enter"
+    );
+}
