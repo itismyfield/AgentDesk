@@ -381,8 +381,9 @@ class DeployPreflightTokenTests(unittest.TestCase):
         deploy = (SCRIPTS / "deploy-release.sh").read_text()
         preflight = deploy.split('if [ "$DEPLOY_TEST_MODE" != "1" ]; then', 1)[1]
         preflight = 'if [ "$DEPLOY_TEST_MODE" != "1" ]; then' + preflight.split("# #743:", 1)[0]
-        build = deploy.split('if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then')[-1]
-        build = 'if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then' + build.split("# Rebuild dashboard", 1)[0]
+        build_start = 'if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "$PEER_BINARY_ACCEPTED" != 1 ]; then'
+        self.assertEqual(deploy.count(build_start), 1)
+        build = build_start + deploy.split(build_start, 1)[1].split("# Rebuild dashboard", 1)[0]
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             token, marker = root / "token", root / "built"
@@ -407,6 +408,8 @@ SCRIPT_DIR="$6"
 SOURCE_BINARY="$4"
 DEPLOY_BUILD_PROFILE="$5"
 DEPLOY_LOCK_TIMEOUT_SECS="${TEST_LOCK_TIMEOUT:-1800}"
+PEER_BINARY_ACCEPTED=0
+_binary_would_revert_o_ledger() { return 1; }
 _preflight_builder_pids() { case "$1" in cargo|rustc) echo 55555;; esac; }
 _preflight_cpu_count() { echo 8; }
 _preflight_loadavg_1min() { echo "${TEST_LOAD:-1}"; }
@@ -452,6 +455,7 @@ ps() {
                             fcntl.flock(holder, fcntl.LOCK_UN)
                         out, err = child.communicate(timeout=10)
                         self.assertEqual(child.returncode, 0, out + err)
+                        self.assertNotIn("command not found", err)
                         self.assertTrue(marker.exists())
                         marker.unlink()
             for extra, reason in (({"TEST_LOAD": "99"}, "load average"),
