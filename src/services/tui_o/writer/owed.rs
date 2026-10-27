@@ -186,7 +186,7 @@ fn reevaluate_at(
         .map(|members| vec![None; members.len()])
         .collect::<Vec<_>>();
     for (source, ranges) in &by_source {
-        let scanned = store.for_each_frame(source, |frame| {
+        let scanned = store.for_each_frame(source, |frame, _| {
             let SpoolFrame::Record(record) = frame else {
                 return;
             };

@@ -170,7 +170,7 @@ fn pending_gc_frames(harness: &Harness, source: &SourceId, tag: &str) -> Vec<Spo
     );
     let mut frames = Vec::new();
     store
-        .for_each_frame(source, |frame| frames.push(frame))
+        .for_each_frame(source, |frame, _| frames.push(frame))
         .unwrap();
     assert!(!frames.is_empty(), "{tag} Pending has spooled rows");
     let gc = store.gc_oldest_segment(source);
@@ -189,7 +189,7 @@ fn pending_gc_frames(harness: &Harness, source: &SourceId, tag: &str) -> Vec<Spo
     );
     let mut after = Vec::new();
     store
-        .for_each_frame(source, |frame| after.push(frame))
+        .for_each_frame(source, |frame, _| after.push(frame))
         .unwrap();
     assert_eq!(after, frames, "{tag} every Pending frame kept");
     frames
