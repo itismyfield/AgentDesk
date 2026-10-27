@@ -107,7 +107,6 @@ enum Key {
 
 /// Runs one content key; under an owner the server runs it only for the pinned pane identity.
 fn key<const N: usize>(pane: &Pane, command: impl Fn(&str) -> [String; N]) -> Key {
-    #[cfg(unix)]
     match owner_input::pinned() {
         Ok(None) => {}
         Ok(Some((target, condition))) => {

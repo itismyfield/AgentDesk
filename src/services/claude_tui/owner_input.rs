@@ -98,7 +98,6 @@ pub(crate) fn load_failed() {
 
 /// The pinned pane id and the identity condition the tmux server checks atomically around an
 /// owner paste or Enter; `None` leaves the command as main runs it.
-#[cfg(unix)]
 pub(crate) fn pinned() -> Result<Option<(String, String)>, String> {
     let Some(scope) = current() else {
         return Ok(None);
