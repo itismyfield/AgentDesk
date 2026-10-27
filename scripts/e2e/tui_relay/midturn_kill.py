@@ -330,7 +330,11 @@ def run_step(driver, step, *, cell, channel_id, args, record, window, refresh) -
             if now - started >= timeout:
                 break
             time.sleep(float(params.get("poll_interval_s", 2.0)))
-        state["settlement"] = {**verdict, "elapsed_s": round(now - started, 1), "timeout_s": timeout}
+        # turn/start answers carry no Discord id, so the follow-up boundary is the newest id seen here.
+        cursor = max([int(window.setup_marker_id)] + [int(row["id"]) for row in window.raw_messages
+                                                        if str(row.get("id") or "").isdigit()])
+        state["settlement"] = {**verdict, "elapsed_s": round(now - started, 1), "timeout_s": timeout,
+                               "message_cursor": str(cursor)}
         caps["turn_settled"] = "pass" if verdict["turn"] == "settled" else "fail"
         caps["pre_kill_output_delivered"] = "pass" if verdict["pre_kill_output"] == "delivered" else "fail"
         if verdict["turn"] != "settled":
@@ -342,11 +346,10 @@ def run_step(driver, step, *, cell, channel_id, args, record, window, refresh) -
         caps["next_turn_new_provider"] = "fail"
         if _alive(killed["pid"], killed["started"]):
             raise assertions.AssertionError(f"killed provider {killed['pid']} is alive again")
-        sends = [send for send in record.get("prompt_sends") or [] if send.get("step") == "send_prompt"]
         refresh()
         author = assertions.provider_bot_id(provider)
         bodies = [row["id"] for row in window.raw_messages if str(row.get("id")) not in window.deleted_ids
                   and marker in (assertions.author_relay_body(row, author) or "")]
         state["replacement"] = replacement(killed, identify(driver, cell, channel_id, args.queue_runtime_root),
-                                           body_ids=bodies, followup_id=int(sends[-1]["message_id"]))
+                                           body_ids=bodies, followup_id=int(state["settlement"]["message_cursor"]))
         caps["next_turn_new_provider"] = "pass"

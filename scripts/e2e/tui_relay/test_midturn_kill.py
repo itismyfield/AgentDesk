@@ -367,7 +367,7 @@ class DriverRun(HostCase):
             else:
                 host.respawn()
                 add(nxt)
-            return {"id": str(sent), "message_id": str(sent)}
+            return {"turn_id": f"discord:{CHANNEL}:{9100095335028306400 + sent}"}
 
         def on_kill():
             if settle:
