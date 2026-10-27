@@ -236,6 +236,18 @@ fn file_read_scan_finds_each_loader_call_but_not_snapshot() {
         fn f() { crate::config::snapshot(); settings::load(); }\n\
         // config::load_graceful() in a comment\n";
     assert_eq!(lines(text), vec![1, 2, 3, 4, 5]);
+
+    // An array type in an owner's signature does not end it; a declaration has no body.
+    let owners = [("src/x.rs", "fn digest(", "reason")];
+    let owned = "fn digest() -> Result<([u8; 32], String), String> { load_graceful(); }\n\
+        fn other() { load_graceful(); }\n";
+    let found = scan("src/x.rs", owned, &FILE_READ_RE, &owners).unwrap();
+    assert_eq!(
+        (found.lines, found.owners_used),
+        (vec![2], vec!["fn digest("])
+    );
+    let declared = "fn digest(seed: [u8; 4]);\n";
+    assert!(scan("src/x.rs", declared, &FILE_READ_RE, &owners).is_err());
 }
 
 fn live_guard() -> crate::config_live_reload::TestLiveGuard {

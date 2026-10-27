@@ -118,17 +118,17 @@ valid edit in the live snapshot, but only `live` fields act on it. A change to a
 | `cluster.api_base_url` | restart | `src/services/cluster/node_registry.rs` bootstrap (node_capabilities -> base_capabilities in heartbeat; machine_resources::spawn) |
 | `cluster.gateway_preferred_instance_id` | restart | `src/services/discord/runtime_bootstrap/gateway_lease.rs` run_bot_spawn_gateway_lease_keepalive (gateway_preference() resolved once per task) |
 | `cluster.gateway_yield_grace_secs` | restart | `src/services/discord/runtime_bootstrap/gateway_lease.rs` run_bot_spawn_gateway_lease_keepalive (GatewayPreference.yield_grace) |
-| `cluster.gateway_lease_idle_expiry_secs` | live | `src/services/discord/runtime_bootstrap/gateway_lease.rs` try_acquire_discord_gateway_lease (load_graceful per acquisition) |
-| `cluster.gateway_handback_breaker.enabled` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = load_graceful per call) |
-| `cluster.gateway_handback_breaker.window_secs` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = load_graceful per call) |
-| `cluster.gateway_handback_breaker.max_empty` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = load_graceful per call) |
-| `cluster.gateway_handback_breaker.suppress_secs` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = load_graceful per call) |
+| `cluster.gateway_lease_idle_expiry_secs` | live | `src/services/discord/runtime_bootstrap/gateway_lease.rs` try_acquire_discord_gateway_lease (config::snapshot per acquisition) |
+| `cluster.gateway_handback_breaker.enabled` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = config::snapshot per call) |
+| `cluster.gateway_handback_breaker.window_secs` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = config::snapshot per call) |
+| `cluster.gateway_handback_breaker.max_empty` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = config::snapshot per call) |
+| `cluster.gateway_handback_breaker.suppress_secs` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = config::snapshot per call) |
 | `cluster.labels` | restart | `src/services/cluster/node_registry.rs` bootstrap (labels JSON captured into spawn_heartbeat_loop) |
 | `cluster.capabilities` | restart | `src/services/cluster/node_registry.rs` bootstrap (base_capabilities captured into heartbeat) |
 | `cluster.nodes` | restart | `src/services/dispatches/wait_queue.rs` RUNTIME_CLUSTER_CONFIG (set once in server::run); forwarding trust from boot AppState |
 | `cluster.blackout_windows` | restart | `src/services/dispatches/wait_queue.rs` RUNTIME_CLUSTER_CONFIG (set once in server::run) and dispatch_outbox_loop |
 | `cluster.dispatch_routing.default_preferred_labels` | restart | `src/services/dispatches/wait_queue.rs` RUNTIME_CLUSTER_CONFIG (set once in server::run) + outbox_queue.rs:dispatch_outbox_loop + node_registry.rs:spawn_stale_claim_owner_reassignment_loop |
-| `cluster.dispatch_routing.opt_out_dispatch_types` | live | `src/dispatch/dispatch_create.rs` dispatch_required_capabilities (load_graceful) |
+| `cluster.dispatch_routing.opt_out_dispatch_types` | live | `src/dispatch/dispatch_create.rs` dispatch_required_capabilities (config::snapshot) |
 | `cluster.dispatch_routing.constraints` | restart | `src/services/dispatches/wait_queue.rs` RUNTIME_CLUSTER_CONFIG (set once in server::run) + outbox_queue.rs:dispatch_outbox_loop + node_registry.rs:spawn_stale_claim_owner_reassignment_loop |
 | `cluster.dispatch_routing.wait_timeout_secs` | restart | `src/services/dispatches/wait_queue.rs` wake_waiting_dispatch_outbox_pg (only invoked with boot copies) |
 | `cluster.dispatch_routing.wake_interval_secs` | restart | `src/services/dispatches/outbox_queue.rs` dispatch_outbox_loop |
@@ -140,8 +140,8 @@ valid edit in the live snapshot, but only `live` fields act on it. A change to a
 | `cluster.intake_routing.stale_claim_recovery_secs` | live | `src/services/cluster/intake_routing_config.rs` EffectiveIntakeRoutingConfig::status_json |
 | `cluster.intake_routing.max_attempts_per_message` | live | `src/services/cluster/node_registry.rs` current_intake_retry_config (per heartbeat tick) |
 | `cluster.intake_routing.retry_authorization_secs` | live | `src/services/cluster/node_registry.rs` current_intake_retry_config (per heartbeat tick) |
-| `cluster.semaphores.*.capacity` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (load_graceful per claim) |
-| `cluster.semaphores.*.scope` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (load_graceful per claim) |
+| `cluster.semaphores.*.capacity` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
+| `cluster.semaphores.*.scope` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
 | `cluster.session_bound_relay_enabled` | restart | `src/server/worker_registry/registry.rs` start_worker (WatcherSupervisor spawn gate) |
 | `kanban.manager_channel_id` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv kanban_manager_channel_id |
 | `kanban.deadlock_manager_channel_id` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv deadlock_manager_channel_id |
@@ -161,7 +161,7 @@ valid edit in the live snapshot, but only `live` fields act on it. A change to a
 | `runtime.context_compact_percent_codex` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via shared_config.rs:startup_reseed) -> context_compact_percent_codex |
 | `runtime.context_compact_percent_claude` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via shared_config.rs:startup_reseed) -> context_compact_percent_claude |
 | `runtime.context_compact_lower_bound_tokens` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (kv scalar; via shared_config.rs:startup_reseed) -> context_compact_lower_bound_tokens |
-| `runtime.context_compact_window_claude` | live | `src/services/claude_tui/session.rs` write_launch_script (load_graceful per launch) |
+| `runtime.context_compact_window_claude` | live | `src/services/claude_tui/session.rs` write_launch_script (config::snapshot per launch) |
 | `runtime.max_retries` | seeded-at-boot | `src/services/settings.rs` seed_runtime_config_defaults_pg (kv runtime-config blob; via startup_reseed) -> maxRetries |
 | `runtime.max_entry_retries` | seeded-at-boot | `src/services/settings.rs` seed_runtime_config_defaults_pg (kv runtime-config blob; via startup_reseed) -> maxEntryRetries |
 | `runtime.stale_dispatched_grace_min` | seeded-at-boot | `src/services/settings.rs` seed_runtime_config_defaults_pg (kv runtime-config blob; via startup_reseed) -> staleDispatchedGraceMin |

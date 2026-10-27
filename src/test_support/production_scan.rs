@@ -81,7 +81,7 @@ pub(crate) fn scan<'a>(
         if signature.is_empty() {
             return Ok(Scan::default());
         }
-        let span = crate::test_support::braced_item_span(&code, signature)
+        let span = owner_span(&code, signature)
             .ok_or_else(|| format!("{file}: owner `{signature}` not found"))?;
         owned.push((*signature, span));
     }
@@ -100,6 +100,26 @@ pub(crate) fn scan<'a>(
         }
     }
     Ok(scan)
+}
+
+/// The owner function's span in a code mask. Unlike `braced_item_span`, a `;` inside the
+/// signature's brackets (an array type such as `[u8; 32]`) does not end the item.
+fn owner_span(code: &str, signature: &str) -> Option<std::ops::Range<usize>> {
+    let start = code.find(signature)?;
+    let mut depth = 0_i64;
+    for (index, byte) in code.bytes().enumerate().skip(start) {
+        match byte {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b';' if depth <= 0 => return None,
+            b'{' if depth <= 0 => {
+                let body = crate::test_support::braced_item_span(&code[index..], "{")?;
+                return Some(start..index + body.end);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Byte ranges of items gated by a test-only `#[cfg(..)]` in a code mask.
