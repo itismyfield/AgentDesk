@@ -1521,6 +1521,42 @@ fn peer_directory_prompt() -> String {
 }
 
 #[test]
+fn peer_directory_example_hides_e2e_and_keeps_specialist_keywords() {
+    let example = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agentdesk.example.yaml"),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _guard = crate::config::set_agentdesk_root_for_test(root.path());
+    let path = crate::runtime_layout::config_file_path(root.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let isolated = example.replace("~/", &format!("{}/", root.path().display()));
+    std::fs::write(&path, isolated).unwrap();
+    let config = crate::config::load_from_path(&path).expect("valid example config");
+    let e2e_agents: Vec<_> = config
+        .agents
+        .iter()
+        .filter(|agent| agent.id.starts_with("adk-") && agent.id.contains("e2e"))
+        .collect();
+    assert!(
+        !e2e_agents.is_empty(),
+        "example must exercise E2E visibility"
+    );
+
+    let prompt = peer_directory_prompt();
+    let directory = prompt.split("[Peer Agent Directory]").nth(1).unwrap();
+    for agent in e2e_agents {
+        assert!(
+            !directory.contains(&agent.id),
+            "example E2E agent {} leaked: {directory}",
+            agent.id
+        );
+    }
+    assert!(directory.contains("ch-td"));
+    assert!(directory.contains("(테크니컬 디렉터) — best for: 아키텍처, 코드"));
+}
+
+#[test]
 fn peer_directory_next_prompt_reads_added_agents_without_restart() {
     let root = tempfile::tempdir().unwrap();
     let _guard = crate::config::set_agentdesk_root_for_test(root.path());
