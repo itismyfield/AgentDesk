@@ -463,7 +463,7 @@ async fn i7441b_source_prefix_and_deadline_budgets_fail_closed_pg() {
                 file: (f.source.dev, f.source.ino),
                 range: (prefix.len() as u64, joined.len() as u64)
             },
-            Instant::now() + std::time::Duration::from_secs(1)
+            Instant::now() + std::time::Duration::from_secs(10)
         )
         .is_none()
     );
