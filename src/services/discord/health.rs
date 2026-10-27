@@ -59,6 +59,8 @@ mod relay_progress;
 mod routine_process;
 pub(crate) use routine_process::cancel_routine_process_turn;
 mod runtime_resolve;
+mod channel_home_seed;
+pub(crate) use channel_home_seed::inspect_at_boot as inspect_channel_home_seed_at_boot;
 mod session_enrichment;
 mod snapshot;
 mod stall_liveness;
@@ -340,6 +342,7 @@ pub(in crate::services::discord) fn startup_doctor_saw_empty_registry() -> bool 
 /// Registry that providers register with so the unified axum API can query all of them.
 /// Also holds Discord HTTP clients for agent-to-agent message routing.
 pub struct HealthRegistry {
+    channel_home_seed_issues: tokio::sync::Mutex<Vec<channel_home_seed::Issue>>,
     providers: tokio::sync::Mutex<Vec<ProviderEntry>>,
     /// Monotonic count of accepted provider registrations. `providers` has no
     /// notify/watch channel and every one of its observers is a pull-mode
@@ -412,6 +415,7 @@ impl HealthRegistry {
     }
     pub fn new() -> Self {
         Self {
+            channel_home_seed_issues: tokio::sync::Mutex::new(Vec::new()),
             providers: tokio::sync::Mutex::new(Vec::new()),
             registrations: AtomicU64::new(0),
             started_at: Instant::now(),

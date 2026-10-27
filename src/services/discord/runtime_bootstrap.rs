@@ -246,6 +246,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 .map(|id| (ChannelId::new(id), instance_id.clone()))
         })
         .collect();
+    health::inspect_channel_home_seed_at_boot(
+        &health_registry,
+        &provider,
+        pg_pool.as_ref(),
+        &restored_node_overrides,
+    )
+    .await;
     let restored_fast_mode_channels =
         restored_fast_mode_enabled_channels_for_provider(&bot_settings, &provider);
     let restored_fast_mode_reset_entries = restored_fast_mode_reset_entries(&bot_settings);
