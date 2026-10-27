@@ -86,6 +86,7 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
                         .map(|path| path.display().to_string())
                         .unwrap_or_else(|| "no checkpoint".to_string())
                 );
+                scan_progress::remove(provider, channel_id);
                 if let Some(path) = candidate.checkpoint_path.as_ref() {
                     let _ = fs::remove_file(path);
                 }
@@ -128,6 +129,7 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         let settled_ids = ledger.settle(&known_snapshot, &mut known_arms, &mut existing_ids);
         let injected = inject_disposition::scan_view(provider);
         injected.merge(&mut known_arms, &mut existing_ids);
+        channel_scan.merge_dispatched(&mut known_arms, &mut existing_ids);
         injected.log_hits(
             "phase1",
             channel_id,
@@ -279,6 +281,7 @@ async fn fetch_messages<A: CatchUpDiscordApi + ?Sized>(
 ) -> ControlFlow<(), Vec<serenity::Message>> {
     let api = context.deps.api;
     let shared = context.deps.shared;
+    let provider = context.deps.provider;
     let scan_wall_time = context.scan_wall_time;
     let max_age = context.max_age;
     let channel_id = candidate.channel_id;
@@ -313,6 +316,7 @@ async fn fetch_messages<A: CatchUpDiscordApi + ?Sized>(
             }
             // #429: permanent errors — remove checkpoint to avoid retrying every restart
             if e.contains("Missing Access") || e.contains("Unknown Channel") {
+                scan_progress::remove(provider, channel_id);
                 if let Some(path) = candidate.checkpoint_path.as_ref() {
                     let _ = fs::remove_file(path);
                 }

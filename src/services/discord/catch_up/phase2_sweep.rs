@@ -77,6 +77,7 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
                     "  [{ts}] ⚠ catch-up phase2: failed to fetch recent messages for channel {channel_id}: {e}"
                 );
                 if e.contains("Missing Access") || e.contains("Unknown Channel") {
+                    scan_progress::remove(provider, channel_id);
                     if let Some(path) = candidate.checkpoint_path.as_ref() {
                         let _ = fs::remove_file(path);
                     }
@@ -115,6 +116,7 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         let settled_ids = ledger.settle(&mailbox, &mut known_arms, &mut existing_ids);
         let injected = inject_disposition::scan_view(provider);
         injected.merge(&mut known_arms, &mut existing_ids);
+        channel_scan.merge_dispatched(&mut known_arms, &mut existing_ids);
         injected.log_hits(
             "phase2",
             channel_id,

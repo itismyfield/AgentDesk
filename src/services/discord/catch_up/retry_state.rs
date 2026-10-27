@@ -6,6 +6,7 @@ use std::time::Instant;
 use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::super::reaction_lifecycle::is_real_discord_message_id_value;
+use super::super::recovery_known_ids::RecoveryKnownIdArm;
 use super::super::{
     SharedData, advance_last_message_checkpoint, is_synthetic_headless_message_id_raw,
     mailbox_clear_channel,
@@ -295,9 +296,26 @@ pub(super) struct CatchUpChannelScan<'a> {
     shared: &'a SharedData,
     channel_id: ChannelId,
     settled_checkpoint: Option<u64>,
+    dispatched: HashSet<u64>,
 }
 
 impl CatchUpChannelScan<'_> {
+    pub(super) fn merge_dispatched(
+        &mut self,
+        arms: &mut HashMap<u64, RecoveryKnownIdArm>,
+        known: &mut HashSet<u64>,
+    ) {
+        self.dispatched
+            .extend(super::super::inject_disposition::dispatched::read(
+                &self.shared.provider,
+                self.channel_id,
+            ));
+        for id in &self.dispatched {
+            arms.entry(*id).or_insert(RecoveryKnownIdArm::Dispatched);
+            known.insert(*id);
+        }
+    }
+
     pub(super) fn settled(&mut self, checkpoint: Option<u64>) {
         self.settled_checkpoint = checkpoint;
     }
@@ -356,6 +374,10 @@ pub(super) fn try_channel_scan(
         shared,
         channel_id,
         settled_checkpoint: None,
+        dispatched: super::super::inject_disposition::dispatched::read(
+            &shared.provider,
+            channel_id,
+        ),
     })
 }
 

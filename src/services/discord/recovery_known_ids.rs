@@ -45,6 +45,8 @@ pub(in crate::services::discord) enum RecoveryKnownIdArm {
     /// `active_user_message_id` — `try_start_turn` stamped THIS message onto
     /// the slot the current turn holds.
     ActiveTurn,
+    /// A durable successful claim, retained after the turn ends; not delivery proof.
+    Dispatched,
     /// A busy-turn injection put this message into a pane that recorded it.
     InjectedObserved,
     /// A busy-turn injection may have put this message into a pane; it is never resent on its

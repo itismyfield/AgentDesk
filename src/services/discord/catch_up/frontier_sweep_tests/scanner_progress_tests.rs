@@ -201,6 +201,7 @@ async fn i7441_scanner_progress_survives_restart_and_newer_intake_checkpoint() {
         settings.owner_user_id = Some(OWNER_ID);
         settings.allow_all_users = true;
     }
+    // Intake advanced its checkpoint but lost the input before queue commit or admission.
     shared.last_message_ids.insert(channel, fresh.get());
     let api = StrictApi::new(&shared).with_history(
         channel,

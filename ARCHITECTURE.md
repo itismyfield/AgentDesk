@@ -1019,6 +1019,7 @@ src/
 │   │   │   └── policy_tests.rs
 │   │   ├── catch_up/
 │   │   │   ├── frontier_sweep_tests/
+│   │   │   │   ├── dispatch_retirement_tests.rs
 │   │   │   │   └── scanner_progress_tests.rs
 │   │   │   ├── absorbed_active_tests.rs
 │   │   │   ├── api.rs
@@ -1432,6 +1433,8 @@ src/
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
+│   │   ├── inject_disposition/
+│   │   │   └── dispatched.rs
 │   │   ├── live_bridge/
 │   │   │   ├── guard_tests/
 │   │   │   │   └── source_guard_tests.rs
