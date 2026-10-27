@@ -11,8 +11,10 @@ use std::borrow::Cow;
 
 const ORIGINAL_0120: &str =
     include_str!("../../../tests/fixtures/postgres/0120_relay_dead_letter_redelivery.original.sql");
+const PRE_VALIDATION_VERSION: i64 = 150;
+const VALIDATION_VERSION: i64 = 151;
 
-fn original_migrator_through_0141() -> Migrator {
+fn original_migrator_through_0150() -> Migrator {
     assert_eq!(
         format!("{:x}", Sha256::digest(ORIGINAL_0120.as_bytes())),
         "ba6981fecb0e07c30dabf307d7b948e358ccfc9958ad6ab6c6f525cff62cf8a6",
@@ -22,7 +24,7 @@ fn original_migrator_through_0141() -> Migrator {
     let mut replaced = 0;
     let migrations = all
         .iter()
-        .filter(|migration| migration.version <= 141)
+        .filter(|migration| migration.version <= PRE_VALIDATION_VERSION)
         .map(|migration| {
             if migration.version == 120 {
                 replaced += 1;
@@ -54,16 +56,16 @@ async fn original_database() -> (TestPostgresDb, PgPool) {
     )
     .await
     .expect("connect without running the head migrations");
-    original_migrator_through_0141()
+    original_migrator_through_0150()
         .run(&pool)
         .await
-        .expect("apply the original migrations through 0141");
+        .expect("apply the original migrations through 0150");
     let last_applied: i64 =
         sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
             .fetch_one(&pool)
             .await
             .expect("read the original migration boundary");
-    assert_eq!(last_applied, 141);
+    assert_eq!(last_applied, PRE_VALIDATION_VERSION);
     (fixture, pool)
 }
 
@@ -75,12 +77,6 @@ async fn upgrade_to_head(pool: &PgPool) {
         .await
         .expect("inspect applied migration checksums after upgrade");
     assert!(mismatches.is_empty(), "checksum drift: {mismatches:?}");
-    let applied: bool =
-        sqlx::query_scalar("SELECT success FROM _sqlx_migrations WHERE version = 142")
-            .fetch_one(pool)
-            .await
-            .expect("the state constraint migration must be recorded");
-    assert!(applied);
     let validated: bool = sqlx::query_scalar(
         "SELECT convalidated FROM pg_constraint \
          WHERE conrelid = 'relay_dead_letter'::regclass \
@@ -89,7 +85,14 @@ async fn upgrade_to_head(pool: &PgPool) {
     .fetch_one(pool)
     .await
     .expect("the state constraint must exist after upgrade");
-    assert!(!validated, "legacy rows must await separate validation");
+    assert!(validated, "legacy rows must be validated after upgrade");
+    let applied: bool =
+        sqlx::query_scalar("SELECT success FROM _sqlx_migrations WHERE version = $1")
+            .bind(VALIDATION_VERSION)
+            .fetch_one(pool)
+            .await
+            .expect("the state validation migration must be recorded");
+    assert!(applied);
 }
 
 fn assert_state_constraint(error: sqlx::Error, operation: &str) {
@@ -108,20 +111,80 @@ async fn upgrade_path_preserves_original_migration_checksums_pg() {
     fixture.drop().await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn state_constraint_preserves_unknown_legacy_rows_and_fences_new_writes_pg() {
-    let (fixture, pool) = original_database().await;
+async fn seed_unknown_legacy_row(pool: &PgPool) -> i64 {
+    sqlx::query(
+        "ALTER TABLE relay_dead_letter DROP CONSTRAINT relay_dead_letter_redelivery_state_check",
+    )
+    .execute(pool)
+    .await
+    .expect("temporarily remove the constraint to recreate a pre-constraint row");
     let legacy_id: i64 = sqlx::query_scalar(
         "INSERT INTO relay_dead_letter (kind, channel_id, content, reason, redelivery_state) \
          VALUES ($1, 'legacy-channel', 'legacy body', 'legacy reason', 'legacy_unknown') \
          RETURNING id",
     )
     .bind(KIND_TERMINAL_NO_DELIVERY_OWNER)
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .expect("seed an unknown state before the constraint exists");
 
-    upgrade_to_head(&pool).await;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/postgres/0142_relay_dead_letter_redelivery_state_check.sql"
+    ))
+    .execute(pool)
+    .await
+    .expect("restore the original NOT VALID constraint around the legacy row");
+    legacy_id
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn state_validation_rejects_unknown_legacy_rows_pg() {
+    let (fixture, pool) = original_database().await;
+    let legacy_id = seed_unknown_legacy_row(&pool).await;
+
+    let error = sqlx::migrate!("./migrations/postgres")
+        .run(&pool)
+        .await
+        .expect_err("validation must fail closed when a legacy state is unknown");
+    match error {
+        sqlx::migrate::MigrateError::ExecuteMigration(error, version) => {
+            assert_eq!(version, VALIDATION_VERSION);
+            assert_state_constraint(error, "validate an unknown legacy state");
+        }
+        other => panic!("expected the validation constraint violation, got {other}"),
+    }
+    let validated: bool = sqlx::query_scalar(
+        "SELECT convalidated FROM pg_constraint \
+         WHERE conrelid = 'relay_dead_letter'::regclass \
+           AND conname = 'relay_dead_letter_redelivery_state_check'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("the constraint must survive failed validation");
+    assert!(!validated);
+    let recorded: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE version = $1")
+            .bind(VALIDATION_VERSION)
+            .fetch_one(&pool)
+            .await
+            .expect("inspect the rejected migration record");
+    assert_eq!(recorded, 0);
+    let state: String =
+        sqlx::query_scalar("SELECT redelivery_state FROM relay_dead_letter WHERE id = $1")
+            .bind(legacy_id)
+            .fetch_one(&pool)
+            .await
+            .expect("the invalid legacy row must remain available for operator repair");
+    assert_eq!(state, "legacy_unknown");
+
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn state_constraint_preserves_unknown_legacy_rows_and_fences_new_writes_pg() {
+    let (fixture, pool) = original_database().await;
+    let legacy_id = seed_unknown_legacy_row(&pool).await;
 
     let preserved: (String, String, String) = sqlx::query_as(
         "SELECT redelivery_state, content, reason FROM relay_dead_letter WHERE id = $1",
