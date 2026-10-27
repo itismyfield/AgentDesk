@@ -1,5 +1,8 @@
 //! The proof a head's transcript must hold: one exact enqueue of its frame under one nonce, then the
 //! absorbed removal and the human prompt command naming the same ids, in one session.
+
+// Successful reconciliation needs the Unix device/inode identity of the bound transcript.
+#![cfg(unix)]
 use super::*;
 use serde_json::{Value, json};
 use std::io::Write;
