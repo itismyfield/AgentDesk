@@ -361,6 +361,32 @@ Before a destructive restart, the driver now fails closed if
 mailbox state, cancel token, inflight state, queue depth, recovery/finalizing
 state, pending Discord callback, stale thread proof, or relay stall state.
 
+### Mid-turn provider SIGKILL (`--midturn-kill`)
+
+`run_tui_relay.py --cell codex-tui|claude-tui --midturn-kill --allow-destructive`
+(with `AGENTDESK_E2E_ALLOW_DESTRUCTIVE=1`) runs only scenario `MK-1` from
+`scripts/e2e/tui_relay/midturn_kill.py`. It is not a YAML scenario, so default
+and `--filter` sweeps never select it, and YAML cannot use its steps.
+
+- Target: the cell's provider process only. The harness follows the runtime
+  session record (`sessions/*-<session>.owner`, `runtime-kind`, launch script
+  `AGENTDESK_BINDING_CONTEXT`) to a binding whose `tmux_session`, `channel_id`,
+  provider and owner match the run, then the session's single live pane. A
+  wrapper pane process (Codex `node`) is never signalled; its one native
+  `codex` child is. The agent must end in `-e2e`; Herdr and pipe cells are
+  refused. dcserver, the tmux server and the harness itself are protected.
+- Kill: only after the hold prompt's early marker is in the provider inflight
+  row with a tool running (`provider_hold_observed`) and the mailbox is busy.
+  Right before `SIGKILL` the identity is read again; any change of pid, start
+  time, cmdline, parent, pane or binding refuses without a signal.
+- Verdicts (`midturn_kill.capabilities` in the report): `provider_killed`,
+  `turn_settled` (two polls in a row with a readable idle mailbox, empty queue
+  files and no live processing status as any message's current text, within
+  300 s), `pre_kill_output_delivered` (the early marker in a provider-bot
+  body), `next_turn_new_provider` (a fresh marker answered by the provider bot
+  after the follow-up, by a process other than the killed pid/start time).
+  A missing behavior fails; the harness does not soften it.
+
 Health waits parse the JSON payload, not just HTTP 2xx. By default a run is
 considered ready only when the health body is healthy (`status: healthy`, `ok`
 not false, `fully_recovered` not false, and no unallowed degraded reasons). A

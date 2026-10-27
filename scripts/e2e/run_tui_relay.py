@@ -52,7 +52,7 @@ import yaml  # type: ignore[import-untyped]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
-from tui_relay import health_readiness, herdr_restart, http_auth, restart_guard, wait_timeout  # noqa: E402
+from tui_relay import health_readiness, herdr_restart, http_auth, midturn_kill, restart_guard, wait_timeout  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -177,6 +177,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "dirty_active_residue",
     "restart_incarnations",
     "prompt_sends",
+    "midturn_kill",
 )
 
 
@@ -246,6 +247,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id", default=uuid.uuid4().hex, help="Explicit run identity shared with source comparison")
     parser.add_argument("--base-url", default="http://127.0.0.1:8791")
     herdr_restart.add_arguments(parser)
+    midturn_kill.add_arguments(parser)
     parser.add_argument("--herdr-isolated-server", action="store_true", help="Operator attests restart target is a dedicated E2E server with no other channels.")
     parser.add_argument("--herdr-endpoint", help="Boot endpoint key for this channel; required for live Herdr observations.")
     parser.add_argument("--herdr-status-bin", default="agentdesk", help="AgentDesk CLI on the target node (read-only herdr status).")
@@ -364,6 +366,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     herdr_restart.validate_arguments(parser, args)
     herdr.validate_arguments(parser, args)
+    midturn_kill.validate_arguments(parser, args)
     args.turn_start_timeout_s = _bounded_value(
         args.turn_start_timeout_s,
         source="--turn-start-timeout-s",
@@ -1140,6 +1143,7 @@ def is_destructive(scenario: dict[str, Any]) -> bool:
             "restart_dcserver",
             "kill_pane",
             "kill_tui_process",
+            "kill_provider_process",
             "send_keys_no_enter",
             "poison_claude_tui_relay_offset",
             "cancel_turn",
@@ -4267,6 +4271,9 @@ def run_one_cell(
                 declared_agent_mode=declared_agent_mode,
                 dry_run=dry_run,
             )
+        elif midturn_kill.owns(step):
+            midturn_kill.run_step(sys.modules[__name__], step, cell=cell, channel_id=channel_id, args=args,
+                                  record=record, window=window, refresh=_ingest_snapshot)
         else:
             raise assertions.AssertionError(f"unknown step shape: {step!r}")
 
@@ -5153,7 +5160,8 @@ def main() -> int:
     run_id = getattr(args, "run_id", output_dir.name)
     print(f"[e2e] cell={cell} run_id={run_id} output={output_dir}")
 
-    scenarios = load_scenarios(scenarios_dir, cell=cell)
+    # The SIGKILL scenario never comes from YAML, so no default or filtered sweep can select it.
+    scenarios = [midturn_kill.scenario(run_id)] if getattr(args, "midturn_kill", False) else load_scenarios(scenarios_dir, cell=cell)
     if not wanted:
         # E36 claims the whole phase (3540s, exclusive single scenario, a 20s provider hold)
         # and needs --e36-intake-log, so a default sweep cannot carry it. Run it as its own
