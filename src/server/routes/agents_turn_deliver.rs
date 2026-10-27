@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use super::agents_turn_target::{AgentTurnTarget, resolve_agent_turn_target};
+use super::auth::HumanInputCaller;
 use crate::services::discord::health::{
     HealthRegistry, HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
     deliver_with_reply, preflight_human_input,
@@ -105,7 +106,10 @@ fn non_empty(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// The caller extractor comes first: a caller the server did not authenticate is refused
+/// before the path or the body is read, so a body author alone never admits input.
 pub async fn deliver_turn_input(
+    _caller: HumanInputCaller,
     State(state): State<AppState>,
     Path(id): Path<String>,
     body: Bytes,
@@ -325,7 +329,14 @@ mod tests {
         pg_pool: Option<sqlx::PgPool>,
         health_registry: Option<Arc<HealthRegistry>>,
     ) -> Router {
-        let config = crate::config::Config::default();
+        router_with(crate::config::Config::default(), pg_pool, health_registry)
+    }
+
+    fn router_with(
+        config: crate::config::Config,
+        pg_pool: Option<sqlx::PgPool>,
+        health_registry: Option<Arc<HealthRegistry>>,
+    ) -> Router {
         let engine = crate::engine::PolicyEngine::new(&config).expect("policy engine");
         let broadcast_tx = crate::eventbus::new_broadcast();
         let batch_buffer = crate::eventbus::spawn_batch_flusher(broadcast_tx.clone());
@@ -361,6 +372,7 @@ mod tests {
             .method(Method::POST)
             .uri(uri)
             .header("content-type", "application/json")
+            .extension(crate::server::routes::auth::loopback_peer())
             .body(Body::from(body.to_string()))
             .expect("request");
         let response = app.clone().oneshot(request).await.expect("response");
@@ -405,6 +417,128 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
             "valid input stops at the missing pool"
         );
+    }
+
+    /// A delivery from `peer` (none: no socket) with extra headers.
+    fn delivery_from(peer: Option<&str>, headers: &[(&str, &str)], body: Body) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/agents/agent/turn/deliver")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        if let Some(peer) = peer {
+            let peer: std::net::SocketAddr = peer.parse().expect("peer");
+            request = request.extension(axum::extract::ConnectInfo(peer));
+        }
+        request.body(body).expect("request")
+    }
+
+    async fn answer(app: &Router, request: Request<Body>) -> (StatusCode, Value) {
+        let response = app.clone().oneshot(request).await.expect("response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1 << 20).await.expect("body");
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn a_refused_caller_is_answered_before_its_body_is_read() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let app = router(None, None);
+        for (peer, headers) in [
+            (Some("100.71.169.10:50000"), vec![]),
+            (None, vec![]),
+            (
+                Some("127.0.0.1:50000"),
+                vec![("origin", "https://evil.example")],
+            ),
+        ] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let counter = polls.clone();
+            // Read, this body would fail as invalid JSON; a refusal must come without reading it.
+            let body = Body::from_stream(futures::stream::once(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"not json"))
+            }));
+            let (status, response) = answer(&app, delivery_from(peer, &headers, body)).await;
+            assert_eq!(
+                (
+                    status,
+                    response["error"].as_str(),
+                    polls.load(Ordering::SeqCst)
+                ),
+                (StatusCode::FORBIDDEN, Some("caller_not_allowed"), 0),
+                "{peer:?} {headers:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_native_local_process_reaches_the_lookup_without_a_token() {
+        let app = router(None, None);
+        let port = crate::config::Config::default().server.port;
+        let own_origin = format!("http://127.0.0.1:{port}");
+        let refused = Some("caller_not_allowed");
+        let looked_up = Some("postgres pool unavailable");
+        type Case<'a> = (
+            Option<&'a str>,
+            Vec<(&'a str, &'a str)>,
+            StatusCode,
+            Option<&'a str>,
+        );
+        #[rustfmt::skip]
+        let cases: Vec<Case> = vec![
+            (Some("127.0.0.1:50000"), vec![], StatusCode::SERVICE_UNAVAILABLE, looked_up),
+            (Some("[::1]:50000"), vec![], StatusCode::SERVICE_UNAVAILABLE, looked_up),
+            (Some("[::ffff:127.0.0.1]:50000"), vec![], StatusCode::SERVICE_UNAVAILABLE, looked_up),
+            (Some("127.0.0.1:50000"), vec![("origin", own_origin.as_str())], StatusCode::SERVICE_UNAVAILABLE, looked_up),
+            (Some("127.0.0.1:50000"), vec![("sec-fetch-site", "same-origin")], StatusCode::SERVICE_UNAVAILABLE, looked_up),
+            (Some("127.0.0.1:50000"), vec![("sec-fetch-site", "none")], StatusCode::SERVICE_UNAVAILABLE, looked_up),
+            (Some("127.0.0.1:50000"), vec![("origin", "https://evil.example")], StatusCode::FORBIDDEN, refused),
+            (Some("127.0.0.1:50000"), vec![("origin", "null")], StatusCode::FORBIDDEN, refused),
+            (Some("127.0.0.1:50000"), vec![("origin", "http://localhost:5173")], StatusCode::FORBIDDEN, refused),
+            (Some("127.0.0.1:50000"), vec![("sec-fetch-site", "cross-site")], StatusCode::FORBIDDEN, refused),
+            (Some("127.0.0.1:50000"), vec![("sec-fetch-site", "same-site")], StatusCode::FORBIDDEN, refused),
+            (Some("127.0.0.1:50000"), vec![("x-forwarded-for", "100.71.169.10")], StatusCode::FORBIDDEN, refused),
+            (Some("127.0.0.1:50000"), vec![("forwarded", "for=100.71.169.10")], StatusCode::FORBIDDEN, refused),
+            (Some("100.71.169.10:50000"), vec![], StatusCode::FORBIDDEN, refused),
+            (Some("192.168.0.5:50000"), vec![], StatusCode::FORBIDDEN, refused),
+            (Some("8.8.8.8:50000"), vec![], StatusCode::FORBIDDEN, refused),
+            (None, vec![], StatusCode::FORBIDDEN, refused),
+        ];
+        for (peer, headers, status, error) in cases {
+            let request = delivery_from(peer, &headers, Body::from(body(json!("42"))));
+            let (actual, response) = answer(&app, request).await;
+            assert_eq!(
+                (actual, response["error"].as_str()),
+                (status, error),
+                "{peer:?} {headers:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tailnet_peer_needs_the_server_token() {
+        let mut config = crate::config::Config::default();
+        config.server.auth_token = Some("server-token".into());
+        let app = router_with(config, None, None);
+        let peer = Some("100.71.169.10:50000");
+        #[rustfmt::skip]
+        let cases = [
+            ("Bearer server-token", StatusCode::SERVICE_UNAVAILABLE, "postgres pool unavailable"),
+            ("Bearer other-token", StatusCode::UNAUTHORIZED, "unauthorized"),
+        ];
+        for (authorization, status, error) in cases {
+            let headers = [("authorization", authorization)];
+            let request = delivery_from(peer, &headers, Body::from(body(json!("42"))));
+            let (actual, response) = answer(&app, request).await;
+            assert_eq!(
+                (actual, response["error"].as_str()),
+                (status, Some(error)),
+                "{authorization}"
+            );
+        }
     }
 }
 
