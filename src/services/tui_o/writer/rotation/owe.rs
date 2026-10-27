@@ -28,10 +28,15 @@ impl<B: BindingEvents> Sources<B> {
         owed: &mut impl Owe,
         source: &SourceId,
         record: &CapturedRecord,
+        identity_version: u32,
     ) {
         let key = source_key(source);
         let Some(link) = self.rotation.links.get(&key).cloned() else {
-            owed.owe(source, record, deriver.derive(record));
+            owed.owe(
+                source,
+                record,
+                deriver.derive_with_version(record, identity_version),
+            );
             return;
         };
         match link.boundary {
@@ -39,7 +44,11 @@ impl<B: BindingEvents> Sources<B> {
             Boundary::Owed { from } => {
                 if record.start >= from {
                     match self.masked(&link, record) {
-                        Ok(false) => owed.owe(source, record, deriver.derive(record)),
+                        Ok(false) => owed.owe(
+                            source,
+                            record,
+                            deriver.derive_with_version(record, identity_version),
+                        ),
                         Ok(true) => {}
                         Err(reason) => owed.owe(
                             source,
@@ -64,7 +73,11 @@ impl<B: BindingEvents> Sources<B> {
                         self.prefix_seen.insert(key);
                     }
                     Some(Class::New) if self.prefix_seen.contains(&key) => {
-                        owed.owe(source, record, deriver.derive(record));
+                        owed.owe(
+                            source,
+                            record,
+                            deriver.derive_with_version(record, identity_version),
+                        );
                         self.decide(&key, Boundary::Owed { from: record.start });
                     }
                     _ => self.pend(&key, record.start),

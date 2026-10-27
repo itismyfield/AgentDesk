@@ -96,6 +96,24 @@ impl ChannelMailboxRegistry {
         GLOBAL_CHANNEL_MAILBOXES.insert(channel_id, handle);
     }
 
+    /// An actor that keeps every request and answers none, so each read waits until it is cut.
+    #[cfg(unix)]
+    pub(crate) fn insert_silent_for_test(&self, channel_id: ChannelId) {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Some(msg) = receiver.recv().await {
+                held.push(msg);
+            }
+        });
+        let handle = ChannelMailboxHandle {
+            sender,
+            recovery_done: Arc::new(RecoveryDoneSignal::new()),
+        };
+        self.handles.insert(channel_id, handle.clone());
+        GLOBAL_CHANNEL_MAILBOXES.insert(channel_id, handle);
+    }
+
     pub(crate) fn insert_reply_dropping_for_test(&self, channel_id: ChannelId) {
         let handle = reply_dropping_handle();
         self.handles.insert(channel_id, handle.clone());

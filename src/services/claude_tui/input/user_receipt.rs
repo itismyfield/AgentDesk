@@ -211,32 +211,11 @@ impl UserReceipt {
             if PaneIdentity::from_binding(&self.session, &current).as_ref() != Some(&self.pane) {
                 return false;
             }
-            self.matches_through(end, false)
+            self.matches_through(end)
         })
     }
 
-    /// Observe only this live attempt; the terminal byte window is sealed separately.
-    pub(crate) fn observed(&mut self) -> bool {
-        if self.ended
-            || binding_context::observe_spawn_nonce_marker(&self.session) != self.pane.nonce
-        {
-            return false;
-        }
-        if self.file.is_none() {
-            self.file = open(&self.pane.output_path).ok();
-        }
-        let Some(end) = self
-            .file
-            .as_ref()
-            .and_then(|f| f.metadata().ok())
-            .map(|m| m.len())
-        else {
-            return false;
-        };
-        end >= self.offset && self.matches_through(end, true)
-    }
-
-    fn matches_through(&mut self, end: u64, live: bool) -> bool {
+    fn matches_through(&mut self, end: u64) -> bool {
         let Some(file) = self.file.as_mut() else {
             return false;
         };
@@ -262,9 +241,6 @@ impl UserReceipt {
                 return false;
             }
             if !line.ends_with(b"\n") {
-                if live {
-                    break;
-                }
                 return false;
             }
             let Ok(record) = serde_json::from_slice::<serde_json::Value>(&line) else {
@@ -278,7 +254,7 @@ impl UserReceipt {
             }
             line.clear();
         }
-        (if live { matches > 0 } else { matches == 1 }) && same_file(file, &self.pane.output_path)
+        matches == 1 && same_file(file, &self.pane.output_path)
     }
 }
 
@@ -397,10 +373,6 @@ mod tests {
             UserReceipt::before_fresh(&session, "fresh input", path.to_str().unwrap(), "sid")
                 .unwrap();
         assert!(!receipt.confirmed());
-        assert!(
-            !receipt.observed(),
-            "missing fresh file is not an acknowledgement"
-        );
         std::fs::write(
             &path,
             format!(
@@ -416,12 +388,8 @@ mod tests {
             .write_all(b"{\"type\":")
             .unwrap();
         assert!(
-            receipt.observed(),
-            "live receipt works before watcher binding registration"
-        );
-        assert!(
             !receipt.confirmed(),
-            "observing input must not seal the terminal window"
+            "an open attempt must not seal the terminal window"
         );
         OpenOptions::new()
             .append(true)
@@ -517,11 +485,6 @@ mod tests {
                 .unwrap()
                 .write_all(after.as_bytes())
                 .unwrap();
-            assert_eq!(
-                receipt.observed(),
-                expected || case == "duplicate",
-                "live exact receipt: {case}"
-            );
             receipt.seal();
             assert_eq!(receipt.confirmed(), expected, "{case}");
             if expected {

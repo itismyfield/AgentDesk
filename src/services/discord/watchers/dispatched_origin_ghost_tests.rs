@@ -178,9 +178,7 @@ mod dispatched_origin_ghost_order_pg_tests {
     /// deferred to α/β, and no test here covers it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn current_generation_live_row_is_not_consumed() {
-        let _env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",

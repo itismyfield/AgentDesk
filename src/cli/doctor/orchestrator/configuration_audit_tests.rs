@@ -95,8 +95,11 @@ fn skill_fixture_reports_stale_agent_and_unlisted_directory_and_clean_has_zero()
     let check = skill_manifest_check(&audit());
     assert!(check.status == CheckStatus::Warn);
     assert!(check.detail.contains("ghost-agent"));
-    assert!(check.detail.contains(&unlisted.display().to_string()));
-    assert!(check.detail.contains(&manifest.display().to_string()));
+    // The detail embeds paths as JSON strings, which escape Windows separators.
+    let json_path =
+        |path: &std::path::Path| serde_json::json!(path.display().to_string()).to_string();
+    assert!(check.detail.contains(&json_path(&unlisted)));
+    assert!(check.detail.contains(&json_path(&manifest)));
     assert_eq!(
         check.evidence.as_ref().unwrap()["findings"]
             .as_array()
@@ -196,9 +199,10 @@ fn source_directories_still_require_their_own_manifest() {
         skills::skill_manifest_paths(Some(runtime), Some(home)),
     ));
     assert_eq!(report.to_json()["findings"].as_array().unwrap().len(), 1);
+    // Compare as paths: the vault root is built from separate components on Windows.
     assert_eq!(
-        report.to_json()["findings"][0]["path"],
-        vault.join("borrowed").display().to_string()
+        std::path::Path::new(report.to_json()["findings"][0]["path"].as_str().unwrap()),
+        vault.join("borrowed")
     );
 }
 

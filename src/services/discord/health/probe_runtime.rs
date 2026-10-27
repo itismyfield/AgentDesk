@@ -31,7 +31,7 @@ static SHARED: LazyLock<HealthProbeRuntime> =
     LazyLock::new(|| HealthProbeRuntime::new(HEALTH_TMUX_MAX_INFLIGHT));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ProbeFault {
+pub(in crate::services::discord::health) enum ProbeFault {
     Saturated,
     Expired,
     Cancelled,
@@ -45,13 +45,13 @@ pub(super) enum ProbeFault {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ProbeOutcome {
+pub(in crate::services::discord::health) enum ProbeOutcome {
     Answered(HealthTmuxAnswer),
     Unwitnessed(ProbeFault),
 }
 
 #[derive(Clone)]
-pub(super) struct HealthProbeRuntime {
+pub(in crate::services::discord::health) struct HealthProbeRuntime {
     inner: Arc<Inner>,
 }
 
@@ -86,8 +86,16 @@ struct ProbeOwner {
 }
 
 impl HealthProbeRuntime {
-    pub(super) fn shared() -> Self {
+    pub(in crate::services::discord::health) fn shared() -> Self {
         SHARED.clone()
+    }
+
+    /// One `tmux -V` through the same capped slots as every presence probe.
+    pub(in crate::services::discord::health) async fn preflight(
+        &self,
+        budget: Duration,
+    ) -> ProbeOutcome {
+        self.observe(HealthTmuxQuery::Version, "", budget).await
     }
 
     fn new(limit: usize) -> Self {
@@ -372,7 +380,7 @@ mod tests {
     #[derive(Default)]
     pub(super) struct Seams {
         scripted: Option<SessionPresence>,
-        calls: [AtomicUsize; 2],
+        calls: [AtomicUsize; 3],
         #[cfg(unix)]
         fake: Option<unix::FakeTmux>,
         reap_faults: AtomicBool,
@@ -389,6 +397,7 @@ mod tests {
                 (SessionPresence::Present, HealthTmuxQuery::PanePid) => {
                     HealthTmuxAnswer::PanePid(4242)
                 }
+                (SessionPresence::Present, HealthTmuxQuery::Version) => HealthTmuxAnswer::Present,
                 (SessionPresence::Missing, _) => HealthTmuxAnswer::Missing,
                 (SessionPresence::ProbeFailed, _) => HealthTmuxAnswer::Failed,
             }))
@@ -492,6 +501,7 @@ mod tests {
         /// Answers by target prefix and logs `pid|argv` for every process it becomes.
         const FAKE_TMUX: &str = r#"#!/bin/sh
 printf '%s|%s\n' "$$" "$*" >> '@LOG@'
+[ "$2" = -V ] && { echo 'tmux 3.5a'; exit 0; }
 query="$3"
 case "$query" in has-session|display-message) ;; *) echo "unexpected tmux command: $*" >&2; exit 3 ;; esac
 if [ "$query" = display-message ]; then target="$6"; else target="$5"; fi
@@ -573,6 +583,28 @@ esac
                         ..Seams::default()
                     },
                 )
+            }
+
+            /// `limit` slots over the fake tmux; `cold` stands for a prepared PATH without tmux.
+            pub(in crate::services::discord::health) fn over_fake_tmux(
+                limit: usize,
+                cold: bool,
+            ) -> Self {
+                Self::faked(
+                    limit,
+                    FakeTmux {
+                        cold,
+                        ..FakeTmux::new()
+                    },
+                )
+            }
+
+            /// Admissions so far, and how many processes the fake became.
+            pub(in crate::services::discord::health) fn admitted_and_spawned(
+                &self,
+            ) -> (usize, usize) {
+                let admitted = self.inner.stats.admitted.load(Ordering::SeqCst);
+                (admitted, spawns(self.fake_dir()).len())
             }
 
             fn fake_dir(&self) -> &Path {

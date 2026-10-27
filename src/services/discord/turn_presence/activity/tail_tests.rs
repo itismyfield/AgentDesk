@@ -289,7 +289,7 @@ fn s1_limits_and_activity_activation_source_are_pinned() {
     let production = &source;
     assert_eq!(
         hex::encode(Sha256::digest(production.as_bytes())),
-        "f9787e1e25c3fecde78e2d528be33ec2da7998effb9c66d992558c8a22d97ae3"
+        "04cf2ec8708d33dcb61c0464cb9315d7146abeb25785b389b725bef3496c6e1c"
     );
 }
 

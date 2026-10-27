@@ -88,3 +88,33 @@ pub(super) fn advance(provider: &ProviderKind, channel: ChannelId, after: u64, o
             "catch-up scanner progress not durably published; next scan may reread inputs");
     }
 }
+
+pub(super) fn remove(provider: &ProviderKind, channel: ChannelId) {
+    let Some(path) = path(provider, channel) else {
+        return;
+    };
+    let lock_path = path.with_extension("json.lock");
+    if !path.exists() && !lock_path.exists() {
+        return;
+    }
+    let result = (|| -> std::io::Result<()> {
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        lock.lock()?;
+        for file in [&path, &lock_path] {
+            match fs::remove_file(file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        runtime_store::fsync_parent_dir(&path)
+    })();
+    if let Err(error) = result {
+        tracing::warn!(channel_id=channel.get(), %error, "stale scanner progress removal failed");
+    }
+}

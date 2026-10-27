@@ -94,7 +94,13 @@ impl<B: BindingEvents> Sources<B> {
                 .map(|c| (c.captured_through, c.prefix_hash.clone()))
         });
         for record in &batch.records {
-            self.owe(deriver, owed, &batch.source, record);
+            self.owe(
+                deriver,
+                owed,
+                &batch.source,
+                record,
+                crate::services::tui_o::shadow::IDENTITY_VERSION,
+            );
         }
         if at_end {
             self.pend_at_end(&key, batch.captured_through);

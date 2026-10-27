@@ -10,6 +10,8 @@ use crate::services::discord::outbound::completed_turn_ledger;
 use crate::services::discord::queue_io::mailbox_enqueue_observed_intervention as observed_enqueue;
 use crate::services::discord::{self as discord, MailboxEnqueueOutcome, SharedData};
 use crate::services::turn_orchestrator::{ClaimObservation, EnqueueRefusalReason};
+#[path = "frontier_sweep_tests/dispatch_retirement_tests.rs"]
+mod dispatch_retirement_tests;
 #[path = "frontier_sweep_tests/scanner_progress_tests.rs"]
 mod scanner_progress_tests;
 
@@ -47,6 +49,8 @@ struct FetchRecord {
 type EnqueueRecord = (u64, bool, Option<EnqueueRefusalReason>);
 
 struct StrictApi {
+    unowned: bool,
+    fetch_failure: Option<(bool, String)>,
     shared: Arc<SharedData>,
     /// Channel history as `(message, first fetch call index that can see it)`.
     channels: HashMap<ChannelId, Vec<(serenity::Message, usize)>>,
@@ -58,6 +62,8 @@ struct StrictApi {
 impl StrictApi {
     fn new(shared: &Arc<SharedData>) -> Self {
         Self {
+            unowned: false,
+            fetch_failure: None,
             shared: Arc::clone(shared),
             channels: HashMap::new(),
             hooks: Mutex::new(HashMap::new()),
@@ -106,7 +112,11 @@ impl CatchUpDiscordApi for StrictApi {
         &self,
         _channel_id: ChannelId,
     ) -> RuntimeChannelBindingStatus {
-        RuntimeChannelBindingStatus::Owned
+        if self.unowned {
+            RuntimeChannelBindingStatus::Unowned
+        } else {
+            RuntimeChannelBindingStatus::Owned
+        }
     }
 
     async fn fetch_messages(
@@ -114,6 +124,11 @@ impl CatchUpDiscordApi for StrictApi {
         channel_id: ChannelId,
         request: CatchUpFetchRequest,
     ) -> Result<Vec<serenity::Message>, String> {
+        if let Some((recent_only, error)) = &self.fetch_failure
+            && (!recent_only || request.cursor.is_none())
+        {
+            return Err(error.clone());
+        }
         let mut fetches = self.fetches.lock().unwrap();
         let call = fetches.len();
         let mut visible: Vec<serenity::Message> = (self.channels.get(&channel_id))
@@ -1482,7 +1497,10 @@ pub(super) mod exhausted_recovery_tests {
         let checkpoint_file = checkpoint_path(fx.root.path(), &fx.provider, channel_id);
         let times = std::fs::FileTimes::new()
             .set_modified(std::time::SystemTime::now() - Duration::from_secs(11 * 60));
-        std::fs::File::open(&checkpoint_file)
+        // Windows needs a writable handle to change file times.
+        std::fs::File::options()
+            .write(true)
+            .open(&checkpoint_file)
             .unwrap()
             .set_times(times)
             .unwrap();

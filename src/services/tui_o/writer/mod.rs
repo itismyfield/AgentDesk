@@ -16,6 +16,7 @@ pub(crate) mod late_adopt;
 pub(crate) mod local_retry;
 pub(crate) mod owed;
 pub mod pieces;
+pub mod progress;
 pub mod resume;
 pub mod rotation;
 pub mod round_trip;

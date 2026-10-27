@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::tui_o::cutover::test_override;
+#[cfg(unix)]
 use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
 
 fn config(enabled: bool, foreign: bool) -> Config {
@@ -139,6 +140,7 @@ fn cleanup_before_first_poll_and_panic_releases_absent_store() {
     }
 }
 
+#[cfg(unix)]
 fn init() -> Initialized {
     Initialized {
         channel: 41,
@@ -149,6 +151,8 @@ fn init() -> Initialized {
     }
 }
 
+// Settling needs an enabled store, which Windows refuses without a directory fsync.
+#[cfg(unix)]
 #[test]
 fn cleanup_settles_published_init_and_orphan_before_releasing() {
     for sealed in [false, true] {

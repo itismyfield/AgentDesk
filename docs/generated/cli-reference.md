@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 56
-- Commands including nested subcommands: 102
+- Top-level commands: 55
+- Commands including nested subcommands: 101
 
 ## Global options
 
@@ -75,7 +75,6 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk reset-tmux`](#agentdesk-reset-tmux) | Kill all AgentDesk-* tmux sessions and clean temp files |  |
 | [`agentdesk ismcptool`](#agentdesk-ismcptool) | Check if MCP tool(s) are registered in .claude/settings.json |  |
 | [`agentdesk addmcptool`](#agentdesk-addmcptool) | Add MCP tool permission(s) to .claude/settings.json |  |
-| [`agentdesk install-memento-session-hook`](#agentdesk-install-memento-session-hook) | #2655: install (or refresh) the Memento `context()` SessionStart hook and a UserPromptSubmit token-pressure reminder into a Claude Code settings file. Idempotent — running twice produces the same file. |  |
 | [`agentdesk status`](#agentdesk-status) | Show server health, active sessions, and auto-queue status |  |
 | [`agentdesk cards`](#agentdesk-cards) | List kanban cards |  |
 | [`agentdesk dispatch`](#agentdesk-dispatch) | Dispatch operations |  |
@@ -733,18 +732,6 @@ Usage: `agentdesk addmcptool <TOOLS>...`
 | Argument | Value | Default | Description |
 |---|---|---|---|
 | `<TOOLS>...` | `String` (repeatable) |  | Tool names to add |
-
-## `agentdesk install-memento-session-hook`
-
-#2655: install (or refresh) the Memento `context()` SessionStart hook and a UserPromptSubmit token-pressure reminder into a Claude Code settings file. Idempotent — running twice produces the same file.
-
-Usage: `agentdesk install-memento-session-hook [OPTIONS]`
-
-| Argument | Value | Default | Description |
-|---|---|---|---|
-| `--settings-path <SETTINGS_PATH>` | `String` |  | Path to the settings.json to mutate. Defaults to `~/.claude/settings.json` when omitted. |
-| `--dry-run` | flag |  | Skip writing and instead print the rendered settings to stdout. |
-| `--uninstall` | flag |  | Remove the AgentDesk-managed memento hook entries instead of installing them. Useful when an operator wants to revert. (conflicts with `dry_run`) |
 
 ## `agentdesk status`
 

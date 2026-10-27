@@ -131,5 +131,7 @@ mod generate_conflict_tests {
             found,
             vec![("run-generated".to_string(), "generated".to_string())]
         );
+        pool.close().await;
+        pg_db.drop().await;
     }
 }

@@ -37,8 +37,19 @@ fn append_episode(fx: &Fixture, channel_id: ChannelId, primary: MessageId, nonce
 
 /// P's episode absorbed H and was delivered, so the next scan settles H with no
 /// enqueue and advances; a restart agrees only while the ledger survives.
-async fn assert_restart_after_delivered_episode(channel_id: ChannelId, ledger_kept: bool) {
+async fn assert_restart_after_delivered_episode(
+    channel_id: ChannelId,
+    ledger_kept: bool,
+    with_dispatch_evidence: bool,
+) {
     let fx = Fixture::new().await;
+    // Isolate delivery-ledger evidence; missing dispatch proof must still rescan.
+    let _failure = (!with_dispatch_evidence).then(|| {
+        crate::services::discord::inject_disposition::dispatched::fail_writes_for_tests(
+            &fx.provider,
+            channel_id,
+        )
+    });
     let (checkpoint, h, p) = (id(1, 600), id(2, 150), id(3, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
     let nonce = absorb_and_claim(&fx.shared, &fx.provider, channel_id, &[h], p).await;
@@ -69,6 +80,13 @@ async fn assert_restart_after_delivered_episode(channel_id: ChannelId, ledger_ke
     let api = StrictApi::new(&shared).with_history(channel_id, history);
     run_catch_up_sweep(CatchUpDeps::new(&api, &shared, &fx.provider)).await;
     assert_phase1_read(&api, after(checkpoint), &[h, p]);
+    if !ledger_kept && with_dispatch_evidence {
+        assert_eq!(accepted(&api), Vec::<u64>::new());
+        assert!(
+            completed_turn_ledger::settled_user_msg_ids(&fx.provider, channel_id.get()).is_empty()
+        );
+        return;
+    }
     if !ledger_kept {
         // Negative control: without the ledger evidence both ids are recovered.
         let recovered = accepted(&api);
@@ -87,18 +105,29 @@ async fn assert_restart_after_delivered_episode(channel_id: ChannelId, ledger_ke
 
 #[tokio::test(flavor = "current_thread")]
 async fn t_s1_a_delivered_episode_settles_what_it_absorbed() {
-    assert_restart_after_delivered_episode(ChannelId::new(4_603_552), true).await;
+    assert_restart_after_delivered_episode(ChannelId::new(4_603_552), true, false).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn t_s1_a_restart_without_the_ledger_recovers_h_and_p() {
-    assert_restart_after_delivered_episode(ChannelId::new(4_603_560), false).await;
+    assert_restart_after_delivered_episode(ChannelId::new(4_603_560), false, false).await;
 }
 
 /// P's delivered episode n1 row, appended before or after the alias, cannot
 /// certify the undelivered episode n2 that absorbed H, so H is recovered.
-async fn assert_other_episode_row_does_not_settle(channel_id: ChannelId, delayed: bool) {
+async fn assert_other_episode_row_does_not_settle(
+    channel_id: ChannelId,
+    delayed: bool,
+    with_dispatch_evidence: bool,
+) {
     let fx = Fixture::new().await;
+    // Isolate delivery-ledger evidence; missing dispatch proof must still rescan.
+    let _failure = (!with_dispatch_evidence).then(|| {
+        crate::services::discord::inject_disposition::dispatched::fail_writes_for_tests(
+            &fx.provider,
+            channel_id,
+        )
+    });
     let (checkpoint, h, p) = (id(1, 600), id(2, 150), id(3, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
     let token = Arc::new(CancelToken::new());
@@ -120,25 +149,40 @@ async fn assert_other_episode_row_does_not_settle(channel_id: ChannelId, delayed
         .with_history(channel_id, history(channel_id, [checkpoint, h, p]));
     fx.sweep(&api).await;
 
-    assert!(accepted(&api).contains(&h.get()), "{:?}", api.enqueue_log());
+    if with_dispatch_evidence {
+        assert_eq!(accepted(&api), Vec::<u64>::new());
+    } else {
+        assert!(accepted(&api).contains(&h.get()), "{:?}", api.enqueue_log());
+    }
+    assert!(
+        !completed_turn_ledger::settled_user_msg_ids(&fx.provider, channel_id.get())
+            .contains(&h.get())
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn t_s2_an_earlier_delivered_episode_does_not_settle_a_later_absorption() {
-    assert_other_episode_row_does_not_settle(ChannelId::new(4_603_553), false).await;
+    assert_other_episode_row_does_not_settle(ChannelId::new(4_603_553), false, false).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn t_s3_a_delayed_append_of_an_earlier_episode_does_not_settle_h() {
-    assert_other_episode_row_does_not_settle(ChannelId::new(4_603_554), true).await;
+    assert_other_episode_row_does_not_settle(ChannelId::new(4_603_554), true, false).await;
 }
 
 /// The alias lives on the claim channel's ledger and a split delivery on
 /// another's, so H is duplicated, never settled.
-#[tokio::test(flavor = "current_thread")]
-async fn t_s7_a_split_channel_delivery_duplicates_but_never_settles() {
+async fn t_s7_a_split_channel_delivery_duplicates_but_never_settles_case(
+    with_dispatch_evidence: bool,
+) {
     let fx = Fixture::new().await;
     let (channel_id, delivery) = (ChannelId::new(4_603_555), ChannelId::new(4_603_556));
+    let _failure = (!with_dispatch_evidence).then(|| {
+        crate::services::discord::inject_disposition::dispatched::fail_writes_for_tests(
+            &fx.provider,
+            channel_id,
+        )
+    });
     let (checkpoint, h, p) = (id(1, 600), id(2, 150), id(3, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
     let nonce = absorb_and_claim(&fx.shared, &fx.provider, channel_id, &[h], p).await;
@@ -149,13 +193,27 @@ async fn t_s7_a_split_channel_delivery_duplicates_but_never_settles() {
         .with_history(channel_id, history(channel_id, [checkpoint, h, p]));
     fx.sweep(&api).await;
 
-    assert!(accepted(&api).contains(&h.get()), "{:?}", api.enqueue_log());
+    if with_dispatch_evidence {
+        assert_eq!(accepted(&api), Vec::<u64>::new());
+    } else {
+        assert!(accepted(&api).contains(&h.get()), "{:?}", api.enqueue_log());
+    }
     let ledger = completed_turn_ledger::read_ledger(&fx.provider, delivery.get());
     let settled = ledger.expect("delivery ledger").settled_ids();
     assert!(
         !settled.contains(&h.get()),
         "the delivery channel never settles H"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t_s7_a_split_channel_delivery_duplicates_but_never_settles() {
+    t_s7_a_split_channel_delivery_duplicates_but_never_settles_case(false).await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn t_s7_a_split_channel_delivery_duplicates_but_never_settles_with_dispatch_evidence_is_not_replayed()
+ {
+    t_s7_a_split_channel_delivery_duplicates_but_never_settles_case(true).await;
 }
 
 /// A restored episode has no in-memory absorbed set; its durable alias restores
@@ -215,4 +273,20 @@ async fn a_claim_without_nonce_or_absorption_writes_no_alias() {
             .unwrap_or_default();
         assert!(aliases.is_empty(), "{channel_id}: {aliases:?}");
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn t_s1_a_restart_without_the_ledger_recovers_h_and_p_with_dispatch_evidence_is_not_replayed()
+{
+    assert_restart_after_delivered_episode(ChannelId::new(4_603_560), false, true).await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn t_s2_an_earlier_delivered_episode_does_not_settle_a_later_absorption_with_dispatch_evidence_is_not_replayed()
+ {
+    assert_other_episode_row_does_not_settle(ChannelId::new(4_603_553), false, true).await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn t_s3_a_delayed_append_of_an_earlier_episode_does_not_settle_h_with_dispatch_evidence_is_not_replayed()
+ {
+    assert_other_episode_row_does_not_settle(ChannelId::new(4_603_554), true, true).await;
 }

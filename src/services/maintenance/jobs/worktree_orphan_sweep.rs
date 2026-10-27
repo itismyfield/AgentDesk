@@ -115,7 +115,7 @@ static BLOCKING_CALL_SITE_OBSERVER: std::sync::Mutex<
 > = std::sync::Mutex::new(None);
 
 #[cfg(test)]
-static BLOCKING_CALL_SITE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static BLOCKING_CALL_SITE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
 fn observe_blocking_call_site() {
@@ -1285,9 +1285,7 @@ mod blocking_directory_walk_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn root_enumerator_call_site_runs_off_the_runtime_thread() {
-        let _test_guard = BLOCKING_CALL_SITE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _test_guard = BLOCKING_CALL_SITE_TEST_LOCK.lock().await;
         let runtime_thread = std::thread::current().id();
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join("child")).unwrap();
@@ -1303,9 +1301,7 @@ mod blocking_directory_walk_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn managed_root_classifier_call_site_runs_off_the_runtime_thread() {
-        let _test_guard = BLOCKING_CALL_SITE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _test_guard = BLOCKING_CALL_SITE_TEST_LOCK.lock().await;
         let runtime_thread = std::thread::current().id();
         let temp = tempfile::tempdir().unwrap();
         let managed_root = temp.path().join("repo");
@@ -1324,9 +1320,7 @@ mod blocking_directory_walk_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn managed_cleanup_call_site_runs_off_the_runtime_thread() {
-        let _test_guard = BLOCKING_CALL_SITE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _test_guard = BLOCKING_CALL_SITE_TEST_LOCK.lock().await;
         let runtime_thread = std::thread::current().id();
         let temp = tempfile::tempdir().unwrap();
         let candidate = temp.path().join("candidate");
@@ -1360,9 +1354,7 @@ mod blocking_directory_walk_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn orphan_removal_call_site_runs_off_the_runtime_thread() {
-        let _test_guard = BLOCKING_CALL_SITE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _test_guard = BLOCKING_CALL_SITE_TEST_LOCK.lock().await;
         let runtime_thread = std::thread::current().id();
         let temp = tempfile::tempdir().unwrap();
         let observer = install_observer();

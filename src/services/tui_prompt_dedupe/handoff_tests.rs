@@ -257,7 +257,7 @@ fn an_expired_handoff_publishes_its_held_input_once() {
     assert_eq!(rx.of(INPUT), vec![(false, None)]);
 }
 
-fn restored_remaining_ttl(legacy_snapshot: bool) {
+fn restored_remaining_ttl(legacy_snapshot: bool, before_boot: bool) {
     let _env = crate::config::shared_test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -283,6 +283,12 @@ fn restored_remaining_ttl(legacy_snapshot: bool) {
         std::fs::write(path, serde_json::to_string(&snapshot).unwrap()).unwrap();
     }
     reset_state_for_tests();
+    if before_boot {
+        Instant::refuse_dates_before_boot();
+    } else {
+        // The restarted process runs on a host already up longer than the handoff's age.
+        Instant::advance(PROMPT_ANCHOR_SUBMIT_TTL);
+    }
     let rollout = root.path().join("rollout.jsonl");
     std::fs::write(&rollout, "").unwrap();
     codex_rehydrated_scan_offset(TMUX, &rollout);
@@ -295,10 +301,20 @@ fn restored_remaining_ttl(legacy_snapshot: bool) {
     Instant::advance(Duration::from_secs(11 * 60));
     drain_expired_handoffs();
     drain_expired_handoffs();
+    if before_boot {
+        assert!(
+            rx.of(INPUT).is_empty(),
+            "an undatable restore holds its input for a full TTL from the restore"
+        );
+        assert_eq!(held_handoff_inputs_for_tests("codex", TMUX), Some(1));
+        Instant::advance(PROMPT_ANCHOR_SUBMIT_TTL);
+        drain_expired_handoffs();
+        drain_expired_handoffs();
+    }
     assert_eq!(
         rx.of(INPUT),
         vec![(false, None)],
-        "the original four-hour TTL drains once"
+        "the held input drains exactly once"
     );
     assert_eq!(held_handoff_inputs_for_tests("codex", TMUX), None);
     assert!(!durable_handoff_present_for_tests("codex", TMUX));
@@ -306,12 +322,19 @@ fn restored_remaining_ttl(legacy_snapshot: bool) {
 
 #[test]
 fn a_restored_handoff_keeps_only_its_remaining_ttl() {
-    restored_remaining_ttl(false);
+    restored_remaining_ttl(false, false);
 }
 
 #[test]
 fn an_old_handoff_snapshot_keeps_its_original_expiry() {
-    restored_remaining_ttl(true);
+    restored_remaining_ttl(true, false);
+}
+
+/// A restore on a host booted after the handoff began cannot date it, as on a fresh Windows
+/// runner; it still publishes the held input once, a full TTL after the restore.
+#[test]
+fn a_handoff_restored_before_its_age_can_be_dated_still_drains_once() {
+    restored_remaining_ttl(false, true);
 }
 
 /// A handoff reserved and bound while an input's owning decision is in progress waits for

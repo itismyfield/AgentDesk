@@ -714,17 +714,18 @@ fn native_collector_case(test_name: &str, mode: u8) {
             receipt.generation_mtime_ns,
             source_authority.generation_mtime_ns
         );
-        let visible = rec.visible.lock().unwrap();
-        assert!(visible[&receipt.panel_msg_id.unwrap()].contains("ADK5833-final"));
-        assert_eq!(
-            visible
-                .values()
-                .filter(|body| body.contains(TRAILING_BODY))
-                .count(),
-            1,
-            "exact terminal delivery must leave one visible copy of the commentary",
-        );
-        drop(visible);
+        {
+            let visible = rec.visible.lock().unwrap();
+            assert!(visible[&receipt.panel_msg_id.unwrap()].contains("ADK5833-final"));
+            assert_eq!(
+                visible
+                    .values()
+                    .filter(|body| body.contains(TRAILING_BODY))
+                    .count(),
+                1,
+                "exact terminal delivery must leave one visible copy of the commentary",
+            );
+        }
         if rowless {
             assert!(
                 load_inflight_state(&fx.provider, fx.channel.get()).is_none(),

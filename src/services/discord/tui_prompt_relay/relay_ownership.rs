@@ -373,14 +373,15 @@ pub(super) fn external_input_relay_output_path(
             .trim()
             .eq_ignore_ascii_case(ProviderKind::Claude.as_str())
             && binding.runtime_kind == RuntimeHandoffKind::ClaudeTui
-            && let Some(transcript_path) = resolved_claude_idle_relay_transcript_path(
+        {
+            // `None` means the binding names a headless SDK transcript with no TUI one to move
+            // to; its path is no output source for this pane's input.
+            return resolved_claude_idle_relay_transcript_path(
                 shared,
                 tmux_session_name,
                 channel_id,
                 binding,
-            )
-        {
-            return Some(transcript_path);
+            );
         }
         if provider
             .trim()

@@ -15,6 +15,267 @@ use std::time::Duration;
 fn prefix(f: &Fixture) -> String {
     record(&f.pane.b, "a1", "2026-10-01T02:00:00Z", "A_BODY", false)
 }
+
+fn spool_versions(f: &Fixture, relabel: Option<u32>) -> Vec<u32> {
+    let spool = f
+        .root
+        .join("o_store")
+        .join(f.pane.channel.get().to_string())
+        .join("spool");
+    let mut versions = Vec::new();
+    for entry in std::fs::read_dir(spool).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|value| value.to_str()) != Some("seg") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let split = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+        let mut header: serde_json::Value = serde_json::from_slice(&bytes[..split]).unwrap();
+        if let Some(version) = relabel {
+            header["identity_version"] = version.into();
+            let mut rewritten = serde_json::to_vec(&header).unwrap();
+            rewritten.extend_from_slice(&bytes[split..]);
+            std::fs::write(path, rewritten).unwrap();
+        }
+        versions.push(header["identity_version"].as_u64().unwrap() as u32);
+    }
+    versions.sort_unstable();
+    versions
+}
+
+#[test]
+fn retained_v5_thinking_stays_excluded_while_new_v6_bodies_post_in_order() {
+    run(async |f| {
+        use crate::services::tui_o::shadow::identity::V5Rule;
+        use crate::services::tui_o::shadow::{UnitKey, UnitKind};
+        let row = |id: &str, thought: &str, text: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type":"assistant", "sessionId":f.pane.a, "uuid":id, "apiBlockIndex":0,
+                    "message":{"id":id, "content":[{"type":"thinking", "thinking":thought},
+                        {"type":"text", "text":text}], "stop_reason":"end_turn"}
+                })
+            )
+        };
+        std::fs::write(&f.pane.path, row("old-v5", "T_OLD", "X_OLD")).unwrap();
+        f.initialize(0);
+        f.gate.acquired();
+        let mut old = f.engine();
+        {
+            let _v5 = V5Rule::hold();
+            old.capture().unwrap();
+        }
+        old.deliver(20).await;
+        assert_eq!(f.posts(), ["X_OLD"]);
+        let old_text = UnitKey {
+            channel_id: f.pane.channel.get(),
+            provider: ShadowProvider::Claude,
+            native_key: "old-v5:1".into(),
+            kind: UnitKind::Body,
+        };
+        assert!(
+            f.channel()
+                .ledger()
+                .latest_piece(&old_text, 0)
+                .is_some_and(|(_, piece)| {
+                    matches!(
+                        piece.outcome,
+                        Some(crate::services::tui_o::store::ledger::PieceOutcome::Posted(
+                            _
+                        ))
+                    )
+                }),
+            "old text must be durably settled before the v6 replay"
+        );
+        drop(old);
+        assert_eq!(spool_versions(&f, Some(5)), [5]);
+        let mut resumed = f.engine();
+        resumed.deliver(20).await;
+        assert_eq!(
+            f.posts(),
+            ["X_OLD"],
+            "retained v5 thinking must never backfill after settled text"
+        );
+        let old_thought = UnitKey {
+            channel_id: f.pane.channel.get(),
+            provider: ShadowProvider::Claude,
+            native_key: "old-v5:0".into(),
+            kind: UnitKind::Body,
+        };
+        assert_eq!(
+            f.channel().ledger().excluded(&old_thought),
+            Some("pre_v6_thinking")
+        );
+        append(&f.pane.path, &row("new-v6", "T_NEW", "X_NEW"));
+        resumed.capture().unwrap();
+        resumed.deliver(20).await;
+        assert_eq!(
+            f.posts(),
+            ["X_OLD", "T_NEW", "X_NEW"],
+            "new v6 bodies must retain their native order"
+        );
+        assert_eq!(spool_versions(&f, None), [5, 6]);
+        drop(resumed);
+        let mut restarted = f.engine();
+        restarted.capture().unwrap();
+        restarted.deliver(20).await;
+        assert_eq!(
+            f.posts(),
+            ["X_OLD", "T_NEW", "X_NEW"],
+            "mixed-version replay must not repost either generation"
+        );
+        assert_eq!(
+            f.channel().ledger().excluded(&old_thought),
+            Some("pre_v6_thinking")
+        );
+    });
+}
+
+#[test]
+fn visible_thinking_realtime_idle_and_rewind_recovery_post_once() {
+    run(async |f| {
+        use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
+        use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
+        let _owned = crate::services::tui_o::cutover::test_override::force_channels(&[(
+            f.pane.channel.get(),
+            RuntimeHandoffKind::ClaudeTui,
+        )]);
+        f.initialize(0);
+        f.gate.acquired();
+        let mut engine = f.engine();
+        engine.capture().unwrap();
+        engine.deliver(20).await;
+        assert_eq!(f.posts(), ["A_BODY"]);
+        let old = [
+            serde_json::json!({"type":"user", "sessionId":f.pane.a,
+                "uuid":"old-user", "parentUuid":"a1", "message":{"content":"old prompt"}}),
+            serde_json::json!({"type":"assistant", "sessionId":f.pane.a,
+                "uuid":"old-answer", "parentUuid":"old-user", "apiBlockIndex":0,
+                "message":{"id":"old-answer", "content":[{"type":"text", "text":"OLD_BRANCH"}]}}),
+            serde_json::json!({"type":"assistant", "sessionId":f.pane.a,
+                "uuid":"empty-thinking", "apiBlockIndex":0,
+                "message":{"id":"empty-thinking", "content":[
+                    {"type":"thinking", "thinking":"", "signature":"EMPTY_SIGNATURE"},
+                    {"type":"thinking", "signature":"ONLY_SIGNATURE"},
+                    {"type":"thinking", "thinking":"  \n  ", "signature":"BLANK_SIGNATURE"},
+                    {"type":"redacted_thinking", "data":"REDACTED_PAYLOAD"}]}}),
+        ];
+        append(
+            &f.pane.path,
+            &old.iter().map(|row| format!("{row}\n")).collect::<String>(),
+        );
+        engine.capture().unwrap();
+        engine.deliver(20).await;
+        assert_eq!(
+            f.posts(),
+            ["A_BODY", "OLD_BRANCH"],
+            "empty thinking and signatures must never post"
+        );
+        let branch_start = std::fs::metadata(&f.pane.path).unwrap().len();
+        let rows = [
+            serde_json::json!({"type":"user", "sessionId":f.pane.a,
+                "uuid":"rewind-user", "parentUuid":"a1",
+                "message":{"content":"synthetic rewind prompt"}}),
+            serde_json::json!({"type":"assistant", "sessionId":f.pane.a,
+                "uuid":"rewind-answer", "parentUuid":"rewind-user", "apiBlockIndex":0,
+                "message":{"id":"rewind-answer", "content":[
+                    {"type":"thinking", "thinking":"BRANCH_THOUGHT", "signature":"PRIVATE_SIGNATURE"},
+                    {"type":"text", "text":"BRANCH_TEXT"},
+                    {"type":"thinking", "thinking":"", "signature":"EMPTY_SIGNATURE"},
+                    {"type":"thinking", "signature":"ONLY_SIGNATURE"},
+                    {"type":"redacted_thinking", "data":"REDACTED_PAYLOAD"}]}}),
+            serde_json::json!({"type":"result", "result":""}),
+        ];
+        let tail: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        append(&f.pane.path, &tail);
+        engine.capture().unwrap();
+        drop(engine);
+        assert_eq!(spool_versions(&f, Some(5)), [5]);
+        let mut recovered = f.engine();
+        recovered.deliver(20).await;
+        assert_eq!(
+            f.posts(),
+            ["A_BODY", "OLD_BRANCH", "BRANCH_TEXT"],
+            "v5 replay must recover text without backfilling historical thinking"
+        );
+
+        let mut buffer = tail.clone();
+        let mut response = String::new();
+        let mut state = crate::services::session_backend::StreamLineState::new();
+        let mut tools = crate::services::discord::tmux::WatcherToolState::new();
+        crate::services::discord::tmux::process_watcher_lines(
+            &mut buffer,
+            &mut state,
+            &mut response,
+            &mut tools,
+        );
+        assert_eq!(response, "BRANCH_THOUGHTBRANCH_TEXT", "realtime body order");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let read = crate::services::session_backend::read_claude_tui_output_file_until_result_with_harvest(
+            f.pane.path.to_str().unwrap(), branch_start, tx, None,
+            crate::services::provider::SessionProbe::process(|| true),
+        ).unwrap();
+        assert!(read.1.decoded_terminal);
+        let idle_bodies: Vec<_> = rx
+            .try_iter()
+            .filter_map(|message| match message {
+                StreamMessage::Text { content } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            idle_bodies,
+            ["BRANCH_THOUGHT", "BRANCH_TEXT"],
+            "idle body order"
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut idle = crate::services::claude::herdr_turn::HerdrTurnLines::default();
+        for line in tail.lines() {
+            assert!(idle.process(line, &tx));
+        }
+        let herdr_bodies: Vec<_> = rx
+            .try_iter()
+            .filter_map(|message| match message {
+                StreamMessage::Text { content } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            herdr_bodies,
+            ["BRANCH_THOUGHT", "BRANCH_TEXT"],
+            "native Herdr body order"
+        );
+        assert_eq!(
+            crate::services::discord::recovery_engine::extract_response_from_output_pub(
+                f.pane.path.to_str().unwrap(),
+                branch_start
+            ),
+            "BRANCH_THOUGHTBRANCH_TEXT",
+            "recovery body order"
+        );
+        for _body in std::iter::once(response).chain(idle_bodies) {
+            let sent = claim_then_send(
+                Some(BodyClaim::new(
+                    f.pane.channel.get(),
+                    Some(RuntimeHandoffKind::ClaudeTui),
+                )),
+                || async { panic!("a second relay must not publish an O-owned body") },
+            )
+            .await;
+            assert!(matches!(sent, Ok(BodySend::<()>::OwnedByO)));
+        }
+        drop(recovered);
+        let mut restarted = f.engine();
+        restarted.capture().unwrap();
+        restarted.deliver(20).await;
+        assert_eq!(
+            f.posts(),
+            ["A_BODY", "OLD_BRANCH", "BRANCH_TEXT"],
+            "restart and both relay paths must leave each body posted once"
+        );
+    });
+}
 fn novel(f: &Fixture, body: &str) -> String {
     record(&f.pane.b, "n1", "2026-10-01T03:00:00Z", body, false)
 }

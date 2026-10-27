@@ -54,7 +54,8 @@ async fn stale_agent_and_unlisted_skill_emit_one_boot_warning_in_same_process() 
         .unwrap()
         .unwrap();
     assert!(message.contains("ghost-agent"));
-    assert!(message.contains(&skill.display().to_string()));
+    // The warning embeds paths as JSON strings, which escape Windows separators.
+    assert!(message.contains(&serde_json::json!(skill.display().to_string()).to_string()));
     assert_eq!(rx.recv().await, None);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
