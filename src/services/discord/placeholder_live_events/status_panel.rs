@@ -600,8 +600,8 @@ pub(super) fn render_status_panel(
     render_status_panel_for(snapshot, provider, time_line, turn_trigger_line, false)
 }
 
-/// `footer`: a class render that would overflow the footer body is fitted section-wise, because
-/// the footer's line cut would otherwise drop trailing Tasks/Subagents sections whole.
+/// A class render over the 2000-unit panel limit (or, for `footer`, the footer body budget) is
+/// fitted section-wise, because the cuts would otherwise drop trailing Tasks/Subagents sections whole.
 pub(super) fn render_status_panel_for(
     snapshot: StatusPanelState,
     provider: &ProviderKind,
@@ -692,7 +692,7 @@ pub(super) fn render_status_panel_for(
         && !snapshot.status.is_terminal()
     {
         super::tool_activity::fit_panel(sections)
-    } else if footer {
+    } else {
         // Judge the untruncated panel: the 2000-unit cut below drops trailing sections whole.
         let formatted = sections
             .iter()
@@ -705,16 +705,16 @@ pub(super) fn render_status_panel_for(
             .trim()
             .split_once('\n')
             .map_or("", |(_, body)| body);
-        if body.len()
-            > super::super::single_message_panel::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES
+        let over_footer_budget = footer
+            && body.len()
+                > super::super::single_message_panel::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES;
+        if over_footer_budget
             || super::super::formatting::discord_message_units(&lossless) > STATUS_PANEL_MAX_CHARS
         {
             super::tool_activity::fit_sections(sections)
         } else {
             format_and_truncate_status_panel_sections(sections)
         }
-    } else {
-        format_and_truncate_status_panel_sections(sections)
     }
 }
 

@@ -356,27 +356,65 @@ fn anonymize_accounts(input: &str) -> String {
     static LABEL: LazyLock<Option<Regex>> = LazyLock::new(|| {
         Regex::new(&format!(r"(?i)((?:\b(?:username|user|login|owner)[ \t]*[:=][ \t]*|--(?:owner|username)(?:=|[ \t]+)))({WORD})")).ok()
     });
+    // Account operands of `sudo -u` and `ssh -l`, scanning only the options before them.
+    static SWITCH_USER: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(&format!(r#"(?i)((?:^|[\s;&|('"])(?:\S*/)?(?:sudo(?:[ \t]+-\S+(?:[ \t]+[^\s-]\S*)?)*?[ \t]+(?:-[a-z]*u[ \t]*|--user(?:=|[ \t]+))|ssh(?:[ \t]+-\S+(?:[ \t]+[^\s-]\S*)?)*?[ \t]+(?-i:-l)[ \t]*))({WORD})"#)).ok()
+    });
+    // Account operands of `su` and `chown` in command position, so prose mentions stay readable.
+    static OWNER_ARG: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(&format!(r#"(?i)((?:^|[;&|('"`]|\b(?:sudo|doas)\b[^\n;&|]*?[ \t])[ \t]*(?:\S*/)?(?:su(?:[ \t]+(?:-[cs]|--command|--shell)[ \t]+{WORD}|[ \t]+-\S*)*|chown(?:[ \t]+-\S+)*)[ \t]+)({WORD})"#)).ok()
+    });
     static ADDRESS: LazyLock<Option<Regex>> = LazyLock::new(|| {
         Regex::new(r#"(?i)(?:^|[\s'"])([a-z0-9_.+-]+)@([a-z0-9][a-z0-9.-]*)"#).ok()
     });
-    static VERSION_OR_TAG: LazyLock<Option<Regex>> = LazyLock::new(|| {
-        Regex::new(r"(?i)^(?:v?\d+(?:\.\d+){0,2}(?:[-+][0-9a-z.-]*)?|latest|next|beta|alpha|canary|rc|stable|nightly|lts)$").ok()
+    // Numeric versions cannot be host names; tags and `v`-versions can, so they need a package command.
+    static VERSION: LazyLock<Option<Regex>> =
+        LazyLock::new(|| Regex::new(r"(?i)^\d+(?:\.(?:\d+|x)){0,2}(?:[-+][0-9a-z.-]*)?$").ok());
+    static TAG: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(r"(?i)^(?:v\d+(?:\.(?:\d+|x)){0,2}(?:[-+][0-9a-z.-]*)?|latest|next|beta|alpha|canary|rc|stable|nightly|lts|main|master|experimental|insiders|edge|dev|preview)$").ok()
     });
-    let (Some(label), Some(address), Some(version_or_tag)) =
-        (LABEL.as_ref(), ADDRESS.as_ref(), VERSION_OR_TAG.as_ref())
+    // The nearest command word before an address decides whether it names a login or a package.
+    static CONTEXT: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        Regex::new(r"(?i)(?:^|[\s;&|(])(?:\S*/)?(?:(ssh|scp|sftp|rsync|mosh|sshfs|ssh-copy-id)|(npm|npx|pnpm|pnpx|yarn|bun|bunx|uv|uvx|pip|pip3|pipx|cargo|go|deno|gem|brew|corepack|volta|nvm|fnm|asdf|mise))\b").ok()
+    });
+    let (
+        Some(label),
+        Some(switch_user),
+        Some(owner_arg),
+        Some(address),
+        Some(version),
+        Some(tag),
+        Some(context),
+    ) = (
+        LABEL.as_ref(),
+        SWITCH_USER.as_ref(),
+        OWNER_ARG.as_ref(),
+        ADDRESS.as_ref(),
+        VERSION.as_ref(),
+        TAG.as_ref(),
+        CONTEXT.as_ref(),
+    )
     else {
         return "***".into();
     };
-    let masked = label.replace_all(input, |capture: &regex::Captures<'_>| {
+    let keep_paths = |capture: &regex::Captures<'_>| {
         if capture[2].contains(['/', '\\']) {
             capture[0].to_string()
         } else {
             format!("{}***", &capture[1])
         }
-    });
+    };
+    let masked = label.replace_all(input, keep_paths);
+    let masked = switch_user.replace_all(&masked, keep_paths);
+    let masked = owner_arg.replace_all(&masked, keep_paths);
     address
         .replace_all(&masked, |capture: &regex::Captures<'_>| {
-            if version_or_tag.is_match(&capture[2]) {
+            let before = &masked[..capture.get(1).map_or(0, |user| user.start())];
+            let command = context.captures_iter(before).last();
+            let login = command.as_ref().is_some_and(|c| c.get(1).is_some());
+            let package = command.as_ref().is_some_and(|c| c.get(2).is_some());
+            let host = &capture[2];
+            if !login && (version.is_match(host) || package && tag.is_match(host)) {
                 capture[0].to_string()
             } else {
                 capture[0].replacen(&capture[1], "***", 1)

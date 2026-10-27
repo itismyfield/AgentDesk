@@ -163,3 +163,44 @@ fn accuracy_code_mode_labels_escape_markdown_and_keep_the_first_label() {
     let read = safe_tool_summary("exec", "tools.read_file({path:'src/lib.rs'})", None).unwrap();
     assert!(read.starts_with("Read · src/lib.rs"), "{read}");
 }
+
+#[test]
+fn accuracy_account_operands_and_versioned_hosts_are_anonymous_while_versions_stay() {
+    let bash = |command: &str| {
+        safe_tool_summary("Bash", &json!({"command":command}).to_string(), None)
+            .map(|out| out.replace('\u{200b}', ""))
+    };
+    for command in [
+        "sudo -u LaneAlice cargo check",
+        "sudo -E -u LaneAlice make",
+        "sudo --user=LaneAlice make",
+        "ssh -l LaneAlice build-host uptime",
+        "ssh -p 22 -l LaneAlice build-host uptime",
+        "su - LaneAlice",
+        "su -c 'make check' LaneAlice",
+        "chown LaneAlice:staff build.log",
+        "chown -R LaneAlice target",
+        "sudo chown LaneAlice build.log",
+        "ssh LaneAlice@v2 uptime",
+        "ssh LaneAlice@canary uptime",
+        "rsync -a target LaneAlice@main:/srv",
+        "echo LaneAlice@canary",
+    ] {
+        let out = bash(command).unwrap_or_default();
+        assert!(!out.contains("LaneAlice"), "{command}: {out}");
+    }
+    for command in [
+        "npm i node-lib@18.x",
+        "pnpm add react@experimental",
+        "npx next@canary build",
+        "npm i some-lib@main",
+        "uvx ruff@v0.6 check",
+        "npm i react@18",
+        "ssh -L 8080:localhost:80 build-host",
+        "ssh build-host ls -la",
+        "echo chown handling",
+    ] {
+        let out = bash(command).expect(command);
+        assert!(out.contains(command), "{command}: {out}");
+    }
+}
