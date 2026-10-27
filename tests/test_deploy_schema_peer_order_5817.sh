@@ -37,7 +37,7 @@ extract_function() {
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/_defaults.sh"
 
-for fn in _resolve_deploy_peers _deploy_peer_env_prelude _deploy_to_one_peer \
+for fn in _resolve_deploy_peers _deploy_peer_env_prelude _prepare_peer_binary _deploy_to_one_peer \
     _deploy_to_all_peers _wait_for_peer_deploy_verdict _report_peer_verdict_failure \
     _schema_order_peers _schema_order_refusal _cluster_target_refusal \
     _schema_order_guard_before_build \

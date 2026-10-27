@@ -5,6 +5,9 @@ use crate::services::tui_prompt_dedupe as dedupe;
 use serenity::all::{ChannelId, MessageId, UserId};
 use std::sync::Arc;
 
+#[path = "claude_terminal_tests/o_stream_regression_tests.rs"]
+mod o_stream_regression_tests;
+
 struct Fixture {
     shared: Arc<crate::services::discord::SharedData>,
     actor: Arc<CancelToken>,
@@ -161,11 +164,23 @@ impl Fixture {
 
 #[test]
 fn contended_captured_terminal_keeps_scheduler_timer_and_loopback_live() {
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(concat!(
+        module_path!(),
+        "::contended_captured_terminal_keeps_scheduler_timer_and_loopback_live"
+    )) {
+        return;
+    }
     assert_terminal_lock_liveness(false);
 }
 
 #[test]
 fn contended_uncaptured_codex_terminal_keeps_scheduler_timer_and_loopback_live() {
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(concat!(
+        module_path!(),
+        "::contended_uncaptured_codex_terminal_keeps_scheduler_timer_and_loopback_live"
+    )) {
+        return;
+    }
     assert_terminal_lock_liveness(true);
 }
 
@@ -287,6 +302,12 @@ fn assert_terminal_lock_liveness(uncaptured: bool) {
 
 #[test]
 fn claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_progress() {
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(concat!(
+        module_path!(),
+        "::claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_progress"
+    )) {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
     let _dedupe = dedupe::TEST_LOCK
@@ -394,6 +415,12 @@ fn claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_pro
 
 #[test]
 fn claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_without_row_mutation() {
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(concat!(
+        module_path!(),
+        "::claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_without_row_mutation"
+    )) {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
     let _dedupe = dedupe::TEST_LOCK
@@ -553,6 +580,12 @@ fn with_kind(mut frame: StreamMessage, to: NativeTerminalKind) -> StreamMessage 
 /// uncaptured abort the legacy gate cannot verify keeps the obligation instead of becoming Done.
 #[test]
 fn an_admitted_terminal_keeps_its_kind_and_an_unverified_abort_is_never_done() {
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(concat!(
+        module_path!(),
+        "::an_admitted_terminal_keeps_its_kind_and_an_unverified_abort_is_never_done"
+    )) {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
     let _dedupe = dedupe::TEST_LOCK
@@ -616,6 +649,12 @@ struct PreKindRange<'a> {
 /// back completed; an aborted range persists and reads back its kind.
 #[test]
 fn a_completed_range_persists_its_pre_kind_bytes_and_an_aborted_one_its_kind() {
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(concat!(
+        module_path!(),
+        "::a_completed_range_persists_its_pre_kind_bytes_and_an_aborted_one_its_kind"
+    )) {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
     let _dedupe = dedupe::TEST_LOCK
