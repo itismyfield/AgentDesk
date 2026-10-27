@@ -72,6 +72,13 @@ static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
 // Tests that also mutate process env must acquire `shared_test_env_lock()` before
 // this lock. Keep that env -> dedupe order globally to avoid AB/BA deadlocks.
 pub(crate) static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+#[cfg(test)]
+pub(crate) fn run_serial_test(future: impl std::future::Future<Output = ()>) {
+    crate::test_support::serial_runtime::run(
+        || TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner()),
+        future,
+    );
+}
 static OBSERVED_PROMPTS: LazyLock<broadcast::Sender<ObservedTuiPrompt>> =
     LazyLock::new(|| broadcast::channel(OBSERVED_PROMPT_BUFFER).0);
 

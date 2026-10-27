@@ -785,9 +785,7 @@ mod tests {
         };
         use crate::services::session_host::test_support::InjectedLivenessGuard;
         use crate::services::session_host::{HostLiveness, HostSessionRef};
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let root = tempfile::tempdir().expect("runtime root");

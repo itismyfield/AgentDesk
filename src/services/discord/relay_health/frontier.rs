@@ -299,12 +299,13 @@ mod tests {
     async fn reset_yields_to_pending_mutation_on_same_thread_without_deadlock() {
         let coord = Arc::new(TmuxRelayCoord::new(ChannelId::new(4_182)));
         coord.confirmed_end_offset.store(100, Ordering::Release);
-        let mut state = coord
-            .reset_state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        state.active_mutations += 1;
-        drop(state);
+        {
+            let mut state = coord
+                .reset_state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state.active_mutations += 1;
+        }
         let guard = RelayFrontierMutationGuard {
             coord: Arc::clone(&coord),
         };
