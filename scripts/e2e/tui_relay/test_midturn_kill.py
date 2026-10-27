@@ -61,7 +61,7 @@ class Host:
 
     def write_binding(self, **overrides):
         binding = {"provider": self.provider, "tmux_session": self.session, "channel_id": int(CHANNEL),
-                   "owner_runtime_root": str(self.runtime.parent), **overrides}
+                   "owner_runtime_root": str(self.runtime.parent), "created_at": "2026-10-27T06:00:00Z", **overrides}
         self.binding.write_text(json.dumps(binding))
 
     def kill(self, pid, sig):
@@ -256,6 +256,34 @@ class SettlementJudgment(unittest.TestCase):
         self.assertEqual(self.judge([_msg(20, "[OK]", self.CLAUDE)], deleted={"20"})["pre_kill_output"], "lost")
 
 
+class Preflight(HostCase):
+    def preflight(self, host, busy=()):
+        with patch.object(midturn_kill, "_mailbox_state", return_value=(1, list(busy))):
+            record = {}
+            midturn_kill.run_step(driver, {"preflight_e2e_channel": {}}, cell=host.cell, channel_id=CHANNEL,
+                                  args=_args(host), record=record, window=None, refresh=None)
+            return record["midturn_kill"]["preflight"]
+
+    def test_the_newest_session_binding_must_name_the_channel_before_any_send(self):
+        host = self.host("codex-tui")
+        old = host.binding.with_name("b0.json")
+        old.write_text(json.dumps({"tmux_session": host.session, "channel_id": 99, "created_at": "2026-10-01T00:00:00Z",
+                                   "owner_runtime_root": str(host.runtime.parent)}))
+        self.assertEqual(self.preflight(host)["binding_context"], str(host.binding))
+        old.write_text(json.dumps({"tmux_session": host.session, "channel_id": 99, "created_at": "2026-10-28T00:00:00Z",
+                                   "owner_runtime_root": str(host.runtime.parent)}))
+        with self.assertRaisesRegex(midturn_kill.Refused, "binding"):
+            self.preflight(host)
+        old.unlink()
+        host.binding.unlink()
+        with self.assertRaisesRegex(midturn_kill.Refused, "binding"):
+            self.preflight(host)
+
+    def test_a_busy_cell_is_refused_before_any_send(self):
+        with self.assertRaisesRegex(midturn_kill.Refused, "not idle"):
+            self.preflight(self.host("claude-tui"), busy=["queue_depth=1"])
+
+
 class SettlementPolling(HostCase):
     def test_one_idle_poll_between_busy_polls_does_not_settle_the_turn(self):
         host = self.host("claude-tui")
@@ -308,7 +336,9 @@ class Gating(unittest.TestCase):
                  patch("sys.stderr"), self.assertRaises(SystemExit):
                 driver.parse_args()
         with patch.object(sys, "argv", base + ["--cell", "codex-tui"]):
-            self.assertTrue(driver.parse_args().midturn_kill)
+            parsed = driver.parse_args()
+        # The force-cancel reset would tear down the idle tmux session before the kill.
+        self.assertEqual((parsed.midturn_kill, parsed.reset_before_each), (True, False))
 
 
 class DriverRun(HostCase):
@@ -319,8 +349,9 @@ class DriverRun(HostCase):
         bot = assertions.provider_bot_id(host.provider)
         rows, ids = [], iter(range(10, 1000))
         scenario = midturn_kill.scenario("r" * 32)
-        ok = scenario["steps"][1]["send_provider_hold_prompt"]["ok_marker"]
-        nxt = scenario["steps"][5]["send_prompt"].rsplit(" ", 1)[-1]
+        step = {key: value for item in scenario["steps"] for key, value in item.items()}
+        ok, nxt = step["send_provider_hold_prompt"]["ok_marker"], step["send_prompt"].rsplit(" ", 1)[-1]
+        held = []
 
         def add(content):
             rows.append(_msg(next(ids), content, bot))
@@ -328,6 +359,7 @@ class DriverRun(HostCase):
         def send_prompt(channel, prompt, **kwargs):
             sent = next(ids)
             if ok in prompt:
+                held.append(sent)
                 add("⠋ 계속 처리 중")
                 if deliver:
                     add(ok)
@@ -350,7 +382,7 @@ class DriverRun(HostCase):
                          queue_runtime_root=str(host.runtime), final_refetches=1, thread_channel_id=None,
                          midturn_kill=True)
         clock = [0.0]
-        mailbox = lambda *a, **kw: (1, [] if host.killed else ["agent_turn_status=active"])  # noqa: E731
+        mailbox = lambda *a, **kw: (1, ["agent_turn_status=active"] if held and not host.killed else [])  # noqa: E731
         with host.active(), patch.dict("os.environ", {"AGENTDESK_E2E_ALLOW_DESTRUCTIVE": "1"}), \
              patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
              patch.object(driver.time, "sleep", side_effect=lambda t: clock.__setitem__(0, clock[0] + t)), \

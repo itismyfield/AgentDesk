@@ -375,10 +375,14 @@ and `--filter` sweeps never select it, and YAML cannot use its steps.
   wrapper pane process (Codex `node`) is never signalled; its one native
   `codex` child is. The agent must end in `-e2e`; Herdr and pipe cells are
   refused. dcserver, the tmux server and the harness itself are protected.
-- Kill: only after the hold prompt's early marker is in the provider inflight
-  row with a tool running (`provider_hold_observed`) and the mailbox is busy.
-  Right before `SIGKILL` the identity is read again; any change of pid, start
-  time, cmdline, parent, pane or binding refuses without a signal.
+- Before any send, the newest runtime binding of the cell's session must name
+  `--channel-id` and the target mailbox must have no busy reason. The mode
+  turns off the pre-scenario force-cancel reset, which tears down an idle tmux
+  session.
+- Kill: the identity is first read once the hold prompt's early marker is in
+  the provider inflight row with a tool running (`provider_hold_observed`) and
+  the mailbox is busy. Right before `SIGKILL` it is read again; any change of
+  pid, start time, cmdline, parent, pane or binding refuses without a signal.
 - Verdicts (`midturn_kill.capabilities` in the report): `provider_killed`,
   `turn_settled` (two polls in a row with a readable idle mailbox, empty queue
   files and no live processing status as any message's current text, within

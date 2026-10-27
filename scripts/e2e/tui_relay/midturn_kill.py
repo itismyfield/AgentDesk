@@ -21,7 +21,7 @@ from . import assertions
 
 SCENARIO_ID = "MK-1"
 CELLS = ("claude-tui", "codex-tui")
-STEPS = ("identify_provider_process", "kill_provider_process", "await_killed_turn_settled", "assert_provider_replaced")
+STEPS = ("preflight_e2e_channel", "identify_provider_process", "kill_provider_process", "await_killed_turn_settled", "assert_provider_replaced")
 HOLD_SECONDS = 90
 SETTLE_TIMEOUT_S = 300.0
 # A settled turn may still flush pre-kill text; wait this long before calling it lost.
@@ -69,6 +69,9 @@ def add_arguments(parser) -> None:
 def validate_arguments(parser, args) -> None:
     if args.midturn_kill and (args.cell not in CELLS or args.filter or getattr(args, "herdr_restart_observe_only", None)):
         parser.error(f"--midturn-kill needs --cell in {CELLS} and forbids --filter and observe-only")
+    if args.midturn_kill:
+        # The pre-scenario force cancel tears down an idle tmux session; preflight requires idle instead.
+        args.reset_before_each = False
 
 
 def scenario(run_id: str) -> dict[str, Any]:
@@ -80,9 +83,10 @@ def scenario(run_id: str) -> dict[str, Any]:
         "agent_mode": "real_live", "coverage_class": "live", "cells": list(CELLS), "destructive": True,
         "report_marker_counts": [ok, late, following],
         "steps": [
-            {"identify_provider_process": {}},
+            {"preflight_e2e_channel": {}},
             {"send_provider_hold_prompt": {"ok_marker": ok, "late_marker": late, "hold_seconds": HOLD_SECONDS}},
             {"wait_for_provider_hold_state": {"ok_marker": ok, "late_marker": late, "timeout_s": 240, "poll_interval_s": 1}},
+            {"identify_provider_process": {}},
             {"kill_provider_process": {"ok_marker": ok}},
             {"await_killed_turn_settled": {"ok_marker": ok, "timeout_s": SETTLE_TIMEOUT_S}},
             {"send_prompt": f"Reply with exactly {following}"},
@@ -136,14 +140,36 @@ def _read(path: Path) -> str:
         return ""
 
 
-def identify(driver, cell: str, channel_id: str, runtime_root: str | Path) -> dict[str, Any]:
-    """The cell's provider PID, traced session record → binding → tmux pane → provider executable."""
+def _e2e_session(driver, cell: str) -> tuple[str, str]:
     if cell not in CELLS:
         raise Refused(f"{cell} has no tmux provider process; mid-turn kill supports {CELLS}")
     provider, agent = driver.cell_provider(cell), driver.cell_default_agent(cell)
     session = driver.cell_session_name(cell)
     if not agent.endswith("-e2e") or session != f"AgentDesk-{provider}-{agent}":
         raise Refused(f"refusing non-E2E cell session {session!r} (agent {agent!r})")
+    return provider, session
+
+
+def channel_guard(driver, cell: str, channel_id: str, runtime_root: str | Path) -> dict[str, Any]:
+    """Before any send: the newest runtime binding of the cell's E2E session must name this channel."""
+    provider, session = _e2e_session(driver, cell)
+    owner = str(Path(runtime_root).parent)
+    bindings = []
+    for path in sorted((Path(runtime_root) / "binding_contexts" / provider).glob("*.json")):
+        try:
+            binding = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(binding, dict) and binding.get("tmux_session") == session and binding.get("owner_runtime_root") == owner:
+            bindings.append((str(binding.get("created_at") or ""), str(binding.get("channel_id")), str(path)))
+    if not bindings or max(bindings)[1] != str(channel_id):
+        raise Refused(f"no newest {session} binding names channel {channel_id}: {max(bindings) if bindings else None}")
+    return {"session": session, "binding_context": max(bindings)[2], "channel_id": str(channel_id)}
+
+
+def identify(driver, cell: str, channel_id: str, runtime_root: str | Path) -> dict[str, Any]:
+    """The cell's provider PID, traced session record → binding → tmux pane → provider executable."""
+    provider, session = _e2e_session(driver, cell)
     runtime = Path(runtime_root)
     owner = str(runtime.parent)
     records = [path for path in sorted((runtime / "sessions").glob(f"*-{session}.owner")) if _read(path) == owner]
@@ -230,7 +256,12 @@ def run_step(driver, step, *, cell, channel_id, args, record, window, refresh) -
         raise Refused("mid-turn kill steps run only under --midturn-kill")
     provider = driver.cell_provider(cell)
     caps = state["capabilities"]
-    if "identify_provider_process" in step:
+    if "preflight_e2e_channel" in step:
+        state["preflight"] = channel_guard(driver, cell, channel_id, args.queue_runtime_root)
+        boxes, busy = _mailbox_state(driver, args, channel_id, provider)
+        if busy:
+            raise Refused(f"cell not idle before the scenario (mailboxes={boxes}): {busy}")
+    elif "identify_provider_process" in step:
         state["baseline"] = identify(driver, cell, channel_id, args.queue_runtime_root)
     elif "kill_provider_process" in step:
         baseline = state.get("baseline")
