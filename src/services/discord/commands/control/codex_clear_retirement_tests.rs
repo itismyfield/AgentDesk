@@ -293,7 +293,13 @@ async fn legacy_codex_turn_mode_unknown_keeps_existing_and_new_input_queued_pg()
     use crate::services::tui_o::turn_mode::TestConfirmation;
     use crate::services::turn_orchestrator::QueueIdentity;
 
-    let fixture = CanaryFixture::new().await;
+    // The Herdr case below runs as node `test-local`; the canary binding is recorded as it too.
+    let fixture = CanaryFixture::build_with_host(
+        0,
+        crate::services::codex::CodexSourceMode::Verified,
+        Some("test-local"),
+    )
+    .await;
     for (index, existing) in [true, false].into_iter().enumerate() {
         let channel = ChannelId::new(6_845_070 + index as u64);
         super::clear_persist_failure_tests::seed_session(&fixture.shared, channel).await;
