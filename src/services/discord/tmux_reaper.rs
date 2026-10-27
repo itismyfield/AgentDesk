@@ -944,9 +944,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn stale_busy_finalize_uses_identity_gate_and_returns_global_slot() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _root = RuntimeRootGuard::set(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -990,9 +988,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn stale_busy_finalize_cannot_release_newer_mailbox_identity() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _root = RuntimeRootGuard::set(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -1037,9 +1033,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn periodic_reaper_preserves_live_turn_for_role_override_provider() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _root = RuntimeRootGuard::set(root.path());
         let config_dir = root.path().join("config");
@@ -1179,9 +1173,7 @@ agents:
     /// probing the reconstructed name instead finds it dead → false-finalize.
     #[tokio::test(flavor = "current_thread")]
     async fn periodic_reaper_probes_recorded_routine_session_not_reconstructed_name() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _root = RuntimeRootGuard::set(root.path());
 
@@ -1287,9 +1279,7 @@ agents:
     /// falling back to the reconstructed dead name here would finalize the turn.
     #[tokio::test(flavor = "current_thread")]
     async fn periodic_reaper_skips_when_recorded_session_name_is_absent() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _root = RuntimeRootGuard::set(root.path());
 

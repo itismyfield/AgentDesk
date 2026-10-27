@@ -1,5 +1,5 @@
-//! Classification 2: comment-free, as-written matching in `handle_event`, the command
-//! block or production text before the tests. A lexical tripwire, not a run proof.
+//! Classification 2: comment-free, as-written matching in `handle_event` or production
+//! text before the tests. A lexical tripwire, not a run proof.
 
 use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::test_support::CommentForgery;
@@ -23,20 +23,6 @@ const LIVE_SUBMISSION_REUSE: &str =
 const SHARED_GUARD: &str =
     "if is_allowed_bot_sender\n                && !should_admit_turn_message(";
 const SOFT_INTERVENTION: &str = "SoftInterventionSpec {";
-const COMMAND_TEXT: &str = "let cmd_text = strip_leading_bot_mention(text);";
-const COMMAND_ORDER: [&str; 7] = [
-    "if cmd_text.starts_with('!')",
-    "let handled = super::message_handler::handle_text_command(",
-    "&mut attachment_local_permit,",
-    ".await?;",
-    "if handled {",
-    "if (!is_skill_command || attachment_local_permit.is_some())",
-    "&& !upload_records_appended_to_session",
-];
-const COMMAND_END: &str = "}\n                return Ok(());\n            }";
-const LEGACY_BLOCK: &str = "if text.starts_with('!')";
-const LEGACY_DENIAL: &str = "super::message_handler::handle_shell_command_raw(";
-
 fn production(source: &str) -> Option<Lexed> {
     let lexed = Lexed::new(source);
     let end = lexed.find(TEST_BOUNDARY)?;
@@ -94,45 +80,6 @@ pub(crate) fn admission_guard_gaps(source: &str) -> Vec<String> {
     gaps
 }
 
-/// Command outcomes end the event before session restore while keeping the upload
-/// conditions; the legacy `!` boundary is a fixed denial followed by a return.
-pub(crate) fn command_boundary_gaps(source: &str) -> Vec<String> {
-    let Some(production) = production(source) else {
-        return vec![format!("missing {TEST_BOUNDARY}")];
-    };
-    let mut gaps = Vec::new();
-    let command = production.find(COMMAND_TEXT).and_then(|at| {
-        let rest = production.slice(at..production.text().len());
-        rest.block(COMMAND_ORDER[0])
-    });
-    match command {
-        Some(command) => {
-            let mut from = 0;
-            for anchor in COMMAND_ORDER {
-                match command.find_after(from, anchor) {
-                    Some(at) => from = at + anchor.len(),
-                    None => gaps.push(format!("missing or out of order: {anchor}")),
-                }
-            }
-            let rest = &command.text()[from..];
-            if !rest.trim_end().ends_with(COMMAND_END) {
-                gaps.push("command block must end with its upload branch and return".into());
-            }
-        }
-        None => gaps.push(format!("missing command block after {COMMAND_TEXT}")),
-    }
-    match production.block(LEGACY_BLOCK) {
-        Some(legacy) if legacy.contains(LEGACY_DENIAL) => {
-            let end = "return Ok(());\n            }";
-            if !legacy.text().trim_end().ends_with(end) {
-                gaps.push("legacy boundary must return after the denial".to_string());
-            }
-        }
-        _ => gaps.push(format!("legacy boundary must call {LEGACY_DENIAL}")),
-    }
-    gaps
-}
-
 fn assert_rejects(judge: fn(&str) -> Vec<String>, needles: &[&str]) {
     assert_eq!(judge(INTAKE_GATE), Vec::<String>::new());
     for needle in needles {
@@ -177,11 +124,4 @@ fn admission_guard_rejects_commented_guard_and_counts_coded_sender_checks() {
         admission_guard_gaps(&coded),
         ["queue branches must not make sender decisions independently"]
     );
-}
-
-#[test]
-fn command_boundary_guard_rejects_commented_outcomes_and_denial() {
-    let mut needles = vec![TEST_BOUNDARY, COMMAND_TEXT, LEGACY_BLOCK, LEGACY_DENIAL];
-    needles.extend(COMMAND_ORDER);
-    assert_rejects(command_boundary_gaps, &needles);
 }

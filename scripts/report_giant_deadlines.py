@@ -502,7 +502,12 @@ def main(argv: list[str] | None = None, *, clock=_utc_now) -> int:
         return 1
     status = report["completeness"]["status"]
     print(f"giant deadline report: {status}; counts {json.dumps(report['deadlines']['counts'], sort_keys=True)}")
-    return 0 if status == "complete" else 2
+    for diagnostic in report["completeness"]["diagnostics"]:
+        location = " ".join(str(diagnostic.get("path") or diagnostic["input"]).splitlines())
+        problem = " ".join(str(diagnostic["problem"]).splitlines())
+        print(f"WARNING: giant-file planning: {location}; {problem}", file=sys.stderr)
+    coverage = report["completeness"]
+    return 2 if "unavailable" in (coverage["deadline_coverage"], coverage["metadata_coverage"]) else 0
 
 
 if __name__ == "__main__":

@@ -294,7 +294,6 @@ unless trigger_events == ["pull_request"]
   warn "#{path}: required PR contexts must be triggered only by pull_request"
   exit 1
 end
-
 script_check_shard_jobs = {
   "scripts" => "cargo",
   "scripts_guards" => "guards",
@@ -317,7 +316,6 @@ unless script_checks_job["needs"] == "changes"
   warn "#{path}: Script checks runner job must retain exact needs: changes"
   exit 1
 end
-
 # Every job the CI required judge reads, with the exact if that runs it; the judge
 # accepts a skip only when the changes outputs say the job was not expected.
 rust_tests_gate = "${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
@@ -327,7 +325,7 @@ cross_os_gate = "needs.changes.outputs.rust_compile == 'true' && needs.changes.o
 expected_closure_if = {
   "changes" => nil, "rust_build" => rust_tests_gate, "rust_tests" => built_gate, "test_evidence" => built_gate,
   "lint" => "needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'",
-  "scripts" => "${{ !cancelled() }}", "scripts_guards" => nil, "scripts_contracts" => nil,
+  "scripts" => "${{ !cancelled() }}", "scripts_guards" => "${{ !cancelled() }}", "scripts_contracts" => "${{ !cancelled() }}",
   "dashboard" => "needs.changes.outputs.dashboard == 'true'", "pg15_owner_proof" => rust_tests_gate,
   "relay_authority_mutations" => relay_gate,
   "check_fast_cross_os" => cross_os_gate, "check_fast_cross_os_targets" => cross_os_gate,
@@ -338,7 +336,6 @@ frontier = ["required_contexts"]
 until frontier.empty?
   job_id = frontier.shift
   next if closure.include?(job_id)
-
   job = jobs[job_id]
   unless job.is_a?(Hash) && expected_closure_if.key?(job_id) && job["if"] == expected_closure_if[job_id] && !job.key?("continue-on-error")
     warn "#{path}: required needs closure job #{job_id.inspect} must exist with its exact if and no continue-on-error"
@@ -356,7 +353,6 @@ unless closure.sort == expected_closure_if.keys.sort
   warn "#{path}: required needs closure changed; expected #{expected_closure_if.keys.sort.inspect}, found #{closure.sort.inspect}"
   exit 1
 end
-
 judge_sha256 = Digest::SHA256.file("scripts/ci/nextest_required.py").hexdigest
 pin_run = <<~SH
        pin() {
@@ -398,7 +394,6 @@ unless required_source_sha256 == "dc368dd623895b68351f29e8e0c46a21c2b718820cf45d
   warn "#{path}: required_contexts source bytes changed (scalar tags/styles and exact step surface are pinned); found #{required_source_sha256 || '<missing>'}"
   exit 1
 end
-
 script_check_steps = Array(script_checks_job["steps"]).select do |step|
   step.is_a?(Hash) && step["name"] == "Run script checks"
 end
@@ -503,6 +498,8 @@ expected_script_check_execution = {
     "GFP_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}",
     "TEST_LANE_BASELINE_REF" => "HEAD^1",
     "SCRIPT_CHECK_SHARD" => "cargo",
+    "SCRIPT_CHECK_CHANGES_RESULT" => "${{ needs.changes.result }}",
+    "SCRIPT_CHECK_CHANGED_FILES" => "${{ needs.changes.outputs.script_check_files }}",
     "ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact",
     "CARGO_PROFILE_DEV_DEBUG" => "0",
     "CARGO_PROFILE_TEST_DEBUG" => "0",
@@ -520,6 +517,8 @@ expected_script_check_execution = {
     "GFP_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}",
     "TEST_LANE_BASELINE_REF" => "HEAD^1",
     "SCRIPT_CHECK_SHARD" => "cargo",
+    "SCRIPT_CHECK_CHANGES_RESULT" => "${{ needs.changes.result }}",
+    "SCRIPT_CHECK_CHANGED_FILES" => "${{ needs.changes.outputs.script_check_files }}",
     "ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact",
     "CARGO_PROFILE_DEV_DEBUG" => "0",
     "CARGO_PROFILE_TEST_DEBUG" => "0",
@@ -554,6 +553,7 @@ script_check_shard_jobs.each do |job_id, shard|
   expected_raw_shard_job = {
     "name" => "Script checks runner (#{shard})",
     "needs" => "changes",
+    "if" => "${{ !cancelled() }}",
     "runs-on" => "ubuntu-latest",
     "timeout-minutes" => "45",
     "steps" => [
@@ -565,7 +565,7 @@ script_check_shard_jobs.each do |job_id, shard|
     ],
   }
   unless raw_jobs.is_a?(Hash) && raw_jobs[job_id] == expected_raw_shard_job
-    warn "#{path}: Script checks shard job #{job_id} must retain the exact fixed job surface (raw YAML scalars; checkout/setup/install/run inventory, action refs, timeout-minutes 45, no permissions/env/defaults/if/continue-on-error)"
+    warn "#{path}: Script checks shard job #{job_id} must retain the exact fixed job surface (raw YAML scalars; checkout/setup/install/run inventory, action refs, timeout-minutes 45, !cancelled(), no permissions/env/defaults/continue-on-error)"
     exit 1
   end
   shard_execution = effective_execution(document, job_id, expected_raw_shard_job["steps"].length - 1)
@@ -685,7 +685,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 100, "job_sha256" => "18f738247b0c02b9cac5cd225bcb4ce366c733f7378d1b6aaa1c4cc38706ba9a",
+    "job_timeout_minutes" => 100, "job_sha256" => "dad6d5b4c9c44754f640fec13d168f622e1df8be2723654af2a0e5643eb0d4b0",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -701,7 +701,7 @@ targets = {
           '--archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \\',
           "--rust-version 1.94.1 --nextest-version \"$(cargo nextest --version | awk 'NR==1 {print $2}')\" \\",
           "--target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \\",
-          '--build-option CARGO_PROFILE_TEST_DEBUG=0 --output "$NEXTEST_DIR/plan"',
+          '--build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan"',
           'python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"',
         ],
         "timeout_minutes" => 45, "env" => {"BASH_ENV" => "/dev/null"},
@@ -1110,7 +1110,10 @@ role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key
   errors << "main #{job_id} must keep needs #{needs.inspect} and if #{gate.inspect}" unless main_job["needs"] == needs && main_job["if"] == gate
   errors << "main #{job_id} must equal the PR job apart from needs, if and the role step" unless role_free.(main_job, "Upload nextest baseline") == role_free.(pr_job, "Compare tests with the comparison base")
   nightly_job = nightly_jobs[job_id]
-  errors << "nightly #{job_id} must equal the main job apart from the baseline upload" unless nightly_job.is_a?(Hash) && nightly_job == role_free.(main_job, "Upload nextest baseline").merge(main_job.slice("needs", "if"))
+  expected_nightly = role_free.(main_job, "Upload nextest baseline").merge(main_job.slice("needs", "if"))
+  # Nightly keeps the strict retry policy: its plan differs from main only in that argument.
+  expected_nightly = JSON.parse(JSON.generate(expected_nightly).gsub("--retry-mode all-once", "--retry-mode policy"))
+  errors << "nightly #{job_id} must equal the main job apart from the baseline upload and --retry-mode policy" unless nightly_job.is_a?(Hash) && nightly_job == expected_nightly
 end
 main_baseline = Array(main_jobs.dig("rust_build", "steps")).select { |step| step.is_a?(Hash) && step["name"] == "Upload nextest baseline" }
 errors << "main rust_build must upload the plan as nextest-baseline for 14 days, exactly once" unless main_baseline == [baseline_upload]

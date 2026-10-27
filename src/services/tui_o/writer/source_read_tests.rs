@@ -809,7 +809,9 @@ fn source_read_transition_missing_equal_and_regressing_time_is_fail_closed() {
 #[test]
 fn source_read_legacy_selector_keeps_latest_mtime_and_resume_boundary() {
     let f = Fixture::new(false);
-    let _home = TestEnvVarGuard::set_path_after_shared_test_env_lock("CODEX_HOME", f.root.path());
+    // The scan returns paths under CODEX_HOME; resolve it like `f.path` so macOS `/var` matches.
+    let home = f.root.path().canonicalize().unwrap();
+    let _home = TestEnvVarGuard::set_path_after_shared_test_env_lock("CODEX_HOME", &home);
     f.header(A);
     response(&f.path(A), "old", "older");
     f.header(B);

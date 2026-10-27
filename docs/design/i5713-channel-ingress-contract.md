@@ -221,7 +221,7 @@ Discord 앞단 `handle_event`와 Poise 명령 경로의 비간섭은 당시 §9.
 
 ### 9.2 경로
 
-1. hook: gateway framework의 event handler(`gateway_runtime::run_bot_framework_options`)가 `handle_event`를 부르기 직전에 `ingress_shadow::observe`를 한 번 부른다. 이 handler가 `handle_event`의 유일한 운영 호출자라 `handle_event` 첫 줄과 같은 지점이고 모든 early return 앞이다. giant 파일 순증 0 게이트 때문에 `router/intake_gate.rs`가 아닌 이 자리에 둔다. Poise `command_check`에는 붙이지 않는다(raw `InteractionCreate`에서 이미 제출한다).
+1. hook: gateway framework의 event handler(`gateway_runtime::run_bot_framework_options`)가 `handle_event`를 부르기 직전에 `ingress_shadow::observe`를 한 번 부른다. 이 handler가 `handle_event`의 유일한 운영 호출자라 `handle_event` 첫 줄과 같은 지점이고 모든 early return 앞이다. hook은 gateway 경계에서 ingress 관측을 소유한다. giant 파일 증가는 현재 경고이며 배치 위치를 줄 수로 정하지 않는다. Poise `command_check`에는 붙이지 않는다(raw `InteractionCreate`에서 이미 제출한다).
 2. 제출: 원본 이벤트를 빌려 종류·실제 channel·원본 ID·application ID만 복사한다. 채널은 thread parent·policy channel이 아니라 이벤트의 channel이다. allowlist 밖이면 아무것도 하지 않는다. `try_send` 한 번이며 DB·HTTP·lock·`await`·task spawn이 없다. 실행 ingress가 아닌 이벤트(edit·delete·ping·presence 등)는 `excluded`로 센다.
 3. queue: 256개 bounded queue, worker 1개. full·closed면 그 descriptor를 버리고 센다. 버린 것도 sequence를 하나 받으므로 기록에서 빈 번호로 드러난다.
 4. 조회: observer 전용 pool(최대 연결 1, 기존 runtime pool의 연결 옵션 복사, 첫 조회 전 연결 없음)로 `o_channel_homes::read_home_at`을 부른다. row와 PG `statement_timestamp()`를 한 SELECT로 읽는다. `started`는 pool acquire 전에 잡고 acquire+query 전체를 250ms로 자른다. timeout·DB 오류·decode 실패는 `Unreadable`, row 없음은 `Missing`이며 retry·cached row는 없다. worker가 끝나면 pool을 닫는다.

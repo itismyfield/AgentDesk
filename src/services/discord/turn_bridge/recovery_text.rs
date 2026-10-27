@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+#[path = "recovery_text/replay.rs"]
+pub(in crate::services::discord) mod replay;
+
 use crate::services::discord::SharedData;
 use crate::services::observability::recovery_audit::{
     RecoveryAuditDraft, RecoveryAuditRecord, insert_recovery_audit_record,
@@ -769,8 +772,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
 ) {
     let ts = chrono::Local::now().format("%H:%M:%S");
     // A protected request reruns only through its exact continuation, never this history retry.
-    let barred = crate::services::discord::replay_policy::legacy_retry_barred;
-    if barred(channel_id.get(), user_message_id.get()) {
+    if replay::blocked(shared, provider, channel_id.get(), user_message_id.get()).await {
         tracing::warn!("  [{ts}] ⏭ auto-retry: protected request held for channel {channel_id}");
         return;
     }
@@ -829,7 +831,9 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
 
     // The history write and enqueue run only if the protected decision has not barred it since.
     let claim = crate::services::discord::replay_policy::claim_legacy_retry;
-    if !claim(channel_id.get(), user_message_id.get()) {
+    if replay::blocked(shared, provider, channel_id.get(), user_message_id.get()).await
+        || !claim(channel_id.get(), user_message_id.get())
+    {
         tracing::warn!("  [{ts}] ⏭ auto-retry: protected request held for channel {channel_id}");
         return;
     }

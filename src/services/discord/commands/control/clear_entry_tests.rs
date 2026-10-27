@@ -249,17 +249,8 @@ impl Rig {
                 message.author.id = author;
                 message.author.name = "clear-entry".into();
                 message.content = "!clear".into();
-                let handle = super::super::text_commands::handle_text_command_with_uploads;
-                let mut permit = None;
-                let handled = handle(
-                    &self.ctx,
-                    &message,
-                    &self.data,
-                    channel,
-                    "!clear",
-                    &[],
-                    &mut permit,
-                );
+                let handle = super::super::text_commands::handle_text_command;
+                let handled = handle(&self.ctx, &message, &self.data, channel, "!clear");
                 assert!(Box::pin(handled).await.expect("the text clear is handled"));
             }
         }

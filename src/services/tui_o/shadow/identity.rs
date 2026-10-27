@@ -9,6 +9,18 @@ use crate::services::discord::response_sanitizer::is_standalone_tui_response_chr
 use crate::services::provider::ProviderKind::{Claude as ClaudeKind, Codex as CodexKind};
 use crate::services::tui_turn_state::envelope_is_turn_end_terminator;
 
+/// Visible assistant prose, preserving the block's text and excluding signatures and blank thinking.
+pub(crate) fn visible_assistant_block_text(block: &serde_json::Value) -> Option<&str> {
+    match block.get("type").and_then(serde_json::Value::as_str) {
+        Some("text") => block.get("text").and_then(serde_json::Value::as_str),
+        Some("thinking") => block
+            .get("thinking")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.trim().is_empty()),
+        _ => None,
+    }
+}
+
 /// What a unit would post; `Excluded` units are recorded but never posted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UnitContent {
@@ -35,8 +47,17 @@ pub enum RecordFact {
 }
 
 pub fn classify(provider: ShadowProvider, record: &Value) -> Vec<RecordFact> {
+    classify_with_version(provider, record, super::IDENTITY_VERSION)
+}
+
+/// Classifies replay using the identity version stored with the frame.
+pub(crate) fn classify_with_version(
+    provider: ShadowProvider,
+    record: &Value,
+    identity_version: u32,
+) -> Vec<RecordFact> {
     match provider {
-        ShadowProvider::Claude => claude(record),
+        ShadowProvider::Claude => claude(record, identity_version),
         ShadowProvider::Codex => codex(record),
     }
 }
@@ -46,14 +67,14 @@ pub fn row_key(record: &Value) -> Option<String> {
     str_at(record, "uuid").map(str::to_owned)
 }
 
-fn claude(record: &Value) -> Vec<RecordFact> {
+fn claude(record: &Value, identity_version: u32) -> Vec<RecordFact> {
     // Strict E wins over any other reading of the row, e.g. an interrupt marker user row.
     if envelope_is_turn_end_terminator(&ClaudeKind, record) {
         return vec![RecordFact::Idle(None)];
     }
     match str_at(record, "type") {
         Some("assistant") => std::iter::once(RecordFact::Assistant)
-            .chain(claude_blocks(record))
+            .chain(claude_blocks(record, identity_version))
             .collect(),
         Some("user") => claude_user(record),
         _ => Vec::new(),
@@ -62,7 +83,7 @@ fn claude(record: &Value) -> Vec<RecordFact> {
 
 /// Each block is keyed `(message.id, apiBlockIndex + position)`, so a one-block row keeps its key;
 /// any unplaceable block blocks the whole row.
-fn claude_blocks(record: &Value) -> Vec<RecordFact> {
+fn claude_blocks(record: &Value, identity_version: u32) -> Vec<RecordFact> {
     let message = record.get("message").unwrap_or(&Value::Null);
     let content = message.get("content").and_then(Value::as_array);
     #[cfg(test)]
@@ -80,9 +101,21 @@ fn claude_blocks(record: &Value) -> Vec<RecordFact> {
     let index = record.get("apiBlockIndex").and_then(Value::as_u64);
     let mut facts = Vec::new();
     for (position, block) in (0u64..).zip(blocks) {
+        #[cfg(test)]
+        if V5_RULE.get() && str_at(block, "type") == Some("thinking") {
+            continue;
+        }
         let (kind, content) = match str_at(block, "type") {
+            Some("thinking") if visible_assistant_block_text(block).is_some() => {
+                let content = if identity_version < 6 {
+                    UnitContent::Excluded("pre_v6_thinking")
+                } else {
+                    claude_body(resumed, block)
+                };
+                (UnitKind::Body, content)
+            }
             Some("thinking" | "redacted_thinking") => continue,
-            Some("text") => (UnitKind::Body, claude_text(resumed, block)),
+            Some("text") => (UnitKind::Body, claude_body(resumed, block)),
             Some("tool_use") => (UnitKind::Tool, tool_call(block, &["input"])),
             other => return vec![blocked(&format!("unsupported assistant block {other:?}"))],
         };
@@ -123,10 +156,34 @@ impl Drop for V3Rule {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static V5_RULE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Captures a store using the old thinking-skip rule without creating thinking ledger entries.
+#[cfg(test)]
+pub(crate) struct V5Rule(());
+
+#[cfg(test)]
+impl V5Rule {
+    pub(crate) fn hold() -> Self {
+        V5_RULE.set(true);
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for V5Rule {
+    fn drop(&mut self) {
+        V5_RULE.set(false);
+    }
+}
+
 /// A cold resume writes a synthetic non-error row holding only TUI chrome; Legacy strips it, so it
 /// is not posted. API error rows always post.
-fn claude_text(resumed: bool, block: &Value) -> UnitContent {
-    let text = str_at(block, "text").unwrap_or("");
+fn claude_body(resumed: bool, block: &Value) -> UnitContent {
+    let text = visible_assistant_block_text(block).unwrap_or("");
     if resumed && is_standalone_tui_response_chrome(text) {
         return UnitContent::Excluded("claude_synthetic_resume_chrome");
     }
@@ -342,13 +399,12 @@ mod tests {
         }
     }
 
-    /// A row holding a whole message keys each block from its `apiBlockIndex`, exactly as one-block
-    /// rows of that message would; thinking yields nothing and an unplaceable block blocks the row.
+    /// Whole-message rows preserve each block's native index; empty thinking yields no unit.
     #[test]
     fn claude_multi_block_row_keys_each_block_like_one_block_rows() {
         use super::{RecordFact, UnitContent, classify};
         use crate::services::tui_o::shadow::UnitKind::{Body, Tool};
-        let thinking = json!({"type": "thinking", "thinking": "t", "signature": "s"});
+        let thinking = json!({"type": "thinking", "thinking": "", "signature": "s"});
         let tool = json!({"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"c": 1}});
         let text = |text: &str| json!({"type": "text", "text": text});
         let row = |index: Value, content: Vec<Value>| {

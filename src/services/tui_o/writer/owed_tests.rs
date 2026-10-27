@@ -36,6 +36,8 @@ pub(crate) struct Port {
     posts: Mutex<Vec<String>>,
     /// Runs inside each POST's first poll, under the gate and any record lock.
     on_post: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// Each POST answers only after this long.
+    delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl Port {
@@ -66,7 +68,13 @@ impl DiscordPort for Port {
             author_id,
             content,
         };
-        async move { PostOutcome::Created(message) }
+        let delay = *self.delay.lock().unwrap();
+        async move {
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            PostOutcome::Created(message)
+        }
     }
 
     /// A readable channel where only another author spoke after `after`.
@@ -86,11 +94,16 @@ impl DiscordPort for Port {
 
 pub(crate) struct Lease;
 
+thread_local! {
+    /// While set, every lease on this thread is held elsewhere.
+    pub(crate) static LEASE_BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl DeliveryLease for Lease {
     type Held = ();
 
     fn try_acquire(&self, _channel: u64, _serial: u64) -> Option<()> {
-        Some(())
+        (!LEASE_BUSY.get()).then_some(())
     }
 }
 

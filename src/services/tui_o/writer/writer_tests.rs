@@ -34,6 +34,8 @@ enum Reply {
     CreatedByOther,
     /// Created by this bot with an id behind the anchor, which the ledger treats as a violation.
     CreatedBehind,
+    /// Created by this bot with an id just behind its previous post, as Discord can mint one.
+    CreatedReordered,
 }
 
 #[derive(Default)]
@@ -51,6 +53,8 @@ struct FakePort {
     /// A lazy request waits on this before it completes.
     hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     on_post: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// Each POST answers only after this long.
+    delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl FakePort {
@@ -114,6 +118,14 @@ impl DiscordPort for FakePort {
                 author_id: BOT,
                 content,
             }),
+            Reply::CreatedReordered => {
+                let id = self.say(BOT, &content).id - 2;
+                PostOutcome::Created(SeenMessage {
+                    id,
+                    author_id: BOT,
+                    content,
+                })
+            }
         };
         if let Some(hook) = self.on_post.lock().unwrap().as_ref() {
             hook();
@@ -122,7 +134,11 @@ impl DiscordPort for FakePort {
             let hold = self.hold.lock().unwrap().take();
             (Arc::clone(&self.started), hold)
         });
+        let delay = *self.delay.lock().unwrap();
         async move {
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             if let Some((started, hold)) = lazy {
                 started.lock().unwrap().push("http");
                 if let Some(hold) = hold {
@@ -869,6 +885,21 @@ async fn a_violation_recorded_while_running_stops_the_writer_before_the_next_pos
         harness.alarms.taken().as_slice(),
         [WriterAlarm::LedgerViolation { .. }]
     ));
+}
+
+/// Guards that an id Discord minted just behind the previous post neither stops nor re-sends.
+#[tokio::test(start_paused = true)]
+async fn a_post_whose_id_trails_the_previous_one_keeps_the_writer_running() {
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let replies = [Reply::Created, Reply::CreatedReordered];
+    harness.port.replies.lock().unwrap().extend(replies);
+    let mut writer = harness.writer();
+    for (key, body) in [("m1", "a"), ("m2", "b"), ("m3", "c")] {
+        assert_eq!(writer.deliver(&piece(key, body)).await, Step::Done);
+    }
+    assert_eq!(harness.port.posts(), ["a", "b", "c"]);
+    assert!(harness.alarms.taken().is_empty());
 }
 
 /// The ledger file a channel store appends to.

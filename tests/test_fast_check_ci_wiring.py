@@ -347,6 +347,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             ("rust_build", "          python3 scripts/check_relay_authority_contract.py --nextest-list \"$NEXTEST_DIR/universe.json\"\n", "", "exact cargo/test command list"),
             ("rust_build", 'nextest-base-diff.sh "$RUNNER_TEMP/nextest"', 'nextest-base-diff.sh "$RUNNER_TEMP/nextest" --report-only', "exact cargo/test command list"),
             ("rust_build", step_block(job_block(workflow, "rust_build"), "Compare tests with the comparison base"), "", 'exactly one "Compare tests with the comparison base"'),
+            ("rust_build", "--retry-mode all-once", "--retry-mode policy", "exact cargo/test command list"),
         )
         for job_id, old, new, reason in mutants:
             with self.subTest(job=job_id, mutation=old):
@@ -365,6 +366,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             ("test_evidence", "    needs: [rust_build, rust_tests]\n", "    needs: rust_build\n", "main test_evidence must keep needs"),
             ("rust_build", "          retention-days: 14\n", "          retention-days: 3\n", "nextest-baseline for 14 days"),
             ("rust_build", "          name: nextest-baseline\n", "          name: nextest-plan-copy\n", "nextest-baseline for 14 days"),
+            ("rust_build", "--retry-mode all-once", "--retry-mode policy", "main rust_build must equal the PR job"),
         )
         for job_id, old, new, reason in main_mutants:
             with self.subTest(main_job=job_id, mutation=old):
@@ -378,6 +380,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         nightly = NIGHTLY_WORKFLOW.read_text(encoding="utf-8")
         nightly_mutants = (
             ("rust_tests", "worker: [0, 1, 2, 3, 4, 5]", "worker: [0, 1]", "nightly rust_tests must equal the main job"),
+            ("rust_build", "--retry-mode policy", "--retry-mode all-once", "nightly rust_build must equal the main job"),
             ("postgres_full", "cargo test --test e2e -- --test-threads=1", "cargo test --lib high_risk_recovery:: -- --test-threads=1",
              "nightly lib tests run only in"),
         )
@@ -908,6 +911,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "GFP_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
                 "TEST_LANE_BASELINE_REF": "HEAD^1",
                 "SCRIPT_CHECK_SHARD": "cargo",
+                "SCRIPT_CHECK_CHANGES_RESULT": "${{ needs.changes.result }}",
+                "SCRIPT_CHECK_CHANGED_FILES": "${{ needs.changes.outputs.script_check_files }}",
                 "ADK_LIB_TEST_ARTIFACT": "${{ runner.temp }}/lib-test-artifact",
                 "CARGO_PROFILE_DEV_DEBUG": "0",
                 "CARGO_PROFILE_TEST_DEBUG": "0",
@@ -1250,7 +1255,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         rust_gate = "${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
         cross_os = "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'"
         expected_if = {
-            "changes": None, "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": None, "scripts_contracts": None,
+            "changes": None, "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": MIRROR_IF, "scripts_contracts": MIRROR_IF,
             "rust_build": rust_gate, "pg15_owner_proof": rust_gate, "rust_tests": n_gate, "test_evidence": n_gate,
             "relay_authority_mutations": RUST_REQUIRED_IF,
             "lint": _LINT_FILTER, "dashboard": "needs.changes.outputs.dashboard == 'true'",

@@ -141,14 +141,14 @@ def lower_ratchet_baselines(
             continue
         issue_ref = entry.get("decompose_issue", "")
         if not issue_ref.startswith("#") or not issue_ref[1:].isdigit():
-            raise RefreshError(
-                f"registry entry has invalid decompose_issue while refreshing ratchets: {entry!r}"
-            )
+            print(f"WARNING: giant-file registry: {entry.get('file', '<no file>')} "
+                  f"has missing or invalid decompose_issue {issue_ref!r}", file=sys.stderr)
+            continue
         issue_number = int(issue_ref[1:])
         if issue_number not in states:
-            raise RefreshError(
-                f"registry entry references issue #{issue_number}, absent from snapshot"
-            )
+            print(f"WARNING: giant-file registry: {entry.get('file', '<no file>')} "
+                  f"references issue #{issue_number}, absent from snapshot", file=sys.stderr)
+            continue
         if states[issue_number] == "closed":
             closed_registry_paths.add(entry.get("file", ""))
 

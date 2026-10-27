@@ -159,7 +159,11 @@ Either way, B2 must not flip read-authority until the chosen isolation holds.
 
 ## 5. Phased plan (each phase its own PR; ratchet stays green)
 
-`giant_file_ratchet` blocks only LoC **increase**; verbatim `git mv` out of a frozen owner lowers its baseline. Precedent: #3379 (`31cdd73f2`, R100 git mv + re-export shim). Ratchet facts (review M5): test LoC is excluded **only for whole `#[cfg(test)] mod` blocks**, not arbitrary `#[cfg(test)]` items (`audit_maintainability/checks/giant_files.py`, `generate_inventory_docs.py:189`); `inflight.rs` sits **exactly at baseline 2523** (`audit_maintainability_giant_baseline.toml:176`) so any prod field needs an offsetting deletion **in the same PR**.
+`giant_file_ratchet` now warns on raw growth for files with at least 1000
+production lines, including newly crossing that threshold. Whole `#[cfg(test)]
+mod` blocks are excluded from production classification, while the warning delta
+counts all raw lines. The former baseline and offsetting-deletion requirements
+are retired; existing responsibilities may grow for fixes and clarification.
 
 ### Phase A — Gateway / surface unification (AC 1–5)
 - **A0 characterization** — pin all ~15 send/replace sites: ordering, edit-fail preserve vs delete (#2757 both arms), the five failure signals, streaming rollover. Tests go in **whole `#[cfg(test)] mod tests` blocks** (M5) → prod-LoC-neutral → ratchet green. Must pass before any cutover.
@@ -206,7 +210,7 @@ Fold delivery into the finalizer ledger only if A+B leave a measured exactly-onc
 3. **Leased-but-not-Committed lost on restart** (H1 / r2-H) → persist `delivery_lease` and `delivered_frontier` as **separate** fields; release clears only the lease; only `Delivered` writes the frontier; reclaim local-instance leases on restart (process-monotonic deadline dead), judge remote holders by `deadline_epoch_ms`.
 4. **Mixed-binary authority split** (H3 / r2-H) → B0 sidecar **outside the `*.json` scan path** (`inflight.rs:2577` reaps malformed siblings) or a rollout gate, before any authority flip; conservative I3 fallback (missing record ≠ delivered).
 5. **#1270 rotation-vs-respawn watermark** → write `generation_mtime_ns` in the same atomic transition as `range`; characterization test for both #1270 scenarios across restart.
-6. **ratchet** (M5) → A0 tests in whole `#[cfg(test)] mod` blocks; B1 pairs the inflight field with an offsetting deletion or an inflight split.
+6. **size review** (M5) → Whole `#[cfg(test)] mod` blocks remain test-only for classification; raw growth warns. Review a split when adding an independent responsibility.
 7. **recon count drift** → replace is 6 not 4; `OutputPlan::Replace` carries `PlaceholderLifecycle` to keep the cancel/prompt-too-long/normal variants distinct.
 
 ---

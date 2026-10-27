@@ -128,7 +128,6 @@ pub mod session_forwarding;
 pub mod session_host;
 pub mod session_resume;
 pub mod settings;
-pub mod shell_guard;
 pub mod slo;
 pub(crate) mod stale_turn_reconciler;
 pub(crate) mod task_completion_v1;

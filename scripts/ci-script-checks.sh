@@ -103,10 +103,37 @@ CURRENT_CHECK=""
 SCRIPT_CHECK_SHARDS=(guards contracts cargo)
 SCRIPT_CHECK_SHARD="${SCRIPT_CHECK_SHARD:-}"
 SCRIPT_CHECK_LIST="${SCRIPT_CHECK_LIST:-}"
+script_check_self_tests_only="${SCRIPT_CHECK_SELF_TESTS_ONLY:-}"
+unset SCRIPT_CHECK_SELF_TESTS_ONLY
+script_check_skips=""
+script_check_self_tests=""
+script_check_inputs_loaded=""
+load_script_check_inputs() {
+  [ -z "$script_check_inputs_loaded" ] || return 0
+  script_check_inputs_loaded=1
+  if ! script_check_skips="$("$PYTHON" scripts/ci/script_check_inputs.py)"; then
+    echo "::warning::Script check inputs unavailable; running every check"
+    script_check_skips=""
+  fi
+  if [ -n "$script_check_self_tests_only" ]; then
+    if [ "$script_check_self_tests_only" != 1 ]; then
+      echo "ERROR: SCRIPT_CHECK_SELF_TESTS_ONLY must be 1 or unset" >&2
+      exit 1
+    fi
+    if ! script_check_self_tests="$("$PYTHON" scripts/ci/script_check_inputs.py --list-self-tests)"; then
+      echo "ERROR: self-test inventory unavailable" >&2
+      exit 1
+    fi
+    if [ -z "$script_check_self_tests" ]; then
+      echo "ERROR: no self-tests registered for the nightly run" >&2
+      exit 1
+    fi
+  fi
+}
 script_check_selected=""
 banner() {
   # Sharded and list runs accept only checks opened by run_check.
-  if [ -n "$SCRIPT_CHECK_SHARD$SCRIPT_CHECK_LIST" ] && [ -z "$script_check_selected" ]; then
+  if [ -n "$SCRIPT_CHECK_SHARD$SCRIPT_CHECK_LIST$script_check_self_tests_only" ] && [ -z "$script_check_selected" ]; then
     CURRENT_CHECK="$1"
     echo "ERROR: check '$1' has no shard; open it with run_check <shard> \"$1\"" >&2
     exit 1
@@ -139,6 +166,25 @@ run_check() {
     printf '%s\t%s\n' "$1" "$2"
     return 1
   fi
+  load_script_check_inputs
+  local title inputs is_self_test=""
+  if [ -n "$script_check_self_tests_only" ]; then
+    while IFS= read -r title; do
+      [ "$title" != "$2" ] || is_self_test=1
+    done <<< "$script_check_self_tests"
+    if [ -z "$is_self_test" ]; then
+      printf 'skipped: current-source check in self-test-only run (%s)\n' "$2"
+      return 1
+    fi
+  fi
+  while IFS=$'\t' read -r title inputs; do
+    if [ "$title" = "$2" ]; then
+      script_check_selected=1
+      banner "$2"
+      printf 'skipped: 입력 변경 없음 (%s)\n' "$inputs"
+      return 1
+    fi
+  done <<< "$script_check_skips"
   script_check_selected=1
   script_check_active=1
   banner "$2"
@@ -196,7 +242,7 @@ if [ -n "$SCRIPT_CHECK_SHARD" ] && ! is_script_check_shard "$SCRIPT_CHECK_SHARD"
   echo "ERROR: SCRIPT_CHECK_SHARD='$SCRIPT_CHECK_SHARD' is not one of: ${SCRIPT_CHECK_SHARDS[*]}" >&2
   exit 1
 fi
-if [ -n "$SCRIPT_CHECK_SHARD$SCRIPT_CHECK_LIST" ]; then
+if [ -n "$SCRIPT_CHECK_SHARD$SCRIPT_CHECK_LIST$script_check_self_tests_only" ]; then
   # -T carries the guard into subshells and command substitutions.
   set -T
   trap script_check_guard DEBUG
@@ -222,6 +268,10 @@ fi
 
 if run_check guards "Writer namespace Windows exact-target runner fixtures (#5670)"; then
 "$PYTHON" -m unittest tests.test_writer_namespace_windows_targets
+fi
+
+if run_check guards "CI setup-node reads .nvmrc"; then
+"$PYTHON" -m unittest tests.test_ci_node_version_file
 fi
 
 if run_check guards "Postgres migration checksum guard"; then
@@ -484,6 +534,10 @@ if run_check contracts "Script checks shard ownership + result mirror contract";
 "$PYTHON" -m unittest tests.test_ci_script_check_shards
 fi
 
+if run_check contracts "Script checks input selection contract"; then
+"$PYTHON" -m unittest tests.test_script_check_inputs
+fi
+
 if run_check contracts "Giant deadline warning reporter contract"; then
 # Verbose output lets the shard contract confirm every acceptance test ran unskipped.
 "$PYTHON" -m unittest -v tests.test_report_giant_deadlines
@@ -646,7 +700,7 @@ if run_check contracts "Build token fairness tests (#5968)"; then
 fi
 
 if run_check cargo "Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036)"; then
-# Measure size before refreshing snapshots; planning metadata is advisory.
+# Report giant raw growth and planning metadata warnings before refreshing snapshots.
 GFP_REFRESH_DOCS=1 "$PYTHON" scripts/giant_file_progress.py
 "$PYTHON" -m unittest tests.test_refresh_giant_file_issue_metadata
 fi
@@ -686,6 +740,12 @@ if run_check cargo "Agent maintenance freshness gate (warn, #1432; targeted hard
   --migration-0093-rollout-gate
 fi
 
+if run_check contracts "Repository source shell contracts"; then
+bash tests/test_doc_path_refs.sh
+bash tests/test_t5_post_terminal_user_boundary_5464.sh
+bash tests/test_prompt_api_routes.sh
+fi
+
 if run_check contracts "Shell test suites (tests/*.sh)"; then
 # #4255: these suites existed but NOTHING executed them — `tests/**` appears in
 # ci-pr.yml only as a path filter that triggers the Rust jobs. Their assertions
@@ -713,6 +773,9 @@ for required_suite in "${required_shell_suites[@]}"; do
 done
 for shell_test in tests/*.sh; do
   [ -f "$shell_test" ] || continue
+  case "$shell_test" in
+    tests/test_doc_path_refs.sh|tests/test_t5_post_terminal_user_boundary_5464.sh|tests/test_prompt_api_routes.sh) continue ;;
+  esac
   echo "--- $shell_test"
   bash "$shell_test" || SHELL_TESTS_FAILED=1
 done

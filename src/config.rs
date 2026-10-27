@@ -22,10 +22,13 @@ pub(crate) mod session_hosts;
 pub use session_hosts::SessionHostsConfig;
 pub(crate) mod disk_write;
 mod peer_filter;
+pub mod reload_classes;
+mod server_surface;
 mod tool_activity_display;
 pub(crate) use disk_write::render_config_for_path;
 pub use disk_write::save_to_path;
 pub use peer_filter::PeerFilterMode;
+pub use server_surface::BrowserGuardMode;
 pub use tool_activity_display::ToolActivityDisplay;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -83,17 +86,8 @@ pub struct Config {
     /// Channels run on a Herdr endpoint; restart-required, empty by default.
     #[serde(default, skip_serializing_if = "SessionHostsConfig::is_empty")]
     pub session_hosts: SessionHostsConfig,
-    /// When true (default), the server watches the on-disk config file and
-    /// hot-reloads the hot-swappable settings (routine tunables, thresholds)
-    /// without a restart, mirroring the policies watcher: the candidate file is
-    /// pre-validated (parsed + runtime defaults applied) and only then atomically
-    /// swapped in; a parse/validation failure keeps the running config. Infra
-    /// fields (`server` bind/port/auth, `database`, `data.dir`, `cluster`,
-    /// Discord/provider/agent launch and voice runtimes, MCP child processes and
-    /// credential watcher, `memory`, GitHub sync cadence, prompt retention, and
-    /// the config watcher flag itself) are NOT hot-swapped — a change to those is
-    /// applied to the shared snapshot but logged as restart-required, since live
-    /// subsystems bound them at boot.
+    /// When true (default), a validated edit to the config file replaces the live snapshot;
+    /// an invalid edit keeps it. `reload_classes::FIELDS` lists which fields act on the swap.
     #[serde(default = "default_true")]
     pub config_hot_reload: bool,
 }
@@ -155,24 +149,9 @@ pub struct ServerConfig {
     /// Socket-peer source filter for every HTTP route (see `web_surface::peer_filter`).
     #[serde(default, skip_serializing_if = "PeerFilterMode::is_default")]
     pub peer_filter: PeerFilterMode,
-}
-
-impl std::fmt::Debug for ServerConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServerConfig")
-            .field("port", &self.port)
-            .field("host", &self.host)
-            .field(
-                "auth_token",
-                &self.auth_token.as_ref().map(|_| "<redacted>"),
-            )
-            .field(
-                "allow_insecure_nonloopback_bind",
-                &self.allow_insecure_nonloopback_bind,
-            )
-            .field("peer_filter", &self.peer_filter)
-            .finish()
-    }
+    /// Host/Origin/body-type guard for browser-borne requests (see `web_surface::browser_guard`).
+    #[serde(default, skip_serializing_if = "BrowserGuardMode::is_default")]
+    pub browser_guard: BrowserGuardMode,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -2117,6 +2096,7 @@ impl Default for ServerConfig {
             auth_token: None,
             allow_insecure_nonloopback_bind: false,
             peer_filter: PeerFilterMode::default(),
+            browser_guard: BrowserGuardMode::default(),
         }
     }
 }

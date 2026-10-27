@@ -22,6 +22,7 @@ const COMPLETE: [Seen; 3] = [
 /// Every retry the bridge schedules, legacy or exact, and every body it shows.
 #[derive(Default)]
 struct Effects {
+    refused: std::sync::atomic::AtomicBool,
     legacy: AtomicUsize,
     exact: Mutex<Vec<(i64, String)>>,
     shown: Mutex<Vec<String>>,
@@ -86,7 +87,14 @@ impl TurnGateway for EffectGateway {
             .lock()
             .unwrap()
             .push((retry.permit.receipt_id(), previous));
-        Box::pin(async { ExactHandoff::Started })
+        let refused = self.0.refused.load(Ordering::SeqCst);
+        Box::pin(async move {
+            if refused {
+                ExactHandoff::Refused
+            } else {
+                ExactHandoff::Started
+            }
+        })
     }
 
     fn dispatch_queued_turn<'a>(
@@ -124,28 +132,47 @@ impl TurnGateway for EffectGateway {
     }
 }
 
-/// Installs a Discord REST mock for this thread that records every request body.
+#[derive(Clone, Debug)]
+struct RestRequest {
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    body: String,
+}
+fn publications(requests: &[RestRequest]) -> Vec<String> {
+    requests
+        .iter()
+        .filter(|r| r.method != axum::http::Method::GET && !r.uri.path().ends_with("/typing"))
+        .map(|r| r.body.clone())
+        .collect()
+}
+
+/// Records method and URI so probes cannot become phantom response bodies.
 async fn rest_bodies(
     channel: u64,
 ) -> (
-    Arc<Mutex<Vec<String>>>,
+    Arc<Mutex<Vec<RestRequest>>>,
     crate::services::discord::shared_state::test_rest::Guard,
 ) {
-    let bodies = Arc::<Mutex<Vec<String>>>::default();
+    let bodies = Arc::<Mutex<Vec<RestRequest>>>::default();
     let recorded = bodies.clone();
-    let app = axum::Router::new().fallback(move |body: String| {
-        let recorded = recorded.clone();
-        async move {
-            recorded.lock().unwrap().push(body);
-            axum::Json(serde_json::json!({
-                "id": "4700001", "channel_id": channel.to_string(), "content": "",
-                "author": {"id":"1", "username":"bot", "discriminator":"0001", "avatar":null},
-                "timestamp":"2026-10-01T00:00:00+00:00", "edited_timestamp":null,
-                "tts":false, "mention_everyone":false, "mentions":[], "mention_roles":[],
-                "attachments":[], "embeds":[], "pinned":false, "type":0
-            }))
-        }
-    });
+    let app = axum::Router::new().fallback(
+        move |method: axum::http::Method, uri: axum::http::Uri, body: String| {
+            let recorded = recorded.clone();
+            async move {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(RestRequest { method, uri, body });
+                axum::Json(serde_json::json!({
+                    "id": "4700001", "channel_id": channel.to_string(), "content": "",
+                    "author": {"id":"1", "username":"bot", "discriminator":"0001", "avatar":null},
+                    "timestamp":"2026-10-01T00:00:00+00:00", "edited_timestamp":null,
+                    "tts":false, "mention_everyone":false, "mentions":[], "mention_roles":[],
+                    "attachments":[], "embeds":[], "pinned":false, "type":0
+                }))
+            }
+        },
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http = poise::serenity_prelude::HttpBuilder::new("test-token")
         .proxy(format!("http://{}", listener.local_addr().unwrap()))
@@ -162,6 +189,7 @@ struct TurnEnd {
     disposition: Option<String>,
     hold_reason: Option<String>,
     replay_rows: i64,
+    notices: i64,
     legacy: usize,
     exact: Vec<(i64, String)>,
     shown: Vec<String>,
@@ -174,6 +202,7 @@ struct TurnEnd {
 /// How the turn's request is protected.
 enum Request<'a> {
     Legacy,
+    Recovered,
     /// A started attempt whose live reader saw these facts.
     Protected(&'a [Seen]),
     /// A started attempt whose receipt another writer already held.
@@ -280,6 +309,18 @@ async fn bridge_turn_with(
         }
         assert!(cancel.attach_replay_attempt(Arc::new(live)));
     }
+    if matches!(request, Request::Recovered) {
+        let attempt = start_attempt(&pool, case).await;
+        started = Some((attempt.receipt_id(), attempt.nonce().to_string()));
+        write::withhold(
+            &pool,
+            &attempt,
+            "held before process loss",
+            &serde_json::json!({"body":"kept"}),
+        )
+        .await
+        .unwrap();
+    }
     driver.inflight.channel_id = channel.get();
     driver.inflight.user_msg_id = user.get();
     prepare(&mut driver.inflight);
@@ -296,6 +337,9 @@ async fn bridge_turn_with(
     assert!(started_turn.await);
 
     let effects = Arc::new(Effects::default());
+    effects
+        .refused
+        .store(case == "p5-refused", Ordering::SeqCst);
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<BridgeCompletionSignal>();
     let ctx = TurnBridgeContext {
         provider: ProviderKind::Claude,
@@ -345,6 +389,22 @@ async fn bridge_turn_with(
     }
 
     let receipt = started.as_ref().map_or(0, |(id, _)| *id);
+    if case == "p5-refused" {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            let held:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox WHERE id=$1 AND replay_disposition='withheld')").bind(receipt).fetch_one(&pool).await.unwrap();
+            if held {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    let notices: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM message_outbox WHERE reason_code='stale_replay_withheld'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let stored: Option<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT replay_disposition, replay_hold_reason FROM intake_outbox WHERE id = $1",
     )
@@ -366,11 +426,12 @@ async fn bridge_turn_with(
         disposition,
         hold_reason,
         replay_rows,
+        notices,
         legacy: effects.legacy.load(Ordering::SeqCst),
         exact: effects.exact.lock().unwrap().clone(),
         shown: [
             effects.shown.lock().unwrap().clone(),
-            rest.lock().unwrap().clone(),
+            publications(&rest.lock().unwrap()),
         ]
         .concat(),
         core_sid,
@@ -767,4 +828,50 @@ async fn legacy_and_protected_retries_claim_a_request_once_pg() {
             .any(|item| item.message_id == user);
         assert_eq!(queued, !held, "{case}");
     }
+}
+
+#[tokio::test]
+async fn recovery_bridge_legacy_stale_cannot_bypass_a_canonical_hold_pg() {
+    let case = "p3-recovered-legacy-stale";
+    let _active =
+        crate::services::discord::router::replay_test_activation::activate(case_channel(case));
+    let end = bridge_turn(case, Request::Recovered, vec![error(STALE)]).await;
+    assert_eq!(end.disposition.as_deref(), Some("withheld"), "{end:?}");
+    assert_eq!((end.legacy, end.exact.len()), (0, 0), "{end:?}");
+    assert!(!end.killed, "{end:?}");
+    assert_eq!(
+        end.replay_rows, 1,
+        "the bypass cannot create another receipt"
+    );
+}
+
+#[tokio::test]
+async fn p5_refused_exact_handoff_is_withheld_and_notified_pg() {
+    let facts = seen(&[]);
+    let end = bridge_turn("p5-refused", Request::Protected(&facts), vec![error(STALE)]).await;
+    assert_eq!(end.disposition.as_deref(), Some("withheld"), "{end:?}");
+    assert_eq!(end.notices, 1, "{end:?}");
+    assert_eq!((end.legacy, end.exact.len()), (0, 1), "{end:?}");
+}
+
+#[test]
+fn p5_rest_witness_excludes_probes_but_keeps_empty_or_foreign_writes() {
+    let r = |method, uri: &str, body: &str| RestRequest {
+        method,
+        uri: uri.parse().unwrap(),
+        body: body.into(),
+    };
+    let requests = [
+        r(axum::http::Method::GET, "/channels/1/messages/2", ""),
+        r(axum::http::Method::POST, "/channels/1/typing", ""),
+        r(axum::http::Method::POST, "/channels/1/messages", ""),
+        r(
+            axum::http::Method::POST,
+            "/channels/999/messages",
+            "foreign",
+        ),
+        r(axum::http::Method::PATCH, "/channels/1/messages/2", "edit"),
+        r(axum::http::Method::DELETE, "/channels/1/messages/2", ""),
+    ];
+    assert_eq!(publications(&requests), ["", "foreign", "edit", ""]);
 }

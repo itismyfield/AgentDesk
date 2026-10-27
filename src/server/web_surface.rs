@@ -7,6 +7,8 @@ use axum::{Router, http::header, response::Html, routing::get};
 
 use super::{dashboard_auth::DashboardAccess, dashboard_provision, routes, ws};
 
+pub(super) mod browser_guard;
+mod host_allowlist;
 mod peer_filter;
 
 pub(super) fn router(
@@ -16,7 +18,8 @@ pub(super) fn router(
 ) -> Router {
     let dashboard_enabled = state.config.cluster.runtime_profile.modules().dashboard;
     let peer_filter = peer_filter::PeerFilter::new(state.config.server.peer_filter);
-    let access = DashboardAccess::new(&state.config);
+    let browser_guard = browser_guard::BrowserGuard::new(&state.config);
+    let access = DashboardAccess::new(&state.config).with_browser_guard(browser_guard.clone());
     let mut app = Router::new();
     if dashboard_enabled {
         app = app.route(
@@ -49,7 +52,7 @@ pub(super) fn router(
             .route("/settings", get(runner_entry))
     };
     // Outermost, so static files, fallbacks, /ws and hook routes are filtered too.
-    peer_filter.wrap(app)
+    peer_filter.wrap(browser_guard.wrap(app))
 }
 
 async fn runner_entry() -> impl axum::response::IntoResponse {

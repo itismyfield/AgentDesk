@@ -149,14 +149,8 @@ async fn command(ctx: &serenity::Context, data: &Data, channel: ChannelId) {
     message.author.id = UserId::new(7);
     message.content = "!stop".into();
     assert!(
-        Box::pin(discord::commands::handle_text_command_with_uploads(
-            ctx,
-            &message,
-            data,
-            channel,
-            "!stop",
-            &[],
-            &mut None,
+        Box::pin(discord::commands::handle_text_command(
+            ctx, &message, data, channel, "!stop",
         ))
         .await
         .unwrap()

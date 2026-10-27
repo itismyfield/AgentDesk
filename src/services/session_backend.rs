@@ -847,7 +847,7 @@ mod stream_line;
 pub use stream_line::{StreamLineState, parse_assistant_extra_tool_uses, process_stream_line};
 pub(crate) use stream_line::{
     classify_task_notification_kind, emit_status_events_from_stream_json, observe_stream_context,
-    parse_stream_message_with_state,
+    parse_stream_message_with_state, process_claude_transcript_line,
 };
 
 /// #3405: terminal-usage adoption (#3344 provenance/magnitude gate) plus the
@@ -913,6 +913,43 @@ pub fn read_output_file_until_result_with_harvest(
     cancel_token: Option<Arc<CancelToken>>,
     probe: SessionProbe,
 ) -> Result<(ReadOutputResult, ReadHarvestStats), ReadOutputFailure> {
+    read_output_file_until_result_using(
+        output_path,
+        start_offset,
+        sender,
+        cancel_token,
+        probe,
+        process_stream_line,
+    )
+}
+
+/// Reads native Claude TUI bodies through the same file, terminal and offset machinery.
+#[cfg(unix)]
+pub(crate) fn read_claude_tui_output_file_until_result_with_harvest(
+    output_path: &str,
+    start_offset: u64,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    probe: SessionProbe,
+) -> Result<(ReadOutputResult, ReadHarvestStats), ReadOutputFailure> {
+    read_output_file_until_result_using(
+        output_path,
+        start_offset,
+        sender,
+        cancel_token,
+        probe,
+        process_claude_transcript_line,
+    )
+}
+
+fn read_output_file_until_result_using(
+    output_path: &str,
+    start_offset: u64,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    probe: SessionProbe,
+    process_line: fn(&str, &Sender<StreamMessage>, &mut StreamLineState) -> bool,
+) -> Result<(ReadOutputResult, ReadHarvestStats), ReadOutputFailure> {
     let mut state = StreamLineState::new();
     let SessionProbe {
         is_alive,
@@ -934,7 +971,7 @@ pub fn read_output_file_until_result_with_harvest(
         move |offset| {
             let _ = offset_sender.send(StreamMessage::OutputOffset { offset });
         },
-        move |line, state| process_stream_line(line, &line_sender, state),
+        move |line, state| process_line(line, &line_sender, state),
         |state| state.final_result.is_some(),
         move |state| {
             synthetic_sender

@@ -1008,6 +1008,8 @@ mod cancel_queue_preserve_pg_tests {
             .expect("the purged user message must be recoverable from relay_dead_letter");
         assert_eq!(content, QUEUED_TEXT);
         assert_eq!(message_id, "9101");
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     /// The preserve path must leave a queue it did not touch exactly as it was:
@@ -1054,6 +1056,8 @@ mod cancel_queue_preserve_pg_tests {
             dead_letter_row(&pool, channel_id).await.is_none(),
             "a preserved queue must not be reported as lost"
         );
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     /// A mailbox that exists but never answers is an unread queue, not a kept one.
@@ -1072,6 +1076,8 @@ mod cancel_queue_preserve_pg_tests {
         let (status, body) = post_cancel(&app, channel_id, false).await;
         assert_eq!(status, StatusCode::OK, "cancel response: {body}");
         assert_explicit_null(&body, "queue_loss_recorded");
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     /// Recording every captured item proves nothing when the post-cancel queue was never read.
@@ -1115,6 +1121,8 @@ mod cancel_queue_preserve_pg_tests {
         assert_eq!(loss.dead_lettered_message_ids, vec![9_402]);
         assert!(dead_letter_row(&pool, channel_id).await.is_some());
         assert_eq!(loss.loss_recorded(), None, "{loss:?}");
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     /// An empty global mirror slot is not an absent actor: another registry can still hold the queue.

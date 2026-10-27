@@ -479,16 +479,71 @@ async fn assert_kept(
     );
 }
 
+/// A one-agent config for the real creators, with a fake Claude binary that never starts.
+fn d1_fixture_config(
+    f: &crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture,
+    ids: &[u64],
+) -> (Vec<crate::config::TestEnvVarGuard>, crate::config::Config) {
+    use crate::config::TestEnvVarGuard as Env;
+    use std::os::unix::fs::PermissionsExt;
+    let path = f.root.path().join("cg-d1-fixture.yaml");
+    let bindings = ids.iter().enumerate().map(|(index, id)| format!("  - id: cg-d1-{index}\n    name: cg-d1-{index}\n    channels:\n      claude: {{id: '{id}', runtime: tui}}\n")).collect::<String>();
+    let data = serde_json::to_string(&f.root.path().join("data")).unwrap();
+    let yaml = format!(
+        "server: {{}}\ndata: {{dir: {data}}}\ncluster: {{instance_id: cg-d1}}\nproviders:\n  claude: {{runtime: tui}}\nagents:\n{bindings}"
+    );
+    std::fs::write(&path, &yaml).unwrap();
+    let fake = f.root.path().join("claude-fixture");
+    std::fs::write(&fake, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let env = vec![
+        Env::set_path_after_shared_test_env_lock("AGENTDESK_CONFIG", &path),
+        Env::set_path_after_shared_test_env_lock("CLAUDE_CONFIG_DIR", f.root.path()),
+        Env::set_path_after_shared_test_env_lock("AGENTDESK_CLAUDE_PATH", &fake),
+    ];
+    (env, serde_yaml::from_str(&yaml).unwrap())
+}
+
+/// Stamps the markers and incarnation a spawned Claude pane `name` would carry.
+fn d1_execution_proof(
+    name: &str,
+    channel: u64,
+) -> crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation {
+    use crate::services::tmux_common as tc;
+    use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+    std::fs::create_dir_all(
+        std::path::Path::new(&tc::session_temp_path(name, "proof"))
+            .parent()
+            .unwrap(),
+    )
+    .unwrap();
+    tc::write_tmux_owner_marker(name).unwrap();
+    tc::host_marker::record_tmux_host_marker(name);
+    tc::write_tmux_runtime_kind_marker(
+        name,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )
+    .unwrap();
+    let sid = uuid::Uuid::new_v4().to_string();
+    let prepared =
+        PreparedIncarnation::prepare("claude", name, Some(channel), Some(&sid), false).unwrap();
+    prepared
+        .finish_spawn(crate::services::discord::stamp_spawn_markers(
+            name,
+            Some(&prepared),
+        ))
+        .unwrap();
+    prepared
+}
+
 async fn actual_creator(creator: Creator) {
-    use crate::services::claude_tui::guarded_outcome;
-    use crate::services::claude_tui::host_input::guarded_submission::executor_tests::{
-        d1_execution_proof, d1_fixture_config, install_shim, renderer, screen,
+    use crate::services::claude_tui::input::submission::tests::{
+        frame_renderer as renderer, screen,
     };
     use crate::services::discord::inflight::{InflightEpisodePin, SubmissionFailure};
     use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture as Tmux;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Tmux::after_shared_test_env_lock();
-    install_shim(&f);
     let id = match creator {
         Creator::Headless => 6_809_001,
         Creator::Intake => 6_809_002,
@@ -665,7 +720,7 @@ async fn actual_creator(creator: Creator) {
     .unwrap();
     assert!(
         entered.exists(),
-        "boot selection must reach the managed pre-read paste, not Legacy"
+        "the real entry must reach the managed paste"
     );
     assert_eq!(
         durable_phase(channel),
@@ -679,14 +734,9 @@ async fn actual_creator(creator: Creator) {
     );
     let pane = f.root.path().join(&name);
     let count = |file: &std::path::Path| std::fs::read(file).map_or(0, |bytes| bytes.len());
-    let exec_enters = f.root.path().join("exec-enters");
     assert_eq!(
-        (
-            count(&pane.join("payloads")),
-            count(&pane.join("enters")),
-            count(&exec_enters)
-        ),
-        (1, 0, 0),
+        (count(&pane.join("payloads")), count(&pane.join("enters"))),
+        (1, 0),
         "T0: one payload and no Enter"
     );
     let frame = std::fs::read(pane.join("frame")).unwrap();
@@ -713,11 +763,10 @@ async fn actual_creator(creator: Creator) {
         SubmissionFailure::GuardedRunning
     ));
     assert_eq!(
-        guarded_outcome::held(&name),
-        None,
-        "T1: the executor has not returned before the bridge finished"
+        count(&pane.join("enters")),
+        0,
+        "T1: no Enter before release"
     );
-    assert_eq!(count(&exec_enters), 0);
     assert_eq!(
         std::fs::read(f.root.path().join(&name).join("frame")).unwrap(),
         std::fs::read(f.root.path().join(&name).join("expected")).unwrap()
@@ -746,36 +795,30 @@ async fn actual_creator(creator: Creator) {
     })
     .await
     .unwrap();
-    assert_eq!(guarded_outcome::held(&name), None, "T2: Enter completes it");
     assert_eq!(
         (
             std::fs::read(pane.join("received")).unwrap(),
             count(&pane.join("payloads")),
             count(&pane.join("enters")),
-            count(&exec_enters)
         ),
-        ([delivered, b"\r".to_vec()].concat(), 1, 1, 0),
+        ([delivered, b"\r".to_vec()].concat(), 1, 1),
         "T2: one payload and one Enter reached the pane"
     );
     assert_kept("T2", &shared, channel, &born, &token).await;
     println!("CG_C32 {creator:?} T2=Applied payload=1 enter=1");
-    crate::services::claude_tui::guarded_outcome::forget_test_hold(&name);
     shared.mailboxes.remove_fixture_for_test(channel);
     server.abort();
 }
 
-fn guarded_creator_child(test: &str) -> bool {
+/// The child inherits this process's environment, so no env fixture may change it meanwhile.
+fn creator_child(test: &str) -> bool {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _guard = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(
-        "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS",
-    );
-    unsafe { std::env::remove_var("AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS") };
     crate::services::discord::admin_host_guard::tests::api_child(test)
 }
 
 #[tokio::test]
 async fn cg_d1_headless_actual_begin_preserves_running_cancelled_bridge() {
-    if !guarded_creator_child(concat!(
+    if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::submission_tests::",
         "cg_d1_headless_actual_begin_preserves_running_cancelled_bridge"
     )) {
@@ -785,7 +828,7 @@ async fn cg_d1_headless_actual_begin_preserves_running_cancelled_bridge() {
 }
 #[tokio::test]
 async fn cg_d1_intake_actual_begin_preserves_running_cancelled_bridge() {
-    if !guarded_creator_child(concat!(
+    if !creator_child(concat!(
         "services::discord::router::message_handler::provider_dispatch::submission_tests::",
         "cg_d1_intake_actual_begin_preserves_running_cancelled_bridge"
     )) {

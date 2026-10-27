@@ -39,6 +39,7 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         for filename in (
             "generate_inventory_docs.py", "giant_file_progress.py", "ratchet_admission.py",
             "generate_env_reference.py", "generate_cli_reference.py", "check_hotfile_ratchet.py",
+            "audit_maintainability.py",
         ):
             shutil.copy2(ROOT / "scripts" / filename, scripts / filename)
         shutil.copytree(ROOT / "scripts/audit_maintainability", scripts / "audit_maintainability",
@@ -79,7 +80,8 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         cls.put_at(cls.template, "scripts/audit_maintainability_giant_baseline.toml",
                    f'[giant_file_ratchet]\n"{GIANT}" = 1200\n')
         cls.put_at(cls.template, "scripts/ratchet_admission_history.toml", "schema_version = 1\n")
-        cls.put_at(cls.template, ".gitignore", "/target/\n__pycache__/\n*.pyc\n")
+        cls.put_at(cls.template, ".gitignore", "/target/\n__pycache__/\n*.pyc\n"
+                   "/docs/generated/module-inventory.md\n/docs/generated/giant-file-registry.md\n")
         cls.put_at(cls.template, "ARCHITECTURE.md",
                    "<!-- BEGIN GENERATED: SRC TREE -->\n<!-- END GENERATED: SRC TREE -->\n"
                    "<!-- BEGIN GENERATED: TOP LEVEL MODULE MAP -->\n"
@@ -190,6 +192,38 @@ class DeadlineEntrypointsTest(unittest.TestCase):
     def test_pr_refresh_accepts_expired_closed_plan_without_bookkeeping(self):
         self.assert_warning_pass(self.progress("pull_request"))
 
+    def test_raw_giant_growth_warns_in_ci_audit_and_prepush(self):
+        env = self.candidate({GIANT: (self.repo / GIANT).read_text() + "// one raw line\n"})
+        commands = ([sys.executable, "scripts/giant_file_progress.py"],
+                    [sys.executable, "scripts/audit_maintainability.py", "--check"],
+                    ["sh", "-c", PREPUSH_SEQUENCE])
+        for command in commands:
+            with self.subTest(command=command):
+                result = self.command_at(self.repo, command, env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                warnings = [line for line in result.stderr.splitlines() if "WARNING:" in line
+                            or "warning" in line]
+                self.assertTrue(any(GIANT in line and "+1 raw lines" in line
+                                    for line in warnings), result.stderr)
+
+    def test_threshold_crossing_warns_in_ci_audit_and_prepush(self):
+        path = "src/cli/near_giant.rs"
+        self.put_at(self.repo, path, "pub fn fixture() {}\n" * 999)
+        result = self.command_at(self.repo, [sys.executable, "scripts/generate_inventory_docs.py"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.git_at(self.repo, "add", "-A")
+        self.git_at(self.repo, "commit", "-qm", "near giant baseline")
+        self.base = self.git_at(self.repo, "rev-parse", "HEAD")
+        env = self.candidate({path: "pub fn fixture() {}\n" * 1000})
+        for command in ([sys.executable, "scripts/giant_file_progress.py"],
+                        [sys.executable, "scripts/audit_maintainability.py", "--check"],
+                        ["sh", "-c", PREPUSH_SEQUENCE]):
+            with self.subTest(command=command):
+                result = self.command_at(self.repo, command, env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(any(path in line and "+1 raw lines" in line
+                                    for line in result.stderr.splitlines()), result.stderr)
+
     def test_push_refresh_accepts_expired_closed_plan_without_bookkeeping(self):
         self.assert_warning_pass(self.progress("push"))
 
@@ -216,13 +250,29 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         self.assertIn("WARNING:", result.stderr)
         self.assertIn("2030-01-01", result.stderr)
 
-    def test_same_expired_fixture_still_rejects_giant_growth(self):
+    def test_giant_growth_also_warns_in_hotfile_gate(self):
         env = self.candidate({GIANT: (self.repo / GIANT).read_text() + "// one raw line\n"})
-        for script in ("giant_file_progress.py", "check_hotfile_ratchet.py"):
-            with self.subTest(script=script):
-                result = self.command_at(self.repo, [sys.executable, "scripts/" + script], env)
-                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn("grew to 1201", result.stdout + result.stderr)
+        result = self.command_at(self.repo, [sys.executable, "scripts/giant_file_progress.py"], env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"giant growth: {GIANT}: +1 raw lines", result.stderr)
+        result = self.command_at(self.repo, [sys.executable, "scripts/check_hotfile_ratchet.py"], env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"WARNING: giant growth: {GIANT}: +1 raw lines", result.stderr)
+
+    def test_missing_deadline_and_issue_warn_without_bookkeeping(self):
+        registry = (self.repo / "scripts/giant_file_registry.toml").read_text()
+        registry = "\n".join(line for line in registry.splitlines()
+                             if not line.startswith(("deadline=", "decompose_issue="))) + "\n"
+        env = self.candidate({"scripts/giant_file_registry.toml": registry})
+        for command in ([sys.executable, "scripts/giant_file_progress.py"],
+                        [sys.executable, "scripts/generate_inventory_docs.py", "--check"],
+                        ["sh", "-c", PREPUSH_SEQUENCE]):
+            with self.subTest(command=command):
+                result = self.command_at(self.repo, command, env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("WARNING: giant-file registry:", result.stderr)
+                self.assertIn("shrink deadline ''", result.stderr)
+                self.assertIn("decompose_issue ''", result.stderr)
 
     def test_same_expired_fixture_still_rejects_generated_document_drift(self):
         path = "docs/generated/route-inventory.md"
@@ -232,20 +282,26 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("stale generated doc: " + path, result.stdout)
 
-    def test_same_expired_fixture_still_rejects_unregistered_new_giant(self):
+    def test_same_expired_fixture_warns_for_unregistered_new_giant(self):
         env = self.candidate({"src/cli/unregistered.rs": "pub fn new_giant() {}\n" * 1000})
         result = self.command_at(self.repo, [sys.executable, "scripts/giant_file_progress.py"], env)
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("new or growing giant", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("new giant: src/cli/unregistered.rs: +1000 raw lines", result.stderr)
         self.assertIn("src/cli/unregistered.rs", result.stderr)
 
     def test_current_registry_warnings_match_overdue_entries_in_all_entrypoints(self):
         # Use checked-in planning inputs with small measured files, keeping the test cheap.
         registry = (ROOT / "scripts/giant_file_registry.toml").read_text()
         entries = tomllib.loads(registry)["entry"]
+        def overdue(entry):
+            try:
+                return date.fromisoformat(entry.get("deadline", "")) < date.fromisoformat(EVALUATION_DATE)
+            except (TypeError, ValueError):
+                return False
+
         expected = [entry for entry in entries
                     if entry.get("decision", "shrink") == "shrink"
-                    and date.fromisoformat(entry["deadline"]) < date.fromisoformat(EVALUATION_DATE)]
+                    and overdue(entry)]
         for entry in entries:
             path = self.repo / entry["file"]
             content = path.read_text() if path.exists() else ""
@@ -278,7 +334,7 @@ class DeadlineEntrypointsTest(unittest.TestCase):
                 warning_lines = [line for line in result.stderr.splitlines()
                                  if line.startswith(OVERDUE_PREFIX)]
                 for entry in expected:
-                    self.assertTrue(any(all(str(entry[key]) in line for key in
+                    self.assertTrue(any(all(str(entry.get(key, "")) in line for key in
                                              ("file", "deadline", "decompose_issue"))
                                         for line in warning_lines), result.stderr)
 

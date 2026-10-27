@@ -251,7 +251,7 @@ fn whole_message(id: &str, content: serde_json::Value) -> Vec<u8> {
 }
 
 fn thinking_then_tool(id: &str) -> Vec<u8> {
-    let thinking = serde_json::json!({"type": "thinking", "thinking": "t", "signature": "s"});
+    let thinking = serde_json::json!({"type": "thinking", "thinking": "", "signature": "s"});
     let tool =
         serde_json::json!({"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}});
     whole_message(id, serde_json::json!([thinking, thinking, tool]))
@@ -1039,6 +1039,8 @@ mod canary_policy;
 mod local_retry;
 #[path = "operator_resume_actor_tests.rs"]
 mod operator_resume;
+#[path = "progress_drain_actor_tests.rs"]
+mod progress_drain;
 
 #[path = "repost_turn_tests.rs"]
 mod repost_turn;

@@ -20,13 +20,27 @@ repository is already clippy-clean.
 
 ## Current Staging
 
-`Cargo.toml` configures eight Clippy denies: `dbg_macro`, `todo`,
-`unimplemented`, `await_holding_lock`, `large_enum_variant`, `result_large_err`,
-`too_many_arguments` and `type_complexity`. The authoritative staged command is
+`Cargo.toml` configures eleven deny entries: the `correctness` group and ten
+individual lints, `dbg_macro`, `todo`, `unimplemented`, `await_holding_lock`,
+`drop_non_drop`, `mistyped_literal_suffixes`, `large_enum_variant`,
+`result_large_err`, `too_many_arguments` and `type_complexity`.
+The authoritative staged command is
 `cargo clippy --workspace --all-targets --all-features -- -W clippy::all`.
-The trailing group level overrides the five group-member denies to warnings;
-only `dbg_macro`, `todo` and `unimplemented` remain denied. Configured deny
-entries must not be mistaken for effective hard gates under this argv.
+The trailing group level lowers the Cargo levels of group-member denies;
+the four structural complexity lints remain warnings.
+
+Effective denies for lib/bin under the staged command: `dbg_macro`, `todo`,
+`unimplemented`, `await_holding_lock`, `drop_non_drop`, `mistyped_literal_suffixes`
+and the `correctness` group.
+
+The first three are outside `clippy::all`. For the other entries, `src/lib.rs`
+and `src/main.rs` redeclare crate-level `#![deny(clippy::<lint>)]` attributes,
+which keep them denied under this argv. These attributes cover the lib/bin
+crates, including their unit tests; separate integration-test crates are not
+covered by those attributes. The library retains existing individual correctness
+allows for `absurd_extreme_comparisons` and `overly_complex_bool_expr`; the group
+deny does not remove them. Configured Cargo deny entries alone must not be
+mistaken for effective hard gates under this argv.
 
 Main and PR lint run this same invocation once, adding only Cargo's JSON output
 format. `check_clippy_warning_count.py` counts compiler warning diagnostics
@@ -37,14 +51,16 @@ the gate, never producing a valid zero. Main uploads the observation. The count
 is compiler-emitted diagnostics, not source occurrences or a deduplicated
 cross-target debt estimate.
 
-The warning-total gate uses `scripts/clippy_warning_baseline.json`: **379**
-diagnostics, measured by Ubuntu main CI at
-`f3724fb6366599a9041bcc63d267be668991c799` after the first warning-debt
-reduction (down from 952). The file records the run URL, artifact ID and diagnostics
-digest. The environment is Rust 1.94.1, x86_64 Linux and the staged argv above;
-local Mac totals cannot substitute for it. Both workflows reject warning growth
-and invalid or mismatched observations. The existing required `Lint` mirror
-owns PR enforcement; no required context is added.
+The warning-total gate uses `scripts/clippy_warning_baseline.json`: **290**
+diagnostics, measured locally on WSL at
+`6330b17f93a7852c42580e65df8f0c90752a1765` after reducing the previous 342-warning
+ceiling. The observation records its local WSL source, commit SHA and diagnostics
+digest; it does not claim a CI run or uploaded artifact. The environment remains
+Rust 1.94.1, x86_64 Linux and the staged argv above; local Mac totals cannot
+substitute for it. Main and PR CI measure again and reject warning growth or
+invalid/mismatched observations. PR CI observes the merge ref with main, so the
+combined change needs a fresh observation when it lands. The existing required
+`Lint` mirror owns PR enforcement; no required context is added.
 
 Lower the baseline with a valid observation when warning debt decreases.
 Admission compares the committed PR base (main uses its first parent) and
@@ -81,7 +97,9 @@ nightly does. CI does not call it: on `main` push and dispatch, every nightly, a
 over six `rust_tests` workers, each with its own PostgreSQL service, and
 `test_evidence` audits that every planned test ran. PR, main and nightly keep the same
 three jobs; `scripts/check-ci-runner-hardening.sh` allows them to differ only in
-`needs`, `if`, the PR base comparison and the main `nextest-baseline` upload.
+`needs`, `if`, the PR base comparison, the main `nextest-baseline` upload and the
+nightly plan's `--retry-mode policy` (PR and main plan `all-once`, see
+[known-flaky-retry.md](known-flaky-retry.md)).
 
 The `lint` job runs fmt, clippy, the policy JS tests, the non-lib side of the
 recipe's `--all-targets` lines (`--bins --test '*'`), and the `ClaudeBinary`

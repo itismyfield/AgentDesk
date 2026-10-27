@@ -87,13 +87,12 @@ fn pending_plain_frame_blocks_the_real_timeout_cleanup_without_prior_holds() {
                 !draft_guarded(&session),
                 "a prior draft guard must not hide this path"
             );
-            assert!(crate::services::claude_tui::guarded_outcome::held_result(&session).is_ok());
             let entered = Cell::new(false);
             let result = super::super::with_composer_cleanup_lock(&session, || {
                 entered.set(true);
                 match stranded_draft_is_ours(&session, PromptReadinessKind::Followup) {
                     Ok(true) => {
-                        super::super::clear_prompt_draft_before_error(&session);
+                        super::clear_prompt_draft(&session);
                         Ok(())
                     }
                     Ok(false) => Ok(()),

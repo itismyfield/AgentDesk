@@ -437,6 +437,7 @@ case "$*" in *"{tmux}"*) read -r state < '{root}/pane' ;; *) state=dead ;; esac
 case "$1" in
  has-session) [ "$state" = dead ] && {{ echo "can't find session" >&2; exit 1; }}; exit 0 ;;
  list-panes) [ "$state" = dead ] && echo 1 || echo 0; exit 0 ;;
+ display-message) for last do :; done; if [ "$last" = '#{{pane_dead}}' ]; then [ "$state" = dead ] && echo 1 || echo 0; fi; exit 0 ;;
  capture-pane) case "$state" in busy) printf '%s\n' '⏺ Running 1 shell command…' '· Actioning… (4m 7s · esc to interrupt)' ;; idle) cat '{root}/idle-pane' ;; esac; exit 0 ;;
  kill-session) echo "$*" >> '{root}/tmux-kills'; exit 0 ;;
  send-keys|load-buffer|paste-buffer) echo "$*" >> '{root}/tmux-writes'; exit 0 ;;

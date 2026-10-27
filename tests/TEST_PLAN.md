@@ -9,17 +9,18 @@
 
 | Layer | 목적 | 기준 파일/경계 | 실행 명령 |
 | --- | --- | --- | --- |
-| `unit` | 직렬화, 저장, mailbox state 같은 로컬 불변식 검증 | `src/services/discord/*` 개별 테스트 모듈 | 모듈별 `cargo test --bin agentdesk <filter>` |
-| `state-transition integration` | DB + policy + dispatch 상태 전이 검증 | `src/integration_tests.rs` | 기본 gate는 `cargo test --all-targets` |
-| `failure-recovery` | restart / reconcile / outbox / delayed-worker 복구 경계 검증 | `src/integration_tests/tests/high_risk_recovery.rs` | `cargo test --bin agentdesk high_risk_recovery::` |
+| `unit` | 직렬화, 저장, mailbox state 같은 로컬 불변식 검증 | `src/services/discord/*` 개별 테스트 모듈 | 모듈별 `cargo test --lib <module::path>` |
+| `state-transition integration` | DB + policy + dispatch 상태 전이 검증 | PostgreSQL이 필요한 lib 시험(`scripts/ci/pg_test_classifier.py`가 분류) | `just test-postgres` (lib 시험 전체를 PG 시험 서버에 대고 실행, `POSTGRES_TEST_DATABASE_URL_BASE` 필요) |
+| `failure-recovery` | restart / reconcile / outbox / delayed-worker 복구 경계 검증 | `src/high_risk_recovery.rs` | `cargo test --lib high_risk_recovery::` |
 
 ### 현재 고정 실행 경로
 
 - broad regression: `cargo test --all-targets`
-- high-risk recovery gate: `cargo test --bin agentdesk high_risk_recovery::`
-- restart / boot reconcile만 재현: `cargo test --bin agentdesk high_risk_recovery::failure_recovery::`
-- outbox boundary만 재현: `cargo test --bin agentdesk high_risk_recovery::outbox_boundary::`
-- delayed worker / watchdog만 재현: `cargo test --bin agentdesk high_risk_recovery::delayed_worker::`
+- high-risk recovery gate: `cargo test --lib high_risk_recovery::`
+- restart / boot reconcile만 재현: `cargo test --lib -- high_risk_recovery::boot_reconcile high_risk_recovery::restart_recovery`
+- outbox boundary만 재현: `cargo test --lib -- high_risk_recovery::runtime_reconcile_auto_queue_pending_delivery_orphans_requeues_notify_outbox_pg services::dispatches::outbox_queue:: services::dispatches::outbox_claiming::`
+- delayed worker / watchdog만 재현: `cargo test --lib -- services::discord::health::recovery::self_watchdog services::hang_forensics::tests services::dispatch_watchdog::tests`
+- 테스트는 모두 lib에 있다. 실행 수가 0이면(`running 0 tests`) 통과가 아니라 실패로 본다.
 
 고위험 coverage inventory와 `existing vs missing` 매핑은 `docs/high-risk-recovery-lane.md`가 기준 문서다.
 
@@ -168,7 +169,7 @@
 
 ### Config Domains
 - `patch_config_entries_rejects_readonly_metadata` — read-only runtime metadata like server_port cannot be written
-- `put_settings_pg_is_full_replace_and_strips_retired_company_keys` — `kv_meta['settings']` is full-replace; callers must merge any hidden keys they intend to preserve, while retired legacy keys are stripped server-side (see `src/server/routes/settings_tests.rs`)
+- `put_settings_pg_is_full_replace_and_strips_retired_company_keys` — `kv_meta['settings']` is full-replace; callers must merge any hidden keys they intend to preserve, while retired legacy keys are stripped server-side (behavior: `put_settings` in `src/services/settings.rs`)
 
 ### bot_settings.json
 - `token_hash_sha256_correct` — SHA256 해시 계산 정확
@@ -281,24 +282,13 @@
 ```
 tests/
 ├── TEST_PLAN.md          ← 이 문서
-├── unit/                 ← 단위 테스트 (각 모듈별)
-│   ├── router_test.rs
-│   ├── settings_test.rs
-│   ├── formatting_test.rs
-│   ├── provider_test.rs
-│   ├── inflight_test.rs
-│   ├── handoff_test.rs
-│   ├── org_schema_test.rs
-│   └── pcd_test.rs
-├── integration/          ← 통합 테스트 (실제 Discord API mock)
-│   ├── turn_lifecycle.rs
-│   ├── restart_recovery.rs
-│   ├── multi_channel.rs
-│   └── session_persistence.rs
-└── e2e/                  ← E2E 테스트 (실제 서버 + API)
-    ├── main.rs           ← 테스트 바이너리 엔트리
-    ├── smoke_test.rs     ← ✅ 서버 기동 → health → CRUD → settings → cleanup
-    └── restart_test.rs   ← 기동 → turn → kill → 재기동 → 복구
+├── e2e/                  ← E2E 테스트 (실제 서버 + API)
+│   ├── main.rs           ← 테스트 바이너리 엔트리
+│   ├── smoke_test.rs     ← ✅ 서버 기동 → health → CRUD → settings → cleanup
+│   └── tui_relay/        ← TUI relay E2E 시나리오(yaml)와 fixture
+├── runtime_root.rs       ← runtime root guard 프로세스 시험
+├── fixtures/             ← 스크립트 시험 입력
+└── test_*.py, test_*.sh  ← Python·셸 시험(주로 scripts/ 검사기의 자기 시험)
 ```
 
-현재 운영 중인 recovery lane 모듈 경계는 `src/integration_tests/tests/high_risk_recovery.rs`이며, 위 디렉터리 구조는 장기적인 분리 방향을 설명한다.
+단위·통합 Rust 시험은 `tests/`가 아니라 lib 안(`src/**`의 `#[cfg(test)]` 모듈과 `*_tests.rs`)에 있다. recovery lane 모듈 경계는 `src/high_risk_recovery.rs`다.

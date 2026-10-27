@@ -19,8 +19,8 @@ const QUEUE_HEADERS: &[&str] = &[
     "• Queued follow-up inputs",
     "• Messages to be submitted at end of turn",
 ];
-/// More composer rows than this are not read; the size check keeps a paste within it.
-pub(super) const MAX_COMPOSER_ROWS: usize = 40;
+/// Bound the pre-paste composer scan; an unread layout does not veto injection.
+const MAX_COMPOSER_ROWS: usize = 40;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Composer {
@@ -35,8 +35,6 @@ pub(super) enum Composer {
 pub(super) struct Screen {
     /// A Codex modal or a screen that hides the composer.
     pub modal: bool,
-    /// The bottom row is an overlay or picker footer.
-    pub overlay: bool,
     pub queued: bool,
     pub composer: Composer,
     /// Image rows above the textarea, which an Enter submits along with the text.
@@ -58,22 +56,10 @@ pub(super) fn read(capture: &str) -> Screen {
         .any(|line| QUEUE_HEADERS.contains(&line.trim()));
     Screen {
         modal,
-        overlay,
         queued,
         composer,
         attachments,
     }
-}
-
-/// Whether the composer holds exactly `text` and nothing an Enter would submit with it. Modal
-/// words in the pasted text itself must not fail the check, so only the footers count here.
-pub(super) fn owns(capture: &str, text: &str) -> bool {
-    let shown = read(capture);
-    let squeeze = |value: &str| -> String { value.split_whitespace().collect() };
-    !shown.overlay
-        && !shown.queued
-        && !shown.attachments
-        && matches!(shown.composer, Composer::Text(held) if squeeze(&held) == squeeze(text))
 }
 
 /// The composer's text and whether image rows sit above it.

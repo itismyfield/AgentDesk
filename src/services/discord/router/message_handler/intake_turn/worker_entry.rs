@@ -103,7 +103,7 @@ async fn worker_replay_admission(
         self as admission, ReplayAdmissionContext, ReplayPreflight,
     };
     let channel = request.channel_id.get().to_string();
-    if request.intake_outbox_id.is_none() || admission::dormant_start(&channel).is_some() {
+    if request.intake_outbox_id.is_none() {
         return None;
     }
     let Some(pool) = shared.pg_pool.as_ref() else {

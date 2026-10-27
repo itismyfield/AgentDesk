@@ -132,8 +132,8 @@ fn extract_response_from_jsonl_bytes(bytes: &[u8]) -> String {
                         let mut block_has_text = false;
                         for block in arr {
                             match block.get("type").and_then(|t| t.as_str()) {
-                                Some("text") => {
-                                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                Some("text" | "thinking") => {
+                                    if let Some(text) = crate::services::claude_tui::transcript_tail::visible_assistant_block_text(block) {
                                         if !text.is_empty() {
                                             response.push_str(text);
                                             block_has_text = true;
