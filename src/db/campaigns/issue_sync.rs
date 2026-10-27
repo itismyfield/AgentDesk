@@ -47,9 +47,8 @@ pub struct IssueFact {
     pub closed_at: Option<DateTime<Utc>>,
     /// The closing event of the current closing; `None` when it could not be confirmed.
     pub closing: Option<ClosingEvent>,
-    /// Set for issues read by number. Only these may change a node's status, consume its
-    /// automatic-close record or clear its drift report, and only if newer than that state.
-    /// A listed fact may still raise a drift report.
+    /// Set for reads by number; only those newer than the node may change its status, consume
+    /// its automatic-close record or clear its drift report. Listed facts may raise drift.
     pub fetched_at: Option<DateTime<Utc>>,
 }
 
