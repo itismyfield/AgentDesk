@@ -82,6 +82,7 @@ pub(crate) async fn dispatch_blocked_on_tx(
         .await
 }
 
+pub(crate) mod hold_notice;
 pub(crate) mod receipt;
 #[cfg(test)]
 mod register_tests;

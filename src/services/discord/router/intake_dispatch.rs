@@ -139,42 +139,6 @@ impl IntakeAdmission {
     }
 }
 
-/// Without an activation supplier the replay check keeps the legacy hold lookup and its outcomes.
-fn replay_starts_dormant(channel_id: &str) -> bool {
-    replay_admission::dormant_start(channel_id).is_some()
-}
-
-/// The legacy hold lookup: a lookup failure or a mixed input blocks instead of waiting in custody.
-async fn dormant_hold_admission(
-    pool: &sqlx::PgPool,
-    submission: &IntakeSubmission,
-    channel_id: &str,
-) -> Option<IntakeAdmission> {
-    let mut sources: Vec<String> = std::iter::once(submission.request.user_msg_id)
-        .chain(submission.request.source_message_ids.iter().copied())
-        .map(|id| id.get().to_string())
-        .collect();
-    sources.sort_unstable();
-    sources.dedup();
-    // Consume every absorbed source before routing or attachment effects; mixed items stay intact.
-    let detail = match crate::db::replay_disposition::unblocked_sources(
-        pool,
-        submission.provider.as_str(),
-        channel_id,
-        &sources,
-    )
-    .await
-    {
-        Ok(unblocked) if unblocked.len() == sources.len() => None,
-        Ok(unblocked) if unblocked.is_empty() => return Some(IntakeAdmission::ConsumedToHold),
-        Ok(_) => Some("intake mixes held and new sources".to_string()),
-        Err(error) => Some(format!("replay hold lookup failed: {error}")),
-    };
-    detail.map(|detail| IntakeAdmission::Blocked {
-        reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
-    })
-}
-
 /// Makes the Discord attachments portable and validates every bundle the input would carry.
 async fn portable_uploads(
     pool: &sqlx::PgPool,
@@ -259,13 +223,7 @@ pub(crate) async fn admit_text_intake(
         return IntakeAdmission::ConsentHeld(Box::new(hold));
     }
     let channel_id = submission.request.channel_id.get().to_string();
-    if let Some(pool) = deps.shared.pg_pool.as_ref()
-        && replay_starts_dormant(&channel_id)
-    {
-        if let Some(admission) = dormant_hold_admission(pool, submission, &channel_id).await {
-            return admission;
-        }
-    } else if let Some(pool) = deps.shared.pg_pool.as_ref() {
+    if let Some(pool) = deps.shared.pg_pool.as_ref() {
         let request = &submission.request;
         let input = replay_admission::discord_input(
             submission.provider.as_str(),
@@ -567,13 +525,13 @@ pub(crate) async fn dispatch_text_intake(
     finish_text_intake_admission(deps, admission, submission).await
 }
 
-/// Only active replay starts defer a live input, so only they hold its checkpoint until custody.
+/// Channel opt-in retains source projection; final execution still needs its supported scope.
 pub(crate) fn checkpoint_waits_for_admission(channel_id: serenity::ChannelId) -> bool {
     #[cfg(unix)]
     if super::herdr_consent::endpoint(channel_id.get()).is_some() {
         return true;
     }
-    !replay_starts_dormant(&channel_id.get().to_string())
+    replay_admission::dormant_start(&channel_id.get().to_string()).is_none()
 }
 
 /// A turn-selected Codex channel may queue a live input for turn mode, so its checkpoint waits too.
@@ -689,6 +647,13 @@ pub(crate) async fn finish_text_intake_admission(
             hold_in_custody(deps, submission, why).await?;
         }
         IntakeAdmission::ReplayDeferred(defer) => {
+            if defer == replay_admission::ReplayDefer::LookupFailed {
+                let reason = IntakeBlockedReason::RoutingDependencyFailed {
+                    detail: "기존 실행 여부를 확인하지 못해 새 실행을 보류했습니다. 완료 여부를 확인한 뒤 다시 시도해 주세요."
+                        .into(),
+                };
+                notify_blocked_intake(deps, &submission, &reason).await;
+            }
             let why = format!("replay check deferred ({defer:?})");
             hold_in_custody(deps, submission, why).await?;
         }

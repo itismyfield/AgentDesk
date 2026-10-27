@@ -26,7 +26,7 @@ async fn seed_receipt(
     .bind(provider)
     .bind(disposition)
     .bind(&sources)
-    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(format!("discord:{}:{channel}:{}", provider.trim().to_lowercase(), sources.last().unwrap()))
     .fetch_one(pool)
     .await
     .expect("seed durable replay receipt")
@@ -96,7 +96,7 @@ async fn replay_live_absorbed_sources_cannot_forward_and_keep_original_pg() {
             vec![MessageId::new(source_a), mixed.request.user_msg_id];
         assert!(matches!(
             super::super::admit_text_intake(&deps, &mixed).await,
-            IntakeAdmission::Blocked { .. }
+            IntakeAdmission::ReplayDeferred(_)
         ));
         // With replay starts active a mixed input is undecided: it waits whole in the queue.
         let _active = super::super::replay_admission::test_activation::activate(channel.get());
@@ -297,6 +297,105 @@ async fn replay_queued_whole_consumed_and_mixed_original_restored_pg() {
         rows, 1,
         "whole and mixed held sources must not create provider routes"
     );
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn p5_off_intake_custody_consumes_every_prior_state_pg() {
+    let _env = ScopedIntakeTestEnv::with_mode("disabled");
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let http = Arc::new(serenity::Http::new("Bot replay-admission-test"));
+    let deps = deps(&http, &shared);
+    for (n, state) in [
+        "registered_not_started",
+        "started_unclassified",
+        "startup_failed_no_effect",
+        "withheld",
+        "classified_normal",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let channel = ChannelId::new(7_330_510 + n as u64);
+        let source = 7_331_510 + n as u64;
+        let id = seed_receipt(&pool, channel, "claude", &[source], state).await;
+        let submission = submission_for_admission(channel, source);
+        let admission = super::super::admit_text_intake(&deps, &submission).await;
+        if state == "registered_not_started" {
+            assert!(matches!(admission, IntakeAdmission::ReplayDeferred(_)));
+        } else {
+            assert!(
+                matches!(admission, IntakeAdmission::ConsumedToHold),
+                "{state}"
+            );
+        }
+        let mut worker = request(channel, source, "admission policy");
+        worker.intake_outbox_id = Some(id);
+        let result = crate::services::discord::router::message_handler::execute_intake_turn_core(
+            &http,
+            &shared,
+            "test-token",
+            worker,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            if state == "registered_not_started" {
+                crate::services::discord::router::IntakeExecution::Deferred
+            } else {
+                crate::services::discord::router::IntakeExecution::ConsumedProtected
+            }
+        );
+        assert_original_kept(&pool, id, state).await;
+    }
+    assert!(shared.core.lock().await.sessions.is_empty());
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn p5_off_intake_query_error_notifies_and_preserves_retry_pg() {
+    let _env = ScopedIntakeTestEnv::with_mode("disabled");
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let channel = ChannelId::new(7_330_516);
+    let discord =
+        crate::services::discord::recovery_engine::o_cut_recorder::start(channel.get()).await;
+    let deps = deps(&discord.http, &shared);
+    sqlx::query("ALTER TABLE intake_outbox RENAME TO p5_intake_unavailable")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let submission = submission_for_admission(channel, 7_331_516);
+    let admission = super::super::admit_text_intake(&deps, &submission).await;
+    assert!(matches!(
+        admission,
+        IntakeAdmission::ReplayDeferred(super::super::replay_admission::ReplayDefer::LookupFailed)
+    ));
+    let result = super::super::finish_text_intake_admission(&deps, admission, submission).await;
+    assert_eq!(
+        discord.contents().len(),
+        1,
+        "a failed lookup cannot silently discard the input"
+    );
+    assert!(shared.core.lock().await.sessions.is_empty());
+    sqlx::query("ALTER TABLE p5_intake_unavailable RENAME TO intake_outbox")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        super::super::admit_text_intake(&deps, &submission_for_admission(channel, 7_331_516)).await,
+        IntakeAdmission::Local(_)
+    ));
+    println!("P5 OFF_QUERY_ERROR visible_notices=1 retry_custody={result:?}");
     pool.close().await;
     fixture.drop().await;
 }
