@@ -18,20 +18,19 @@ pub(crate) fn inspect(content: &str) -> Result<SnapshotRead, String> {
 }
 
 /// Runs before any unlink, marker change or legacy publish, even in an adopted actor. Only a
-/// snapshot read as a non-legacy object refuses; a failed read leaves the write to report itself.
+/// parsed non-legacy object refuses; a failed read or parse lets the write proceed as main does.
 pub(crate) fn require_legacy_write(path: &Path) -> Result<(), String> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Ok(());
     };
-    if content.trim_start().starts_with('{') {
-        let value: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| format!("unreadable queue object {}: {e}", path.display()))?;
-        if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
-            return Err(format!(
-                "read-only queue snapshot {}: legacy mutation refused; preserve the original file and use a V2-capable recovery binary for manual inspection",
-                path.display()
-            ));
-        }
+    if content.trim_start().starts_with('{')
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
+        && value.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+    {
+        return Err(format!(
+            "read-only queue snapshot {}: legacy mutation refused; preserve the original file and use a V2-capable recovery binary for manual inspection",
+            path.display()
+        ));
     }
     Ok(())
 }

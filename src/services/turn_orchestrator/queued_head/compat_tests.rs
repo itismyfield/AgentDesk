@@ -153,13 +153,9 @@ fn v2_metadata_only_catalog_is_visible_but_legacy_recovery_is_quarantined() {
 fn v2_and_unknown_objects_refuse_legacy_mutation_before_unlink() {
     let _root = TestRuntimeRootGuard::new();
     run(async {
-        for (index, content) in [
-            "{\"version\":3,\"items\":[]}",
-            "{\"version\":2,",
-            "{\"items\":[]}",
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, content) in ["{\"version\":3,\"items\":[]}", "{\"items\":[]}"]
+            .into_iter()
+            .enumerate()
         {
             let channel = ChannelId::new(7_272_270 + index as u64);
             let (path, _) = seed(channel.get(), &json!([]));
@@ -173,6 +169,19 @@ fn v2_and_unknown_objects_refuse_legacy_mutation_before_unlink() {
             assert!(result.persistence.count_unknown);
             assert_eq!(std::fs::read_to_string(path).unwrap(), content);
         }
+        // An object that does not parse is not a snapshot to protect; /clear clears it as main does.
+        let channel = ChannelId::new(7_272_272);
+        let (path, _) = seed(channel.get(), &json!([]));
+        std::fs::write(&path, "{\"version\":2,").unwrap();
+        assert!(compat::require_legacy_write(&path).is_ok());
+        ChannelMailboxRegistry::default()
+            .handle(channel)
+            .clear(context())
+            .await;
+        assert_ne!(
+            std::fs::read_to_string(&path).ok().as_deref(),
+            Some("{\"version\":2,")
+        );
     });
 }
 
