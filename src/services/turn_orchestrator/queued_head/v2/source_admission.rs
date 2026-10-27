@@ -168,6 +168,7 @@ impl Owner {
                         payload_window: None,
                         resolved_target: None,
                         preparation_hold: None,
+                        legacy_attempt: None,
                     },
                     reason: RetainedReason::Rejected {
                         reason: "opaque_unsent".into(),

@@ -205,6 +205,8 @@ pub(crate) fn register(
 }
 
 pub(crate) fn withdraw(id: &str, transcript: &Path) {
+    // A scoped attempt keeps its registration and writes nothing; only the queue's exact
+    // not-sent proof, projected as abandoned, releases its collision candidate.
     #[cfg(test)]
     if v2::scoped() {
         return;

@@ -361,6 +361,7 @@ fn history_v2_actual_writer_golden_is_read_only_for_the_approved_rollback_reader
             serde_json::to_string_pretty(&golden).unwrap() + "\n",
         )
         .unwrap();
+        panic!("history golden regenerated; rerun without ADK_UPDATE_HISTORY_GOLDEN to compare");
     }
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(fixture).unwrap()).unwrap(),
@@ -454,3 +455,6 @@ fn history_v2_passive_encoding_tracks_late_binding_receipts_and_settlement() {
     assert_eq!(disk["passive"][0]["state"], "settled");
     assert_eq!(disk["passive"][0]["entry"]["events"][0]["row"], "late-row");
 }
+
+#[path = "v2/s4_tests.rs"]
+mod s4;

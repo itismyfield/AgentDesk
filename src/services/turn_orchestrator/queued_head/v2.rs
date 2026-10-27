@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub(crate) mod actor;
 mod attempt;
 mod commit;
+mod migration;
 mod retained;
 pub(crate) mod source_admission;
 mod sources;
@@ -109,6 +110,7 @@ impl Owner {
             payload_window: None,
             resolved_target: None,
             preparation_hold: None,
+            legacy_attempt: None,
         });
         self.commit(next)?;
         Ok(key)

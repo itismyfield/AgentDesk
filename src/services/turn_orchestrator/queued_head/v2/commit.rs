@@ -22,6 +22,10 @@ impl Owner {
         if actual != self.bytes {
             return Err("snapshot changed outside owner".into());
         }
+        if Some(&candidate) == self.bytes.as_ref() {
+            self.snapshot = next;
+            return Ok(());
+        }
         let mut sync_unconfirmed = false;
         let result = if self.fault == Fault::Before {
             Err("before publish".into())

@@ -54,12 +54,18 @@ fn v2_value(path: &Path) -> Option<serde_json::Value> {
 #[cfg(test)]
 pub(super) fn known_v2(path: &Path, hashes: &[String]) -> Option<bool> {
     let value = v2_value(path)?;
-    let entries = value["live"].as_array()?.iter().chain(
+    // An abandoned frame was proven never pasted, so it marks no native row as injected.
+    let passive = || {
         value["passive"]
-            .as_array()?
-            .iter()
-            .filter_map(|p| p.get("entry")),
-    );
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p["state"] != "abandoned")
+    };
+    let entries = value["live"]
+        .as_array()?
+        .iter()
+        .chain(passive().filter_map(|p| p.get("entry")));
     let bound = entries.into_iter().any(|e| {
         e["class_hash"]
             .as_str()
@@ -75,7 +81,7 @@ pub(super) fn known_v2(path: &Path, hashes: &[String]) -> Option<bool> {
                     .is_some_and(|h| hashes.iter().any(|x| x == h))
             })
         });
-    let unbound = value["passive"].as_array()?.iter().any(|p| {
+    let unbound = passive().any(|p| {
         p["registration"]["frame"]["class_hash"]
             .as_str()
             .is_some_and(|h| hashes.iter().any(|x| x == h))

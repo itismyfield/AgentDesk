@@ -33,6 +33,9 @@ pub(crate) struct InputAttempt {
     pub(crate) resolved_target: Option<crate::services::tui_input::target_epoch::PaneEpoch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) preparation_hold: Option<serde_json::Value>,
+    /// The attempt a legacy snapshot recorded, kept verbatim because it names no provider or target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) legacy_attempt: Option<super::mend::HeadAttempt>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

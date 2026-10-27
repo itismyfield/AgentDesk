@@ -26,6 +26,7 @@ impl Owner {
                 },
             });
         }
+        super::migration::anchor_terminals(&mut next, now);
         next.terminal_identities
             .retain(|terminal| now.saturating_sub(terminal.settled_at_ms) < 86_400_000);
         self.commit(next)?;
@@ -115,10 +116,21 @@ impl Owner {
             return;
         }
         for entry in &self.snapshot.retained_inputs {
-            if let Some(attempt) = &entry.input.attempt {
+            let Some(attempt) = &entry.input.attempt else {
+                continue;
+            };
+            let (provider, owner) = (&attempt.provider, &attempt.target.owner);
+            // A proven-unsent paste can never be observed, so its ledger entry is forgotten.
+            if matches!(entry.disposition, Some(RetainedDisposition::KnownNotSent)) {
+                crate::services::tui_prompt_dedupe::withdraw_injected_steer(
+                    provider,
+                    owner,
+                    &attempt.nonce,
+                );
+            } else {
                 crate::services::tui_prompt_dedupe::retain_injected_steer(
-                    &attempt.provider,
-                    &attempt.target.owner,
+                    provider,
+                    owner,
                     &attempt.nonce,
                 );
             }
