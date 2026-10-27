@@ -566,3 +566,7 @@ pub(crate) use rebind_runtime::codex_rebind_complete_for_tests;
 pub(crate) use rebind_runtime::codex_rebind_spawn_for_tests;
 #[cfg(test)]
 pub(crate) use restore_persist_outcome::codex_restart_output_for_tests;
+
+#[cfg(all(test, unix))]
+#[path = "recovery_engine/o_settlement_tests.rs"]
+pub(in crate::services::discord) mod o_settlement_tests;

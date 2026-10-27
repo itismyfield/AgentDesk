@@ -58,10 +58,38 @@ use terminal_controller_cutover::{bridge_body_claim, bridge_o_body_peek_decision
 
 const TERMINAL_DELIVERY_LOG_TARGET: &str = module_path!();
 
+fn record_delivered_input(provider: &ProviderKind, channel: ChannelId, input: &InflightTurnState) {
+    if input.user_msg_id == 0
+        || super::super::is_synthetic_headless_message_id_raw(input.user_msg_id)
+    {
+        return;
+    }
+    super::super::outbound::completed_turn_ledger::append_completed_episode(
+        provider,
+        channel.get(),
+        input.user_msg_id,
+        input
+            .turn_nonce
+            .as_deref()
+            .filter(|nonce| !nonce.is_empty()),
+    );
+}
+
 pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
     mut state: TerminalOutcomeDeliveryState,
 ) -> TerminalOutcomeDeliveryOutput {
+    #[cfg(unix)]
+    if !ctx.cancelled && !ctx.transport_error && !ctx.is_prompt_too_long && !ctx.recovery_retry {
+        let mut captured = state.inflight_state.clone();
+        captured.full_response = state.full_response.clone();
+        #[cfg(unix)]
+        super::super::outbound::completed_turn_ledger::o_pending::capture(
+            &state.provider,
+            &captured,
+        )
+        .await;
+    }
     let claude_tui_followup_busy_readiness_timeout =
         bridge_claude_tui_followup_busy_readiness_timeout(
             &state.provider,
@@ -716,6 +744,13 @@ pub(super) async fn run_terminal_outcome_delivery(
                                     replace_committed
                                 } else {
                                     // NoRange: no new bytes, so no lease and no advance.
+                                    if replace_committed || fallback_delivered {
+                                        record_delivered_input(
+                                            &provider,
+                                            channel_id,
+                                            &inflight_state,
+                                        );
+                                    }
                                     replace_committed
                                 };
                                 if outcome {
@@ -754,6 +789,12 @@ pub(super) async fn run_terminal_outcome_delivery(
                     );
                 let delivery_outcome =
                     enqueue_claimed_headless_delivery(body_claim, delivery_arguments).await;
+                if matches!(
+                    delivery_outcome,
+                    super::headless_delivery::HeadlessDeliveryOutcome::Delivered
+                ) {
+                    record_delivered_input(&provider, channel_id, &inflight_state);
+                }
                 match super::headless_delivery::headless_delivery_disposition(&delivery_outcome) {
                     super::headless_delivery::HeadlessDeliveryDisposition::Commit => {
                         cleanup_headless_streaming_placeholder_after_delivery(

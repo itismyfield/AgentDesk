@@ -153,6 +153,16 @@ async fn mailbox_try_start_turn_ordered(
                 .await
         }
     };
+    if result.started
+        && let Err(error) = crate::services::discord::inject_disposition::dispatched::record(
+            &shared.provider,
+            channel_id,
+            user_message_id,
+            &result.absorbed_source_ids,
+        )
+    {
+        tracing::warn!(channel_id = channel_id.get(), %error, "dispatch evidence not preserved; catch-up may rescan input");
+    }
     // The alias lands before the claim is reported, hence before any delivery
     // of this episode can append `(user_message_id, turn_nonce)`.
     if result.started

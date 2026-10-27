@@ -119,6 +119,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct ActiveReadState {
 pub(in crate::services::discord::tmux::tmux_watcher) struct CollectedTurnStream {
     pub(in crate::services::discord::tmux::tmux_watcher) turn_data_start_offset: u64,
     pub(in crate::services::discord::tmux::tmux_watcher) source_authority: WatcherSourceAuthority,
+    pub(in crate::services::discord::tmux::tmux_watcher) mixed_read_provenance: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) split_trailing_turn_follows: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) state: StreamLineState,
     pub(in crate::services::discord::tmux::tmux_watcher) restored_response_seed: String,
