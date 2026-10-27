@@ -552,3 +552,44 @@ async fn output_origin_o_request_keeps_guard_after_writer_waiter_aborts_pg() {
     server.abort();
     let _ = server.await;
 }
+
+#[tokio::test]
+async fn output_origin_database_failure_never_hides_local_denial_pg() {
+    let (_db, pool, origin) = fixture("7336952").await;
+    let artifact = origin.seal("answer");
+    pool.close().await;
+    let scope = Scope {
+        pool,
+        provider: "claude".into(),
+    };
+    assert!(matches!(
+        scope.acquire("7336952", "answer", Some(&artifact)).await,
+        Err(AcquireError::Database(_))
+    ));
+    for (channel, body) in [("7336953", "answer"), ("7336952", "changed")] {
+        assert!(matches!(
+            scope.acquire(channel, body, Some(&artifact)).await,
+            Err(AcquireError::Withheld(_))
+        ));
+    }
+    for (field, value) in [
+        ("binding", serde_json::json!(null)),
+        ("delivery", serde_json::json!(0)),
+        ("receipt", serde_json::json!(0)),
+        ("generation", serde_json::json!(-1)),
+        ("executor", serde_json::json!("")),
+        ("nonce", serde_json::json!("")),
+        ("incarnation", serde_json::json!("")),
+    ] {
+        let mut bad = serde_json::to_value(&artifact).unwrap();
+        bad["origin"][field] = value;
+        let bad: Artifact = serde_json::from_value(bad).unwrap();
+        assert!(
+            matches!(
+                scope.acquire("7336952", "answer", Some(&bad)).await,
+                Err(AcquireError::Withheld(_))
+            ),
+            "malformed {field} must not turn into a database retry"
+        );
+    }
+}

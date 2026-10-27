@@ -136,7 +136,7 @@ impl DiscordPort for GatewayPort {
             .await
             {
                 Ok(guard) => guard,
-                Err(error) => return PostOutcome::Withheld(error),
+                Err(error) => return PostOutcome::Withheld(error.to_string()),
             };
             guard
                 .run(request)

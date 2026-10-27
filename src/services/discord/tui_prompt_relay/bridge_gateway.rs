@@ -10,6 +10,18 @@ pub(super) struct TuiDirectBridgeGateway {
 }
 
 impl TurnGateway for TuiDirectBridgeGateway {
+    fn has_raw_output_boundaries(&self) -> bool {
+        true
+    }
+
+    fn output_pool(&self) -> Option<&sqlx::PgPool> {
+        self.shared.pg_pool.as_ref()
+    }
+
+    fn output_provider(&self) -> Option<ProviderKind> {
+        Some(self.provider.clone())
+    }
+
     fn send_notice_once<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -92,10 +104,12 @@ impl TurnGateway for TuiDirectBridgeGateway {
     ) -> GatewayFuture<'a, Result<(), String>> {
         Box::pin(async move {
             super::super::rate_limit_wait(&self.shared, channel_id).await;
-            channel_id
-                .delete_message(&self.http, message_id)
-                .await
-                .map_err(|error| error.to_string())
+            super::super::outbound::raw_output::request(
+                channel_id,
+                channel_id.delete_message(&self.http, message_id),
+            )
+            .await
+            .map_err(|error| error.to_string())
         })
     }
 
