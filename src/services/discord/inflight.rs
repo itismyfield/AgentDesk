@@ -72,6 +72,8 @@ pub(in crate::services::discord) use managed_submission::{
 #[cfg(test)]
 pub(in crate::services::discord) use managed_submission::{SubmissionPhase, fault};
 pub(in crate::services::discord) use store::InflightDeliveryRewindReason;
+#[cfg(test)]
+pub(in crate::services::discord) use store::boot_observation::Probe as SidecarAttemptProbe;
 use store::inflight_provider_dir;
 pub(in crate::services::discord) use store::inflight_state_path;
 pub(crate) use store::lock_inflight_state_path;
@@ -196,7 +198,8 @@ use self::store::{
 pub(super) use self::save_store::save_inflight_state;
 pub(super) use self::save_store::{
     CreateNewInflightError, save_inflight_delivery_rewind_if_matches_identity,
-    save_inflight_state_create_new, save_inflight_state_if_absent,
+    save_inflight_state_create_new, save_inflight_state_create_new_fenced,
+    save_inflight_state_if_absent,
 };
 pub(in crate::services::discord) use self::save_store::{
     GuardedSaveOutcome, StreamRelayAuthority, bind_recovery_anchor_for_snapshot,

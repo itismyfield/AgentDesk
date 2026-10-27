@@ -1896,6 +1896,7 @@ src/
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
+│   │   │   │   ├── provider_isolation_seed_save_tests.rs
 │   │   │   │   ├── provider_isolation_source_guard_tests.rs
 │   │   │   │   ├── root_replaced_recovery_tests.rs
 │   │   │   │   ├── s1_entry_tests.rs
