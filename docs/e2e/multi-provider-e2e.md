@@ -379,6 +379,11 @@ and `--filter` sweeps never select it, and YAML cannot use its steps.
   `--channel-id` and the target mailbox must have no busy reason. The mode
   turns off the pre-scenario force-cancel reset, which tears down an idle tmux
   session.
+- Hold: the E2E worker roles forbid shell commands, so Claude keeps the turn
+  running with a fixed chain of `Read` calls after the early marker. Codex has
+  only the shell command; on `codex-tui` it answers the early marker as its
+  final answer, and the run fails before any kill (`provider not observed
+  mid-turn`).
 - Kill: the identity is first read once the hold prompt's early marker is in
   the provider inflight row with a tool running (`provider_hold_observed`) and
   the mailbox is busy. Right before `SIGKILL` it is read again; any change of
