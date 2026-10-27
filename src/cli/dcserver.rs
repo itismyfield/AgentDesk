@@ -967,9 +967,7 @@ pub fn handle_dcserver(token: Option<String>) {
                 }
             }
         } else {
-            let fallback_path = settings_path
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("config").join("agentdesk.yaml"));
+            let fallback_path = config::resolved_config_path();
             crate::services::discord_config_audit::LoadedRuntimeConfig {
                 config: config::load_graceful(),
                 existed: fallback_path.is_file(),

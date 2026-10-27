@@ -120,6 +120,10 @@ write_peer_checkout() {
     # The resolution block sources the deploy helpers next to the script.
     cp "$REPO_ROOT"/scripts/_*.sh "$dir/scripts/"
     cp "$REPO_ROOT/scripts/lib/deploy_allow_degraded.sh" "$dir/scripts/lib/"
+    cat >"$dir/scripts/resolve-config-path.sh" <<'RESOLVER'
+#!/bin/bash
+printf '%s\n' "$1/selected.yaml"
+RESOLVER
     {
         printf '#!/usr/bin/env bash\nset -euo pipefail\n'
         printf '%s\n' "$resolution_block"
@@ -133,7 +137,8 @@ PROBE
 
 write_peer_root() {
     mkdir -p "$1/config"
-    printf 'server:\n  port: 9411\n' >"$1/config/agentdesk.yaml"
+    printf 'server:\n  port: 8111\n' >"$1/config/agentdesk.yaml"
+    printf 'server:\n  port: 9411\n' >"$1/selected.yaml"
 }
 
 child_value() {

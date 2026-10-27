@@ -444,20 +444,17 @@ _extract_yaml_server_port_shell() {
     ' "$path"
 }
 
+_release_config_path() {
+    bash "$SCRIPT_DIR/resolve-config-path.sh" "$ADK_REL"
+}
+
 _resolve_release_server_port() {
     local fallback_port="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
     local config_path=""
     local configured_port
 
-    if [ -n "${AGENTDESK_CONFIG:-}" ] && [ -f "$AGENTDESK_CONFIG" ]; then
-        config_path="$AGENTDESK_CONFIG"
-    elif [ -f "$ADK_REL/config/agentdesk.yaml" ]; then
-        config_path="$ADK_REL/config/agentdesk.yaml"
-    elif [ -f "$ADK_REL/agentdesk.yaml" ]; then
-        config_path="$ADK_REL/agentdesk.yaml"
-    fi
-
-    if [ -z "$config_path" ]; then
+    config_path="$(_release_config_path)" || return 1
+    if [ ! -f "$config_path" ]; then
         printf '%s\n' "$fallback_port"
         return 0
     fi
@@ -1973,22 +1970,13 @@ git merge --quiet --ff-only origin/main"
         return 1
     fi
 
-    # Send _extract_yaml_server_port_shell function to remote, use it to extract port from config.
-    # This ensures single-source maintenance of YAML parsing logic across local and remote paths.
-    # Every `\$` below is deliberately left for the remote shell EXCEPT `$peer` in the failure
-    # message: the peer name exists only here, so escaping it printed a bare `[peer:]` and a
-    # multi-peer deploy could not be told which peer had the unreadable config.
+    # Query the pre-synced peer checkout so its own root and resolver choose the file.
     if ! peer_info="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
         'bash -lc '"$(printf '%q' "$(declare -f _extract_yaml_server_port_shell)
+${remote_cd_command}
 adk_rel=\"\${AGENTDESK_ROOT_DIR:-\$HOME/.adk/release}\"
-# Try primary path first, then fallback to secondary
-if [ -f \"\$adk_rel/config/agentdesk.yaml\" ]; then
-    port=\$(_extract_yaml_server_port_shell \"\$adk_rel/config/agentdesk.yaml\")
-elif [ -f \"\$adk_rel/agentdesk.yaml\" ]; then
-    port=\$(_extract_yaml_server_port_shell \"\$adk_rel/agentdesk.yaml\")
-else
-    port=\"\"
-fi
+config_path=\$(bash scripts/resolve-config-path.sh \"\$adk_rel\") || exit 1
+port=\$(_extract_yaml_server_port_shell \"\$config_path\")
 if [ -z \"\$port\" ]; then
     echo \"✗ [peer:$peer] could not extract server.port: no config found or port unreadable\" >&2
     exit 1
@@ -2826,7 +2814,7 @@ PLIST_EOF
 
 _pg_write_probe_conninfo() {
     local local_port=$1 output_dir=$2 password_output=$3
-    local config_path="$ADK_REL/config/agentdesk.yaml"
+    local config_path
     command -v ruby >/dev/null 2>&1 || return 1
     if [ -n "${DATABASE_URL:-}" ]; then
         DATABASE_URL="$DATABASE_URL" ruby -ruri - "$local_port" "$output_dir" "$password_output" \
@@ -2901,6 +2889,7 @@ end
 RUBY
         return $?
     fi
+    config_path="$(_release_config_path)" || return 1
     [ -r "$config_path" ] || return 1
     ruby -ryaml - "$config_path" "$local_port" "$output_dir" "$password_output" \
         2>/dev/null <<'RUBY'
@@ -3333,8 +3322,9 @@ fi
 
 # Resolved once before promotion so the new-binary and rollback health gates
 # accept the same smoke channels; an unreadable config accepts none.
+DEPLOY_CONFIG_PATH="$(_release_config_path)"
 DEPLOY_E2E_SMOKE_CHANNEL_IDS=$(_deploy_e2e_smoke_channel_ids "$REPO" \
-    "$ADK_REL/config/agentdesk.yaml" "$POST_DEPLOY_SMOKE_RELAY_CELL" "$POST_DEPLOY_SMOKE_CODEX_TURNS_CELL")
+    "$DEPLOY_CONFIG_PATH" "$POST_DEPLOY_SMOKE_RELAY_CELL" "$POST_DEPLOY_SMOKE_CODEX_TURNS_CELL")
 echo "▸ Smoke E2E channels whose reader-count or held-start alarm does not block health: ${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-none}"
 echo "▸ Promoting staged binary..."
 mv -f "$STAGED_BINARY" "$REL_BINARY"
@@ -3386,7 +3376,7 @@ rm -rf "$ADK_REL/skills.old"
 # deploy-time git shape) — never from a dev workspace working tree, whose
 # checked-out branch can silently diverge from the deployed binary. Runs while
 # dcserver is stopped, so the rewrite is picked up by the post-deploy start.
-AGENTDESK_YAML="$ADK_REL/config/agentdesk.yaml"
+AGENTDESK_YAML="$(_release_config_path)"
 if [ -f "$AGENTDESK_YAML" ]; then
     POLICIES_DIR_MIGRATION=$(python3 - "$AGENTDESK_YAML" "$ADK_REL/policies" <<'PYEOF' 2>&1
 import os
@@ -4129,7 +4119,7 @@ _post_deploy_smoke_check_relay_round_trip() {
     local cluster_standby gateway channel_id relay_output relay_log
     local resolve_rc cell_busy cell_guard_rc rc=0 verdict
     local run_id
-    local config_path="$ADK_REL/config/agentdesk.yaml"
+    local config_path
     if [ -z "$POST_DEPLOY_SMOKE_HEALTH_BODY" ] || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_BODY" ]; then
         _post_deploy_smoke_fail "relay E-1 NOT VERIFIED: /api/health body unavailable for standby gate; round-trip did not run (smoke coverage gap, not a relay failure)" || true
         return 1
@@ -4162,6 +4152,7 @@ _post_deploy_smoke_check_relay_round_trip() {
         return 0
     fi
 
+    config_path="$(_release_config_path)" || return 1
     # Resolve machine-local channel ids through the existing E2E config resolver.
     if channel_id=$(python3 - "$REPO" "$config_path" "$POST_DEPLOY_SMOKE_RELAY_CELL" \
         2>> "$POST_DEPLOY_SMOKE_EVIDENCE" <<'PY'
@@ -4349,7 +4340,9 @@ _post_deploy_smoke_run_turn_scenario() {
     fi
     local classification_args=()
     if [ "$scenario" = E-50 ]; then
-        classification_args=(--config "$ADK_REL/config/agentdesk.yaml" --run-id "$run_id")
+        local config_path
+        config_path="$(_release_config_path)" || return 1
+        classification_args=(--config "$config_path" --run-id "$run_id")
     fi
     verdict=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py judge ${classification_args[@]+"${classification_args[@]}"} \
         --report "$output/report.${cell}.json" \
@@ -4376,7 +4369,7 @@ _post_deploy_smoke_run_turn_scenario() {
 
 _post_deploy_smoke_check_turn_scenarios() {
     local failed=0 codex_channel resolve_rc
-    local config_path="$ADK_REL/config/agentdesk.yaml"
+    local config_path
     POST_DEPLOY_SMOKE_TURN_COVERAGE=""
     # Ride E-1's gates: an empty channel means standby, unconfigured or unproven.
     if [ -z "$POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID" ]; then
@@ -4395,6 +4388,7 @@ _post_deploy_smoke_check_turn_scenarios() {
             _post_deploy_smoke_note "relay E-50=skipped: relay cell ${POST_DEPLOY_SMOKE_RELAY_CELL} is not a Claude cell" || return 1
             ;;
     esac
+    config_path="$(_release_config_path)" || return 1
     # Same machine-local resolver as E-1: channel ids are never hard-coded.
     if codex_channel=$(python3 - "$REPO" "$config_path" "$POST_DEPLOY_SMOKE_CODEX_TURNS_CELL" \
         2>> "$POST_DEPLOY_SMOKE_EVIDENCE" <<'PY'
