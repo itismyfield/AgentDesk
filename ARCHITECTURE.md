@@ -25,6 +25,8 @@ src/
 │   │   ├── runtime_config.rs
 │   │   └── transport.rs
 │   ├── dcserver/
+│   │   ├── replay_recovery.rs
+│   │   ├── replay_recovery_tests.rs
 │   │   ├── startup.rs
 │   │   └── startup_audit_tests.rs
 │   ├── direct/
@@ -243,8 +245,14 @@ src/
 │   ├── relay_dead_letter/
 │   │   └── migration_tests.rs
 │   ├── replay_disposition/
+│   │   ├── hold_notice/
+│   │   │   └── outbox.rs
 │   │   ├── write/
+│   │   │   ├── hold_notice.rs
+│   │   │   ├── settle.rs
 │   │   │   └── start.rs
+│   │   ├── hold_notice.rs
+│   │   ├── hold_notice_tests.rs
 │   │   ├── receipt.rs
 │   │   ├── register_tests.rs
 │   │   ├── write.rs
@@ -954,6 +962,7 @@ src/
 │   │   ├── actual_submit_tests.rs
 │   │   ├── c1_teardown_tests.rs
 │   │   ├── command_streaming.rs
+│   │   ├── direct_reader.rs
 │   │   ├── followup_reader.rs
 │   │   ├── herdr_guard_tests.rs
 │   │   ├── herdr_turn.rs
@@ -1195,6 +1204,8 @@ src/
 │   │   │   ├── streaming_status.rs
 │   │   │   └── tool_markdown.rs
 │   │   ├── gateway/
+│   │   │   ├── headless.rs
+│   │   │   ├── headless_exact.rs
 │   │   │   ├── intake_placeholder_retirement_tests.rs
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
@@ -1672,6 +1683,7 @@ src/
 │   │   │   │   ├── kickoff_identity_tests.rs
 │   │   │   │   ├── output_paths.rs
 │   │   │   │   ├── ready_without_output_tests.rs
+│   │   │   │   ├── replay_decision.rs
 │   │   │   │   ├── replay_hold.rs
 │   │   │   │   └── replay_hold_tests.rs
 │   │   │   ├── terminal_text_idempotency/
@@ -1745,11 +1757,20 @@ src/
 │   │   │   ├── idle_tmux.rs
 │   │   │   └── tests.rs
 │   │   ├── replay_policy/
+│   │   │   ├── live/
+│   │   │   │   ├── observer_tests.rs
+│   │   │   │   ├── seal.rs
+│   │   │   │   ├── stderr.rs
+│   │   │   │   └── tap.rs
+│   │   │   ├── activation.rs
+│   │   │   ├── decision.rs
 │   │   │   ├── live.rs
 │   │   │   ├── live_tests.rs
 │   │   │   ├── permit.rs
 │   │   │   ├── permit_tests.rs
-│   │   │   └── policy_tests.rs
+│   │   │   ├── policy_tests.rs
+│   │   │   ├── recovery.rs
+│   │   │   └── recovery_tests.rs
 │   │   ├── restart_report/
 │   │   │   ├── model/
 │   │   │   │   ├── entry_tests.rs
@@ -1826,6 +1847,9 @@ src/
 │   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   ├── foreign_row_refusal_tests.rs
 │   │   │   │   │   ├── process_mailbox.rs
+│   │   │   │   │   ├── recovery_context_take_order_tests.rs
+│   │   │   │   │   ├── replay_start.rs
+│   │   │   │   │   ├── replay_start_tests.rs
 │   │   │   │   │   └── routine_metadata.rs
 │   │   │   │   ├── input_payload/
 │   │   │   │   │   ├── tests/
@@ -1839,6 +1863,8 @@ src/
 │   │   │   │   │   │   └── requeue_tests.rs
 │   │   │   │   │   ├── recovery_context_take_order_tests/
 │   │   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   │   ├── replay_start/
+│   │   │   │   │   │   └── common.rs
 │   │   │   │   │   ├── retry_prompt/
 │   │   │   │   │   │   ├── tests.rs
 │   │   │   │   │   │   └── wiring_tests.rs
@@ -1867,7 +1893,8 @@ src/
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
-│   │   │   │   │   └── producer_error_test_support.rs
+│   │   │   │   │   ├── producer_error_test_support.rs
+│   │   │   │   │   └── replay_scope.rs
 │   │   │   │   ├── provider_isolation/
 │   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
@@ -2140,6 +2167,8 @@ src/
 │   │   │   │   ├── post_terminal_disposal_tests.rs
 │   │   │   │   ├── types.rs
 │   │   │   │   └── watcher_resume.rs
+│   │   │   ├── pre_emit_guard/
+│   │   │   │   └── replay.rs
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   ├── committed_progress_tests.rs
 │   │   │   │   ├── existing_panel_update.rs
@@ -2444,8 +2473,11 @@ src/
 │   │   │   │   ├── intake_outbox_argument.rs
 │   │   │   │   ├── outcome.rs
 │   │   │   │   └── production_seam_tests.rs
+│   │   │   ├── recovery_text/
+│   │   │   │   └── replay.rs
 │   │   │   ├── retry_state/
-│   │   │   │   └── delivery_rewind.rs
+│   │   │   │   ├── delivery_rewind.rs
+│   │   │   │   └── replay.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── codex_replacement_tests.rs
 │   │   │   │   ├── guarded_save.rs

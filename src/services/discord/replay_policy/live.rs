@@ -3,6 +3,9 @@
 use crate::db::replay_disposition::write::ExactAttempt;
 use crate::services::agent_protocol::StreamMessage;
 use std::sync::Mutex;
+pub(crate) mod seal;
+mod tap;
+pub(crate) use tap::RawTap;
 
 /// Activity after start that makes an automatic rerun unsafe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,42 +69,50 @@ pub(crate) struct RawObservation {
     receipt_id: i64,
     nonce: String,
     seen: Vec<Seen>,
+    seal: seal::Seal,
 }
 
 impl RawObservation {
-    pub(crate) fn for_attempt(attempt: &ExactAttempt) -> Self {
+    fn new(attempt: &ExactAttempt) -> Self {
         Self {
             receipt_id: attempt.receipt_id(),
             nonce: attempt.nonce().to_string(),
             seen: Vec::new(),
+            seal: seal::Seal::default(),
         }
     }
 
-    pub(crate) fn record(&mut self, seen: Seen) {
+    #[cfg(test)]
+    pub(crate) fn for_attempt(attempt: &ExactAttempt) -> Self {
+        let mut observation = Self::new(attempt);
+        observation.seal = seal::Seal::fixture();
+        observation
+    }
+
+    fn append(&mut self, seen: Seen) {
         self.seen.push(seen);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record(&mut self, seen: Seen) {
+        self.append(seen);
     }
 
     /// The reader has nothing more to add: stdout ended, the child was waited and stderr drained,
     /// or the record broke.
     fn finished(&self) -> bool {
-        self.seen.contains(&Seen::Broken)
-            || [Seen::StdoutEof, Seen::StderrDrained]
-                .iter()
-                .all(|needed| self.seen.contains(needed))
-                && self
-                    .seen
-                    .iter()
-                    .any(|seen| matches!(seen, Seen::Exited { .. }))
+        self.seal.closed || self.seen.contains(&Seen::Broken)
     }
 
     fn complete(&self) -> bool {
-        [
-            Seen::StdoutEof,
-            Seen::Exited { waited: true },
-            Seen::StderrDrained,
-        ]
-        .iter()
-        .all(|needed| self.seen.contains(needed))
+        self.seal.complete()
+            && [
+                Seen::StdoutEof,
+                Seen::Exited { waited: true },
+                Seen::StderrDrained,
+            ]
+            .iter()
+            .all(|needed| self.seen.contains(needed))
             && !self
                 .seen
                 .iter()
@@ -203,7 +214,7 @@ pub(crate) struct LiveAttempt {
 impl LiveAttempt {
     pub(crate) fn new(attempt: ExactAttempt) -> Self {
         Self {
-            observation: Mutex::new(RawObservation::for_attempt(&attempt)),
+            observation: Mutex::new(RawObservation::new(&attempt)),
             attempt: Mutex::new(Some(attempt)),
             recorded: tokio::sync::Notify::new(),
             verdict: Mutex::new(None),
@@ -213,8 +224,8 @@ impl LiveAttempt {
         }
     }
 
-    pub(crate) fn record(&self, seen: Seen) {
-        lock(&self.observation).record(seen);
+    fn record_fact(&self, seen: Seen) {
+        lock(&self.observation).append(seen);
         self.recorded.notify_waiters();
     }
 
@@ -222,6 +233,21 @@ impl LiveAttempt {
     pub(crate) async fn take_for_decision(
         &self,
         wait: std::time::Duration,
+    ) -> Option<(ExactAttempt, RawObservation)> {
+        self.take(wait, false).await
+    }
+
+    pub(super) async fn take_for_terminal(
+        &self,
+        wait: std::time::Duration,
+    ) -> Option<(ExactAttempt, RawObservation)> {
+        self.take(wait, true).await
+    }
+
+    async fn take(
+        &self,
+        wait: std::time::Duration,
+        terminal: bool,
     ) -> Option<(ExactAttempt, RawObservation)> {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
@@ -231,15 +257,39 @@ impl LiveAttempt {
             recorded.as_mut().enable();
             let finished = lock(&self.observation).finished();
             #[cfg(test)]
-            for seen in std::mem::take(&mut *lock(&self.after_check)) {
-                self.record(seen);
+            {
+                let injected = std::mem::take(&mut *lock(&self.after_check));
+                if !injected.is_empty() {
+                    for seen in injected {
+                        self.record_fact(seen);
+                    }
+                    lock(&self.observation).seal.closed = true;
+                    self.recorded.notify_waiters();
+                }
             }
             if finished || tokio::time::timeout_at(deadline, recorded).await.is_err() {
                 break;
             }
         }
-        let attempt = lock(&self.attempt).take()?;
-        Some((attempt, lock(&self.observation).clone()))
+        let mut attempt = lock(&self.attempt);
+        let observation = lock(&self.observation).clone();
+        if self.verdict().is_some()
+            || (terminal && self.stale() && observation.no_effect_evidence().is_some())
+        {
+            return None;
+        }
+        Some((attempt.take()?, observation))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record(&self, seen: Seen) {
+        lock(&self.observation).seal = seal::Seal::fixture();
+        self.record_fact(seen);
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_pending(&self) {
+        lock(&self.observation).seal.closed = false;
     }
 
     pub(crate) fn settle(&self, verdict: Verdict) {
@@ -259,62 +309,12 @@ impl LiveAttempt {
     }
 }
 
-/// The direct adapter's tap on its reader. It records nothing unless the token carries a live
-/// attempt, which only a protected start attaches.
-pub(crate) struct RawTap(Option<std::sync::Arc<LiveAttempt>>);
-
-impl RawTap {
-    pub(crate) fn for_token(token: Option<&crate::services::provider::CancelToken>) -> Self {
-        Self(token.and_then(|token| token.replay_attempt()).cloned())
-    }
-
-    pub(crate) fn active(&self) -> bool {
-        self.0.is_some()
-    }
-
-    pub(crate) fn see(&self, seen: Seen) {
-        if let Some(live) = &self.0 {
-            live.record(seen);
-        }
-    }
-
-    pub(crate) fn record_line(&self, record_type: &str, message: Option<&StreamMessage>) {
-        if let Some(seen) = Seen::of_record(record_type, message) {
-            self.see(seen);
-        }
-    }
-
-    /// Reads stderr to its end and returns the fact to record once the last message is sent. A
-    /// protected attempt waits at most `STDERR_SETTLE`; an unfinished or failed read is broken.
-    pub(crate) fn read_stderr(&self, stderr: Option<std::process::ChildStderr>) -> (String, Seen) {
-        let read = match (stderr, self.active()) {
-            (None, _) => None,
-            (Some(stderr), false) => std::io::read_to_string(stderr).ok(),
-            (Some(stderr), true) => {
-                let (tx, rx) = std::sync::mpsc::channel();
-                std::thread::spawn(move || tx.send(std::io::read_to_string(stderr)));
-                rx.recv_timeout(STDERR_SETTLE).ok().and_then(Result::ok)
-            }
-        };
-        match read {
-            Some(text) => (text, Seen::StderrDrained),
-            None => (String::new(), Seen::Broken),
-        }
-    }
-
-    /// Records the stderr fact last, after any failed send, so a decision never judges a record
-    /// that is complete but still missing that failure.
-    pub(crate) fn finish(&self, delivered: bool, drained: Seen) {
-        if !delivered {
-            self.see(Seen::Broken);
-        }
-        self.see(drained);
-    }
-}
-
-/// How long a protected attempt's reader waits for stderr to end after the child exited.
-const STDERR_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
-
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
+
+#[cfg(all(test, unix))]
+#[path = "live/observer_tests.rs"]
+mod observer_tests;
+
+pub(crate) use seal::can_activate;
