@@ -80,12 +80,15 @@ impl<B: BindingEvents> Sources<B> {
                 let source = cursor.source.clone();
                 self.raised.push(WriterAlarm::BoundaryPending { source });
             }
-            let replay = writer.store().for_each_frame(&cursor.source, |frame| {
-                if let SpoolFrame::Record(record) = frame {
-                    captured_any = true;
-                    self.owe(deriver, owed, &cursor.source, &record);
-                }
-            });
+            let replay =
+                writer
+                    .store()
+                    .for_each_frame(&cursor.source, |frame, identity_version| {
+                        if let SpoolFrame::Record(record) = frame {
+                            captured_any = true;
+                            self.owe(deriver, owed, &cursor.source, &record, identity_version);
+                        }
+                    });
             replay.map_err(halted("spool replay"))?;
             let missing = self.reader_config.is_some()
                 && matches!(

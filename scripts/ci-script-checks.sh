@@ -270,6 +270,10 @@ if run_check guards "Writer namespace Windows exact-target runner fixtures (#567
 "$PYTHON" -m unittest tests.test_writer_namespace_windows_targets
 fi
 
+if run_check guards "CI setup-node reads .nvmrc"; then
+"$PYTHON" -m unittest tests.test_ci_node_version_file
+fi
+
 if run_check guards "Postgres migration checksum guard"; then
 "$PYTHON" scripts/check_postgres_migration_checksums.py --require-base
 "$PYTHON" -m unittest tests.test_postgres_migration_checksum_guard

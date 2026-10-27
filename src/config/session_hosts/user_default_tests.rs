@@ -32,10 +32,16 @@ fn user_default_resolves_only_the_execution_users_socket() {
         "remote_user_default_socket_stays_logical_contract"
     );
     let mut worker = config("worker");
-    resolve(&mut worker, || Some("/execution-user".into())).unwrap();
+    // An absolute execution-user HOME takes a drive prefix on Windows.
+    let home = if cfg!(windows) {
+        "C:/execution-user"
+    } else {
+        "/execution-user"
+    };
+    resolve(&mut worker, || Some(home.into())).unwrap();
     assert_eq!(
         worker.session_hosts.herdr.endpoints["user"].socket_path,
-        PathBuf::from("/execution-user/.config/herdr/herdr.sock"),
+        PathBuf::from(home).join(".config/herdr/herdr.sock"),
         "execution_user_home_socket_contract"
     );
     assert_eq!(

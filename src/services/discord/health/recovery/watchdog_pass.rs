@@ -2,6 +2,7 @@
 
 use super::*;
 
+use super::super::tick_mailboxes::{TickMailboxes, WatcherRead};
 use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_via_shared as tv_clear;
 
@@ -132,6 +133,45 @@ pub(super) fn revalidate_and_clear_explicit_background_inflight(
     }
 }
 
+use super::super::transcript_binding_stall::{self as binding_stall, TranscriptBindingStall};
+
+/// The liveness deferral last logged per channel; a continuing deferral logs once.
+static DEFERRALS: std::sync::LazyLock<binding_stall::TransitionLog> =
+    std::sync::LazyLock::new(binding_stall::TransitionLog::default);
+
+/// An O verdict that blames delivery pages as branch 4 does: once per cooldown, nothing cleaned.
+async fn page_o_stall(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: &WatcherStateSnapshot,
+) {
+    let delivery = [
+        TranscriptBindingStall::ODeliveryStalled,
+        TranscriptBindingStall::ODrainedTurnOpen,
+    ];
+    let blamed = delivery
+        .iter()
+        .any(|stall| stall.as_str() == snapshot.transcript_binding_stall);
+    if !blamed {
+        return;
+    }
+    // The turn the verdict judged, not the Legacy row, which may be left from an earlier turn.
+    let mailbox = discord::mailbox_snapshot(shared, channel_id).await;
+    let turn_age = binding_stall::turn_age_secs(&mailbox, snapshot.inflight_started_at.as_deref());
+    if turn_age.is_none_or(|age| age < STALL_WATCHDOG_THRESHOLD_SECS) {
+        return;
+    }
+    let inflight = discord::inflight::load_inflight_state(provider, channel_id.get());
+    stall_alert::notify_suspected_stall_without_cleanup(
+        shared,
+        provider,
+        channel_id,
+        inflight.as_ref(),
+    )
+    .await;
+}
+
 /// Run a single stall-watchdog pass against one provider+SharedData.
 ///
 /// Iterates every attached watcher and cleans channels whose snapshot satisfies
@@ -151,9 +191,11 @@ pub(crate) async fn run_stall_watchdog_pass(
     if runtimes.is_empty() {
         return 0;
     }
+    // Every consumer of this tick reads the one enumeration; the next tick makes its own.
+    let tick = TickMailboxes::enumerate(provider, runtimes).await;
     let mut candidate_channels: Vec<(ChannelId, Arc<SharedData>)> = Vec::new();
     let mut seen: std::collections::HashSet<ChannelId> = std::collections::HashSet::new();
-    for runtime in &runtimes {
+    for runtime in tick.runtimes() {
         let runtime_channels: Vec<ChannelId> = runtime
             .tmux_watchers
             .iter()
@@ -175,12 +217,12 @@ pub(crate) async fn run_stall_watchdog_pass(
     for (channel_id, shared) in candidate_channels {
         // Use the selected runtime so same-provider multi-bot snapshots target
         // the bot that owns this watcher.
-        let snapshot = match registry
-            .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
+        let snapshot = match tick
+            .watcher_state(registry, shared.clone(), channel_id)
             .await
         {
-            Some(snapshot) => snapshot,
-            None => continue,
+            WatcherRead::Observed(snapshot) => *snapshot,
+            WatcherRead::Gone | WatcherRead::Unknown => continue,
         };
         // A successful takeover owns this tick; the snapshot is now stale.
         if recovering.contains(&channel_id.get())
@@ -396,16 +438,19 @@ pub(crate) async fn run_stall_watchdog_pass(
             continue;
         }
 
-        let should_clean = stall_watchdog_should_force_clean(
-            snapshot.attached,
-            snapshot.desynced,
-            capture_assessment.advancing,
-            snapshot.inflight_terminal_delivery_committed,
-            snapshot.inflight_started_at.as_deref(),
-            now_unix_secs,
-            STALL_WATCHDOG_THRESHOLD_SECS,
-            registry.started_at_unix(),
-        );
+        // O posts this channel's body: its ledger judges the turn, not the capture axis.
+        let o_owned = binding_stall::o_owns(channel_id.get());
+        let should_clean = !o_owned
+            && stall_watchdog_should_force_clean(
+                snapshot.attached,
+                snapshot.desynced,
+                capture_assessment.advancing,
+                snapshot.inflight_terminal_delivery_committed,
+                snapshot.inflight_started_at.as_deref(),
+                now_unix_secs,
+                STALL_WATCHDOG_THRESHOLD_SECS,
+                registry.started_at_unix(),
+            );
         let judgment_basis = stall_liveness::StallWatchdogJudgmentBasis::from_snapshot(
             &snapshot,
             now_unix_secs,
@@ -425,7 +470,12 @@ pub(crate) async fn run_stall_watchdog_pass(
                 stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
                 stall_liveness::STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
             );
-            if decision.should_defer() {
+            let deferral = decision
+                .should_defer()
+                .then_some(("defer_for_liveness", None));
+            let key = format!("{}:{}", provider.as_str(), channel_id.get());
+            let logged = DEFERRALS.record(&key, deferral, tokio::time::Instant::now());
+            if logged.warns() {
                 stall_liveness::log_stall_watchdog_liveness_deferred(
                     provider,
                     channel_id,
@@ -438,11 +488,16 @@ pub(crate) async fn run_stall_watchdog_pass(
             }
             liveness_decision = Some(decision);
         } else {
+            let key = format!("{}:{}", provider.as_str(), channel_id.get());
+            DEFERRALS.record(&key, None, tokio::time::Instant::now());
             stall_liveness::clear_stall_watchdog_liveness_state_if_healthy(
                 provider, channel_id, &snapshot,
             );
         }
         if !should_clean {
+            if o_owned {
+                page_o_stall(&shared, provider, channel_id, &snapshot).await;
+            }
             // Detection-only sibling probe for "completed-stale" inflight
             // leaks: bridge handed off cleanup to the watcher (or the watcher
             // delivered the response itself), but the inflight file persisted
@@ -622,7 +677,12 @@ pub(crate) async fn run_stall_watchdog_pass(
     }
     // A cancelled watcher and a failed respawn both leave the channel out of the
     // watcher-derived candidate loop above, so neither is reachable from it.
-    watcher_respawn::sweep_and_retry_absences(registry, provider, &runtimes, &seen, now_unix_secs)
+    watcher_respawn::sweep_and_retry_absences(registry, provider, &tick, &seen, now_unix_secs)
         .await;
-    cleaned + relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &runtimes).await
+    cleaned + relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &tick).await
 }
+
+#[cfg(test)]
+mod o_stall_tests;
+#[cfg(all(test, unix))]
+mod tick_tests;

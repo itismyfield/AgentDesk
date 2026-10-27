@@ -96,7 +96,6 @@ fn boot_entries_select_approved_hosts_pg() {
                         "--nocapture",
                     ])
                     .env(CELL, format!("{entry}:{scenario}"))
-                    .env_remove("AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS")
                     .output()
                     .unwrap();
                 assert!(

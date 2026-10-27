@@ -19,8 +19,6 @@ const BODY: &str = "fixture body line one\nsecond line of the injected text";
 const FAST: Timing = Timing {
     lock_retries: &[Duration::ZERO, Duration::from_millis(5)],
     settle: Duration::ZERO,
-    rechecks: 3,
-    recheck_interval: Duration::from_millis(5),
     confirm_window: Duration::from_millis(300),
     confirm_poll: Duration::from_millis(20),
 };
@@ -233,13 +231,6 @@ fn captured_screens_read_as_shown() {
             SOURCE, AUTHOR, NAME, NONCE, BODY
         ))
     );
-    assert!(screen::owns(
-        &fixture("busy_frame_v1.ansi"),
-        &crate::services::tui_input::human_frame::inject(SOURCE, AUTHOR, NAME, NONCE, BODY)
-    ));
-    let other =
-        crate::services::tui_input::human_frame::inject(SOURCE, AUTHOR, NAME, "0ther000", BODY);
-    assert!(!screen::owns(&fixture("busy_frame_v1.ansi"), &other));
     let legacy = crate::services::tui_input::human_frame::legacy_inject(SOURCE, NAME, NONCE, BODY);
     let shown = screen::read(&fixture("busy_frame.ansi"));
     assert_eq!(shown.composer, screen::Composer::Text(legacy));
@@ -257,31 +248,30 @@ fn captured_screens_read_as_shown() {
     assert_eq!(shown.composer, screen::Composer::Text("typed".into()));
 }
 
-/// A scripted `tmux`: `if-shell -F` runs its command only while the scripted attach count is 0;
-/// an applied Enter appends `on_enter` to the rollout, and `fail_after.<sub>` fails it afterwards.
+/// Scripted tmux records actual writes and can lose the pane or fail each command.
 const FAKE_TMUX: &str = r#"#!/bin/sh
 d='@D@'
 next() { n=$(cat "$d/$1.n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/$1.n"; f="$d/$1.$n"; [ -f "$f" ] || f="$d/$1"; cat "$f"; }
 echo "$*" >> "$d/log"
 [ -f "$d/fail.$2" ] && exit 1
 case "$2" in
-display-message) next attach ;;
-capture-pane) next cap ;;
-load-buffer) for last do :; done; cp "$last" "$d/buffer" ;;
-if-shell)
-  k=$(next keyattach)
-  if [ "$k" = 0 ]; then
-    sub="${7%% *}"
-    echo "-u $7" >> "$d/log"
-    [ -f "$d/fail.$sub" ] && exit 1
-    if [ "$sub" = send-keys ] && [ -f "$d/on_enter" ]; then cat "$d/on_enter" >> '@T@'; fi
-    [ -f "$d/fail_after.$sub" ] && exit 1
-  elif [ "$k" = gone ]; then
-    echo "agentdesk-busy-inject-vetoed"
-  else
-    echo "agentdesk-busy-inject-vetoed $k"
-  fi ;;
+display-message) [ -f "$d/gone" ] && exit 1; next attach ;;
+capture-pane)
+  [ -f "$d/pasted" ] && [ -f "$d/fail_post_capture" ] && exit 1
+  next cap ;;
+load-buffer)
+  for last do :; done; cp "$last" "$d/buffer"
+  [ -f "$d/gone_after_load" ] && touch "$d/gone" ;;
+paste-buffer)
+  [ -f "$d/gone" ] && exit 1
+  touch "$d/pasted"
+  [ -f "$d/gone_after_paste" ] && touch "$d/gone" ;;
+send-keys)
+  [ -f "$d/gone" ] && exit 1
+  [ -f "$d/on_enter" ] && cat "$d/on_enter" >> '@T@'
+  [ -f "$d/remove_rollout" ] && rm '@T@' ;;
 esac
+[ -f "$d/fail_after.$2" ] && exit 1
 exit 0
 "#;
 
@@ -325,7 +315,6 @@ impl Fake {
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
         let fake = Self { dir, rollout };
         fake.answers("attach", &["0,,80,24"]);
-        fake.answers("keyattach", &["0"]);
         fake.caps(&["busy_empty.ansi", "busy_frame_v1.ansi"]);
         fake
     }
@@ -382,6 +371,10 @@ impl Fake {
     }
 
     fn run_with(&self, ledger: &FakeLedger, text: &str) -> Outcome {
+        self.run_with_nonce(ledger, text, NONCE)
+    }
+
+    fn run_with_nonce(&self, ledger: &FakeLedger, text: &str, nonce: &str) -> Outcome {
         let name = self.dir.path().file_name().unwrap().to_string_lossy();
         let name: String = name
             .chars()
@@ -395,7 +388,7 @@ impl Fake {
             source: SOURCE,
             author: AUTHOR,
             name: NAME,
-            nonce: NONCE,
+            nonce,
             text,
             target_turn: T,
         };
@@ -418,47 +411,53 @@ impl Fake {
     }
 }
 
-/// The frame is pasted, proven to be the whole composer, and submitted by exactly one Enter; the
-/// turn the rollout names decides whether it joined the target turn.
+/// Local success does not claim a native turn; the receipt observer identifies it later.
 #[test]
-fn one_enter_and_the_rollout_names_the_turn_it_joined() {
+fn one_enter_completes_and_the_observer_names_the_turn() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let fake = Fake::new();
-    fake.accept_into(T);
-    let ledger = FakeLedger::default();
-    let joined = Outcome::Injected {
-        observed_turn: Some(T.into()),
-        joined: true,
-    };
-    assert_eq!(fake.run(&ledger), joined);
-    assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
-    assert_eq!((ledger.registered.get(), ledger.withdrawn.get()), (1, 0));
-    // The turn ended between the check and the Enter: the input opened the next turn.
-    let fake = Fake::new();
-    fake.accept_into("01b-next-turn");
-    let moved = Outcome::Injected {
-        observed_turn: Some("01b-next-turn".into()),
-        joined: false,
-    };
-    assert_eq!(fake.run(&FakeLedger::default()), moved);
+    for turn in [T, "01b-next-turn"] {
+        let fake = Fake::new();
+        fake.accept_into(turn);
+        let ledger = FakeLedger::default();
+        assert_eq!(fake.run(&ledger), Outcome::Injected);
+        assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
+        assert_eq!((ledger.registered.get(), ledger.withdrawn.get()), (1, 0));
+        wait_receipt(&fake);
+        assert_eq!(
+            rollout::submitted(&fake.rollout, 0, NONCE),
+            Some(Some(turn.into()))
+        );
+    }
 }
 
-/// An emptied composer is not a submission: without the rollout record the input stays
-/// unconfirmed. An Enter whose call fails after it applied is never sent again.
+fn wait_receipt(fake: &Fake) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while crate::services::tui_input::human_frame::history::receipt_row(NONCE, &fake.rollout)
+        .is_none()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "diagnostic observer missed the receipt"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Missing receipt evidence cannot fail local submission; a failed Enter is never repeated.
 #[test]
-fn only_the_rollout_confirms_and_enter_is_never_repeated() {
+fn missing_receipt_succeeds_and_enter_is_never_repeated() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
-    fake.caps(&["busy_empty.ansi", "busy_frame_v1.ansi", "busy_empty.ansi"]);
     let ledger = FakeLedger::default();
-    let outcome = fake.run(&ledger);
-    assert_eq!(outcome, Outcome::Unconfirmed(Unconfirmed::NotObserved));
+    assert_eq!(fake.run(&ledger), Outcome::Injected);
     assert_eq!((fake.enters(), ledger.withdrawn.get()), (1, 0));
     let fake = Fake::new();
     fake.accept_into(T);
     fake.flag("fail_after.send-keys");
-    let outcome = fake.run(&FakeLedger::default());
-    assert_eq!(outcome, Outcome::Unconfirmed(Unconfirmed::EnterFailed));
+    assert_eq!(
+        fake.run(&FakeLedger::default()),
+        Outcome::Unconfirmed(Unconfirmed::EnterFailed)
+    );
     assert_eq!(fake.enters(), 1);
 }
 
@@ -510,32 +509,27 @@ fn the_turn_is_rechecked_before_the_paste() {
     }
 }
 
-/// A paste that may fold or outgrow the screen, or a pane whose size is unknown, is refused.
+/// Folded or oversized composer renders and unknown geometry still get exactly one Enter.
 #[test]
-fn unpredictable_renders_are_refused() {
+fn unpredictable_renders_still_send_once() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let render = Outcome::NotSent(Veto::UnpredictableRender);
-    let fake = Fake::new();
-    let rows: Vec<String> = (0..14).map(|row| format!("row {row}")).collect();
-    assert_eq!(
-        fake.run_with(&FakeLedger::default(), &rows.join("\n")),
-        render
-    );
-    let fake = Fake::new();
-    assert_eq!(
-        fake.run_with(&FakeLedger::default(), &"y".repeat(1000)),
-        render
-    );
-    let fake = Fake::new();
-    fake.answers("attach", &["0,,"]);
-    assert_eq!(fake.run(&FakeLedger::default()), render);
-    assert_eq!(fake.calls("capture-pane"), 0);
-    // Thirteen short rows fit an 80x24 pane once the header is counted.
-    assert_eq!(predicted_rows(&rows[..13].join("\n"), 80), Some(13));
+    let rows = (0..14)
+        .map(|row| format!("row {row}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for body in [rows, "y".repeat(1000)] {
+        let fake = Fake::new();
+        fake.answers("attach", &["0,,"]);
+        assert_eq!(
+            fake.run_with(&FakeLedger::default(), &body),
+            Outcome::Injected
+        );
+        assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
+        assert_eq!(fake.calls("capture-pane"), 1);
+    }
 }
 
-/// The ledger hears of a paste before it runs; a refused registration or a paste the guard kept
-/// out withdraws, while a paste of unknown effect leaves the record for a late observation.
+/// A lost pane withdraws an unwritten reservation; an attempted paste retains its evidence.
 #[test]
 fn the_ledger_brackets_the_paste() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
@@ -550,9 +544,9 @@ fn the_ledger_brackets_the_paste() {
         (0, 1)
     );
     let fake = Fake::new();
-    fake.answers("keyattach", &["1"]);
+    fake.flag("gone_after_load");
     let ledger = FakeLedger::default();
-    assert_eq!(fake.run(&ledger), Outcome::NotSent(Veto::HumanAttached));
+    assert_eq!(fake.run(&ledger), Outcome::NotSent(Veto::PaneUnavailable));
     assert_eq!((ledger.registered.get(), ledger.withdrawn.get()), (1, 1));
     let fake = Fake::new();
     fake.flag("fail.paste-buffer");
@@ -564,30 +558,20 @@ fn the_ledger_brackets_the_paste() {
     assert_eq!((ledger.withdrawn.get(), fake.enters()), (0, 0));
 }
 
-/// A person at the pane, or a composer that does not show exactly the frame after the paste,
-/// keeps the Enter back.
+/// Attach changes and foreign post-paste text never introduce another UI check.
 #[test]
-fn attach_and_foreign_composer_text_withhold_the_enter() {
+fn attached_people_and_post_paste_text_do_not_withhold_enter() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let fake = Fake::new();
-    fake.answers("attach", &["1,,80,24"]);
-    assert_eq!(
-        fake.run(&FakeLedger::default()),
-        Outcome::NotSent(Veto::HumanAttached)
-    );
-    let fake = Fake::new();
-    fake.caps(&["busy_empty.ansi", "busy_draft.ansi"]);
-    let outcome = fake.run(&FakeLedger::default());
-    assert_eq!(outcome, Outcome::Unconfirmed(Unconfirmed::DraftNotOwned));
-    assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 0));
-    let fake = Fake::new();
-    fake.answers("attach", &["0,,80,24", "1,1791496900,80,24"]);
-    let outcome = fake.run(&FakeLedger::default());
-    assert_eq!(
-        outcome,
-        Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste)
-    );
-    assert_eq!(fake.enters(), 0);
+    for attach in ["1,,80,24", "0,,80,24"] {
+        let fake = Fake::new();
+        fake.answers("attach", &[attach, "1,1791496900,12,10"]);
+        fake.caps(&["busy_empty.ansi", "busy_draft.ansi"]);
+        assert_eq!(fake.run(&FakeLedger::default()), Outcome::Injected);
+        assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
+        assert_eq!(fake.calls("capture-pane"), 1);
+        let log = fs::read_to_string(fake.dir.path().join("log")).unwrap();
+        assert!(!log.contains("session_attached") && !log.contains("pane_width"));
+    }
 }
 
 /// The capture with a remote image row drawn above its textarea, as Codex shows a restored draft.
@@ -599,10 +583,9 @@ fn with_image(capture: &str) -> String {
     rows.join("\n")
 }
 
-/// An image left above an empty textarea is a draft an Enter would submit: it is refused before
-/// any write, and an image that appears after the paste keeps the Enter back.
+/// A visible image draft is refused before the paste; later screen changes are not inspected.
 #[test]
-fn an_image_draft_is_refused_before_the_paste_and_never_owned() {
+fn an_image_draft_is_refused_only_before_the_paste() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     let shown = screen::read(&with_image(&fixture("busy_empty.ansi")));
     assert_eq!(
@@ -625,34 +608,30 @@ fn an_image_draft_is_refused_before_the_paste_and_never_owned() {
     let after = with_image(&fixture("busy_frame_v1.ansi"));
     fake.answers("cap", &[&fixture("busy_empty.ansi"), &after]);
     let outcome = fake.run(&FakeLedger::default());
-    assert_eq!(outcome, Outcome::Unconfirmed(Unconfirmed::DraftNotOwned));
-    assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 0));
+    assert_eq!(outcome, Outcome::Injected);
+    assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
+    assert_eq!(fake.calls("capture-pane"), 1);
 }
 
-/// Bodies the screen reader could not prove after the paste go back to the queue before any
-/// write: a blank or blank-looking line, or more rows than the reader scans in a tall pane.
+/// Blank lines and tall pasted text need no post-paste rendering proof.
 #[test]
-fn bodies_the_reader_cannot_prove_are_refused_before_any_write() {
+fn bodies_the_reader_cannot_prove_are_submitted_once() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let tall: Vec<String> = (0..40).map(|row| format!("row {row}")).collect();
-    let bodies = [
-        "first\n\nsecond".to_string(),
-        "first\n   \nsecond".to_string(),
-        "first\n".to_string(),
-        tall.join("\n"),
-    ];
-    for body in bodies {
+    let tall = (0..40)
+        .map(|row| format!("row {row}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for body in [
+        "first\n\nsecond".into(),
+        "first\n   \nsecond".into(),
+        "first\n".into(),
+        tall,
+    ] {
         let fake = Fake::new();
-        fake.answers("attach", &["0,,80,100"]);
         let ledger = FakeLedger::default();
-        let outcome = fake.run_with(&ledger, &body);
-        assert_eq!(
-            outcome,
-            Outcome::NotSent(Veto::UnpredictableRender),
-            "{body:?}"
-        );
-        let writes = fake.calls("load-buffer") + fake.calls("paste-buffer") + fake.enters();
-        assert_eq!((writes, ledger.registered.get()), (0, 0), "{body:?}");
+        assert_eq!(fake.run_with(&ledger, &body), Outcome::Injected, "{body:?}");
+        assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
+        assert_eq!(ledger.registered.get(), 1);
     }
 }
 
@@ -788,7 +767,7 @@ fn plain_receipts_do_not_use_a_late_completed_alias_for_the_second_attempt() {
 }
 
 #[test]
-fn common_glyphs_use_body_confirmation_without_a_width_allowlist() {
+fn common_glyphs_submit_without_a_width_allowlist() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     let payload = "한글 English 123 “둥근” ‘따옴표’ … — (괄호) 😀 🚀 👍🏻 👨‍👩‍👧‍👦 ❤️ 🇰🇷 漢字 かな カナ （全角）、。！？".repeat(3);
     let expected = frame(SOURCE, AUTHOR, NAME, NONCE, &payload);
@@ -808,10 +787,168 @@ fn common_glyphs_use_body_confirmation_without_a_width_allowlist() {
     fs::write(on_enter, record).unwrap();
     assert_eq!(
         fake.run_with(&FakeLedger::default(), &payload),
-        Outcome::Injected {
-            observed_turn: Some(T.into()),
-            joined: true,
-        }
+        Outcome::Injected
     );
     assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
+}
+
+/// Layout prediction and a clipped footer cannot hold back an otherwise valid paste.
+#[test]
+fn a_plan_narrow_and_clipped_screens_reach_enter() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    for (size, before) in [
+        ("0,,12,10", fixture("busy_empty.ansi")),
+        ("0,,46,12", "\n› \n\n  GPT-6-Luna xh".into()),
+        ("0,,", fixture("busy_empty.ansi")),
+    ] {
+        let fake = Fake::new();
+        fake.answers("attach", &[size]);
+        fake.answers("cap", &[&before, "unread post-paste screen"]);
+        let outcome = fake.run(&FakeLedger::default());
+        assert_eq!(
+            (fake.calls("paste-buffer"), fake.enters()),
+            (1, 1),
+            "{size}: {outcome:?}"
+        );
+        assert!(matches!(outcome, Outcome::Injected));
+        assert_eq!(fake.calls("capture-pane"), 1);
+    }
+}
+
+/// Failed post-paste reads do not block Enter or keep the next input locked.
+#[test]
+fn a_plan_post_paste_read_failure_does_not_block_next_input() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let fake = Fake::new();
+    fake.flag("fail_post_capture");
+    let ledger = FakeLedger::default();
+    let first = fake.run(&ledger);
+    assert_eq!(fake.enters(), 1, "{first:?}");
+    assert!(matches!(first, Outcome::Injected));
+    let next = fake.run_with_nonce(&ledger, "next human message", "c0ffee02");
+    assert_eq!(
+        (fake.calls("paste-buffer"), fake.enters()),
+        (2, 2),
+        "{next:?}"
+    );
+    assert!(matches!(next, Outcome::Injected));
+    assert_eq!(fake.calls("capture-pane"), 2);
+}
+
+/// Every menu fixture is refused before buffer loading or input registration.
+#[test]
+fn a_plan_menus_are_not_sent() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    for screen in ["overlay.ansi", "review_picker.ansi", "review_custom.txt"] {
+        let fake = Fake::new();
+        fake.caps(&[screen]);
+        let ledger = FakeLedger::default();
+        assert_eq!(fake.run(&ledger), Outcome::NotSent(Veto::Modal), "{screen}");
+        assert_eq!(
+            (
+                fake.calls("load-buffer"),
+                fake.calls("paste-buffer"),
+                fake.enters()
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(ledger.registered.get(), 0);
+    }
+}
+
+/// Transport failures, including lost acknowledgements, never become local success.
+#[test]
+fn pane_loss_and_write_failures_are_never_success() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    for (fault, expected, pasted, entered) in [
+        (
+            "fail.display-message",
+            Outcome::NotSent(Veto::PaneUnavailable),
+            0,
+            0,
+        ),
+        ("fail.load-buffer", Outcome::NotSent(Veto::LoadFailed), 0, 0),
+        (
+            "gone_after_load",
+            Outcome::NotSent(Veto::PaneUnavailable),
+            0,
+            0,
+        ),
+        (
+            "fail.paste-buffer",
+            Outcome::Unconfirmed(Unconfirmed::PasteFailed),
+            1,
+            0,
+        ),
+        (
+            "fail_after.paste-buffer",
+            Outcome::Unconfirmed(Unconfirmed::PasteFailed),
+            1,
+            0,
+        ),
+        (
+            "gone_after_paste",
+            Outcome::Unconfirmed(Unconfirmed::EnterFailed),
+            1,
+            1,
+        ),
+        (
+            "fail.send-keys",
+            Outcome::Unconfirmed(Unconfirmed::EnterFailed),
+            1,
+            1,
+        ),
+        (
+            "fail_after.send-keys",
+            Outcome::Unconfirmed(Unconfirmed::EnterFailed),
+            1,
+            1,
+        ),
+    ] {
+        let fake = Fake::new();
+        fake.flag(fault);
+        assert_eq!(fake.run(&FakeLedger::default()), expected, "{fault}");
+        assert_eq!(
+            (fake.calls("paste-buffer"), fake.enters()),
+            (pasted, entered),
+            "{fault}"
+        );
+    }
+}
+
+/// Receipt collection can finish after injection, or lose the rollout, without changing success.
+#[test]
+fn late_or_unreadable_receipts_are_diagnostic_only() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let fake = Fake::new();
+    assert_eq!(fake.run(&FakeLedger::default()), Outcome::Injected);
+    assert!(
+        crate::services::tui_input::human_frame::history::registered(
+            NONCE,
+            &fake.rollout,
+            &frame_text()
+        )
+    );
+    assert_eq!(
+        crate::services::tui_input::human_frame::history::receipt_row(NONCE, &fake.rollout),
+        None
+    );
+    fake.accept_into(T);
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&fake.rollout)
+        .unwrap();
+    file.write_all(
+        fs::read(fake.dir.path().join("on_enter"))
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    wait_receipt(&fake);
+    assert_eq!((fake.calls("capture-pane"), fake.enters()), (1, 1));
+    let fake = Fake::new();
+    fake.flag("remove_rollout");
+    assert_eq!(fake.run(&FakeLedger::default()), Outcome::Injected);
+    assert!(!fake.rollout.exists());
+    assert_eq!(fake.enters(), 1);
 }

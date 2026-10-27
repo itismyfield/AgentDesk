@@ -1,3 +1,6 @@
+//! Cases marked `cfg(unix)` need a journaled or escrowed handoff, which Windows refuses
+//! because it has no durable directory sync.
+
 use super::*;
 use serde_json::{Value, json};
 
@@ -43,6 +46,7 @@ pub(crate) fn seed(root: &Path, channel: u64) -> (InflightTurnState, Value) {
     (row, evidence)
 }
 
+#[cfg(unix)]
 pub(crate) fn handed_off(root: &Path, channel: u64, evidence: &Value) -> bool {
     [
         "discord_circuit_evidence",
@@ -69,6 +73,7 @@ pub(crate) fn handed_off(root: &Path, channel: u64, evidence: &Value) -> bool {
     })
 }
 
+#[cfg(unix)]
 #[test]
 fn alpha_abandon_handoffs_without_observer() {
     let temp = tempfile::tempdir().unwrap();
@@ -127,6 +132,7 @@ fn abandon(root: &Path, row: &InflightTurnState) -> GuardedClearOutcome {
     )
 }
 
+#[cfg(unix)]
 #[test]
 fn alpha_journal_failure_escrows() {
     let temp = tempfile::tempdir().unwrap();
@@ -141,6 +147,7 @@ fn alpha_journal_failure_escrows() {
     assert!(handed_off(&root, row.channel_id, &evidence));
 }
 
+#[cfg(unix)]
 #[test]
 fn alpha_storage_failure_preserves_row() {
     let temp = tempfile::tempdir().unwrap();
@@ -180,6 +187,7 @@ fn alpha_pending_carry_forward_keeps_origin() {
     assert_eq!(written["current_msg_id"], 33);
 }
 
+#[cfg(unix)]
 #[test]
 fn alpha_distinct_unresolved_evidence_retained() {
     let temp = tempfile::tempdir().unwrap();
@@ -212,6 +220,7 @@ fn alpha_unknown_evidence_version_preserved() {
     assert_eq!(fs::read(&path).unwrap(), before);
 }
 
+#[cfg(unix)]
 #[test]
 fn alpha_origin_and_range_survive_path_reuse() {
     use crate::services::discord::relay_recovery::circuit_evidence::{
@@ -291,6 +300,7 @@ fn alpha_origin_and_range_survive_path_reuse() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn alpha_no_evidence_eviction() {
     let temp = tempfile::tempdir().unwrap();
@@ -317,6 +327,7 @@ fn alpha_no_evidence_eviction() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn alpha_conflicting_identity_cannot_fork_into_escrow() {
     let temp = tempfile::tempdir().unwrap();

@@ -24,6 +24,57 @@
 /// it, and far shorter than the ~31 minutes the observed incident stayed silent.
 pub(in crate::services::discord) const BOUND_TRANSCRIPT_FROZEN_ALERT_SECS: u64 = 5 * 60;
 
+/// How long an alerting state stays in health after its last read; a few watchdog ticks.
+const ALERT_REASON_FRESH: std::time::Duration = std::time::Duration::from_secs(120);
+
+mod o_witness;
+mod transition_log;
+
+#[cfg(test)]
+pub(in crate::services::discord) use o_witness::backdate_for_tests as o_witness_backdate_for_tests;
+pub(in crate::services::discord) use o_witness::{OWitness, classify_relay_stall, o_owns};
+pub(in crate::services::discord) use transition_log::{Transition, TransitionLog};
+
+#[cfg(not(test))]
+static STALL_LOG: std::sync::LazyLock<TransitionLog> =
+    std::sync::LazyLock::new(TransitionLog::default);
+// Tests keep one log per thread so one fixture's alert never reaches another's health.
+#[cfg(test)]
+thread_local! {
+    static STALL_LOG: TransitionLog = TransitionLog::default();
+}
+
+fn with_stall_log<R>(read: impl FnOnce(&TransitionLog) -> R) -> R {
+    #[cfg(not(test))]
+    return read(&STALL_LOG);
+    #[cfg(test)]
+    STALL_LOG.with(read)
+}
+
+/// Health reasons for the O channels whose delivery verdict is alerting now.
+pub(in crate::services::discord) fn health_reasons() -> Vec<String> {
+    with_stall_log(|log| log.reasons(ALERT_REASON_FRESH, tokio::time::Instant::now()))
+}
+
+/// Degrades `/api/health` and its detail while an O channel's delivery verdict alerts.
+pub(crate) fn attach_o_stall_reasons(
+    status: &mut super::HealthStatus,
+    reasons: &mut Vec<serde_json::Value>,
+) {
+    for reason in health_reasons() {
+        *status = status.worsen(super::HealthStatus::Degraded);
+        reasons.push(serde_json::Value::String(reason));
+    }
+}
+
+/// The O side of an O-owned channel's verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) struct OTurn {
+    pub witness: OWitness,
+    /// The mailbox holds an active turn; the Legacy inflight row is not consulted.
+    pub turn_open: bool,
+}
+
 /// Evidence for the cross-check, captured by the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(in crate::services::discord) struct TranscriptBindingStallView {
@@ -57,6 +108,11 @@ pub(in crate::services::discord) struct TranscriptBindingStallView {
     /// process itself named a different session, so the file this binding points
     /// at cannot grow again.
     pub binding_session_is_superseded: bool,
+    /// Seconds since the turn now waiting began. A turn younger than the freeze threshold cannot
+    /// have waited that long, whatever an older transcript's mtime says.
+    pub turn_age_secs: Option<u64>,
+    /// Set when O posts this channel's body; the verdict is then O's, not the transcript's.
+    pub o: Option<OTurn>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +128,13 @@ pub(in crate::services::discord) enum TranscriptBindingStall {
     /// waiting on has not grown for minutes. Bytes are owed and nothing is
     /// arriving, whatever the cause.
     FrozenWithLiveTurn,
+    /// O owns the body and still owes pieces, but its ledger has not moved for minutes.
+    ODeliveryStalled,
+    /// O delivered the turn and moved no further, the native turn shows no open unit and its
+    /// transcript stopped, yet the mailbox still holds the turn open.
+    ODrainedTurnOpen,
+    /// O owns the body but no running actor reports a position for a turn open for minutes.
+    OUnwitnessed,
 }
 
 impl TranscriptBindingStall {
@@ -80,6 +143,30 @@ impl TranscriptBindingStall {
             Self::None => "none",
             Self::FrozenAfterSessionRotation => "frozen_after_session_rotation",
             Self::FrozenWithLiveTurn => "frozen_with_live_turn",
+            Self::ODeliveryStalled => "o_delivery_stalled",
+            Self::ODrainedTurnOpen => "o_drained_turn_open",
+            Self::OUnwitnessed => "o_unwitnessed",
+        }
+    }
+
+    /// What the alert means, for the one WARN that opens it.
+    const fn describe(self) -> &'static str {
+        match self {
+            Self::None => "delivery binding stall cleared",
+            Self::FrozenAfterSessionRotation | Self::FrozenWithLiveTurn => {
+                "#5188: delivery binding points at a transcript that stopped growing while the \
+                 pane is alive and output is owed; relay frame counters cannot show this because \
+                 nothing is ever attempted against a file that does not grow"
+            }
+            Self::ODeliveryStalled => {
+                "O owes this channel pieces but its ledger has not moved for minutes while the turn is open"
+            }
+            Self::ODrainedTurnOpen => {
+                "O delivered this turn and the native turn ended, but the mailbox still holds it open"
+            }
+            Self::OUnwitnessed => {
+                "O owns this channel's body but no running writer reports its position for an open turn"
+            }
         }
     }
 
@@ -92,12 +179,21 @@ impl TranscriptBindingStall {
 pub(in crate::services::discord) fn classify_transcript_binding_stall(
     view: TranscriptBindingStallView,
 ) -> TranscriptBindingStall {
-    if !view.relay_attached || !view.tmux_alive {
+    if !view.tmux_alive {
+        return TranscriptBindingStall::None;
+    }
+    if let Some(o) = view.o {
+        return classify_o_turn(o, view.turn_age_secs, view.bound_transcript_idle_secs);
+    }
+    if !view.relay_attached {
         return TranscriptBindingStall::None;
     }
     let Some(idle_secs) = view.bound_transcript_idle_secs else {
         return TranscriptBindingStall::None;
     };
+    let idle_secs = view
+        .turn_age_secs
+        .map_or(idle_secs, |age| idle_secs.min(age));
     if idle_secs < BOUND_TRANSCRIPT_FROZEN_ALERT_SECS {
         return TranscriptBindingStall::None;
     }
@@ -121,6 +217,47 @@ pub(in crate::services::discord) fn classify_transcript_binding_stall(
     // case that makes a bare `frames_received == 0` alarm useless, so it stays
     // silent here on purpose.
     TranscriptBindingStall::None
+}
+
+/// An O-owned channel: only an open mailbox turn is owed anything, and O's ledger is the progress.
+fn classify_o_turn(
+    o: OTurn,
+    turn_age_secs: Option<u64>,
+    transcript_idle_secs: Option<u64>,
+) -> TranscriptBindingStall {
+    let threshold = BOUND_TRANSCRIPT_FROZEN_ALERT_SECS;
+    if !o.turn_open || turn_age_secs.is_none_or(|age| age < threshold) {
+        return TranscriptBindingStall::None;
+    }
+    let turn_age = turn_age_secs.unwrap_or_default();
+    match o.witness {
+        OWitness::Unwitnessed => TranscriptBindingStall::OUnwitnessed,
+        OWitness::Seen { still_secs, .. } if still_secs < threshold => TranscriptBindingStall::None,
+        OWitness::Seen { debt: 1.., .. } => TranscriptBindingStall::ODeliveryStalled,
+        // An open unit is the native turn still at work; that pace is not a delivery stall.
+        OWitness::Seen { unsealed: true, .. } => TranscriptBindingStall::None,
+        // O posted for this turn and then stopped: the native turn ended, the mailbox did not.
+        OWitness::Seen { still_secs, .. }
+            if still_secs < turn_age
+                && transcript_idle_secs.is_some_and(|idle| idle >= threshold) =>
+        {
+            TranscriptBindingStall::ODrainedTurnOpen
+        }
+        OWitness::Seen { .. } => TranscriptBindingStall::None,
+    }
+}
+
+/// The verdict on an open O turn `turn_age_secs` old whose transcript stopped, from the position
+/// `channel`'s actor last published, read the way the health snapshot reads it.
+#[cfg(all(test, unix))]
+pub(crate) fn o_verdict_for_tests(channel: u64, turn_age_secs: u64) -> &'static str {
+    let position = crate::services::tui_o::writer::progress::read(channel);
+    let witness = o_witness::witness_for_tests(channel, position, tokio::time::Instant::now());
+    let turn = OTurn {
+        witness,
+        turn_open: true,
+    };
+    classify_o_turn(turn, Some(turn_age_secs), Some(u64::MAX)).as_str()
 }
 
 /// #4408 phase-2 (I1): resolve the transcript path / provider session the relay
@@ -156,16 +293,60 @@ pub(in crate::services::discord) fn resolve_bound_selector(
     (bound_output_path, bound_session_id)
 }
 
+/// The turn the verdict judges, as the snapshot builder saw it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(in crate::services::discord) struct TurnFacts {
+    pub channel_id: u64,
+    /// The mailbox holds an active turn.
+    pub turn_open: bool,
+    pub turn_age_secs: Option<u64>,
+    /// A Legacy inflight row exists for the channel.
+    pub inflight_present: bool,
+}
+
+impl TurnFacts {
+    pub(in crate::services::discord) fn new(
+        channel_id: u64,
+        mailbox: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
+        session: &super::session_enrichment::SessionEnrichment,
+    ) -> Self {
+        Self {
+            channel_id,
+            turn_open: mailbox.cancel_token.is_some() || mailbox.active_user_message_id.is_some(),
+            turn_age_secs: turn_age_secs(mailbox, session.inflight_started_at().as_deref()),
+            inflight_present: session.inflight_state_present,
+        }
+    }
+}
+
+/// Seconds since the younger of the mailbox turn's start and the inflight row's; either may be
+/// stale, and a turn cannot have waited longer than the newer of the two.
+pub(in crate::services::discord) fn turn_age_secs(
+    mailbox: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
+    inflight_started_at: Option<&str>,
+) -> Option<u64> {
+    let inflight =
+        inflight_started_at.and_then(crate::services::discord::inflight::parse_started_at_unix);
+    let mailbox_started = mailbox.turn_started_at.map(|at| at.timestamp());
+    let started = [mailbox_started, inflight].into_iter().flatten().max()?;
+    Some(
+        chrono::Utc::now()
+            .timestamp()
+            .saturating_sub(started)
+            .max(0) as u64,
+    )
+}
+
 /// #5188 (R5/R6): gather the evidence for [`classify_transcript_binding_stall`]
-/// and emit the bounded incident when it alerts.
+/// and log the verdict once per change of state for `(session, bound path)`.
 ///
 /// Lives here rather than inline in the snapshot builder because it is the same
 /// concern as [`resolve_bound_selector`] above — what transcript is delivery
 /// bound to, and is that transcript still alive — and because `snapshot.rs` sits
 /// against the 1000-line giant-file threshold.
 ///
-/// Costs one `stat` of a path the caller already resolved plus an in-memory
-/// ledger lookup, so it is safe on the health-endpoint path.
+/// Costs one `stat` of a path the caller already resolved plus in-memory
+/// lookups, so it is safe on the health-endpoint path.
 pub(in crate::services::discord) fn resolve_transcript_binding_stall(
     provider_name: &str,
     tmux_session: Option<&str>,
@@ -173,7 +354,7 @@ pub(in crate::services::discord) fn resolve_transcript_binding_stall(
     bound_session_id: Option<&str>,
     relay_attached: bool,
     tmux_session_alive: Option<bool>,
-    inflight_present: bool,
+    turn: TurnFacts,
 ) -> TranscriptBindingStall {
     let bound_transcript_idle_secs = bound_output_path
         .map(std::path::Path::new)
@@ -194,35 +375,78 @@ pub(in crate::services::discord) fn resolve_transcript_binding_stall(
         (Some(bound), Some(adopted)) if !bound.is_empty() => bound != adopted,
         _ => false,
     };
+    let o = o_witness::observe(turn.channel_id).map(|witness| OTurn {
+        witness,
+        turn_open: turn.turn_open,
+    });
     let stall = classify_transcript_binding_stall(TranscriptBindingStallView {
         relay_attached,
         // Unknown liveness must not alert: an unprobed pane is not evidence that
         // a live TUI is being starved.
         tmux_alive: tmux_session_alive == Some(true),
         bound_transcript_idle_secs,
-        inflight_present,
+        inflight_present: turn.inflight_present,
         rotation_pending: tmux_session.is_some_and(|tmux| {
             crate::services::tui_prompt_dedupe::claude_session_rotation_for_tmux(tmux).is_some()
         }),
         binding_session_is_superseded,
+        turn_age_secs: turn.turn_age_secs,
+        o,
     });
-    if stall.is_alerting() {
+    let key = format!(
+        "{provider_name}\u{1f}{}\u{1f}{}",
+        tmux_session.unwrap_or(""),
+        bound_output_path.unwrap_or("")
+    );
+    let state = stall.is_alerting().then(|| {
+        let reason = o.map(|_| {
+            format!(
+                "o_stall:{}:{provider_name}:{}",
+                stall.as_str(),
+                turn.channel_id
+            )
+        });
+        (stall.as_str(), reason)
+    });
+    let transition = with_stall_log(|log| log.record(&key, state, tokio::time::Instant::now()));
+    if transition.warns() {
+        let previous = match transition {
+            Transition::Changed(previous) => previous,
+            _ => "none",
+        };
         tracing::warn!(
             provider = provider_name,
+            channel_id = turn.channel_id,
             tmux_session = tmux_session.unwrap_or(""),
             bound_output_path = bound_output_path.unwrap_or(""),
             bound_session_id = bound_session_id.unwrap_or(""),
             hook_adopted_session_id = hook_adopted_session_id.as_deref().unwrap_or(""),
             binding_session_is_superseded,
             bound_transcript_idle_secs = bound_transcript_idle_secs.unwrap_or(0),
+            turn_age_secs = turn.turn_age_secs.unwrap_or(0),
+            o_witness = ?o.map(|o| o.witness),
+            previous,
             transcript_binding_stall = stall.as_str(),
-            "#5188: delivery binding points at a transcript that stopped growing while the \
-             pane is alive and output is owed; relay frame counters cannot show this because \
-             nothing is ever attempted against a file that does not grow"
+            "{}",
+            stall.describe()
+        );
+    } else if let Transition::Ended(previous) = transition {
+        tracing::info!(
+            provider = provider_name,
+            channel_id = turn.channel_id,
+            tmux_session = tmux_session.unwrap_or(""),
+            previous,
+            "delivery binding stall cleared"
         );
     }
     stall
 }
+
+#[cfg(test)]
+mod o_verdict_tests;
+
+#[cfg(all(test, unix))]
+mod o_relay_stall_tests;
 
 #[cfg(test)]
 mod tests {
@@ -236,6 +460,8 @@ mod tests {
             inflight_present: false,
             rotation_pending: false,
             binding_session_is_superseded: false,
+            turn_age_secs: None,
+            o: None,
         }
     }
 

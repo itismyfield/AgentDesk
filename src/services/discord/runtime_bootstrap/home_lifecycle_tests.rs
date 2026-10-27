@@ -1,6 +1,6 @@
 //! Ordinary gateway writers retain their detached lifetime across runtime shutdown boundaries.
 use super::*;
-use crate::services::tui_o::cutover::{self, test_override};
+use crate::services::tui_o::cutover;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};
 use crate::services::tui_o::writer::host::{self, HostParts, ManagedWriterHandle, Readiness};
@@ -97,9 +97,11 @@ fn every_slot_holding_runtime_registers_one_sigterm_handler() {
     assert!(!include_str!("gateway_runtime.rs").contains("run_bot_spawn_sigterm_handler"));
 }
 
+// The writer recovers through an enabled store, which Windows refuses without a directory fsync.
+#[cfg(unix)]
 #[test]
 fn ordinary_gateway_writer_starts_detached_and_backend_exit_does_not_join_it() {
-    if !test_override::isolated_binding_case(concat!(
+    if !cutover::test_override::isolated_binding_case(concat!(
         module_path!(),
         "::ordinary_gateway_writer_starts_detached_and_backend_exit_does_not_join_it"
     )) {
@@ -112,7 +114,7 @@ fn ordinary_gateway_writer_starts_detached_and_backend_exit_does_not_join_it() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let _channels = test_override::force_candidates(&[(
+        let _channels = cutover::test_override::force_candidates(&[(
             CHANNEL,
             crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
         )]);

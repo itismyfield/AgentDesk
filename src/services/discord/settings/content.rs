@@ -705,7 +705,7 @@ fn render_peer_agent_guidance_with_cache(current_role_id: &str, memoize: bool) -
 
     let mut lines = vec![
         "[Peer Agent Directory]".to_string(),
-        "Other specialist agents share this workspace. For requests mostly outside your scope:".to_string(),
+        "Other specialist agents work in this AgentDesk. For requests mostly outside your scope:".to_string(),
         "1. Name 1-2 peer agents that fit better and why.".to_string(),
         "2. Ask \"해당 에이전트에게 전달할까요?\" and wait for approval.".to_string(),
         "3. On approval, call `agentdesk send-to-agent --from <self> --to <peer> --message \"...\" --expect-reply <true|false> [--channel-kind cc|cdx]` to forward context via the announce bot so the peer intake_gate can trigger. Use `true` when a reply is needed, otherwise `false`.".to_string(),

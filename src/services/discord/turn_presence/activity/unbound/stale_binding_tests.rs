@@ -66,7 +66,7 @@ impl RecoveryFixture {
         assert!(shared.core.lock().await.sessions.is_empty());
         assert!(shared.tmux_watchers.channel_binding(&channel).is_none());
         assert!(
-            registrations(&config)
+            registrations()
                 .unwrap()
                 .iter()
                 .filter(|binding| binding.channel_id == id)
