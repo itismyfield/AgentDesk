@@ -791,13 +791,6 @@ src/
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
 │   │   │   └── relay_receipts.rs
-│   │   ├── host_input/
-│   │   │   ├── guarded_submission/
-│   │   │   │   ├── idle_stash/
-│   │   │   │   │   └── idle_stash_tests.rs
-│   │   │   │   ├── executor_tests.rs
-│   │   │   │   └── idle_stash.rs
-│   │   │   └── guarded_submission.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── fresh_hold_tests.rs
@@ -813,10 +806,10 @@ src/
 │   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
 │   │   │   ├── hold_lifecycle_tests.rs
-│   │   │   ├── legacy_submission.rs
 │   │   │   ├── literal_chunks.rs
 │   │   │   ├── preparation_hold.rs
 │   │   │   ├── submission.rs
+│   │   │   ├── submission_tests.rs
 │   │   │   ├── timeout_draft_tests.rs
 │   │   │   └── user_receipt.rs
 │   │   ├── session/
@@ -843,7 +836,6 @@ src/
 │   │   ├── source_verify.rs
 │   │   ├── startup_dialog.rs
 │   │   ├── submission_fence.rs
-│   │   ├── submit_canary.rs
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
 │   ├── cluster/
@@ -2398,8 +2390,6 @@ src/
 │   │   │   ├── finalize_epilogue/
 │   │   │   │   └── r1_transition_busy_tests.rs
 │   │   │   ├── followup_requeue/
-│   │   │   │   ├── tests/
-│   │   │   │   │   └── person_draft_tests.rs
 │   │   │   │   ├── attempt.rs
 │   │   │   │   ├── draft_release.rs
 │   │   │   │   └── preparation_notice.rs
@@ -3322,9 +3312,6 @@ src/
 │   ├── tui_input/
 │   │   ├── actor/
 │   │   │   ├── gate/
-│   │   │   │   ├── claude_guarded/
-│   │   │   │   │   └── acceptance_tests.rs
-│   │   │   │   ├── claude_guarded.rs
 │   │   │   │   └── own_draft_tests.rs
 │   │   │   ├── pane/
 │   │   │   │   └── submit_tests.rs

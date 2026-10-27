@@ -428,9 +428,12 @@ fn modal(capture: &str) -> bool {
     screen::modal(capture)
 }
 
-/// Read once before any key: whether a visible draft may be parked with C-s. An unread composer
+/// Read once before any key: whether a visible draft is parked with C-s. An unread composer
 /// deliberately proceeds without C-s.
-pub(in crate::services::claude_tui) fn before_paste(pane: &Pane) -> Result<bool, Veto> {
+pub(in crate::services::claude_tui) fn before_paste(
+    pane: &Pane,
+    stash_allowed: bool,
+) -> Result<bool, Veto> {
     if pane
         .ok(&["display-message", "-p", "-t", pane.target(), "#{pane_dead}"])
         .is_none_or(|output| !pane_dead_is_live(&output))
@@ -443,7 +446,13 @@ pub(in crate::services::claude_tui) fn before_paste(pane: &Pane) -> Result<bool,
     if modal(&capture) {
         return Err(Veto::Modal);
     }
-    Ok(screen::parkable(&capture))
+    Ok(park_draft(stash_allowed, screen::parkable(&capture)))
+}
+
+/// The one rule for a visible draft: a listed channel parks it with C-s, any other channel
+/// pastes behind it.
+fn park_draft(stash_allowed: bool, parkable: bool) -> bool {
+    stash_allowed && parkable
 }
 
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.
@@ -504,8 +513,8 @@ fn inject_locked(
     stash: bool,
     turn_gate: TurnGate,
 ) -> Report {
-    let parkable = match before_paste(pane) {
-        Ok(parkable) => parkable,
+    let park = match before_paste(pane, stash) {
+        Ok(park) => park,
         Err(veto) => return Report::not_sent(veto),
     };
     if matches!(turn_gate, TurnGate::BusyOnly)
@@ -527,7 +536,7 @@ fn inject_locked(
         return Report::not_sent(Veto::LoadFailed);
     }
     let report = Report {
-        outcome: stash::submit(pane, request.nonce, text, timing, stash && parkable),
+        outcome: stash::submit(pane, request.nonce, text, timing, park),
     };
     if report.outcome == Outcome::Injected {
         let request = (

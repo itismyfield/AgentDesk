@@ -206,8 +206,6 @@ fn rewatch_matching_draft_holds(
 mod tests {
     use super::*;
 
-    mod person_draft_tests;
-
     /// A failed attempt that cost no bridge time.
     fn attempt(turn_id: &str) -> BusyAttempt<'_> {
         BusyAttempt {
@@ -657,11 +655,13 @@ mod tests {
     }
 
     /// An idle Claude pane: `status` above the composer box, an empty composer, the bypass footer.
+    #[cfg(unix)]
     fn idle_pane(status: &str) -> String {
         idle_pane_with(status, "\u{276f}\u{a0}")
     }
 
     /// An idle Claude pane whose composer shows `row`.
+    #[cfg(unix)]
     fn idle_pane_with(status: &str, row: &str) -> String {
         let border = "\u{2500}".repeat(60);
         let footer = "  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";
@@ -669,37 +669,31 @@ mod tests {
     }
 
     /// The real follow-up submit over a scripted pane; returns its result and the pane writes.
+    #[cfg(unix)]
     fn submit_follow_up(
         session: &str,
         pane: &str,
-        idle: &std::path::Path,
         prompt: &str,
     ) -> (Result<(), String>, Vec<String>) {
         use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
+        use crate::services::claude_tui::input::submission::tests::ScriptedTmux;
         let captures = std::iter::repeat_n(pane, 3)
             .chain(["\u{2733} Architecting\u{2026}"])
             .map(|capture| Some(capture.to_string()))
             .collect();
-        let spy = SpyGuard::install(SpyState {
+        let _spy = SpyGuard::install(SpyState {
             captures,
             ..SpyState::default()
         });
-        let submitted = crate::services::claude_tui::input::send_followup_prompt_or_idle_transcript(
-            session, prompt, None, idle,
-        );
-        let write = |call: &&String| {
-            ["keys:", "literal:", "load:", "paste:"]
-                .iter()
-                .any(|k| call.starts_with(k))
-        };
-        (
-            submitted,
-            spy.calls().iter().filter(write).cloned().collect(),
-        )
+        let tmux = ScriptedTmux::new(pane);
+        let submitted =
+            crate::services::claude_tui::input::send_warm_followup(session, prompt, None);
+        (submitted, tmux.sends())
     }
 
     /// A draft-held follow-up goes through the real classifier into the mailbox, stays whole and
     /// unsent at the cap, and after the person recovers the draft gets one kickoff and one submit.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_follow_up_held_by_a_draft_resumes_once_the_draft_is_recovered() {
         use crate::services::claude_tui::composer_lock::{
@@ -719,7 +713,7 @@ mod tests {
         bind_watch_session(&session, &idle);
         guard_draft(&session, DraftGuard::RecoveryRequired);
         let stashed = idle_pane(&format!("{:>58}", "\u{203a} stashed"));
-        let (refused, writes) = submit_follow_up(&session, &stashed, &idle, "queued follow-up");
+        let (refused, writes) = submit_follow_up(&session, &stashed, "queued follow-up");
         let error = refused.expect_err("a held pane takes no follow-up");
         assert_eq!(writes, Vec::<String>::new());
 
@@ -834,9 +828,9 @@ mod tests {
         let watch = (channel_id.get(), session.clone());
         assert!(!draft_release_watches().contains(&watch));
 
-        let (resumed, writes) = submit_follow_up(&session, &settled, &idle, "queued follow-up");
+        let (resumed, writes) = submit_follow_up(&session, &settled, "queued follow-up");
         assert_eq!(resumed, Ok(()));
-        assert_eq!(writes, ["literal:queued follow-up", "keys:Enter"]);
+        assert_eq!(writes, ["load", "paste", "Enter"]);
         crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
             "claude",
             &session,
@@ -855,7 +849,6 @@ mod tests {
         channel_id: ChannelId,
         session: String,
         pane: String,
-        idle: std::path::PathBuf,
     ) -> (
         Dispatched,
         crate::services::discord::queue_io::IdleQueueKickHookResetForTests,
@@ -864,8 +857,7 @@ mod tests {
         let record = sent.clone();
         let hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(
             Arc::new(move |shared, provider, channel, _reason| {
-                let (record, session, pane, idle) =
-                    (record.clone(), session.clone(), pane.clone(), idle.clone());
+                let (record, session, pane) = (record.clone(), session.clone(), pane.clone());
                 Box::pin(async move {
                     if channel != channel_id {
                         return None;
@@ -876,7 +868,7 @@ mod tests {
                     .await;
                     let started = taken.intervention.is_some();
                     if let Some(input) = taken.intervention {
-                        let (ended, writes) = submit_follow_up(&session, &pane, &idle, &input.text);
+                        let (ended, writes) = submit_follow_up(&session, &pane, &input.text);
                         assert_eq!(ended, Ok(()));
                         record.lock().unwrap().push((input.message_id, writes));
                         let lease = taken.dispatch_lease.expect("automatic dequeue lease");
@@ -986,8 +978,7 @@ mod tests {
         let progression = automatic_progression(&shared, &provider, channel_id, &snapshot);
         assert_eq!(progression, blocked);
 
-        let (sent, _hook) =
-            dispatch_on_kickoff(channel_id, session.clone(), idle_pane(""), idle.clone());
+        let (sent, _hook) = dispatch_on_kickoff(channel_id, session.clone(), idle_pane(""));
         let backlog = || {
             shared
                 .restart
@@ -1024,10 +1015,7 @@ mod tests {
 
         // The kickoff dispatches the held input once; later polls and the backstop add nothing.
         tokio::time::sleep(std::time::Duration::from_secs(60 * 10)).await;
-        let submit = vec![
-            "literal:queued follow-up".to_string(),
-            "keys:Enter".to_string(),
-        ];
+        let submit = vec!["load".to_string(), "paste".to_string(), "Enter".to_string()];
         assert_eq!(*sent.lock().unwrap(), vec![(held_id, submit)]);
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
         let queued: Vec<_> = snapshot
@@ -1185,7 +1173,9 @@ mod tests {
         tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding);
         assert_eq!(
             crate::services::claude_tui::composer_lock::composer_admission(&session, || {
-                Some(crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::view("", false))
+                Some(crate::services::claude_tui::input::submission::tests::view(
+                    "", false,
+                ))
             }),
             crate::services::claude_tui::composer_lock::ComposerAdmission::Any
         );

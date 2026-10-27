@@ -25,6 +25,5 @@ pub mod session;
 pub(crate) mod source_verify;
 pub(crate) mod startup_dialog;
 pub(crate) mod submission_fence;
-pub(crate) mod submit_canary;
 pub mod transcript_tail;
 pub mod tui_relay;
