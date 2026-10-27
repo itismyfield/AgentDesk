@@ -107,6 +107,8 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── config/
+│   ├── config_path/
+│   │   └── tests.rs
 │   ├── reload_classes/
 │   │   ├── detect.rs
 │   │   ├── table.rs
@@ -132,6 +134,7 @@ src/
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
 │   ├── cluster_role.rs
+│   ├── config_path.rs
 │   ├── disk_write.rs
 │   ├── late_live_reload_tests.rs
 │   ├── peer_filter.rs
@@ -275,6 +278,8 @@ src/
 │   │   └── writes.rs
 │   ├── session_observability/
 │   │   └── background_ordering_pg_tests.rs
+│   ├── turns/
+│   │   └── timestamp_tests.rs
 │   ├── agent_read.rs
 │   ├── agents.rs
 │   ├── automation_candidate_card_program.rs
@@ -316,6 +321,7 @@ src/
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
 │   ├── session_transcripts_retired_boundary_pg_tests.rs
+│   ├── timestamps.rs
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_status/
@@ -1382,6 +1388,8 @@ src/
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/
+│   │   │   │   │   │   ├── claude_terminal_tests/
+│   │   │   │   │   │   │   └── o_stream_regression_tests.rs
 │   │   │   │   │   │   ├── before_start_stop_admission.rs
 │   │   │   │   │   │   ├── before_start_stop_admission_tests.rs
 │   │   │   │   │   │   ├── captured_terminal_admission.rs
@@ -2109,7 +2117,8 @@ src/
 │   │   │   └── turn_lifecycle.rs
 │   │   ├── tmux_output_stream/
 │   │   │   ├── tests/
-│   │   │   │   └── compact_summary_tests.rs
+│   │   │   │   ├── compact_summary_tests.rs
+│   │   │   │   └── section_replay_tests.rs
 │   │   │   ├── native_codex.rs
 │   │   │   └── provider_output_guard_tests.rs
 │   │   ├── tmux_placeholder_suppression/
@@ -2514,6 +2523,7 @@ src/
 │   │   │   │   │   ├── rowless_receipt_tests/
 │   │   │   │   │   │   ├── background_child_ordering_tests.rs
 │   │   │   │   │   │   ├── o_after_done_chain_tests.rs
+│   │   │   │   │   │   ├── o_stream_regression_tests.rs
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
 │   │   │   │   │   ├── codex_empty_tests.rs

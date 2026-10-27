@@ -161,3 +161,47 @@ fn folding_never_combines_success_unknown_pending_or_failed_statuses() {
         "-# ▸ Bash ×2  ✓\n-# ▸ Bash ×2  ·\n-# ▸ Read  ·\n-# ▸ Bash  ✓\n-# ▸ Bash  ·\n-# ▸ Bash  ?\n-# ▸ Bash  ?\n-# ▸ Bash  ✗\n-# ▸ Bash  ✗"
     );
 }
+
+#[test]
+fn code_mode_exec_status_line_resolves_the_card_result() {
+    // A completed script can still hold a failed command, so only a script failure is decisive.
+    let failed_command = "{\"exit_code\":1,\"output\":\"error: could not compile\"}";
+    for (header, is_error, expected) in [
+        (
+            "Script completed\nWall time 0.1 seconds\nOutput:",
+            None,
+            '·',
+        ),
+        (
+            "Script completed\nWall time 0.1 seconds\nOutput:",
+            Some(true),
+            '✗',
+        ),
+        ("Script failed\nWall time 0.1 seconds\nOutput:", None, '✗'),
+        ("Script completed later", None, '·'),
+    ] {
+        let mut derive = deriver();
+        derive.derive(&record(json!({"type":"response_item","payload":{
+            "type":"custom_tool_call","id":"native-exec","call_id":"exec","name":"exec",
+            "input":"const r = await tools.exec_command({cmd: \"cargo check\"});"
+        }})));
+        let mut output = json!({"type":"response_item","payload":{
+            "type":"custom_tool_call_output","call_id":"exec",
+            "output":[{"type":"input_text","text":header},{"type":"input_text","text":failed_command},
+                {"type":"input_text","text":"PRIVATE_RESULT_BODY"}]
+        }});
+        if let Some(is_error) = is_error {
+            output["payload"]["is_error"] = json!(is_error);
+        }
+        derive.derive(&record(output));
+        let work = derive.derive(&end());
+        let posted = cards(&work);
+        assert_eq!(posted.len(), 1, "{header}");
+        assert!(
+            posted[0].payload.ends_with(&format!("  {expected}")),
+            "{header}: {}",
+            posted[0].payload
+        );
+        assert!(!posted[0].payload.contains("PRIVATE_RESULT_BODY"));
+    }
+}

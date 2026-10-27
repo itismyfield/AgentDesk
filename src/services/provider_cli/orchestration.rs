@@ -189,16 +189,7 @@ fn configured_provider_agent_ids(provider: &str) -> Vec<String> {
 }
 
 pub fn configured_provider_agents(provider: &str) -> Vec<super::AgentInfo> {
-    let Some(root) = crate::config::runtime_root() else {
-        return Vec::new();
-    };
-    let config = [
-        crate::runtime_layout::config_file_path(&root),
-        crate::runtime_layout::legacy_config_file_path(&root),
-    ]
-    .into_iter()
-    .find_map(|path| crate::config::load_from_path(&path).ok());
-    let Some(config) = config else {
+    let Some((config, _)) = crate::config::config_path::load_runtime_config_file() else {
         return Vec::new();
     };
 

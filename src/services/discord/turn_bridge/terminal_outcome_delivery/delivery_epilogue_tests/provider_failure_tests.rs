@@ -1,6 +1,9 @@
 //! A turn that ends on a provider error, at the terminal delivery: the bridge's failure notice is
 //! shown and marked failed on O's channel as on a Legacy one, and only a confirmed replace counts.
 
+// Positive delivery needs Unix transcript identity and the directory-fsync-backed OStore.
+#![cfg(unix)]
+
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
 use crate::services::discord::turn_bridge::status_panel::provider_failure::PROVIDER_FAILURE_SUMMARY;

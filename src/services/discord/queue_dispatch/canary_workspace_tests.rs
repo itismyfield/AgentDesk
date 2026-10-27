@@ -27,8 +27,10 @@ fn original(message: u64) -> Intervention {
     }
 }
 
+// Breaks the file the process resolves, which is the fixture's `$AGENTDESK_CONFIG`.
 fn break_workspace(fixture: &CanaryFixture) {
-    let config = crate::runtime_layout::config_file_path(fixture.root.path());
+    let config = crate::config::config_path::config_path_in(fixture.root.path());
+    assert_eq!(config, fixture.root.path().join("config.yaml"));
     let yaml = std::fs::read_to_string(&config).unwrap();
     let workspace = serde_json::to_string(fixture.root.path()).unwrap();
     let missing = serde_json::to_string(&fixture.root.path().join("missing-workspace")).unwrap();

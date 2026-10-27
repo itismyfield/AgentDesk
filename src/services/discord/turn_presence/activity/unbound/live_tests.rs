@@ -138,3 +138,56 @@ fn s1_unbound_registration_reads_preserve_precedence_and_permissions() {
         "a corrupt registration must not become empty absence"
     );
 }
+
+#[test]
+fn unbound_registrations_read_only_the_resolved_config_file() {
+    let _root = TestRuntimeRootGuard::new();
+    let root = crate::config::runtime_root().unwrap();
+    let canonical = crate::runtime_layout::config_file_path(&root);
+    let legacy = crate::runtime_layout::legacy_config_file_path(&root);
+    let explicit = root.join("explicit.yaml");
+    let write = |path: &std::path::Path, channel: u64| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let yaml = format!(
+            "server: {{}}\nagents:\n  - id: a\n    name: a\n    provider: codex\n    channels:\n      codex: {{id: '{channel}', name: c}}\n"
+        );
+        std::fs::write(path, yaml).unwrap();
+    };
+    let channels = || -> Vec<u64> {
+        registrations()
+            .unwrap()
+            .iter()
+            .map(|binding| binding.channel_id)
+            .collect()
+    };
+    let env =
+        crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock("AGENTDESK_CONFIG");
+    unsafe { std::env::remove_var("AGENTDESK_CONFIG") };
+
+    write(&legacy, 69_181_701);
+    assert_eq!(
+        channels(),
+        vec![69_181_701],
+        "legacy-only root keeps its file"
+    );
+    write(&canonical, 69_181_702);
+    assert_eq!(channels(), vec![69_181_702]);
+
+    unsafe { std::env::set_var("AGENTDESK_CONFIG", &explicit) };
+    write(&explicit, 69_181_703);
+    std::fs::write(&canonical, "agents: [\n").unwrap();
+    assert_eq!(channels(), vec![69_181_703], "only the env file counts");
+
+    write(&canonical, 69_181_702);
+    std::fs::write(&explicit, "agents: [\n").unwrap();
+    let others = [&canonical, &legacy].map(|path| std::fs::read(path).unwrap());
+    assert!(
+        registrations().is_err(),
+        "a broken env file must not fall back to another file"
+    );
+    assert_eq!(
+        [&canonical, &legacy].map(|path| std::fs::read(path).unwrap()),
+        others
+    );
+    drop(env);
+}
