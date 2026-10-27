@@ -294,19 +294,11 @@ impl UnitDeriver {
     }
 }
 
-// Code-mode `exec` output opens with the harness status line, Codex's only recorded outcome.
+// Code-mode `exec` reports only the script's outcome; a completed script may still hold a
+// failed command, so only a script failure decides the card result.
 fn code_mode_exec_failed(value: &serde_json::Value) -> Option<bool> {
-    if value.pointer("/payload/type")?.as_str()? != "custom_tool_call_output" {
-        return None;
-    }
-    match value
-        .pointer("/payload/output/0/text")?
-        .as_str()?
-        .lines()
-        .next()?
-    {
-        "Script completed" => Some(false),
-        "Script failed" => Some(true),
-        _ => None,
-    }
+    let output = value.pointer("/payload/output/0/text")?.as_str()?;
+    (value.pointer("/payload/type")?.as_str()? == "custom_tool_call_output"
+        && output.lines().next()? == "Script failed")
+        .then_some(true)
 }

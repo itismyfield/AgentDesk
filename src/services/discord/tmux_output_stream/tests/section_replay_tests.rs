@@ -59,7 +59,7 @@ fn claude_result(id: &str, extra: Value) -> Value {
     record
 }
 
-fn claude_records(commands: usize, plan_text: &str) -> Vec<Value> {
+fn claude_records(commands: usize, plan_text: &str, agent_text: &str, agents: usize) -> Vec<Value> {
     let todos: Vec<_> = (0..8)
         .map(|i| json!({"content":format!("{plan_text} {i}"),"status":if i == 0 {"in_progress"} else {"pending"},"activeForm":"더미 진행"}))
         .collect();
@@ -79,15 +79,18 @@ fn claude_records(commands: usize, plan_text: &str) -> Vec<Value> {
         "toolu_task",
         json!({"task":{"id":"1","subject":"더미 작업"}}),
     ));
-    records.extend(claude_tool(
-        "toolu_agent",
-        "Agent",
-        json!({"description":"더미 조사","subagent_type":"Explore","prompt":"더미 프롬프트","run_in_background":true}),
-    ));
-    records.push(claude_result(
-        "toolu_agent",
-        json!({"isAsync":true,"status":"async_launched","agentId":"a0fixture","description":"더미 조사"}),
-    ));
+    for i in 0..agents {
+        let (id, desc) = (format!("toolu_agent{i}"), format!("{agent_text} {i}"));
+        records.extend(claude_tool(
+            &id,
+            "Agent",
+            json!({"description":desc,"subagent_type":"Explore","prompt":"더미 프롬프트","run_in_background":true}),
+        ));
+        records.push(claude_result(
+            &id,
+            json!({"isAsync":true,"status":"async_launched","agentId":format!("a{i}fixture"),"description":desc}),
+        ));
+    }
     for i in 0..commands {
         let id = format!("toolu_bash{i}");
         records.extend(claude_tool(
@@ -142,15 +145,32 @@ fn bodies() -> [String; 3] {
 
 #[test]
 fn section_replay_claude_footer_keeps_plan_tasks_subagents_in_every_admission() {
+    // The ASCII case exceeds the 2000-unit panel limit yet fits 1400 bytes once Subagents is
+    // dropped whole, so only a lossless budget check keeps that section in the footer.
+    let ascii = (
+        "p".repeat(100),
+        format!("dummy research {}", "y".repeat(90)),
+    );
     for (records, pressure) in [
-        (claude_records(2, "더미 계획"), false),
-        (claude_records(12, &"긴 더미 계획 항목".repeat(10)), true),
+        (claude_records(2, "더미 계획", "더미 조사", 1), "none"),
+        (
+            claude_records(12, &"긴 더미 계획 항목".repeat(10), "더미 조사", 1),
+            "korean",
+        ),
+        (claude_records(2, &ascii.0, &ascii.1, 10), "ascii"),
     ] {
         for mode in [ToolActivityDisplay::Summary, ToolActivityDisplay::Class] {
             for body in bodies() {
                 let [panel, footer] = replay(ProviderKind::Claude, &records, mode, &body);
                 let case = format!("{mode:?} pressure={pressure} body={}", body.len());
-                for text in [&panel, &footer] {
+                // The standalone class panel keeps its whole-section overflow drop; footers are fitted.
+                let standalone_drop = mode == ToolActivityDisplay::Class && pressure == "ascii";
+                let texts = if standalone_drop {
+                    vec![&footer]
+                } else {
+                    vec![&panel, &footer]
+                };
+                for text in texts {
                     assert_eq!(
                         titles(text),
                         ["Plan", "Tasks", "Subagents"],

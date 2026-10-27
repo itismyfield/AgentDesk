@@ -693,14 +693,25 @@ pub(super) fn render_status_panel_for(
     {
         super::tool_activity::fit_panel(sections)
     } else if footer {
-        let panel = format_and_truncate_status_panel_sections(sections.clone());
-        let body = panel.trim().split_once('\n').map_or("", |(_, body)| body);
+        // Judge the untruncated panel: the 2000-unit cut below drops trailing sections whole.
+        let formatted = sections
+            .iter()
+            .map(|section| {
+                crate::services::terminal_status_formatting::format_subtext_block(section)
+            })
+            .collect::<Vec<_>>();
+        let lossless = join_status_panel_sections(&formatted);
+        let body = lossless
+            .trim()
+            .split_once('\n')
+            .map_or("", |(_, body)| body);
         if body.len()
             > super::super::single_message_panel::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES
+            || super::super::formatting::discord_message_units(&lossless) > STATUS_PANEL_MAX_CHARS
         {
             super::tool_activity::fit_sections(sections)
         } else {
-            panel
+            format_and_truncate_status_panel_sections(sections)
         }
     } else {
         format_and_truncate_status_panel_sections(sections)
