@@ -880,14 +880,28 @@ async fn a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_p
     let row = insert(&pool, &payload, 1, None).await.unwrap();
     let api = Recorder::start().await;
     let _rest = crate::services::discord::shared_state::test_rest::install(api.http.clone());
-    let owner = crate::services::discord::health::owner_runtime_for_tests::registered("claude");
-    let (_registry, owner) = owner.await;
+    let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+    let mut owner = shared_on(&pool).await;
+    Arc::get_mut(&mut owner).unwrap().health_registry = Arc::downgrade(&registry);
+    owner
+        .http
+        .cached_bot_token
+        .set("test-token".into())
+        .unwrap();
+    registry.register("claude".into(), owner.clone()).await;
     let _hosts =
         crate::config::session_hosts::force_for_test(Some("mac-mini"), &[(channel, "mac-mini")]);
 
     let not_cancelled = || false;
     let tick = run_intake_worker_tick(&pool, &owner, "worker-1", "claude", "o", &not_cancelled);
     assert_eq!(tick.await.unwrap(), TickOutcome::Processed);
+    assert_eq!(
+        run_intake_worker_tick(&pool, &owner, "worker-1", "claude", "o", &not_cancelled)
+            .await
+            .unwrap(),
+        TickOutcome::QueueEmpty,
+        "the failed refusal is not left pending for another worker tick"
+    );
 
     let row: (String, Option<String>, serde_json::Value) = sqlx::query_as(
         "SELECT status::TEXT, last_error, attachment_refs FROM intake_outbox WHERE id = $1",
