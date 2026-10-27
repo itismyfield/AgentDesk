@@ -200,6 +200,7 @@ mod tests {
         "catch_up_too_old",
         "boot_custody_notice",
         "queue_overflow_notice",
+        "retained_input_notice",
         "outbox_delivery_alert",
         "long_turn_watchdog",
         "relay_signal_rollup",
