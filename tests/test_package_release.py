@@ -170,9 +170,13 @@ class ReleasePackagingTests(unittest.TestCase):
             packaging.copy_file(outside, self.output / "leak", self.root)
         self.assertFalse(self.output.exists())
 
-    def install_assets(self, source, destination):
+    def install_assets(self, source, destination, helper=None, contract=None):
+        command = [sys.executable, str(helper or source / "scripts/install_runtime_assets.py"),
+                   str(source), str(destination)]
+        if contract is not None:
+            command.extend(["--contract", str(contract)])
         result = subprocess.run(
-            [sys.executable, str(source / "scripts/install_runtime_assets.py"), str(source), str(destination)],
+            command,
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -196,6 +200,42 @@ class ReleasePackagingTests(unittest.TestCase):
                 for relative in expected:
                     self.assertEqual((destination / relative).read_bytes(), (source / relative).read_bytes())
                 self.assertFalse((destination / "policies/operator-local.yaml").exists())
+
+    def test_old_release_uses_external_helper_contract_and_preserves_operator_edits(self):
+        archive = packaging.package(self.root, self.binary("darwin"), "aarch64-apple-darwin", self.output)
+        release = Path(self.temp.name) / "old-release"
+        prefix = "agentdesk-darwin-aarch64/"
+        bootstrap = {"scripts/runtime-assets.txt", "scripts/install_runtime_assets.py"}
+        for name, content in self.read_archive(archive).items():
+            relative = name.removeprefix(prefix)
+            if relative in bootstrap:
+                continue
+            path = release / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        destination = Path(self.temp.name) / "old-release-install"
+        operator = destination / "routines/operator.js"
+        operator.parent.mkdir(parents=True)
+        operator.write_text("operator routine")
+        helper = ROOT / "scripts/install_runtime_assets.py"
+        contract = ROOT / "scripts/runtime-assets.txt"
+        self.install_assets(release, destination, helper=helper, contract=contract)
+        expected = set(packaging.git(self.root, "ls-files", "-z", "--",
+                                    *runtime_assets.runtime_assets(self.root)).split("\0")) - {""} - bootstrap
+        ledger = destination / "runtime/install-assets.json"
+        self.assertEqual(set(json.loads(ledger.read_text())), expected)
+        owned = "policies/lib/shared.js"
+        edited = destination / "routines/queue.js"
+        edited.write_text("operator edit")
+        (release / owned).write_text("module.exports = { updated: true };\n")
+        (release / "routines/queue.js").write_text("upstream edit")
+        self.install_assets(release, destination, helper=helper, contract=contract)
+        self.assertEqual((destination / owned).read_bytes(), (release / owned).read_bytes())
+        self.assertEqual(edited.read_text(), "operator edit")
+        self.assertEqual(operator.read_text(), "operator routine")
+        for relative in bootstrap:
+            self.assertFalse((release / relative).exists())
+            self.assertFalse((destination / relative).exists())
 
     def test_reinstall_updates_owned_assets_and_preserves_operator_files_and_links(self):
         destination = Path(self.temp.name) / "install"

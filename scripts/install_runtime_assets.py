@@ -2,6 +2,7 @@
 """Install release-owned assets without replacing operator-owned files."""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -12,9 +13,9 @@ import sys
 import tempfile
 
 
-def runtime_assets(root: Path) -> tuple[str, ...]:
+def runtime_assets(root: Path, contract: Path | None = None) -> tuple[str, ...]:
     assets = tuple(line.strip() for line in
-                   (root / "scripts/runtime-assets.txt").read_text(encoding="utf-8").splitlines()
+                   (contract or root / "scripts/runtime-assets.txt").read_text(encoding="utf-8").splitlines()
                    if line.strip() and not line.lstrip().startswith("#"))
     for asset in assets:
         path = PurePosixPath(asset)
@@ -36,8 +37,8 @@ def linked_path(root: Path, relative: Path) -> bool:
                                     for parent in (relative, *relative.parents))
 
 
-def asset_files(root: Path) -> list[str]:
-    assets = runtime_assets(root)
+def asset_files(root: Path, contract: Path | None = None) -> list[str]:
+    assets = runtime_assets(root, contract)
     if (root / ".git").exists():
         tracked = subprocess.check_output(["git", "-C", str(root), "ls-files", "-z", "--", *assets])
         files = [name for name in tracked.decode("utf-8").split("\0") if name]
@@ -68,7 +69,7 @@ def atomic_copy(source: Path, destination: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def install(source: Path, destination: Path) -> None:
+def install(source: Path, destination: Path, contract: Path | None = None) -> None:
     source = source.resolve()
     destination = destination.absolute()
     ledger_relative = Path("runtime/install-assets.json")
@@ -80,7 +81,7 @@ def install(source: Path, destination: Path) -> None:
                                          for k, v in prior.items()):
         raise ValueError("invalid runtime asset ledger")
     managed = dict(prior)
-    files = asset_files(source)
+    files = asset_files(source, contract)
     for relative in files:
         target = destination / relative
         if linked_path(destination, Path(relative)) or (target.exists() and not target.is_file()):
@@ -105,9 +106,12 @@ def install(source: Path, destination: Path) -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path)
+    parser.add_argument("destination", type=Path)
+    parser.add_argument("--contract", type=Path)
+    args = parser.parse_args()
     try:
-        if len(sys.argv) != 3:
-            raise ValueError("expected source and installation directories")
-        install(Path(sys.argv[1]), Path(sys.argv[2]))
+        install(args.source, args.destination, args.contract)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         sys.exit(f"Runtime asset installation failed: {error}")
