@@ -2068,7 +2068,8 @@ src/
 │   │   │   └── turn_lifecycle.rs
 │   │   ├── tmux_output_stream/
 │   │   │   ├── tests/
-│   │   │   │   └── compact_summary_tests.rs
+│   │   │   │   ├── compact_summary_tests.rs
+│   │   │   │   └── section_replay_tests.rs
 │   │   │   ├── native_codex.rs
 │   │   │   └── provider_output_guard_tests.rs
 │   │   ├── tmux_placeholder_suppression/

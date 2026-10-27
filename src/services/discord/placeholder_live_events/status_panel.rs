@@ -597,6 +597,18 @@ pub(super) fn render_status_panel(
     // activity line (or `None` for headless/synthetic/id-0 turns).
     turn_trigger_line: Option<String>,
 ) -> String {
+    render_status_panel_for(snapshot, provider, time_line, turn_trigger_line, false)
+}
+
+/// `footer`: a class render that would overflow the footer body is fitted section-wise, because
+/// the footer's line cut would otherwise drop trailing Tasks/Subagents sections whole.
+pub(super) fn render_status_panel_for(
+    snapshot: StatusPanelState,
+    provider: &ProviderKind,
+    time_line: String,
+    turn_trigger_line: Option<String>,
+    footer: bool,
+) -> String {
     let activity_line = super::freshness::render_panel_activity_line(&snapshot, provider);
     let time_lines = time_line.lines().collect::<Vec<_>>();
     let mut header_lines = std::iter::once(activity_line.as_str())
@@ -680,6 +692,16 @@ pub(super) fn render_status_panel(
         && !snapshot.status.is_terminal()
     {
         super::tool_activity::fit_panel(sections)
+    } else if footer {
+        let panel = format_and_truncate_status_panel_sections(sections.clone());
+        let body = panel.trim().split_once('\n').map_or("", |(_, body)| body);
+        if body.len()
+            > super::super::single_message_panel::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES
+        {
+            super::tool_activity::fit_sections(sections)
+        } else {
+            panel
+        }
     } else {
         format_and_truncate_status_panel_sections(sections)
     }

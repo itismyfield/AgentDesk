@@ -127,7 +127,8 @@ impl UnitDeriver {
                             .pointer("/payload/is_error")
                             .or_else(|| value.pointer("/payload/isError"))
                             .and_then(serde_json::Value::as_bool)
-                            .filter(|failed| *failed),
+                            .filter(|failed| *failed)
+                            .or_else(|| code_mode_exec_failed(&value)),
                     };
                     out.extend(self.unit(unit_key, content, meta, failed));
                 }
@@ -290,5 +291,22 @@ impl UnitDeriver {
         };
         out.extend(work);
         out
+    }
+}
+
+// Code-mode `exec` output opens with the harness status line, Codex's only recorded outcome.
+fn code_mode_exec_failed(value: &serde_json::Value) -> Option<bool> {
+    if value.pointer("/payload/type")?.as_str()? != "custom_tool_call_output" {
+        return None;
+    }
+    match value
+        .pointer("/payload/output/0/text")?
+        .as_str()?
+        .lines()
+        .next()?
+    {
+        "Script completed" => Some(false),
+        "Script failed" => Some(true),
+        _ => None,
     }
 }
