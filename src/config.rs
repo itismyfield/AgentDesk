@@ -33,6 +33,12 @@ pub use peer_filter::PeerFilterMode;
 pub use server_surface::BrowserGuardMode;
 pub use tool_activity_display::ToolActivityDisplay;
 
+/// The last validated daemon config; absent until boot installs it.
+/// This read never loads a file or installs fallback defaults.
+pub fn snapshot() -> Option<std::sync::Arc<Config>> {
+    crate::config_live_reload::current()
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Config {
     pub server: ServerConfig,
@@ -88,8 +94,8 @@ pub struct Config {
     /// Channels run on a Herdr endpoint; restart-required, empty by default.
     #[serde(default, skip_serializing_if = "SessionHostsConfig::is_empty")]
     pub session_hosts: SessionHostsConfig,
-    /// When true (default), a validated edit to the config file replaces the live snapshot;
-    /// an invalid edit keeps it. `reload_classes::FIELDS` lists which fields act on the swap.
+    /// Validated file edits update the snapshot when true (default); false keeps the boot value.
+    /// Failed edits/watchers retain the last value; `reload_classes::FIELDS` lists when fields act.
     #[serde(default = "default_true")]
     pub config_hot_reload: bool,
 }

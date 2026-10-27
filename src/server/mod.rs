@@ -260,13 +260,6 @@ pub(crate) async fn run(
     crate::config::validate_config(&config)?;
     let modules = config.cluster.runtime_profile.modules();
     crate::services::dispatches::wait_queue::set_runtime_cluster_config(config.cluster.clone());
-    // Hot-swappable settings reload without a restart. The guard lives for all of `run`;
-    // dropping it on shutdown joins the watcher thread.
-    crate::config_live_reload::install(config.clone());
-    let _config_hot_reload_guard = crate::config_live_reload::start(
-        crate::config::resolved_config_path(),
-        config.config_hot_reload,
-    );
     let pg_pool = match pg_pool {
         // Callers that provide a runtime pool have already completed the
         // startup migrate/config-audit/reseed sequence under the startup lock.

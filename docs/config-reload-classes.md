@@ -7,6 +7,10 @@ When an edit to `agentdesk.yaml` takes effect. Config hot reload stores every
 valid edit in the live snapshot, but only `live` fields act on it. A change to a
 `restart` or `seeded-at-boot` field logs one WARN line naming the field.
 
+Daemon snapshot readers retain the last validated boot/reload value when hot reload
+is disabled or its watcher cannot start. The bot or standalone server owns the watcher;
+ending the HTTP task does not stop it.
+
 - `live`: read from the live snapshot (or disk) at use time.
 - `restart`: captured at boot or on first access; restart to apply.
 - `seeded-at-boot`: copied into the DB/kv at boot, and runtime readers read that
@@ -118,11 +122,11 @@ valid edit in the live snapshot, but only `live` fields act on it. A change to a
 | `cluster.api_base_url` | restart | `src/services/cluster/node_registry.rs` bootstrap (node_capabilities -> base_capabilities in heartbeat; machine_resources::spawn) |
 | `cluster.gateway_preferred_instance_id` | restart | `src/services/discord/runtime_bootstrap/gateway_lease.rs` run_bot_spawn_gateway_lease_keepalive (gateway_preference() resolved once per task) |
 | `cluster.gateway_yield_grace_secs` | restart | `src/services/discord/runtime_bootstrap/gateway_lease.rs` run_bot_spawn_gateway_lease_keepalive (GatewayPreference.yield_grace) |
-| `cluster.gateway_lease_idle_expiry_secs` | live | `src/services/discord/runtime_bootstrap/gateway_lease.rs` try_acquire_discord_gateway_lease (load_graceful per acquisition) |
-| `cluster.gateway_handback_breaker.enabled` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = load_graceful per call) |
-| `cluster.gateway_handback_breaker.window_secs` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = load_graceful per call) |
-| `cluster.gateway_handback_breaker.max_empty` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = load_graceful per call) |
-| `cluster.gateway_handback_breaker.suppress_secs` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = load_graceful per call) |
+| `cluster.gateway_lease_idle_expiry_secs` | live | `src/services/discord/runtime_bootstrap/gateway_lease.rs` try_acquire_discord_gateway_lease (config::snapshot per acquisition) |
+| `cluster.gateway_handback_breaker.enabled` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = config::snapshot per call) |
+| `cluster.gateway_handback_breaker.window_secs` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = config::snapshot per call) |
+| `cluster.gateway_handback_breaker.max_empty` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = config::snapshot per call) |
+| `cluster.gateway_handback_breaker.suppress_secs` | live | `src/services/discord/runtime_bootstrap/gateway_handback_breaker.rs` GatewayHandbackBreaker::for_owner (config closure = config::snapshot per call) |
 | `cluster.labels` | restart | `src/services/cluster/node_registry.rs` bootstrap (labels JSON captured into spawn_heartbeat_loop) |
 | `cluster.capabilities` | restart | `src/services/cluster/node_registry.rs` bootstrap (base_capabilities captured into heartbeat) |
 | `cluster.nodes` | restart | `src/services/dispatches/wait_queue.rs` RUNTIME_CLUSTER_CONFIG (set once in server::run); forwarding trust from boot AppState |
@@ -132,16 +136,16 @@ valid edit in the live snapshot, but only `live` fields act on it. A change to a
 | `cluster.dispatch_routing.constraints` | restart | `src/services/dispatches/wait_queue.rs` RUNTIME_CLUSTER_CONFIG (set once in server::run) + outbox_queue.rs:dispatch_outbox_loop + node_registry.rs:spawn_stale_claim_owner_reassignment_loop |
 | `cluster.dispatch_routing.wait_timeout_secs` | restart | `src/services/dispatches/wait_queue.rs` wake_waiting_dispatch_outbox_pg (only invoked with boot copies) |
 | `cluster.dispatch_routing.wake_interval_secs` | restart | `src/services/dispatches/outbox_queue.rs` dispatch_outbox_loop |
-| `cluster.intake_routing.capacity_aware` | live | `src/services/cluster/execution_capacity.rs` automatic_enabled (current()) |
+| `cluster.intake_routing.capacity_aware` | live | `src/services/cluster/execution_capacity.rs` automatic_enabled (config::snapshot) |
 | `cluster.intake_routing.enabled` | restart | `src/services/discord/runtime_bootstrap/intake.rs` run_bot_maybe_spawn_intake_worker (worker consumer spawned only if effective mode != disabled at bot boot) |
 | `cluster.intake_routing.mode` | restart | `src/services/discord/runtime_bootstrap/intake.rs` run_bot_maybe_spawn_intake_worker |
-| `cluster.intake_routing.owner_authority_channel_ids` | live | `src/services/cluster/intake_routing_config.rs` effective_intake_routing_config (current()) |
+| `cluster.intake_routing.owner_authority_channel_ids` | live | `src/services/cluster/intake_routing_config.rs` effective_intake_routing_config (config::snapshot) |
 | `cluster.intake_routing.forward_pre_claim_timeout_secs` | live | `src/services/discord/router/intake_dispatch.rs` admit_text_intake (effective_intake_routing_config) |
 | `cluster.intake_routing.stale_claim_recovery_secs` | live | `src/services/cluster/intake_routing_config.rs` EffectiveIntakeRoutingConfig::status_json |
 | `cluster.intake_routing.max_attempts_per_message` | live | `src/services/cluster/node_registry.rs` current_intake_retry_config (per heartbeat tick) |
 | `cluster.intake_routing.retry_authorization_secs` | live | `src/services/cluster/node_registry.rs` current_intake_retry_config (per heartbeat tick) |
-| `cluster.semaphores.*.capacity` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (load_graceful per claim) |
-| `cluster.semaphores.*.scope` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (load_graceful per claim) |
+| `cluster.semaphores.*.capacity` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
+| `cluster.semaphores.*.scope` | live | `src/server/task_dispatch_claims/config_read.rs` claim_task_dispatches (config::snapshot per claim) |
 | `cluster.session_bound_relay_enabled` | restart | `src/server/worker_registry/registry.rs` start_worker (WatcherSupervisor spawn gate) |
 | `kanban.manager_channel_id` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv kanban_manager_channel_id |
 | `kanban.deadlock_manager_channel_id` | seeded-at-boot | `src/services/settings.rs` config_default_seed_actions (applied by db/postgres/shared_config.rs:startup_reseed) -> kv deadlock_manager_channel_id |
@@ -222,7 +226,7 @@ valid edit in the live snapshot, but only `live` fields act on it. A change to a
 | `tui_o.turn` | restart | `src/services/discord/tui_direct_pending_start/turn_retirement.rs` confirm_at_boot (turn_mode CONFIRMED set) |
 | `tui_o.alert_channel_id` | restart | `src/services/tui_o/alarm.rs` AlarmRouter::for_process (runtime_bootstrap/o_writer_host.rs:parts at gateway boot) |
 | `session_hosts` | restart | `src/config/session_hosts.rs` install_selected (BOOT OnceLock; bootstrap::install_boot_snapshots) |
-| `config_hot_reload` | restart | `src/server/mod.rs` run (config_live_reload::start(path, config.config_hot_reload)) |
+| `config_hot_reload` | restart | `src/bootstrap.rs` prepare_dcserver_boot + `src/launch.rs` after_database_ready (watcher guard owned by bot/server lifetime) |
 
 ## Files outside `agentdesk.yaml`
 

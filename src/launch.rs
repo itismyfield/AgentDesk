@@ -84,5 +84,9 @@ where
     Fut: std::future::Future<Output = Result<()>>,
 {
     crate::bootstrap::prepare_and_install_boot_snapshots(config, pool).await?;
+    let _config_hot_reload_guard = crate::config_live_reload::start(
+        crate::config::resolved_config_path(),
+        config.config_hot_reload,
+    );
     serve().await
 }

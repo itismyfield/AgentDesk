@@ -136,6 +136,7 @@ src/
 │   ├── agent_memory.rs
 │   ├── cluster_role.rs
 │   ├── config_path.rs
+│   ├── daemon_snapshot_pg_tests.rs
 │   ├── disk_write.rs
 │   ├── late_live_reload_tests.rs
 │   ├── peer_filter.rs
@@ -936,6 +937,7 @@ src/
 │   │   ├── session_matcher.rs
 │   │   ├── session_registry.rs
 │   │   ├── session_routing.rs
+│   │   ├── snapshot_tests.rs
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
 │   ├── codex/

@@ -32,6 +32,10 @@ use crate::config::reload_classes::ReloadClass;
 #[path = "config/readers_live_reload_tests.rs"]
 mod readers_tests;
 
+#[cfg(all(test, unix))]
+#[path = "config/daemon_snapshot_pg_tests.rs"]
+mod daemon_snapshot_pg_tests;
+
 /// Process-global live config snapshot. `None` until [`install`] runs at boot.
 static LIVE: OnceLock<RwLock<Arc<Config>>> = OnceLock::new();
 
@@ -176,14 +180,14 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
     let Some(dir) = path.parent().map(Path::to_path_buf) else {
         tracing::warn!(
             path = %path.display(),
-            "config hot-reload: config path has no parent dir; disabled"
+            "config hot-reload: config path has no parent dir; retaining the last validated config until restart"
         );
         return None;
     };
     if !dir.exists() {
         tracing::warn!(
             dir = %dir.display(),
-            "config hot-reload: config directory does not exist; disabled"
+            "config hot-reload: config directory does not exist; retaining the last validated config until restart"
         );
         return None;
     }
@@ -192,8 +196,8 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
     // Watch the parent directory (not the file) so atomic rename-on-save —
     // write `agentdesk.yaml.tmp`, then rename over `agentdesk.yaml` — is still
     // observed; watching the inode directly misses the swap.
-    let mut watcher =
-        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+    let mut watcher = match notify::recommended_watcher(
+        move |res: notify::Result<notify::Event>| {
             if let Ok(event) = res
                 && matches!(
                     event.kind,
@@ -202,15 +206,16 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
             {
                 let _ = tx.send(event);
             }
-        }) {
-            Ok(watcher) => watcher,
-            Err(error) => {
-                tracing::warn!(%error, "config hot-reload: failed to create watcher; disabled");
-                return None;
-            }
-        };
+        },
+    ) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            tracing::warn!(%error, "config hot-reload: failed to create watcher; retaining the last validated config until restart");
+            return None;
+        }
+    };
     if let Err(error) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-        tracing::warn!(%error, dir = %dir.display(), "config hot-reload: watch failed; disabled");
+        tracing::warn!(%error, dir = %dir.display(), "config hot-reload: watch failed; retaining the last validated config until restart");
         return None;
     }
 
@@ -269,7 +274,9 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
         .ok();
 
     if join.is_none() {
-        tracing::warn!("config hot-reload: failed to spawn worker thread; disabled");
+        tracing::warn!(
+            "config hot-reload: failed to spawn worker thread; retaining the last validated config until restart"
+        );
         return None;
     }
 

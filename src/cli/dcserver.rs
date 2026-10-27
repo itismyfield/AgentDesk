@@ -1178,7 +1178,8 @@ pub fn handle_dcserver(token: Option<String>) {
                 }
             }
         };
-        crate::bootstrap::prepare_dcserver_boot(&ad_config, &discord_pg_pool).await;
+        let _config_hot_reload_guard =
+            crate::bootstrap::prepare_dcserver_boot(&ad_config, &discord_pg_pool).await;
         crate::services::termination_audit::init_audit_db(Some(discord_pg_pool.clone()));
 
         // Start axum HTTP server (background task) — now serves all API
