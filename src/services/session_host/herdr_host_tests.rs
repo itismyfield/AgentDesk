@@ -3687,3 +3687,59 @@ fn e07_e08_census_alias_and_indirection() {
         );
     }
 }
+
+/// Herdr content from an owner on another host, or from a thread without the owner holding the
+/// pane, is refused before any call; the holding owner's own write still goes out once.
+#[test]
+fn herdr_content_fails_closed_outside_the_owner_that_holds_the_pane() {
+    use crate::services::claude_tui::owner_input::with_scope;
+    // A pane no other test's owner holds, so parallel owners never share this lease.
+    let own = || HostSessionRef::herdr_pane("a4b-own");
+    let scope = |host: &str, run: &mut dyn FnMut()| {
+        let target =
+            json!({"host": host, "owner": "a4b", "root": "/a4b", "execution_nonce": "a4b"});
+        with_scope(
+            "claude".into(),
+            target,
+            742703,
+            std::sync::Arc::new(|_| Ok(())),
+            std::sync::Arc::new(|_, _| Ok(())),
+            std::sync::Arc::new(|_| Ok(())),
+            run,
+        )
+    };
+    let fenced = || {
+        Ok(HostMutation::Refused(HostRefusal::Precondition(
+            "owner_content_fence".into(),
+        )))
+    };
+    let silent = host(Vec::new());
+    scope("tmux", &mut || {
+        assert_eq!(silent.send_text(own(), "x"), fenced());
+        assert_eq!(silent.send_paste(own(), "x"), fenced());
+        assert_eq!(silent.send_line(own(), "x"), fenced());
+    });
+    assert!(calls(&silent).is_empty());
+
+    let own_call = HerdrRequest::PaneSendText {
+        pane_id: "a4b-own".into(),
+        text: "own".into(),
+    };
+    let herdr = std::sync::Arc::new(host(vec![(own_call, ok())]));
+    let other = herdr.clone();
+    scope("herdr", &mut || {
+        assert_eq!(herdr.send_text(own(), "own"), Ok(HostMutation::Confirmed));
+        let other = other.clone();
+        let spawned = std::thread::spawn(move || {
+            [
+                other.send_text(own(), "x"),
+                other.send_paste(own(), "x"),
+                other.send_line(own(), "x"),
+            ]
+        });
+        for refused in spawned.join().unwrap() {
+            assert_eq!(refused, fenced());
+        }
+    });
+    assert_eq!(calls(&herdr).len(), 1);
+}

@@ -1,7 +1,7 @@
 //! Browser guard: Host allowlist, cross-site rule, JSON body type, and WebSocket alignment.
 
 use super::super::browser_guard::{BrowserGuard, RAW_JSON_ROUTES, Violation, is_raw_json_route};
-use super::super::host_allowlist::{HostAllowlist, configured_names, parse_tailscale_self};
+use super::super::host_allowlist::{HostAllowlist, configured_hosts, parse_tailscale_self};
 use super::*;
 use crate::config::BrowserGuardMode;
 use crate::server::dashboard_auth::DashboardAccess;
@@ -286,17 +286,115 @@ fn concrete(template: &str) -> String {
     template.replace("{}", "1234567890")
 }
 
+const EXPECTED_RAW_JSON_ROUTES: &[&str] = &[
+    "/api/agents/{}/turn/deliver",
+    "/api/inflight/rebind",
+    "/api/doctor/stale-mailbox/repair",
+    "/api/channels/{}/relay-recovery",
+    "/api/turns/{}/cancel",
+    "/api/discord/send",
+    "/api/discord/send-to-agent",
+    "/api/discord/send-dm",
+    "/api/queue/runs/{}/phase-gates/repair",
+    "/api/queue/reset",
+    "/api/queue/reset-global",
+    "/api/queue/pause",
+];
+
+#[tokio::test]
+async fn browser_guard_violation_mode_matrix_preserves_body_calls_and_warn_throttle() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let cases = [
+        (vec![("host", "evil.example")], "host_not_allowed", 403),
+        (
+            vec![("host", "localhost"), ("sec-fetch-site", "cross-site")],
+            "cross_site_request",
+            403,
+        ),
+        (
+            vec![("host", "localhost"), ("origin", "https://evil.example")],
+            "origin_not_allowed",
+            403,
+        ),
+        (
+            vec![("host", "localhost"), ("origin", "null")],
+            "origin_not_allowed",
+            403,
+        ),
+        (
+            vec![("host", "localhost"), ("content-type", "text/plain")],
+            "json_content_type_required",
+            415,
+        ),
+    ];
+    for (headers, code, expected_status) in cases {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let baseline = Router::new().route(
+            "/api/queue/pause",
+            axum::routing::post({
+                let calls = Arc::clone(&calls);
+                let received = Arc::clone(&received);
+                move |body: axum::body::Bytes| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    received.lock().unwrap().push(body.to_vec());
+                    async move { (StatusCode::ACCEPTED, body) }
+                }
+            }),
+        );
+        let payload = "{\"message\":\"preserve me 한글\"}";
+        let expected = send(
+            &baseline,
+            browser_request(Method::POST, "/api/queue/pause", &headers, payload),
+        )
+        .await;
+        assert_eq!(expected, (StatusCode::ACCEPTED, payload.to_string()));
+        for mode in [BrowserGuardMode::Log, BrowserGuardMode::Enforce] {
+            calls.store(0, Ordering::SeqCst);
+            received.lock().unwrap().clear();
+            let app = BrowserGuard::with_hosts(mode, fixed_hosts()).wrap(baseline.clone());
+            let (buffer, _capture) = capture_warnings();
+            for attempt in 1..=2 {
+                let actual = send(
+                    &app,
+                    browser_request(Method::POST, "/api/queue/pause", &headers, payload),
+                )
+                .await;
+                if mode == BrowserGuardMode::Log {
+                    assert_eq!(actual, expected, "{mode:?} {code}");
+                    assert_eq!(calls.load(Ordering::SeqCst), attempt, "{code}");
+                    assert_eq!(received.lock().unwrap().last().unwrap(), payload.as_bytes());
+                } else {
+                    assert_eq!(actual.0.as_u16(), expected_status, "{code}");
+                    assert!(actual.1.contains(code), "{code}: {}", actual.1);
+                    assert_eq!(calls.load(Ordering::SeqCst), 0, "{code}");
+                    assert!(received.lock().unwrap().is_empty());
+                }
+            }
+            let warnings = browser_guard_warnings(&buffer);
+            assert_eq!(warnings.len(), 1, "{mode:?} {code}: {warnings:?}");
+            assert!(warnings[0].contains(code), "{warnings:?}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn browser_guard_requires_json_on_every_raw_body_handler() {
     let root = tempfile::tempdir().unwrap();
     let app = guarded_app(root.path(), BrowserGuardMode::Enforce);
     let host = ("host", "127.0.0.1:8791");
-    for template in RAW_JSON_ROUTES {
+    let auth = ("authorization", "Bearer web-entry-test-token");
+    for template in EXPECTED_RAW_JSON_ROUTES {
         let path = concrete(template);
         for headers in [
-            vec![host],
-            vec![host, ("content-type", "text/plain")],
-            vec![host, ("content-type", "application/x-www-form-urlencoded")],
+            vec![host, auth],
+            vec![host, auth, ("content-type", "text/plain")],
+            vec![
+                host,
+                auth,
+                ("content-type", "application/x-www-form-urlencoded"),
+            ],
         ] {
             let (status, body) = send(
                 &app,
@@ -319,7 +417,7 @@ async fn browser_guard_requires_json_on_every_raw_body_handler() {
                 browser_request(
                     Method::POST,
                     &path,
-                    &[host, ("content-type", content_type)],
+                    &[host, auth, ("content-type", content_type)],
                     "{}",
                 ),
             )
@@ -329,11 +427,17 @@ async fn browser_guard_requires_json_on_every_raw_body_handler() {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 StatusCode::NOT_FOUND,
                 StatusCode::METHOD_NOT_ALLOWED,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
             ] {
                 assert_ne!(status, unexpected, "{path} {content_type}: {body}");
             }
         }
-        let (status, body) = send(&app, browser_request(Method::POST, &path, &[host], "")).await;
+        let (status, body) = send(
+            &app,
+            browser_request(Method::POST, &path, &[host, auth], ""),
+        )
+        .await;
         assert_ne!(
             status,
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -361,6 +465,14 @@ fn collect_rs_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
 
 #[test]
 fn raw_json_route_table_covers_every_bytes_body_handler() {
+    let expected: std::collections::HashSet<_> = EXPECTED_RAW_JSON_ROUTES.iter().collect();
+    let actual: std::collections::HashSet<_> = RAW_JSON_ROUTES.iter().collect();
+    assert_eq!(
+        actual.len(),
+        RAW_JSON_ROUTES.len(),
+        "duplicate raw JSON route"
+    );
+    assert_eq!(actual, expected);
     let routes = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/routes");
     let mut files = Vec::new();
     collect_rs_files(&routes, &mut files);
@@ -476,7 +588,7 @@ fn allowlist_is_built_from_config_and_tailscale_status_without_operator_input() 
             ..Default::default()
         },
     );
-    let mut names = configured_names(&config);
+    let mut names = configured_hosts(&config).0;
     names.sort();
     assert_eq!(
         names,
@@ -487,7 +599,7 @@ fn allowlist_is_built_from_config_and_tailscale_status_without_operator_input() 
         ]
     );
     config.server.host = "0.0.0.0".into();
-    assert!(!configured_names(&config).contains(&"0.0.0.0".to_string()));
+    assert!(!configured_hosts(&config).0.contains(&"0.0.0.0".to_string()));
 
     let status = serde_json::json!({
         "Self": {

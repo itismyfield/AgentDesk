@@ -275,7 +275,6 @@ impl MeetingParticipant {
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             peer_agents_enabled: self.peer_agents_enabled,
-            quality_feedback_injection_enabled: true,
             auth_profile: "default".to_string(),
             memory: self.memory.clone(),
         }

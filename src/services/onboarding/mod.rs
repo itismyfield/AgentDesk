@@ -2294,6 +2294,15 @@ fn validate_complete_request(
             ));
         }
     };
+    for mapping in &body.channels {
+        if let Err(error) = crate::utils::input_validation::validate_agent_id(&mapping.role_id) {
+            return Err(bad_request(
+                rerun_policy,
+                explicit_rerun_policy,
+                error.to_string(),
+            ));
+        }
+    }
     let request_fingerprint = match requested_channel_fingerprint(body, provider) {
         Ok(fingerprint) => fingerprint,
         Err(error) => {
@@ -2569,7 +2578,11 @@ async fn complete_with_options(
     body: &CompleteBody,
     options: &CompleteExecutionOptions,
 ) -> (StatusCode, serde_json::Value) {
-    let body = &channel::apply_runtime_config_defaults(state, body);
+    let mut body = channel::apply_runtime_config_defaults(state, body);
+    for mapping in &mut body.channels {
+        mapping.role_id = mapping.role_id.trim().to_string();
+    }
+    let body = &body;
     let provider = body.provider.as_deref().unwrap_or("claude");
 
     let (rerun_policy, explicit_rerun_policy, request_fingerprint) =
@@ -2872,6 +2885,50 @@ async fn complete_with_options(
         Vec::new(),
         extra,
     )
+}
+
+#[cfg(test)]
+mod input_validation_tests {
+    use super::*;
+
+    fn request(id: &str) -> CompleteBody {
+        serde_json::from_value(json!({
+            "token": "fixture",
+            "guild_id": "123",
+            "channels": [{"channel_id": "456", "channel_name": "test", "role_id": id}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn onboarding_rejects_unsafe_workspace_agent_ids_before_effects() {
+        for id in [
+            "",
+            ".",
+            "..",
+            "../bad",
+            "a/b",
+            "a\\b",
+            "a.b",
+            "a b",
+            "요리사",
+        ] {
+            assert!(
+                validate_complete_request(&request(id), "claude").is_err(),
+                "{id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn onboarding_preserves_existing_agent_id_formats() {
+        for id in ["project-agentdesk", "agent_2", "GPT-6_1", "123", "-", "_"] {
+            assert!(
+                validate_complete_request(&request(id), "claude").is_ok(),
+                "{id}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

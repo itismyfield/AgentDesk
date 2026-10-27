@@ -74,7 +74,7 @@ impl CodexWrites for HerdrInput<'_> {
 
 impl CodexWrites for TmuxCodexInput {
     fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String> {
-        tmux::send_literal(session, text)
+        TmuxHost.send_literal(session, text)
     }
 
     fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String> {
@@ -87,7 +87,7 @@ impl CodexWrites for TmuxCodexInput {
         buffer: &str,
         delete: bool,
     ) -> Result<Output, String> {
-        tmux::paste_buffer(session, buffer, delete)
+        TmuxHost.paste_buffer(session, buffer, delete)
     }
 
     fn send_keys(&mut self, session: &str, keys: &[HostKey]) -> Result<Output, String> {

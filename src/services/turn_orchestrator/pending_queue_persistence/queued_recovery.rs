@@ -1,19 +1,70 @@
+use super::super::queued_head::compat::{self, SnapshotRead};
 use super::{
     ChannelId, Instant, PendingQueueRecovery, ProviderKind, STALE_PENDING_QUEUE_TMP_AGE,
-    SystemTime, cleanup_stale_pending_queue_tmp_files_in_dir, fs, parse_snapshot,
+    SystemTime, cleanup_stale_pending_queue_tmp_files_in_dir, fs,
     pending_dispatch_marker_channel_id, pending_queue_items_to_interventions, pending_queue_root,
 };
+use std::collections::HashMap;
 use std::io;
 
 #[cfg(test)]
 #[path = "queued_recovery_tests.rs"]
 mod tests;
 
+#[derive(Default)]
+pub(crate) struct SnapshotCatalog {
+    pub(crate) snapshots: HashMap<ChannelId, SnapshotRead>,
+    pub(crate) quarantined: Vec<(ChannelId, String)>,
+    pub(crate) scan_errors: Vec<String>,
+}
+
 pub(crate) fn load_pending_queues_checked(
     provider: &ProviderKind,
     token_hash: &str,
 ) -> PendingQueueRecovery {
-    let mut recovery = PendingQueueRecovery::default();
+    let catalog = read_catalog(provider, token_hash);
+    let mut recovery = PendingQueueRecovery {
+        quarantined: catalog.quarantined,
+        scan_errors: catalog.scan_errors,
+        ..Default::default()
+    };
+    let reference_instant = Instant::now();
+    let reference_wall_time = SystemTime::now();
+    for (channel, snapshot) in catalog.snapshots {
+        let items = match snapshot {
+            SnapshotRead::Legacy(items, meta) => {
+                if items.is_empty() && meta.as_deref().is_some_and(super::SnapshotMeta::is_set) {
+                    tracing::debug!(%channel, "metadata-only queue remains in recovery catalog");
+                }
+                items
+            }
+            SnapshotRead::ReadOnlyV2(snapshot) => {
+                recovery.quarantined.push((
+                    channel,
+                    format!(
+                        "queue V2 is read-only: {} retained inputs",
+                        snapshot.retained_inputs.len()
+                    ),
+                ));
+                continue;
+            }
+        };
+        if let Some(override_id) = items.iter().find_map(|item| item.override_channel_id) {
+            recovery
+                .overrides
+                .insert(channel, ChannelId::new(override_id));
+        }
+        let interventions =
+            pending_queue_items_to_interventions(items, reference_wall_time, reference_instant);
+        if !interventions.is_empty() {
+            recovery.queues.insert(channel, interventions);
+        }
+    }
+    recovery
+}
+
+pub(crate) fn read_catalog(provider: &ProviderKind, token_hash: &str) -> SnapshotCatalog {
+    let mut recovery = SnapshotCatalog::default();
     let Some(root) = pending_queue_root() else {
         return recovery;
     };
@@ -35,8 +86,6 @@ pub(crate) fn load_pending_queues_checked(
             return recovery;
         }
     };
-    let reference_instant = Instant::now();
-    let reference_wall_time = SystemTime::now();
     for entry in entries {
         #[cfg(test)]
         let entry = scan_fault::take(&dir, scan_fault::Point::Entry).map_or(entry, Err);
@@ -66,7 +115,7 @@ pub(crate) fn load_pending_queues_checked(
         };
         let items = match fs::read_to_string(&path)
             .map_err(|error| format!("read {}: {error}", path.display()))
-            .and_then(|content| parse_snapshot(&content).map(|(items, _)| items))
+            .and_then(|content| compat::inspect(&content))
         {
             Ok(items) => items,
             Err(error) => {
@@ -76,18 +125,7 @@ pub(crate) fn load_pending_queues_checked(
                 continue;
             }
         };
-        if let Some(override_id) = items.iter().find_map(|item| item.override_channel_id) {
-            recovery
-                .overrides
-                .insert(ChannelId::new(channel_id), ChannelId::new(override_id));
-        }
-        let interventions =
-            pending_queue_items_to_interventions(items, reference_wall_time, reference_instant);
-        if !interventions.is_empty() {
-            recovery
-                .queues
-                .insert(ChannelId::new(channel_id), interventions);
-        }
+        recovery.snapshots.insert(ChannelId::new(channel_id), items);
     }
     recovery
 }

@@ -45,19 +45,9 @@ pub(super) fn pending(session: &str, text: &str) -> bool {
     };
     let mut cache = CACHE.lock().unwrap_or_else(|poison| poison.into_inner());
     if cache.as_ref().is_none_or(|cached| cached.key != key) {
-        let Ok(store) = read(&key.path) else {
+        let Some(frames) = frames_for(&key.path) else {
             return false;
         };
-        let frames = store
-            .entries
-            .into_iter()
-            .filter(|entry| {
-                entry.provider == "claude"
-                    && entry.events.is_empty()
-                    && !entry.screen_prefix.is_empty()
-            })
-            .map(|entry| (entry.session, entry.screen_prefix))
-            .collect();
         *cache = Some(Cached { key, frames });
     }
     let folded = fold(text);
@@ -67,4 +57,24 @@ pub(super) fn pending(session: &str, text: &str) -> bool {
             .iter()
             .any(|(owner, prefix)| owner == session && folded.contains(prefix))
     })
+}
+
+fn frames_for(path: &std::path::Path) -> Option<Vec<(String, String)>> {
+    #[cfg(test)]
+    if let Some(frames) = super::compat::screen_frames_v2(path) {
+        return Some(frames);
+    }
+    let store = read(path).ok()?;
+    Some(
+        store
+            .entries
+            .into_iter()
+            .filter(|entry| {
+                entry.provider == "claude"
+                    && entry.events.is_empty()
+                    && !entry.screen_prefix.is_empty()
+            })
+            .map(|entry| (entry.session, entry.screen_prefix))
+            .collect(),
+    )
 }

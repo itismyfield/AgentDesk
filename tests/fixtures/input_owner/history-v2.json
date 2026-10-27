@@ -1,0 +1,208 @@
+{
+  "live": [
+    {
+      "author": "7",
+      "body_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "class_hash": "d3fe41412e06777cda5acd6f51c82f0703bc91ba04d16395098f496c50847954",
+      "events": [],
+      "file": [
+        11,
+        12
+      ],
+      "hash": "d3fe41412e06777cda5acd6f51c82f0703bc91ba04d16395098f496c50847954",
+      "header": "live frame]",
+      "id": "nonce802",
+      "offset": 0,
+      "path": "/source/native.jsonl",
+      "provider": "codex",
+      "registration": {
+        "frame": {
+          "author": "7",
+          "body_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "class_hash": "d3fe41412e06777cda5acd6f51c82f0703bc91ba04d16395098f496c50847954",
+          "hash": "d3fe41412e06777cda5acd6f51c82f0703bc91ba04d16395098f496c50847954",
+          "header": "live frame]",
+          "screen_prefix": "liveframe"
+        },
+        "key": {
+          "attempt": {
+            "nonce": "nonce802",
+            "provider": "codex",
+            "source": {
+              "file": [
+                11,
+                12
+              ],
+              "kind": "existing",
+              "offset": 0,
+              "session_id": "native",
+              "transcript": "/source/native.jsonl"
+            },
+            "target": {
+              "execution_nonce": "spawn",
+              "host": "tmux",
+              "owner": "history-pane",
+              "root": "/tmp"
+            }
+          },
+          "identity": {
+            "primary": 802,
+            "queued_generation": 5,
+            "sources": [
+              {
+                "message_id": 802,
+                "queued_generation": 5
+              }
+            ]
+          }
+        },
+        "namespace": "history-test",
+        "source": {
+          "binding_watermark": null,
+          "file": [
+            11,
+            12
+          ],
+          "offset": 0,
+          "provider": "codex",
+          "session_id": "native",
+          "target": {
+            "execution_nonce": "spawn",
+            "host": "tmux",
+            "owner": "history-pane",
+            "root": "/tmp"
+          },
+          "transcript": "/source/native.jsonl"
+        }
+      },
+      "screen_prefix": "liveframe",
+      "session": "history-pane"
+    }
+  ],
+  "passive": [
+    {
+      "entry": {
+        "author": "7",
+        "body_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "class_hash": "d1325663c8e0e5608c4d1c5c0e0ce9f7adedb4ce6b4c06cf47fb36c97f609569",
+        "events": [],
+        "file": [
+          11,
+          12
+        ],
+        "hash": "d1325663c8e0e5608c4d1c5c0e0ce9f7adedb4ce6b4c06cf47fb36c97f609569",
+        "header": "retained frame]",
+        "id": "nonce800",
+        "offset": 0,
+        "path": "/source/native.jsonl",
+        "provider": "codex",
+        "screen_prefix": "retainedframe",
+        "session": "history-pane"
+      },
+      "registration": {
+        "frame": {
+          "author": "7",
+          "body_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "class_hash": "d1325663c8e0e5608c4d1c5c0e0ce9f7adedb4ce6b4c06cf47fb36c97f609569",
+          "hash": "d1325663c8e0e5608c4d1c5c0e0ce9f7adedb4ce6b4c06cf47fb36c97f609569",
+          "header": "retained frame]",
+          "screen_prefix": "retainedframe"
+        },
+        "key": {
+          "attempt": {
+            "nonce": "nonce800",
+            "provider": "codex",
+            "source": {
+              "file": [
+                11,
+                12
+              ],
+              "kind": "existing",
+              "offset": 0,
+              "session_id": "native",
+              "transcript": "/source/native.jsonl"
+            },
+            "target": {
+              "execution_nonce": "spawn",
+              "host": "tmux",
+              "owner": "history-pane",
+              "root": "/tmp"
+            }
+          },
+          "identity": {
+            "primary": 800,
+            "queued_generation": 5,
+            "sources": [
+              {
+                "message_id": 800,
+                "queued_generation": 5
+              }
+            ]
+          }
+        },
+        "namespace": "history-test",
+        "source": {
+          "binding_watermark": null,
+          "file": [
+            11,
+            12
+          ],
+          "offset": 0,
+          "provider": "codex",
+          "session_id": "native",
+          "target": {
+            "execution_nonce": "spawn",
+            "host": "tmux",
+            "owner": "history-pane",
+            "root": "/tmp"
+          },
+          "transcript": "/source/native.jsonl"
+        }
+      },
+      "state": "retained"
+    }
+  ],
+  "planned": [
+    {
+      "frame": {
+        "author": "7",
+        "body_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "class_hash": "b602990da144926159b21a4fb0c644e60b23a5a2ebbbd50cd7d5b3d24ea4836b",
+        "hash": "b602990da144926159b21a4fb0c644e60b23a5a2ebbbd50cd7d5b3d24ea4836b",
+        "header": "planned frame]",
+        "screen_prefix": "plannedframe"
+      },
+      "key": {
+        "attempt": {
+          "nonce": "nonce801",
+          "provider": "codex",
+          "source": {
+            "binding_watermark": "watermark",
+            "expected_session_id": "native",
+            "expected_transcript": "/source/native.jsonl",
+            "kind": "pre_source"
+          },
+          "target": {
+            "execution_nonce": "spawn",
+            "host": "tmux",
+            "owner": "history-pane",
+            "root": "/tmp"
+          }
+        },
+        "identity": {
+          "primary": 801,
+          "queued_generation": 5,
+          "sources": [
+            {
+              "message_id": 801,
+              "queued_generation": 5
+            }
+          ]
+        }
+      },
+      "namespace": "history-test",
+      "source": null
+    }
+  ],
+  "version": 2
+}

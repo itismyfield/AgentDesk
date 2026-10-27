@@ -271,10 +271,18 @@ pub(crate) fn critical_publish(
     data: &str,
     context: AtomicWriteContext<'_>,
 ) -> Result<(), String> {
+    critical_publish_status(path, data, context).map(|_| ())
+}
+
+pub(crate) fn critical_publish_status(
+    path: &Path,
+    data: &str,
+    context: AtomicWriteContext<'_>,
+) -> Result<FlushStatus, String> {
     match publish_durable(&trusted_root(&context), path, data) {
         Ok(published) => {
             log_flush_status(path, &context, &published.flush_status);
-            Ok(())
+            Ok(published.flush_status)
         }
         Err(error) => {
             tracing::error!(
@@ -292,6 +300,13 @@ pub(crate) fn critical_publish(
             Err(error.message)
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn retry_published_status(path: &Path, context: AtomicWriteContext<'_>) -> FlushStatus {
+    let status = flush_published(&trusted_root(&context), path);
+    log_flush_status(path, &context, &status);
+    status
 }
 
 /// Best-effort durable publication: never fails its caller, but every failure is logged.

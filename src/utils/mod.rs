@@ -4,6 +4,7 @@ pub mod auth;
 pub mod discord;
 pub mod format;
 pub mod github_links;
+pub(crate) mod input_validation;
 pub mod loopback_url;
 pub mod redact;
 pub mod secret_file;

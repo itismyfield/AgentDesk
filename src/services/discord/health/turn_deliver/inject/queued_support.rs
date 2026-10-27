@@ -2,6 +2,7 @@
 //! the one it would type into, and how its finished attempt reads to an operator.
 use std::sync::Arc;
 
+use super::queued_provider::QueuedProvider;
 use super::{
     HumanInputRequest, InjectAttempt, Target, binding_key, busy_turn, channel_name, herdr,
     live_tui_session, observe, row_key, turn_mode_tmux,
@@ -22,6 +23,10 @@ pub(super) async fn queued_target_matches(
     target: &Target,
     before_effect: bool,
 ) -> bool {
+    let Some(provider) = QueuedProvider::select(&request.provider, request.channel_id.get()) else {
+        return false;
+    };
+    let runtime = provider.runtime();
     let named = channel_name(shared, request.channel_id).await;
     let (snapshot, row) = observe(shared, request).await;
     let claim = match (&snapshot.cancel_token, &target.claim) {
@@ -36,16 +41,13 @@ pub(super) async fn queued_target_matches(
     claim
         && row.as_ref().map(row_key) == target.row
         && binding_key(&target.session) == target.binding
-        && live_tui_session(
-            shared,
-            request,
-            RuntimeHandoffKind::ClaudeTui,
-            row.as_ref(),
-            named,
-        ) == Some((target.session.clone(), target.transcript.clone()))
+        && live_tui_session(shared, request, runtime, row.as_ref(), named)
+            == Some((target.session.clone(), target.transcript.clone()))
         && (!before_effect
-            || (target.herdr.is_none() && turn_mode_tmux(request.channel_id.get()))
-            || busy_turn(RuntimeHandoffKind::ClaudeTui, &target.transcript).is_ok())
+            || (runtime == RuntimeHandoffKind::ClaudeTui
+                && target.herdr.is_none()
+                && turn_mode_tmux(request.channel_id.get()))
+            || busy_turn(runtime, &target.transcript).is_ok())
         && same_herdr_execution(shared, request, target).await
 }
 

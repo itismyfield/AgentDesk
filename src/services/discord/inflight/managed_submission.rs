@@ -11,6 +11,8 @@ use crate::services::turn_host::TurnHost;
 const MANAGED_SUBMISSION_PROTOCOL: u32 = 1;
 const FENCE_CALLER: &str = "managed_submission_fence";
 mod evidence;
+#[cfg(test)]
+mod outcome;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum SubmissionPhase {
@@ -18,6 +20,8 @@ pub(in crate::services::discord) enum SubmissionPhase {
     Waiting,
     /// The fence persisted before the first payload; resending is unsafe even if no key landed.
     MayHaveSubmitted,
+    /// The exact birth proved that no key reached the pane; only a distinct birth may retry.
+    NotSubmitted,
     /// A phase a newer binary wrote; kept verbatim and never read as `Waiting`.
     Unrecognized(String),
 }
@@ -27,6 +31,7 @@ impl SubmissionPhase {
         match self {
             Self::Waiting => "waiting",
             Self::MayHaveSubmitted => "may_have_submitted",
+            Self::NotSubmitted => "not_submitted",
             Self::Unrecognized(raw) => raw,
         }
     }
@@ -44,6 +49,7 @@ impl<'de> Deserialize<'de> for SubmissionPhase {
         Ok(match raw.as_str() {
             "waiting" => Self::Waiting,
             "may_have_submitted" => Self::MayHaveSubmitted,
+            "not_submitted" => Self::NotSubmitted,
             _ => Self::Unrecognized(raw),
         })
     }
@@ -72,6 +78,7 @@ impl ManagedSubmissionRecord {
         match (self.protocol == MANAGED_SUBMISSION_PROTOCOL, &self.phase) {
             (true, SubmissionPhase::Waiting) => 1,
             (true, SubmissionPhase::MayHaveSubmitted) => 2,
+            (true, SubmissionPhase::NotSubmitted) => 3,
             _ => u8::MAX,
         }
     }
