@@ -209,9 +209,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_surface_is_uniformly_unmounted_for_methods_bodies_and_subpaths() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _control = crate::services::discord::e2e_control::TestControlGuard::set(false, [44]);
         let app = test_api_router();
         let cases = [
@@ -245,9 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn enabled_surface_rejects_channels_outside_boot_allowlist() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _control = crate::services::discord::e2e_control::TestControlGuard::set(true, [44]);
         let app = test_api_router();
 

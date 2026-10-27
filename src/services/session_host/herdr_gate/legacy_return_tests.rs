@@ -56,7 +56,12 @@ fn endpoint() -> HerdrEndpoint {
     HerdrEndpoint::new(
         "test-node",
         "herdr.default",
-        std::path::Path::new("/adk/herdr.sock"),
+        // The endpoint needs an absolute socket path, which takes a drive prefix on Windows.
+        std::path::Path::new(if cfg!(windows) {
+            r"C:\adk\herdr.sock"
+        } else {
+            "/adk/herdr.sock"
+        }),
         "agentdesk",
     )
     .unwrap()

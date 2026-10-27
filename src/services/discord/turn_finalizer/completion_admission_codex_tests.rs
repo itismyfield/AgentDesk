@@ -1,5 +1,7 @@
 //! A selected Codex channel O committed confirms turn mode before its queue wakes, on the source its
 //! takeover committed; a refused confirmation keeps the claim, past the TTL, for one reconcile wake.
+//! Takeover cases read an enabled o_store, which Windows refuses, so they and their helpers are
+//! unix-only.
 
 use std::collections::HashMap;
 
@@ -10,6 +12,7 @@ use crate::services::discord::turn_completion_events::{
 };
 use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
 use crate::services::tui_o::cutover::test_override;
+#[cfg(unix)]
 use crate::services::tui_o::store::InitOrigin;
 use crate::services::tui_o::turn_mode::{TestConfirmation, transcript_turns};
 
@@ -102,6 +105,7 @@ fn a_refused_codex_confirmation_keeps_the_claim_for_one_reconcile_wake() {
 }
 
 /// The late-adopt boot snapshot after this process took the channel over, or after a restart.
+#[cfg(unix)]
 fn taken_over(restarted: bool) -> test_override::ChannelsGuard {
     let config: crate::config::Config = serde_json::from_value(serde_json::json!({
         "server": {},
@@ -121,11 +125,13 @@ fn taken_over(restarted: bool) -> test_override::ChannelsGuard {
     test_override::force_boot(boot)
 }
 
+#[cfg(unix)]
 fn line(value: serde_json::Value) -> String {
     format!("{value}\n")
 }
 
 /// A rollout bound through the hook log; `turn` opens its first turn after the metadata.
+#[cfg(unix)]
 fn bound(
     root: &std::path::Path,
     name: &str,
@@ -163,6 +169,7 @@ fn bound(
     crate::services::tui_o::shadow::binding_reader::source_id_for("parent", &path).unwrap()
 }
 
+#[cfg(unix)]
 fn end_turn(source: &crate::services::tui_o::shadow::SourceId) {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
@@ -186,6 +193,7 @@ fn end_turn(source: &crate::services::tui_o::shadow::SourceId) {
 }
 
 /// Writes the channel's init of `source` from its first byte, recording `origin`.
+#[cfg(unix)]
 fn init_from_start(
     root: &std::path::Path,
     source: &crate::services::tui_o::shadow::SourceId,
@@ -211,6 +219,7 @@ fn init_from_start(
 
 /// O took over rollout A, whose turn still runs, and the binding log then rotated to a
 /// metadata-only B.
+#[cfg(unix)]
 fn committed_a_then_b(root: &std::path::Path) -> crate::services::tui_o::shadow::SourceId {
     crate::services::tui_prompt_dedupe::binding_events::set_test_root(Some(root));
     let a = bound(root, "rollout-a.jsonl", true);
@@ -219,6 +228,7 @@ fn committed_a_then_b(root: &std::path::Path) -> crate::services::tui_o::shadow:
     a
 }
 
+#[cfg(unix)]
 fn reconciled(
     runtime: &tokio::runtime::Runtime,
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
@@ -231,6 +241,7 @@ fn reconciled(
 
 /// After the binding rotates to a metadata-only B, the takeover confirms once A's turn ends and the
 /// queue wakes exactly once; an expired claim is kept while it waits, then collected.
+#[cfg(unix)]
 #[test]
 fn a_takeover_confirms_on_its_committed_source_after_the_binding_rotates() {
     for expired in [false, true] {
@@ -276,6 +287,7 @@ fn a_takeover_confirms_on_its_committed_source_after_the_binding_rotates() {
 
 /// With no confirmation in memory, a restarted late-adopt boot reads the takeover from its init:
 /// A's open turn holds turn mode though B is bound, and A's end confirms it.
+#[cfg(unix)]
 #[test]
 fn a_restarted_takeover_confirms_on_its_init_source() {
     use super::super::super::tui_direct_pending_start::turn_retirement::codex;
@@ -299,6 +311,7 @@ fn a_restarted_takeover_confirms_on_its_init_source() {
 
 /// A Fresh init that holds one empty source from its first byte, as a non-late activation over an
 /// empty rollout leaves it, confirms on a restarted late-adopt boot by the boot rule alone.
+#[cfg(unix)]
 #[test]
 fn a_fresh_init_of_one_empty_source_confirms_on_a_restarted_late_adopt_boot() {
     use super::super::super::tui_direct_pending_start::turn_retirement::codex;

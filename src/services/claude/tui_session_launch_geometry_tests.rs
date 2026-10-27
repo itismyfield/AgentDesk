@@ -159,17 +159,14 @@ impl Drop for Lab {
     }
 }
 
-// Guarded and other channels use the regular tmux launch; Herdr selection still refuses tmux.
+// Every non-Herdr channel uses the regular tmux launch; Herdr selection still refuses tmux.
 #[test]
 fn claude_launch_guarded_and_other_channels_use_regular_sessions() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let lab = Lab::new();
-    let _hosts = crate::config::session_hosts::force_with_claude_guard_for_test(
-        Some("mac-mini"),
-        &[(HERDR, "mac-mini")],
-        &[TEST],
-    );
+    let _hosts =
+        crate::config::session_hosts::force_for_test(Some("mac-mini"), &[(HERDR, "mac-mini")]);
 
     let refused = lab.launch("AgentDesk-cga-herdr", Some(HERDR));
     assert_eq!(
@@ -177,10 +174,6 @@ fn claude_launch_guarded_and_other_channels_use_regular_sessions() {
         Some(crate::services::herdr_launch::HERDR_NOT_ADMITTED)
     );
     assert!(lab.take_calls().is_empty(), "Herdr reaches no tmux");
-
-    assert!(crate::config::session_hosts::claude_guarded(Some(TEST)));
-    assert!(!crate::config::session_hosts::claude_guarded(Some(OTHER)));
-    assert!(!crate::config::session_hosts::claude_guarded(None));
 
     for (name, channel) in [
         ("claude-launch-guarded", Some(TEST)),

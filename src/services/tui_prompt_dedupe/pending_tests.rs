@@ -2035,5 +2035,44 @@ mod verified_adoption {
     }
 }
 
+/// While the pane waits on its `/clear` successor, a hook naming a headless SDK transcript in the
+/// same project dir is refused at the source check; the successor still binds once written.
+#[test]
+fn a_hook_naming_a_headless_sdk_transcript_never_becomes_the_pane_source() {
+    let lane = Lane::new();
+    let (channel, tmux) = (7_633, "headless-hook");
+    let (a, b) = launch_then_clear(&lane, channel, tmux, true);
+    // An SDK prompt can push the first entrypoint past the probe bound; that file fails closed too.
+    let long_prompt = serde_json::json!({"type": "attachment", "content": "x".repeat(1 << 20)});
+    for (at, prefix) in [(20, String::new()), (22, format!("{long_prompt}\n"))] {
+        let sdk = uuid();
+        let sdk_path = lane.path(&sdk);
+        let queued = serde_json::json!({"type": "queue-operation", "sessionId": sdk});
+        let prompt = serde_json::json!({"type": "user", "sessionId": sdk, "entrypoint": "sdk-cli"});
+        fs::write(&sdk_path, format!("{queued}\n{prefix}{prompt}\n")).unwrap();
+
+        let refused =
+            adopt_claude_continuation_explained(&a, &sdk, &prompt_at(&sdk_path, at)).unwrap();
+
+        let not_tui = AdoptSkip::SourceRejected(SourceRejection::NotTuiTranscript);
+        assert_eq!(refused, (None, Some(not_tui)));
+        let bound = runtime_binding_for_tmux_session(tmux).unwrap();
+        assert_eq!(bound.output_path, lane.path(&a).display().to_string());
+        let records = records_strict(channel).unwrap().unwrap();
+        assert!(
+            !records
+                .iter()
+                .any(|r| matches!(&r.new, BindingTarget::Source(s) if s.session_id == sdk)),
+            "the headless session is never logged as the pane's source"
+        );
+    }
+    let b_path = lane.touch(&b);
+    let adopted = adopt_claude_continuation_session(&a, &b, &prompt_at(&b_path, 30)).unwrap();
+    assert_eq!(
+        adopted,
+        Some((tmux.to_owned(), b_path.display().to_string()))
+    );
+}
+
 #[path = "pending_history_tests.rs"]
 mod history;

@@ -109,6 +109,7 @@ async fn the_route_injects_into_a_busy_tui_direct_turn_only_when_switched_on_pg(
     let registry = Arc::new(HealthRegistry::new());
     let shared = register_inject_runtime(&registry, &channels, Some(pool.clone())).await;
     let [on, off, menu, unconfirmed] = agents.map(|(_, ch, mode)| InjectPane::new(ch, mode));
+    // The A-plan reads the pane once before its paste, so this veto now comes from a menu.
     menu.menu();
     unconfirmed.set("fail_paste", "");
     let app = router(Some(pool), Some(registry));
@@ -222,7 +223,8 @@ async fn the_route_stashes_an_attached_persons_draft_only_on_the_allowlisted_cha
     assert_eq!(outside.applied(), ["paste", "Enter"]);
     let records = outside.records();
     assert_eq!(records.len(), 1);
-    assert!(records[0].ends_with(&outside.read("buffer").unwrap()));
+    let buffer = outside.read("buffer").unwrap();
+    assert_eq!(records[0], format!("{draft}{buffer}"));
     assert!(outside.read("stash").is_none());
 }
 
@@ -943,6 +945,7 @@ mod s1a {
         f.assert_calls(1);
 
         let pane = InjectPane::new(f.channel, "external");
+        // The A-plan reads the pane once before its paste, so this veto now comes from a menu.
         pane.menu();
         inject_hook::fault_handback(f.channel, inject_hook::HandbackFault::AnswerLost);
         let uncertain = input(
@@ -1510,7 +1513,8 @@ mod s1a {
             assert_eq!(off.applied(), ["C-s", "paste", "Enter"]);
             assert_eq!(off.read("composer").as_deref(), Some(draft));
             assert_eq!(f.counts().await, (0, 0));
-            // A tab needs no render prediction: the ON path stashes and sends it like any text.
+            // The A-plan reads the pane once before its paste, so a tab needs no render
+            // prediction: the ON path stashes and sends it like any text.
             let on_channel = f.channel + 100;
             f.add_agent("s1b-on-stash", on_channel).await;
             let mut on = InjectPane::new(on_channel, "external");
@@ -1582,6 +1586,7 @@ mod s1a {
             let answer = f.call(true, input(Some(joined), "status?", 200)).await;
             assert_eq!(answer.1["delivery"], "injected", "{}", answer.1);
             let e0 = f.row(joined).await.episode_key.unwrap();
+            // The A-plan reads the pane once before its paste, so this veto now comes from a menu.
             pane.menu();
             let guid = "p:0/HANDED";
             let answer = f.call(true, input(Some(guid), "status?", 200)).await;

@@ -85,7 +85,7 @@ fn legacy_retry_rebinds_an_old_format_row_and_keeps_legacy_call_column() {
                 retry_pending_watcher_respawn(
                     &fx.registry,
                     &fx.provider,
-                    std::slice::from_ref(&fx.shared),
+                    &TickMailboxes::enumerate(&fx.provider, vec![fx.shared.clone()]).await,
                     fx.channel,
                     10
                 )

@@ -341,9 +341,7 @@ mod tests {
     /// successful one leaves nothing behind.
     #[tokio::test]
     async fn cleanup_deletes_the_candidate_and_queues_it_only_when_delete_fails() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",
@@ -378,9 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn authority_or_message_epoch_advance_during_send_aborts_and_deletes_candidate() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",

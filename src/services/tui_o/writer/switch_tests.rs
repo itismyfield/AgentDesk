@@ -401,7 +401,7 @@ async fn a_restart_holds_the_new_source_behind_an_old_backlog_even_mid_read() {
         codex_line(
             serde_json::json!({"type": "assistant", "uuid": format!("u-t{i}"),
             "apiBlockIndex": 0, "message": {"id": format!("t{i}"),
-            "content": [{"type": "thinking", "thinking": text}]}}),
+            "content": [{"type": "thinking", "thinking": "", "signature": text}]}}),
         )
     };
     let backlog: Vec<u8> = (0..6).flat_map(thinking).collect();

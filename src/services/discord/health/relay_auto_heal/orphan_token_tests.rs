@@ -5,6 +5,7 @@ use std::time::Duration;
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 use super::super::HealthRegistry;
+use super::super::tick_mailboxes::TickMailboxes;
 use crate::config::TestEnvVarGuard;
 use crate::services::discord::SharedData;
 use crate::services::discord::relay_recovery::tests::orphan_token_finish::queued;
@@ -112,8 +113,8 @@ async fn assert_wedge_graded_once(
     assert_eq!(watcher_state.relay_health.tmux_alive, tmux_alive);
 
     for _ in 0..2 {
-        super::run_orphan_token_auto_heal_pass(&registry, &provider, std::slice::from_ref(&shared))
-            .await;
+        let tick = TickMailboxes::enumerate(&provider, vec![shared.clone()]).await;
+        super::run_orphan_token_auto_heal_pass(&registry, &provider, &tick).await;
     }
 
     assert_anchor_and_queue_kept(&shared, channel, anchor, &token).await;

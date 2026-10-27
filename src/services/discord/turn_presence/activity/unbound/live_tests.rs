@@ -124,7 +124,7 @@ fn s1_unbound_registration_reads_preserve_precedence_and_permissions() {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let bindings = registrations(&config).unwrap();
+    let bindings = registrations().unwrap();
     assert_eq!(bindings.len(), 2);
     assert_eq!(bindings[0].channel_id, 69_181_602);
     assert_eq!(bindings[0].owner_provider, ProviderKind::Codex);
@@ -134,7 +134,7 @@ fn s1_unbound_registration_reads_preserve_precedence_and_permissions() {
     );
     std::fs::write(&org, "corrupt: [").unwrap();
     assert!(
-        registrations(&config).is_err(),
+        registrations().is_err(),
         "a corrupt registration must not become empty absence"
     );
 }

@@ -89,9 +89,7 @@ fn message(tmux_ready: bool, tmux: &str, output: &str) -> RuntimeHandoffLoopMess
 // watcher; an admitted one gets its owner after the claim, a Legacy one before it, as on main.
 #[tokio::test(flavor = "current_thread")]
 async fn a_withheld_handoff_records_no_owner_and_a_legacy_one_records_it_before_the_claim() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().expect("runtime root");
     let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
@@ -226,9 +224,7 @@ fn list_while_claim_parked(tmux: &str) -> std::thread::JoinHandle<std::thread::J
 // the claim: the handoff commits owner and watcher together, and the pane is listed afterwards.
 #[tokio::test(flavor = "current_thread")]
 async fn a_listing_inside_a_legacy_handoff_lands_after_its_claim() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().expect("runtime root");
     let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",

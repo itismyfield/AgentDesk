@@ -32,7 +32,7 @@ async fn a_withheld_paused_attach_leaves_the_row_registry_and_retries_untouched_
     // (row, channel, attach result, tmux retries scheduled)
     let cases = [
         (Stored::Hosted, 5340_31, false, 0),
-        (Stored::Legacy, 5340_32, true, 1),
+        (Stored::Legacy, 534_032, true, 1),
     ];
     for (stored, channel, attached, retries) in cases {
         let name = format!("AgentDesk-claude-p8c6-{channel}");

@@ -127,7 +127,7 @@ async fn local_retry_actor_gc_and_restart_use_ledger_without_the_original_spool(
     );
     let at = store.ledger().piece(0).unwrap().outcome_at.unwrap();
     store
-        .for_each_frame(&source, |frame| {
+        .for_each_frame(&source, |frame, _| {
             if let crate::services::tui_o::store::spool::SpoolFrame::Record(record) = frame {
                 assert!(!String::from_utf8_lossy(&record.line).contains("ledger survives GC"));
             }

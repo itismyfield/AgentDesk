@@ -1037,15 +1037,15 @@ pub(super) mod provider_output_guard_tests {
         .await
         .expect("blocked edit");
         assert_eq!(outcome, GuardedRolloverEditOutcome::Blocked);
-        let edits = gateway.edits.lock().expect("edits lock");
-        assert_eq!(edits.len(), 1);
-        assert_eq!(
-            edits[0],
-            crate::services::provider_output_guard::BLOCKED_PROVIDER_OUTPUT_BODY
-        );
-        assert!(!edits[0].contains("<output-file>"));
-        drop(edits);
-
+        {
+            let edits = gateway.edits.lock().expect("edits lock");
+            assert_eq!(edits.len(), 1);
+            assert_eq!(
+                edits[0],
+                crate::services::provider_output_guard::BLOCKED_PROVIDER_OUTPUT_BODY
+            );
+            assert!(!edits[0].contains("<output-file>"));
+        }
         let partial = guarded_bridge_rollover_edit(
             &gateway,
             &ProviderKind::Claude,

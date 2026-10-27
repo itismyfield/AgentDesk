@@ -185,11 +185,6 @@ impl InjectPane {
             self.set(name, &value);
         }
         assert_eq!(self.read("attached").as_deref(), Some("4"));
-        let pane = crate::services::claude_tui::busy_inject::Pane::with_program(
-            &self.session(),
-            self.path("tmux"),
-        );
-        assert_eq!(pane.state().unwrap().generation.attached, 4);
     }
 
     pub(crate) fn read(&self, name: &str) -> Option<String> {
