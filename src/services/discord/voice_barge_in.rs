@@ -2398,6 +2398,7 @@ mod tests {
             channels: crate::config::AgentChannels::new()
                 .with("claude", crate::config::AgentChannel::from("100"))
                 .with("codex", crate::config::AgentChannel::from("200")),
+            peer_directory: true,
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,

@@ -980,6 +980,7 @@ mod tests {
                     ..AgentChannelConfig::default()
                 }),
             ),
+            peer_directory: true,
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,
@@ -1007,6 +1008,7 @@ mod tests {
                     ..AgentChannelConfig::default()
                 }),
             ),
+            peer_directory: true,
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,

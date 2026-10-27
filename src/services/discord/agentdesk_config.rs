@@ -90,6 +90,7 @@ pub(crate) fn ensure_agent_setup_config(
         voice: crate::config::AgentVoiceConfig::default(),
         provider: input.provider.clone(),
         channels,
+        peer_directory: true,
         keywords: Vec::new(),
         department: None,
         avatar_emoji: None,
@@ -743,43 +744,10 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
         return Vec::new();
     };
 
-    if let Some(meeting) = &config.meeting {
-        let available_agents = &meeting.available_agents;
-        if !available_agents.is_empty() {
-            let mut peers = Vec::new();
-            let mut seen = HashSet::new();
-            for entry in available_agents {
-                let Some(agent) = meeting_agent_from_entry(&config, entry) else {
-                    continue;
-                };
-                if !seen.insert(agent.role_id.clone()) {
-                    continue;
-                }
-                let provider = agent.provider.clone();
-                let identity = identity_from_parts(
-                    &agent.role_id,
-                    &agent.display_name,
-                    provider
-                        .clone()
-                        .unwrap_or_else(|| ProviderKind::Unsupported("unknown".into())),
-                    agent.model.clone(),
-                    None,
-                );
-                peers.push(PeerAgentInfo {
-                    role_id: agent.role_id,
-                    display_name: agent.display_name,
-                    keywords: agent.keywords,
-                    provider,
-                    identity_label: identity_label(&identity),
-                });
-            }
-            return peers;
-        }
-    }
-
     let mut peers = config
         .agents
         .iter()
+        .filter(|agent| agent.peer_directory)
         .map(|agent| {
             let provider = ProviderKind::from_str(&agent.provider);
             let identity = identity_from_parts(

@@ -1499,3 +1499,156 @@ fn system_prompt_inspection_preserves_pending_restore_for_the_next_turn() {
         "normal turns still consume restore packets"
     );
 }
+
+fn peer_directory_prompt() -> String {
+    build_system_prompt(
+        "ctx",
+        &[],
+        "/tmp",
+        ChannelId::new(1),
+        "tok",
+        Some(&test_role_binding("family-counsel")),
+        false,
+        DispatchProfile::Full,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+}
+
+#[test]
+fn peer_directory_next_prompt_reads_added_agents_without_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let _guard = crate::config::set_agentdesk_root_for_test(root.path());
+    let path = crate::runtime_layout::config_file_path(root.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let initial = "server: {}\ndatabase: {enabled: false}\nagents:\n  - {id: family-counsel, name: Counsel}\n  - {id: chef-goat, name: Chef, name_ko: 셰프, keywords: [요리, 식단, 재료, 레시피, 미표시]}\nmeeting:\n  channel_name: fixture\n  available_agents: [family-counsel, chef-goat]\n";
+    std::fs::write(&path, initial).unwrap();
+    crate::config::load_from_path(&path).expect("valid peer directory fixture");
+    let before = peer_directory_prompt();
+    assert!(
+        before.contains("chef-goat"),
+        "initial directory must exist: {before}"
+    );
+    assert!(!before.contains("family-smarthome"));
+    assert_eq!(before, peer_directory_prompt());
+
+    let mut config: crate::config::Config = serde_yaml::from_str(initial).unwrap();
+    for id in [
+        "family-smarthome",
+        "family-camping",
+        "personal-obiseo",
+        "personal-yobiseo",
+    ] {
+        config
+            .agents
+            .push(serde_yaml::from_str(&format!("id: {id}\nname: {id}\n")).unwrap());
+    }
+    std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    let after = peer_directory_prompt();
+    for id in [
+        "chef-goat",
+        "family-smarthome",
+        "family-camping",
+        "personal-obiseo",
+        "personal-yobiseo",
+    ] {
+        assert!(after.contains(id), "next prompt must include {id}: {after}");
+    }
+    let directory = after.split("[Peer Agent Directory]").nth(1).unwrap();
+    assert!(!directory.contains("- family-counsel"));
+    assert!(directory.contains("(셰프) — best for: 요리, 식단, 재료, 레시피"));
+    assert!(!directory.contains("미표시"));
+    config.meeting.as_mut().unwrap().available_agents.clear();
+    std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    assert_eq!(after, peer_directory_prompt());
+    config.meeting = None;
+    std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    assert_eq!(after, peer_directory_prompt());
+    let mut value = serde_yaml::to_value(config).unwrap();
+    value["agents"][1]["peer_directory"] = serde_yaml::Value::Bool(false);
+    std::fs::write(&path, serde_yaml::to_string(&value).unwrap()).unwrap();
+    let hidden = peer_directory_prompt();
+    assert!(!hidden.contains("chef-goat"));
+    assert!(hidden.contains("family-smarthome"));
+}
+
+#[test]
+fn peer_directory_excludes_meeting_only_and_hidden_agents() {
+    let root = tempfile::tempdir().unwrap();
+    let _guard = crate::config::set_agentdesk_root_for_test(root.path());
+    let path = crate::runtime_layout::config_file_path(root.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut yaml = "server: {}\ndatabase: {enabled: false}\nagents:\n  - {id: family-counsel, name: Counsel}\n  - {id: chef-goat, name: Chef, name_ko: 셰프}\n  - {id: english-only, name: English}\n  - {id: blank-ko, name: Fallback, name_ko: ' '}\n".to_string();
+    for id in [
+        "adk-claude-e2e",
+        "adk-codex-e2e",
+        "adk-gemini-e2e",
+        "adk-qwen-e2e",
+        "adk-opencode-e2e",
+        "adk-kilo-e2e",
+        "adk-hermes-e2e",
+        "adk-e2e-orchestrator",
+    ] {
+        yaml.push_str(&format!(
+            "  - {{id: {id}, name: Hidden, peer_directory: false}}\n"
+        ));
+    }
+    yaml.push_str("meeting:\n  channel_name: fixture\n  available_agents:\n    - {role_id: meeting-only, display_name: Ghost, keywords: [ghost]}\n");
+    std::fs::write(&path, yaml).unwrap();
+    let config = crate::config::load_from_path(&path).expect("valid visibility fixture");
+    crate::config::save_to_path(&path, &config).unwrap();
+    let prompt = peer_directory_prompt();
+    assert!(
+        !prompt.contains("meeting-only"),
+        "meeting-only agent leaked: {prompt}"
+    );
+    assert!(
+        !prompt.contains("Hidden"),
+        "hidden e2e agent leaked: {prompt}"
+    );
+    assert!(prompt.contains("(셰프)"));
+    assert!(prompt.contains("(English)"));
+    assert!(prompt.contains("(Fallback)"));
+}
+
+#[test]
+fn peer_directory_never_restores_legacy_sources_when_agents_are_empty() {
+    let root = tempfile::tempdir().unwrap();
+    let _guard = crate::config::set_agentdesk_root_for_test(root.path());
+    let path = crate::runtime_layout::config_file_path(root.path());
+    let org = crate::runtime_layout::org_schema_path(root.path());
+    let role_map = crate::runtime_layout::role_map_path(root.path());
+    for file in [&path, &org, &role_map] {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    }
+    std::fs::write(
+        &org,
+        "version: 1\nagents:\n  legacy-org: {display_name: Legacy}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &role_map,
+        r#"{"meeting":{"available_agents":[{"roleId":"legacy-role-map","displayName":"Legacy"}]}}"#,
+    )
+    .unwrap();
+    for org_present in [true, false] {
+        if !org_present {
+            std::fs::remove_file(&org).unwrap();
+        }
+        for yaml in [
+            "server: {}\nagents: []\n",
+            "server: {}\nagents:\n  - {id: hidden, name: Hidden, peer_directory: false}\n",
+            "agents: [invalid\n",
+        ] {
+            std::fs::write(&path, yaml).unwrap();
+            assert!(!peer_directory_prompt().contains("[Peer Agent Directory]"));
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert!(!peer_directory_prompt().contains("[Peer Agent Directory]"));
+    }
+}

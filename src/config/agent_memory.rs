@@ -29,6 +29,8 @@ pub struct AgentDef {
     pub channels: AgentChannels,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub peer_directory: bool,
     #[serde(default)]
     pub department: Option<String>,
     #[serde(default)]

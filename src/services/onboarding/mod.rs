@@ -1761,6 +1761,7 @@ fn write_agentdesk_channel_bindings(
                 voice: crate::config::AgentVoiceConfig::default(),
                 provider: provider.to_string(),
                 channels: crate::config::AgentChannels::default(),
+                peer_directory: true,
                 keywords: Vec::new(),
                 department: None,
                 avatar_emoji: None,
