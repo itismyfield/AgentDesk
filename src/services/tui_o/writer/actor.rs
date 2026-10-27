@@ -311,6 +311,7 @@ where
             }
         }
     }
+    let progress = super::progress::Publisher::new(actor.writer.channel());
     let mut sources_resumed = false;
     while !actor.writer.is_stopped() && !*stop.borrow() {
         if actor.rescope() {
@@ -342,7 +343,7 @@ where
             actor.writer.retry_local(now).await;
         }
         if !actor.writer.has_local_retry() {
-            actor.deliver_owed().await;
+            actor.deliver_owed(&progress).await;
         }
         // Re-post runs in this same turn and only once nothing is owed, so it never sends beside
         // a piece of this channel. It holds no exact permit, so a verified channel never runs it.
@@ -357,6 +358,7 @@ where
         actor.read_sources();
         actor.poll_transition(sources_resumed, &unsettled).await;
         actor.observe_waiting(sources_resumed);
+        progress.publish(actor.progress());
         #[cfg(test)]
         fresh_resume::note_work(actor.owed.len(), actor.deriver.has_unsealed());
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
@@ -589,10 +591,18 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             })
     }
 
-    async fn deliver_owed(&mut self) {
+    /// Delivers in order and publishes the position after each piece, so a long drain shows its
+    /// progress to health while it runs.
+    async fn deliver_owed(&mut self, progress: &super::progress::Publisher) {
         if let Some(log) = &mut self.verified {
+            let (legacy, unsealed) = (self.owed.len(), self.deriver.has_unsealed());
+            let delivered = |writer: &mut ChannelWriter<P, L, A>, log: &super::owed::OwedLog| {
+                let (retry, owed) = (writer.has_local_retry(), legacy + log.work.len());
+                let ledger = writer.store().ledger();
+                progress.publish(super::progress::position(owed, retry, ledger, unsealed));
+            };
             // Legacy retries in `owed` have no provenance, so they stay Unknown here.
-            return super::owed::deliver_owed(&mut self.writer, log).await;
+            return super::owed::deliver_owed(&mut self.writer, log, delivered).await;
         }
         while !self.owed.is_empty() {
             if !self.delivery_allowed() {
@@ -604,6 +614,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             match self.writer.deliver(item).await {
                 Step::Done => {
                     self.owed.pop_front();
+                    progress.publish(self.progress());
                     if self.writer.has_local_retry() {
                         return;
                     }
@@ -671,6 +682,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let retired: HashSet<String> = retired.map(|cursor| source_key(&cursor.source)).collect();
         let old = rotation.successors.keys();
         Some(old.filter(|key| !retired.contains(*key)).count())
+    }
+
+    /// What this poll left owed, whether a unit waits on its seal, and the ledger position.
+    fn progress(&mut self) -> super::progress::ChannelProgress {
+        let verified = self.verified.as_ref().map_or(0, |log| log.work.len());
+        let (retry, unsealed) = (self.writer.has_local_retry(), self.deriver.has_unsealed());
+        let ledger = self.writer.store().ledger();
+        super::progress::position(self.owed.len() + verified, retry, ledger, unsealed)
     }
 
     /// Pieces, an open `Prepared`, unsealed units, sources read short of their end and binds not
@@ -808,7 +827,8 @@ mod test_support {
             actor.writer.retry_local(now).await;
         }
         if !actor.writer.has_local_retry() {
-            actor.deliver_owed().await;
+            let progress = super::super::progress::Publisher::new(channel);
+            actor.deliver_owed(&progress).await;
         }
         assert_eq!(
             cursor(&mut actor),

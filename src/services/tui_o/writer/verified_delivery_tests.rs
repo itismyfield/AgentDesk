@@ -1,5 +1,7 @@
 //! Verified owed delivery through the real writer and actor: exact permits, FIFO holds, kept
 //! debt and per-source GC protection, with the readiness gate opened only by the test.
+#[path = "progress_drain_verified_tests.rs"]
+mod progress_drain;
 #[path = "tool_card_provenance_tests.rs"]
 mod tool_card_provenance;
 #[path = "tool_card_codex_tests.rs"]
@@ -124,7 +126,7 @@ impl Verified {
     }
 
     async fn deliver(&mut self) {
-        deliver_owed(&mut self.writer, &mut self.collector.log).await;
+        deliver_owed(&mut self.writer, &mut self.collector.log, |_, _| ()).await;
     }
 
     fn queued(&self) -> Vec<&str> {

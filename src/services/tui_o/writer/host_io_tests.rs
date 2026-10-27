@@ -257,5 +257,7 @@ impl HostIo for TestHost {
     }
 }
 
+// The host recovers through an enabled store, which Windows refuses without a directory fsync.
+#[cfg(unix)]
 #[path = "local_retry_host_tests.rs"]
 mod local_retry;

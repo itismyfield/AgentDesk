@@ -2,6 +2,7 @@
 
 use super::fork_lineage::{Class, RowIds};
 use super::*;
+use crate::services::tui_o::shadow::identity::classify_with_version;
 use crate::services::tui_o::store::rotation::{BoundaryEvidence, HotCandidate};
 
 impl<B: BindingEvents> Sources<B> {
@@ -55,9 +56,9 @@ impl<B: BindingEvents> Sources<B> {
             });
             writer
                 .store()
-                .for_each_frame(&source, |frame| {
+                .for_each_frame(&source, |frame, identity_version| {
                     if let SpoolFrame::Record(record) = frame {
-                        self.owe(deriver, owed, &source, &record);
+                        self.owe(deriver, owed, &source, &record, identity_version);
                     }
                 })
                 .map_err(halted("explicit boundary replay"))?;
@@ -122,9 +123,9 @@ impl<B: BindingEvents> Sources<B> {
             if replay {
                 writer
                     .store()
-                    .for_each_frame(&link.source, |frame| {
+                    .for_each_frame(&link.source, |frame, identity_version| {
                         if let SpoolFrame::Record(record) = frame {
-                            self.owe(deriver, owed, &link.source, &record);
+                            self.owe(deriver, owed, &link.source, &record, identity_version);
                         }
                     })
                     .map_err(halted("automatic boundary replay"))?;
@@ -208,7 +209,7 @@ impl<B: BindingEvents> Sources<B> {
         let ledger = writer.store().ledger().clone();
         writer
             .store()
-            .for_each_frame(&link.source, |frame| {
+            .for_each_frame(&link.source, |frame, identity_version| {
                 if novel.is_some() || invalid {
                     return;
                 }
@@ -225,7 +226,7 @@ impl<B: BindingEvents> Sources<B> {
                 }
                 match lineage.native_class(self.provider, &record.line, from) {
                     Class::Inherited => {
-                        let derived = scratch.derive(&record);
+                        let derived = scratch.derive_with_version(&record, identity_version);
                         let mut units = HashMap::<_, Vec<_>>::new();
                         for work in derived {
                             let key = match &work {
@@ -244,14 +245,16 @@ impl<B: BindingEvents> Sources<B> {
                     }
                     Class::New => {
                         let value = serde_json::from_slice(&record.line).unwrap_or_default();
-                        let native = classify(self.provider, &value).iter().any(|fact| {
-                            matches!(
-                                fact,
-                                RecordFact::Unit(..)
-                                    | RecordFact::Prompt(..)
-                                    | RecordFact::Assistant
-                            )
-                        });
+                        let native = classify_with_version(self.provider, &value, identity_version)
+                            .iter()
+                            .any(|fact| {
+                                matches!(
+                                    fact,
+                                    RecordFact::Unit(..)
+                                        | RecordFact::Prompt(..)
+                                        | RecordFact::Assistant
+                                )
+                            });
                         if native {
                             if anchor {
                                 novel = Some(record.start);

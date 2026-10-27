@@ -33,8 +33,7 @@ use super::transcript_binding_stall::{self, resolve_bound_selector};
 use super::unpaired_active_token::{self, RelayHealthBuildInput, build_relay_health_snapshot};
 use super::{BotTokenReloadScopes, HealthRegistry, bot_token_reload_scopes};
 use crate::services::discord::relay_health::{
-    DurableFrontierObservation, RelayActiveTurn, RelayHealthSnapshot, RelayStallClassifier,
-    RelayStallState,
+    DurableFrontierObservation, RelayActiveTurn, RelayHealthSnapshot, RelayStallState,
 };
 use crate::services::discord::{self, SharedData};
 use crate::services::provider::ProviderKind;
@@ -145,8 +144,8 @@ pub struct WatcherStateSnapshot {
     /// advances a watermark) is intentionally never consulted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound_session_id: Option<String>,
-    /// #5188 (R5/R6): `"none"`, or why a delivery binding is pointed at a
-    /// transcript that stopped growing. See
+    /// `"none"`, or why delivery looks stalled: a binding on a transcript that stopped growing,
+    /// or for an O-owned channel O's own verdict. See
     /// [`super::transcript_binding_stall::TranscriptBindingStall`].
     pub transcript_binding_stall: &'static str,
     /// #3126: `true` when the in-flight row records a turn whose terminal
@@ -601,7 +600,7 @@ async fn watcher_state_snapshot_for_shared(
             session.inflight.as_ref(),
         ),
     });
-    let relay_stall_state = RelayStallClassifier::classify(&relay_health);
+    let relay_stall_state = transcript_binding_stall::classify_relay_stall(&relay_health);
     trace_relay_health_classification(&relay_health, relay_stall_state);
     // #4408 phase-2 (I1): resolve the relay tail's bound transcript/session. The
     // runtime binding is a sync single-shot lookup (its Mutex guard is released
@@ -628,7 +627,7 @@ async fn watcher_state_snapshot_for_shared(
         bound_session_id.as_deref(),
         session.attached,
         tmux_session_alive,
-        session.inflight_state_present,
+        transcript_binding_stall::TurnFacts::new(channel.get(), &mailbox_snapshot, &session),
     );
     // #5071 T4-B4 (4987 S4): compare the row's transcript coordinate against the
     // registry's independently resolved one by FILE IDENTITY. Does NOT replace

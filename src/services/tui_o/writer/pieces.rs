@@ -6,7 +6,7 @@ use super::tool_cards::{ToolCardRun, ToolMeta};
 pub use super::turn_summary::SummaryInputs;
 use super::turn_summary::TurnSummaryRun;
 use crate::services::discord::formatting::split_for_shadow;
-use crate::services::tui_o::shadow::identity::{RecordFact, UnitContent, classify};
+use crate::services::tui_o::shadow::identity::{RecordFact, UnitContent, classify_with_version};
 use crate::services::tui_o::shadow::seal::{SealOutcome, SealRegistry};
 use crate::services::tui_o::shadow::unit_plan::{UnitPlan, plan};
 use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider, UnitKey, UnitKind};
@@ -81,6 +81,14 @@ impl UnitDeriver {
 
     /// Units in record order; a repeated key with the same plan (a fork copy) yields nothing.
     pub fn derive(&mut self, record: &CapturedRecord) -> Vec<Derived> {
+        self.derive_with_version(record, crate::services::tui_o::shadow::IDENTITY_VERSION)
+    }
+
+    pub(crate) fn derive_with_version(
+        &mut self,
+        record: &CapturedRecord,
+        identity_version: u32,
+    ) -> Vec<Derived> {
         if record.line.iter().all(u8::is_ascii_whitespace) {
             return Vec::new();
         }
@@ -102,7 +110,7 @@ impl UnitDeriver {
             Vec::new().into_iter()
         };
         let mut out = Vec::new();
-        for fact in classify(self.provider, &value) {
+        for fact in classify_with_version(self.provider, &value, identity_version) {
             match fact {
                 RecordFact::Unit(native_key, kind, content) => {
                     let (channel_id, provider) = (self.channel, self.provider);

@@ -329,14 +329,17 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                                     .unwrap_or(0),
                             );
                         }
-                        // Text content from assistant message
+                        // Visible content from assistant message
                         if let Some(content) = message.get("content") {
                             if let Some(arr) = content.as_array() {
                                 for block in arr {
                                     let block_type = block.get("type").and_then(|t| t.as_str());
-                                    if block_type == Some("text") {
+                                    if block_type == Some("text")
+                                        || (block_type == Some("thinking")
+                                            && crate::services::claude_tui::transcript_tail::visible_assistant_block_text(block).is_some())
+                                    {
                                         if let Some(text) =
-                                            block.get("text").and_then(|t| t.as_str())
+                                            crate::services::claude_tui::transcript_tail::visible_assistant_block_text(block)
                                         {
                                             // #4275: the watcher/jsonl path emits each
                                             // assistant text block as a discrete event

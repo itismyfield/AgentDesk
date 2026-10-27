@@ -720,7 +720,8 @@ async fn deliver_permitted(fixture: &mut Fixture, episodes: &[TurnEpisodeRef]) -
     }
     set_ready_for_tests(7, true);
     let mut log = fixture.collect();
-    crate::services::tui_o::writer::owed::deliver_owed(&mut fixture.writer, &mut log).await;
+    crate::services::tui_o::writer::owed::deliver_owed(&mut fixture.writer, &mut log, |_, _| ())
+        .await;
     set_ready_for_tests(7, false);
     fixture.port.posts()
 }

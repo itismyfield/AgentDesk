@@ -1652,10 +1652,10 @@ mod tests {
         }
 
         #[cfg(unix)]
-        #[tokio::test(flavor = "current_thread")]
+        #[test]
         #[rustfmt::skip]
-        async fn pinned_codex_short_replace_generation_flip_5264() {
-            let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner()); let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner()); crate::services::tui_prompt_dedupe::reset_state_for_tests(); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
+        fn pinned_codex_short_replace_generation_flip_5264() {
+            let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock(); crate::services::tui_prompt_dedupe::run_serial_test(async { crate::services::tui_prompt_dedupe::reset_state_for_tests(); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
             // A per-iteration runtime root: the same-channel sweep (owner == delivery) writes
             // its fingerprint under CH, and the split-channel sweep asserts CH holds NO
             // fingerprint. Both sweeps use one tmux session, one generation stamp and one
@@ -1666,131 +1666,131 @@ mod tests {
                 assert!(committed && !fallback); assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, MSG, owner.get(), "answer"); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
             let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 3); let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, false);
             assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, false).await.0); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let broken = runtime_root_guard(); std::fs::create_dir_all(broken._temp.path().join("runtime")).unwrap(); std::fs::write(broken._temp.path().join("runtime/discord_delivery_records"), b"blocked").unwrap(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, broken._temp.path(), ch(), 6); let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, false).await.0); assert_eq!((gw.replace_calls.load(Ordering::SeqCst), shared.committed_relay_offset(ch())), (1, 64)); assert!(dr::read_record(&provider, CH).is_none()); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased));
+            });
         }
 
         // Drive the production gateway through an edit rejection and fallback POST.
         // A fabricated Replace outcome would miss the transport-to-anchor boundary.
         #[cfg(unix)]
-        #[tokio::test(flavor = "current_thread")]
-        async fn pinned_short_fallback_exact_receipt_5071() {
-            let _lock = crate::config::shared_test_env_lock()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            crate::services::tui_prompt_dedupe::reset_state_for_tests();
-            for (post_ok, replace_source) in [(true, false), (false, false), (true, true)] {
-                let root = runtime_root_guard();
-                let shared = make_shared_data_for_tests();
-                let provider = ProviderKind::Codex;
-                let (pin, source) = pinned(&shared, root._temp.path(), owner_ch(), 5_071);
-                let edits = Arc::new(AtomicUsize::new(0));
-                let posts = Arc::new(AtomicUsize::new(0));
-                let edit_count = edits.clone();
-                let _edit =
-                    crate::services::discord::formatting::chunk_transport_test_hook::install(
-                        Box::new(move |channel, message, body| {
-                            assert_eq!(
-                                (channel, message, body),
-                                (ch(), MessageId::new(MSG), "answer")
-                            );
-                            edit_count.fetch_add(1, Ordering::SeqCst);
-                            Some(Err("edit rejected".into()))
-                        }),
+        #[test]
+        fn pinned_short_fallback_exact_receipt_5071() {
+            let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+            crate::services::tui_prompt_dedupe::run_serial_test(async {
+                crate::services::tui_prompt_dedupe::reset_state_for_tests();
+                for (post_ok, replace_source) in [(true, false), (false, false), (true, true)] {
+                    let root = runtime_root_guard();
+                    let shared = make_shared_data_for_tests();
+                    let provider = ProviderKind::Codex;
+                    let (pin, source) = pinned(&shared, root._temp.path(), owner_ch(), 5_071);
+                    let edits = Arc::new(AtomicUsize::new(0));
+                    let posts = Arc::new(AtomicUsize::new(0));
+                    let edit_count = edits.clone();
+                    let _edit =
+                        crate::services::discord::formatting::chunk_transport_test_hook::install(
+                            Box::new(move |channel, message, body| {
+                                assert_eq!(
+                                    (channel, message, body),
+                                    (ch(), MessageId::new(MSG), "answer")
+                                );
+                                edit_count.fetch_add(1, Ordering::SeqCst);
+                                Some(Err("edit rejected".into()))
+                            }),
+                        );
+                    let post_count = posts.clone();
+                    let replacement = flip(source.clone());
+                    let _post =
+                        crate::services::discord::formatting::rollback_transport_test_hook::install(
+                            Box::new(move |channel, body, _, _, _| {
+                                assert_eq!((channel, body), (ch(), "answer"));
+                                post_count.fetch_add(1, Ordering::SeqCst);
+                                if replace_source {
+                                    replacement();
+                                }
+                                Some(if post_ok {
+                                    Ok((channel, MessageId::new(9_071)))
+                                } else {
+                                    Err("POST rejected".into())
+                                })
+                            }),
+                            Box::new(|_, _| Some(Ok(()))),
+                        );
+                    let gateway = crate::services::discord::gateway::DiscordGateway::new(
+                        Arc::new(serenity::all::Http::new("test-token")),
+                        shared.clone(),
+                        provider.clone(),
+                        None,
                     );
-                let post_count = posts.clone();
-                let replacement = flip(source.clone());
-                let _post =
-                    crate::services::discord::formatting::rollback_transport_test_hook::install(
-                        Box::new(move |channel, body, _, _, _| {
-                            assert_eq!((channel, body), (ch(), "answer"));
-                            post_count.fetch_add(1, Ordering::SeqCst);
-                            if replace_source {
-                                replacement();
-                            }
-                            Some(if post_ok {
-                                Ok((channel, MessageId::new(9_071)))
-                            } else {
-                                Err("POST rejected".into())
-                            })
-                        }),
-                        Box::new(|_, _| Some(Ok(()))),
-                    );
-                let gateway = crate::services::discord::gateway::DiscordGateway::new(
-                    Arc::new(serenity::all::Http::new("test-token")),
-                    shared.clone(),
-                    provider.clone(),
-                    None,
-                );
-                let outcome = pinned_transport(shared.as_ref(), &gateway, &provider, owner_ch())
-                    .deliver(pin, false)
-                    .await;
-                assert_eq!(
-                    outcome,
-                    (post_ok, post_ok, post_ok.then_some(MessageId::new(9_071)))
-                );
-                assert_eq!(
-                    (edits.load(Ordering::SeqCst), posts.load(Ordering::SeqCst)),
-                    (1, 1)
-                );
-                assert_eq!(
-                    dr::confirmed_delivery_receipt_exists(&provider, ch(), 9_071, &source),
-                    post_ok
-                );
-                assert!(!dr::confirmed_delivery_receipt_exists(
-                    &provider,
-                    ch(),
-                    MSG,
-                    &source
-                ));
-                assert!(matches!(
-                    shared.delivery_lease(owner_ch()).read(),
-                    LeaseSnapshot::Unleased
-                ));
-                if post_ok {
-                    let locals = apply(
-                        toc::DeliveryOutcome::Delivered {
-                            committed_to: 64,
-                            replace_kind: Some(
-                                toc::ReplaceDeliveryKind::FreshFallbackAfterEditFailure {
-                                    edit_error: "edit rejected".into(),
-                                    replacement_anchor: outcome.2,
-                                },
-                            ),
-                            new_chunks: None,
-                        },
-                        true,
-                        "answer".len(),
-                    );
-                    assert!(locals.committed && locals.visible && !locals.preserve);
-                    assert_eq!(locals.inflight_offset, "answer".len());
-                    assert!(
-                        locals.footer.is_none(),
-                        "a fallback must not footer-edit the failed original"
-                    );
-                }
-                if replace_source {
-                    assert_pinned_barrier(&source, 9_071, 5_071, "answer");
-                } else {
+                    let outcome =
+                        pinned_transport(shared.as_ref(), &gateway, &provider, owner_ch())
+                            .deliver(pin, false)
+                            .await;
                     assert_eq!(
-                        shared.committed_relay_offset(owner_ch()),
-                        if post_ok { 64 } else { 0 }
+                        outcome,
+                        (post_ok, post_ok, post_ok.then_some(MessageId::new(9_071)))
                     );
+                    assert_eq!(
+                        (edits.load(Ordering::SeqCst), posts.load(Ordering::SeqCst)),
+                        (1, 1)
+                    );
+                    assert_eq!(
+                        dr::confirmed_delivery_receipt_exists(&provider, ch(), 9_071, &source),
+                        post_ok
+                    );
+                    assert!(!dr::confirmed_delivery_receipt_exists(
+                        &provider,
+                        ch(),
+                        MSG,
+                        &source
+                    ));
+                    assert!(matches!(
+                        shared.delivery_lease(owner_ch()).read(),
+                        LeaseSnapshot::Unleased
+                    ));
+                    if post_ok {
+                        let locals = apply(
+                            toc::DeliveryOutcome::Delivered {
+                                committed_to: 64,
+                                replace_kind: Some(
+                                    toc::ReplaceDeliveryKind::FreshFallbackAfterEditFailure {
+                                        edit_error: "edit rejected".into(),
+                                        replacement_anchor: outcome.2,
+                                    },
+                                ),
+                                new_chunks: None,
+                            },
+                            true,
+                            "answer".len(),
+                        );
+                        assert!(locals.committed && locals.visible && !locals.preserve);
+                        assert_eq!(locals.inflight_offset, "answer".len());
+                        assert!(
+                            locals.footer.is_none(),
+                            "a fallback must not footer-edit the failed original"
+                        );
+                    }
+                    if replace_source {
+                        assert_pinned_barrier(&source, 9_071, 5_071, "answer");
+                    } else {
+                        assert_eq!(
+                            shared.committed_relay_offset(owner_ch()),
+                            if post_ok { 64 } else { 0 }
+                        );
+                    }
                 }
-            }
+            });
         }
 
         #[cfg(unix)]
-        #[tokio::test(flavor = "current_thread")]
+        #[test]
         #[rustfmt::skip]
-        async fn pinned_codex_long_chunks_generation_flip_5264() {
-            let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner()); let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner()); crate::services::tui_prompt_dedupe::reset_state_for_tests(); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
+        fn pinned_codex_long_chunks_generation_flip_5264() {
+            let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock(); crate::services::tui_prompt_dedupe::run_serial_test(async { crate::services::tui_prompt_dedupe::reset_state_for_tests(); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
             // Per-iteration runtime root — same reason as the short-replace sweep above.
             for owner in [ch(), owner_ch()] { let root = runtime_root_guard(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), owner, owner.get() + 4); let mut gw = long_gateway(true, true); gw.hook = Some(flip(source.clone())); let outcome = pinned_transport(shared.as_ref(), &gw, &provider, owner).deliver(pin, true).await;
                 assert_eq!((outcome.0, outcome.1), (true, false)); let mut inflight = crate::services::discord::inflight::load_inflight_state_read_only(&provider, CH).unwrap(); assert!(super::super::super::stream_loop::types::persist_pinned_terminal_anchor(&mut inflight, outcome.2)); let restored = crate::services::discord::inflight::load_inflight_state_read_only(&provider, CH).unwrap(); assert!(dr::confirmed_delivery_receipt_exists(&provider, ch(), restored.current_msg_id, &source)); assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, 9001, owner.get() + 4, "answer"); assert!(!dr::historical_pinned_delivery_exists(&source, 9000)); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
             let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 5); let gw = long_gateway(false, true);
             assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 7); let gw = long_gateway(true, true); gw.clock.store(usize::MAX, Ordering::SeqCst); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let broken = runtime_root_guard(); std::fs::create_dir_all(broken._temp.path().join("runtime")).unwrap(); std::fs::write(broken._temp.path().join("runtime/discord_delivery_records"), b"blocked").unwrap(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, broken._temp.path(), ch(), 8); let gw = long_gateway(true, true); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert_eq!((gw.send_calls.load(Ordering::SeqCst), shared.committed_relay_offset(ch())), (1, 64)); assert!(dr::read_record(&provider, CH).is_none()); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased));
+            });
         }
 
         async fn run_long_apply(

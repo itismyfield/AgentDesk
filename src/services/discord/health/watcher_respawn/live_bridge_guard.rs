@@ -26,10 +26,10 @@ pub(in crate::services::discord) async fn complete_force_clean_watcher_recovery(
         .await;
 }
 
-pub(in crate::services::discord) async fn retry_pending_watcher_respawn(
+pub(super) async fn retry_pending_watcher_respawn(
     registry: &HealthRegistry,
     provider: &ProviderKind,
-    runtimes: &[Arc<SharedData>],
+    tick: &TickMailboxes,
     channel_id: ChannelId,
     now_unix_secs: i64,
 ) -> bool {
@@ -47,7 +47,7 @@ pub(in crate::services::discord) async fn retry_pending_watcher_respawn(
         .run(retry_pending_watcher_respawn_admitted(
             registry,
             provider,
-            runtimes,
+            tick,
             channel_id,
             now_unix_secs,
         ))

@@ -57,6 +57,9 @@ fn alpha_policy_handoffs_without_observer() {
     let _env = crate::config::set_agentdesk_root_for_test(temp.path());
     let root = temp.path().join("runtime/discord_inflight");
     let evidence = seed(&root);
+    let seeded = std::fs::read(root.join("claude/57153.json")).unwrap();
+    // Windows refuses circuit evidence without a directory sync, so its remove keeps the row.
+    let durable = crate::services::discord::runtime_store::PARENT_DIR_FSYNC_FLUSHES;
     let hook_root = root.clone();
     let hook_evidence = evidence.clone();
     crate::services::discord::policy_op::unlink_hook::install(move |_| {
@@ -74,7 +77,10 @@ fn alpha_policy_handoffs_without_observer() {
         for (provider, channel) in [("Claude", "57153"), ("claude", "057153")] {
             let invalid = root.join(provider).join(format!("{channel}.json"));
             std::fs::create_dir_all(invalid.parent().unwrap()).unwrap();
-            std::fs::copy(root.join("claude/57153.json"), &invalid).unwrap();
+            // On a case-insensitive filesystem `Claude/` already is the real `claude/` row.
+            if !invalid.exists() {
+                std::fs::copy(root.join("claude/57153.json"), &invalid).unwrap();
+            }
             let before = std::fs::read(&invalid).unwrap();
             let result: String = ctx
                 .eval(format!(
@@ -90,18 +96,36 @@ fn alpha_policy_handoffs_without_observer() {
             .eval("JSON.stringify(agentdesk.inflight.remove('claude',57153))")
             .unwrap();
         let result: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(result["ok"], true);
+        if durable {
+            assert_eq!(result["ok"], true, "{result}");
+        } else {
+            assert_eq!(result["ok"], false, "{result}");
+            assert_eq!(result["reason"], "Io", "{result}");
+        }
     });
     assert_eq!(
         crate::services::discord::policy_op::unlink_hook::attempts(),
-        1
+        usize::from(durable)
     );
     crate::services::discord::policy_op::unlink_hook::install(|_| {});
-    assert!(!root.join("claude/57153.json").exists());
-    assert!(
-        handed_off(&root, &evidence),
-        "policy remove lost the pending proof before any observer tick"
-    );
+    if durable {
+        assert!(!root.join("claude/57153.json").exists());
+        assert!(
+            handed_off(&root, &evidence),
+            "policy remove lost the pending proof before any observer tick"
+        );
+    } else {
+        assert_eq!(
+            std::fs::read(root.join("claude/57153.json")).unwrap(),
+            seeded
+        );
+        for store in [
+            "discord_circuit_evidence",
+            "discord_circuit_evidence_escrow",
+        ] {
+            assert!(!root.parent().unwrap().join(store).exists(), "{store}");
+        }
+    }
 }
 
 #[test]

@@ -6,8 +6,8 @@ fmt:
 fmt-check:
     cargo fmt --all --check
 
-# `-W clippy::all` reports debt and overrides five group-member deny levels.
-# dbg_macro/todo/unimplemented remain denied; see docs/ci/rust-quality-gates.md.
+# `-W clippy::all` lowers Cargo group-member denies; crate attributes in src/lib.rs and
+# src/main.rs keep the risk lints and the correctness group denied. See docs/ci/rust-quality-gates.md.
 lint:
     cargo clippy --workspace --all-targets --all-features -- -W clippy::all
 

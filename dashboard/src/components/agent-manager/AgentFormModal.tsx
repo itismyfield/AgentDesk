@@ -8,6 +8,8 @@ import { localeName, useI18n } from "../../i18n";
 import EmojiPicker from "./EmojiPicker";
 import AgentPromptEditor from "./AgentPromptEditor";
 import type { FormData } from "./types";
+import { useFocusTrap } from "../common/overlay/useFocusTrap";
+import { useReturnFocus } from "../common/overlay/useReturnFocus";
 import {
   SurfaceActionButton,
   SurfaceCard,
@@ -55,7 +57,8 @@ export default function AgentFormModal({
   onClose: () => void;
 }) {
   const { t } = useI18n();
-  const overlayRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useFocusTrap(true);
+  useReturnFocus(true);
   const {
     register,
     handleSubmit,

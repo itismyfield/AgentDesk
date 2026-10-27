@@ -215,7 +215,7 @@ impl TurnGateway for StatusPanelFallbackGateway {
 // waits for the dispatch completion.
 #[tokio::test(flavor = "current_thread")]
 async fn actual_bridge_children_run_through_cleanup_and_retry_completion() {
-    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
@@ -363,12 +363,12 @@ impl Drop for RuntimeRootGuard {
     }
 }
 
-fn isolate_agentdesk_runtime_root() -> (std::sync::MutexGuard<'static, ()>, RuntimeRootGuard) {
-    let lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let root = RuntimeRootGuard::new();
-    (lock, root)
+fn isolate_agentdesk_runtime_root() -> (
+    crate::config::test_env_lock::SharedTestEnvLockGuard,
+    RuntimeRootGuard,
+) {
+    let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    (lock, RuntimeRootGuard::new())
 }
 
 fn wip_warning_inflight_state(
