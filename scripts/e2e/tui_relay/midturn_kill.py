@@ -75,14 +75,14 @@ def validate_arguments(parser, args) -> None:
 
 
 def hold_prompt(ok: str, late: str) -> str:
-    """Early marker, then a long shell command; Codex skipped the shared E-18 wording and ended the turn."""
-    return (f"E2E {SCENARIO_ID} long-running turn fixture. Run it exactly; skipping the command fails the test.\n"
-            f"1. Send a short progress update that is exactly: {ok}\n"
-            "2. Then call your shell/terminal command tool and run this command, waiting until it exits "
+    """Early marker, then a long shell command; Codex ended the turn on the shared E-18 wording."""
+    return (f"E2E {SCENARIO_ID} long-running turn fixture: two messages with one command between them. "
+            "Skipping the command fails the test.\n"
+            f"1. Before any tool call, post this progress line. It is NOT your final answer: {ok}\n"
+            "2. Then run this exact command with your shell/terminal tool and wait until it exits "
             f"(about {HOLD_SECONDS} seconds is intended):\n"
             f"   python3 -c \"import time; time.sleep({HOLD_SECONDS})\"\n"
-            f"3. Only after the command exits, reply exactly: {late}\n"
-            f"Do not write {late} before the command exits.")
+            f"3. Your final answer, only after the command exits, is exactly: {late}")
 
 
 def scenario(run_id: str) -> dict[str, Any]:
