@@ -34,6 +34,11 @@ fn adopt_under_symlinked_home(via_alias: bool) -> IngressOutcome {
         "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
         std::ffi::OsStr::new("1"),
     );
+    // Verified eligibility probes the CLI; a fixture keeps the test off any installed Codex.
+    let cli = root.path().join("codex-fixture");
+    std::fs::write(&cli, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.157.1'; else echo '--dangerously-bypass-hook-trust'; fi\n").unwrap();
+    std::fs::set_permissions(&cli, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let _cli = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &cli);
     dedupe::reset_state_for_tests();
     binding_events::set_test_root(Some(root.path()));
     let real = root.path().join("real-home");
