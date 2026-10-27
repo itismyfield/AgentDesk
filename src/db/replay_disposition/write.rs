@@ -199,3 +199,32 @@ impl std::fmt::Debug for NoEffectAck {
             .finish_non_exhaustive()
     }
 }
+
+/// Preserves one receipt while its delivery loses ownership; the caller holds the channel lock.
+pub(crate) async fn withhold_owner_loss_on_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    receipt_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(r#"UPDATE intake_outbox SET replay_disposition='withheld',
+        replay_preserved=COALESCE(replay_preserved,'{}'::jsonb) || '{"reason":"owner_superseded"}'::jsonb
+        WHERE id=$1 AND replay_only AND replay_disposition IN
+        ('registered_not_started','started_unclassified','startup_failed_no_effect')"#)
+        .bind(receipt_id).execute(&mut **tx).await?;
+    Ok(())
+}
+
+/// An unreceipted delivery with an uncertain old start is preserved in place, never retried as new.
+pub(crate) async fn withhold_legacy_owner_loss_on_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    delivery_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(r#"UPDATE intake_outbox SET status='unknown',
+        replay_disposition=CASE WHEN replay_disposition='classified_normal' OR replay_sources_blocked(provider,channel_id,
+            COALESCE(replay_source_message_ids,ARRAY[user_msg_id]),id)
+            THEN replay_disposition ELSE 'withheld' END,
+        replay_source_message_ids=COALESCE(replay_source_message_ids,ARRAY[user_msg_id]),
+        replay_preserved=CASE WHEN replay_disposition='withheld' THEN replay_preserved ELSE COALESCE(replay_preserved,'{}'::jsonb) || '{"reason":"owner_superseded"}'::jsonb END
+        WHERE id=$1 AND NOT replay_only"#)
+        .bind(delivery_id).execute(&mut **tx).await?;
+    Ok(())
+}

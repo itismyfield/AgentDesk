@@ -1,6 +1,6 @@
 //! Shared home settings; execution ownership is a separate authority.
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::services::cluster::agent_execution_node::AgentExecutionNode;
@@ -16,7 +16,7 @@ pub(crate) struct Preference {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum WriteOutcome {
-    Committed(Preference),
+    Applied(Preference),
     Reused(Preference),
     Conflict(Option<Preference>),
 }
@@ -40,8 +40,23 @@ pub(crate) async fn read(
 }
 
 /// Revision zero means no row. A reset writes inherit rather than deleting the row.
+#[cfg(test)]
 pub(crate) async fn write(
     pool: &PgPool,
+    identity: &OwnerIdentity,
+    expected_revision: i64,
+    operation_id: Uuid,
+    home: Option<&str>,
+) -> Result<WriteOutcome, WriteError> {
+    let mut tx = pool.begin().await?;
+    let outcome = write_on_tx(&mut tx, identity, expected_revision, operation_id, home).await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// Uses the caller's connection, including when it already holds the channel owner lock.
+pub(crate) async fn write_on_tx(
+    tx: &mut Transaction<'_, Postgres>,
     identity: &OwnerIdentity,
     expected_revision: i64,
     operation_id: Uuid,
@@ -64,13 +79,12 @@ pub(crate) async fn write(
     } else {
         "inherit"
     };
-    let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(identity.advisory_key())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     let stored: Option<Preference> = sqlx::query_as("SELECT mode, home_instance_id, revision, operation_id FROM channel_home_preferences WHERE provider=$1 AND raw_channel_id=$2")
-        .bind(identity.provider()).bind(identity.raw_channel_id()).fetch_optional(&mut *tx).await?;
+        .bind(identity.provider()).bind(identity.raw_channel_id()).fetch_optional(&mut **tx).await?;
     if let Some(previous) = &stored
         && previous.operation_id == operation_id
     {
@@ -80,18 +94,15 @@ pub(crate) async fn write(
         {
             return Err(WriteError::OperationMismatch);
         }
-        tx.commit().await?;
         return Ok(WriteOutcome::Reused(previous.clone()));
     }
     if stored.as_ref().map_or(0, |row| row.revision) != expected_revision {
-        tx.commit().await?;
         return Ok(WriteOutcome::Conflict(stored));
     }
     let saved = sqlx::query_as("INSERT INTO channel_home_preferences (provider,raw_channel_id,mode,home_instance_id,revision,operation_id) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (provider,raw_channel_id) DO UPDATE SET mode=EXCLUDED.mode,home_instance_id=EXCLUDED.home_instance_id,revision=EXCLUDED.revision,operation_id=EXCLUDED.operation_id,updated_at=NOW() WHERE channel_home_preferences.revision=$7 RETURNING mode,home_instance_id,revision,operation_id")
         .bind(identity.provider()).bind(identity.raw_channel_id()).bind(mode).bind(home)
-        .bind(next_revision).bind(operation_id).bind(expected_revision).fetch_one(&mut *tx).await?;
-    tx.commit().await?;
-    Ok(WriteOutcome::Committed(saved))
+        .bind(next_revision).bind(operation_id).bind(expected_revision).fetch_one(&mut **tx).await?;
+    Ok(WriteOutcome::Applied(saved))
 }
 
 #[cfg(test)]

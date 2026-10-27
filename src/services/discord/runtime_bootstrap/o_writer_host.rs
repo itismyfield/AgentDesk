@@ -142,7 +142,8 @@ impl HostIo for GatewayHost {
                 .await
                 .map_err(|error| format!("agent node: {error}"))?;
             let node_override =
-                super::super::commands::channel_node_override(&shared, ChannelId::new(channel));
+                super::super::commands::channel_node_override(&shared, ChannelId::new(channel))
+                    .await?;
             Ok(ActivationFacts {
                 open_intake: rows.open_intake,
                 runner_sessions: rows.foreign_sessions,
@@ -165,7 +166,8 @@ impl HostIo for GatewayHost {
             .await
             .map_err(|error| format!("agent node: {error}"))?;
         let node_override =
-            super::super::commands::channel_node_override(&self.shared, ChannelId::new(channel));
+            super::super::commands::channel_node_override(&self.shared, ChannelId::new(channel))
+                .await?;
         let (hold, rows, queued_bodies) =
             crate::db::o_channel_activation::fenced_activation_rows(pool, &id, &local)
                 .await

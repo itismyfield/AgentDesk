@@ -775,6 +775,11 @@
       "path": "migrations/postgres/0152_channel_home_preferences.sql",
       "sha256": "a0523901b63e955bf3d7e9170180ffbc7d9b6763b26bb53015608f4932b84006",
       "version": 152
+    },
+    {
+      "path": "migrations/postgres/0153_intake_routing_custody.sql",
+      "sha256": "aff7f962743210f42e863062e0d56fd84237500320e05f3028a004a6fb24da24",
+      "version": 153
     }
   ],
   "version": 1

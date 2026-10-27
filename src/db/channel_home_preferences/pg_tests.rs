@@ -11,7 +11,7 @@ async fn channel_home_commit_reset_and_retry_without_owner_pg() {
     let committed = write(&pool, &key, 0, operation, Some("desk-A"))
         .await
         .unwrap();
-    let WriteOutcome::Committed(first) = committed else {
+    let WriteOutcome::Applied(first) = committed else {
         panic!("first write did not commit")
     };
     assert_eq!(
@@ -35,8 +35,7 @@ async fn channel_home_commit_reset_and_retry_without_owner_pg() {
     let second_reader = db.connect_and_migrate().await;
     assert_eq!(read(&second_reader, &key).await.unwrap(), Some(first));
     let reset_op = Uuid::new_v4();
-    let WriteOutcome::Committed(reset) = write(&pool, &key, 1, reset_op, None).await.unwrap()
-    else {
+    let WriteOutcome::Applied(reset) = write(&pool, &key, 1, reset_op, None).await.unwrap() else {
         panic!("reset did not commit")
     };
     assert_eq!(
@@ -92,7 +91,7 @@ async fn channel_home_concurrent_revision_cas_has_one_winner_pg() {
     assert_eq!(
         outcomes
             .iter()
-            .filter(|v| matches!(v, WriteOutcome::Committed(_)))
+            .filter(|v| matches!(v, WriteOutcome::Applied(_)))
             .count(),
         1
     );

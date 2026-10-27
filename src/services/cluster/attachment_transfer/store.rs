@@ -80,7 +80,7 @@ pub(crate) async fn put(
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM intake_attachment_bundles WHERE expires_at <= NOW()")
+    sqlx::query("DELETE FROM intake_attachment_bundles WHERE expires_at <= NOW() AND NOT intake_routing_bundle_pinned(id)")
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
@@ -123,7 +123,7 @@ pub(crate) async fn load(
     reference: &BundleRef,
 ) -> Result<ValidatedAttachmentBundle, ReadError> {
     let (manifest, payload): (serde_json::Value, Vec<u8>) = sqlx::query_as(
-        "SELECT manifest,payload FROM intake_attachment_bundles WHERE id=$1 AND provider=$2 AND channel_id=$3 AND user_msg_id=$4 AND expires_at > NOW()")
+        "SELECT manifest,payload FROM intake_attachment_bundles WHERE id=$1 AND provider=$2 AND channel_id=$3 AND user_msg_id=$4 AND (expires_at > NOW() OR intake_routing_bundle_pinned(id))")
         .bind(reference.bundle_id).bind(&reference.identity.provider).bind(&reference.identity.channel_id)
         .bind(&reference.identity.user_msg_id).fetch_optional(pool).await?
         .ok_or_else(|| ReadError::Rejected("attachment bundle missing, expired or identity mismatch; resend the original files".into()))?;
@@ -205,10 +205,14 @@ pub(crate) async fn validate_refs(
 }
 
 pub(crate) async fn cleanup(pool: &PgPool) -> Result<u64, sqlx::Error> {
-    Ok(
-        sqlx::query("DELETE FROM intake_attachment_bundles WHERE expires_at <= NOW()")
-            .execute(pool)
-            .await?
-            .rows_affected(),
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtext('agentdesk.attachment-bundles.v1')::BIGINT)",
     )
+    .execute(&mut *tx)
+    .await?;
+    let deleted = sqlx::query("DELETE FROM intake_attachment_bundles WHERE expires_at <= NOW() AND NOT intake_routing_bundle_pinned(id)")
+        .execute(&mut *tx).await?.rows_affected();
+    tx.commit().await?;
+    Ok(deleted)
 }
