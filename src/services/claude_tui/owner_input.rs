@@ -115,22 +115,6 @@ pub(crate) fn condition(session: &str, previous: &str) -> Result<String, String>
         Err("live epoch unsupported".into())
     }
 }
-#[cfg(unix)]
-pub(crate) fn request(
-    session: &str,
-) -> Option<std::rc::Rc<super::host_input::guarded_submission::Request>> {
-    let scope = current()?;
-    if scope.target["host"] != "tmux" {
-        return None;
-    }
-    Some(std::rc::Rc::new(
-        super::host_input::guarded_submission::Request {
-            target: super::host_input::InputTarget::legacy_tmux(session),
-            gate: std::rc::Rc::new(super::host_input::LegacyTmuxGate),
-            steering: false,
-        },
-    ))
-}
 impl submission_fence::SubmissionFence for Scope {
     fn before_first_payload(&self) -> Result<(), submission_fence::PreSubmitPersistenceRefused> {
         self.refusal().map_or(Ok(()), Err)

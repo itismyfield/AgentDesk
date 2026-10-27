@@ -1,16 +1,13 @@
 use super::*;
 use crate::services::claude_tui::composer_lock::{DraftGuard, guard_draft};
-use crate::services::claude_tui::host_input::guarded_submission::executor_tests::{
-    install_shim, renderer, screen,
-};
 use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
+use crate::services::claude_tui::input::submission::tests::{frame_renderer as renderer, screen};
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 
 #[test]
 fn a2_fresh_readiness_hold_never_kills_the_session_or_owner_marker() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::after_shared_test_env_lock();
-    install_shim(&f);
     let name = "a2-fresh-held";
     let transcript = f.root.path().join("a2-fresh.jsonl");
     let owner = f.root.path().join("a2-owner");

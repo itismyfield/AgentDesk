@@ -1,18 +1,15 @@
 #![cfg(unix)]
 use super::*;
-use crate::services::claude_tui::host_input::guarded_submission::executor_tests::{
-    install_shim, renderer, screen,
-};
+use crate::services::claude_tui::input::submission::tests::{frame_renderer, screen};
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 
 #[test]
 fn cold_claude_submit_returns_before_missing_source_and_keeps_payload_once() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::after_shared_test_env_lock();
-    install_shim(&f);
     let name = "cold-submit-source-delayed";
     let prompt = "reply + attachments\nvoice _ literal";
-    renderer(&f, name, prompt, &screen(""), &screen(prompt), &screen(""));
+    frame_renderer(&f, name, prompt, &screen(""), &screen(prompt), &screen(""));
     let transcript = f.root.path().join("not-created.jsonl");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -71,18 +68,16 @@ fn cold_claude_submit_returns_before_missing_source_and_keeps_payload_once() {
 }
 
 #[test]
-fn fresh_submit_held_and_guarded_never_retry_or_write_payload() {
-    use crate::services::claude_tui::host_input::guarded_submission::test_support;
+fn fresh_submit_held_never_retries_or_writes_payload() {
     use crate::services::claude_tui::{
         composer_lock::{DraftGuard, guard_draft},
-        host_input::{LegacyTmuxGate, SpyGuard, SpyState},
+        host_input::{SpyGuard, SpyState},
         input,
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::after_shared_test_env_lock();
-    install_shim(&f);
     let name = "fresh-branch-hold";
-    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    frame_renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
     guard_draft(name, DraftGuard::RecoveryRequired);
     let spy = SpyGuard::install(SpyState {
         captures: [
@@ -125,18 +120,6 @@ fn fresh_submit_held_and_guarded_never_retry_or_write_payload() {
         "Held has zero payload"
     );
     drop(spy);
-    let result =
-        test_support::with_request("different-target", std::rc::Rc::new(LegacyTmuxGate), || {
-            submit("/not-created", 0, None, name, "own")
-        });
-    assert!(
-        matches!(result.0, Err(SubmissionError::Guarded(_))),
-        "fresh Guarded must remain typed"
-    );
-    assert!(
-        !f.root.path().join(name).join("payloads").exists(),
-        "Guarded has zero payload"
-    );
 }
 
 #[test]

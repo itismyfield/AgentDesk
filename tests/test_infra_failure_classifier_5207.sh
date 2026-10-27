@@ -8,12 +8,9 @@
 # What that cost, stated exactly: the run's summary labelled a pure
 # infrastructure outage as an ordinary unexplained failure, and humans read it
 # as a code regression. It did NOT cost a retry. Measured on run 31116949449,
-# attempts 1-3: the PostgreSQL job never appears among the failed jobs, and
-# `decide_retry` only ever reruns a single failed PostgreSQL job, so the
-# decision was `no-op:no-pg-failure` before this change and is
-# `no-op:no-pg-failure` after it — identical, bit for bit. This work changes
-# the classification LABEL, not the retry behaviour. Widening the retry scope
-# beyond the PostgreSQL job is a separate issue.
+# attempts 1-3: no retry-candidate job appears among the failed jobs, so the
+# decision is a no-op either way. This work changes the classification LABEL,
+# not the retry behaviour; the candidates are now the nextest worker jobs.
 #
 # These tests pin BOTH directions. Widening the infra patterns so a real
 # regression is auto-rerun is strictly worse than the bug being fixed, so every
@@ -61,7 +58,7 @@ write_log() {
   printf '%s' "$path"
 }
 
-PG_JOB="PostgreSQL tests (shard 0)"
+WORKER_JOB="Rust tests (worker 0)"
 
 # --- R1: the outage fingerprint is infrastructure -------------------------
 OUTAGE_LOG="$(write_log outage.log \
@@ -69,7 +66,7 @@ OUTAGE_LOG="$(write_log outage.log \
   'Failed to resolve action download info. Error: Service Unavailable' \
   'Failed to resolve action download info. Error: Service Unavailable')"
 assert_class "action download outage is classified as infrastructure" \
-  "infra-unrelated" "$PG_JOB" "$OUTAGE_LOG" 1
+  "infra-unrelated" "$WORKER_JOB" "$OUTAGE_LOG" 1
 
 # --- R4 / acceptance: regression outranks infrastructure ------------------
 # The most important direction. A log carrying regression markers must not be
@@ -79,15 +76,15 @@ REGRESSION_LOG="$(write_log regression-with-outage.log \
   'The runner has received a shutdown signal.' \
   'test result: FAILED. 163 passed; 1 failed')"
 assert_class "regression outranks the action-download pattern" \
-  "regression" "$PG_JOB" "$REGRESSION_LOG" 1
+  "regression" "$WORKER_JOB" "$REGRESSION_LOG" 1
 assert_class "regression outranks the zero-step structural signal" \
-  "regression" "$PG_JOB" "$REGRESSION_LOG" 0
+  "regression" "$WORKER_JOB" "$REGRESSION_LOG" 0
 
 PANIC_LOG="$(write_log panic-with-outage.log \
   'Failed to resolve action download info. Error: Service Unavailable' \
   'thread panicked at src/services/relay.rs:42:9')"
 assert_class "panic outranks the action-download pattern" \
-  "regression" "$PG_JOB" "$PANIC_LOG" 0
+  "regression" "$WORKER_JOB" "$PANIC_LOG" 0
 
 # --- R1 narrowness: negative controls -------------------------------------
 BARE_ERROR_LOG="$(write_log bare-service-unavailable.log \
@@ -96,7 +93,7 @@ BARE_ERROR_LOG="$(write_log bare-service-unavailable.log \
   'Error: Service Unavailable' \
   'HTTP/1.1 503 Service Unavailable')"
 assert_class "bare 'Service Unavailable' is not infrastructure" \
-  "unrelated-failure" "$PG_JOB" "$BARE_ERROR_LOG" 1
+  "unrelated-failure" "$WORKER_JOB" "$BARE_ERROR_LOG" 1
 
 # A workflow that names an action which does not exist is a repo-config
 # regression, not an outage. It shares the action-download prefix, so this is
@@ -116,22 +113,22 @@ assert_class "bare 'Service Unavailable' is not infrastructure" \
 NOT_FOUND_LOG="$(write_log action-not-found.log \
   'Failed to resolve action download info. Error: Unable to resolve action `actions/chcekout@v2`, repository not found')"
 assert_class "unresolvable action (real 'Unable to resolve action' wording) is not infrastructure" \
-  "unrelated-failure" "$PG_JOB" "$NOT_FOUND_LOG" 0
+  "unrelated-failure" "$WORKER_JOB" "$NOT_FOUND_LOG" 0
 
 BAD_GATEWAY_LOG="$(write_log bad-gateway.log \
   'Failed to resolve action download info. Error: Bad gateway')"
 assert_class "action download bad gateway is infrastructure" \
-  "infra-unrelated" "$PG_JOB" "$BAD_GATEWAY_LOG" 1
+  "infra-unrelated" "$WORKER_JOB" "$BAD_GATEWAY_LOG" 1
 
 # #5207 (r4, P3-1): the text in this slot is `response.ReasonPhrase` verbatim
 # (LaunchHttpClient.cs:51,77 -> ActionManager.cs:1086), and servers ship both
 # RFC 2616's `Gateway Time-out` and RFC 7231's `Gateway Timeout`. The
 # `time-?out` tolerance is deliberate, so both spellings are pinned.
 assert_class "action download gateway timeout (RFC 7231 spelling) is infrastructure" \
-  "infra-unrelated" "$PG_JOB" \
+  "infra-unrelated" "$WORKER_JOB" \
   "$(write_log gateway-timeout.log 'Failed to resolve action download info. Error: Gateway Timeout')" 1
 assert_class "action download gateway time-out (RFC 2616 spelling) is infrastructure" \
-  "infra-unrelated" "$PG_JOB" \
+  "infra-unrelated" "$WORKER_JOB" \
   "$(write_log gateway-time-out.log 'Failed to resolve action download info. Error: Gateway Time-out')" 1
 
 # The two alternations REMOVED in r4, pinned as removed so neither can return
@@ -142,10 +139,10 @@ assert_class "action download gateway time-out (RFC 2616 spelling) is infrastruc
 # line below is a log GitHub does not emit. `temporarily unavailable` is not an
 # HTTP reason phrase and was found in this slot zero times.
 assert_class "r4: a 429 in the action-download slot is not infrastructure (unreachable phrasing, removed)" \
-  "unrelated-failure" "$PG_JOB" \
+  "unrelated-failure" "$WORKER_JOB" \
   "$(write_log too-many-requests.log 'Failed to resolve action download info. Error: Too Many Requests')" 1
 assert_class "r4: 'temporarily unavailable' is not infrastructure (no provenance, removed)" \
-  "unrelated-failure" "$PG_JOB" \
+  "unrelated-failure" "$WORKER_JOB" \
   "$(write_log temporarily-unavailable.log 'Failed to resolve action download info. Error: Temporarily Unavailable')" 1
 
 # --- R3: zero executed repo steps is a structural infrastructure signal ----
@@ -155,15 +152,15 @@ assert_class "r4: 'temporarily unavailable' is not infrastructure (no provenance
 QUIET_LOG="$(write_log quiet.log \
   'Error: The operation could not be completed.')"
 assert_class "a job that executed no repo steps is infrastructure" \
-  "infra-no-steps" "$PG_JOB" "$QUIET_LOG" 0
+  "infra-no-steps" "$WORKER_JOB" "$QUIET_LOG" 0
 assert_class "a job that executed repo steps does not take the zero-step path" \
-  "unrelated-failure" "$PG_JOB" "$QUIET_LOG" 13
+  "unrelated-failure" "$WORKER_JOB" "$QUIET_LOG" 13
 assert_class "one executed repo step does not take the zero-step path" \
-  "unrelated-failure" "$PG_JOB" "$QUIET_LOG" 1
+  "unrelated-failure" "$WORKER_JOB" "$QUIET_LOG" 1
 # Absent step data must fail closed. Reading a missing `steps` array as zero
 # would classify every failed job as infrastructure.
 assert_class "absent step data fails closed rather than reading as zero" \
-  "unrelated-failure" "$PG_JOB" "$QUIET_LOG" unknown
+  "unrelated-failure" "$WORKER_JOB" "$QUIET_LOG" unknown
 
 # --- F1: zero steps is NECESSARY, not SUFFICIENT --------------------------
 # Six repo-configuration faults, each this repo's own defect, each killing the
@@ -180,7 +177,7 @@ assert_class "absent step data fails closed rather than reading as zero" \
 while IFS='|' read -r FAULT_DESC FAULT_LINE; do
   [ -n "$FAULT_DESC" ] || continue
   assert_class "F1: $FAULT_DESC is not infrastructure at 0 steps" \
-    "unrelated-failure" "$PG_JOB" "$(write_log repo-fault.log "$FAULT_LINE")" 0
+    "unrelated-failure" "$WORKER_JOB" "$(write_log repo-fault.log "$FAULT_LINE")" 0
 done <<'CASES'
 nonexistent action ref|Failed to resolve action download info. Error: Unable to resolve action `actions/chcekout@v2`, repository not found
 action blocked by Actions policy|Failed to resolve action download info. Error: Bad request - freertos/ci-cd-github-actions@main is not allowed to be used in aws/aws-iot-device-sdk-embedded-C.
@@ -193,7 +190,7 @@ CASES
 # The opposite direction, which is the reason this change exists at all. If the
 # guard ever widens far enough to swallow these, #5207 is un-fixed.
 assert_class "F1 reverse: the real outage fingerprint at 0 steps is still infrastructure" \
-  "infra-unrelated" "$PG_JOB" "$OUTAGE_LOG" 0
+  "infra-unrelated" "$WORKER_JOB" "$OUTAGE_LOG" 0
 # ★ LIMIT, not a feature. This pins the RESIDUAL RISK enumerated at
 # REPO_CONFIG_FAULT_REGEX: a repo-configuration fault whose wording is NOT in
 # that list is still labelled infrastructure and still auto-retried. The fixture
@@ -203,7 +200,7 @@ assert_class "F1 reverse: the real outage fingerprint at 0 steps is still infras
 NOVEL_OUTAGE_LOG="$(write_log novel-outage.log \
   'Error: a transient failure wording that no pattern here knows yet')"
 assert_class "LIMIT: an unenumerated repo-config fault at 0 steps is still auto-retried as infrastructure" \
-  "infra-no-steps" "$PG_JOB" "$NOVEL_OUTAGE_LOG" 0
+  "infra-no-steps" "$WORKER_JOB" "$NOVEL_OUTAGE_LOG" 0
 
 # --- P2-1: a repo-config fault beside an outage fingerprint ---------------
 # Both fingerprints in ONE log, on different lines — a configuration regression
@@ -213,9 +210,9 @@ MIXED_FAULT_LOG="$(write_log outage-plus-repo-fault.log \
   'Failed to resolve action download info. Error: Service Unavailable' \
   'Failed to resolve action download info. Error: Unable to resolve action `acme/gone@v1`, repository not found')"
 assert_class "P2-1: a repo-config fault beside the outage fingerprint is not infrastructure" \
-  "unrelated-failure" "$PG_JOB" "$MIXED_FAULT_LOG" 1
+  "unrelated-failure" "$WORKER_JOB" "$MIXED_FAULT_LOG" 1
 assert_class "P2-1: the same log at 0 steps is withheld from the structural path too" \
-  "unrelated-failure" "$PG_JOB" "$MIXED_FAULT_LOG" 0
+  "unrelated-failure" "$WORKER_JOB" "$MIXED_FAULT_LOG" 0
 # The accepted COST of that guard, pinned so it cannot be paid by accident: a
 # genuine outage log that happens to carry an enumerated phrase loses its
 # automatic rerun. Fail-closed — a human reruns it.
@@ -223,10 +220,10 @@ COINCIDENCE_LOG="$(write_log outage-with-incidental-manifest.log \
   'Failed to resolve action download info. Error: Service Unavailable' \
   'docker: Error response from daemon: manifest for ghcr.io/acme/cache:v3 not found: manifest unknown')"
 assert_class "P2-1 cost: an outage log carrying an incidental enumerated phrase is withheld too" \
-  "unrelated-failure" "$PG_JOB" "$COINCIDENCE_LOG" 1
+  "unrelated-failure" "$WORKER_JOB" "$COINCIDENCE_LOG" 1
 # The direction that must NOT change: a clean outage log still reruns.
 assert_class "P2-1 reverse: a clean outage log is unaffected by the hoisted guard" \
-  "infra-unrelated" "$PG_JOB" "$OUTAGE_LOG" 1
+  "infra-unrelated" "$WORKER_JOB" "$OUTAGE_LOG" 1
 
 # --- r4: the NARROWNESS of two withhold alternations, pinned ---------------
 # Both of these were previously asserted only by a comment. Because
@@ -244,7 +241,7 @@ BARE_BAD_REQUEST_LOG="$(write_log outage-with-bare-bad-request.log \
   'Failed to resolve action download info. Error: Service Unavailable' \
   '2026-08-07T00:00:01Z WARN relay: upstream answered 400 Bad Request, retrying')"
 assert_class "r4 [1] narrowness: a bare 'bad request' elsewhere in the log does not withhold the retry" \
-  "infra-unrelated" "$PG_JOB" "$BARE_BAD_REQUEST_LOG" 1
+  "infra-unrelated" "$WORKER_JOB" "$BARE_BAD_REQUEST_LOG" 1
 
 # [5]: the quoted `'<x>' … '<y>'` shape is what makes this a permissions
 # rejection. Relaxed to `requesting.*allowed`, ordinary prose containing both
@@ -253,7 +250,7 @@ LOOSE_PERMISSIONS_LOG="$(write_log outage-with-requesting-allowed-prose.log \
   'Failed to resolve action download info. Error: Service Unavailable' \
   'DEBUG scheduler: worker is requesting a slot; queue growth is allowed')"
 assert_class "r4 [5] narrowness: unquoted 'requesting … allowed' prose does not withhold the retry" \
-  "infra-unrelated" "$PG_JOB" "$LOOSE_PERMISSIONS_LOG" 1
+  "infra-unrelated" "$WORKER_JOB" "$LOOSE_PERMISSIONS_LOG" 1
 
 # --- second outage fingerprint: an abandoned upstream ---------------------
 # Run 31120826793 (PR #5204): the gating `Changed paths` job waited ~16 minutes
@@ -276,18 +273,18 @@ ABANDONED_WORD_LOG="$(write_log abandoned-word.log \
   'INFO dropping the abandoned queue entry' \
   'the request was abandoned by the client')"
 assert_class "the bare word 'abandoned' is not an infrastructure fingerprint" \
-  "unrelated-failure" "$PG_JOB" "$ABANDONED_WORD_LOG" 5
+  "unrelated-failure" "$WORKER_JOB" "$ABANDONED_WORD_LOG" 5
 
 # A mirror failing closed for a different upstream result keeps the plain
 # label — only `abandoned` means "GitHub never gave the job a runner".
 MIRROR_CANCELLED_LOG="$(write_log mirror-cancelled.log \
   "Changed paths result is 'cancelled'; failing closed instead of treating Fast check result 'skipped' as pass")"
 assert_class "a fail-closed mirror with a non-abandoned upstream keeps the plain label" \
-  "unrelated-failure" "$PG_JOB" "$MIRROR_CANCELLED_LOG" 5
+  "unrelated-failure" "$WORKER_JOB" "$MIRROR_CANCELLED_LOG" 5
 
 # Regression precedence still outranks the new fingerprint.
 assert_class "regression outranks the abandoned-upstream fingerprint" \
-  "regression" "$PG_JOB" "$(write_log abandoned-with-regression.log \
+  "regression" "$WORKER_JOB" "$(write_log abandoned-with-regression.log \
     "##[error]Changed paths result is unexpected: 'abandoned'" \
     'test result: FAILED. 1 passed; 1 failed')" 5
 
@@ -350,9 +347,9 @@ fi
 
 # End-to-end: the count the expression produced must drive the classification.
 assert_class "F3 end-to-end: the produced 'unknown' fails closed in the classifier" \
-  "unrelated-failure" "$PG_JOB" "$QUIET_LOG" "$(step_count_for 106)"
+  "unrelated-failure" "$WORKER_JOB" "$QUIET_LOG" "$(step_count_for 106)"
 assert_class "F3 end-to-end: the produced 0 reaches the structural signal" \
-  "infra-no-steps" "$PG_JOB" "$QUIET_LOG" "$(step_count_for 101)"
+  "infra-no-steps" "$WORKER_JOB" "$QUIET_LOG" "$(step_count_for 101)"
 
 # --- r4 P2: `run_classifier`, the production entry point -------------------
 # ★ Everything above drives `--classify-job`, a DIAGNOSTIC entry point nothing
@@ -383,6 +380,7 @@ if [ "${1-}" = "api" ]; then
     */pulls/*) src="$GH_FIXTURE_DIR/pull.json" ;;
     */attempts/*/jobs*) src="$GH_FIXTURE_DIR/jobs.json" ;;
     */attempts/*) src="$GH_FIXTURE_DIR/attempt.json" ;;
+    */runs/*/artifacts*) src="$GH_FIXTURE_DIR/artifacts.json" ;;
     */actions/jobs/*/logs)
       job="${2##*/actions/jobs/}"
       src="$GH_FIXTURE_DIR/job-${job%/logs}.log"
@@ -397,6 +395,11 @@ if [ "${1-}" = "api" ]; then
   cat "$src"
   exit 0
 fi
+if [[ "${1-} ${2-} ${4-} ${6-} ${8-}" == "run download --repo --name --dir" ]]; then
+  [ "${GH_FAIL_DOWNLOAD-}" != "$7" ] && [ -d "$GH_FIXTURE_DIR/artifacts/$7" ] || exit 1
+  mkdir -p "$9" && cp -R "$GH_FIXTURE_DIR/artifacts/$7/." "$9/"
+  exit 0
+fi
 if [[ "${1-} ${2-}" == "run rerun" && "${GH_ALLOW_RERUN-}" == 1 ]]; then
   printf '%s\n' "$*" >> "$GH_FIXTURE_DIR/rerun.log"
   exit "${GH_FAIL_RERUN:-0}"
@@ -405,6 +408,29 @@ printf 'gh %s\n' "$*" >>"$GH_FIXTURE_DIR/refused.log"
 exit 1
 GH_STUB
 chmod +x "$E2E_BIN/gh"
+
+# One real two-worker plan, uploaded as the `nextest-plan` artifact of every case.
+PLAN_FIXTURE="$WORK_DIR/plan-fixture"
+mkdir -p "$PLAN_FIXTURE"
+printf '%s' '{"test-count":2,"rust-suites":{"agentdesk":{"binary-id":"agentdesk","kind":"lib","status":"listed","testcases":{"m::a":{"ignored":false,"filter-match":{"status":"matches"}},"m::b":{"ignored":false,"filter-match":{"status":"matches"}}}}}}' >"$PLAN_FIXTURE/list.json"
+printf 'archive' >"$PLAN_FIXTURE/lib-tests.tar.zst"
+printf 'version = 1\n' >"$PLAN_FIXTURE/policy.toml"
+python3 "$ROOT_DIR/scripts/ci/nextest_ci.py" plan --universe "$PLAN_FIXTURE/list.json" \
+  --archive "$PLAN_FIXTURE/lib-tests.tar.zst" --workers 2 --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --scope linux-lib --run-id 7 --base-config "$ROOT_DIR/.config/nextest.toml" \
+  --retry-policy "$PLAN_FIXTURE/policy.toml" --today 2026-10-24 --output "$PLAN_FIXTURE/plan" \
+  --rust-version 1.94.1 --nextest-version 0.9.149 --target x86_64-unknown-linux-gnu >/dev/null
+
+# Record worker <index>'s attempt-1 artifact with one failed testcase, as a real worker uploads it.
+e2e_failed_worker_artifact() {
+  local dir="$E2E_CASE/artifacts/nextest-worker-$1-attempt-1"
+  python3 "$ROOT_DIR/scripts/ci/nextest_ci.py" verify-archive --plan "$PLAN_FIXTURE/plan/plan.json" \
+    --worker "$1" --archive "$PLAN_FIXTURE/lib-tests.tar.zst" --config "$PLAN_FIXTURE/plan/worker-$1.toml" \
+    --sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --run-id 7 --run-attempt 1 --record "$dir" >/dev/null 2>&1
+  printf '100\n' >"$dir/exit-code"
+  printf '%s' '<testsuites name="nextest-run"><testsuite name="agentdesk"><testcase name="m::a" classname="agentdesk" time="0.1"><failure message="x"/></testcase></testsuite></testsuites>' >"$dir/junit.xml"
+  printf '{"total_count":2,"artifacts":[{"name":"nextest-plan","expired":false},{"name":"nextest-worker-%s-attempt-1","expired":false}]}\n' "$1" >"$E2E_CASE/artifacts.json"
+}
 
 E2E_N=0
 E2E_CASE=""
@@ -419,15 +445,18 @@ new_e2e_case() {
   printf '%s\n' '{"state":"open","head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}' >"$E2E_CASE/pull.json"
   : >"$E2E_CASE/refused.log"
   : >"$E2E_CASE/summary.md"
+  mkdir -p "$E2E_CASE/artifacts/nextest-plan"
+  cp -R "$PLAN_FIXTURE/plan" "$E2E_CASE/artifacts/nextest-plan/plan"
+  printf '%s\n' '{"total_count":1,"artifacts":[{"name":"nextest-plan","expired":false}]}' >"$E2E_CASE/artifacts.json"
 }
 
-# One failed PostgreSQL job, its `steps` array written so the real jq expression
+# One failed worker job, its `steps` array written so the real jq expression
 # derives the executed-step count the case needs.
-e2e_pg_job() {
+e2e_worker_job() {
   local job_id="$1"
   local steps_json="$2"
   printf '{"total_count":1,"jobs":[{"id":%s,"name":"%s","conclusion":"failure","steps":%s}]}\n' \
-    "$job_id" "$PG_JOB" "$steps_json" >"$E2E_CASE/jobs.json"
+    "$job_id" "$WORKER_JOB" "$steps_json" >"$E2E_CASE/jobs.json"
 }
 
 assert_e2e() {
@@ -468,26 +497,26 @@ assert_e2e() {
 }
 
 # E2E-1 — the wiring hole itself. A repo-config fault beside the outage
-# fingerprint, on the PostgreSQL job, at its real step count of 0. The retry
+# fingerprint, on a worker job, at its real step count of 0. The retry
 # predicate must decline, so the run must NOT be rerun and the job must be
-# labelled `unclassified-pg-failure`. Point `run_classifier` at
+# labelled `unclassified-worker-failure`. Point `run_classifier` at
 # `log_has_infra_failure` instead and both flip: `would-rerun:infra` /
 # `infra-shutdown`.
 new_e2e_case
-e2e_pg_job 901 '[{"name":"Set up job"}]'
+e2e_worker_job 901 '[{"name":"Set up job"}]'
 printf '%s\n' \
   'Failed to resolve action download info. Error: Service Unavailable' \
   'Failed to resolve action download info. Error: Unable to resolve action `acme/gone@v1`, repository not found' \
   >"$E2E_CASE/job-901.log"
 assert_e2e "E2E: run_classifier withholds the rerun when a repo-config fault sits beside the outage" \
-  "no-op:unclassified-pg-failure" "unclassified-pg-failure"
+  "no-op:unclassified-worker-failure" "unclassified-worker-failure"
 
-# E2E-2 — the label chain must reach the decision. A PostgreSQL regression that
+# E2E-2 — the label chain must reach the decision. A worker regression that
 # also carries a shutdown fingerprint: `classify_job` calls it a regression,
 # that count blocks the rerun. Stop `run_classifier` from consulting
 # `classify_job` and the infra predicate alone reruns a red test suite.
 new_e2e_case
-e2e_pg_job 902 '[{"name":"Set up job"},{"name":"Run tests"},{"name":"Complete job"}]'
+e2e_worker_job 902 '[{"name":"Set up job"},{"name":"Run tests"},{"name":"Complete job"}]'
 printf '%s\n' \
   'The runner has received a shutdown signal.' \
   'test result: FAILED. 163 passed; 1 failed' \
@@ -497,7 +526,7 @@ assert_e2e "E2E: run_classifier lets the regression classification block the rer
 
 # E2E-3 — anti-vacuity. Without this, E2E-1 and E2E-2 could both be passing
 # because the harness never reaches a rerun at all. A clean outage on the
-# PostgreSQL job at 0 steps must arrive at `would-rerun:infra` — and `gh run
+# worker job at 0 steps must arrive at `would-rerun:infra` — and `gh run
 # rerun` must still never be called, which the stub's refusal log checks.
 #
 # #5207 (r5, D5) — HOW STRONG THAT CHECK ACTUALLY IS. It is a redundant second
@@ -510,7 +539,7 @@ assert_e2e "E2E: run_classifier lets the regression classification block the rer
 # defence in depth against a future path that refuses without moving the
 # decision — but do not claim it proves anything `RERUN_DRY_RUN` does not.
 new_e2e_case
-e2e_pg_job 903 '[{"name":"Set up job"}]'
+e2e_worker_job 903 '[{"name":"Set up job"}]'
 printf '%s\n' \
   'Failed to resolve action download info. Error: Service Unavailable' \
   'Failed to resolve action download info. Error: Service Unavailable' \
@@ -520,7 +549,7 @@ assert_e2e "E2E: a clean outage still reaches would-rerun:infra without calling 
 
 new_shard_case() {
   new_e2e_case
-  printf '%s\n' '{"total_count":2,"jobs":[{"id":901,"name":"PostgreSQL tests (shard 0)","conclusion":"failure","steps":[{"name":"Set up job"}]},{"id":902,"name":"PostgreSQL tests (shard 1)","conclusion":"failure","steps":[{"name":"Set up job"}]}]}' > "$E2E_CASE/jobs.json"
+  printf '%s\n' '{"total_count":2,"jobs":[{"id":901,"name":"Rust tests (worker 0)","conclusion":"failure","steps":[{"name":"Set up job"}]},{"id":902,"name":"Rust tests (worker 1)","conclusion":"failure","steps":[{"name":"Set up job"}]}]}' > "$E2E_CASE/jobs.json"
   printf '%s\n' 'Failed to resolve action download info. Error: Service Unavailable' > "$E2E_CASE/job-901.log"
   cp "$E2E_CASE/job-901.log" "$E2E_CASE/job-902.log"
   cp "$E2E_CASE/attempt.json" "$E2E_CASE/latest.json"
@@ -533,22 +562,73 @@ assert_rerun_ids() {
 }
 
 new_shard_case
-GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "both infra shards retry independently" "rerun-requested:infra" "infra-shutdown"
+GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "both infra workers retry" "rerun-requested:infra" "infra-shutdown"
 assert_rerun_ids '901,902'
 
+# The artifacts decide: an unclassified worker log, a recorded test failure behind an
+# infra-looking log, a failed download or a missing plan each veto every worker.
 new_shard_case
 printf '%s\n' 'Failed to resolve action download info. Error: Unable to resolve action `acme/gone@v1`, repository not found' > "$E2E_CASE/job-902.log"
-GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "only the classified infra shard retries" "rerun-requested:infra" "unclassified-pg-failure"
-assert_rerun_ids '901'
+GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "an unclassified worker vetoes the infra worker" "no-op:worker-artifact-veto" "unclassified-worker-failure"
+[[ ! -e "$E2E_CASE/rerun.log" ]] || fail "unclassified worker made a retry request"
+
+new_shard_case
+e2e_failed_worker_artifact 1
+GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "a recorded test failure vetoes an infra-looking log" "no-op:worker-artifact-veto" "infra-shutdown"
+[[ ! -e "$E2E_CASE/rerun.log" ]] || fail "recorded test failure made a retry request"
+
+new_shard_case
+e2e_failed_worker_artifact 1
+GH_FAIL_DOWNLOAD=nextest-worker-1-attempt-1 assert_e2e "a listed worker artifact that fails to download vetoes" "no-op:worker-artifact-veto" "infra-shutdown"
+
+new_shard_case
+printf '%s\n' '{"total_count":0,"artifacts":[]}' >"$E2E_CASE/artifacts.json"
+assert_e2e "a run without its plan artifact vetoes" "no-op:worker-artifact-veto" "infra-shutdown"
+
+# A failure logged by the test step vetoes even when the worker's result upload then died; each signal alone suffices.
+nextest_step_log() {
+  printf '%s\n' '##[group]Run set +e' 'cargo nextest run --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" \\' "$@" \
+    '##[group]Run actions/upload-artifact@v4' 'The operation was canceled.' >"$E2E_CASE/job-902.log"
+}
+for signal in '    LEAK-FAIL [   2.003s] agentdesk m::a' 'error: test run failed' \
+  '2026-10-25T01:02:03.4567890Z ##[error]Process completed with exit code 100.'; do
+  new_shard_case
+  nextest_step_log 'test result: ok. 1 passed; 0 failed' "$signal"
+  GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "a logged '${signal##* ##}' alone vetoes despite a missing artifact" "no-op:regression" "nextest-test-failure"
+  [[ ! -e "$E2E_CASE/rerun.log" ]] || fail "logged nextest failure made a retry request"
+done
+
+# A long test log after an early failure must still read as that failure.
+new_shard_case
+nextest_step_log '    LEAK-FAIL [   2.003s] agentdesk m::a' $(seq -f '        PASS [   0.001s] agentdesk m::t%g' 1 12000)
+GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "an early LEAK-FAIL before 12000 more lines vetoes" "no-op:regression" "nextest-test-failure"
+
+# Test output that quotes the runner's phrase is not the runner's exit line.
+new_shard_case
+nextest_step_log 'note: Process completed with exit code 100.' 'The runner has received a shutdown signal.'
+GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "a quoted exit-100 phrase in test output stays infra" "rerun-requested:infra" "infra-shutdown"
+assert_rerun_ids '901,902'
+
+# Only the test step's own output counts: an exit 100 from another step stays an infra retry.
+new_shard_case
+printf '%s\n' '##[group]Run ./scripts/ci/postgres-service.sh start' '##[error]Process completed with exit code 100.' \
+  'The runner has received a shutdown signal.' >"$E2E_CASE/job-902.log"
+GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "an exit 100 outside the test step is not a test failure" "rerun-requested:infra" "infra-shutdown"
+assert_rerun_ids '901,902'
+
+# A worker artifact the run lists as expired is unreadable evidence, not a missing upload.
+new_shard_case
+printf '%s\n' '{"total_count":2,"artifacts":[{"name":"nextest-plan","expired":false},{"name":"nextest-worker-1-attempt-1","expired":true}]}' >"$E2E_CASE/artifacts.json"
+assert_e2e "an expired worker artifact vetoes" "no-op:worker-artifact-veto" "infra-shutdown"
 
 new_shard_case
 printf '%s\n' 'test result: FAILED. 1 passed; 1 failed' > "$E2E_CASE/job-902.log"
-GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "one real regression blocks both shards" "no-op:regression" "regression"
+GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "one real regression blocks both workers" "no-op:regression" "regression"
 [[ ! -e "$E2E_CASE/rerun.log" ]] || fail "regression made a retry request"
 
 new_shard_case
 mv "$E2E_CASE/job-902.log" "$E2E_CASE/unavailable.log"
-assert_e2e "one unknown log blocks both shards" "no-op:unknown" "unknown"
+assert_e2e "one unknown log blocks both workers" "no-op:unknown" "unknown"
 
 # BSD sed (macOS prepush) needs a backup suffix for -i, so write one and drop it.
 new_shard_case
@@ -557,12 +637,12 @@ out="$(PATH="$E2E_BIN:$PATH" GH_FIXTURE_DIR="$E2E_CASE" GITHUB_REPOSITORY=itismy
 [[ "$out" == 'decision=no-op:incomplete-jobs' ]] && pass "incomplete jobs block all retries" || fail "incomplete jobs accepted"
 
 new_shard_case
-sed -i.bak 's/shard 1/shard 0/' "$E2E_CASE/jobs.json" && rm -f "$E2E_CASE/jobs.json.bak"
-assert_e2e "duplicate shard names remain ambiguous" "no-op:unknown" "infra-shutdown"
+sed -i.bak 's/worker 1/worker 0/' "$E2E_CASE/jobs.json" && rm -f "$E2E_CASE/jobs.json.bak"
+assert_e2e "duplicate worker names remain ambiguous" "no-op:unknown" "infra-shutdown"
 
 new_shard_case
-sed -i.bak 's/shard 0/shard 00/;s/shard 1/shard 01/' "$E2E_CASE/jobs.json" && rm -f "$E2E_CASE/jobs.json.bak"
-assert_e2e "near-match names cannot become PG jobs" "no-op:no-pg-failure" "infra-unrelated"
+sed -i.bak 's/worker 0/worker 00/;s/worker 1/worker 01/' "$E2E_CASE/jobs.json" && rm -f "$E2E_CASE/jobs.json.bak"
+assert_e2e "near-match names cannot become worker jobs" "no-op:no-worker-failure" "infra-unrelated"
 
 new_shard_case
 sed -i.bak 's/"run_attempt":1/"run_attempt":2/' "$E2E_CASE/latest.json" && rm -f "$E2E_CASE/latest.json.bak"
@@ -571,7 +651,7 @@ GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "stale attempt blocks both retry r
 
 new_shard_case
 out="$(PATH="$E2E_BIN:$PATH" GH_FIXTURE_DIR="$E2E_CASE" GITHUB_REPOSITORY=itismyfield/AgentDesk RUN_ID=31116949449 RUN_ATTEMPT=2 RERUN_DRY_RUN=0 bash "$SCRIPT")"
-[[ "$out" == 'decision=no-op:attempt-cap' ]] && pass "each shard is retried at most once" || fail "second retry accepted"
+[[ "$out" == 'decision=no-op:attempt-cap' ]] && pass "each worker is retried at most once" || fail "second retry accepted"
 
 new_shard_case
 GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 GH_FAIL_RERUN=1 GH_EXPECT_RC=1 assert_e2e "rejected retry request remains a failure" "no-op:rerun-request-failed" "infra-shutdown"
@@ -584,7 +664,6 @@ SYNC_REPO="$WORK_DIR/sync-repo"
 mkdir -p "$SYNC_REPO/scripts/ci"
 cp "$ROOT_DIR/scripts/main-ci-triage.sh" "$SYNC_REPO/scripts/main-ci-triage.sh"
 cp "$SCRIPT" "$SYNC_REPO/scripts/ci/infra-failure-rerun.sh"
-cp "$ROOT_DIR/scripts/check_pg_test_lane_membership.py" "$SYNC_REPO/scripts/check_pg_test_lane_membership.py"
 cp "$ROOT_DIR/scripts/ci/real-failure-predicate.sh" "$SYNC_REPO/scripts/ci/real-failure-predicate.sh"
 
 if bash "$SYNC_REPO/scripts/ci/infra-failure-rerun.sh" --self-test >/dev/null 2>&1; then

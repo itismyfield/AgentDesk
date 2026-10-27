@@ -345,17 +345,13 @@ interaction tokens or ephemeral visibility.
 | File:line | Notes | Triage |
 |---|---|---|
 | `src/services/discord/commands/restart.rs:185, 194, 223` | `/restart` ACK | excluded — interaction reply |
-| `src/services/discord/commands/receipt.rs:57, 138` | `/receipt` ACK | excluded |
+| `src/services/discord/commands/receipt.rs` (`cmd_usage`) | `/usage` ACK | excluded |
 | `src/services/discord/commands/fast_mode.rs` (`cmd_fast`) | `/fast` ACK | excluded |
 | `src/services/discord/commands/help.rs:77, 83` | `/help` ACK | excluded |
 | `src/services/discord/commands/mod.rs:93` | shared command reply helper | excluded |
 | `src/services/discord/commands/skill.rs:141, 158, 161, 187, 206, 209, 247, 314, 321, 330` | `/skill` family ACK | excluded |
-| `src/services/discord/commands/control.rs:452, 456, 478, 510, 532, 550, 559, 564` | `/stop`, `/clear`, `/down` ACK | excluded |
-| `src/services/discord/commands/diagnostics/mod.rs` (`cmd_sessions`, `cmd_deletesession`, `cmd_debug`) | `/sessions`, `/deletesession`, `/debug` ACK | excluded |
-| `src/services/discord/commands/session.rs:72, 114, 125, 153, 362, 365` | `/start` ACK | excluded |
-| `src/services/discord/commands/config.rs:756, 762, 767, 801, 824, 837, 845, 870, 885, 892, 917, 944` | `/allowed`, `/adduser`, `/removeuser`, `/public` ACK | excluded |
-| `src/services/discord/commands/meeting_cmd.rs:33, 42, 83, 97` | `/meeting` ACK | excluded |
-| `src/services/discord/commands/text_commands.rs:1239` | text-command running banner | excluded |
+| `src/services/discord/commands/control.rs` (`cmd_stop`, `cmd_cancel_queued`, `cmd_clear`) | `/stop`, `/cancel-queued`, `/clear` ACK | excluded |
+| `src/services/discord/commands/config.rs` (`cmd_allowall`) | `/allowall` ACK | excluded |
 | `src/services/discord/commands/model_picker.rs:60, 132` | `/model` picker | excluded |
 | `src/services/discord/router/intake_gate.rs:960, 1071` | "duplicate-queue" + "drain-pending" notices | candidate — these are bot notifications, not interaction tokens. Triage: **low priority**, very short fixed strings, no length risk. |
 
@@ -369,10 +365,7 @@ fallback policy). Excluded by #1175.
 | File:line | Notes | Triage |
 |---|---|---|
 | `src/services/discord/discord_io.rs` (`send_file_to_channel`) | CLI `--discord-sendfile` | excluded — attachment is the payload |
-| `src/services/discord/commands/text_commands.rs` (`handle_text_command_with_uploads`, file branch) | text-command file output (moved out of `router/message_handler.rs`) | excluded |
-| `src/services/discord/commands/text_commands.rs:975` | text-command attached output | excluded |
 | `src/services/discord/outbound/manual_delivery.rs` (`post_text_attachment`) | announce-bot oversize fallback | excluded — attachment fallback that remains a compatibility shim while the v3 outbound text contract truncates first |
-| `src/services/discord/commands/text_commands.rs` (`handle_text_command_with_uploads`, skill branch) | skill-running banner (moved out of `router/message_handler.rs`) | excluded |
 | `src/services/discord/commands/skill.rs:273, 339` | skill announce | excluded |
 
 Total attachments-bucket: **7 callsites**.

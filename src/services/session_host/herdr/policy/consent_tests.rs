@@ -356,7 +356,7 @@ fn consent_absent_corrupt_newer_and_permissions_have_distinct_results() {
         "consent_corruption_is_not_absence_contract: {corrupt}"
     );
     let mut newer: serde_json::Value = serde_json::from_slice(&original).unwrap();
-    newer["schema"] = 3.into();
+    newer["schema"] = 4.into();
     newer["future_field"] = true.into();
     std::fs::write(&path, serde_json::to_vec(&newer).unwrap()).unwrap();
     let future = store.load(&key).unwrap_err();

@@ -129,14 +129,8 @@ impl Rig {
         message.author.name = "clear-test".into();
         message.content = "!clear".into();
         self.api.take();
-        let handled = Box::pin(super::handle_text_command_with_uploads(
-            &self.ctx,
-            &message,
-            &self.data,
-            channel.id,
-            "!clear",
-            &[],
-            &mut None,
+        let handled = Box::pin(super::handle_text_command(
+            &self.ctx, &message, &self.data, channel.id, "!clear",
         ))
         .await;
         let posted = format!("POST /api/v10/channels/{}/messages ", channel.id.get());

@@ -203,9 +203,6 @@ impl ManagedSubmission {
 }
 
 impl Owner for Attempt {
-    fn submission_record_observed(&self) -> bool {
-        evidence::submission_record_observed(self)
-    }
     fn native_session_id(&self) -> Option<String> {
         self.native_session_id.clone()
     }

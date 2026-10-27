@@ -51,7 +51,6 @@ pub(crate) enum IntakeOrigin {
     /// A queue item, carrying the route it resolved before it was queued.
     QueuedDrain(Option<crate::services::turn_orchestrator::QueuedRoute>),
     SlashSkill,
-    TextSkill,
     RawAttachment,
 }
 
@@ -105,7 +104,11 @@ impl LocalAdmissionPermit {
 #[derive(Debug)]
 pub(crate) enum IntakeAdmission {
     #[cfg(unix)]
-    ConsentHeld(Box<Result<super::herdr_consent::admission::Hold, String>>),
+    ConsentHeld(
+        Box<
+            Result<super::herdr_consent::admission::Hold, super::herdr_consent::admission::Refusal>,
+        >,
+    ),
     Local(LocalAdmissionPermit),
     Forwarded {
         target_instance_id: String,

@@ -447,37 +447,7 @@ mod tests {
         assert!(!record.redacted_preview.contains("live-token"));
     }
 
-    // #4979 S7: PG tests live below a marked module so `just test-postgres`
-    // selects them by the whole-path `_pg` substring. The pure sibling stays
-    // in this parent and is selected by the curated non-PG invocation.
-    //
-    // The `*_pg_tests` suffix is a human convention, but the marker contract
-    // it satisfies is enforced, and it is two-sided — a name that clears one
-    // side can still fail the other:
-    //   rule1 (`justfile` test-postgres) selects on `_pg`, `pg_`, or
-    //     `postgres` as a normalized-path substring;
-    //   rule2 (nightly pgless sweep, ci-nightly.yml:121 and :163) excludes on
-    //     `_pg_` or `postgres_` — note the trailing underscore.
-    // So `pg_foo_tests` clears rule1 yet is still swept by the pgless lane and
-    // lands as rule2 debt; a live example sits at
-    // scripts/pg_test_lane_baseline.txt:81
-    // (`dispatch::dispatch_cancel::pg_observability_tests::…`). The `_pg_tests`
-    // suffix used here contains `_pg_` and so clears both sides.
-    //
-    // Batch mutation measurements at this declaration and the sibling in
-    // turn_lifecycle.rs (rc values are measured, not inferred):
-    //
-    //   1. Rename both modules away from the marker, retaining `#[cfg(test)]`:
-    //        membership rc=1 (manifest drift; after snapshot regeneration,
-    //        membership rc=1 again on rule1/rule2 baseline growth)
-    //        coverage rc=0; after snapshot regeneration coverage rc=0
-    //      The curated parent invocations cover the renamed modules, so the
-    //      membership manifest/baseline ratchet, not coverage, guards markers.
-    //
-    //   2. Remove only both nested `#[cfg(test)]` attributes:
-    //        membership rc=0, coverage rc=1 (two newly uncovered parents)
-    //      The parent coverage debts were removed in S7 after adding the pure
-    //      invocations. Thus this attribute IS load-bearing in this slice.
+    // PG-backed tests; the pure sibling stays in this parent module.
     #[cfg(test)]
     mod recovery_audit_pg_tests {
         use super::*;

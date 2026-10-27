@@ -191,3 +191,59 @@ mod formatting {
         assert_eq!(no_data_report(), "```text\n최근 턴 데이터 없음\n```");
     }
 }
+
+/// `/adk inspect` answers only users `check_auth` admits: an outsider gets no
+/// interaction response (no defer, no report), the owner gets the report.
+#[cfg(unix)]
+#[test]
+fn inspect_refuses_unauthorized_users_before_answering() {
+    use crate::services::discord::commands::cancel_backstop_tests::{
+        ActionTransport, invoke_real_slash_action_with_options,
+    };
+    use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+    use poise::serenity_prelude as serenity;
+
+    let root = tempfile::tempdir().expect("command runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("inspect action runtime");
+    runtime.block_on(async {
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let owner = serenity::UserId::new(42);
+        let outsider = serenity::UserId::new(7);
+        shared.settings.write().await.owner_user_id = Some(owner.get());
+        let voice_config = crate::voice::VoiceConfig::default();
+        let data = crate::services::discord::Data {
+            shared,
+            token: "test-token".into(),
+            provider: ProviderKind::Claude,
+            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
+            voice_config,
+        };
+        let channel = serenity::ChannelId::new(discord_mock::CHANNEL_ID);
+        let inspect = || {
+            super::super::cmd_adk()
+                .subcommands
+                .into_iter()
+                .find(|command| command.name == "inspect")
+                .expect("registered /adk inspect")
+        };
+        let view_last = serde_json::json!([{"name": "view", "type": 4, "value": 0}]);
+        let transport = ActionTransport::new(discord_mock::DiscordMockState::new()).await;
+        for (author, answers) in [(outsider, false), (owner, true)] {
+            let answered = invoke_real_slash_action_with_options(
+                &transport.ctx,
+                &data,
+                channel,
+                author,
+                inspect(),
+                "inspect",
+                view_last.clone(),
+            )
+            .await;
+            assert_eq!(answered, answers, "author {author}");
+        }
+    });
+}

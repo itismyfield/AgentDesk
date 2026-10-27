@@ -629,14 +629,14 @@ pub(super) async fn handle_text_message(
                         } else {
                             rate_limit_wait(shared, channel_id).await;
                             let _ = channel_id
-                                .say(http, "No active session. Use `/start <path>` first.")
+                                .say(http, "No active session. Set a workspace in agentdesk.yaml.")
                                 .await;
                             return Ok(IntakeExecution::Executed);
                         }
                     } else {
                         rate_limit_wait(shared, channel_id).await;
                         let _ = channel_id
-                            .say(http, "No active session. Use `/start <path>` first.")
+                            .say(http, "No active session. Set a workspace in agentdesk.yaml.")
                             .await;
                         return Ok(IntakeExecution::Executed);
                     }

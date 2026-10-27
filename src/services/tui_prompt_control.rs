@@ -8,7 +8,7 @@
 //! Discord note after local execution has completed; it cannot swallow command
 //! injection or execution, and the first marker is always retained.
 
-/// AgentDesk pass-through commands that complete locally in a Claude TUI.
+/// Claude TUI commands that complete locally: AgentDesk pass-throughs plus `/cost` and `/context`.
 pub(crate) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
     ["/effort", "/compact", "/cost", "/context"];
 

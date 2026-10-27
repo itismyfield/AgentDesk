@@ -1,8 +1,6 @@
 use super::owner_input::*;
 use crate::services::claude_tui::composer_lock::{self, ComposerAdmission, DraftGuard};
-use crate::services::claude_tui::host_input::guarded_submission::executor_tests::{
-    install_shim, renderer, screen,
-};
+use crate::services::claude_tui::input::submission::tests::{frame_renderer, screen};
 use crate::services::tui_input::submission_tmux::guarded::{
     PaneIdentity, transport_tests::Fixture,
 };
@@ -42,9 +40,8 @@ fn scoped<R>(target: serde_json::Value, run: impl FnOnce() -> R) -> R {
 fn i7314_c_epoch_preserves_old_guard_and_unknown_nonce_never_writes() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::after_shared_test_env_lock();
-    install_shim(&f);
     let name = "epoch-guard-owner";
-    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    frame_renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
     let old = "00112233445566778899aabbccddee11";
     let new = "00112233445566778899aabbccddee12";
     let pin = PaneIdentity::observe(name).unwrap();

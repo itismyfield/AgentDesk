@@ -6,15 +6,15 @@ use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Notify;
 
 #[cfg(test)]
-pub use super::guarded_outcome::{send_followup_prompt_or_idle_transcript, send_fresh_prompt};
+pub use super::guarded_outcome::{send_fresh_prompt, send_warm_followup};
 use super::{
     guarded_outcome::{self, SubmissionError},
-    host_input::{self, guarded_submission as guarded},
+    host_input,
 };
 
 mod literal_chunks;
 mod preparation_hold;
-mod submission;
+pub(crate) mod submission;
 mod user_receipt;
 use literal_chunks::split_literal_chunks;
 pub(crate) use preparation_hold::PreparationHold;
@@ -278,16 +278,6 @@ pub struct SelectorNavigation {
     pub target_index: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PromptSubmitConfirmationDecision {
-    Submitted,
-    RetrySnapshot,
-    RetryEnter,
-    FailedSessionDead,
-    FailedCaptureUnavailable,
-    FailedDraftStuck,
-}
-
 pub fn plan_prompt_submit(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
     let normalized_prompt;
     let prompt = if prompt.contains('\r') {
@@ -436,7 +426,7 @@ pub(crate) fn send_prompt_with_readiness(
     readiness: PromptReadinessKind,
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), SubmissionError> {
-    submission::send(session_name, prompt, readiness, cancel_token, None)
+    submission::send(session_name, prompt, readiness, cancel_token)
 }
 
 /// Submit `/compact` into a busy Claude pane without the generic readiness wait.
@@ -590,21 +580,9 @@ pub(crate) fn steering_snapshot_decision(
 }
 
 pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
-    if let Some(run) = guarded::steering_selected(session_name, prompt) {
-        return SubmissionError::from_run(run).map_err(SubmissionError::into_legacy);
-    }
-    let actions = plan_prompt_submit(prompt)?;
-    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
-        admit_automatic_write(session_name, PromptReadinessKind::Followup)?;
-        let snapshot = prompt_readiness_snapshot(session_name);
-        steering_snapshot_decision(&snapshot).map_err(str::to_string)?;
-        crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-            "claude",
-            session_name,
-            prompt,
-        );
-        run_actions_with_submission_confirmation(session_name, &actions, None, None)
-    })
+    let snapshot = prompt_readiness_snapshot(session_name);
+    steering_snapshot_decision(&snapshot).map_err(str::to_string)?;
+    submission::send_now(session_name, prompt).map_err(SubmissionError::into_legacy)
 }
 
 fn compact_queued_message_hint(pane_tail: &str) -> bool {
@@ -889,11 +867,12 @@ fn run_actions(
     host_input::run_legacy(session_name, actions, cancel_token).into_legacy()
 }
 
-mod legacy_submission;
-use legacy_submission::*;
-
-fn clear_prompt_draft_before_error(session_name: &str) {
-    legacy_submission::clear_prompt_draft(session_name);
+fn prompt_submit_settle_for_attempt(attempt: usize) -> Duration {
+    if attempt == 0 {
+        PROMPT_SUBMIT_INITIAL_SETTLE
+    } else {
+        PROMPT_SUBMIT_RETRY_SETTLE
+    }
 }
 
 /// F1 single authority: run an out-of-turn composer cleanup through the SAME
@@ -988,18 +967,16 @@ pub fn wait_for_prompt_ready_or_idle_transcript(
     wait_for_prompt_ready_inner(session_name, readiness, cancel_token, Some(transcript_path))
 }
 
-pub(crate) fn send_followup_prompt_or_idle_transcript_owned(
+pub(crate) fn send_warm_followup_owned(
     session_name: &str,
     prompt: &str,
     cancel_token: Option<&CancelToken>,
-    transcript_path: &std::path::Path,
 ) -> Result<(), SubmissionError> {
     submission::send(
         session_name,
         prompt,
         PromptReadinessKind::ProvenWarmFollowup,
         cancel_token,
-        Some(transcript_path),
     )
 }
 
@@ -1511,7 +1488,7 @@ fn wait_for_prompt_ready_polling(
                 // Inside it only a prompt AgentDesk typed is cleared; other text keeps every key.
                 let held = with_composer_cleanup_lock(session_name, || {
                     match stranded_draft_is_ours(session_name, readiness) {
-                        Ok(true) => clear_prompt_draft_before_error(session_name),
+                        Ok(true) => draft_hold::clear_prompt_draft(session_name),
                         Ok(false) => {}
                         Err(held) => return Some(held),
                     }
@@ -1612,28 +1589,6 @@ pub(crate) fn final_prompt_ready(snapshot: &PromptReadinessSnapshot) -> bool {
     snapshot.tmux_pane_alive
         && snapshot.capture_available
         && prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, snapshot)
-}
-
-/// Revalidate a hosted warm follow-up after it acquires the narrow composer
-/// lock. The earlier readiness wait may validly have returned through the
-/// transcript-idle fallback before a pane capture showed the `❯` marker, so a
-/// marker-only recheck would incorrectly reject an otherwise ready warm pane.
-///
-/// This mirrors the snapshot-based success condition in
-/// `wait_for_prompt_ready_inner`: the normal prompt marker is sufficient, or a
-/// live, non-busy snapshot plus an idle transcript is sufficient for the
-/// recorded-turn warm-reuse path.
-fn proven_warm_followup_revalidates_prompt_ready(
-    snapshot: &PromptReadinessSnapshot,
-    transcript_path: &std::path::Path,
-) -> bool {
-    let readiness = PromptReadinessKind::ProvenWarmFollowup;
-    prompt_marker_confirms_prompt_ready(readiness, snapshot)
-        || transcript_idle_snapshot_confirms_prompt_ready(
-            readiness,
-            snapshot,
-            Some(transcript_path),
-        )
 }
 
 /// #3889/#4528: an MCP-auth warning blocks readiness unless the caller proves
@@ -2004,44 +1959,6 @@ fn log_prompt_ready_mcp_auth_block(
     );
 }
 
-fn log_prompt_submit_left_draft(session_name: &str, snapshot: &PromptReadinessSnapshot) {
-    tracing::warn!(
-        tmux_session_name = session_name,
-        prompt_marker_detected = snapshot.prompt_marker_detected,
-        prompt_draft_detected = snapshot.prompt_draft_detected,
-        tmux_pane_alive = snapshot.tmux_pane_alive,
-        capture_available = snapshot.capture_available,
-        pane_tail = %snapshot.pane_tail,
-        "claude_tui prompt submit still has a draft after Enter retries"
-    );
-    crate::services::claude::debug_log_to(
-        "claude_tui.log",
-        &format!(
-            "prompt submit left draft session={} prompt_marker_detected={} prompt_draft_detected={} tmux_pane_alive={} capture_available={} pane_tail:\n{}",
-            session_name,
-            snapshot.prompt_marker_detected,
-            snapshot.prompt_draft_detected,
-            snapshot.tmux_pane_alive,
-            snapshot.capture_available,
-            snapshot.pane_tail
-        ),
-    );
-}
-
-fn log_prompt_submit_capture_unavailable(
-    session_name: &str,
-    attempt: usize,
-    snapshot: &PromptReadinessSnapshot,
-) {
-    tracing::warn!(
-        tmux_session_name = session_name,
-        attempt,
-        tmux_pane_alive = snapshot.tmux_pane_alive,
-        capture_available = snapshot.capture_available,
-        "claude_tui post-submit capture unavailable; cannot confirm Enter took effect"
-    );
-}
-
 fn prompt_ready_debug_tail(pane: &str) -> String {
     let mut lines = pane
         .lines()
@@ -2240,43 +2157,6 @@ mod tests {
             TuiTurnState::Idle
         );
         assert!(transcript_has_recorded_turn(&recorded_idle));
-    }
-
-    #[test]
-    fn warm_followup_lock_revalidation_keeps_idle_transcript_fallback() {
-        // The warm hosted path can become ready through the transcript-idle
-        // fallback before a concurrent pane capture observes the prompt marker.
-        // Acquiring the composer lock must revalidate that same valid state,
-        // rather than narrowing it to a marker-only condition.
-        let dir = tempfile::tempdir().unwrap();
-        let transcript = dir.path().join("recorded-idle.jsonl");
-        std::fs::write(
-            &transcript,
-            "{\"type\":\"system\",\"subtype\":\"init\"}\n\
-             {\"type\":\"user\"}\n\
-             {\"type\":\"assistant\"}\n\
-             {\"type\":\"result\"}\n",
-        )
-        .unwrap();
-        let snapshot = PromptReadinessSnapshot {
-            prompt_marker_detected: false,
-            prompt_draft_detected: false,
-            tmux_pane_alive: true,
-            capture_available: true,
-            pane_tail: "completed warm turn; prompt chrome not yet captured".to_string(),
-        };
-
-        assert!(
-            !prompt_marker_confirms_prompt_ready(
-                PromptReadinessKind::ProvenWarmFollowup,
-                &snapshot
-            ),
-            "fixture must exercise the markerless transcript fallback"
-        );
-        assert!(proven_warm_followup_revalidates_prompt_ready(
-            &snapshot,
-            &transcript,
-        ));
     }
 
     #[test]
@@ -2732,199 +2612,6 @@ mod tests {
         let timeout = format!("{PROMPT_READY_TIMEOUT_ERROR_PREFIX} fresh prompt input readiness");
         assert!(is_prompt_ready_timeout_error(&timeout));
         assert!(!is_mcp_auth_required_error(&timeout));
-    }
-
-    #[test]
-    fn prompt_submit_retries_only_when_live_pane_still_has_draft() {
-        let draft_snapshot = PromptReadinessSnapshot {
-            prompt_marker_detected: true,
-            prompt_draft_detected: true,
-            tmux_pane_alive: true,
-            capture_available: true,
-            pane_tail: "\u{276f} draft".to_string(),
-        };
-        assert!(prompt_submit_needs_enter_retry(&draft_snapshot));
-
-        let active_snapshot = PromptReadinessSnapshot {
-            prompt_marker_detected: false,
-            prompt_draft_detected: false,
-            tmux_pane_alive: true,
-            capture_available: true,
-            pane_tail: "✳ Architecting...".to_string(),
-        };
-        assert!(!prompt_submit_needs_enter_retry(&active_snapshot));
-
-        let inconsistent_snapshot = PromptReadinessSnapshot {
-            prompt_marker_detected: false,
-            prompt_draft_detected: true,
-            tmux_pane_alive: true,
-            capture_available: true,
-            pane_tail: "stale draft heuristic without prompt marker".to_string(),
-        };
-        assert!(!prompt_submit_needs_enter_retry(&inconsistent_snapshot));
-
-        let dead_snapshot = PromptReadinessSnapshot {
-            prompt_marker_detected: false,
-            prompt_draft_detected: true,
-            tmux_pane_alive: false,
-            capture_available: true,
-            pane_tail: "stale draft".to_string(),
-        };
-        assert!(!prompt_submit_needs_enter_retry(&dead_snapshot));
-    }
-
-    #[test]
-    fn prompt_submit_confirmation_decision_retries_enter_then_fails_stuck_draft() {
-        let snapshot = PromptReadinessSnapshot {
-            prompt_marker_detected: true,
-            prompt_draft_detected: true,
-            tmux_pane_alive: true,
-            capture_available: true,
-            pane_tail: "\u{276f} draft".to_string(),
-        };
-
-        assert_eq!(
-            prompt_submit_confirmation_decision(&snapshot, false, 0, 2),
-            PromptSubmitConfirmationDecision::RetryEnter
-        );
-        assert_eq!(
-            prompt_submit_confirmation_decision(&snapshot, false, 2, 2),
-            PromptSubmitConfirmationDecision::FailedDraftStuck
-        );
-    }
-
-    #[test]
-    fn prompt_submit_confirmation_decision_retries_capture_without_enter() {
-        let snapshot = PromptReadinessSnapshot {
-            prompt_marker_detected: false,
-            prompt_draft_detected: false,
-            tmux_pane_alive: true,
-            capture_available: false,
-            pane_tail: "<capture unavailable>".to_string(),
-        };
-
-        assert_eq!(
-            prompt_submit_confirmation_decision(&snapshot, false, 0, 2),
-            PromptSubmitConfirmationDecision::RetrySnapshot
-        );
-        assert_eq!(
-            prompt_submit_confirmation_decision(&snapshot, false, 2, 2),
-            PromptSubmitConfirmationDecision::FailedCaptureUnavailable
-        );
-    }
-
-    #[test]
-    fn prompt_submit_confirmation_decision_handles_submitted_and_dead_pane() {
-        let submitted = PromptReadinessSnapshot {
-            prompt_marker_detected: false,
-            prompt_draft_detected: false,
-            tmux_pane_alive: true,
-            capture_available: true,
-            pane_tail: "✳ Architecting...".to_string(),
-        };
-        assert_eq!(
-            prompt_submit_confirmation_decision(&submitted, false, 0, 2),
-            PromptSubmitConfirmationDecision::Submitted
-        );
-
-        let dead = PromptReadinessSnapshot {
-            prompt_marker_detected: false,
-            prompt_draft_detected: false,
-            tmux_pane_alive: false,
-            capture_available: false,
-            pane_tail: "<capture unavailable>".to_string(),
-        };
-        assert_eq!(
-            prompt_submit_confirmation_decision(&dead, false, 0, 2),
-            PromptSubmitConfirmationDecision::FailedSessionDead
-        );
-    }
-
-    #[test]
-    fn fresh_prompt_left_unsubmitted_in_the_composer_gets_enter_again() {
-        use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
-        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let session = format!("fresh-enter-retry-{}", uuid::Uuid::new_v4());
-        let prompt = "[User: 명령봇 (ID: 1479017284805722200)] 응답에 정확히 한 줄로 \
-                      [E2E:E50:run:AFTER_CLEAR] 만 출력해줘.";
-        let rule = "─".repeat(80);
-        let banner = " ▐▛███▛█   Claude Code v2.1.289\n~/.adk/release/workspaces/e2e\n\n";
-        let footer = format!(
-            "{rule}\n  ⏱ 0m │ ░░░░░░░░░░ │ 0% │ 0/1.0M │ $0.00\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
-        );
-        let empty = format!("{banner}{rule}\n\u{276f} \n{footer}");
-        // The swallowed-Enter pane seen in production after `!clear`.
-        let stuck = format!(
-            "{banner}{rule}\n\u{276f} [User: 명령봇 (ID: 1479017284805722200)] 응답에 정확히 한 줄로\n  \
-             [E2E:E50:run:AFTER_CLEAR] 만\n  출력해줘.\n\n{footer}"
-        );
-        let submitted = format!(
-            "{banner}\u{276f} [User: 명령봇 (ID: 1479017284805722200)] 응답에 정확히 한 줄로\n  \
-             [E2E:E50:run:AFTER_CLEAR] 만\n  출력해줘.\n\n\u{2733} Architecting\u{2026} (esc to interrupt)\n\n\
-             {rule}\n\u{276f} \n{footer}"
-        );
-        assert_eq!(
-            crate::services::claude_tui::busy_inject::composer_owner_in_session(&session, &stuck),
-            crate::services::claude_tui::busy_inject::ComposerOwner::AgentDesk
-        );
-        let token = CancelToken::new();
-        let enters_after = |tail: &[&str], succeeds: bool| {
-            let session = format!("{session}-{}", uuid::Uuid::new_v4());
-            let guard = SpyGuard::install(SpyState {
-                captures: std::iter::repeat_n(Some(empty.clone()), 30).collect(),
-                captures_after_send: Some(tail.iter().map(|pane| Some(pane.to_string())).collect()),
-                ..SpyState::default()
-            });
-            assert_eq!(
-                send_fresh_prompt(&session, prompt, Some(&token)).is_ok(),
-                succeeds
-            );
-            let calls = guard.calls();
-            assert!(calls.contains(&format!("literal:{prompt}")), "{calls:?}");
-            calls.iter().filter(|call| *call == "keys:Enter").count()
-        };
-        assert_eq!(enters_after(&[&stuck, &stuck, &submitted], true), 2);
-        assert_eq!(
-            enters_after(&[&submitted], true),
-            1,
-            "a landed submit gets no extra Enter"
-        );
-        assert_eq!(
-            enters_after(
-                &[&stuck, &stuck, &stuck, &stuck, &stuck, &stuck, &stuck],
-                true
-            ),
-            PROMPT_SUBMIT_CONFIRM_RETRIES + 1
-        );
-    }
-
-    #[test]
-    fn prompt_submit_errors_preserve_literal_and_paste_payloads() {
-        use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
-        for payload in [
-            TuiInputAction::Literal("abc".into()),
-            TuiInputAction::PasteBuffer("line1\nline2".into()),
-        ] {
-            let session = format!("preserved-payload-{}", uuid::Uuid::new_v4());
-            let spy = SpyGuard::install(SpyState {
-                fail_send: Some((1, Err("uncertain ACK".into()))),
-                ..SpyState::default()
-            });
-            assert!(
-                run_actions_with_submission_confirmation(
-                    &session,
-                    &[payload, TuiInputAction::Enter],
-                    None,
-                    None
-                )
-                .is_err()
-            );
-            assert!(!spy.calls().iter().any(|call| call.contains("C-u")
-                || call.contains("Escape")
-                || call.contains("BSpace")));
-        }
     }
 
     #[test]
@@ -3674,6 +3361,8 @@ line 37";
     // (so callers can fall back to the busy notice deterministically).
     #[test]
     fn wait_for_prompt_ready_is_public_and_returns_err_for_missing_session() {
+        // A fixture's PATH tmux would answer for any session, so none may run alongside.
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let session_name = format!("agentdesk-test-missing-{}", std::process::id());
         let result = wait_for_prompt_ready(&session_name, PromptReadinessKind::Followup, None);
         assert!(
@@ -3997,97 +3686,5 @@ line 37";
         cleanup_entered_rx
             .recv_timeout(Duration::from_millis(250))
             .expect("cleanup proceeds once /compact releases the composer lock");
-    }
-
-    // Operating entries keep main's submit path; the guarded helper is dormant.
-    mod default_entry_submission {
-        use super::super::*;
-        use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
-
-        const IDLE: &str =
-            include_str!("../../../tests/fixtures/tui_input/claude-2.1.293-idle.txt");
-        const BUSY: &str = "✳ Architecting…";
-
-        #[derive(Clone, Copy, Debug)]
-        enum Entry {
-            Fresh,
-            Followup,
-            ProvenWarm,
-            Steering,
-        }
-
-        const ENTRIES: [Entry; 4] = [
-            Entry::Fresh,
-            Entry::Followup,
-            Entry::ProvenWarm,
-            Entry::Steering,
-        ];
-
-        fn submit_text(entry: Entry, session: &str, prompt: &str) -> Result<(), String> {
-            // Hosted dispatch supplies a token; its polling path stays on the thread owning this spy.
-            let token = CancelToken::new();
-            let token = Some(&token);
-            match entry {
-                Entry::Fresh => send_fresh_prompt(session, prompt, token),
-                Entry::Followup => send_followup_prompt(session, prompt, token),
-                Entry::Steering => inject_steering_prompt(session, prompt),
-                Entry::ProvenWarm => {
-                    let transcript = tempfile::NamedTempFile::new().unwrap();
-                    std::fs::write(
-                        transcript.path(),
-                        "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
-                    )
-                    .unwrap();
-                    send_followup_prompt_or_idle_transcript(
-                        session,
-                        prompt,
-                        token,
-                        transcript.path(),
-                    )
-                }
-            }
-        }
-
-        #[test]
-        fn claude_default_entries_deliver_lines_beyond_the_composer_rows_unchanged() {
-            let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            // At 80x24 each needs 15 to 22 typed rows yet stays under the 800-char paste fold.
-            let lines = [
-                "가".repeat(533),
-                "가".repeat(800),
-                format!("{}가", "가 ".repeat(399)),
-            ];
-            for prompt in lines {
-                for entry in ENTRIES {
-                    let session = format!("claude-r5-default-{}", uuid::Uuid::new_v4());
-                    let spy = SpyGuard::install(SpyState {
-                        captures: std::iter::repeat_n(Some(IDLE.to_string()), 16).collect(),
-                        captures_after_send: Some(
-                            std::iter::repeat_n(Some(BUSY.to_string()), 4).collect(),
-                        ),
-                        ..SpyState::default()
-                    });
-                    let result = submit_text(entry, &session, &prompt);
-                    let calls = spy.calls();
-                    assert_eq!(result, Ok(()), "{entry:?}: {calls:?}");
-                    // Every pane mutation, in order: the whole prompt once, then one Enter.
-                    let writes: Vec<&String> = calls
-                        .iter()
-                        .filter(|c| {
-                            ["literal:", "load:", "paste:", "keys:", "retire:"]
-                                .iter()
-                                .any(|prefix| c.starts_with(prefix))
-                        })
-                        .collect();
-                    assert_eq!(
-                        writes,
-                        [&format!("literal:{prompt}"), &"keys:Enter".to_string()],
-                        "{entry:?}: {calls:?}"
-                    );
-                }
-            }
-        }
     }
 }

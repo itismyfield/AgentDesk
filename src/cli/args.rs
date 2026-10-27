@@ -454,8 +454,8 @@ pub(crate) enum Commands {
     /// Phase-gate violation snapshot (issue #2657).
     ///
     /// Read-only inspector that flags auto-queue entries dispatched at a
-    /// higher `batch_phase` than the run's live phase pointer. Mirrors the
-    /// `/adk-phase` Discord slash command.
+    /// higher `batch_phase` than the run's live phase pointer. Same data as
+    /// `GET /api/queue/phase-gates/violations`.
     Phase {
         #[command(subcommand)]
         action: Option<PhaseAction>,

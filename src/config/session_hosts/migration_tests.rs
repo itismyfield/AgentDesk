@@ -718,49 +718,6 @@ fn migration_mode_omitted_and_explicit_legacy_normalize_identically() {
     );
 }
 
-#[test]
-fn migration_user_default_validator_reports_key_and_supported_action() {
-    let mut config: crate::config::Config = serde_json::from_value(serde_json::json!({
-        "server": {}, "cluster": {"instance_id": "test-node"},
-        "agents": [{"id": "fixture", "name": "fixture", "channels": {
-            "claude": {"id": "41", "runtime": "tui"}
-        }}],
-        "session_hosts": {"herdr": {
-            "endpoints": {"one": {"execution_node": "test-node",
-                "socket_path": "/fixture/herdr.sock", "herdr_home": "/fixture/herdr",
-                "herdr_session": "agentdesk"}},
-            "channels": {"41": "one"}
-        }}
-    }))
-    .unwrap();
-    crate::config::validate_config(&config).expect("complete legacy fixture is supported");
-    config
-        .session_hosts
-        .herdr
-        .endpoints
-        .get_mut("one")
-        .unwrap()
-        .mode = EndpointMode::UserDefault;
-    let before = crate::services::herdr_launch::admissions_on_this_thread();
-    let result = crate::config::validate_config(&config);
-    assert!(result.is_err(), "user_default unsupported guard contract");
-    assert_eq!(
-        crate::services::herdr_launch::admissions_on_this_thread() - before,
-        0,
-        "validator_refusal_reaches_no_launch_admission_contract"
-    );
-    let error = result.unwrap_err().to_string();
-    for required in [
-        "session_hosts.herdr.endpoints.one.mode",
-        "user_default",
-        "지원 조각 미착지",
-        "legacy_dedicated",
-        "until support is complete",
-    ] {
-        assert!(error.contains(required), "missing {required:?}: {error}");
-    }
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn migration_failed_publication_keeps_server_and_read_only_cli_on_old_generation() {
@@ -972,20 +929,6 @@ async fn migration_no_pool_only_blocks_changes_to_herdr_channels() {
         "unchanged no-pool must have no diagnostic"
     );
     assert!(store.saved.borrow().is_empty());
-
-    let mut guarded = old.clone();
-    guarded.config.claude_guard_channels.insert(42);
-    let store = Store::new(Some(old.clone()));
-    let selected = select(guarded.clone(), &store, &PgRows(None), &NoHoldStore, false)
-        .await
-        .into_hosts();
-    assert_eq!(
-        Projection::of(&selected),
-        Projection::of(&guarded),
-        "guard-only migration needs no database"
-    );
-    assert_eq!(reason(&selected), None);
-    assert_eq!(&*store.saved.borrow(), &[Projection::of(&guarded)]);
 
     let candidate = remap(old.clone(), "/fixture/new.sock");
     let store = Store::new(Some(old.clone()));

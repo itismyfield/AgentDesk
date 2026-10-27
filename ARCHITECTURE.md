@@ -83,6 +83,8 @@ src/
 │   ├── discord_thread_create_lock.rs
 │   ├── doctor.rs
 │   ├── herdr.rs
+│   ├── herdr_probe.rs
+│   ├── herdr_probe_tests.rs
 │   ├── herdr_terminate_tests.rs
 │   ├── herdr_tests.rs
 │   ├── init.rs
@@ -109,14 +111,16 @@ src/
 │   ├── session_hosts/
 │   │   ├── migration/
 │   │   │   ├── consent_holds.rs
-│   │   │   └── consent_holds_tests.rs
+│   │   │   ├── consent_holds_tests.rs
+│   │   │   └── consent_returns_tests.rs
 │   │   ├── approval_store.rs
 │   │   ├── boot_pg_tests.rs
 │   │   ├── migration.rs
 │   │   ├── migration_tests.rs
 │   │   ├── projection.rs
 │   │   ├── user_default.rs
-│   │   └── user_default_tests.rs
+│   │   ├── user_default_tests.rs
+│   │   └── user_default_validator_tests.rs
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── agent_channels.rs
@@ -787,13 +791,6 @@ src/
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs
 │   │   │   └── relay_receipts.rs
-│   │   ├── host_input/
-│   │   │   ├── guarded_submission/
-│   │   │   │   ├── idle_stash/
-│   │   │   │   │   └── idle_stash_tests.rs
-│   │   │   │   ├── executor_tests.rs
-│   │   │   │   └── idle_stash.rs
-│   │   │   └── guarded_submission.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── fresh_hold_tests.rs
@@ -809,10 +806,10 @@ src/
 │   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
 │   │   │   ├── hold_lifecycle_tests.rs
-│   │   │   ├── legacy_submission.rs
 │   │   │   ├── literal_chunks.rs
 │   │   │   ├── preparation_hold.rs
 │   │   │   ├── submission.rs
+│   │   │   ├── submission_tests.rs
 │   │   │   ├── timeout_draft_tests.rs
 │   │   │   └── user_receipt.rs
 │   │   ├── session/
@@ -841,7 +838,6 @@ src/
 │   │   ├── source_verify.rs
 │   │   ├── startup_dialog.rs
 │   │   ├── submission_fence.rs
-│   │   ├── submit_canary.rs
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
 │   ├── cluster/
@@ -1064,6 +1060,7 @@ src/
 │   │   │   ├── config/
 │   │   │   │   ├── provider_settings/
 │   │   │   │   │   └── revision_tests.rs
+│   │   │   │   ├── allowall_tests.rs
 │   │   │   │   └── provider_settings.rs
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
@@ -1122,20 +1119,20 @@ src/
 │   │   │   ├── restart/
 │   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
-│   │   │   │   └── autocomplete.rs
+│   │   │   │   ├── autocomplete.rs
+│   │   │   │   └── resume_key_tests.rs
 │   │   │   ├── skill/
 │   │   │   │   └── stop_response_tests.rs
 │   │   │   ├── system_prompt/
 │   │   │   │   ├── reconstruct.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── text_commands/
-│   │   │   │   ├── command_dispatch_contract_tests/
-│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── clear_http_overlap_tests.rs
 │   │   │   │   ├── clear_refusal_reply_tests.rs
 │   │   │   │   └── native_stop.rs
 │   │   │   ├── voice/
-│   │   │   │   └── alert.rs
+│   │   │   │   ├── alert.rs
+│   │   │   │   └── sensitivity.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── command_policy.rs
 │   │   │   ├── config.rs
@@ -1144,13 +1141,11 @@ src/
 │   │   │   ├── goals.rs
 │   │   │   ├── help.rs
 │   │   │   ├── help_tests.rs
-│   │   │   ├── meeting_cmd.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── model_picker.rs
 │   │   │   ├── model_ui.rs
 │   │   │   ├── node.rs
 │   │   │   ├── receipt.rs
-│   │   │   ├── recovery_ops.rs
 │   │   │   ├── restart.rs
 │   │   │   ├── session.rs
 │   │   │   ├── sidecar.rs
@@ -1742,9 +1737,13 @@ src/
 │   │   ├── router/
 │   │   │   ├── herdr_consent/
 │   │   │   │   ├── admission.rs
+│   │   │   │   ├── admission_notice_tests.rs
+│   │   │   │   ├── admission_refusal.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── custody_tests.rs
+│   │   │   │   ├── return_input.rs
+│   │   │   │   ├── return_input_tests.rs
 │   │   │   │   ├── service_tests.rs
 │   │   │   │   ├── startup.rs
 │   │   │   │   ├── startup_tests.rs
@@ -2267,6 +2266,7 @@ src/
 │   │   │   │   ├── prompt_identity_e2e_tests/
 │   │   │   │   │   ├── herdr_direct_actual_client_tests.rs
 │   │   │   │   │   └── herdr_direct_roundtrip_tests.rs
+│   │   │   │   ├── agent_text_command_e2e_tests.rs
 │   │   │   │   ├── busy_inject_e2e_tests.rs
 │   │   │   │   ├── busy_inject_thread_e2e_tests.rs
 │   │   │   │   ├── busy_inject_turn_mode_e2e_tests.rs
@@ -2414,8 +2414,6 @@ src/
 │   │   │   ├── finalize_epilogue/
 │   │   │   │   └── r1_transition_busy_tests.rs
 │   │   │   ├── followup_requeue/
-│   │   │   │   ├── tests/
-│   │   │   │   │   └── person_draft_tests.rs
 │   │   │   │   ├── attempt.rs
 │   │   │   │   ├── draft_release.rs
 │   │   │   │   └── preparation_notice.rs
@@ -3226,6 +3224,7 @@ src/
 │   │   │   │   │   ├── engine_tests.rs
 │   │   │   │   │   ├── preview.rs
 │   │   │   │   │   ├── preview_tests.rs
+│   │   │   │   │   ├── return_tests.rs
 │   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   ├── settlement_tests.rs
 │   │   │   │   │   ├── workflow.rs
@@ -3251,6 +3250,7 @@ src/
 │   │   │   │   ├── grant_store.rs
 │   │   │   │   ├── grant_store_tests.rs
 │   │   │   │   ├── loaded_image.rs
+│   │   │   │   ├── loaded_image_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── peer.rs
 │   │   │   │   ├── peer_tests.rs
@@ -3337,9 +3337,6 @@ src/
 │   ├── tui_input/
 │   │   ├── actor/
 │   │   │   ├── gate/
-│   │   │   │   ├── claude_guarded/
-│   │   │   │   │   └── acceptance_tests.rs
-│   │   │   │   ├── claude_guarded.rs
 │   │   │   │   └── own_draft_tests.rs
 │   │   │   ├── pane/
 │   │   │   │   └── submit_tests.rs
@@ -3923,7 +3920,6 @@ src/
 │   ├── session_resume.rs
 │   ├── session_selector_validity.rs
 │   ├── settings.rs
-│   ├── shell_guard.rs
 │   ├── stale_turn_reconciler.rs
 │   ├── task_completion_v1.rs
 │   ├── terminal_status_formatting.rs

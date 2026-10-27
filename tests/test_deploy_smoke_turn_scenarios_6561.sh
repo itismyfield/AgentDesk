@@ -135,7 +135,8 @@ run_case() {
         : > "$POST_DEPLOY_SMOKE_EVIDENCE"
         python3() {
             case "${1:-}" in
-                scripts/e2e/post_deploy_turn_smoke.py)
+                scripts/e2e/post_deploy_turn_smoke.py|*/scripts/e2e/post_deploy_turn_smoke.py)
+                    if [ "${2:-}" = cell-reset ]; then return 0; fi
                     if [ "${2:-}" = preflight ]; then
                         [ "$preflight_rc" -eq 0 ] && { echo idle; return 0; }
                         echo "busy: mailbox fixture active_turn"; return 1

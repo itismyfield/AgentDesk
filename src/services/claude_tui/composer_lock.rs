@@ -73,14 +73,7 @@ pub(crate) fn try_with_composer_mutation_lock<R>(
 
 /// A private, non-sendable witness exists only while the actual composer lock is held.
 pub(crate) struct ComposerPermit<'a> {
-    session: &'a str,
-    _local: std::marker::PhantomData<std::rc::Rc<()>>,
-}
-
-impl ComposerPermit<'_> {
-    pub(crate) fn session(&self) -> &str {
-        self.session
-    }
+    _local: std::marker::PhantomData<(&'a str, std::rc::Rc<()>)>,
 }
 
 pub(crate) fn try_with_composer_permit<R>(
@@ -89,7 +82,6 @@ pub(crate) fn try_with_composer_permit<R>(
 ) -> Option<R> {
     try_with_composer_mutation_lock(session, || {
         operation(ComposerPermit {
-            session,
             _local: std::marker::PhantomData,
         })
     })

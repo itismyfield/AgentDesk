@@ -12,7 +12,7 @@
 //! is missing — users only learn about a misfire by reading turn logs.
 //!
 //! This module provides the read side: a single `scan_violations_pg` entry
-//! point that callers (Discord `/adk-phase`, CLI `agentdesk query
+//! point that callers (the phase-gate API route, CLI `agentdesk query
 //! phase-gate`, dashboard) can poll. **It does not block dispatches** —
 //! blocking is the activate path's responsibility and intentionally scoped
 //! out of this PR to keep blast radius small.

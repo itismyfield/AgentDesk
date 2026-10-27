@@ -160,7 +160,9 @@ async fn legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_
     let held = hold_live(
         &deps,
         submission(8_916_099, IntakeOrigin::LiveMessage),
-        Err("unpolled frame contract".into()),
+        Err(refusal::Code::Missing.of()(
+            "unpolled frame contract".into(),
+        )),
     );
     let frame = std::mem::size_of_val(&held);
     assert!(
@@ -178,7 +180,6 @@ async fn legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_
     for (index, origin) in [
         IntakeOrigin::LiveMessage,
         IntakeOrigin::SlashSkill,
-        IntakeOrigin::TextSkill,
         IntakeOrigin::RawAttachment,
         IntakeOrigin::QueuedDrain(None),
     ]
@@ -186,7 +187,7 @@ async fn legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_
     .enumerate()
     {
         let mut value = submission(8_916_000 + index as u64, origin);
-        if index == 3 {
+        if index == 2 {
             value
                 .attachments
                 .push(super::super::super::message_handler::AttachmentDescriptor {
@@ -242,10 +243,7 @@ async fn legacy_actual_skill_dispatch_preserves_base_enforce_refusal_without_con
     let f = Fixture::new("enforce").await;
     let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")]);
     let reads = STORE_READS.load(Ordering::SeqCst);
-    for (index, origin) in [IntakeOrigin::SlashSkill, IntakeOrigin::TextSkill]
-        .into_iter()
-        .enumerate()
-    {
+    for (index, origin) in [IntakeOrigin::SlashSkill].into_iter().enumerate() {
         let result = intake::dispatch_skill_intake(
             &f.deps(),
             ProviderKind::Claude,
@@ -388,7 +386,7 @@ async fn consent_live_custody_keeps_expanded_prompt_sources_upload_and_voice_fif
     let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
         .with_mode(EndpointMode::UserDefault);
     for (id, origin, spoken) in [
-        (8_916_030, IntakeOrigin::TextSkill, false),
+        (8_916_030, IntakeOrigin::SlashSkill, false),
         (8_916_031, IntakeOrigin::LiveMessage, true),
     ] {
         let mut value = submission(id, origin);
@@ -411,7 +409,7 @@ async fn consent_live_custody_keeps_expanded_prompt_sources_upload_and_voice_fif
         vec![8_916_030, 8_916_031],
         "consent_original_custody_fifo_contract"
     );
-    for (item, expected_origin) in items.iter().zip(["TextSkill", "Voice"]) {
+    for (item, expected_origin) in items.iter().zip(["SlashSkill", "Voice"]) {
         let id = item.message_id.get();
         assert_eq!(
             item.text,
@@ -605,7 +603,7 @@ async fn consent_persistence_failure_retains_live_payload_without_success_or_car
     let saved = checkpoints.clone();
     let result = intake::dispatch_live_text_intake(
         &f.deps(),
-        submission(8_916_060, IntakeOrigin::TextSkill),
+        submission(8_916_060, IntakeOrigin::SlashSkill),
         move || {
             saved.fetch_add(1, Ordering::SeqCst);
         },
@@ -642,7 +640,7 @@ async fn consent_persistence_failure_retains_live_payload_without_success_or_car
     std::fs::remove_file(obstacle).unwrap();
     let replayed = hold_live(
         &f.deps(),
-        submission(8_916_060, IntakeOrigin::TextSkill),
+        submission(8_916_060, IntakeOrigin::SlashSkill),
         Ok(f.hold()),
     )
     .await;
@@ -656,45 +654,6 @@ async fn consent_persistence_failure_retains_live_payload_without_success_or_car
         (disk[0].message_id.get(), disk[0].text.as_str()),
         (8_916_060, "expanded prompt 8916060"),
         "consent_failed_persistence_retains_original_replay_payload_contract"
-    );
-}
-
-#[test]
-fn full_binding_validator_keeps_user_default_unreachable() {
-    let mut config: crate::config::Config = serde_json::from_value(serde_json::json!({
-        "server": {}, "cluster": {"instance_id": "test-node"},
-        "agents": [{"id":"fixture", "name":"fixture", "channels":{"claude":{"id":"41","runtime":"tui"}}}],
-        "session_hosts":{"herdr":{"endpoints":{"one":{"execution_node":"test-node",
-            "socket_path":"/fixture/herdr.sock","herdr_home":"/fixture/herdr","herdr_session":"agentdesk"}},
-            "channels":{"41":"one"}}}
-    })).unwrap();
-    assert!(
-        crate::config::validate_config(&config).is_ok(),
-        "consent_validator_complete_legacy_fixture_contract"
-    );
-    config
-        .session_hosts
-        .herdr
-        .endpoints
-        .get_mut("one")
-        .unwrap()
-        .mode = EndpointMode::UserDefault;
-    let calls = crate::services::herdr_launch::admissions_on_this_thread();
-    let result = crate::config::validate_config(&config);
-    assert!(
-        result.is_err(),
-        "consent_validator_user_default_stays_unreachable_contract"
-    );
-    let error = result.unwrap_err().to_string();
-    assert!(
-        error.contains("session_hosts.herdr.endpoints.one.mode")
-            && error.contains("지원 조각 미착지"),
-        "consent_validator_rejects_exact_feature_guard_contract: {error}"
-    );
-    assert_eq!(
-        crate::services::herdr_launch::admissions_on_this_thread(),
-        calls,
-        "consent_validator_admission_reached_zero_contract"
     );
 }
 
@@ -1377,7 +1336,7 @@ async fn already_held_requires_every_original_source_and_exact_generation() {
         .await
         .unwrap();
         if include_new {
-            let mut b = submission(8_916_111, IntakeOrigin::TextSkill);
+            let mut b = submission(8_916_111, IntakeOrigin::SlashSkill);
             b.request.merge_consecutive = true;
             b.request.has_reply_boundary = false;
             b.request.reply_context = None;

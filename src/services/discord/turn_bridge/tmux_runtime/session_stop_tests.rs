@@ -119,14 +119,8 @@ async fn command(ctx: &serenity::Context, data: &Data, channel: ChannelId) {
     message.author.id = serenity::UserId::new(7);
     message.author.name = "stop-test".into();
     message.content = "!stop".into();
-    let handled = crate::services::discord::commands::handle_text_command_with_uploads(
-        ctx,
-        &message,
-        data,
-        channel,
-        "!stop",
-        &[],
-        &mut None,
+    let handled = crate::services::discord::commands::handle_text_command(
+        ctx, &message, data, channel, "!stop",
     )
     .await
     .unwrap();

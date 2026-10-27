@@ -18,10 +18,27 @@ sys.path.insert(0, str(SCRIPT.parent))
 spec = importlib.util.spec_from_file_location("flaky_retry", SCRIPT)
 retry = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(retry)
+import nextest_required  # noqa: E402  (loaded from scripts/ci by the retry module)
 sys.path.pop(0)
 KNOWN = "suite::known_failure"
 UNKNOWN = "suite::new_regression"
 HEAD_SHA = "a" * 40
+
+
+def judge_log(failed):
+    """The `CI required` judge step's real log when the jobs in `failed` fail and every other judged job passes."""
+    jobs = {job for groups in nextest_required.CONTEXTS.values() for group, _ in groups for job in group}
+    outputs = {name: "true" for name in ("rust_tests", "rust_or_policy", "relay_contract", "high_risk_recovery",
+                                         "dashboard", "rust_tests_skip", "cross_os_rust")}
+    outputs["rust_tests_skip"] = "false"
+    needs = {"changes": {"result": "success", "outputs": outputs},
+             **{job: {"result": "failure" if job in failed else "success"} for job in jobs}}
+    done = subprocess.run([sys.executable, str(SCRIPT.parent / "nextest_ci.py"), "required-gate", "--needs-json",
+                           json.dumps(needs), "--summary-out", ""], capture_output=True, text=True,
+                          env={**os.environ, "PINS_OUTCOME": "success"})
+    assert done.returncode == 1, done.stdout
+    lines = [line.replace("::error::", "2026-10-22T08:57:43.9533985Z ##[error]", 1) for line in done.stdout.splitlines()]
+    return "\n".join(lines) + "\n2026-10-22T08:57:43.9544388Z ##[error]Process completed with exit code 1.\n"
 
 
 def rust_log(*names):
@@ -39,7 +56,8 @@ class Retry(unittest.TestCase):
         self.path = Path(self.tmp.name)
         self.script = self.path / SCRIPT.name
         self.script.write_bytes(SCRIPT.read_bytes())
-        (self.path / "pr_head_current.py").write_bytes((SCRIPT.parent / "pr_head_current.py").read_bytes())
+        for name in ("pr_head_current.py", "nextest_required.py"):
+            (self.path / name).write_bytes((SCRIPT.parent / name).read_bytes())
         self.write("known-flaky-tests.json", [{
             "test": KNOWN, "run": "https://github.com/itismyfield/AgentDesk/actions/runs/39703194502",
             "reason": "Reproduced scheduler-dependent fixture race.",
@@ -58,12 +76,17 @@ p = pathlib.Path(os.environ['FIXTURES'])
 args = sys.argv[1:]
 with (p / 'calls.jsonl').open('a') as f: f.write(json.dumps(args) + '\\n')
 if args[:2] == ['run', 'rerun']: sys.exit(int(os.environ.get('FAIL_RERUN', '0')))
+if args[:2] == ['run', 'download']:
+    import shutil
+    shutil.copytree(p / 'artifacts' / args[args.index('--name') + 1], args[args.index('--dir') + 1])
+    sys.exit(0)
 if args[0] != 'api': sys.exit(99)
 url = args[1]
 if '/pulls/' in url: file = 'pull.json'
 elif '/jobs?' in url: file = 'jobs.json'
 elif '/attempts/' in url: file = 'attempt.json'
 elif url.endswith('/logs'): file = url.split('/')[-2] + '.log'
+elif '/artifacts?' in url: file = 'artifacts.json'
 else: file = 'latest.json'
 sys.stdout.write((p / file).read_text())
 """)
@@ -80,15 +103,12 @@ sys.stdout.write((p / file).read_text())
         self.write("jobs.json", dict(total_count=len(jobs), jobs=jobs))
 
     def mirrored_failure(self, **overrides):
-        source = {**self.job(901), "name": "Library test sweep (shard 1)"}
-        mirror = {**self.job(902), "name": "Library test sweep (ubuntu-latest)", "steps": [
-            dict(name="Mirror library sweep result across path-filter skips", conclusion="failure"),
+        source = {**self.job(901), "name": "Script checks runner (guards)"}
+        judge = {**self.job(902), "name": nextest_required.GATE, "steps": [
+            dict(name="Judge required checks", conclusion="failure"),
         ], **overrides}
-        self.jobs(source, mirror, {**self.job(903, "success"), "name": "Changed paths"})
-        (self.path / "902.log").write_text(
-            "2026-10-22T08:57:43.9533985Z ##[error]rust_tests=true requires "
-            "library_sweep to succeed; result was 'failure'\n"
-            "2026-10-22T08:57:43.9544388Z ##[error]Process completed with exit code 1.\n")
+        self.jobs(source, judge, {**self.job(903, "success"), "name": "Changed paths"})
+        (self.path / "902.log").write_text(judge_log({"scripts_guards"}))
 
     def run_retry(self, attempt=1, command=None, **extra):
         for name in ("calls.jsonl", "output", "summary"):
@@ -105,10 +125,24 @@ sys.stdout.write((p / file).read_text())
     def infra_command(self):
         scripts = self.path / "repo/scripts"
         (scripts / "ci").mkdir(parents=True, exist_ok=True)
-        for name in ("ci/infra-failure-rerun.sh", "ci/real-failure-predicate.sh",
-                     "ci/pr_head_current.py", "check_pg_test_lane_membership.py"):
+        for name in ("ci/infra-failure-rerun.sh", "ci/real-failure-predicate.sh", "ci/pr_head_current.py",
+                     "ci/nextest_ci.py", "ci/nextest_required.py"):
             (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
-        self.jobs({**self.job(901), "name": "PostgreSQL tests (shard 0)"})
+        # The worker died before uploading; the run's plan artifact still lets classify-worker decide.
+        self.write("list.json", {"test-count": 1, "rust-suites": {"agentdesk": {
+            "binary-id": "agentdesk", "kind": "lib", "status": "listed", "testcases": {
+                "m::a": {"ignored": False, "filter-match": {"status": "matches"}}}}}})
+        (self.path / "lib-tests.tar.zst").write_bytes(b"archive")
+        (self.path / "policy.toml").write_text("version = 1\n")
+        subprocess.run([sys.executable, str(ROOT / "scripts/ci/nextest_ci.py"), "plan", "--universe", self.path / "list.json",
+                        "--archive", self.path / "lib-tests.tar.zst", "--workers", "1", "--sha", HEAD_SHA,
+                        "--scope", "linux-lib", "--run-id", "7", "--base-config", ROOT / ".config/nextest.toml",
+                        "--retry-policy", self.path / "policy.toml", "--today", "2026-10-24",
+                        "--output", self.path / "artifacts/nextest-plan/plan", "--rust-version", "1.94.1",
+                        "--nextest-version", "0.9.149", "--target", "x86_64-unknown-linux-gnu"],
+                       check=True, capture_output=True)
+        self.write("artifacts.json", {"total_count": 1, "artifacts": [{"name": "nextest-plan", "expired": False}]})
+        self.jobs({**self.job(901), "name": "Rust tests (worker 0)"})
         (self.path / "901.log").write_text("Failed to resolve action download info. Error: Service Unavailable\n")
         return ["bash", str(scripts / "ci/infra-failure-rerun.sh")]
 
@@ -129,6 +163,17 @@ sys.stdout.write((p / file).read_text())
         out, calls = self.run_retry(command=command, attempt=2)
         self.assertIn("attempt-cap", out)
         self.assertEqual(calls, [])
+
+    def test_infra_retry_ignores_a_judge_only_failure(self):
+        # A judge failure with no failed worker is no infra evidence; an operator reruns it.
+        command = self.infra_command()
+        self.jobs({**self.job(900, "success"), "name": "Rust tests (worker 0)"},
+                  {**self.job(901), "name": nextest_required.GATE,
+                   "steps": [dict(name="Judge required checks", conclusion="failure")]})
+        (self.path / "901.log").write_text("##[error]CI required: needs job extra is judged by no context\n")
+        out, calls = self.run_retry(command=command)
+        self.assertIn("decision=no-op:no-worker-failure", out)
+        self.assertFalse(any(c[:2] == ["run", "rerun"] for c in calls), calls)
 
     def test_flaky_exception_still_runs_workflow_infra_fallback_once(self):
         command = self.infra_command()
@@ -230,26 +275,33 @@ sys.stdout.write((p / file).read_text())
         self.assertIn("rerun-requested:known-flaky", out)
         self.assertEqual(sum(call[:2] == ["run", "rerun"] for call in calls), 1)
 
-    def test_script_shard_mirror_links_to_the_exact_source(self):
-        self.mirrored_failure(name="Script checks", steps=[dict(
-            name="Mirror script checks guards shard result for branch protection", conclusion="failure")])
-        jobs = json.loads((self.path / "jobs.json").read_text())["jobs"]
-        jobs[0]["name"] = "Script checks runner (guards)"
-        self.jobs(*jobs)
-        (self.path / "902.log").write_text(
-            "##[error]scripts=true requires scripts_guards to succeed; result was 'failure'\n"
-            "##[error]Process completed with exit code 1.\n")
-        self.assertIn("rerun-requested:known-flaky", self.run_retry()[0])
+    def test_judge_links_each_failed_job_to_its_exact_source(self):
+        # lint fails two contexts at once; each failed context must name a classified source.
+        for failed, source in (({"lint"}, "Lint runner"), ({"relay_authority_mutations"}, "Relay authority mutations (2)")):
+            with self.subTest(failed=failed):
+                self.mirrored_failure()
+                jobs = json.loads((self.path / "jobs.json").read_text())["jobs"]
+                jobs[0]["name"] = source
+                self.jobs(*jobs)
+                (self.path / "902.log").write_text(judge_log(failed))
+                self.assertIn("rerun-requested:known-flaky", self.run_retry()[0])
+
+    def test_only_the_ci_required_job_is_a_judge_mirror(self):
+        # A job still named after one context is not the judge, so its failure is never derived.
+        self.mirrored_failure(name="Script checks")
+        self.assertIn("no-op:unlisted-failure", self.assert_no_retry())
 
     def test_mirror_requires_its_own_classified_failed_source(self):
         self.mirrored_failure()
         jobs = json.loads((self.path / "jobs.json").read_text())["jobs"]
-        jobs[0]["name"] = "High-risk recovery runner"
-        self.jobs(*jobs)
-        self.assertIn("unlisted-mirror", self.assert_no_retry())
+        for name in ("Script checks runner (contracts)", "Rust tests (worker 1)"):
+            with self.subTest(source=name):
+                jobs[0]["name"] = name
+                self.jobs(*jobs)
+                self.assertIn("unlisted-mirror", self.assert_no_retry())
 
     def test_mirror_rejects_pin_and_unknown_step_failure(self):
-        for name in ("Pin required-check mirror helper (#5321)", "Unrelated independent check"):
+        for name in ("Verify pinned judge and CI structure", "Unrelated independent check"):
             with self.subTest(name=name):
                 self.mirrored_failure(steps=[dict(name=name, conclusion="failure")])
                 self.assertIn("unlisted-mirror", self.assert_no_retry())
@@ -258,12 +310,21 @@ sys.stdout.write((p / file).read_text())
         self.mirrored_failure()
         original = (self.path / "902.log").read_text()
         for log in (
-            original.replace("library_sweep", "high-risk-recovery"),
-            original.replace("rust_tests=true", "rust_tests=false"),
-            original.replace("'failure'", "'skipped'"),
+            original.replace("scripts_guards: 'failure'", "scripts_contracts: 'failure'"),
+            original.replace("expected to run: true\n2026-10-22T08:57:43.9533985Z ##[error]Script checks: scripts_contracts",
+                             "expected to run: false\n2026-10-22T08:57:43.9533985Z ##[error]Script checks: scripts_contracts"),
+            original.replace("'failure' but", "'cancelled' but"),
+            original.replace("scripts_contracts: success (expected to run: true)",
+                             "scripts_contracts: 'skipped' but expected to run: true"),
+            original.replace("Script checks: rust_tests: success", "Lint: rust_tests: success"),
+            original.replace("##[error]Script checks: test_evidence: success (expected to run: true)\n", ""),
             original + "##[error]content hash mismatch: expected trusted, found changed\n",
+            original.replace("2026-10-22T08:57:43.9544388Z ##[error]Process completed",
+                             "2026-10-22T08:57:43.9533985Z ##[error]CI required: needs job extra is judged by no context\n"
+                             "2026-10-22T08:57:43.9544388Z ##[error]Process completed"),
             original + "ERROR an independent check failed\n",
-            original.replace("##[error]rust_tests", "rust_tests"),
+            original.replace("##[error]Script checks: scripts_guards", "Script checks: scripts_guards"),
+            judge_log({"scripts_guards", "rust_tests"}),
             rust_log(KNOWN),
         ):
             with self.subTest(log=log):
@@ -298,6 +359,16 @@ class Parser(unittest.TestCase):
 
     def test_mirror_contracts_match_the_trusted_workflow(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/ci-pr.yml").read_text())["jobs"]
+        judge = jobs["required_contexts"]
+        self.assertEqual(judge["name"], nextest_required.GATE)
+        self.assertEqual([s["run"] for s in judge["steps"] if s.get("name") == retry.JUDGE_STEP],
+                         ["python3 scripts/ci/nextest_ci.py required-gate"])
+        judged = {job for groups in nextest_required.CONTEXTS.values() for group, _ in groups for job in group}
+        self.assertEqual(judged, set(retry.JOB_NAMES))
+        for job_id in judged:
+            rendered = jobs[job_id]["name"].replace("${{ matrix.worker }}", "1").replace(
+                "${{ matrix.shard }}", "1").replace("${{ matrix.os }}", "windows-latest")
+            self.assertRegex(rendered, "^" + retry.JOB_NAMES[job_id] + "$")
         contracts = set()
         for job_id, job in jobs.items():
             for step in job.get("steps", []):
