@@ -4,7 +4,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use super::discord_mock::BOT_ID;
+use super::discord_mock::{BOT_ID, HistoryQuery};
 use super::stop_command_catch_up_e2e::{
     assert_no_unhandled, hold_a_turn, queued_ids, recent_snowflake_base, stop_the_turn_with,
 };
@@ -24,25 +24,50 @@ fn record_path() -> std::path::PathBuf {
         .join(format!("{}.consumed.json", super::CHANNEL_ID))
 }
 
-/// Phase 1 resumes past `newest` from the durable checkpoint and reads nothing,
-/// while phase 2 still scans from the live cursor at `active`.
-fn leave_the_scan_to_phase2(harness: &RelayE2eHarness, active: u64, newest: u64) {
+/// Keep the scanner before the incoming scenario while the live cursor tracks the active turn.
+fn leave_the_scan_to_phase2(harness: &RelayE2eHarness, active: u64, frontier: u64, newest: u64) {
     runtime_store::save_last_message_id(PROVIDER_KEY, super::CHANNEL_ID, newest);
-    harness.seed_scanner_checkpoint(newest);
+    harness.seed_scanner_checkpoint(frontier);
     harness
         .shared
         .last_message_ids
         .insert(harness.channel_id, active);
 }
 
-fn assert_phase1_read_past(harness: &RelayE2eHarness, newest: u64) {
-    let first = harness.history_queries().first().cloned();
-    let phase1_after = first.and_then(|query| query.after);
+fn assert_phase1_read_past(harness: &RelayE2eHarness, frontier: u64) {
     assert_eq!(
-        phase1_after,
-        Some(newest),
-        "phase 1 must not see the scenario"
+        harness.history_queries(),
+        vec![
+            HistoryQuery {
+                limit: Some(50),
+                before: None,
+                after: Some(frontier)
+            },
+            HistoryQuery {
+                limit: Some(20),
+                before: None,
+                after: None
+            },
+        ],
+        "phase 1 reads the earlier snapshot; phase 2 alone sees the incoming scenario"
     );
+}
+
+async fn reveal_to_phase2(harness: &RelayE2eHarness, history: &[(u64, &str, bool)]) {
+    assert!(
+        harness.wait_for_held_history(Duration::from_secs(5)).await,
+        "the first After GET must be held before reading the old history"
+    );
+    harness.hold_next_history();
+    harness.release_held_history();
+    assert!(
+        harness.wait_for_held_history(Duration::from_secs(5)).await,
+        "the phase 2 GET must be held after the empty After response"
+    );
+    assert_eq!(harness.history_queries().len(), 2);
+    eprintln!("phase2 history GET held after the empty After snapshot");
+    harness.seed_channel_history(history);
+    harness.release_held_history();
 }
 
 /// A command consumed after classification is refused at the commit in either phase, with or
@@ -61,28 +86,38 @@ async fn a_command_consumed_after_classification_is_refused_at_the_commit() {
                 (base | 1, base | 2, base | 3, base | 4, base | 5);
             let (dropped_text, stop_text) =
                 (format!("{prefix}!skill review"), format!("{prefix}!stop"));
-            harness.seed_channel_history(&[
+            let history = [
                 (answered, "bot answer", true),
                 (dropped, &dropped_text, false),
                 (stop, &stop_text, false),
                 (missed, "question the gateway dropped", false),
-            ]);
+            ];
+            if let Phase::Two = phase {
+                harness.seed_channel_history(&[(answered, "bot answer", true)]);
+            } else {
+                harness.seed_channel_history(&history);
+            }
             let (_turn, token) = hold_a_turn(&harness, active).await;
             if let Phase::Two = phase {
-                leave_the_scan_to_phase2(&harness, active, missed);
+                leave_the_scan_to_phase2(&harness, active, answered, missed);
+                harness.hold_next_history();
             }
             let (held, release) = test_gate::hold(Stage::BeforeLock, stop);
             let sweep = harness.spawn_catch_up();
+            if let Phase::Two = phase {
+                reveal_to_phase2(&harness, &history).await;
+            }
             let parked = tokio::time::timeout(Duration::from_secs(5), held.notified()).await;
             assert!(
                 parked.is_ok(),
                 "{case}: the sweep must classify the stop as recoverable"
             );
+            eprintln!("BeforeLock(stop) reached: {case}");
             stop_the_turn_with(&harness, &token, stop, &stop_text).await;
             release.notify_one();
             sweep.await.expect("the sweep finishes");
             if let Phase::Two = phase {
-                assert_phase1_read_past(&harness, missed);
+                assert_phase1_read_past(&harness, answered);
             }
 
             assert_eq!(queued_ids(&harness).await, vec![dropped, missed], "{case}");
@@ -106,18 +141,29 @@ async fn phase2_settles_a_consumed_command_without_a_retry() {
     harness.register_channel_in_role_map();
     let base = recent_snowflake_base();
     let (answered, active, stop, missed) = (base | 1, base | 2, base | 3, base | 4);
-    harness.seed_channel_history(&[
+    let history = [
         (answered, "bot answer", true),
         (stop, "!stop", false),
         (missed, "question the gateway dropped", false),
-    ]);
+    ];
+    harness.seed_channel_history(&[(answered, "bot answer", true)]);
     let (_turn, token) = hold_a_turn(&harness, active).await;
     stop_the_turn_with(&harness, &token, stop, "!stop").await;
-    leave_the_scan_to_phase2(&harness, active, missed);
+    let recorded: Vec<u64> =
+        serde_json::from_slice(&std::fs::read(record_path()).unwrap()).unwrap();
+    assert!(
+        recorded.contains(&stop),
+        "the live handler must have recorded the stop before the scan"
+    );
+    eprintln!("consumed stop recorded before phase2 GET");
+    leave_the_scan_to_phase2(&harness, active, answered, missed);
 
-    harness.run_catch_up().await;
+    harness.hold_next_history();
+    let sweep = harness.spawn_catch_up();
+    reveal_to_phase2(&harness, &history).await;
+    sweep.await.expect("the phase 2 sweep finishes");
 
-    assert_phase1_read_past(&harness, missed);
+    assert_phase1_read_past(&harness, answered);
     assert_eq!(queued_ids(&harness).await, vec![missed]);
     assert!(
         !harness
