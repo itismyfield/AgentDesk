@@ -1821,6 +1821,7 @@ mod tests {
             provider: "codex".to_string(),
             channels: crate::config::AgentChannels::new()
                 .with("codex", crate::config::AgentChannel::from("pg-agent-cdx")),
+            peer_keywords: Vec::new(),
             peer_directory: true,
             keywords: Vec::new(),
             department: Some("platform".to_string()),
@@ -2842,6 +2843,7 @@ mod tests {
             provider: "codex".to_string(),
             channels: crate::config::AgentChannels::new()
                 .with("codex", crate::config::AgentChannel::from("maker-cdx")),
+            peer_keywords: Vec::new(),
             peer_directory: true,
             keywords: Vec::new(),
             department: Some("engineering".to_string()),
@@ -2961,6 +2963,7 @@ mod tests {
                 provider: "codex".to_string(),
                 channels: crate::config::AgentChannels::new()
                     .with("codex", crate::config::AgentChannel::from("maker-cdx")),
+                peer_keywords: Vec::new(),
                 peer_directory: true,
                 keywords: Vec::new(),
                 department: Some("engineering".to_string()),
@@ -2980,6 +2983,7 @@ mod tests {
                 provider: "codex".to_string(),
                 channels: crate::config::AgentChannels::new()
                     .with("codex", crate::config::AgentChannel::from("legacy-cdx")),
+                peer_keywords: Vec::new(),
                 peer_directory: true,
                 keywords: Vec::new(),
                 department: Some("legacy".to_string()),

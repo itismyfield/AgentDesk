@@ -90,6 +90,7 @@ pub(crate) fn ensure_agent_setup_config(
         voice: crate::config::AgentVoiceConfig::default(),
         provider: input.provider.clone(),
         channels,
+        peer_keywords: Vec::new(),
         peer_directory: true,
         keywords: Vec::new(),
         department: None,
@@ -762,7 +763,7 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
             PeerAgentInfo {
                 role_id: agent.id.clone(),
                 display_name: agent_display_name(agent),
-                keywords: agent.keywords.clone(),
+                keywords: agent.peer_keywords.clone(),
                 provider,
                 identity_label: identity_label(&identity),
             }

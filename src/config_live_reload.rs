@@ -362,6 +362,7 @@ mod tests {
                     ..crate::config::AgentChannelConfig::default()
                 }),
             ),
+            peer_keywords: Vec::new(),
             peer_directory: true,
             keywords: Vec::new(),
             department: None,

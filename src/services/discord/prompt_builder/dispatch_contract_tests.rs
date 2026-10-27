@@ -1521,7 +1521,63 @@ fn peer_directory_prompt() -> String {
 }
 
 #[test]
-fn peer_directory_example_hides_e2e_and_keeps_specialist_keywords() {
+fn peer_directory_shared_keywords_are_not_voice_aliases_or_meeting_keywords() {
+    let root = tempfile::tempdir().unwrap();
+    let _guard = crate::config::set_agentdesk_root_for_test(root.path());
+    let path = crate::runtime_layout::config_file_path(root.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "server: {}\ndatabase: {enabled: false}\nvoice: {enabled: true}\nagents:\n  - {id: ch-tad, name: TechnicalArt, name_ko: 테크아트, keywords: [기술미술], peer_keywords: [아트]}\n  - {id: ch-ad, name: ArtDirector, name_ko: 아트디렉터, keywords: [미술감독], peer_keywords: [아트]}\n  - {id: voice-only, name: VoiceOnly, name_ko: 목소리, keywords: [음성전용]}\nmeeting:\n  channel_name: fixture\n  summary_agent: ch-tad\n  available_agents:\n    - ch-tad\n    - {role_id: ch-ad}\n    - voice-only\n",
+    )
+    .unwrap();
+    let config = crate::config::load_from_path(&path).expect("valid shared keyword fixture");
+    let aliases = crate::voice::commands::validate_agent_alias_collisions(&config.agents);
+    let loaded = crate::services::discord_config_audit::load_runtime_config(root.path())
+        .expect("config audit voice precheck accepts shared directory keywords");
+    assert!(
+        aliases.is_ok(),
+        "shared directory keywords collided: {aliases:?}"
+    );
+    assert!(loaded.config.voice.enabled, "audit must keep voice enabled");
+    let audit = crate::services::discord_config_audit::audit_and_reconcile_config_only(
+        root.path(),
+        loaded.config,
+        loaded.path,
+        loaded.existed,
+        &Default::default(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(audit.report.status, "ok");
+    assert_eq!(audit.report.warnings_count, 0);
+    let mut voice_collision = config.agents.clone();
+    for agent in &mut voice_collision[..2] {
+        agent.keywords = vec!["음성충돌".to_string()];
+    }
+    assert!(crate::voice::commands::validate_agent_alias_collisions(&voice_collision).is_err());
+
+    let prompt = peer_directory_prompt();
+    let directory = prompt.split("[Peer Agent Directory]").nth(1).unwrap();
+    for id in ["ch-tad", "ch-ad"] {
+        let line = directory
+            .lines()
+            .find(|line| line.starts_with(&format!("- {id} ")))
+            .unwrap();
+        assert!(
+            line.contains("best for: 아트"),
+            "missing shared keyword: {line}"
+        );
+    }
+    assert!(directory.contains("(목소리)"));
+    assert!(!directory.contains("음성전용"));
+    let meeting = crate::services::discord::agentdesk_config::load_meeting_config().unwrap();
+    assert_eq!(meeting.available_agents[0].keywords, ["기술미술"]);
+    assert_eq!(meeting.available_agents[1].keywords, ["미술감독"]);
+}
+
+#[test]
+fn peer_directory_example_hides_e2e_and_keeps_specialist_names() {
     let example = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agentdesk.example.yaml"),
     )
@@ -1530,7 +1586,8 @@ fn peer_directory_example_hides_e2e_and_keeps_specialist_keywords() {
     let _guard = crate::config::set_agentdesk_root_for_test(root.path());
     let path = crate::runtime_layout::config_file_path(root.path());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let isolated = example.replace("~/", &format!("{}/", root.path().display()));
+    let fixture_home = root.path().to_string_lossy().replace('\\', "/");
+    let isolated = example.replace("~/", &format!("{fixture_home}/"));
     std::fs::write(&path, isolated).unwrap();
     let config = crate::config::load_from_path(&path).expect("valid example config");
     let e2e_agents: Vec<_> = config
@@ -1553,7 +1610,7 @@ fn peer_directory_example_hides_e2e_and_keeps_specialist_keywords() {
         );
     }
     assert!(directory.contains("ch-td"));
-    assert!(directory.contains("(테크니컬 디렉터) — best for: 아키텍처, 코드"));
+    assert!(directory.contains("(테크니컬 디렉터)"));
 }
 
 #[test]
@@ -1562,7 +1619,7 @@ fn peer_directory_next_prompt_reads_added_agents_without_restart() {
     let _guard = crate::config::set_agentdesk_root_for_test(root.path());
     let path = crate::runtime_layout::config_file_path(root.path());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let initial = "server: {}\ndatabase: {enabled: false}\nagents:\n  - {id: family-counsel, name: Counsel}\n  - {id: chef-goat, name: Chef, name_ko: 셰프, keywords: [요리, 식단, 재료, 레시피, 미표시]}\nmeeting:\n  channel_name: fixture\n  available_agents: [family-counsel, chef-goat]\n";
+    let initial = "server: {}\ndatabase: {enabled: false}\nagents:\n  - {id: family-counsel, name: Counsel}\n  - {id: chef-goat, name: Chef, name_ko: 셰프, peer_keywords: [요리, 식단, 재료, 레시피, 미표시]}\nmeeting:\n  channel_name: fixture\n  available_agents: [family-counsel, chef-goat]\n";
     std::fs::write(&path, initial).unwrap();
     crate::config::load_from_path(&path).expect("valid peer directory fixture");
     let before = peer_directory_prompt();
@@ -1605,6 +1662,11 @@ fn peer_directory_next_prompt_reads_added_agents_without_restart() {
     config.meeting = None;
     std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
     assert_eq!(after, peer_directory_prompt());
+    config.agents[1].peer_keywords = vec!["새로운전문분야".to_string()];
+    std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    let updated = peer_directory_prompt();
+    assert!(updated.contains("best for: 새로운전문분야"));
+    assert!(!updated.contains("요리, 식단, 재료, 레시피"));
     let mut value = serde_yaml::to_value(config).unwrap();
     value["agents"][1]["peer_directory"] = serde_yaml::Value::Bool(false);
     std::fs::write(&path, serde_yaml::to_string(&value).unwrap()).unwrap();
@@ -1619,7 +1681,7 @@ fn peer_directory_excludes_meeting_only_and_hidden_agents() {
     let _guard = crate::config::set_agentdesk_root_for_test(root.path());
     let path = crate::runtime_layout::config_file_path(root.path());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let mut yaml = "server: {}\ndatabase: {enabled: false}\nagents:\n  - {id: family-counsel, name: Counsel}\n  - {id: chef-goat, name: Chef, name_ko: 셰프}\n  - {id: english-only, name: English}\n  - {id: blank-ko, name: Fallback, name_ko: ' '}\n".to_string();
+    let mut yaml = "server: {}\ndatabase: {enabled: false}\nagents:\n  - {id: family-counsel, name: Counsel}\n  - {id: chef-goat, name: Chef, name_ko: 셰프, peer_keywords: [요리]}\n  - {id: english-only, name: English}\n  - {id: blank-ko, name: Fallback, name_ko: ' '}\n".to_string();
     for id in [
         "adk-claude-e2e",
         "adk-codex-e2e",
@@ -1638,6 +1700,11 @@ fn peer_directory_excludes_meeting_only_and_hidden_agents() {
     std::fs::write(&path, yaml).unwrap();
     let config = crate::config::load_from_path(&path).expect("valid visibility fixture");
     crate::config::save_to_path(&path, &config).unwrap();
+    let reloaded = crate::config::load_from_path(&path).unwrap();
+    assert_eq!(reloaded.agents[1].peer_keywords, ["요리"]);
+    let saved: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(saved["agents"][2].get("peer_keywords").is_none());
     let prompt = peer_directory_prompt();
     assert!(
         !prompt.contains("meeting-only"),
