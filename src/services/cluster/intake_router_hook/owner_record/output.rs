@@ -46,7 +46,17 @@ pub(crate) struct Scope {
     pub(crate) provider: String,
 }
 
+#[must_use]
 pub(crate) struct EffectGuard(Option<Transaction<'static, Postgres>>);
+
+async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query("SET LOCAL idle_in_transaction_session_timeout='65s'")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(tx)
+}
 
 impl Scope {
     pub(crate) async fn acquire(
@@ -56,11 +66,7 @@ impl Scope {
         artifact: Option<&Artifact>,
     ) -> Result<EffectGuard, String> {
         let id = OwnerIdentity::new(&self.provider, channel);
-        let mut tx = self.pool.begin().await.map_err(|e| e.to_string())?;
-        sqlx::query("SET LOCAL idle_in_transaction_session_timeout='65s'")
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut tx = begin(&self.pool).await?;
         custody::lock(&mut tx, &id)
             .await
             .map_err(|e| e.to_string())?;
@@ -170,13 +176,32 @@ pub(crate) async fn source_artifact(
     Ok(rows.into_iter().next().map(|origin| origin.seal(payload)))
 }
 
-pub(crate) async fn reject_unstamped_managed(pool: &PgPool, channel: &str) -> Result<(), String> {
+pub(crate) async fn acquire_unstamped(pool: &PgPool, channel: &str) -> Result<EffectGuard, String> {
+    use crate::services::provider::ProviderKind;
+    let mut tx = begin(pool).await?;
+    // Old rows cannot name a provider; serialize with every supported owner namespace.
+    let mut identities = [
+        ProviderKind::Claude,
+        ProviderKind::Codex,
+        ProviderKind::Gemini,
+        ProviderKind::OpenCode,
+        ProviderKind::Qwen,
+        ProviderKind::Grok,
+        ProviderKind::Antigravity,
+    ]
+    .map(|provider| OwnerIdentity::new(provider.as_str(), channel));
+    identities.sort_unstable_by_key(OwnerIdentity::advisory_key);
+    for identity in &identities {
+        custody::lock(&mut tx, identity)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     let managed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox WHERE channel_id=$1 AND routing_receipt_id IS NOT NULL)")
-        .bind(channel).fetch_one(pool).await.map_err(|e| e.to_string())?;
+        .bind(channel).fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
     if managed {
         Err("managed output has no origin stamp".into())
     } else {
-        Ok(())
+        Ok(EffectGuard(Some(tx)))
     }
 }
 

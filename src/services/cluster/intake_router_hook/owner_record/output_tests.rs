@@ -9,7 +9,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-fn payload(channel: &str, message: &str, gateway: &str) -> outbox::InsertPendingPayload {
+pub(crate) fn payload(channel: &str, message: &str, gateway: &str) -> outbox::InsertPendingPayload {
     outbox::InsertPendingPayload {
         target_instance_id: gateway.into(),
         forwarded_by_instance_id: gateway.into(),
