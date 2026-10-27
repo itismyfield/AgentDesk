@@ -226,7 +226,7 @@ async fn attempt(
     if !shared.has_inject_turn(provider, live.channel_id).await {
         return None;
     }
-    let prepare = super::super::message_handler::prepare_busy_inject_uploads;
+    let prepare = super::super::input_payload::prepare_busy_uploads;
     let uploads = match prepare(live.channel_id, live.uploads, shared.pg_pool.as_ref()).await {
         Ok(records) => records,
         Err(error) => {

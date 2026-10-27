@@ -1,8 +1,9 @@
 server:
   port: 8791
   host: "0.0.0.0"
-  # Peers outside loopback, Tailscale (100.64.0.0/10) and private LAN ranges:
-  # off = no filter, log = warn only (default), enforce = 403.
+  # Peers outside loopback and Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48):
+  # off = no filter, log = warn only (default), enforce = 403 for public peers.
+  # Private LAN peers are still served but logged with peer_class=private_lan.
   # peer_filter: log
 
 cluster:

@@ -86,98 +86,12 @@ impl SnapshotMeta {
     }
 }
 
-/// The V1 snapshot: queue items with the head reservation and the submitted sources.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ChannelQueueSnapshotV1 {
-    version: u32,
-    items: Vec<PendingQueueItem>,
-    #[serde(flatten)]
-    meta: SnapshotMeta,
-}
-
-/// The legacy array while `meta` is unset, the V1 object otherwise.
-pub(super) fn snapshot_json(
-    items: Vec<PendingQueueItem>,
-    meta: Option<&SnapshotMeta>,
-) -> serde_json::Result<String> {
-    let Some(meta) = meta.cloned() else {
-        return serde_json::to_string_pretty(&items);
-    };
-    serde_json::to_string_pretty(&ChannelQueueSnapshotV1 {
-        version: 1,
-        items,
-        meta,
-    })
-}
-
-/// A legacy array, or a version-1 object; any other object is an error, never an empty queue.
-pub(super) fn parse_snapshot(
-    content: &str,
-) -> Result<(Vec<PendingQueueItem>, Option<SnapshotMeta>), String> {
-    if !content.trim_start().starts_with('{') {
-        let items = serde_json::from_str(content).map_err(|e| e.to_string())?;
-        return Ok((items, None));
-    }
-    let snapshot: ChannelQueueSnapshotV1 =
-        serde_json::from_str(content).map_err(|e| e.to_string())?;
-    if snapshot.version != 1 {
-        return Err(format!(
-            "unsupported queue snapshot version {}",
-            snapshot.version
-        ));
-    }
-    if let Some(head) = &snapshot.meta.head_injection {
-        let first = snapshot
-            .items
-            .first()
-            .ok_or("reserved snapshot has no head")?;
-        for item in [first, &head.original] {
-            if item.message_id == 0
-                || item.author_id == 0
-                || item.channel_id.is_none_or(|channel| channel == 0)
-                || item.source_message_ids.contains(&0)
-                || item
-                    .source_text_segments
-                    .iter()
-                    .any(|segment| segment.message_id == 0)
-            {
-                return Err("reserved snapshot has an invalid zero identity".into());
-            }
-        }
-        let identity = |item: &PendingQueueItem| QueueIdentity {
-            primary: item.message_id,
-            queued_generation: item.queued_generation,
-            sources: (if item.source_message_ids.is_empty() {
-                vec![item.message_id]
-            } else {
-                item.source_message_ids.clone()
-            })
-            .into_iter()
-            .map(|message_id| SourceIdentity {
-                message_id,
-                queued_generation: item
-                    .source_message_queued_generations
-                    .iter()
-                    .find(|owner| owner.message_id == message_id)
-                    .map_or(item.queued_generation, |owner| owner.queued_generation),
-            })
-            .collect(),
-        };
-        if identity(first) != head.identity || identity(&head.original) != head.identity {
-            return Err("reserved snapshot source identity differs from its original".into());
-        }
-        let channel = first.channel_id.ok_or("reserved snapshot has no channel")?;
-        let item = super::pending_queue_persistence::pending_queue_item_to_intervention(
-            first.clone(),
-            std::time::SystemTime::now(),
-            Instant::now(),
-        );
-        if !is_head(head, &item, ChannelId::new(channel)) {
-            return Err("reserved snapshot payload differs from its original".into());
-        }
-    }
-    Ok((snapshot.items, Some(snapshot.meta)))
-}
+pub(super) mod compat;
+mod snapshot;
+#[cfg(test)]
+mod v2;
+mod v2_types;
+pub(super) use snapshot::{parse_snapshot, snapshot_json};
 
 /// The head and submitted sources a queue file holds; `None` for a missing file or a legacy array,
 /// an error for a file that cannot be read or parsed, legacy or not.
@@ -226,6 +140,8 @@ pub(crate) struct HeadLease;
 /// The actor's copy of the channel's snapshot metadata, read from disk once per namespace.
 #[derive(Default)]
 pub(super) struct HeadLedger {
+    #[cfg(test)]
+    v2: Option<v2::Owner>,
     adopted: Option<(ProviderKind, String)>,
     pub(super) meta: SnapshotMeta,
     lease: Option<Arc<HeadLease>>,
@@ -330,6 +246,8 @@ pub(super) fn release_for_clear(
         false => Vec::new(),
     };
     state.queued_head = HeadLedger {
+        #[cfg(test)]
+        v2: previous.v2,
         adopted: Some(key),
         meta: SnapshotMeta {
             head_injection: None,
@@ -574,6 +492,8 @@ mod claim {
     }
 
     pub(crate) enum HeadMsg {
+        #[cfg(test)]
+        V2(v2::actor::Message),
         Claim {
             expected: QueueIdentity,
             persistence: QueuePersistenceContext,
@@ -592,6 +512,8 @@ mod claim {
     impl HeadMsg {
         pub(in crate::services::turn_orchestrator) fn refuse(self, error: String) {
             match self {
+                #[cfg(test)]
+                Self::V2(msg) => msg.refuse(),
                 Self::Claim { reply, .. } => {
                     let _ = reply.send(QueuedHeadClaim::PersistenceFailed(error));
                 }
@@ -609,6 +531,8 @@ mod claim {
         msg: HeadMsg,
     ) {
         match msg {
+            #[cfg(test)]
+            HeadMsg::V2(msg) => msg.run(&mut state.queued_head.v2),
             HeadMsg::Claim {
                 expected,
                 persistence,
@@ -931,3 +855,7 @@ mod tests;
 #[cfg(test)]
 #[path = "queued_head_s2a_tests.rs"]
 mod s2a_tests;
+
+#[cfg(test)]
+#[path = "queued_head/compat_tests.rs"]
+mod compat_tests;
