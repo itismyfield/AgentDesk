@@ -35,7 +35,7 @@ pub(super) fn check_credential_permissions(cfg: &config::Config) -> Check {
     if let Some(root) = config::runtime_root() {
         candidates.push((
             "agentdesk_yaml",
-            crate::runtime_layout::config_file_path(&root),
+            crate::config::config_path::config_path_in(&root),
             cfg.server
                 .auth_token
                 .as_deref()

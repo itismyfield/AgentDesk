@@ -457,6 +457,7 @@ mod tests {
         assert_eq!(
             callers,
             [
+                "services/discord/inflight/save_store/identity_gate/runtime_stamp/claude_terminal_tests/o_stream_regression_tests.rs",
                 "services/discord/live_bridge/guard_tests.rs",
                 "services/discord/recovery_engine/restore_inflight.rs",
                 "services/discord/router/message_handler/headless_turn.rs",
@@ -473,6 +474,7 @@ mod tests {
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/o_after_done_chain_tests.rs",
+                "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/o_stream_regression_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
                 "services/discord/turn_bridge/tmux_runtime/native_stop_contract_tests.rs",
             ],

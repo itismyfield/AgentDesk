@@ -4,6 +4,8 @@ use super::recovery_retry_guard_tests as summary_assertions;
 use super::*;
 
 mod o_after_done_chain_tests;
+#[cfg(unix)]
+mod o_stream_regression_tests;
 #[cfg(test)]
 mod pg_tests;
 mod preloop_cleanup_tests;

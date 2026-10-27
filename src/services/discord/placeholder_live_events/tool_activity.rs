@@ -338,8 +338,8 @@ pub(super) fn json_result_observations(
     events
 }
 
-pub(super) fn fit_panel(mut sections: Vec<String>) -> String {
-    sections = sections
+pub(super) fn fit_panel(sections: Vec<String>) -> String {
+    let sections = sections
         .into_iter()
         .enumerate()
         .filter_map(|(index, section)| {
@@ -355,6 +355,12 @@ pub(super) fn fit_panel(mut sections: Vec<String>) -> String {
             }
         })
         .collect();
+    fit_sections(sections)
+}
+
+/// Fits panel sections to the live footer body by dropping whole tool rows, then shortening
+/// the longest section, so every section title stays visible.
+pub(super) fn fit_sections(mut sections: Vec<String>) -> String {
     let format = |sections: &[String]| {
         sections
             .iter()
