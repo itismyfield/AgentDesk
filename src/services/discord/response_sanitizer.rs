@@ -14,7 +14,7 @@ const HIDDEN_HEADERS: &[&str] = &[
     "[Shared Agent Rules]",
     "[Channel Role Binding]",
     "[ADK API Usage]",
-    "[Agent Performance",
+    "[Agent Performance", // Existing sessions can still echo the retired prompt block.
     "[Peer Agent Directory]",
     "[Proactive Memory Guidance]",
     "[Memory Recall Ownership]",
@@ -227,6 +227,18 @@ fn trim_blank_edges(lines: Vec<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strips_legacy_agent_performance_echo_from_existing_sessions() {
+        let echoed = "[Agent Performance — Last 7 Days]\n\
+                      Review pass rate: n/a (30d baseline: n/a)\n\
+                      Turn success: 75%\n\
+                      Self-feedback: verify before final status.\n\
+                      Rollup day: 2026-10-27\n\n\
+                      검증을 마쳤습니다.";
+
+        assert_eq!(sanitize_hidden_context(echoed), "검증을 마쳤습니다.");
+    }
 
     #[test]
     fn strips_echoed_memory_recall_ownership_block() {

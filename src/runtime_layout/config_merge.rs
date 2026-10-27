@@ -314,6 +314,8 @@ fn ensure_config_agent(
         voice: crate::config::AgentVoiceConfig::default(),
         provider: provider_key.to_string(),
         channels: crate::config::AgentChannels::default(),
+        peer_keywords: Vec::new(),
+        peer_directory: true,
         keywords: Vec::new(),
         department: None,
         avatar_emoji: None,

@@ -106,18 +106,21 @@ const ANCESTORS: [(&str, &str, &str, &[&str]); 2] = [
         &[
             "post_adk_session_status_for_channel(",
             "hosted_tui_busy_preflight",
+            "save_intake_inflight(codex_seed.as_ref(), &mut inflight_state)",
         ],
     ),
     (
         "headless",
         HEADLESS_TURN,
         "async fn start_reserved_headless_turn_admitted(",
-        &["post_adk_session_status_with_canonical_identity("],
+        &[
+            "post_adk_session_status_with_canonical_identity(",
+            "save_inflight_state_create_new(&inflight_state)",
+        ],
     ),
 ];
 const JUDGE: &str = "turn_teardown_clearance::for_turn(";
 const SPAWN: &str = "tokio::task::spawn_blocking(";
-const SAVE: &str = "save_inflight_state_create_new(&inflight_state)";
 const VERDICT_ARGS: [&str; 2] = ["adk_session_key.as_deref()", "tmux_session_name.as_deref()"];
 const EXECUTE: &str = "provider_dispatch::execute(";
 const SPAWNED_ARGS: [&str; 2] = [
@@ -146,7 +149,7 @@ fn last_step_gaps(source: &str, entry: &str, earlier: &[&str]) -> Vec<String> {
     if !text[end..spawn].trim().is_empty() {
         gaps.push("nothing runs between the verdict and the spawn".to_string());
     }
-    for step in earlier.iter().chain(&[SAVE]) {
+    for step in earlier {
         if !src.find(step).is_some_and(|at| at < call) {
             gaps.push(format!("{step} must precede the verdict"));
         }
@@ -184,7 +187,7 @@ fn last_step_guard_rejects_commented_steps_and_code_before_spawn() {
     use crate::services::discord::router::source_guard_support::{Lexed, forge};
     use crate::test_support::CommentForgery;
     for (file, source, entry, earlier) in ANCESTORS {
-        let mut needles = vec![entry, JUDGE, SPAWN, SAVE, EXECUTE];
+        let mut needles = vec![entry, JUDGE, SPAWN, EXECUTE];
         needles.extend(
             earlier
                 .iter()

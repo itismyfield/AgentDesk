@@ -9,6 +9,7 @@ pub(super) struct StreamChunkState<'a> {
     pub(super) channel_id: ChannelId,
     pub(super) watcher_instance_id: u64,
     pub(super) source_authority: WatcherSourceAuthority,
+    pub(super) mixed_read_provenance: &'a mut bool,
     pub(super) retained_source: bool,
     pub(super) read_witness: Option<SourceWitness>,
     pub(super) chunk: &'a [u8],
@@ -60,6 +61,7 @@ pub(super) fn process_stream_chunk(
         channel_id,
         watcher_instance_id,
         source_authority,
+        mixed_read_provenance,
         retained_source,
         read_witness,
         chunk,
@@ -116,6 +118,7 @@ pub(super) fn process_stream_chunk(
     let chunk_start = current_offset.saturating_sub(chunk.len() as u64);
     let decoded_chunk =
         utf8_decoder.decode_source_for_buffer(chunk, chunk_start, authority, all_data);
+    *mixed_read_provenance |= decoded_chunk.mixed_read_provenance;
     let authority = authority_for_decoded_text(authority, decoded_chunk.mixed_read_provenance);
     // Defer forwarding until parsing attaches the terminal fence.
     let chunk_buffer_was_empty = all_data.is_empty();

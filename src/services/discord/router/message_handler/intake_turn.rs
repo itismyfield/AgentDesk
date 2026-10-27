@@ -1628,7 +1628,7 @@ pub(super) async fn handle_text_message(
         )
         .await;
 
-        let (inflight_tmux_name, inflight_output_path, inflight_input_fifo, mut inflight_offset) =
+        let ((inflight_tmux_name, inflight_output_path, inflight_input_fifo, mut inflight_offset), codex_seed) =
             prelaunch_inflight_runtime_seed(
                 &provider,
                 remote_profile.is_none(),
@@ -1636,11 +1636,6 @@ pub(super) async fn handle_text_message(
                 prelaunch_runtime_kind,
             );
         let watcher_tmux_name = inflight_tmux_name.clone();
-        let watcher_output_path = prelaunch_watcher_output_path(
-            inflight_tmux_name.as_deref(),
-            inflight_output_path.as_deref(),
-            prelaunch_runtime_kind,
-        );
         #[cfg(unix)]
         let mut recapture_offset_after_busy_wait = false;
         // #2416: compute claude_tui busy-followup diagnostic with a wait+retry step.
@@ -2084,10 +2079,17 @@ pub(super) async fn handle_text_message(
             Err(false) => return Err("original bridge start deferred; retry enqueue refused".into()),
         };
         inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
-        let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);
+        let row = save_intake_inflight(codex_seed.as_ref(), &mut inflight_state);
         if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {
             return Ok(IntakeExecution::deferred(channel_id));
         }
+        // A replaced Codex source is saved as the wrapper end; the watcher follows the saved row.
+        inflight_offset = inflight_state.last_offset;
+        let watcher_output_path = prelaunch_watcher_output_path(
+            watcher_tmux_name.as_deref(),
+            inflight_state.output_path.as_deref(),
+            prelaunch_runtime_kind,
+        );
 
         if preserve_queued_view {
             tv_start_current_with_attempt(shared, http, channel_id, user_msg_id, "queued_replay_input_started")
