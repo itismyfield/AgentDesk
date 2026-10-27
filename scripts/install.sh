@@ -205,6 +205,7 @@ finish_install() {
       if [ "$BINARY_REPLACED" = 1 ] && [ ! -f "$INSTALL_STAGE/agentdesk" ]; then
         [ ! -f "$target" ] || chflags nouchg "$target" || status=1
         if ! mv -f "$INSTALL_STAGE/previous" "$target"; then
+          [ ! -f "$target" ] || chflags uchg "$target"
           [ "$OLD_BINARY_LOCKED" = 0 ] || chflags uchg "$INSTALL_STAGE/previous"
           warn "Binary recovery failed; previous binary retained at $INSTALL_STAGE/previous"
           exit 1

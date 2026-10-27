@@ -364,6 +364,11 @@ class InstallBootstrapPortableTests(unittest.TestCase):
         """)
         self.write_executable(fakebin / "mv", r"""
             args="$*"
+            if [[ "${FAIL_INSTALL_RECOVERY:-0}" == 1 && "$args" == *"/bin/agentdesk" ]]; then
+              if [[ "$args" == *"/previous "* ]]; then exit 75; fi
+              /bin/mv "$@"
+              exit 74
+            fi
             if [[ "${FAIL_INSTALL_REPLACE:-0}" == 1 && "$args" == *".agentdesk-install."* && "$args" == *"/bin/agentdesk" ]]; then
               echo replace > "$FIXTURE_FAILURE_LOG"
               exit 72
@@ -565,6 +570,25 @@ else:
                         self.assertNotIn("Installation Complete", failed.stdout)
                         print("RECOVERY", mode, failure, "sha256=" + hashlib.sha256(old_bytes).hexdigest(),
                               "flags=" + str(binary.stat().st_flags))
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("node"), "real macOS immutable flags and Node required")
+    def test_failed_rollback_retains_protected_candidate_and_previous_binary(self):
+        for mode in ("source", "release"):
+            with self.subTest(mode=mode):
+                _, runtime, fixture, env = self.installer_sandbox(mode)
+                first = self.install_fixture(fixture, env)
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                binary = runtime / "bin/agentdesk"
+                old_bytes, old_flags = binary.read_bytes(), binary.stat().st_flags
+                failed = self.install_fixture(fixture, {**env, "FAIL_INSTALL_RECOVERY": "1"}, "two")
+                self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+                self.assertIn("Binary recovery failed; previous binary retained at", failed.stdout)
+                self.assertNotIn("Installation Complete", failed.stdout)
+                self.assertTrue(binary.stat().st_flags & 2)
+                backups = list((runtime / "bin").glob(".agentdesk-install.*/previous"))
+                self.assertEqual(len(backups), 1)
+                self.assertEqual(backups[0].read_bytes(), old_bytes)
+                self.assertEqual(backups[0].stat().st_flags, old_flags)
 
     @unittest.skipUnless(sys.platform == "darwin" and shutil.which("node"), "macOS reinstall and Node required")
     def test_reinstall_requires_new_boot_incarnation(self):
