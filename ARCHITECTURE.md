@@ -545,10 +545,12 @@ src/
 │   │   │   │   ├── types.rs
 │   │   │   │   └── validation.rs
 │   │   │   └── auto_queue_preflight_harness_tests.rs
+│   │   ├── agent_input_tests.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_host_guard_tests.rs
 │   │   ├── agents_setup.rs
+│   │   ├── agents_setup_validation_tests.rs
 │   │   ├── agents_stop.rs
 │   │   ├── agents_turn_deliver.rs
 │   │   ├── agents_turn_target.rs
@@ -4031,6 +4033,7 @@ src/
 │   ├── discord.rs
 │   ├── format.rs
 │   ├── github_links.rs
+│   ├── input_validation.rs
 │   ├── loopback_url.rs
 │   ├── mod.rs
 │   ├── redact.rs
