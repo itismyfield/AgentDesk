@@ -169,7 +169,7 @@ async fn exact_history_adapter_pastes_once_and_reconciles_after_restart_pg() {
         binding,
     );
     // The native client consumed the first input; the composer is empty after restart.
-    std::fs::remove_file(fixture.pane.path("pasted")).unwrap();
+    let _ = std::fs::remove_file(fixture.pane.path("pasted"));
     let target = super::super::resolve(&fixture.shared, &request, true)
         .await
         .unwrap();
@@ -257,7 +257,8 @@ async fn exact_history_adapter_pastes_once_and_reconciles_after_restart_pg() {
     for index in 1..=11u64 {
         let text = if index == 11 { "fresh C" } else { "same body" };
         let emit_receipt = index >= 10;
-        let deliver = index == 11;
+        // A completed paste and Enter is delivered whatever the receipt shows.
+        let deliver = index >= 10;
         let target = super::super::resolve(&fixture.shared, &request, true)
             .await
             .unwrap();
@@ -295,11 +296,13 @@ async fn exact_history_adapter_pastes_once_and_reconciles_after_restart_pg() {
             })
             .await
             .unwrap();
-        let marker = fixture.pane.path("defer.receipt");
-        if emit_receipt {
-            let _ = std::fs::remove_file(&marker);
-        } else {
-            std::fs::write(&marker, "defer").unwrap();
+        // A withheld receipt is unconfirmed only when tmux could not report the Enter either.
+        for marker in ["defer.receipt", "fail.enter"].map(|name| fixture.pane.path(name)) {
+            if emit_receipt {
+                let _ = std::fs::remove_file(&marker);
+            } else {
+                std::fs::write(&marker, "defer").unwrap();
+            }
         }
         let _ = std::fs::remove_file(fixture.pane.path("pasted"));
         let adapter = QueuedProvider::Codex
@@ -364,8 +367,8 @@ async fn exact_history_adapter_pastes_once_and_reconciles_after_restart_pg() {
     assert!(snapshot["head_injection"].is_null());
     assert_eq!(
         snapshot["retained_inputs"].as_array().unwrap().len(),
-        10,
-        "nine Unknown originals and ambiguous same-body B survive fresh C"
+        9,
+        "nine Unknown originals survive fresh same-body B and C"
     );
     assert_eq!(
         snapshot["retained_inputs"][0]["input"]["original"]["text"],

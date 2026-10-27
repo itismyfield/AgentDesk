@@ -17,12 +17,11 @@ pub(crate) fn inspect(content: &str) -> Result<SnapshotRead, String> {
     Ok(SnapshotRead::Legacy(items, meta.map(Box::new)))
 }
 
-/// Runs before any unlink, marker change or legacy publish, even in an adopted actor.
+/// Runs before any unlink, marker change or legacy publish, even in an adopted actor. Only a
+/// snapshot read as a non-legacy object refuses; a failed read leaves the write to report itself.
 pub(crate) fn require_legacy_write(path: &Path) -> Result<(), String> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(format!("read-only queue preflight {}: {e}", path.display())),
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Ok(());
     };
     if content.trim_start().starts_with('{') {
         let value: serde_json::Value = serde_json::from_str(&content)

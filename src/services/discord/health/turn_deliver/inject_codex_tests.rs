@@ -56,6 +56,7 @@ with (d / "rollout.jsonl").open("a") as stream:
     for record in (response, completed):
         stream.write(json.dumps(record) + "\n")
 PY
+    [ -f "$d/fail.enter" ] && exit 1
     ;;
   esac ;;
 esac
@@ -637,8 +638,10 @@ impl QueuedCodex {
         }
     }
 
+    /// An Enter whose result tmux could not report is a real unconfirmed effect.
     async fn leave_unknown(&self) {
         self.pane.set("defer.receipt", "");
+        self.pane.set("fail.enter", "");
         let attempt = self.attempt().await;
         assert!(
             matches!(
@@ -939,7 +942,7 @@ async fn queued_codex_same_owner_serializes_two_inputs_across_effect_pg() {
         .intervention_queue;
     assert_eq!(queue.len(), 1);
     assert_eq!(queue[0].message_id, second.message_id);
-    fs::remove_file(f.pane.path("pasted")).unwrap();
+    let _ = fs::remove_file(f.pane.path("pasted"));
     let second_origin = inject::Origin::QueuedHead {
         expected: QueueIdentity::of(&second),
         parent: None,
