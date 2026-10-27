@@ -341,7 +341,16 @@ pub(super) async fn handle_stream_content_message(
                                     }
                                 }
                             }
-                            if let Some(resolved) = resolve_done_response(
+                            let preserve_progress = !matches!(stream_body_ownership_peek(
+                                channel_id, inflight_state, gateway.can_deliver_directly(),
+                            ), Ok(false));
+                            if preserve_progress {
+                                // Admission may have merged newer durable progress under its lock.
+                                full_response.clone_from(&inflight_state.full_response);
+                                response_sent_offset = inflight_state.response_sent_offset;
+                            }
+                            if (!preserve_progress || result.starts_with(&full_response))
+                                && let Some(resolved) = resolve_done_response(
                                 &full_response,
                                 &result,
                                 any_tool_used,
@@ -362,7 +371,7 @@ pub(super) async fn handle_stream_content_message(
                                     inflight_state,
                                 );
                             }
-                            if done_result_requires_full_terminal_replay(
+                            if !preserve_progress && done_result_requires_full_terminal_replay(
                                 &full_response,
                                 &result,
                                 response_sent_offset,
@@ -380,8 +389,12 @@ pub(super) async fn handle_stream_content_message(
                                 );
                                 terminal_full_replay_cleanup_msg_ids =
                                     streaming_rollover_frozen_msg_ids.clone();
+                                #[cfg(test)]
+                                super::super::record_stream_test_event(channel_id.get(), "replay");
                                 response_sent_offset = 0;
                             }
+                            #[cfg(test)]
+                            super::super::record_stream_test_event(channel_id.get(), format!("done-body={:?}/{}", full_response, response_sent_offset));
                             if let Some(s) = sid {
                                 new_session_id = Some(s.clone());
                                 inflight_state.session_id = Some(s);

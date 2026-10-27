@@ -34,7 +34,7 @@ extract_function() {
     ' "$DEPLOY_SH"
 }
 
-for fn in _deploy_peer_env_prelude _extract_yaml_server_port_shell _deploy_to_one_peer; do
+for fn in _deploy_peer_env_prelude _extract_yaml_server_port_shell _prepare_peer_binary _deploy_to_one_peer; do
     body="$(extract_function "$fn")"
     if [ -z "$body" ]; then
         printf 'FAIL: could not extract %s from %s\n' "$fn" "$DEPLOY_SH" >&2

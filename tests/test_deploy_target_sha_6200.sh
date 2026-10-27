@@ -39,7 +39,7 @@ extract_target_validation() {
 }
 
 for fn in _verify_deploy_target_sha _verify_deploy_target_ci_green _check_repo_source_identity \
-    _check_repo_remote_freshness _deploy_peer_env_prelude _deploy_to_one_peer; do
+    _check_repo_remote_freshness _deploy_peer_env_prelude _prepare_peer_binary _deploy_to_one_peer; do
     body="$(extract_function "$fn")"
     if [ -z "$body" ]; then
         printf 'FAIL: could not extract %s from %s\n' "$fn" "$DEPLOY_SH" >&2

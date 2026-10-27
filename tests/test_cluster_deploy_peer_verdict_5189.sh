@@ -645,6 +645,7 @@ esac
 
 # Now test rc propagation: load the function, stub its dependencies, and verify
 # that when _wait_for_peer_deploy_verdict fails (rc=1), _deploy_to_one_peer also fails.
+eval "$(extract_function _prepare_peer_binary)"
 eval "$(extract_function _deploy_to_one_peer)"
 
 # Stub git to match actual invocation: git -C "$REPO" rev-parse HEAD
