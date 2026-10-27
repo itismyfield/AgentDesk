@@ -172,6 +172,10 @@ const PATH_OWNERS: &[(&str, &str)] = &[
     ),
     ("src/cli/migrate/apply.rs", "writes the migrated file"),
     (
+        "src/cli/dcserver.rs",
+        "handle_dcserver's body is pinned by check_legacy_supervision_census",
+    ),
+    (
         "src/services/discord/turn_presence/activity/unbound/live.rs",
         "not converted yet",
     ),
