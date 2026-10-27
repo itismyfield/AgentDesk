@@ -114,7 +114,8 @@ pub(in crate::services::discord) async fn capture(
         || crate::services::discord::is_synthetic_headless_message_id_raw(row.user_msg_id)
         || row.tui_terminal_kind
             == Some(crate::services::agent_protocol::NativeTerminalKind::Aborted)
-        || cutover::peek_o_owns_tui_output_for_channel(row.channel_id, row.runtime_kind) != Ok(true)
+        || cutover::peek_o_owns_tui_output_for_channel_quiet(row.channel_id, row.runtime_kind)
+            != Ok(true)
     {
         return;
     }

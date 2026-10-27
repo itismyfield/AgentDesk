@@ -28,6 +28,7 @@ fn record_path() -> std::path::PathBuf {
 /// while phase 2 still scans from the live cursor at `active`.
 fn leave_the_scan_to_phase2(harness: &RelayE2eHarness, active: u64, newest: u64) {
     runtime_store::save_last_message_id(PROVIDER_KEY, super::CHANNEL_ID, newest);
+    harness.seed_scanner_checkpoint(newest);
     harness
         .shared
         .last_message_ids

@@ -89,7 +89,7 @@ TUI_O_ROOT = "src/services/tui_o/"
 TUI_O_RAW_CLAIM_RE = re.compile(rf"{_RAW_CLAIM}|\.\s*{_CLAIM_METHOD}\s*\(|::\s*{_CLAIM_METHOD}\b")
 GATE_RES = {
     "claim": re.compile(rf"{_RAW_CLAIM}|\bclaim_then_(?:direct_)?send(?:_held)?\b|\bclaim_at_post\b"),
-    "peek": re.compile(rf"\b(?:peek_{_OWNS}|bridge_o_body_peek_decision)\b"),
+    "peek": re.compile(rf"\b(?:peek_{_OWNS}(?:_quiet)?|bridge_o_body_peek_decision)\b"),
 }
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
 TURN_MARK_RES = {
@@ -605,7 +605,7 @@ def _fn_bodies(text: str) -> list[tuple[str, int, int]]:
     return bodies
 
 
-USE_RE = re.compile(r"(?:^|[;{}])\s*(?:pub(?:\s*\([^)]*\))?\s+)?use\s[^;]*$")
+USE_RE = re.compile(r"(?:^|[;{}])\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\s*\([^)]*\))?\s+)?use\s[^;]*$")
 
 
 def _gate_sites(text: str, patterns=None) -> list[str]:
