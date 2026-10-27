@@ -65,9 +65,8 @@ fn received(f: &Fixture, name: &str) -> String {
     std::fs::read_to_string(f.root.path().join(name).join("received")).unwrap_or_default()
 }
 
-/// Inside an owner's scope its target is held: the owner writes it through its start commit,
-/// while the same writers on a spawned thread, or the owner writing another target, are refused
-/// unsent; once the owner ends, both run as main.
+/// An owner writes its held target through its start commit; a spawned thread or another target
+/// is refused unsent, and once the owner ends both run as main.
 #[test]
 fn held_tmux_target_refuses_unscoped_and_foreign_content_at_every_writer() {
     let _root = crate::config::TestRuntimeRootGuard::new();
