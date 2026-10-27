@@ -18,6 +18,8 @@ use crate::services::stream_json_cli::{
 use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, TurnHost};
 use crate::services::{claude, claude_tui, codex, gemini, opencode, qwen};
 
+pub(super) mod replay_scope;
+
 pub(super) struct StreamingTurn<'a> {
     pub pool: Option<&'a sqlx::PgPool>,
     pub provider: &'a ProviderKind,
@@ -217,6 +219,19 @@ pub(super) fn execute(
     start: ReplayStart,
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
+    let start = if start.receipt_id().is_some() {
+        let scope = replay_scope::selected(
+            turn.provider,
+            turn.channel_id,
+            turn.remote_profile.is_some(),
+            turn.tmux_session_name,
+        );
+        start
+            .in_scope(scope.driver.as_str(), scope.runtime)
+            .map_err(|error| format!("replay driver scope changed: {error:?}"))?
+    } else {
+        start
+    };
     // Spent before any driver, Herdr included, so a protected start's first input needs its permit.
     let target = EffectTarget::ProviderStart {
         provider: turn.provider.as_str().to_string(),
@@ -279,38 +294,36 @@ pub(super) fn execute(
                 claude_tui::submission_fence::with_scope(
                     turn.submission.map(ManagedSubmission::fence),
                     || {
-                        claude_tui::submit_canary::with_channel(turn.channel_id, || {
-                            #[cfg(all(test, unix))]
-                            submission_tests::observe_owner(
-                                turn.channel_id,
-                                turn.submission,
-                                turn.prompt,
-                            );
-                            #[cfg(test)]
-                            if let Some(result) = claude_legacy_probe(turn.channel_id) {
-                                return result;
-                            }
-                            claude::execute_command_streaming(
-                                turn.prompt,
-                                turn.session_id,
-                                turn.working_dir,
-                                sender,
-                                turn.system_prompt,
-                                Some(turn.allowed_tools),
-                                Some(turn.cancel),
-                                turn.remote_profile,
-                                turn.tmux_session_name,
-                                turn.teardown,
-                                Some(turn.channel_id),
-                                Some(turn.provider.clone()),
-                                turn.model,
-                                turn.native_fast_mode,
-                                turn.compact_percent,
-                                turn.compact_lower_bound_tokens,
-                                turn.cache_ttl_minutes,
-                                turn.dispatch_type,
-                            )
-                        })
+                        #[cfg(all(test, unix))]
+                        submission_tests::observe_owner(
+                            turn.channel_id,
+                            turn.submission,
+                            turn.prompt,
+                        );
+                        #[cfg(test)]
+                        if let Some(result) = claude_legacy_probe(turn.channel_id) {
+                            return result;
+                        }
+                        claude::execute_command_streaming(
+                            turn.prompt,
+                            turn.session_id,
+                            turn.working_dir,
+                            sender,
+                            turn.system_prompt,
+                            Some(turn.allowed_tools),
+                            Some(turn.cancel),
+                            turn.remote_profile,
+                            turn.tmux_session_name,
+                            turn.teardown,
+                            Some(turn.channel_id),
+                            Some(turn.provider.clone()),
+                            turn.model,
+                            turn.native_fast_mode,
+                            turn.compact_percent,
+                            turn.compact_lower_bound_tokens,
+                            turn.cache_ttl_minutes,
+                            turn.dispatch_type,
+                        )
                     },
                 )
             },

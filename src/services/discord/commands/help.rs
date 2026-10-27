@@ -1,13 +1,11 @@
 use super::super::{Context, Data, Error};
-use super::command_policy::{TEXT_COMMANDS, TextCommandSurface};
+use super::command_policy::TEXT_COMMANDS;
 use crate::services::provider::ProviderKind;
 
 /// Discord rejects single messages over 2000 characters; keep headroom.
 const HELP_MESSAGE_CHAR_BUDGET: usize = 1900;
 /// Discord caps slash descriptions at 100 characters.
 const HELP_DESCRIPTION_CHAR_LIMIT: usize = 100;
-/// Session controls kept as text because agents cannot run slash commands.
-const AGENT_TEXT_COMMANDS: [&str; 3] = ["!clear", "!restart", "!stop"];
 
 /// One help line. Descriptions that restate the usage as `/name [args] — text`
 /// keep that usage; others get the bare command path.
@@ -57,13 +55,8 @@ fn build_slash_help_messages(
     }
     lines.push(String::new());
     lines.push("**Agent Text Commands** (plain messages, for agents)".to_string());
-    for name in AGENT_TEXT_COMMANDS {
-        let implemented = TEXT_COMMANDS.iter().find(|(registered, id, _)| {
-            *registered == name && id.text_surface() == TextCommandSurface::Implemented
-        });
-        if let Some((_, _, line)) = implemented {
-            lines.push((*line).to_string());
-        }
+    for (_, _, line) in TEXT_COMMANDS {
+        lines.push(line.to_string());
     }
 
     let mut messages = Vec::new();

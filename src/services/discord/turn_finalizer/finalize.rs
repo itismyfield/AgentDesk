@@ -428,9 +428,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn identity_guard_mismatch_does_not_release_wrong_owner_and_logs() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _env = EnvGuard::set_root(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -503,9 +501,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn finalize_chokepoint_publishes_mailbox_release_completion_event() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _env = EnvGuard::set_root(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -560,9 +556,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn thread_finalize_removes_parent_mapping_and_schedules_parent_kickoff() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _env = EnvGuard::set_root(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -606,9 +600,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn guarded_miss_preserves_parent_mapping_and_skips_parent_kickoff() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _env = EnvGuard::set_root(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -663,9 +655,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn non_thread_finalize_schedules_no_parent_kickoff() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _env = EnvGuard::set_root(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();

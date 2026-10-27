@@ -2,8 +2,6 @@
 
 use super::*;
 use crate::config::TestEnvVarGuard as Env;
-use crate::services::claude_tui::host_input::InputTransport;
-use crate::services::session_host::HostKey;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,27 +46,12 @@ impl Fixture {
             format!(
                 r#"#!/bin/sh
 for arg in "$@"; do
-  if [ "$arg" = load-buffer ] && [ "$(cat {mode} 2>/dev/null)" = load_nonzero ]; then
-    {real} -L {socket} -f /dev/null "$@" >/dev/null
-    exit 1
-  fi
   if [ "$arg" = capture-pane ] && [ "$(cat {mode} 2>/dev/null)" = capture_resize ]; then
     {real} -L {socket} resize-window -t =capture-race: -x 80 -y 24
-  fi
-  if [ "$arg" = if-shell ]; then
-    printf x >> {calls}
-    mode=$(cat {mode} 2>/dev/null)
-    case "$mode" in
-      drop|nonzero|timeout)
-        {real} -L {socket} -f /dev/null "$@" >/dev/null
-        case "$mode" in nonzero) exit 1;; timeout) sleep 6;; esac
-        exit 0;;
-    esac
   fi
 done
 exec {real} -L {socket} -f /dev/null "$@"
 "#,
-                calls = quoted(&root.path().join("calls")),
                 mode = quoted(&root.path().join("mode")),
                 real = quoted(&real)
             ),
@@ -181,17 +164,8 @@ while True:
 
     fn control(&self) {
         self.session("control");
-        assert_eq!(
-            SubmissionTmux.pin_guarded("control").unwrap().enter(),
-            EffectOutcome::Applied
-        );
-        self.assert_enter("control", 1);
-    }
-
-    pub(crate) fn calls(&self) -> usize {
-        std::fs::read(self.root.path().join("calls"))
-            .unwrap_or_default()
-            .len()
+        let pinned = SubmissionTmux.pin_guarded("control").unwrap();
+        assert!(pinned.capture_draft().unwrap().contains("control"));
     }
 
     /// `kill-server` returns before the server process exits; a client started in that gap
@@ -312,15 +286,6 @@ while True:
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        if let Ok(output) = Command::new(&self.real)
-            .args(["-L", &self.socket, "list-sessions", "-F", "#{session_name}"])
-            .output()
-        {
-            for session in String::from_utf8_lossy(&output.stdout).lines() {
-                crate::services::claude_tui::guarded_outcome::forget_test_hold(session);
-            }
-        }
-
         let _ = Command::new(&self.real)
             .args(["-L", &format!("{}-bad-driver", self.socket), "kill-server"])
             .output();
@@ -334,7 +299,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn cg_b2b_modes_and_attached_writer_refuse_pin_and_enter() {
+fn cg_b2b_modes_and_attached_writer_refuse_pin_and_capture() {
     let f = Fixture::new();
     f.control();
     for mode in ["copy", "input-off", "attached"] {
@@ -353,8 +318,7 @@ fn cg_b2b_modes_and_attached_writer_refuse_pin_and_enter() {
             SubmissionTmux.pin_guarded(mode).is_err(),
             "pin admitted {mode}"
         );
-        assert!(!pinned.geometry_matches(), "snapshot admitted {mode}");
-        refused(pinned.enter());
+        assert!(pinned.capture_draft().is_none(), "snapshot admitted {mode}");
         f.assert_enter(mode, 0);
     }
 }
@@ -371,126 +335,6 @@ fn cg_b2b_capture_rechecks_snapshot_in_same_tmux_command() {
         "changed geometry was used as ownership capture"
     );
     f.assert_enter("capture-race", 0);
-}
-
-#[test]
-fn cg_b2b_payload_literal_quotes_and_bracketed_paste_preserve_frame() {
-    let f = Fixture::new();
-    f.control();
-    f.tmux(&["set-buffer", "-b", "foreign", "keep"]);
-    for (label, action, expected) in [
-        (
-            "literal",
-            TuiInputAction::Literal(" a  '\"; $HOME \\ #{pane_id} ~ 가😀 trailing  ".into()),
-            b" a  '\"; $HOME \\ #{pane_id} ~ \xea\xb0\x80\xf0\x9f\x98\x80 trailing  ".to_vec(),
-        ),
-        (
-            "paste",
-            TuiInputAction::PasteBuffer("a  b\n\"'\\; $HOME #{pane_id}\n가 😀\n".into()),
-            b"\x1b[200~a  b\n\"'\\; $HOME #{pane_id}\n\xea\xb0\x80 \xf0\x9f\x98\x80\n\x1b[201~"
-                .to_vec(),
-        ),
-    ] {
-        f.session(label);
-        let pinned = SubmissionTmux.pin_guarded(label).unwrap();
-        assert!(pinned.session_matches(label));
-        assert!(!pinned.session_matches("another-session"));
-        let before = f.calls();
-        assert_eq!(pinned.payload(&action), EffectOutcome::Applied);
-        wait_until(|| f.received(label).len() >= expected.len());
-        assert_eq!(
-            f.received(label),
-            expected,
-            "actual frame bytes for {label}"
-        );
-        assert_eq!(f.calls() - before, 1, "one conditional payload for {label}");
-        f.assert_enter(label, 0);
-        assert_eq!(f.tmux(&["list-buffers", "-F", "#{buffer_name}"]), "foreign");
-        assert_eq!(pinned.enter(), EffectOutcome::Applied);
-        f.assert_enter(label, 1);
-    }
-}
-
-#[test]
-fn cg_b2b_payload_false_branch_sends_zero_and_cleans_only_owned_buffer() {
-    let f = Fixture::new();
-    f.control();
-    f.tmux(&["set-buffer", "-b", "foreign", "keep"]);
-    for (label, action) in [
-        ("literal-held", TuiInputAction::Literal("unsent".into())),
-        (
-            "paste-held",
-            TuiInputAction::PasteBuffer("unsent\nframe".into()),
-        ),
-    ] {
-        let pane = f.session(label);
-        let pinned = SubmissionTmux.pin_guarded(label).unwrap();
-        f.tmux(&["resize-window", "-t", &pane, "-x", "80", "-y", "24"]);
-        let before = f.calls();
-        assert_eq!(pinned.payload(&action), EffectOutcome::Held);
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(
-            f.received(label).is_empty(),
-            "false branch wrote payload for {label}"
-        );
-        assert_eq!(f.calls() - before, 1);
-        assert_eq!(f.tmux(&["list-buffers", "-F", "#{buffer_name}"]), "foreign");
-        assert_eq!(f.tmux(&["show-buffer", "-b", "foreign"]), "keep");
-        f.assert_enter(label, 0);
-    }
-}
-
-#[test]
-fn cg_b2b_payload_unknown_ack_is_not_retried_and_owned_buffer_is_cleaned() {
-    let f = Fixture::new();
-    f.control();
-    f.tmux(&["set-buffer", "-b", "foreign", "keep"]);
-    for (label, action, expected) in [
-        (
-            "literal-lost",
-            TuiInputAction::Literal("once".into()),
-            b"once".to_vec(),
-        ),
-        (
-            "paste-lost",
-            TuiInputAction::PasteBuffer("once\nframe".into()),
-            b"\x1b[200~once\nframe\x1b[201~".to_vec(),
-        ),
-    ] {
-        f.session(label);
-        let pinned = SubmissionTmux.pin_guarded(label).unwrap();
-        std::fs::write(f.root.path().join("mode"), "drop").unwrap();
-        let before = f.calls();
-        assert!(matches!(pinned.payload(&action), EffectOutcome::Unknown(_)));
-        wait_until(|| f.received(label).len() >= expected.len());
-        assert_eq!(f.received(label), expected);
-        assert_eq!(f.calls() - before, 1);
-        assert_eq!(f.tmux(&["list-buffers", "-F", "#{buffer_name}"]), "foreign");
-        f.assert_enter(label, 0);
-    }
-}
-
-#[test]
-fn cg_b2b_unknown_buffer_load_cleans_only_its_uuid_and_never_sends() {
-    let f = Fixture::new();
-    f.control();
-    f.tmux(&["set-buffer", "-b", "foreign", "keep"]);
-    f.session("load-lost");
-    let pinned = SubmissionTmux.pin_guarded("load-lost").unwrap();
-    std::fs::write(f.root.path().join("mode"), "load_nonzero").unwrap();
-    let before = f.calls();
-    assert!(matches!(
-        pinned.payload(&TuiInputAction::PasteBuffer("unsent\nframe".into())),
-        EffectOutcome::Unknown(_)
-    ));
-    assert_eq!(
-        f.calls(),
-        before,
-        "load failure reached no conditional pane mutation"
-    );
-    assert!(f.received("load-lost").is_empty());
-    assert_eq!(f.tmux(&["list-buffers", "-F", "#{buffer_name}"]), "foreign");
-    assert_eq!(f.tmux(&["show-buffer", "-b", "foreign"]), "keep");
 }
 
 #[test]
@@ -521,12 +365,7 @@ fn cg_b2b_linked_window_writer_is_never_admitted() {
         "0"
     );
     assert!(SubmissionTmux.pin_guarded("linked-original").is_err());
-    assert!(!pinned.geometry_matches());
-    assert_eq!(
-        pinned.payload(&TuiInputAction::Literal("unsent".into())),
-        EffectOutcome::Held
-    );
-    refused(pinned.enter());
+    assert!(pinned.capture_draft().is_none());
     f.assert_enter("linked-original", 0);
     assert!(f.received("linked-original").is_empty());
 }
@@ -553,52 +392,12 @@ fn cg_b2b_capture_joins_only_soft_wrap_and_keeps_spaces() {
     f.assert_enter("soft-wrap", 0);
 }
 
-#[test]
-fn cg_b2b_observer_keeps_original_identity_after_consumed_enter() {
-    let f = Fixture::new();
-    f.control();
-    let pane = f.session("observe-original");
-    let pinned = SubmissionTmux.pin_guarded("observe-original").unwrap();
-    let observer = pinned.observer();
-    assert_eq!(pinned.enter(), EffectOutcome::Applied);
-    f.assert_enter("observe-original", 1);
-    assert!(
-        observer
-            .capture_draft()
-            .unwrap()
-            .contains("observe-original")
-    );
-    let command = f.receiver("observe-replacement");
-    f.tmux(&["respawn-pane", "-k", "-t", &pane, &command]);
-    f.wait_ready("observe-replacement");
-    assert!(
-        observer.capture_draft().is_none(),
-        "passive observer accepted a replaced process"
-    );
-    f.assert_enter("observe-replacement", 0);
-}
-
 fn wait_until(mut ready: impl FnMut() -> bool) {
     let until = Instant::now() + Duration::from_secs(3);
     while !ready() {
         assert!(Instant::now() < until, "fixture did not become ready");
         std::thread::sleep(Duration::from_millis(10));
     }
-}
-
-fn refused(run: EffectOutcome) {
-    assert_eq!(run, EffectOutcome::Held);
-}
-
-#[test]
-fn cg_b2a_single_live_pane_enter_once() {
-    let f = Fixture::new();
-    f.session("positive");
-    let pinned = SubmissionTmux.pin_guarded("positive").unwrap();
-    assert!(pinned.geometry_matches());
-    assert!(pinned.capture_draft().unwrap().contains("positive"));
-    assert_eq!(pinned.enter(), EffectOutcome::Applied);
-    f.assert_enter("positive", 1);
 }
 
 #[test]
@@ -638,56 +437,10 @@ fn cg_b2a_pin_rejects_missing_small_nonmanual_split_and_dead() {
     wait_until(|| f.tmux(&["display-message", "-p", "-t", &pane, "#{pane_dead}"]) == "1");
     assert!(SubmissionTmux.pin_guarded("dead").is_err());
     f.assert_enter("dead", 0);
-    assert_eq!(f.calls(), 1);
 }
 
 #[test]
-fn cg_b2a_snapshot_resize_and_split_hold_but_size_mode_change_enters() {
-    let f = Fixture::new();
-    f.control();
-    for mode in ["resize", "grow", "manual", "split"] {
-        let pane = f.session(mode);
-        let pinned = SubmissionTmux.pin_guarded(mode).unwrap();
-        match mode {
-            "resize" => {
-                f.tmux(&["resize-window", "-t", &pane, "-x", "80", "-y", "24"]);
-            }
-            "grow" => {
-                f.tmux(&["resize-window", "-t", &pane, "-x", "161", "-y", "40"]);
-            }
-            "manual" => {
-                f.tmux(&["set-window-option", "-t", &pane, "window-size", "latest"]);
-            }
-            _ => {
-                f.tmux(&["split-window", "-h", "-d", "-t", &pane, "sleep 30"]);
-                f.tmux(&["resize-window", "-t", &pane, "-x", "321", "-y", "40"]);
-                f.tmux(&["resize-pane", "-t", &pane, "-x", "160"]);
-                assert_eq!(
-                    f.tmux(&[
-                        "display-message",
-                        "-p",
-                        "-t",
-                        &pane,
-                        "#{pane_width} #{pane_height} #{window_panes} #{window-size}"
-                    ]),
-                    "160 40 2 manual"
-                );
-            }
-        }
-        assert!(!pinned.geometry_matches(), "snapshot change: {mode}");
-        if mode == "manual" {
-            assert_eq!(pinned.enter(), EffectOutcome::Applied);
-            f.assert_enter(mode, 1);
-        } else {
-            refused(pinned.enter());
-            f.assert_enter(mode, 0);
-        }
-    }
-    assert_eq!(f.calls(), 5);
-}
-
-#[test]
-fn cg_b2a_replaced_same_name_and_dead_identity_never_enter() {
+fn cg_b2a_replaced_same_name_and_dead_identity_never_capture() {
     let f = Fixture::new();
     f.control();
     let old = f.session("replacement");
@@ -713,25 +466,21 @@ fn cg_b2a_replaced_same_name_and_dead_identity_never_enter() {
     f.tmux(&["set-window-option", "-t", &new, "window-size", "manual"]);
     f.wait_ready("new-receiver");
     assert_ne!(old, new);
-    assert!(!pinned.geometry_matches());
     assert!(pinned.capture_draft().is_none());
-    assert_ne!(pinned.enter(), EffectOutcome::Applied);
     f.assert_enter("new-receiver", 0);
     let pane = f.session("post-dead");
     let pinned = SubmissionTmux.pin_guarded("post-dead").unwrap();
     f.tmux(&["set-window-option", "-t", &pane, "remain-on-exit", "on"]);
     f.tmux(&["respawn-pane", "-k", "-t", &pane, "true"]);
     wait_until(|| f.tmux(&["display-message", "-p", "-t", &pane, "#{pane_dead}"]) == "1");
-    assert!(!pinned.geometry_matches());
-    assert_ne!(pinned.enter(), EffectOutcome::Applied);
+    assert!(pinned.capture_draft().is_none());
     f.assert_enter("post-dead", 0);
     let pane = f.session("respawn-original");
     let pinned = SubmissionTmux.pin_guarded("respawn-original").unwrap();
     let command = f.receiver("respawn-new");
     f.tmux(&["respawn-pane", "-k", "-t", &pane, &command]);
     f.wait_ready("respawn-new");
-    assert!(!pinned.geometry_matches());
-    refused(pinned.enter());
+    assert!(pinned.capture_draft().is_none());
     f.assert_enter("respawn-new", 0);
     f.kill_server();
     let old = f.session("restart");
@@ -755,13 +504,12 @@ fn cg_b2a_replaced_same_name_and_dead_identity_never_enter() {
     f.tmux(&["set-window-option", "-t", &new, "window-size", "manual"]);
     f.wait_ready("restart-new");
     assert_eq!(old, new, "server restart recycles textual pane ids");
-    assert!(!pinned.geometry_matches());
-    refused(pinned.enter());
+    assert!(pinned.capture_draft().is_none());
     f.assert_enter("restart-new", 0);
 }
 
 #[test]
-fn cg_b2a_capture_and_enter_stay_on_pinned_pane_after_active_window_change() {
+fn cg_b2a_capture_stays_on_pinned_pane_after_active_window_change() {
     let f = Fixture::new();
     f.session("original");
     let pinned = SubmissionTmux.pin_guarded("original").unwrap();
@@ -779,59 +527,12 @@ fn cg_b2a_capture_and_enter_stay_on_pinned_pane_after_active_window_change() {
     let command = f.receiver("other-pane");
     f.tmux(&["split-window", "-t", &other, &command]);
     f.wait_ready("other-pane");
-    assert!(pinned.geometry_matches());
     let capture = pinned.capture_draft().unwrap();
     assert!(capture.contains("original"), "{capture:?}");
     assert!(!capture.contains("other-"), "{capture:?}");
-    assert_eq!(pinned.enter(), EffectOutcome::Applied);
-    f.assert_enter("original", 1);
+    f.assert_enter("original", 0);
     f.assert_enter("other-window", 0);
     f.assert_enter("other-pane", 0);
-}
-
-#[test]
-fn cg_b2a_lost_nonzero_and_timeout_ack_are_indeterminate_without_retry() {
-    let f = Fixture::new();
-    f.control();
-    for mode in ["drop", "nonzero", "timeout"] {
-        f.session(mode);
-        let pinned = SubmissionTmux.pin_guarded(mode).unwrap();
-        std::fs::write(f.root.path().join("mode"), mode).unwrap();
-        let before = f.calls();
-        assert!(
-            matches!(pinned.enter(), EffectOutcome::Unknown(_)),
-            "ACK failure: {mode}"
-        );
-        f.assert_enter(mode, 1);
-        assert_eq!(f.calls() - before, 1, "conditional Enter must never retry");
-    }
-}
-
-#[test]
-fn cg_b2a_dormant_default_and_empty_allowlist_keep_legacy_transport() {
-    let f = Fixture::new();
-    let defaults = crate::config::session_hosts::BootSessionHosts::default();
-    assert!(!defaults.claude_guarded(1));
-    let _empty = crate::config::session_hosts::force_for_test(None, &[]);
-    assert!(!crate::config::session_hosts::claude_guarded(Some(1)));
-    assert!(!crate::config::session_hosts::claude_guarded(None));
-    f.session("legacy");
-    let mut transport = SubmissionTmux;
-    assert!(
-        transport
-            .capture_draft("legacy")
-            .unwrap()
-            .contains("legacy")
-    );
-    assert!(
-        transport
-            .send_keys("legacy", &[HostKey::Enter])
-            .unwrap()
-            .status
-            .success()
-    );
-    f.assert_enter("legacy", 1);
-    assert_eq!(f.calls(), 0);
 }
 
 #[test]

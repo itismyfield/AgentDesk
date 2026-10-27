@@ -309,6 +309,8 @@ pub(crate) enum SourceRejection {
     /// A start Claude may run after it moved on, so it cannot show it is newer than a hooked move;
     /// a later hook of its session adopts it.
     UnprovenStart,
+    /// The transcript records a headless SDK entrypoint, or its entrypoint could not be read.
+    NotTuiTranscript,
 }
 
 /// Judges one hook against the bound session, its pin and the pane's history: a left session needs

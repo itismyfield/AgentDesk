@@ -9,7 +9,8 @@ MacBook + Mac mini runtime check.
 
 Nightly workflow: `.github/workflows/ci-nightly.yml`
 
-Job: `multinode_regression`
+Jobs: `rust_build` → `rust_tests` → `test_evidence`, the nextest run of every lib test
+(`server::multinode_regression::` included) that PR and main CI also run.
 
 Coverage:
 
@@ -25,8 +26,11 @@ Coverage:
 Local command:
 
 ```bash
-cargo test --bin agentdesk multinode_regression:: -- --nocapture --test-threads=1
+cargo test --lib server::multinode_regression:: -- --nocapture --test-threads=1
 ```
+
+These are PostgreSQL tests. A run that reports `running 0 tests` is a failure,
+not a pass.
 
 ## Physical Smoke
 

@@ -8,10 +8,10 @@ error() {
   fail=1
 }
 
-if ! python3 scripts/ci/nested_libtest.py check; then
-  error "nested libtest declarations must pass validation"
-fi
+python3 scripts/ci/nested_libtest.py check || error "nested libtest declarations must pass validation"
+python3 scripts/ci/cargo_test_filters.py || error "main, nightly and Windows warm cargo test commands must not carry a name filter"
 
+readonly REQUIRED_CHECKS_JSON='["CI required"]'
 readonly REQUIRED_CHECK_MIRROR_SHA256="57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 
 verify_required_check_mirror_hash() {
@@ -26,7 +26,7 @@ verify_required_check_mirror_hash() {
     return
   fi
   if [ "$actual" != "$REQUIRED_CHECK_MIRROR_SHA256" ]; then
-    error "$helper content hash mismatch: expected $REQUIRED_CHECK_MIRROR_SHA256, found $actual; review the helper and update all three #5321 pins together"
+    error "$helper content hash mismatch: expected $REQUIRED_CHECK_MIRROR_SHA256, found $actual; review the helper and update this pin"
   fi
 }
 
@@ -36,7 +36,7 @@ validate_pr_debug_envs() {
     return
   fi
 
-  if ! ruby - "$pr_workflow" "$REQUIRED_CHECK_MIRROR_SHA256" <<'RUBY'
+  if ! ruby - "$pr_workflow" <<'RUBY'
 require "yaml"
 require "json"
 require "digest"
@@ -52,19 +52,6 @@ def canonical_yaml(value)
     end
   when Array
     value.map { |item| canonical_yaml(item) }
-  else
-    value
-  end
-end
-
-def normalize_required_check_pin(value)
-  case value
-  when Hash
-    value.transform_values { |item| normalize_required_check_pin(item) }
-  when Array
-    value.map { |item| normalize_required_check_pin(item) }
-  when String
-    value.gsub(/expected=[0-9a-f]{64}/, "expected=<required-check-pin-sha256>")
   else
     value
   end
@@ -247,7 +234,6 @@ def execution_contract(snapshot, expected)
 end
 
 path = ARGV.fetch(0)
-helper_sha256 = ARGV.fetch(1)
 gate_sha256 = Digest::SHA256.file("scripts/check-ci-runner-hardening.sh").hexdigest
 begin
   document = YAML.load_file(path)
@@ -308,7 +294,6 @@ unless trigger_events == ["pull_request"]
   warn "#{path}: required PR contexts must be triggered only by pull_request"
   exit 1
 end
-
 script_check_shard_jobs = {
   "scripts" => "cargo",
   "scripts_guards" => "guards",
@@ -327,202 +312,86 @@ if script_checks_job["continue-on-error"]
   warn "#{path}: Script checks runner job must not be allowed to continue on error"
   exit 1
 end
-script_checks_needs = script_checks_job["needs"]
-unless script_checks_needs == %w[changes lib_test_prepare]
-  warn "#{path}: Script checks runner job must retain exact needs: [changes, lib_test_prepare]"
+unless script_checks_job["needs"] == "changes"
+  warn "#{path}: Script checks runner job must retain exact needs: changes"
   exit 1
 end
-
-changes_job = jobs["changes"]
-unless changes_job.is_a?(Hash)
-  warn "#{path}: changes job must exist for the Script checks result mirror"
-  exit 1
-end
-
-expected_unconditional_closure = %w[
-  changes
-  lib_test_prepare
-  relay-authority-contract
-  relay_authority_targets
-  relay_authority_mutations
-  scripts
-  scripts_contracts
-  scripts_guards
-  scripts_required_context
-].sort
-unconditional_roots = %w[scripts_required_context relay-authority-contract]
-unconditional_closure = []
-frontier = unconditional_roots.dup
+# Every job the CI required judge reads, with the exact if that runs it; the judge
+# accepts a skip only when the changes outputs say the job was not expected.
+rust_tests_gate = "${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
+built_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
+relay_gate = "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
+cross_os_gate = "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'"
+expected_closure_if = {
+  "changes" => nil, "rust_build" => rust_tests_gate, "rust_tests" => built_gate, "test_evidence" => built_gate,
+  "lint" => "needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'",
+  "scripts" => "${{ !cancelled() }}", "scripts_guards" => "${{ !cancelled() }}", "scripts_contracts" => "${{ !cancelled() }}",
+  "dashboard" => "needs.changes.outputs.dashboard == 'true'", "pg15_owner_proof" => rust_tests_gate,
+  "relay_authority_mutations" => relay_gate,
+  "check_fast_cross_os" => cross_os_gate, "check_fast_cross_os_targets" => cross_os_gate,
+  "required_contexts" => "${{ always() }}",
+}
+closure = []
+frontier = ["required_contexts"]
 until frontier.empty?
   job_id = frontier.shift
-  next if unconditional_closure.include?(job_id)
-
+  next if closure.include?(job_id)
   job = jobs[job_id]
-  unless job.is_a?(Hash)
-    warn "#{path}: required unconditional needs closure references missing job #{job_id.inspect}"
+  unless job.is_a?(Hash) && expected_closure_if.key?(job_id) && job["if"] == expected_closure_if[job_id] && !job.key?("continue-on-error")
+    warn "#{path}: required needs closure job #{job_id.inspect} must exist with its exact if and no continue-on-error"
     exit 1
   end
-  case job_id
-  when "lib_test_prepare", "relay_authority_targets", "relay_authority_mutations"
-    unless job["if"] == "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
-      warn "#{path}: required Rust consumer #{job_id} must use the verified skip gate"
-      exit 1
-    end
-  when "scripts"
-    unless job["if"] == "${{ !cancelled() }}"
-      warn "#{path}: required consumer #{job_id} must use !cancelled() for producer-failure fallback"
-      exit 1
-    end
-  when "scripts_required_context"
-    unless job.key?("if") && job["if"] == "${{ !cancelled() }}"
-      warn "#{path}: Script checks publisher must carry `if: ${{ !cancelled() }}` so upstream failure still runs the fail-closed mirror"
-      exit 1
-    end
-  when "relay-authority-contract"
-    unless job.key?("if") && job["if"] == "${{ !cancelled() }}"
-      warn "#{path}: relay-authority-contract publisher must carry `if: ${{ !cancelled() }}` so upstream failure still runs the fail-closed mirror"
-      exit 1
-    end
-  else
-    if job.key?("if")
-      warn "#{path}: required closure execution job #{job_id} must not define an if key"
-      exit 1
-    end
-  end
-  if job.key?("continue-on-error")
-    warn "#{path}: required unconditional job #{job_id} must not define a continue-on-error key"
-    exit 1
-  end
-
-  unconditional_closure << job_id
   needs = job["needs"]
-  case needs
-  when nil
-    nil
-  when String
-    frontier << needs
-  when Array
-    unless needs.all? { |dependency| dependency.is_a?(String) }
-      warn "#{path}: required unconditional job #{job_id} has non-string needs"
-      exit 1
-    end
-    frontier.concat(needs)
-  else
-    warn "#{path}: required unconditional job #{job_id} has unsupported needs shape"
+  unless needs.nil? || needs.is_a?(String) || (needs.is_a?(Array) && needs.all? { |dependency| dependency.is_a?(String) })
+    warn "#{path}: required needs closure job #{job_id} has unsupported needs shape"
     exit 1
   end
+  closure << job_id
+  frontier.concat(Array(needs))
 end
-unless unconditional_closure.sort == expected_unconditional_closure
-  warn "#{path}: required unconditional needs closure changed; expected #{expected_unconditional_closure.inspect}, found #{unconditional_closure.sort.inspect}"
+unless closure.sort == expected_closure_if.keys.sort
+  warn "#{path}: required needs closure changed; expected #{expected_closure_if.keys.sort.inspect}, found #{closure.sort.inspect}"
   exit 1
 end
-
-script_checks_context_job = jobs["scripts_required_context"]
-unless script_checks_context_job.is_a?(Hash)
-  warn "#{path}: Script checks required-context mirror job must be a YAML mapping"
-  exit 1
-end
-expected_shard_mirror_steps = script_check_shard_jobs.map do |job_id, shard|
-  {
-    "name" => job_id == "scripts" ?
-      "Mirror script checks result for branch protection" :
-      "Mirror script checks #{shard} shard result for branch protection",
-    "env" => {
-      "BASH_ENV" => "/dev/null",
-      "PYTHON" => "python3",
-      "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
-      "FILTER_NAME" => "scripts",
-      "FILTER_OUTPUT" => "true",
-      "UPSTREAM_JOB_NAME" => job_id,
-      "UPSTREAM_RESULT" => "${{ needs.#{job_id}.result }}",
-    },
-    "run" => "./scripts/required-check-mirror.sh",
-  }
-end
-expected_mirror_contract_step = {
-  "name" => "Verify Script checks mirror contract (#5321)",
-  "env" => {"BASH_ENV" => "/dev/null"},
-  "shell" => "bash",
-  "timeout-minutes" => 10,
-  "run" => [
-    "helper_path=scripts/required-check-mirror.sh",
-    "expected=#{helper_sha256}",
-    'actual="$(sha256sum "$helper_path" | cut -d \' \' -f 1)"',
-    'if [ "$actual" != "$expected" ]; then',
-    '  echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"',
-    "  exit 1",
-    "fi",
-    "gate_path=scripts/check-ci-runner-hardening.sh",
-    "expected=#{gate_sha256}",
-    'actual="$(sha256sum "$gate_path" | cut -d \' \' -f 1)"',
-    'if [ "$actual" != "$expected" ]; then',
-    '  echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"',
-    "  exit 1",
-    "fi",
-    "scripts/check-ci-runner-hardening.sh",
-    "python3 scripts/check_writer_gate_ci_wiring.py",
-  ].join("\n") + "\n",
-}
-expected_mirror_steps = [
-  {"uses" => "actions/checkout@v4"},
-  expected_mirror_contract_step,
-  *expected_shard_mirror_steps,
-]
-expected_mirror_job = {
-  "name" => "Script checks",
-  "needs" => ["changes", *script_check_shard_jobs.keys],
-  "if" => "${{ !cancelled() }}",
+judge_sha256 = Digest::SHA256.file("scripts/ci/nextest_required.py").hexdigest
+pin_run = <<~SH
+       pin() {
+         actual="$(sha256sum "$1" | cut -d ' ' -f 1)"
+         if [ "$actual" != "$2" ]; then
+           echo "::error file=$1::content hash mismatch: expected $2, found $actual; review it and update every pin together"
+           exit 1
+         fi
+       }
+       pin scripts/ci/nextest_required.py #{judge_sha256}
+       pin scripts/check-ci-runner-hardening.sh #{gate_sha256}
+       scripts/check-ci-runner-hardening.sh
+       python3 scripts/check_writer_gate_ci_wiring.py
+     SH
+expected_required_job = {
+  "name" => "CI required",
+  "needs" => expected_closure_if.keys - ["required_contexts"],
+  "if" => "${{ always() }}",
   "runs-on" => "ubuntu-latest",
-  "steps" => expected_mirror_steps,
+  "timeout-minutes" => 15,
+  "permissions" => {"contents" => "read"},
+  "steps" => [
+    {"uses" => "actions/checkout@v4"},
+    {"name" => "Verify pinned judge and CI structure", "id" => "pins", "continue-on-error" => true,
+     "env" => {"BASH_ENV" => "/dev/null"}, "shell" => "bash", "run" => pin_run},
+    {"name" => "Judge required checks",
+     "env" => {"BASH_ENV" => "/dev/null", "NEEDS_JSON" => "${{ toJSON(needs) }}", "PINS_OUTCOME" => "${{ steps.pins.outcome }}"},
+     "run" => "python3 scripts/ci/nextest_ci.py required-gate"},
+  ],
 }
-unless expected_mirror_job.reject { |key, _| key == "steps" }.all? do |key, value|
-  script_checks_context_job[key] == value
-end
-  warn "#{path}: Script checks required-context mirror must retain its exact job wiring"
+unless canonical_yaml(jobs["required_contexts"]) == canonical_yaml(expected_required_job)
+  warn "#{path}: required_contexts must retain its exact judge, pins and needs; expected #{JSON.generate(canonical_yaml(expected_required_job))}"
   exit 1
 end
-if script_checks_context_job["continue-on-error"]
-  warn "#{path}: Script checks required-context mirror must not continue on error"
-  exit 1
-end
-expected_shard_mirror_steps.each do |expected_mirror_step|
-  mirror_steps = Array(script_checks_context_job["steps"]).select do |step|
-    step.is_a?(Hash) && step["name"] == expected_mirror_step["name"]
-  end
-  unless mirror_steps.length == 1
-    warn "#{path}: Script checks required-context mirror must retain exactly one #{expected_mirror_step["name"].inspect} step"
-    exit 1
-  end
-  normalized_mirror_step = canonical_yaml(mirror_steps.fetch(0))
-  if normalized_mirror_step.dig("env", "FILTER_OUTPUT")
-    normalized_mirror_step["env"]["FILTER_OUTPUT"] =
-      normalized_mirror_step["env"]["FILTER_OUTPUT"].to_s
-  end
-  unless normalized_mirror_step == expected_mirror_step
-    warn "#{path}: Script checks result-mirror step #{expected_mirror_step["name"].inspect} must retain the exact fail-closed wiring"
-    exit 1
-  end
-end
-raw_mirror_job = raw_jobs.is_a?(Hash) ? raw_jobs["scripts_required_context"] : nil
-expected_raw_mirror_job = canonical_yaml(expected_mirror_job)
-expected_raw_mirror_job["steps"][1]["timeout-minutes"] = "10"
-unless raw_mirror_job == expected_raw_mirror_job
-  warn "#{path}: Script checks required-context mirror must retain the exact fixed job surface (raw YAML scalars; defaults/env/environment/strategy/container and checkout/contract/per-shard mirror inventory)"
-  exit 1
-end
-mirror_key_node = if jobs_node.is_a?(Psych::Nodes::Mapping)
-  jobs_node.children.each_slice(2).find do |key_node, _value_node|
-    key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == "scripts_required_context"
-  end&.first
-end
-mirror_source = mirror_key_node && raw_job_source(path, mirror_key_node)
-mirror_source = mirror_source&.gsub(
-  /expected=[0-9a-f]{64}/,
-  "expected=<required-check-pin-sha256>",
-)
-mirror_source_sha256 = mirror_source && Digest::SHA256.hexdigest(mirror_source)
-unless mirror_source_sha256 == "d78151431f9f92845ded58a8b9d11046bfe644522f7a1399b09f95ecc5910928"
-  warn "#{path}: Script checks required-context source bytes changed (scalar tags/styles and exact step surface are pinned); found #{mirror_source_sha256 || '<missing>'}"
+required_key_node = jobs_node.children.each_slice(2).find { |key_node, _| key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == "required_contexts" }&.first
+required_source = required_key_node && raw_job_source(path, required_key_node).gsub(/\b[0-9a-f]{64}\b/, "<sha256>")
+required_source_sha256 = required_source && Digest::SHA256.hexdigest(required_source)
+unless required_source_sha256 == "dc368dd623895b68351f29e8e0c46a21c2b718820cf45d25e74ab657423702a5"
+  warn "#{path}: required_contexts source bytes changed (scalar tags/styles and exact step surface are pinned); found #{required_source_sha256 || '<missing>'}"
   exit 1
 end
 script_check_steps = Array(script_checks_job["steps"]).select do |step|
@@ -600,7 +469,7 @@ script_check_execution = effective_execution(
 expected_script_check_execution = {
   "runs-on" => "ubuntu-latest",
   "protected_step_inventory" => {
-    "protected_indices" => [11, 12],
+    "protected_indices" => [9, 10],
     "steps_between_protected" => [],
   },
   "shell_candidates" => {
@@ -629,6 +498,8 @@ expected_script_check_execution = {
     "GFP_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}",
     "TEST_LANE_BASELINE_REF" => "HEAD^1",
     "SCRIPT_CHECK_SHARD" => "cargo",
+    "SCRIPT_CHECK_CHANGES_RESULT" => "${{ needs.changes.result }}",
+    "SCRIPT_CHECK_CHANGED_FILES" => "${{ needs.changes.outputs.script_check_files }}",
     "ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact",
     "CARGO_PROFILE_DEV_DEBUG" => "0",
     "CARGO_PROFILE_TEST_DEBUG" => "0",
@@ -646,13 +517,15 @@ expected_script_check_execution = {
     "GFP_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}",
     "TEST_LANE_BASELINE_REF" => "HEAD^1",
     "SCRIPT_CHECK_SHARD" => "cargo",
+    "SCRIPT_CHECK_CHANGES_RESULT" => "${{ needs.changes.result }}",
+    "SCRIPT_CHECK_CHANGED_FILES" => "${{ needs.changes.outputs.script_check_files }}",
     "ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact",
     "CARGO_PROFILE_DEV_DEBUG" => "0",
     "CARGO_PROFILE_TEST_DEBUG" => "0",
   ),
 }
 unless script_check_execution["protected_step_inventory"] == expected_script_check_execution["protected_step_inventory"]
-  warn "#{path}: Script checks protected step inventory changed; expected indices [11, 12] with no interstitial steps, found #{JSON.generate(script_check_execution["protected_step_inventory"])}"
+  warn "#{path}: Script checks protected step inventory changed; expected indices [9, 10] with no interstitial steps, found #{JSON.generate(script_check_execution["protected_step_inventory"])}"
   exit 1
 end
 unless execution_contract(script_check_execution, expected_script_check_execution)
@@ -680,6 +553,7 @@ script_check_shard_jobs.each do |job_id, shard|
   expected_raw_shard_job = {
     "name" => "Script checks runner (#{shard})",
     "needs" => "changes",
+    "if" => "${{ !cancelled() }}",
     "runs-on" => "ubuntu-latest",
     "timeout-minutes" => "45",
     "steps" => [
@@ -691,7 +565,7 @@ script_check_shard_jobs.each do |job_id, shard|
     ],
   }
   unless raw_jobs.is_a?(Hash) && raw_jobs[job_id] == expected_raw_shard_job
-    warn "#{path}: Script checks shard job #{job_id} must retain the exact fixed job surface (raw YAML scalars; checkout/setup/install/run inventory, action refs, timeout-minutes 45, no permissions/env/defaults/if/continue-on-error)"
+    warn "#{path}: Script checks shard job #{job_id} must retain the exact fixed job surface (raw YAML scalars; checkout/setup/install/run inventory, action refs, timeout-minutes 45, !cancelled(), no permissions/env/defaults/continue-on-error)"
     exit 1
   end
   shard_execution = effective_execution(document, job_id, expected_raw_shard_job["steps"].length - 1)
@@ -718,7 +592,7 @@ writer_wiring_execution = effective_execution(
 expected_writer_wiring_execution = {
   "runs-on" => "ubuntu-latest",
   "protected_step_inventory" => {
-    "protected_indices" => [11, 12],
+    "protected_indices" => [9, 10],
     "steps_between_protected" => [],
   },
   "shell_candidates" => {
@@ -742,7 +616,7 @@ expected_writer_wiring_execution = {
   "effective_env" => expected_workflow_env,
 }
 unless writer_wiring_execution["protected_step_inventory"] == expected_writer_wiring_execution["protected_step_inventory"]
-  warn "#{path}: Script checks protected step inventory changed; expected indices [11, 12] with no interstitial steps, found #{JSON.generate(writer_wiring_execution["protected_step_inventory"])}"
+  warn "#{path}: Script checks protected step inventory changed; expected indices [9, 10] with no interstitial steps, found #{JSON.generate(writer_wiring_execution["protected_step_inventory"])}"
   exit 1
 end
 unless execution_contract(writer_wiring_execution, expected_writer_wiring_execution)
@@ -793,41 +667,93 @@ setup_specs.each do |name, spec|
   end
 end
 
-# Same-run sharing is optional, but the producer and original execution surfaces are mandatory.
-artifact_env = {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"}
-producer = jobs["lib_test_prepare"]
-expected_upload = {"name" => "Upload shared lib tests", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "lib-test-artifact", "path" => "${{ runner.temp }}/lib-test-artifact.tar.gz", "if-no-files-found" => "error", "retention-days" => 1}}
-expected_prepare = {"name" => "Prepare and verify lib tests", "timeout-minutes" => 45, "shell" => "bash", "env" => artifact_env.merge("BASH_ENV" => "/dev/null"), "run" => "python3 scripts/ci/lib-test-artifact.py prepare --directory \"$ADK_LIB_TEST_ARTIFACT\"\npython3 scripts/ci/lib-test-artifact.py validate --directory \"$ADK_LIB_TEST_ARTIFACT\"\npython3 scripts/check_test_target_integrity.py --verify-lib-inventory\ntar -C \"$ADK_LIB_TEST_ARTIFACT\" -czf \"$RUNNER_TEMP/lib-test-artifact.tar.gz\" .\n"}
-unless producer.is_a?(Hash) && producer["runs-on"] == "ubuntu-latest" && producer["timeout-minutes"] == 60 && producer["env"] == {"CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"} && producer["needs"] == "changes" && producer["if"] == "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}" && !producer.key?("continue-on-error") && Array(producer["steps"]).first == {"uses" => "actions/checkout@v4"} && Array(producer["steps"]).count { |step| step["uses"] == "dtolnay/rust-toolchain@master" && step["with"] == {"toolchain" => "1.94.1"} && !step.key?("if") && !step.key?("continue-on-error") } == 1 && Array(producer["steps"]).count(expected_prepare) == 1 && Array(producer["steps"]).count(expected_upload) == 1
-  warn "#{path}: lib_test_prepare must retain its independent build, inventory verification and upload contract"
-  exit 1
-end
-consumers = %w[test_fast pg15_owner_proof high-risk-recovery library_sweep scripts relay_authority_targets]
-expected_download = {"name" => "Download shared lib tests", "continue-on-error" => true, "uses" => "actions/download-artifact@v4", "with" => {"name" => "lib-test-artifact", "path" => "${{ runner.temp }}/lib-test-download"}}
-expected_restore = {"name" => "Restore shared lib tests", "continue-on-error" => true, "shell" => "bash", "run" => "mkdir -p \"$RUNNER_TEMP/lib-test-artifact\"\nif [ -f \"$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz\" ]; then\n  tar -C \"$RUNNER_TEMP/lib-test-artifact\" -xzf \"$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz\"\nfi\n"}
-consumers.each do |job_id|
-  job = jobs[job_id]
-  unless job.is_a?(Hash) && Array(job["needs"]).include?("lib_test_prepare") && job["if"].to_s.start_with?("${{ !cancelled()") && Array(job["steps"]).select { |step| step.is_a?(Hash) && [expected_download["name"], expected_restore["name"]].include?(step["name"]) } == [expected_download, expected_restore]
-    warn "#{path}: #{job_id} must retain same-run download and producer-failure fallback wiring"
-    exit 1
-  end
-end
+# Test results travel only as the plan artifact and per-attempt worker artifacts the audit reads.
+expected_uploads = {
+  "rust_build" => [{"name" => "Upload nextest plan", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-plan", "path" => "${{ runner.temp }}/nextest", "if-no-files-found" => "error", "retention-days" => 1}}],
+  "rust_tests" => [{"name" => "Upload worker results", "if" => "always()", "timeout-minutes" => 10, "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-worker-${{ matrix.worker }}-attempt-${{ github.run_attempt }}", "path" => "${{ runner.temp }}/nextest-result", "if-no-files-found" => "warn", "retention-days" => 7}}],
+}
 jobs.each do |job_id, job|
-  Array(job["steps"]).each do |step|
-    next unless step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/upload-artifact")
-    unless job_id == "scripts" || (job_id == "lib_test_prepare" && step == expected_upload) || (job_id == "lint" && step["name"] == "Upload Clippy observation")
-      warn "#{path}: artifact uploads must stay in approved jobs"
-      exit 1
-    end
+  uploads = Array(job["steps"]).select { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/upload-artifact") }
+  next if job_id == "scripts" || (uploads.empty? && !expected_uploads.key?(job_id))
+  unless uploads == expected_uploads[job_id]
+    warn "#{path}: artifact uploads must stay in approved jobs with their exact names"
+    exit 1
   end
 end
 
 targets = {
-  "lib_test_prepare" => {
-    "label" => "shared lib producer", "name" => "Prepare shared lib tests",
-    "needs" => "changes", "if" => "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}", "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 60, "job_sha256" => "a2d10d23b48a214512b319b684f081db3c8665cdade3bed7c3e8fdb343fcaacd",
-    "cargo_steps" => {"Prepare and verify lib tests" => {"commands" => expected_prepare["run"].lines.map(&:strip), "timeout_minutes" => 45, "env" => expected_prepare["env"]}},
+  "rust_build" => {
+    "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
+    "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
+    "job_timeout_minutes" => 100, "job_sha256" => "dad6d5b4c9c44754f640fec13d168f622e1df8be2723654af2a0e5643eb0d4b0",
+    "cargo_steps" => {
+      "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
+      "Archive, list, compare and plan" => {
+        "commands" => [
+          "set -euo pipefail", 'NEXTEST_DIR="$RUNNER_TEMP/nextest"', 'mkdir -p "$NEXTEST_DIR"',
+          'cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"',
+          'cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \\',
+          '--ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"',
+          'python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"',
+          'python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \\',
+          '--json-out "$NEXTEST_DIR/compare.json"',
+          'python3 scripts/ci/nextest_ci.py plan --universe "$NEXTEST_DIR/universe.json" \\',
+          '--archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \\',
+          "--rust-version 1.94.1 --nextest-version \"$(cargo nextest --version | awk 'NR==1 {print $2}')\" \\",
+          "--target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \\",
+          '--build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan"',
+          'python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"',
+        ],
+        "timeout_minutes" => 45, "env" => {"BASH_ENV" => "/dev/null"},
+      },
+      # Dropping this step or changing its argv (a report-only diff) is rejected here.
+      "Compare tests with the comparison base" => {
+        "commands" => ['bash scripts/ci/nextest-base-diff.sh "$RUNNER_TEMP/nextest"'], "timeout_minutes" => 40,
+        "env" => {"BASH_ENV" => "/dev/null", "GH_TOKEN" => "${{ github.token }}", "PR_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}"},
+      },
+    },
+  },
+  "rust_tests" => {
+    "label" => "nextest worker job", "name" => "Rust tests (worker ${{ matrix.worker }})",
+    "needs" => %w[changes rust_build], "if" => built_gate, "runs_on" => "ubuntu-latest",
+    "job_timeout_minutes" => 75, "job_sha256" => "8f3b3092e27904b1fa84db80039bf5da6a1da78cd7709b71199dd44e49453e7f", "require_debug_env" => false,
+    "cargo_steps" => {
+      "Verify archive and plan" => {
+        "commands" => ['python3 scripts/ci/nextest_ci.py verify-archive --plan "$RUNNER_TEMP/nextest/plan/plan.json" --worker ${{ matrix.worker }} --archive "$RUNNER_TEMP/nextest/lib-tests.tar.zst" --config "$RUNNER_TEMP/nextest/plan/worker-${{ matrix.worker }}.toml" --sha "$GITHUB_SHA" --record "$RUNNER_TEMP/nextest-result"'],
+        "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"},
+      },
+      "Run planned tests" => {
+        "commands" => [
+          "set +e", 'NEXTEST_DIR="$RUNNER_TEMP/nextest"', 'RESULT_DIR="$RUNNER_TEMP/nextest-result"', 'mkdir -p "$RUNNER_TEMP/nextest-extract"',
+          'cargo nextest run --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \\',
+          '--extract-to "$RUNNER_TEMP/nextest-extract" --extract-overwrite \\',
+          '--config-file "$NEXTEST_DIR/plan/worker-${{ matrix.worker }}.toml" --profile ci --no-tests fail',
+          "code=$?", 'echo "$code" > "$RESULT_DIR/exit-code"',
+          %q(junit="$(find "$RUNNER_TEMP/nextest-extract" "$GITHUB_WORKSPACE/target" -path '*/nextest/ci/junit.xml' 2>/dev/null | head -n 1)"),
+          '[ -n "$junit" ] && cp "$junit" "$RESULT_DIR/junit.xml"', 'exit "$code"',
+        ],
+        "timeout_minutes" => 60, "env" => {"BASH_ENV" => "/dev/null"},
+      },
+    },
+  },
+  "test_evidence" => {
+    "label" => "nextest evidence job", "name" => "Rust tests evidence",
+    "needs" => %w[changes rust_build rust_tests], "if" => built_gate, "runs_on" => "ubuntu-latest",
+    "job_timeout_minutes" => 15, "job_sha256" => "14d385240c0d4d6438308e41efd0bf308f0ba963bde15592d5c1615b9c61cf45", "require_debug_env" => false,
+    "cargo_steps" => {
+      "Audit worker results" => {
+        "commands" => [
+          "set -euo pipefail", 'plan="$RUNNER_TEMP/nextest/plan/plan.json"',
+          'python3 scripts/ci/nextest_ci.py collect-results --plan "$plan" --artifacts "$RUNNER_TEMP/nextest-artifacts" \\',
+          '--output "$RUNNER_TEMP/nextest-results"',
+          'python3 scripts/ci/nextest_ci.py selector-audit --plan "$plan"', "status=0",
+          'python3 scripts/ci/nextest_ci.py audit --plan "$plan" --results "$RUNNER_TEMP/nextest-results" \\',
+          '--json-out "$RUNNER_TEMP/verdict.json" --summary-out "$RUNNER_TEMP/summary.md" || status=$?',
+          'cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"', 'exit "$status"',
+        ],
+        "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"},
+      },
+    },
   },
   "check_fast_cross_os" => {
     "label" => "cross-OS job",
@@ -835,7 +761,7 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "79745b96e7fc4d02c7744ac9141e4da962ea56c603b5926401294c1af8a56cee",
+    "job_sha256" => "17e9ab8a51ddb0e4ddf21ab10360dfcbfe13c814f54b259c82450df361221201",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
@@ -849,139 +775,38 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "e2c2439d9eeeaf058608a9fbd26a44f5ce4d966a4c91e92123cbb1be2ba58cca",
+    "job_sha256" => "bc15b089191e1d1234060197410f90e4d3a9cf0bce533d35bddb700cfc21159b",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
         "timeout_minutes" => 60,
         "if_condition" => "runner.os == 'Windows'",
       },
-    },
-  },
-  "check_fast_cross_os_required_context" => {
-    "label" => "cross-OS required-context mirror",
-    "name" => "Fast check cross OS required context (ubuntu-latest)",
-    "needs" => %w[changes check_fast_cross_os check_fast_cross_os_targets],
-    "if" => "${{ !cancelled() }}",
-    "runs_on" => "ubuntu-latest",
-    "job_sha256" => "a805ae940c4b5cc781b0857dccd3c5ee7d8cb5ad79df4c011f3b1c4df13e224b",
-    "require_debug_env" => false,
-    "cargo_steps" => %w[check_fast_cross_os check_fast_cross_os_targets].to_h do |runner|
-      [
-        "Mirror #{runner} result for branch protection",
-        {
-          "commands" => ["./scripts/required-check-mirror.sh"],
-          "timeout_minutes" => nil,
-          "env" => {
-            "BASH_ENV" => "/dev/null",
-            "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
-            "FILTER_NAME" => "cross_os_rust",
-            "FILTER_OUTPUT" => "${{ needs.changes.outputs.cross_os_rust }}",
-            "UPSTREAM_JOB_NAME" => runner,
-            "UPSTREAM_RESULT" => "${{ needs.#{runner}.result }}",
-          },
-        },
-      ]
-    end,
-  },
-  "test_fast" => {
-    "label" => "PostgreSQL job",
-    "name" => "PostgreSQL tests (shard ${{ matrix.shard }})",
-    "needs" => ["changes", "pg_shards", "lib_test_prepare"],
-    "if" => "${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
-    "runs_on" => "ubuntu-latest",
-    "job_sha256" => "97407ada5fcaf2bb22ffbdf58f1d9bd2b2827079253998e35b13c9bcf8b2a3f6",
-    "cargo_steps" => {
-      "Footer-only marker regressions" => {
+      "Compare Windows Rust test sources with the nextest list" => {
         "commands" => [
-          "source scripts/ci/non-pg-test-filter.sh",
-          'python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib task_notification -- "${NON_PG_SKIP_ARGS[@]}"',
-          'python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- "${NON_PG_SKIP_ARGS[@]}"',
+          "set -euo pipefail",
+          "cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json",
+          "python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json",
         ],
-        "timeout_minutes" => 10,
-      },
-      "Trusted session forwarding tests" => {
-        "commands" => [
-          "source scripts/ci/non-pg-test-filter.sh",
-          'env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::session_forwarding -- "${NON_PG_SKIP_ARGS[@]}"',
-        ],
-        "timeout_minutes" => 10,
-      },
-      "Terminal delivery evidence regressions" => {
-        "commands" => [
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib inflight::terminal_delivery_evidence_loss::tests",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn",
-        ],
-        "timeout_minutes" => 10,
-      },
-      "PostgreSQL shard tests" => {
-        "commands" => ["python3 scripts/ci/test-selection.py run --lane pg"],
-        "timeout_minutes" => 75,
-        "env" => {"ADK_TEST_SELECTION_PLAN" => "${{ needs.pg_shards.outputs.plan }}", "PG_INCLUDE_SHARD" => "${{ matrix.shard }}", "BASH_ENV" => "/dev/null", "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"},
+        "timeout_minutes" => 30,
+        "if_condition" => "runner.os == 'Windows'",
+        "env" => {"BASH_ENV" => "/dev/null"},
       },
     },
   },
   "pg15_owner_proof" => {
     "label" => "PostgreSQL 15 owner proof job",
     "name" => "PostgreSQL 15 owner proof",
-    "needs" => ["changes", "pg_shards", "lib_test_prepare"],
-    "if" => "${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
+    "needs" => "changes",
+    "if" => rust_tests_gate,
     "runs_on" => "ubuntu-latest",
     "job_timeout_minutes" => 50,
-    "job_sha256" => "76ea7647252d90c94f50c18bb062cdbfc90649309c634c268195eecf64faec0b",
+    "job_sha256" => "8969b3636cef97c616239bf3aff95df073f8d2a36afb5fe368f120013a7d78ca",
     "cargo_steps" => {
       "PostgreSQL 15 exact owner proof" => {
         "commands" => ["python3 scripts/run_test_lane.py --lane pg --max-summaries 4 --expected-ids scripts/ci/pg15_required_ids.txt -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- --exact db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg db::auto_queue::run_owner_guard_pg_tests::force_pause_cleanup_waits_for_run_token_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_cannot_escape_cancel_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_waits_on_run_token_not_origin_row_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_context_create_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_foreign_to_target_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg db::auto_queue::run_owner_guard_pg_tests::rest_revival_refused_for_cancelled_owner_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_cas_rejects_direct_cancel_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_refuses_failed_dispatch_of_cancelled_run_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_waits_for_run_cancel_and_refuses_pg db::auto_queue::run_owner_guard_pg_tests::verdict_rollback_revival_refused_for_cancelled_owner_pg db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_census_failure_rolls_back_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg --test-threads=1"],
         "timeout_minutes" => 40,
         "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact", "BASH_ENV" => "/dev/null"},
-      },
-    },
-  },
-  "library_sweep" => {
-    "label" => "PR library sweep job",
-    "name" => "Library test sweep (shard ${{ matrix.shard }})",
-    "needs" => %w[changes lib_test_prepare pg_shards],
-    "if" => "${{ !cancelled() && (needs.changes.outputs.rust_tests == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
-    "runs_on" => "ubuntu-latest",
-    "job_sha256" => "92e8171f4fba33ebfd2c1b4721edbf0bb856281baebad43d5c78e418b4df7d09",
-    "cargo_steps" => {
-      "Library sweep (selection-set gated)" => {
-        "commands" => ['python3 scripts/ci/test-selection.py run --lane sweep --shard "${{ matrix.shard }}"'],
-        "timeout_minutes" => 60,
-        "env" => {"ADK_TEST_SELECTION_PLAN" => "${{ needs.pg_shards.outputs.plan }}", "SWEEP_SHARD_TOTAL" => "${{ strategy.job-total }}", "BASH_ENV" => "/dev/null", "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"},
-      },
-    },
-  },
-  "relay_authority_targets" => {
-    "label" => "relay-authority targets job",
-    "name" => "Relay authority targets",
-    "needs" => %w[changes lib_test_prepare],
-    "if" => "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
-    "runs_on" => "ubuntu-latest",
-    "job_sha256" => "724964893b64cbbf45da486fdd1957fdd0e3d2655956fd80c10aab3ce57e5854",
-    "job_timeout_minutes" => 30,
-    "cargo_steps" => {
-      "Verify named relay-authority targets and selection floors" => {
-        "commands" => ["python3 scripts/check_relay_authority_contract.py"],
-        "timeout_minutes" => 30,
-      },
-      "Run named relay-authority contract targets" => {
-        "commands" => [
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::session_relay_sink -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::entry_gate_matrix_over_outcome_and_anchor -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1",
-        ],
-        "timeout_minutes" => 30,
       },
     },
   },
@@ -1003,119 +828,6 @@ targets = {
         "commands" => ["bash scripts/run_relay_authority_mutations.sh"],
         "timeout_minutes" => 45,
         "if_condition" => "steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false'",
-      },
-    },
-  },
-  "relay-authority-contract" => {
-    "label" => "relay-authority contract job",
-    "name" => "relay-authority-contract",
-    "needs" => %w[changes relay_authority_targets relay_authority_mutations],
-    "if" => "${{ !cancelled() }}",
-    "runs_on" => "ubuntu-latest",
-    "job_sha256" => "a325e34eabb26063617a57f1587b1a09e7ba4477ef2e170767fcf86ca7e903e9",
-    "job_timeout_minutes" => 10,
-    "cargo_steps" => {
-      "Pin required-check mirror content (#5321)" => {
-        "commands" => [
-          "helper_path=scripts/required-check-mirror.sh",
-          "expected=#{helper_sha256}",
-          'actual="$(sha256sum "$helper_path" | cut -d \' \' -f 1)"',
-          'if [ "$actual" != "$expected" ]; then',
-          'echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"',
-          "exit 1",
-          "fi",
-          "gate_path=scripts/check-ci-runner-hardening.sh",
-          "expected=#{gate_sha256}",
-          'actual="$(sha256sum "$gate_path" | cut -d \' \' -f 1)"',
-          'if [ "$actual" != "$expected" ]; then',
-          'echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"',
-          "exit 1",
-          "fi",
-          "scripts/check-ci-runner-hardening.sh",
-        ],
-        "timeout_minutes" => 10,
-      },
-      "Mirror relay authority targets result for branch protection" => {
-        "commands" => ["./scripts/required-check-mirror.sh"],
-        "timeout_minutes" => 10,
-        "env" => {
-          "BASH_ENV" => "/dev/null",
-          "CARGO_PROFILE_DEV_DEBUG" => "0",
-          "CARGO_PROFILE_TEST_DEBUG" => "0",
-          "PYTHON" => "python3",
-          "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
-          "FILTER_NAME" => "relay_authority",
-          "FILTER_OUTPUT" => "${{ needs.changes.outputs.rust_tests_skip != 'true' }}",
-          "UPSTREAM_JOB_NAME" => "relay_authority_targets",
-          "UPSTREAM_RESULT" => "${{ needs.relay_authority_targets.result }}",
-        },
-      },
-      "Mirror relay authority mutations result for branch protection" => {
-        "commands" => ["./scripts/required-check-mirror.sh"],
-        "timeout_minutes" => 10,
-        "env" => {
-          "BASH_ENV" => "/dev/null",
-          "CARGO_PROFILE_DEV_DEBUG" => "0",
-          "CARGO_PROFILE_TEST_DEBUG" => "0",
-          "PYTHON" => "python3",
-          "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
-          "FILTER_NAME" => "relay_authority",
-          "FILTER_OUTPUT" => "${{ needs.changes.outputs.rust_tests_skip != 'true' }}",
-          "UPSTREAM_JOB_NAME" => "relay_authority_mutations",
-          "UPSTREAM_RESULT" => "${{ needs.relay_authority_mutations.result }}",
-        },
-      },
-    },
-  },
-  "high-risk-recovery" => {
-    "label" => "High-risk recovery job",
-    "name" => "High-risk recovery runner",
-    "needs" => %w[changes lib_test_prepare],
-    "if" => "${{ !cancelled() && needs.changes.outputs.high_risk_recovery == 'true' }}",
-    "runs_on" => "ubuntu-latest",
-    "job_sha256" => "1a3d89e8365df6a4df21ea3831911a85fc07d54169a863d537f8c5d444ce1d2d",
-    "cargo_steps" => {
-      "High-risk recovery lane" => {
-        "commands" => ["python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib high_risk_recovery:: -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::recovery_engine::state_extractors::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_health::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::session_enrichment::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::relay_dead_reattach::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::hang_forensics::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::recovery::self_watchdog -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::health_diagnostics::tests -- --test-threads=1"],
-        "timeout_minutes" => nil,
-        "shell" => nil,
-        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
-      },
-      "Herdr recovery and admission regressions" => {
-        "commands" => ["python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- services::session_host::herdr_gate::tests::root_replaced_tests:: services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests:: services::tui_prompt_dedupe::hosted_source::tests:: services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests:: --test-threads=1"],
-        "timeout_minutes" => nil,
-        "shell" => nil,
-        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
-      },
-      "Operational alert intake admission regressions" => {
-        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::dispatch_policy::allowed_turn_sender_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::formatting::delivery::attachment_delivery_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected -- --exact --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::gate::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib server::outbox_actionable_delivery::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- server::policy_tick_logging:: services::observability::events:: server::policy_tick_schedule_tests::", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::message_outbox::dedupe_key_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints -- --exact --test-threads=1"],
-        "timeout_minutes" => nil,
-        "shell" => nil,
-        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
-      },
-      "Accepted turn lifetime regressions" => {
-        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib accepted_turn_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib child_exit_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::process::stream_child::stream_queue::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::process::process_group_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::process::simple_cancel_watcher_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::provider::cancel_token_cleanup::executor::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib accepted_quiet_turn_survives_virtual_day -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib accepted_stream_runs_past_virtual_day_until_real_eof -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib productive_turns_older_than_four_and_six_hours_defer_cleanup -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib quiet_native_turn_resumes_after_virtual_day -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::provider::cancel_watchdog::tests -- --test-threads=1"],
-        "timeout_minutes" => nil,
-        "shell" => nil,
-        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
-      },
-      "Cancel-preserved queue observation regression" => {
-        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::hold_detail_tests -- --test-threads=1"],
-        "timeout_minutes" => nil,
-        "shell" => nil,
-        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
-      },
-      "Local model durable queue wake regression" => {
-        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1"],
-        "timeout_minutes" => nil,
-        "shell" => nil,
-        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
-      },
-      "Transition-busy requeue spin regressions" => {
-        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::message_handler::intake_turn::race_loss:: -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_io::presleep_tests::race_loss_recheck_fences_on_transition_without_parking_a_waiter_5170 -- --exact --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_io:: -- --test-threads=1"],
-        "timeout_minutes" => nil,
-        "shell" => nil,
-        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
       },
     },
   },
@@ -1147,7 +859,6 @@ targets.each do |job_id, spec|
   end
 
   canonical_job = canonical_yaml(job)
-  canonical_job = normalize_required_check_pin(canonical_job) if job_id == "relay-authority-contract"
   job_sha256 = Digest::SHA256.hexdigest(JSON.generate(canonical_job))
   unless job_sha256 == spec.fetch("job_sha256")
     errors << "#{label} semantic structure or command inventory changed; found #{job_sha256}"
@@ -1177,8 +888,8 @@ targets.each do |job_id, spec|
       errors << "#{label} must retain the Windows matrix" unless strategy.dig("matrix", "os") == ["windows-latest"]
     end
   end
-  if job_id == "library_sweep"
-    expected_strategy = {"fail-fast" => false, "matrix" => "${{ fromJSON(needs.pg_shards.outputs.sweep_matrix) }}"}
+  if job_id == "rust_tests"
+    expected_strategy = {"fail-fast" => false, "matrix" => {"worker" => [0, 1, 2, 3, 4, 5]}}
     errors << "#{label} must use the validated sweep matrix without fail-fast" unless job["strategy"] == expected_strategy
   end
 
@@ -1227,7 +938,6 @@ targets.each do |job_id, spec|
         errors << "#{label} #{name.inspect} must retain exact raw timeout policy"
       end
       expected_env = step_spec.fetch("env", protected_step_env)
-      expected_env = expected_env.merge("ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact") if %w[test_fast library_sweep relay_authority_targets high-risk-recovery].include?(job_id)
       unless step_env == expected_env
         errors << "#{label} #{name.inspect} must pin exact step env and disable BASH_ENV"
       end
@@ -1257,9 +967,10 @@ RUBY
   fi
 }
 
-trusted_workflow=".github/workflows/ci-macos-trusted.yml"
 pr_workflow=".github/workflows/ci-pr.yml"
 main_workflow=".github/workflows/ci-main.yml"
+warm_workflow=".github/workflows/ci-windows-cache-warm.yml"
+nightly_workflow=".github/workflows/ci-nightly.yml"
 validate_main_script_check_shards() {
   if ! ruby - "$main_workflow" <<'RUBY'
 require "yaml"
@@ -1319,8 +1030,8 @@ unless evidence == [["scripts", {"name" => "Upload giant-file progress evidence"
   errors << "giant-file progress evidence upload must remain exact, unconditional and only in the cargo shard job"
 end
 clippy_upload = {"name" => "Upload Clippy observation", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "clippy-observation-${{ github.sha }}", "path" => "target/clippy-observation/", "if-no-files-found" => "error"}}
-lib_upload = {"name" => "Upload shared lib tests", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "lib-test-artifact", "path" => "${{ runner.temp }}/lib-test-artifact.tar.gz", "if-no-files-found" => "error", "retention-days" => 1}}
-errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) || (job_id == "lib_test_prepare" && step == lib_upload) }
+nextest_upload = ->(job_id, step) { %w[rust_build rust_tests].include?(job_id) && step["uses"] == "actions/upload-artifact@v4" && step["with"].to_h["name"].to_s.start_with?("nextest-") }
+errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) || nextest_upload.(job_id, step) }
 errors.each { |message| warn "#{path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY
@@ -1330,18 +1041,19 @@ RUBY
 }
 validate_main_script_check_shards
 
-validate_main_full_sweep() {
-  if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
+validate_main_lint_and_nextest() {
+  if ! ruby - "$main_workflow" "$pr_workflow" "$nightly_workflow" <<'RUBY'
 require "yaml"
-main_path, pr_path = ARGV
+require "json"
+require "digest"
+main_path, pr_path, nightly_path = ARGV
 main_jobs = YAML.load_file(main_path).fetch("jobs", {})
 pr_jobs = YAML.load_file(pr_path).fetch("jobs", {})
-pr_sweep = pr_jobs["library_sweep"]
+nightly_jobs = YAML.load_file(nightly_path).fetch("jobs", {})
 errors = []
-sweep_name = "Library sweep (selection-set gated)"
 lint_tests_name = "Non-lib tests and doctests"
 cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
-{"full_non_pg" => "Library test sweep (main shard ${{ matrix.shard }})", "lint" => "Main lint and non-lib tests (ubuntu-latest)"}.each do |job_id, name|
+{"lint" => "Main lint and non-lib tests (ubuntu-latest)"}.each do |job_id, name|
   job = main_jobs[job_id]
   unless job.is_a?(Hash)
     errors << "job #{job_id} is missing"
@@ -1349,13 +1061,11 @@ cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./script
   end
   errors << "job #{job_id} must be named #{name.inspect}" unless job["name"] == name
   errors << "job #{job_id} must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
-  forbidden = job_id == "lint" ? %w[if needs continue-on-error strategy] : %w[continue-on-error]
-  forbidden.each { |key| errors << "job #{job_id} must not set #{key}" if job.key?(key) }
+  %w[if needs continue-on-error strategy].each { |key| errors << "job #{job_id} must not set #{key}" if job.key?(key) }
   Array(job["steps"]).each do |step|
     next unless step.is_a?(Hash)
     label = "job #{job_id} step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
-    optional_restore = job_id == "full_non_pg" && ["Download shared lib tests", "Restore shared lib tests"].include?(step["name"]) && step["continue-on-error"] == true
-    errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error") && !optional_restore
+    errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error")
     errors << "#{label} may only set if: always() as a cleanup step" if step.key?("if") && !(step["if"] == "always()" && cleanup.(step))
   end
 end
@@ -1387,168 +1097,66 @@ if lint.is_a?(Hash)
     errors << "job lint #{lint_tests_name} must keep #{key}=0" unless tests && (tests["env"] || {})[key] == "0"
   end
 end
-job = main_jobs["full_non_pg"]
-if job.is_a?(Hash) && pr_sweep.is_a?(Hash)
-  errors << "job full_non_pg must retain the sweep planner and optional artifact producer dependencies" unless job["needs"] == %w[sweep_shards lib_test_prepare]
-  errors << "job full_non_pg must preserve producer-failure fallback" unless job["if"] == "${{ !cancelled() }}"
-  strategy = {"fail-fast" => false, "matrix" => "${{ fromJSON(needs.sweep_shards.outputs.matrix) }}"}
-  errors << "job full_non_pg must use the validated sweep matrix without fail-fast" unless job["strategy"] == strategy
-  env = job["env"] || {}
-  errors << "job full_non_pg env must equal #{pr_path} library_sweep env" unless env == pr_sweep["env"]
-  { "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0", "AGENTDESK_REQUIRE_PG" => "1" }.each do |key, value|
-    errors << "job full_non_pg env must set #{key}=#{value}" unless env[key] == value
+# PR N == main N == nightly N: the jobs differ only in needs, the PR base comparison and the main baseline upload.
+built_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
+baseline_upload = {"name" => "Upload nextest baseline", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "nextest-baseline", "path" => "${{ runner.temp }}/nextest/plan/plan.json", "if-no-files-found" => "error", "retention-days" => 14}}
+role_free = ->(job, role_step) { job.reject { |key, _| %w[needs if].include?(key) }.merge("steps" => Array(job["steps"]).reject { |step| step.is_a?(Hash) && step["name"] == role_step }) }
+{"rust_build" => [nil, nil], "rust_tests" => ["rust_build", built_gate], "test_evidence" => [%w[rust_build rust_tests], built_gate]}.each do |job_id, (needs, gate)|
+  main_job, pr_job = main_jobs[job_id], pr_jobs[job_id]
+  unless main_job.is_a?(Hash) && pr_job.is_a?(Hash)
+    errors << "job #{job_id} must exist in both workflows"
+    next
   end
-  steps = Array(job["steps"])
-  index = ->(pred) { steps.index { |step| step.is_a?(Hash) && pred.(step) } }
-  start = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh start" && !step.key?("if") })
-  sweep = index.(->(step) { step["name"] == sweep_name })
-  stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" && step["if"] == "always()" })
-  errors << "job full_non_pg must start PostgreSQL, sweep, then stop PostgreSQL under always()" unless start && sweep && stop && start < sweep && sweep < stop
-  if sweep
-    step = steps[sweep]
-    %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].each do |key|
-      errors << "full_non_pg #{sweep_name} must keep #{key}=0" unless (step["env"] || {})[key] == "0"
-    end
-    errors << "full_non_pg #{sweep_name} must keep timeout-minutes: 60" unless step["timeout-minutes"] == 60
-  end
-  pr_step = Array(pr_sweep["steps"]).find { |step| step["name"] == sweep_name }
-  expected_step = pr_step && pr_step.merge("env" => pr_step.fetch("env").reject { |key, _| key == "ADK_TEST_SELECTION_PLAN" },
-                                         "run" => 'python3 scripts/ci/test-selection.py run --lane sweep --full --shard "${{ matrix.shard }}"')
-  errors << "full_non_pg must execute exactly one unconditional full sweep shard with the shared artifact fallback" unless expected_step && steps.select { |step| step["name"] == sweep_name } == [expected_step]
-  artifact_names = ["Download shared lib tests", "Restore shared lib tests"]
-  expected_restore = Array(pr_sweep["steps"]).select { |step| artifact_names.include?(step["name"]) }
-  errors << "full_non_pg must retain same-run download and producer-failure fallback wiring" unless expected_restore.length == 2 && steps.select { |step| artifact_names.include?(step["name"]) } == expected_restore
-else
-  errors << "#{pr_path} job library_sweep is missing" unless pr_sweep.is_a?(Hash)
+  errors << "main #{job_id} must keep needs #{needs.inspect} and if #{gate.inspect}" unless main_job["needs"] == needs && main_job["if"] == gate
+  errors << "main #{job_id} must equal the PR job apart from needs, if and the role step" unless role_free.(main_job, "Upload nextest baseline") == role_free.(pr_job, "Compare tests with the comparison base")
+  nightly_job = nightly_jobs[job_id]
+  expected_nightly = role_free.(main_job, "Upload nextest baseline").merge(main_job.slice("needs", "if"))
+  # Nightly keeps the strict retry policy: its plan differs from main only in that argument.
+  expected_nightly = JSON.parse(JSON.generate(expected_nightly).gsub("--retry-mode all-once", "--retry-mode policy"))
+  errors << "nightly #{job_id} must equal the main job apart from the baseline upload and --retry-mode policy" unless nightly_job.is_a?(Hash) && nightly_job == expected_nightly
 end
-planner = {
-  "runs-on" => "ubuntu-latest",
-  "outputs" => {"matrix" => "${{ steps.plan.outputs.matrix }}"},
-  "steps" => [
-    {"uses" => "actions/checkout@v4"},
-    {"id" => "plan", "shell" => "bash", "run" => "matrix=$(python3 scripts/ci/test-selection.py sweep-matrix)\necho \"matrix=$matrix\" >> \"$GITHUB_OUTPUT\"\n"},
-  ],
-}
-errors << "sweep_shards must validate and emit the canonical full sweep matrix" unless main_jobs["sweep_shards"] == planner
-producer = pr_jobs["lib_test_prepare"]
-expected_producer = producer && producer.reject { |key, _| %w[needs if].include?(key) }
-errors << "main lib_test_prepare must retain the independent shared lib producer contract" unless expected_producer && main_jobs["lib_test_prepare"] == expected_producer
-aggregate = main_jobs["full_non_pg_required_context"]
-expected_aggregate_step = {"shell" => "bash", "env" => {"SWEEP_RESULT" => "${{ needs.full_non_pg.result }}"}, "run" => "echo \"aggregate-only: upstream=full_non_pg result=$SWEEP_RESULT\"\ntest \"$SWEEP_RESULT\" = success\n"}
-aggregate_steps = Array(aggregate && aggregate["steps"]).map { |step| step.reject { |key, _| key == "name" } }
-expected_aggregate = {"name" => "Full tests (ubuntu-latest)", "needs" => "full_non_pg", "if" => "always()", "runs-on" => "ubuntu-latest"}
-errors << "full_non_pg_required_context must preserve the original required status and fail closed over every sweep shard" unless aggregate.is_a?(Hash) && aggregate.reject { |key, _| key == "steps" } == expected_aggregate && aggregate_steps == [expected_aggregate_step]
-errors << "only full_non_pg_required_context may publish the original Full tests required status" unless main_jobs.select { |_, candidate| candidate["name"] == "Full tests (ubuntu-latest)" }.keys == ["full_non_pg_required_context"]
-expected_pr_aggregate = {
-  "name" => "Library test sweep (ubuntu-latest)", "needs" => %w[changes library_sweep], "if" => "${{ !cancelled() }}", "runs-on" => "ubuntu-latest",
-  "steps" => [
-    {"uses" => "actions/checkout@v4"},
-    {"name" => "Mirror library sweep result across path-filter skips", "env" => {"CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}", "FILTER_NAME" => "rust_tests", "FILTER_OUTPUT" => "${{ needs.changes.outputs.rust_tests }}", "UPSTREAM_JOB_NAME" => "library_sweep", "UPSTREAM_RESULT" => "${{ needs.library_sweep.result }}"}, "run" => "./scripts/required-check-mirror.sh"},
-  ],
-}
-errors << "library_sweep_required_context must preserve its required status and mirror every sweep shard" unless pr_jobs["library_sweep_required_context"] == expected_pr_aggregate
+main_baseline = Array(main_jobs.dig("rust_build", "steps")).select { |step| step.is_a?(Hash) && step["name"] == "Upload nextest baseline" }
+errors << "main rust_build must upload the plan as nextest-baseline for 14 days, exactly once" unless main_baseline == [baseline_upload]
+errors << "only rust_build, rust_tests and test_evidence may run the main lib tests" unless main_jobs.none? { |job_id, job| !%w[rust_build rust_tests test_evidence].include?(job_id) && Array(job.is_a?(Hash) && job["steps"]).any? { |step| step.is_a?(Hash) && step["run"].to_s.match?(/cargo nextest|test-postgres|cargo test --lib(?! --no-run)/) } }
+lib_run = /cargo nextest|test-postgres|cargo test --lib(?! --no-run)/
+errors << "nightly lib tests run only in rust_build, rust_tests, test_evidence and the native nextest-native.sh steps" unless nightly_jobs.none? { |job_id, job| !%w[rust_build rust_tests test_evidence].include?(job_id) && Array(job.is_a?(Hash) && job["steps"]).any? { |step| step.is_a?(Hash) && step["run"].to_s.match?(lib_run) } }
 errors.each { |message| warn "#{main_path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY
   then
-    error "$main_workflow must run the full non-PG sweep unconditionally with PostgreSQL and debuginfo stripped"
+    error "$main_workflow and $nightly_workflow must keep their lint contract and run the same nextest jobs as $pr_workflow"
   fi
 }
-validate_main_full_sweep
+validate_main_lint_and_nextest
 
-validate_main_pg_shards() {
-  if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
+validate_windows_cache_warm() {
+  if ! ruby - "$warm_workflow" "$pr_workflow" "$main_workflow" <<'RUBY'
 require "yaml"
-errors = []
-ARGV.each do |main_path|
-pr = main_path.end_with?("ci-pr.yml")
-job_id = pr ? "test_fast" : "postgres"
-document = YAML.load_file(main_path)
-plan = {
-  "runs-on" => "ubuntu-latest",
-  "outputs" => { "matrix" => "${{ steps.plan.outputs.matrix }}" },
-  "steps" => [
-    { "uses" => "actions/checkout@v4" },
-    { "id" => "plan", "shell" => "bash", "run" => "matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)\necho \"matrix=$matrix\" >> \"$GITHUB_OUTPUT\"\n" },
-  ],
-}
-plan.merge!("needs" => "changes", "outputs" => { "force_full" => "${{ steps.plan.outputs.force_full }}" }.merge(plan["outputs"], "plan" => "${{ steps.plan.outputs.plan }}", "sweep_matrix" => "${{ steps.plan.outputs.sweep_matrix }}"),
-            "steps" => [plan["steps"][0], { "id" => "plan", "shell" => "bash", "env" => { "ADK_CI_SELECT" => "${{ vars.ADK_CI_SELECT }}" }, "run" => "python3 scripts/ci/test-selection.py plan" }]) if pr
-recipe, recipe_step = pr ? ["python3 scripts/ci/test-selection.py run --lane pg", "PostgreSQL shard tests"] : ["just test-postgres-shard"] * 2
-job = document.dig("jobs", job_id)
-unless job.is_a?(Hash)
-  warn "#{main_path}: job postgres is missing"
-  exit 1
-end
-errors << "#{main_path}: pg_shards must emit the canonical matrix" unless document.dig("jobs", "pg_shards") == plan
-errors << "job postgres must be named per shard" unless job["name"] == "PostgreSQL tests (shard ${{ matrix.shard }})"
-errors << "job postgres must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
-errors << "PG job must retain its exact needs" unless job["needs"] == (pr ? ["changes", "pg_shards", "lib_test_prepare"] : "pg_shards")
-errors << "PG job must retain its path condition" unless (pr ? job["if"] == "${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}" : !job.key?("if"))
-errors << "PG job must not set continue-on-error" if job.key?("continue-on-error")
-errors << "PG job must use the canonical matrix without fail-fast" unless job["strategy"] == { "fail-fast" => false, "matrix" => "${{ fromJSON(needs.pg_shards.outputs.matrix) }}" }
-env = job["env"] || {}
-errors << "PG_INCLUDE_SHARD must not be inherited by the PostgreSQL prelude" if env.key?("PG_INCLUDE_SHARD") || (document["env"] || {}).key?("PG_INCLUDE_SHARD")
-errors << "job postgres env must set AGENTDESK_REQUIRE_PG=1" unless env["AGENTDESK_REQUIRE_PG"] == "1"
-diagnostics = {
-  "PostgreSQL lane resource diagnostics" => "${{ inputs.resource_diagnostics == true }}",
-  "Show PostgreSQL lane resource diagnostics" => "always() && inputs.resource_diagnostics == true",
-}
-
-cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
-runs_tests = ->(step) { step["run"].to_s.match?(/\b(?:cargo\s+test|just\s+test|test-selection\.py\s+run)/) }
-start_run = "./scripts/ci/postgres-service.sh start"
-steps = Array(job["steps"]).select { |step| step.is_a?(Hash) }
-steps.each do |step|
-  label = "job postgres step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
-  errors << "PG_INCLUDE_SHARD must be confined to the actual PostgreSQL shard step" if step["name"] != recipe_step && (step["env"] || {}).key?("PG_INCLUDE_SHARD")
-  errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error") && !(pr && %w[Download Restore].any? { |prefix| step["name"] == "#{prefix} shared lib tests" } && step["continue-on-error"] == true)
-  next unless step.key?("if")
-  allowed = if runs_tests.(step) || step["run"] == start_run then nil
-            elsif diagnostics.key?(step["name"]) then diagnostics[step["name"]]
-            elsif cleanup.(step) then "always()"
-            end
-  errors << "#{label} may not set if: #{step["if"].inspect}" unless step["if"] == allowed
-end
-index = ->(pred) { steps.index(&pred) }
-start = index.(->(step) { step["run"] == start_run })
-tests = steps.each_index.select { |i| runs_tests.(steps[i]) }
-stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" })
-errors << "PG job must run the shard recipe exactly once" unless steps.count { |step| step["run"].to_s.strip == recipe } == 1
-test_step = steps.find { |step| step["run"].to_s.strip == recipe } || {}
-errors << "actual PostgreSQL shard step must set PG_INCLUDE_SHARD from matrix.shard" unless test_step.dig("env", "PG_INCLUDE_SHARD") == "${{ matrix.shard }}"
-errors << "PG shard step must keep its exact name" unless test_step["name"] == recipe_step
-errors << "job postgres test step must keep timeout-minutes: 75" unless test_step["timeout-minutes"] == 75
-errors << "job postgres must not set a job timeout-minutes" if job.key?("timeout-minutes")
-errors << "PG job must start PostgreSQL, run tests, then stop it" unless start && stop && !tests.empty? && tests.all? { |i| start < i && i < stop }
-errors << "main PG job must have exactly one test step" unless pr || tests.length == 1
-end
-errors.each { |message| warn message }
-exit(errors.empty? ? 0 : 1)
-RUBY
-  then
-    error "$main_workflow must run both PostgreSQL shards unconditionally"
-  fi
-}
-validate_main_pg_shards
-
-validate_main_windows_cache_warm() {
-  if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
-require "yaml"
-main_path, pr_path = ARGV
-main = YAML.load_file(main_path)
+warm_path, pr_path, ci_main_path = ARGV
+warm = YAML.load_file(warm_path)
 pr = YAML.load_file(pr_path)
 errors = []
-label = "#{main_path} job windows_cache_warm"
-job = main.fetch("jobs", {})["windows_cache_warm"]
+label = "#{warm_path} job windows_cache_warm"
+job = warm.fetch("jobs", {})["windows_cache_warm"]
 unless job.is_a?(Hash)
   warn "#{label} is missing; PR Windows jobs would compile cold"
   exit 1
 end
+# Dependency or toolchain changes on main, plus a daily run inside the 7-day cache eviction window.
+trigger = (warm[true] || warm["on"]).then { |value| value.is_a?(Hash) ? value : {} }
+push = trigger["push"].is_a?(Hash) ? trigger["push"] : {}
+warm_paths = ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml", ".cargo/config", warm_path]
+errors << "#{warm_path}: triggers must be exactly push, schedule and workflow_dispatch" unless trigger.keys.map(&:to_s).sort == %w[push schedule workflow_dispatch]
+errors << "#{warm_path}: push must run on main only, filtered by paths alone" unless push.keys.sort == %w[branches paths] && push["branches"] == ["main"]
+errors << "#{warm_path}: push paths must be exactly #{warm_paths.inspect}" unless push["paths"] == warm_paths
+errors << "#{warm_path}: must keep exactly one daily schedule (cron \"30 16 * * *\")" unless trigger["schedule"] == [{"cron" => "30 16 * * *"}]
+# The PR side is READ_ONLY on purpose, so these are asserted directly rather than compared.
+errors << "#{warm_path}: sccache must write the shared GHA cache" unless warm.dig("env", "SCCACHE_GHA_ENABLED") == "true" && warm.dig("env", "SCCACHE_GHA_RW_MODE") == "READ_WRITE"
+errors << "#{ci_main_path}: windows_cache_warm moved to #{warm_path}; a second warm would double the Windows minutes" if YAML.load_file(ci_main_path).fetch("jobs", {}).key?("windows_cache_warm")
 
 # rust-cache and sccache hash these env prefixes, so both workflows must agree.
 hashed = ->(env) { (env || {}).select { |key, _| key.to_s.match?(/\A(CARGO|CC|CFLAGS|CXX|CMAKE|RUST)/) } }
-errors << "#{label}: workflow CARGO/RUST env must equal #{pr_path}" unless hashed.(main["env"]) == hashed.(pr["env"])
+errors << "#{label}: workflow CARGO/RUST env must equal #{pr_path}" unless hashed.(warm["env"]) == hashed.(pr["env"])
 
 setup = ->(steps) do
   Array(steps).take_while { |step| step["uses"].to_s.start_with?("actions/checkout", "actions/setup-python", "dtolnay/", "mozilla-actions/", "Swatinem/") || step["if"] == "runner.os == 'macOS'" }
@@ -1556,7 +1164,7 @@ setup = ->(steps) do
     .map { |step| step.reject { |key, _| %w[name if].include?(key) } }
 end
 compile = ->(steps) { Array(steps).select { |step| step["run"].to_s.include?("cargo") } }
-main_compile = compile.(job["steps"])
+warm_compile = compile.(job["steps"])
 
 pr_compile_steps = {
   "check_fast_cross_os" => "cargo check",
@@ -1571,10 +1179,10 @@ pr_compile_steps.each do |pr_id, step_name|
   errors << "#{label}: env must equal #{pr_id}" unless job["env"] == pr_job["env"]
   errors << "#{label}: setup steps before the compile must equal #{pr_id}" unless setup.(job["steps"]) == setup.(pr_job["steps"])
   pr_shape = Array(pr_job["steps"]).select { |step| step["name"] == step_name }.map { |step| step.slice("shell", "env") }
-  errors << "#{label}: compile step shell/env must equal #{pr_id} #{step_name.inspect}" unless pr_shape.length == 1 && main_compile.map { |step| step.slice("shell", "env") }.uniq == pr_shape
+  errors << "#{label}: compile step shell/env must equal #{pr_id} #{step_name.inspect}" unless pr_shape.length == 1 && warm_compile.map { |step| step.slice("shell", "env") }.uniq == pr_shape
 end
 pr_check = compile.(pr.dig("jobs", "check_fast_cross_os", "steps")).map { |step| step["run"].strip }
-errors << "#{label}: cargo check must equal check_fast_cross_os" unless main_compile.first&.fetch("run", "")&.strip == pr_check.first
+errors << "#{label}: cargo check must equal check_fast_cross_os" unless warm_compile.first&.fetch("run", "")&.strip == pr_check.first
 
 expected_cache = {
   "cache-targets" => false,
@@ -1584,7 +1192,7 @@ expected_cache = {
 }
 cache_steps = Array(job["steps"]).select { |step| step["uses"] == "Swatinem/rust-cache@v2" }
 errors << "#{label}: rust-cache must save the shared key from main only" unless cache_steps.map { |step| step["with"] } == [expected_cache]
-commands = main_compile.map { |step| step["run"].strip }
+commands = warm_compile.map { |step| step["run"].strip }
 errors << "#{label}: must build exactly check + lib test binary without running tests" unless commands == ["cargo check --workspace --all-targets", "cargo test --lib --no-run"]
 errors << "#{label}: must not gate or depend on other jobs" if job.key?("needs") || job.key?("if")
 errors << "#{label}: must stay advisory (continue-on-error: true)" unless job["continue-on-error"] == true
@@ -1594,10 +1202,10 @@ errors.each { |message| warn message }
 exit(errors.empty? ? 0 : 1)
 RUBY
   then
-    error "$main_workflow must warm the Windows cargo cache the PR Windows jobs restore"
+    error "$warm_workflow must warm the Windows cargo cache the PR Windows jobs restore"
   fi
 }
-validate_main_windows_cache_warm
+validate_windows_cache_warm
 
 workflow_files() {
   find .github/workflows -maxdepth 1 -type f \
@@ -1610,17 +1218,18 @@ validate_workflow_entries() {
   done < <(find .github/workflows -type l -print0)
 }
 
-validate_required_context_uniqueness() {
+validate_workflow_job_policy() {
   if ! command -v ruby >/dev/null 2>&1; then
-    error "ruby is required to validate required workflow contexts structurally"
+    error "ruby is required to validate workflow jobs structurally"
     return
   fi
 
   while IFS= read -r -d '' workflow; do
-    if ! ruby - "$workflow" "$pr_workflow" <<'RUBY'
+    if ! ruby - "$workflow" <<'RUBY'
 require "yaml"
+require "json"
 
-path, pr_path = ARGV
+path = ARGV.fetch(0)
 begin
   # Workflow aliases are intentionally unsupported. Rejecting them keeps every
   # audited job definition local and explicit instead of expanding YAML graphs.
@@ -1766,67 +1375,18 @@ unless ambiguous_plain_job_ids.empty?
   warn "#{path}: ambiguous YAML plain job keys must be quoted or renamed: #{rendered_ids}"
   exit 1
 end
-required_context = "Script checks"
-required_context_jobs = []
-unsafe_dynamic_name_jobs = []
-jobs.each do |job_id, job|
-  next unless job.is_a?(Hash)
-
-  name = job["name"]
-  required_context_jobs << job_id.to_s if name.to_s.strip == required_context
-  next unless name.is_a?(String) && name.include?("${{")
-
-  # Do not evaluate Actions expressions. Permit exactly one matrix substitution
-  # whose static prefix/suffix make the required context impossible to render.
-  expression_shape_valid = name.scan("${{").length == 1 && name.scan("}}").length == 1
-  matrix_name = if expression_shape_valid
-    /\A([^{}]*)\$\{\{\s*matrix\.[A-Za-z_][A-Za-z0-9_.-]*\s*\}\}([^{}]*)\z/.match(name)
-  end
-  can_render_required = if matrix_name
-    static_fragments = [matrix_name[1], matrix_name[2]]
-    static_fragments.any? { |fragment| fragment.include?(required_context) } ||
-      (required_context.start_with?(matrix_name[1]) && required_context.end_with?(matrix_name[2]))
-  else
-    true
-  end
-  unsafe_dynamic_name_jobs << job_id.to_s if can_render_required
-end
-if path == pr_path
-  scripts = jobs["scripts"]
-  mirror = jobs["scripts_required_context"]
-  unless mirror.is_a?(Hash) && mirror["name"] == required_context
-    warn "#{path}: required Script checks context must be the exact literal name of jobs.scripts_required_context"
-    exit 1
-  end
-  unless scripts.is_a?(Hash) && scripts["name"] != required_context
-    warn "#{path}: jobs.scripts must not publish the required Script checks context"
-    exit 1
-  end
-  unexpected_required = required_context_jobs - ["scripts_required_context"]
-  if unexpected_required.any?
-    warn "#{path}: required Script checks context must belong only to jobs.scripts_required_context"
-    exit 1
-  end
-elsif required_context_jobs.any?
-  warn "#{path}: must not publish required Script checks context (jobs: #{required_context_jobs.join(', ')})"
-  exit 1
-end
-if unsafe_dynamic_name_jobs.any?
-  warn "#{path}: dynamic job names must not be able to publish required Script checks context (jobs: #{unsafe_dynamic_name_jobs.join(', ')})"
-  exit 1
-end
 RUBY
     then
-      error "$workflow violates required Script checks context uniqueness"
+      error "$workflow violates hosted runner or job ID policy"
     fi
   done < <(workflow_files)
 }
 
-# Path-filtered required contexts publish from `if: ${{ !cancelled() }}` result mirrors so a failed
-# or timed-out `changes` job cannot leave the required name skipped (skipped counts as passing).
-validate_path_filter_required_mirrors() {
+# The branch-protection check name comes only from the required_contexts judge in ci-pr.yml; any other
+# job, workflow or checks writer could publish a result the judge never saw.
+validate_required_check_publishers() {
   if ! command -v ruby >/dev/null 2>&1; then
-    error "ruby is required to validate path-filter required mirrors structurally"
+    error "ruby is required to validate required check publishers structurally"
     return
   fi
 
@@ -1835,44 +1395,15 @@ validate_path_filter_required_mirrors() {
     workflows+=("$workflow")
   done < <(workflow_files)
 
-  if ! ruby - "$pr_workflow" "$REQUIRED_CHECK_MIRROR_SHA256" "${workflows[@]}" <<'RUBY'
+  if ! ruby - "$pr_workflow" "$REQUIRED_CHECKS_JSON" "${workflows[@]}" <<'RUBY'
 require "yaml"
+require "json"
 
-pr_path, helper_sha256, *workflow_paths = ARGV
+pr_path, contexts_json, *workflow_paths = ARGV
+contexts = JSON.parse(contexts_json)
 
-def raw_yaml_node(node)
-  case node
-  when Psych::Nodes::Mapping
-    node.children.each_slice(2).each_with_object({}) do |(key, value), mapped|
-      raise "mapping keys must be scalar" unless key.is_a?(Psych::Nodes::Scalar)
-
-      mapped[key.value] = raw_yaml_node(value)
-    end
-  when Psych::Nodes::Sequence
-    node.children.map { |item| raw_yaml_node(item) }
-  when Psych::Nodes::Scalar
-    node.value
-  else
-    raise "unsupported YAML node: #{node.class}"
-  end
-end
-
-def stringify(value)
-  case value
-  when Hash then value.transform_values { |item| stringify(item) }
-  when Array then value.map { |item| stringify(item) }
-  else value.to_s
-  end
-end
-
-def load_jobs(path)
-  document = YAML.safe_load(File.read(path), aliases: false, filename: path)
-  jobs = document.is_a?(Hash) ? document["jobs"] : nil
-  [document, jobs.is_a?(Hash) ? jobs : {}]
-end
-
-# Mirrors the Script checks rule: one matrix substitution is allowed only when
-# its static prefix/suffix cannot render the required context.
+# One matrix substitution is allowed only when its static prefix/suffix cannot
+# render the required check name.
 def can_render_context?(name, context)
   return name.strip == context unless name.include?("${{")
 
@@ -1898,153 +1429,50 @@ def publishes_context?(job_id, job, context)
     context.start_with?("#{name.strip} (") && context.end_with?(")")
 end
 
-lint_filter = "needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'"
-specs = [
-  {
-    "mirror" => "lint_required_context",
-    "context" => "Lint",
-    "runner" => "lint",
-    "runner_name" => "Lint runner",
-    "runner_if" => lint_filter,
-    "step" => "Mirror lint result for branch protection",
-    "filter_name" => "rust_or_policy_or_relay_contract",
-    "filter_output" => "${{ #{lint_filter} }}",
-  },
-  {
-    "mirror" => "high_risk_recovery_required_context",
-    "context" => "High-risk recovery",
-    "runner" => "high-risk-recovery",
-    "runner_name" => "High-risk recovery runner",
-    "runner_if" => "${{ !cancelled() && needs.changes.outputs.high_risk_recovery == 'true' }}",
-    "step" => "Mirror high-risk recovery result across path-filter skips",
-    "filter_name" => "high_risk_recovery",
-    "filter_output" => "${{ needs.changes.outputs.high_risk_recovery }}",
-  },
-  {
-    "mirror" => "dashboard_required_context",
-    "context" => "Dashboard (Node 22)",
-    "runner" => "dashboard",
-    "runner_name" => "Dashboard (Node 22) runner",
-    "runner_if" => "needs.changes.outputs.dashboard == 'true'",
-    "step" => "Mirror dashboard result for branch protection",
-    "filter_name" => "dashboard",
-    "filter_output" => "${{ needs.changes.outputs.dashboard }}",
-  },
-]
-
-pin_step = {
-  "name" => "Pin required-check mirror helper (#5321)",
-  "env" => {"BASH_ENV" => "/dev/null"},
-  "shell" => "bash",
-  "timeout-minutes" => 10,
-  "run" => [
-    "helper_path=scripts/required-check-mirror.sh",
-    "expected=#{helper_sha256}",
-    'actual="$(sha256sum "$helper_path" | cut -d \' \' -f 1)"',
-    'if [ "$actual" != "$expected" ]; then',
-    '  echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update every #5321 helper pin together"',
-    "  exit 1",
-    "fi",
-  ].join("\n") + "\n",
-}
-
 errors = []
-begin
-  _pr_document, jobs = load_jobs(pr_path)
-  raw_root = raw_yaml_node(Psych.parse_file(pr_path).root)
-  raw_jobs = raw_root.is_a?(Hash) && raw_root["jobs"].is_a?(Hash) ? raw_root["jobs"] : {}
-rescue StandardError => error
-  warn "#{pr_path}: cannot parse YAML: #{error.message}"
-  exit 1
-end
-
-specs.each do |spec|
-  mirror_id = spec.fetch("mirror")
-  context = spec.fetch("context")
-  runner_id = spec.fetch("runner")
-  expected_mirror = {
-    "name" => context,
-    "needs" => ["changes", runner_id],
-    "if" => "${{ !cancelled() }}",
-    "runs-on" => "ubuntu-latest",
-    "steps" => [
-      {"uses" => "actions/checkout@v4"},
-      pin_step,
-      {
-        "name" => spec.fetch("step"),
-        "env" => {
-          "BASH_ENV" => "/dev/null",
-          "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
-          "FILTER_NAME" => spec.fetch("filter_name"),
-          "FILTER_OUTPUT" => spec.fetch("filter_output"),
-          "UPSTREAM_JOB_NAME" => runner_id,
-          "UPSTREAM_RESULT" => "${{ needs.#{runner_id}.result }}",
-        },
-        "run" => "./scripts/required-check-mirror.sh",
-      },
-    ],
-  }
-  mirror = jobs[mirror_id]
-  if !mirror.is_a?(Hash)
-    errors << "#{context} required-context mirror job #{mirror_id} must exist"
-  elsif mirror != expected_mirror
-    errors << "#{context} required-context mirror #{mirror_id} must retain its exact `if: ${{ !cancelled() }}` job surface, helper pin, and fail-closed result-mirror step"
-  elsif raw_jobs[mirror_id] != stringify(expected_mirror)
-    errors << "#{context} required-context mirror #{mirror_id} must retain the exact raw YAML scalars"
-  end
-
-  runner = jobs[runner_id]
-  if !runner.is_a?(Hash)
-    errors << "#{context} runner job #{runner_id} must exist"
-  else
-    {
-      "name" => spec.fetch("runner_name"),
-      "needs" => runner_id == "high-risk-recovery" ? %w[changes lib_test_prepare] : "changes",
-      "if" => spec.fetch("runner_if"),
-    }.each do |field, expected|
-      errors << "#{context} runner job #{runner_id} must retain exact #{field}" unless runner[field] == expected
-    end
-    if runner.key?("continue-on-error")
-      errors << "#{context} runner job #{runner_id} must not define a continue-on-error key"
-    end
-  end
-
-  publishers = jobs.select { |job_id, job| publishes_context?(job_id, job, context) }.keys.map(&:to_s)
-  unless publishers == [mirror_id]
-    errors << "required #{context} context must belong only to jobs.#{mirror_id}; publishers: #{publishers.inspect}"
-  end
-end
-
-(workflow_paths - [pr_path]).each do |path|
+workflow_paths.each do |path|
   begin
-    document, other_jobs = load_jobs(path)
+    document = YAML.safe_load(File.read(path), aliases: false, filename: path)
   rescue StandardError => error
     errors << "#{path}: cannot parse YAML: #{error.message}"
     next
   end
-
+  jobs = document.is_a?(Hash) && document["jobs"].is_a?(Hash) ? document["jobs"] : {}
   # Workflow names do not namespace check names, so any trigger that can
   # report on a candidate SHA (push, dispatch, schedule) counts.
-  specs.each do |spec|
-    context = spec.fetch("context")
-    publishers = other_jobs.select { |job_id, job| publishes_context?(job_id, job, context) }.keys.map(&:to_s)
-    next if publishers.empty?
+  contexts.each do |context|
+    publishers = jobs.select { |job_id, job| publishes_context?(job_id, job, context) }.keys.map(&:to_s)
+    expected = path == pr_path ? ["required_contexts"] : []
+    next if publishers == expected
 
-    errors << "#{path}: workflow must not publish required #{context} context (jobs: #{publishers.join(', ')})"
+    errors << "#{path}: required #{context} check must be published only by #{pr_path} jobs.required_contexts; publishers: #{publishers.inspect}"
+  end
+  # A check run can carry the required name too, so no job may hold checks: write.
+  scopes = {"<workflow>" => document.is_a?(Hash) ? document["permissions"] : nil}
+  jobs.each { |job_id, job| scopes[job_id.to_s] = job["permissions"] if job.is_a?(Hash) }
+  scopes.each do |scope, permissions|
+    next unless permissions == "write-all" || (permissions.is_a?(Hash) && permissions["checks"] == "write")
+
+    errors << "#{path}: #{scope} must not grant checks: write; the required check is a native job"
   end
 end
 
-errors.each { |message| warn "#{pr_path}: #{message}" }
+self_path = "scripts/check-ci-runner-hardening.sh"
+(Dir.glob(".github/**/*", File::FNM_DOTMATCH) + Dir.glob("scripts/**/*")).sort.each do |file|
+  next if !File.file?(file) || file.include?("/__pycache__/") || file == self_path
+  next unless File.binread(file).include?("check-runs")
+
+  errors << "#{file}: no CI file may call the check-runs API"
+end
+
+errors.each { |message| warn message }
 exit(errors.empty? ? 0 : 1)
 RUBY
   then
-    error "$pr_workflow must publish path-filtered required contexts from fail-closed result mirrors"
+    error "$pr_workflow must publish the required check only from the required_contexts judge"
   fi
 }
 
-if [ ! -f "$trusted_workflow" ]; then
-  error "missing $trusted_workflow"
-fi
 if [ ! -f "$pr_workflow" ]; then
   error "missing $pr_workflow"
 fi
@@ -2059,19 +1487,8 @@ while IFS= read -r -d '' workflow; do
   fi
 done < <(workflow_files)
 
-validate_required_context_uniqueness
-validate_path_filter_required_mirrors
-
-# Trusted macOS runs on a timer or by hand only and no run cancels another:
-# a per-push run outlasts the gap between main pushes and never finishes.
-if [ -f "$trusted_workflow" ] && ! ruby -ryaml -e '
-  doc = YAML.safe_load(File.read(ARGV[0])); trigger = doc[true] || doc["on"]; group = doc["concurrency"] || {}
-  crons = trigger.is_a?(Hash) ? Array(trigger["schedule"]) : []
-  exit(trigger.is_a?(Hash) && trigger.keys.sort == %w[schedule workflow_dispatch] && crons.any? &&
-    crons.all? { |entry| entry.is_a?(Hash) && entry["cron"].is_a?(String) } &&
-    group["cancel-in-progress"] == false && group["group"].to_s.include?("github.event_name"))' "$trusted_workflow"; then
-  error "$trusted_workflow must trigger only on schedule and workflow_dispatch, and no run may cancel another"
-fi
+validate_workflow_job_policy
+validate_required_check_publishers
 
 # Superseded PR heads must release hosted runners immediately. Required
 # contexts remain fail-closed on the newest exact SHA; branch protection never

@@ -2,11 +2,9 @@
 
 use super::fault::{FenceWriteFault, arm};
 use super::*;
-use crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::ScriptedTmux;
 use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
-use crate::services::claude_tui::input::{
-    send_followup_prompt_or_idle_transcript, send_fresh_prompt,
-};
+use crate::services::claude_tui::input::submission::tests::ScriptedTmux;
+use crate::services::claude_tui::input::{send_fresh_prompt, send_warm_followup};
 use crate::services::claude_tui::submission_fence;
 use crate::services::provider::CancelToken;
 use crate::services::turn_host::HerdrRefusal;
@@ -88,19 +86,12 @@ enum Entry {
     Warm,
 }
 
-fn submit(
-    entry: Entry,
-    channel: u64,
-    prompt: &str,
-    transcript: &std::path::Path,
-) -> Result<(), String> {
+fn submit(entry: Entry, channel: u64, prompt: &str) -> Result<(), String> {
     let session = format!("AgentDesk-claude-zp1-{channel}");
     let token = CancelToken::new();
     match entry {
         Entry::Fresh => send_fresh_prompt(&session, prompt, Some(&token)),
-        Entry::Warm => {
-            send_followup_prompt_or_idle_transcript(&session, prompt, Some(&token), transcript)
-        }
+        Entry::Warm => send_warm_followup(&session, prompt, Some(&token)),
     }
 }
 
@@ -120,9 +111,6 @@ fn run_on(
     fail_send: Option<usize>,
     screen: &str,
 ) -> Run {
-    let dir = tempfile::tempdir().unwrap();
-    let transcript = dir.path().join("session.jsonl");
-    std::fs::write(&transcript, "{\"type\":\"result\"}\n").unwrap();
     let spy = SpyGuard::install(SpyState {
         captures: std::iter::repeat_n(Some(ready_pane()), 24).collect(),
         ..SpyState::default()
@@ -133,9 +121,8 @@ fn run_on(
     if let Some(n) = fail_send {
         tmux.fail_send(n);
     }
-    let result = submission_fence::with_scope(Some(submission.fence()), || {
-        submit(entry, channel, prompt, &transcript)
-    });
+    let result =
+        submission_fence::with_scope(Some(submission.fence()), || submit(entry, channel, prompt));
     assert!(
         !spy.calls().iter().any(|call| is_payload_or_enter(call)),
         "the managed attempt types only after its one pre-read: {:?}",
@@ -428,7 +415,7 @@ fn a_menu_at_the_pre_read_fails_before_the_fence() {
 #[test]
 fn cg_d1_off_restart_keeps_durable_may_have_submitted_and_refuses_resend() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let _boot = crate::config::session_hosts::force_with_claude_guard_for_test(None, &[], &[]);
+    let _boot = crate::config::session_hosts::force_for_test(None, &[]);
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -448,8 +435,6 @@ fn cg_d1_off_restart_keeps_durable_may_have_submitted_and_refuses_resend() {
         guarded: Mutex::new(GuardedState::Dormant),
         evidence: Mutex::new(evidence::Evidence::default()),
     }));
-    let session = row.tmux_session_name.as_deref().unwrap();
-    assert!(crate::services::claude_tui::guarded_outcome::held(session).is_none());
     // The row already left Waiting, so the restarted attempt is never admitted to type.
     let result = crate::services::claude_tui::guarded_outcome::with_owner(
         Some(restarted.observer()),
@@ -580,11 +565,9 @@ fn a2_resolved_fresh_sid_survives_nested_receipt_recapture() {
         );
         guarded_outcome::capture_preparation(|| {
             guarded_outcome::receipt(session, &row.user_text);
-            assert_eq!(guarded_outcome::fresh_submission_observed(), Some(false));
             cap.fence().before_first_payload().unwrap();
             writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}",
                 serde_json::json!({"type":"user", "sessionId":"resolved-fresh-sid", "message":{"content":row.user_text}})).unwrap();
-            assert_eq!(guarded_outcome::fresh_submission_observed(), Some(true), "real attempt owner exposes its live exact input receipt");
             Ok(())
         })
         .unwrap();

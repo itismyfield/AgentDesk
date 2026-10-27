@@ -6,24 +6,41 @@ repository is already clippy-clean.
 ## Entrypoints
 
 - `just check`: local aggregate for `just fmt-check`, staged clippy,
-  `cargo check --workspace --all-features --all-targets`, the existing
-  non-Postgres test subset, and the targeted `ClaudeBinary` compile-fail
-  doctest guard.
-- `just test-postgres`: existing PostgreSQL test lane for CI jobs with a
-  Postgres service.
+  `cargo check --workspace --all-features --all-targets` and `just test`.
+- `just test`: the CI nextest run, `cargo nextest run --lib --profile ci`, over every
+  lib test; the PostgreSQL ones need a dedicated test server.
+- `just test-non-pg`: without PostgreSQL, the lib tests the source PG classifier leaves
+  out through the native CI path, then every non-lib test and the `ClaudeBinary`
+  compile-fail doctests.
+- `just test-postgres`: every lib test against an explicit
+  `POSTGRES_TEST_DATABASE_URL_BASE` server.
 - `just lint-strict`: target end state, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`. This is intentionally not wired into required
   CI yet.
 
 ## Current Staging
 
-`Cargo.toml` configures eight Clippy denies: `dbg_macro`, `todo`,
-`unimplemented`, `await_holding_lock`, `large_enum_variant`, `result_large_err`,
-`too_many_arguments` and `type_complexity`. The authoritative staged command is
+`Cargo.toml` configures eleven deny entries: the `correctness` group and ten
+individual lints, `dbg_macro`, `todo`, `unimplemented`, `await_holding_lock`,
+`drop_non_drop`, `mistyped_literal_suffixes`, `large_enum_variant`,
+`result_large_err`, `too_many_arguments` and `type_complexity`.
+The authoritative staged command is
 `cargo clippy --workspace --all-targets --all-features -- -W clippy::all`.
-The trailing group level overrides the five group-member denies to warnings;
-only `dbg_macro`, `todo` and `unimplemented` remain denied. Configured deny
-entries must not be mistaken for effective hard gates under this argv.
+The trailing group level lowers the Cargo levels of group-member denies;
+the four structural complexity lints remain warnings.
+
+Effective denies for lib/bin under the staged command: `dbg_macro`, `todo`,
+`unimplemented`, `await_holding_lock`, `drop_non_drop`, `mistyped_literal_suffixes`
+and the `correctness` group.
+
+The first three are outside `clippy::all`. For the other entries, `src/lib.rs`
+and `src/main.rs` redeclare crate-level `#![deny(clippy::<lint>)]` attributes,
+which keep them denied under this argv. These attributes cover the lib/bin
+crates, including their unit tests; separate integration-test crates are not
+covered by those attributes. The library retains existing individual correctness
+allows for `absurd_extreme_comparisons` and `overly_complex_bool_expr`; the group
+deny does not remove them. Configured Cargo deny entries alone must not be
+mistaken for effective hard gates under this argv.
 
 Main and PR lint run this same invocation once, adding only Cargo's JSON output
 format. `check_clippy_warning_count.py` counts compiler warning diagnostics
@@ -34,14 +51,16 @@ the gate, never producing a valid zero. Main uploads the observation. The count
 is compiler-emitted diagnostics, not source occurrences or a deduplicated
 cross-target debt estimate.
 
-The warning-total gate uses `scripts/clippy_warning_baseline.json`: **379**
-diagnostics, measured by Ubuntu main CI at
-`f3724fb6366599a9041bcc63d267be668991c799` after the first warning-debt
-reduction (down from 952). The file records the run URL, artifact ID and diagnostics
-digest. The environment is Rust 1.94.1, x86_64 Linux and the staged argv above;
-local Mac totals cannot substitute for it. Both workflows reject warning growth
-and invalid or mismatched observations. The existing required `Lint` mirror
-owns PR enforcement; no required context is added.
+The warning-total gate uses `scripts/clippy_warning_baseline.json`: **290**
+diagnostics, measured locally on WSL at
+`6330b17f93a7852c42580e65df8f0c90752a1765` after reducing the previous 342-warning
+ceiling. The observation records its local WSL source, commit SHA and diagnostics
+digest; it does not claim a CI run or uploaded artifact. The environment remains
+Rust 1.94.1, x86_64 Linux and the staged argv above; local Mac totals cannot
+substitute for it. Main and PR CI measure again and reject warning growth or
+invalid/mismatched observations. PR CI observes the merge ref with main, so the
+combined change needs a fresh observation when it lands. The existing required
+`Lint` mirror owns PR enforcement; no required context is added.
 
 Lower the baseline with a valid observation when warning debt decreases.
 Admission compares the committed PR base (main uses its first parent) and
@@ -72,27 +91,28 @@ production-only, test-aware, or repo-wide before adding hard gates.
 
 ## Non-Postgres Test Scope
 
-`just test-non-pg` keeps a targeted non-Postgres subset for local `just check`.
-CI no longer runs it: on `main` push and dispatch, `ci-main.yml` plans the
-full adjudicated library sweep and runs `full_non_pg` as four parallel shards,
-each with its own PostgreSQL service. The job needs `sweep_shards` and
-`lib_test_prepare` and runs under `!cancelled()`. An `always()` aggregate
-requires every shard to succeed and retains `Full tests (ubuntu-latest)`.
-PR `library_sweep` uses the same partitioner on its existing selected or full
-set and retains its required mirror. Counter union checks preserve the exact
-filter-plus-replay population, declared ignored IDs share shards with runnable
-IDs, and each leg checks `SWEEP_SHARD_TOTAL` against its planned count before
-execution. Exact-ID adjudication still rejects missing IDs and zero execution.
+`just test-non-pg` runs the classifier's non-PG lib tests locally the way the native
+nightly does. CI does not call it: on `main` push and dispatch, every nightly, and on PRs whose
+`rust_tests` filter is on, `rust_build` archives the lib tests and plans every listed test
+over six `rust_tests` workers, each with its own PostgreSQL service, and
+`test_evidence` audits that every planned test ran. PR, main and nightly keep the same
+three jobs; `scripts/check-ci-runner-hardening.sh` allows them to differ only in
+`needs`, `if`, the PR base comparison, the main `nextest-baseline` upload and the
+nightly plan's `--retry-mode policy` (PR and main plan `all-once`, see
+[known-flaky-retry.md](known-flaky-retry.md)).
 
 The `lint` job runs fmt, clippy, the policy JS tests, the non-lib side of the
 recipe's `--all-targets` lines (`--bins --test '*'`), and the `ClaudeBinary`
-compile-fail doctests. The nightly macOS and Windows lanes run their
-`--all-targets` non-Postgres sweeps. Main and PR PG matrices use the numeric
-shard count from `PG_SHARD_COUNT` (currently eight), plus a separate `continuity` leg. Numeric
-legs run only their PG selection; continuity runs its existing recipe once
-with `PG_INCLUDE_SHARD` removed. Selected PRs schedule only numeric shards
-containing selected IDs, plus continuity, while preserving the existing PG
-and continuity populations.
+compile-fail doctests. The nightly macOS and Windows lanes run
+`scripts/ci/nextest-native.sh`: native source compare, plan, preflight, run
+record and audit on one worker. They plan the non-PG lib tests that
+`scripts/ci/pg_test_classifier.py` selects, then run the non-lib targets with
+`cargo test` and the non-Postgres skips.
+
+The macOS-only `herdr_loaded_image_macos_` tests compile on no PR runner.
+`scripts/ci/herdr_loaded_image_macos_ids.txt` lists them and a static test pins it
+to the macOS source inventory. A local Mac run checks that exactly those ran:
+`python3 scripts/run_test_lane.py --lane macos-loaded-image --expected-ids scripts/ci/herdr_loaded_image_macos_ids.txt -- env -u AGENTDESK_ROOT_DIR cargo test --lib herdr_loaded_image_macos_ -- --test-threads=1`.
 
 A broader sweep was attempted with:
 
@@ -119,13 +139,17 @@ Ubuntu lint jobs (PR `Lint runner`, main `Main lint`) are the authoritative form
 full workspace gates until remaining Unix-only tmux tests are made portable or
 cfg-guarded.
 `ci-nightly.yml` has the same Windows boundary today: its Windows lane runs
-default-feature `cargo test --all-targets`.
-`ci-main.yml` `windows_cache_warm` builds the same Windows compile on every
-`main` push (`cargo check --workspace --all-targets` and `cargo test --lib
---no-run`, no tests run) and saves the registry and sccache entries the PR
-Windows jobs restore. It is advisory (`continue-on-error`) and not a required
-context; `scripts/check-ci-runner-hardening.sh` keeps its env, setup steps and
-rust-cache inputs equal to the PR Windows jobs so both hash to the same keys.
+default-feature lib tests through nextest and the other targets with `cargo test`.
+`ci-windows-cache-warm.yml` `windows_cache_warm` builds the same Windows compile
+when a `main` push changes `Cargo.lock`, `Cargo.toml`, `rust-toolchain.toml` or
+the cargo config, and once a day inside the 7-day cache eviction window
+(`cargo check --workspace --all-targets` and `cargo test --lib --no-run`, no
+tests run). It saves the registry and sccache entries the PR Windows jobs
+restore. A day without a warm only slows those jobs; it never decides them. It
+is advisory (`continue-on-error`) and not a required context;
+`scripts/check-ci-runner-hardening.sh` keeps its env, setup steps and
+rust-cache inputs equal to the PR Windows jobs so both hash to the same keys,
+and rejects a second warm job in `ci-main.yml`.
 
 ### Local Windows GNU compile check from macOS
 

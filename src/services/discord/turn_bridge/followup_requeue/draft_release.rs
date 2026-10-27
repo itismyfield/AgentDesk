@@ -23,10 +23,7 @@ pub(in crate::services::discord) fn idle_release_pending(
     if !draft_release_watches().contains(&key) {
         return None;
     }
-    let observed =
-        crate::services::claude_tui::host_input::guarded_submission::idle_stash::wake_hint_observed(
-            session,
-        );
+    let observed = crate::services::claude_tui::input::submission::wake_hint_observed(session);
     let watches = draft_release_watches();
     if !watches.contains(&key) {
         return None;
@@ -98,9 +95,11 @@ pub(super) fn watch_draft_release(
                 && crate::services::claude_tui::busy_inject::stash_enabled(Some(channel_id.get()))
             {
                 let session = session.clone();
-                tokio::task::spawn_blocking(move ||
-                    crate::services::claude_tui::host_input::guarded_submission::idle_stash::wake_hint(&session)
-                ).await.unwrap_or(None)
+                tokio::task::spawn_blocking(move || {
+                    crate::services::claude_tui::input::submission::wake_hint(&session)
+                })
+                .await
+                .unwrap_or(None)
             } else {
                 None
             };

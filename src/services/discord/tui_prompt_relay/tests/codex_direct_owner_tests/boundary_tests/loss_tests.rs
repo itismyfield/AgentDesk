@@ -267,9 +267,9 @@ case "$2" in
 display-message) echo '0,,80,24';;
 capture-pane) if [ -f "$d/pasted" ]; then cat "$d/after"; else cat "$d/before"; fi;;
 load-buffer) for last do :; done; cp "$last" "$d/buffer";;
-if-shell)
-  echo "$7" >> "$d/keys"
-  case "$7" in
+paste-buffer|send-keys)
+  shift; echo "$*" >> "$d/keys"
+  case "$1" in
   paste-buffer*)
     touch "$d/pasted"
     if [ -f "$d/dynamic" ]; then
@@ -440,13 +440,7 @@ async fn injected_new_turn_delivers(root: PathBuf, channel: u64, hook_first: boo
         );
         std::fs::write(dir.join("release"), "").unwrap();
     }
-    assert_eq!(
-        injected.await.unwrap(),
-        inject::Outcome::Injected {
-            observed_turn: Some(b.clone()),
-            joined: false
-        }
-    );
+    assert_eq!(injected.await.unwrap(), inject::Outcome::Injected);
     let next = loop {
         let event = tokio::time::timeout(Duration::from_secs(5), fx.observed.recv())
             .await

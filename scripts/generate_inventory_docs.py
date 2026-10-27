@@ -1300,7 +1300,7 @@ def build_giant_registrations(
     seen: set[str] = set()
 
     # Report grandfathered paths outside the frozen planning snapshot.
-    # Independent size gates still reject new or growing giants.
+    # Size measurements and planning metadata are advisory.
     if baseline_paths is None:
         problems.append(
             "missing `grandfathered_baseline_paths` array in "
@@ -1498,6 +1498,7 @@ def giant_file_snapshot(root: Path, *, evaluation_date: date | None = None) -> d
                 for item in registrations}
     return {
         "modules": {item.file_path: item.prod_line_count for item in modules},
+        "raw_modules": {item.file_path: item.line_count for item in modules},
         "registrations": metadata,
         "overdue": sorted(
             item.file_path

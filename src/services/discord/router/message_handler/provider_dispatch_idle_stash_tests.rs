@@ -1,8 +1,6 @@
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::{
-    PROMPT, events, renderer, view, wait,
-};
+use crate::services::claude_tui::input::submission::tests::{PROMPT, events, renderer, view, wait};
 use crate::services::claude_tui::{
     busy_inject::StashChannelGuard, guarded_outcome, input, submission_fence,
 };
@@ -81,12 +79,7 @@ fn submit(
     let result = guarded_outcome::with_owner(Some(cap.observer()), || {
         submission_fence::with_scope(Some(cap.fence()), || {
             if warm {
-                input::send_followup_prompt_or_idle_transcript_owned(
-                    session,
-                    PROMPT,
-                    Some(&token),
-                    transcript,
-                )
+                input::send_warm_followup_owned(session, PROMPT, Some(&token))
             } else {
                 input::send_prompt_with_readiness(
                     session,
@@ -257,7 +250,6 @@ async fn successful_writes_do_not_need_receipt_or_restore_and_cannot_resubmit() 
                 .intervention_queue
                 .is_empty()
         );
-        guarded_outcome::forget_test_hold(&name);
     }
 }
 
@@ -348,7 +340,7 @@ async fn capped_held_capture_failure_preserves_fifo_until_reobservation() {
 
 #[test]
 fn wake_observation_separates_failed_reads_and_confirmed_unsupported_geometry() {
-    use crate::services::claude_tui::host_input::guarded_submission::idle_stash::wake_hint_observed;
+    use crate::services::claude_tui::input::submission::wake_hint_observed;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::after_shared_test_env_lock();
     let name = "act-wake-observation";
@@ -582,12 +574,7 @@ async fn held_fifo(capped: bool, capture_failure: bool) {
                         managed_request(id, name, &idle, input.message_id.get(), &input.text);
                     let result = guarded_outcome::with_owner(Some(cap.observer()), || {
                         submission_fence::with_scope(Some(cap.fence()), || {
-                            input::send_followup_prompt_or_idle_transcript_owned(
-                                name,
-                                &input.text,
-                                None,
-                                &idle,
-                            )
+                            input::send_warm_followup_owned(name, &input.text, None)
                         })
                     });
                     assert!(
@@ -770,7 +757,7 @@ fn unpredicted_body_submits_without_a_draft_hold() {
     let (_, cap) = managed_request(id, name, &path, id + 10, prompt);
     let result = guarded_outcome::with_owner(Some(cap.observer()), || {
         submission_fence::with_scope(Some(cap.fence()), || {
-            input::send_followup_prompt_or_idle_transcript_owned(name, prompt, None, &path)
+            input::send_warm_followup_owned(name, prompt, None)
         })
     });
     assert!(result.is_ok(), "{result:?}");

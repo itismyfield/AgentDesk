@@ -7,7 +7,7 @@
 
 | Method | Path | Handler | Handler Source | Route Decl |
 | --- | --- | --- | --- | --- |
-| `GET` | `/` | `runner_entry` | `src/server/web_surface.rs:54` | `src/server/web_surface.rs:48` |
+| `GET` | `/` | `runner_entry` | `src/server/web_surface.rs:57` | `src/server/web_surface.rs:51` |
 | `GET` | `/api/achievements` | `analytics::achievements` | `src/server/routes/analytics.rs:431` | `src/server/routes/domains/analytics.rs:16` |
 | `GET` | `/api/activity-heatmap` | `analytics::activity_heatmap` | `src/server/routes/analytics.rs:446` | `src/server/routes/domains/analytics.rs:17` |
 | `GET` | `/api/agents` | `agents_crud::list_agents` | `src/server/routes/agents_crud.rs:381` | `src/server/routes/domains/agents.rs:16` |
@@ -130,9 +130,9 @@
 | `POST` | `/api/github/issues/create` | `github::create_issue` | `src/server/routes/github.rs:300` | `src/server/routes/domains/integrations.rs:74` |
 | `GET` | `/api/github/pr-summary` | `pr_summary::get_pr_summary` | `src/server/routes/pr_summary.rs:88` | `src/server/routes/domains/integrations.rs:80` |
 | `POST` | `/api/github/pr-summary/invalidate` | `pr_summary::invalidate_pr_summary` | `src/server/routes/pr_summary.rs:131` | `src/server/routes/domains/integrations.rs:81` |
-| `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:787` | `src/server/routes/domains/integrations.rs:75` |
-| `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:820` | `src/server/routes/domains/integrations.rs:75` |
-| `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:864` | `src/server/routes/domains/integrations.rs:79` |
+| `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:783` | `src/server/routes/domains/integrations.rs:75` |
+| `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:816` | `src/server/routes/domains/integrations.rs:75` |
+| `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:860` | `src/server/routes/domains/integrations.rs:79` |
 | `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:368` | `src/server/routes/domains/access.rs:15` |
 | `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:373` | `src/server/routes/domains/runtime.rs:21` |
 | `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:37` | `src/server/routes/domains/ops.rs:267` |
@@ -320,5 +320,5 @@
 | `PUT` | `/api/voice/config` | `voice_config::put_voice_config` | `src/server/routes/voice_config.rs:165` | `src/server/routes/domains/admin.rs:62` |
 | `POST` | `/api/voice/speak` | `voice_audio::speak` | `src/server/routes/voice_audio.rs:73` | `src/server/routes/domains/runtime.rs:142` |
 | `POST` | `/api/voice/transcribe` | `voice_audio::transcribe` | `src/server/routes/voice_audio.rs:40` | `src/server/routes/domains/runtime.rs:141` |
-| `GET` | `/settings` | `runner_entry` | `src/server/web_surface.rs:54` | `src/server/web_surface.rs:49` |
-| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:27` | `src/server/web_surface.rs:22` |
+| `GET` | `/settings` | `runner_entry` | `src/server/web_surface.rs:57` | `src/server/web_surface.rs:52` |
+| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:27` | `src/server/web_surface.rs:25` |

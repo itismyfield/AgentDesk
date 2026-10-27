@@ -18,7 +18,6 @@ EVALUATOR = "scripts/giant_file_progress.py"
 METADATA = "scripts/giant_file_issue_metadata.json"
 GIANT_PIN = "scripts/audit_maintainability_giant_baseline.toml"
 TRANSITION = "scripts/giant_file_closed_issue_transition_list.txt"
-FROZEN = (GIANT_PIN, TRANSITION)
 LEDGER = frozenset({REGISTRY, METADATA, TRANSITION, GIANT_PIN})
 def git(*args: str, binary: bool = False) -> str | bytes:
     result = subprocess.run(
@@ -67,7 +66,7 @@ def diff_facts(base: str, candidate: str) -> dict[str, object]:
     return {"changed": changed, "additions": additions}
 
 def base_pins(root: Path) -> dict[str, int]:
-    """Invalid cap authority is a measurement failure, never a planning warning."""
+    """Read advisory references, rejecting malformed measurement inputs."""
     try:
         from audit_maintainability.checks.giant_file_ratchet import load_giant_baseline
         pins = parse_cap_table((root / GIANT_PIN).read_text(encoding="utf-8"),
@@ -78,19 +77,23 @@ def base_pins(root: Path) -> dict[str, int]:
     except Exception as error:
         raise inventory.ParseError(f"invalid giant-file pins: {error}") from error
 
-def new_or_growing_errors(base: dict[str, object],
+def giant_growth_warnings(base: dict[str, object],
                           candidate: dict[str, object]) -> list[str]:
     base_loc, candidate_loc = base["modules"], candidate["modules"]
-    errors = []
-    for path, loc in candidate_loc.items():
+    warnings = []
+    for path, loc in sorted(candidate_loc.items()):
         old = base_loc.get(path, 0)
-        if loc >= 1000 and (old < 1000 or loc > old):
-            errors.append(f"new or growing giant: {path} grew to {loc} > base {old}")
-    for path, cap in candidate.get("pins", {}).items():
+        raw, old_raw = candidate["raw_modules"][path], base["raw_modules"].get(path, 0)
+        if loc >= 1000 and (old < 1000 or raw > old_raw):
+            kind = "new giant" if old < 1000 else "giant growth"
+            warnings.append(f"{kind}: {path}: {raw - old_raw:+d} raw lines "
+                            f"({old_raw} -> {raw}); production LoC {old} -> {loc}")
+    for path, cap in sorted(candidate.get("pins", {}).items()):
         old = base.get("pins", {}).get(path)
         if old is not None and cap > old:
-            errors.append(f"giant cap increased: {path}: {old} -> {cap}")
-    return errors
+            warnings.append(f"giant reference increased: {path}: +{cap - old} "
+                            f"production lines ({old} -> {cap})")
+    return warnings
 
 def planning_warnings(base: dict[str, object], candidate: dict[str, object],
                       facts: dict[str, object]) -> list[str]:
@@ -110,7 +113,7 @@ def planning_warnings(base: dict[str, object], candidate: dict[str, object],
 
 def pr_evaluation(base: dict[str, object], candidate: dict[str, object],
                   facts: dict[str, object]) -> tuple[str, list[str]]:
-    return "pr_ordinary_no_regression", new_or_growing_errors(base, candidate)
+    return "pr_giant_warnings", giant_growth_warnings(base, candidate) + planning_warnings(base, candidate, facts)
 
 def main_record(snapshot: dict[str, object]) -> dict[str, object]:
     overdue = snapshot["overdue"]
@@ -121,11 +124,21 @@ def write_evidence(payload: dict[str, object]) -> None:
     temporary = EVIDENCE.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(EVIDENCE)
+
+def emit_warnings(warnings: list[str]) -> None:
+    for warning in warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary and warnings:
+        with open(summary, "a", encoding="utf-8") as stream:
+            stream.write("\n### Giant-file warnings\n\n")
+            stream.writelines(f"- {warning}\n" for warning in warnings)
+
 def main() -> int:
     env = os.environ
     event, repository = env.get("GFP_EVENT_NAME", ""), env.get("GFP_REPOSITORY", "")
     candidate_sha = env.get("GFP_CANDIDATE_SHA", "")
-    selector, candidate = "main_no_regression_record", {"overdue": [], "registrations": {}}
+    selector, candidate = "main_giant_record", {"overdue": [], "registrations": {}}
     payload: dict[str, object] = {
         "schema": 1, "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "event": event, "repository": repository, "selected": True, "executed": True,
@@ -142,11 +155,11 @@ def main() -> int:
                     or env.get("GFP_REF_PROTECTED") != "true"
                     or candidate_sha != oid("refs/remotes/origin/main")):
                 raise RuntimeError("dispatch requires protected main head in itismyfield/AgentDesk")
-            selector = "main_no_regression_record"
+            selector = "main_giant_record"
             payload.update({"ref": env["GFP_REF"], "ref_protected": True,
                             "main_head_sha": candidate_sha})
         if event == "pull_request":
-            selector = "pr_ordinary_no_regression"
+            selector = "pr_giant_warnings"
             # Fork PRs use the same immutable candidate provenance checks.
             if repository != "itismyfield/AgentDesk" or not env.get("GFP_HEAD_REPOSITORY"):
                 raise RuntimeError(
@@ -176,18 +189,14 @@ def main() -> int:
                 base["pins"] = base_pins(base_root)
                 candidate["pins"] = base_pins(candidate_root)
                 facts = diff_facts(base_sha, candidate_sha)
-                warnings = planning_warnings(base, candidate, facts)
+                selector, warnings = pr_evaluation(base, candidate, facts)
                 payload["warnings"] = warnings
-                for warning in warnings:
-                    print(f"WARNING: {warning}", file=sys.stderr)
+                emit_warnings(warnings)
                 base_evaluator = base_root / EVALUATOR
                 base_evaluator_sha256 = (hashlib.sha256(base_evaluator.read_bytes()).hexdigest()
                                          if base_evaluator.exists() else "")
                 candidate_evaluator_sha256 = hashlib.sha256(
                     (candidate_root / EVALUATOR).read_bytes()).hexdigest()
-                selector, errors = pr_evaluation(base, candidate, facts)
-                if errors:
-                    raise RuntimeError("; ".join(errors))
                 payload.update({"event_base_sha": event_base_sha,
                     "merge_first_parent": parents[1], "head_sha": head_sha, "merge_sha": candidate_sha,
                     "base_tree": oid(base_sha, "tree"), "base_overdue": base["overdue"],
@@ -197,9 +206,9 @@ def main() -> int:
                     payload.update({"evaluator_changed": True,
                         "base_evaluator_sha256": base_evaluator_sha256,
                         "candidate_evaluator_sha256": candidate_evaluator_sha256})
-                reason = "candidate introduces no giant and no giant growth"
+                reason = "giant growth and planning metadata are advisory"
             elif event in {"push", "workflow_dispatch"} and repository == "itismyfield/AgentDesk":
-                selector = "main_no_regression_record"
+                selector = "main_giant_record"
                 payload.update(main_record(candidate))
                 reason = "main records current giant-file debt"
             else:

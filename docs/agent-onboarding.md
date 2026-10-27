@@ -209,12 +209,11 @@ failure.
 
 ### 5.3 Failure injection in tests
 
-`AGENTDESK_TEST_AGENT_SETUP_FAIL_AFTER=<step>` (env var, `#[cfg(test)]`
-only) forces the named step to return a synthetic failure after applying its
-mutation. This is what the E2E smoke test in
-`src/integration_tests/tests/agents_setup_e2e.rs` uses to verify rollback.
-Steps recognized: `agentdesk_yaml`, `prompt_file`, `workspace_seed`,
-`db_seed`, `skill_mapping`.
+No test injects a step failure today. The `AGENTDESK_TEST_AGENT_SETUP_FAIL_AFTER`
+hook and the E2E smoke test that used it to verify rollback were removed with
+the legacy integration harness, so the rollback path (`finalize_failed_setup`
+in `src/server/routes/agents_setup.rs`) has no automated coverage. Use §5.2 to
+check a rollback by hand.
 
 ---
 
@@ -273,8 +272,8 @@ legacy CLI to unblock; otherwise fix the wizard.
 
 ## 8. End-to-End Smoke Test
 
-`src/integration_tests/tests/agents_setup_e2e.rs` exercises the full chain
-through the public HTTP surface:
+`src/integration_tests/tests/agents_setup_e2e.rs` (removed) exercised the full
+chain through the public HTTP surface:
 
 1. Boot an axum router on top of an in-memory DB and a tempdir runtime root.
 2. Seed a fake skill (`memory-read`) and a shared prompt template.
@@ -299,11 +298,16 @@ through the public HTTP surface:
    `new_channel`, source channel does not appear in any of the four channel
    columns, and `system_prompt` is **not** populated from the body.
 
-Run with:
+That end-to-end harness went away with `src/integration_tests/` (removed). The
+remaining lib tests cover only the setup and duplicate paths' config-secret
+handling:
 
 ```bash
-cargo test --bin agentdesk integration_tests::tests::agents_setup_e2e
+cargo test --lib -- server::routes::agents_setup:: server::routes::agents_crud::
 ```
+
+All tests live in the lib target. A run that reports `running 0 tests` is a
+failure, not a pass.
 
 ---
 

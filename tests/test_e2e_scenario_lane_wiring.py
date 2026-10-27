@@ -7,7 +7,7 @@ instead of compiling in review and executing nowhere.
 
 from __future__ import annotations
 
-import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -18,11 +18,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CI_SCRIPT_CHECKS = REPO_ROOT / "scripts/ci-script-checks.sh"
 CI_PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 TUI_RELAY_TESTS = REPO_ROOT / "scripts/e2e/tui_relay"
-CENSUS_JOB = "relay_authority_targets"
 CENSUS_TARGET = "services::discord::tui_prompt_relay::tests::scenario_census_e2e"
-# Failed/missing skip outputs run the census even if the shared producer fails.
-PRODUCER_NEEDS_LINE = "    needs: [changes, lib_test_prepare]"
-CANCELLATION_GUARD_LINE = "    if: ${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
+RELAY_MANIFEST = REPO_ROOT / "scripts/relay_authority_contract_targets.json"
+# The census runs in the single nextest run; the build job proves its floor on that run's list.
+FLOOR_COMMAND = 'python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"'
 
 
 def executable_lines(text: str) -> list[str]:
@@ -42,37 +41,6 @@ def discovered_test_modules() -> set[str]:
     }
 
 
-def job_block(text: str, job: str) -> str:
-    lines = text.splitlines()
-    header = re.compile(r"^  [A-Za-z0-9_-]+:$")
-    start = None
-    for index, line in enumerate(lines):
-        if line == f"  {job}:":
-            start = index
-            break
-    if start is None:
-        raise AssertionError(f"{job} job not found")
-    end = len(lines)
-    for index in range(start + 1, len(lines)):
-        if header.match(lines[index]):
-            end = index
-            break
-    return "\n".join(lines[start:end])
-
-
-def activation_lines(block: str) -> list[str]:
-    return [line for line in block.splitlines() if line.startswith(("    if:", "    needs:"))]
-
-
-def census_job_has_verified_skip(block: str) -> bool:
-    return sorted(activation_lines(block)) == [CANCELLATION_GUARD_LINE, PRODUCER_NEEDS_LINE]
-
-
-def with_activation(block: str, *lines: str) -> str:
-    body = [line for line in block.splitlines() if line not in activation_lines(block)]
-    return "\n".join(body[:1] + list(lines) + body[1:])
-
-
 class E2eScenarioLaneWiring(unittest.TestCase):
     def setUp(self) -> None:
         self.script = CI_SCRIPT_CHECKS.read_text(encoding="utf-8")
@@ -86,59 +54,28 @@ class E2eScenarioLaneWiring(unittest.TestCase):
             with self.subTest(module=module):
                 self.assertIn(module, body, f"{module} is not executed by ci-script-checks.sh")
 
-    def test_scenario_census_runner_is_wired_into_the_verified_skip_job(self) -> None:
-        block = job_block(self.workflow, CENSUS_JOB)
-        self.assertIn(CENSUS_TARGET, block, f"{CENSUS_TARGET} must run in {CENSUS_JOB}")
-        self.assertEqual(
-            self.workflow.count(CENSUS_TARGET),
-            1,
-            "the census runner must have exactly one call site in ci-pr.yml",
-        )
-
-    def test_the_census_job_uses_only_the_verified_skip_gate(self) -> None:
-        block = job_block(self.workflow, CENSUS_JOB)
-        self.assertTrue(
-            census_job_has_verified_skip(block),
-            f"{CENSUS_JOB} must use the verified skip gate; found {activation_lines(block)!r}",
-        )
-
-    def test_an_unconditional_or_missing_guard_is_rejected(self) -> None:
-        block = job_block(self.workflow, CENSUS_JOB)
-        self.assertFalse(census_job_has_verified_skip(with_activation(block)))
-
-    def test_other_census_job_activation_fails(self) -> None:
-        block = job_block(self.workflow, CENSUS_JOB)
-        for lines in (
-            ("    if: false",),
-            ("    if: ${{ false }}",),
-            ("    if: needs.changes.outputs.relay == 'true'",),
-            (PRODUCER_NEEDS_LINE, "    if: ${{ needs.changes.outputs.relay == 'true' }}"),
-            (PRODUCER_NEEDS_LINE,
-             "    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' }}"),
-            (PRODUCER_NEEDS_LINE, "    if: ${{ always() }}"),
-            (PRODUCER_NEEDS_LINE, "    if: ${{!cancelled()}}"),
-            (PRODUCER_NEEDS_LINE, "    if: ${{ !cancelled() }}"),
-            (PRODUCER_NEEDS_LINE, "    if: ${{ !cancelled() && needs.changes.outputs.rust_tests_skip == 'false' }}"),
-            (PRODUCER_NEEDS_LINE,),
-            ("    needs: changes", CANCELLATION_GUARD_LINE),
-            ("    needs: [lib_test_prepare, changes]", CANCELLATION_GUARD_LINE),
-            ("    needs: [lib_test_prepare]", CANCELLATION_GUARD_LINE),
-            ("    needs:", CANCELLATION_GUARD_LINE),
-            (PRODUCER_NEEDS_LINE, CANCELLATION_GUARD_LINE, "    if: false"),
-        ):
-            with self.subTest(lines=lines):
-                self.assertFalse(census_job_has_verified_skip(with_activation(block, *lines)))
-
-    def test_census_target_remains_required_by_the_always_publisher(self) -> None:
+    def test_scenario_census_is_a_declared_relay_floor_checked_on_the_run(self) -> None:
+        import json
+        lanes = [lane for lane in json.loads(RELAY_MANIFEST.read_text(encoding="utf-8"))["lanes"]
+                 if lane.get("status") == "active" and CENSUS_TARGET in lane.get("command", [])]
+        self.assertEqual(len(lanes), 1, f"{CENSUS_TARGET} must be exactly one active relay lane")
+        self.assertGreaterEqual(lanes[0]["minimum"], 1)
         jobs = yaml.safe_load(self.workflow)["jobs"]
-        publisher = jobs["relay-authority-contract"]
-        self.assertEqual(publisher["if"], "${{ !cancelled() }}")
-        self.assertEqual(publisher["needs"], ["changes", CENSUS_JOB, "relay_authority_mutations"])
-        census_steps = [step for step in jobs[CENSUS_JOB]["steps"]
-                        if CENSUS_TARGET in step.get("run", "")]
-        self.assertEqual(len(census_steps), 1)
-        self.assertNotIn("if", census_steps[0])
-        self.assertNotIn("continue-on-error", census_steps[0])
+        floor_steps = [step for step in jobs["rust_build"]["steps"] if FLOOR_COMMAND in str(step.get("run", "")).splitlines()]
+        self.assertEqual(len(floor_steps), 1)
+        self.assertNotIn("if", floor_steps[0])
+        self.assertNotIn("continue-on-error", floor_steps[0])
+
+    def test_census_run_remains_required_by_the_always_judge(self) -> None:
+        jobs = yaml.safe_load(self.workflow)["jobs"]
+        judge = jobs["required_contexts"]
+        self.assertEqual(judge["if"], "${{ always() }}")
+        self.assertLessEqual({"rust_build", "rust_tests", "test_evidence"}, set(judge["needs"]))
+        sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
+        import nextest_required
+        sys.path.pop(0)
+        self.assertEqual(judge["name"], nextest_required.GATE)
+        self.assertIn("relay-authority-contract", nextest_required.CONTEXTS)
 
     def test_commented_wiring_does_not_count(self) -> None:
         fixture = '# "$PYTHON" -m unittest scripts.e2e.tui_relay.test_fixtures'

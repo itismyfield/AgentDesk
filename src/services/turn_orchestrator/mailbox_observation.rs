@@ -17,8 +17,26 @@ impl MailboxObservationFailure {
     }
 }
 
+#[cfg(all(test, unix))]
+thread_local! {
+    static ENUMERATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts a whole-registry read, so a test can tell how often one pass enumerated actors.
+fn count_enumeration() {
+    #[cfg(all(test, unix))]
+    ENUMERATIONS.with(|count| count.set(count.get() + 1));
+}
+
 impl ChannelMailboxRegistry {
+    /// Whole-registry reads this thread has made through `snapshot_all` or the health read.
+    #[cfg(all(test, unix))]
+    pub(crate) fn enumerations_for_tests() -> usize {
+        ENUMERATIONS.with(std::cell::Cell::get)
+    }
+
     pub(crate) async fn snapshot_all(&self) -> HashMap<ChannelId, ChannelMailboxSnapshot> {
+        count_enumeration();
         let handles: Vec<_> = self
             .handles
             .iter()
@@ -65,6 +83,7 @@ impl ChannelMailboxRegistry {
         required_channels: impl IntoIterator<Item = ChannelId>,
         deadline: tokio::time::Instant,
     ) -> HashMap<ChannelId, Result<ChannelMailboxSnapshot, MailboxObservationFailure>> {
+        count_enumeration();
         let handles: HashMap<_, _> = self
             .handles
             .iter()

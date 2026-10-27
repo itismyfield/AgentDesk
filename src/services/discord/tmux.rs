@@ -996,9 +996,7 @@ mod monitor_auto_turn_signal_tests {
 
     #[tokio::test]
     async fn monitor_auto_turn_inflight_persists_actor_episode_nonce() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _env = EnvGuard::set_root(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -1038,9 +1036,7 @@ mod monitor_auto_turn_signal_tests {
 
     #[tokio::test]
     async fn finish_monitor_auto_turn_if_claimed_releases_mailbox_token() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _env = EnvGuard::set_root(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();

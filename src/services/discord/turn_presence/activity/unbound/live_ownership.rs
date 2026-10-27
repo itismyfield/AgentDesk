@@ -155,6 +155,28 @@ impl OwnerInputs {
         owners
     }
 
+    /// Whether every runtime's watcher owner and routine receipt for `name` was read and names no
+    /// channel but `target`; a conflicting claim or an unread source leaves the owner unresolved.
+    pub(super) fn admits(&self, name: &str, target: u64) -> bool {
+        let watchers = &self.evidence.watchers;
+        let own =
+            |owner: Option<&Option<u64>>| owner.is_some_and(|o| o.is_none_or(|o| o == target));
+        let Ok(routines) = &self.evidence.routines else {
+            return false;
+        };
+        // A name no registered runtime keyed was never queried, which is not an empty receipt.
+        let mut receipts = routines.for_name(name).peekable();
+        receipts.peek().is_some()
+            && receipts.all(|r| !r.invalid() && r.channels().iter().all(|c| *c == target))
+            && own(watchers.local.get(name))
+            && !watchers.registered.is_empty()
+            && watchers
+                .registered
+                .iter()
+                .all(|owners| own(owners.get(name)))
+            && matches!(self.nonces.get(name), Some(Ok(_)))
+    }
+
     pub(super) fn local_conflict(&self, name: &str) -> bool {
         self.evidence.local_conflict(name)
     }

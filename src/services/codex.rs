@@ -1,4 +1,5 @@
 mod command_streaming;
+mod direct_reader;
 pub(crate) use command_streaming::{CommandStreamingRequest, execute_command_streaming_observed};
 #[cfg(unix)]
 mod absence_launch;
@@ -38,7 +39,7 @@ pub(crate) use tui_session_launch::{
 use crate::services::provider::session_prompt;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Read};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
@@ -1237,6 +1238,8 @@ fn execute_streaming_direct(
     readonly_mode: bool,
     compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
+    let tap =
+        crate::services::discord::replay_policy::live::RawTap::for_codex(cancel_token.as_deref());
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
         .resolved_path
@@ -1288,67 +1291,14 @@ fn execute_streaming_direct(
         return Ok(());
     }
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Failed to capture Codex stdout".to_string())?;
-    let reader = BufReader::new(stdout);
-
-    let mut current_thread_id = session_id.map(str::to_string);
-    let mut final_text = String::new();
-    let mut saw_done = false;
-    let started_at = std::time::Instant::now();
-
-    for line in reader.lines() {
+    direct_reader::read(child, sender, session_id, tap, |child| {
         if cancel_requested(cancel_token.as_deref()) {
-            kill_child_tree(&mut child);
-            return Ok(());
-        }
-
-        let line = match line {
-            Ok(line) => line,
-            Err(e) => return Err(format!("Failed to read Codex output: {}", e)),
-        };
-
-        if let Some(done) = handle_codex_json_line(
-            &line,
-            &sender,
-            &mut current_thread_id,
-            &mut final_text,
-            started_at,
-        )? {
-            saw_done = saw_done || done;
-        }
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to wait for Codex: {}", e))?;
-
-    if !output.status.success() && !saw_done {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let message = if stderr.is_empty() {
-            format!("Codex exited with code {:?}", output.status.code())
+            kill_child_tree(child);
+            true
         } else {
-            stderr
-        };
-        let _ = sender.send(StreamMessage::Error {
-            message,
-            stdout: String::new(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            exit_code: output.status.code(),
-        });
-        return Ok(());
-    }
-
-    if !saw_done {
-        let _ = sender.send(StreamMessage::Done {
-            result: final_text,
-            session_id: current_thread_id,
-        });
-    }
-
-    Ok(())
+            false
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -337,7 +337,7 @@ fn default_shared_prompt() -> &'static str {
 
 ## Work Style
 - Plan briefly, verify before reporting done, fix bugs autonomously.
-- Check `GET /api/docs` or `GET /api/docs/{category}` before guessing ADK API calls.
+- Check `GET /api/docs` or `GET /api/docs/{group}/{category}` before guessing ADK API calls.
 - ADK API 반복 시행착오는 `api-friction`으로 기록 (DB 직접 접근 우회 금지).
 <!-- /profile -->
 

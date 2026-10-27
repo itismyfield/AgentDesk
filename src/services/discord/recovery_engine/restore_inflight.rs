@@ -52,20 +52,9 @@ pub(super) use output_paths::detect_live_tmux_output_path;
 #[path = "restore_inflight/replay_hold.rs"]
 mod replay_hold;
 
-fn observe_restore_inflight_snapshot(
-    provider: &ProviderKind,
-    states: &[inflight::InflightTurnState],
-    boot_elapsed: std::time::Duration,
-) {
-    let current_generation = super::runtime_store::process_generation();
-    tracing::info!(provider = %provider.as_str(), snapshot_rows = states.len(), boot_elapsed_ms = boot_elapsed.as_millis(), "restore_inflight snapshot loaded");
-    for state in states
-        .iter()
-        .filter(|state| state.born_generation != 0 && state.born_generation == current_generation)
-    {
-        tracing::warn!(provider = %provider.as_str(), channel_id = state.channel_id, user_msg_id = state.user_msg_id, born_generation = state.born_generation, current_generation, boot_elapsed_ms = boot_elapsed.as_millis(), "restore_inflight snapshot contains a row authored by the running process");
-    }
-}
+#[path = "restore_inflight/replay_decision.rs"]
+mod replay_decision;
+use replay_decision::observe_restore_inflight_snapshot;
 
 pub(in crate::services::discord) async fn restore_inflight_turns(
     http: &Arc<serenity::Http>,
@@ -79,10 +68,12 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         shared.restart.recovery_started_at.elapsed(),
     );
     if states.is_empty() {
+        replay_decision::spawn_pg_only(shared.pg_pool.as_ref(), provider.as_str());
         return;
     }
 
     Box::pin(restore_inflight_states(http, shared, provider, states)).await;
+    replay_decision::spawn_pg_only(shared.pg_pool.as_ref(), provider.as_str());
 }
 
 pub(in crate::services::discord) async fn restore_inflight_states(
@@ -114,7 +105,13 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             continue;
         }
         // An unverified projected receipt waits for another pass without persisting a read error.
-        if !replay_hold::hydrate_replay_hold(shared.pg_pool.as_ref(), &mut state).await {
+        if !replay_hold::hydrate_replay_hold(
+            shared.pg_pool.as_ref(),
+            &mut state,
+            shared.restart.replay_restart.get(),
+        )
+        .await
+        {
             continue;
         }
         if state.replay_rerun_blocked() {

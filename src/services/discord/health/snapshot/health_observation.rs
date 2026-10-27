@@ -17,6 +17,7 @@ use super::super::session_enrichment::{
     self, ExecutorWitness, SessionEnrichment, TmuxObservationBudget,
 };
 use super::super::stall_verdict;
+use super::super::transcript_binding_stall as binding_stall;
 use super::super::unpaired_active_token::{
     self, RelayHealthBuildInput, build_relay_health_snapshot,
 };
@@ -25,7 +26,7 @@ use super::{
     DiscordHealthSnapshot, HealthStatus, RelayThreadProofSnapshot, last_outbound_activity_ms,
     relay_active_turn_from_inflight, trace_relay_health_classification,
 };
-use crate::services::discord::relay_health::{FrontierProvenanceReport, RelayStallClassifier};
+use crate::services::discord::relay_health::FrontierProvenanceReport;
 use crate::services::discord::{self, SharedData};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{ChannelMailboxSnapshot, MailboxObservationFailure};
@@ -314,7 +315,7 @@ pub(super) async fn channel_entries<'s>(
             );
             #[cfg(unix)]
             let reachability = relay_verdict.report();
-            let relay_stall_state = RelayStallClassifier::classify(&relay_health);
+            let relay_stall_state = binding_stall::classify_relay_stall(&relay_health);
             trace_relay_health_classification(&relay_health, relay_stall_state);
             mailbox_entries.push(MailboxHealthSnapshot {
                 provider: entry.name.clone(),

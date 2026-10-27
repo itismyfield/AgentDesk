@@ -18,15 +18,14 @@ from types import SimpleNamespace
 from unittest import mock
 
 import yaml
-from tests.test_nightly_repair import ROOT, NIGHTLY, PG_STEP, PG_CARGO, FILTER_SOURCE
-from tests.test_nightly_repair import MEMBERSHIP, load_module, step_of, workflow_triggers
+from tests.test_nightly_repair import ROOT, NIGHTLY, PG_STEP, PG_CARGO
+from tests.test_nightly_repair import load_module, step_of, workflow_triggers
 
 HELPER = ROOT / "scripts/ci/pg-resource-diagnostics.py"
 M = load_module("pg_boundary_diagnostics", HELPER)
 GATE = "github.event_name == 'workflow_dispatch' && inputs.resource_diagnostics == true"
 VERIFY = "Verify PostgreSQL resource diagnostics"
-ARGV = " ".join(("test --lib --", *MEMBERSHIP.load_non_pg_skip_args(ROOT)[1::2],
-                 "--nocapture --test-threads=1"))
+ARGV = PG_CARGO.removeprefix("cargo ")
 MEM = dict(zip(M.MEMORY_KEYS, (16000, 9000, 4000, 3900)))
 META = {"run_id": "9001", "run_attempt": "1", "commit_sha": "c" * 40, "container": "agentdesk-postgres"}
 IDENTITY = ["--run-id", "9001", "--run-attempt", "1", "--commit-sha", "c" * 40]
@@ -240,10 +239,9 @@ class BoundaryRuntimeTests(unittest.TestCase):
         changes = (("exit \"$status\"", "exit 0", "fail", 101, True),
                    ('local status=$?', 'true\nlocal status=$?', "fail", 101, True),
                    ('exit "$status"', 'exit "${snapshot_status:-0}"', "fail", 101, True),
-                   (FILTER_SOURCE, 'exit 0\n' + FILTER_SOURCE, "ok", 0, True),
                    (PG_CARGO, "true", "ok", 0, True), (PG_CARGO, PG_CARGO + '\n' + PG_CARGO, "ok", 0, True),
                    (PG_CARGO, 'if false; then\n' + PG_CARGO + '\nfi', "ok", 0, True),
-                   ("--lib", "--all-targets", "ok", 0, True),
+                   ("--test e2e", "--all-targets", "ok", 0, True),
                    ('if [ "${PG_DIAG_ENABLED:-false}" = "true" ]; then', 'if true; then', "ok", 0, False))
         for old, new, mode, status, enabled in changes:
             with self.subTest(mutant=old), launch(base.replace(old, new), mode=mode, enabled=enabled) as (p, d):

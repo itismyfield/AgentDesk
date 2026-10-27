@@ -2,10 +2,8 @@
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::guarded_outcome;
-use crate::services::claude_tui::host_input::guarded_submission::executor_tests::{
-    install_shim, renderer, screen,
-};
 use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
+use crate::services::claude_tui::input::submission::tests::{frame_renderer as renderer, screen};
 use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
 
 #[tokio::test(flavor = "current_thread")]
@@ -13,12 +11,8 @@ async fn a2_fresh_hold_preserves_binding_through_no_init_and_notifies_once_pg() 
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
     let f = driver.input_fixture();
-    install_shim(&f);
     let name = format!("a2-held-bridge-{}", uuid::Uuid::new_v4());
-    let empty_view =
-        crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::view(
-            "", false,
-        );
+    let empty_view = crate::services::claude_tui::input::submission::tests::view("", false);
     renderer(&f, &name, "own", &empty_view, &screen("own"), &empty_view);
     let transcript = f.root.path().join("held.jsonl");
     let owner = f.root.path().join("owner");
@@ -193,10 +187,7 @@ async fn a2_fresh_hold_preserves_binding_through_no_init_and_notifies_once_pg() 
     std::fs::write(pane.join("expected"), &input.text).unwrap();
     std::fs::write(
         pane.join("own"),
-        crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::view(
-            &input.text,
-            false,
-        ),
+        crate::services::claude_tui::input::submission::tests::view(&input.text, false),
     )
     .unwrap();
     guarded_outcome::with_owner(Some(cap.observer()), || {
@@ -549,7 +540,7 @@ async fn a2_cleanup_refusal_then_success_delivers_once_without_requeue() {
             relay_last_offset: None,
         },
     );
-    let view = crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::view;
+    let view = crate::services::claude_tui::input::submission::tests::view;
     let empty = view("", false);
     let mut captures = std::collections::VecDeque::from([Some(view("person draft", false))]);
     captures.extend(std::iter::repeat_n(Some(empty.clone()), 40));
@@ -558,7 +549,7 @@ async fn a2_cleanup_refusal_then_success_delivers_once_without_requeue() {
         ..SpyState::default()
     });
     // The managed attempt reads and types through tmux; Enter records the prompt as Claude does.
-    let tmux = crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::ScriptedTmux::new(&empty);
+    let tmux = crate::services::claude_tui::input::submission::tests::ScriptedTmux::new(&empty);
     let receipt = serde_json::json!({"type":"user", "sessionId":"transient-sid", "message":{"content":frame}});
     tmux.on_enter(&path, &receipt.to_string());
     crate::services::claude_tui::composer_lock::guard_draft(

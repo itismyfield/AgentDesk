@@ -197,14 +197,12 @@ impl Text {
         message.author.name = "clear-test".into();
         message.content = "!clear".into();
         self.api.take();
-        let handled = Box::pin(super::super::handle_text_command_with_uploads(
+        let handled = Box::pin(super::super::handle_text_command(
             &self.ctx,
             &message,
             &self.data,
             channel(),
             "!clear",
-            &[],
-            &mut None,
         ))
         .await;
         let posted = format!("POST /api/v10/channels/{CHANNEL}/messages ");

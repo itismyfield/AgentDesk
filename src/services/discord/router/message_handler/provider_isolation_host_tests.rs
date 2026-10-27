@@ -49,62 +49,61 @@ async fn reconcile(
 
 // A live session of the wrong runtime kind is killed and forgotten only when the turn's
 // key reads a legacy row or no row yet; a kept session keeps its pane and binding.
-#[tokio::test]
-async fn a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg() {
+#[test]
+fn a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    crate::services::tui_prompt_dedupe::reset_state_for_tests();
-    let tmux = FakeTmux::install("-");
-    let (db, pool) = postgres().await;
-    let shared = shared_on(&pool).await;
-    let channel_of = |n: u64| 1_479_671_301_387_062_000 + n;
-    for (n, case) in Case::ALL.into_iter().enumerate() {
-        let name = format!("AgentDesk-claude-p4c1-kind-{n}");
-        let key = channel_key(&shared, &name);
-        case.seed(&pool, &key, &name, channel_of(n as u64)).await;
-        let got = reconcile(&shared, &tmux, channel_of(n as u64), Some(&key), &name).await;
-        assert_eq!(got, (case.admitted(), !case.admitted()), "{case:?}");
-    }
+    crate::services::tui_prompt_dedupe::run_serial_test(async {
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        let tmux = FakeTmux::install("-");
+        let (db, pool) = postgres().await;
+        let shared = shared_on(&pool).await;
+        let channel_of = |n: u64| 1_479_671_301_387_062_000 + n;
+        for (n, case) in Case::ALL.into_iter().enumerate() {
+            let name = format!("AgentDesk-claude-p4c1-kind-{n}");
+            let key = channel_key(&shared, &name);
+            case.seed(&pool, &key, &name, channel_of(n as u64)).await;
+            let got = reconcile(&shared, &tmux, channel_of(n as u64), Some(&key), &name).await;
+            assert_eq!(got, (case.admitted(), !case.admitted()), "{case:?}");
+        }
 
-    // A row written under the channel's old name still decides through its channel row.
-    for (n, stored) in [(80, Stored::Legacy), (81, Stored::Hosted)] {
-        let old = format!("AgentDesk-claude-p4c1-kind-old-{n}");
-        let mut row_owner = owner(&channel_of(n).to_string());
-        row_owner.discord_token_hash = shared.token_hash.clone();
-        let raw =
-            (stored == Stored::Hosted).then(|| wire(&record(&row_owner, "n1", HostedState::Bound)));
-        let hash = Some(shared.token_hash.as_str());
-        let old_key = channel_key(&shared, &old);
-        seed_row(&pool, "claude", hash, &old_key, channel_of(n), raw).await;
-        let name = format!("AgentDesk-claude-p4c1-kind-new-{n}");
-        let key = channel_key(&shared, &name);
-        let got = reconcile(&shared, &tmux, channel_of(n), Some(&key), &name).await;
-        let admitted = stored == Stored::Legacy;
-        assert_eq!(got, (admitted, !admitted), "renamed {stored:?}");
-    }
+        // A row written under the channel's old name still decides through its channel row.
+        for (n, stored) in [(80, Stored::Legacy), (81, Stored::Hosted)] {
+            let old = format!("AgentDesk-claude-p4c1-kind-old-{n}");
+            let mut row_owner = owner(&channel_of(n).to_string());
+            row_owner.discord_token_hash = shared.token_hash.clone();
+            let raw = (stored == Stored::Hosted)
+                .then(|| wire(&record(&row_owner, "n1", HostedState::Bound)));
+            let hash = Some(shared.token_hash.as_str());
+            let old_key = channel_key(&shared, &old);
+            seed_row(&pool, "claude", hash, &old_key, channel_of(n), raw).await;
+            let name = format!("AgentDesk-claude-p4c1-kind-new-{n}");
+            let key = channel_key(&shared, &name);
+            let got = reconcile(&shared, &tmux, channel_of(n), Some(&key), &name).await;
+            let admitted = stored == Stored::Legacy;
+            assert_eq!(got, (admitted, !admitted), "renamed {stored:?}");
+        }
 
-    let unkeyed = reconcile(
-        &shared,
-        &tmux,
-        channel_of(90),
-        None,
-        "AgentDesk-claude-p4c1-nokey",
-    );
-    assert_eq!(
-        unkeyed.await,
-        (true, false),
-        "a turn with no key keeps main's path"
-    );
-    pool.close().await;
-    let name = "AgentDesk-claude-p4c1-kind-0";
-    let key = channel_key(&shared, name);
-    let unread = reconcile(&shared, &tmux, channel_of(0), Some(&key), name).await;
-    assert_eq!(
-        unread,
-        (false, true),
-        "a failed row read is not a legacy answer"
-    );
-    db.drop().await;
+        let unkeyed = reconcile(
+            &shared,
+            &tmux,
+            channel_of(90),
+            None,
+            "AgentDesk-claude-p4c1-nokey",
+        );
+        assert_eq!(
+            unkeyed.await,
+            (true, false),
+            "a turn with no key keeps main's path"
+        );
+        pool.close().await;
+        let name = "AgentDesk-claude-p4c1-kind-0";
+        let key = channel_key(&shared, name);
+        let unread = reconcile(&shared, &tmux, channel_of(0), Some(&key), name).await;
+        assert_eq!(
+            unread,
+            (false, true),
+            "a failed row read is not a legacy answer"
+        );
+        db.drop().await;
+    });
 }

@@ -1,5 +1,7 @@
-//! Test-only Rust lexer for `include_str!` guards. It knows comments and literals only:
-//! no `cfg` evaluation, macro expansion, name resolution, or TOML/YAML/SQL parsing.
+//! Test-only serialized runtimes and Rust source scanning for `include_str!` guards.
+//! The lexer handles comments and literals without resolving names or evaluating `cfg`.
+
+pub(crate) mod serial_runtime;
 
 use std::fmt;
 use std::ops::Range;

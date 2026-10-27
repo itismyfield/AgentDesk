@@ -468,7 +468,7 @@ async fn parent_spool_gc_preserves_reconstructed_mask_evidence() {
         "actual durable GC record"
     );
     let mut frames = 0;
-    store.for_each_frame(&a, |_| frames += 1).unwrap();
+    store.for_each_frame(&a, |_, _| frames += 1).unwrap();
     assert_eq!(frames, 0);
     drop(store);
     let fresh = prompt("fresh", "new");

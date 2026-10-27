@@ -327,7 +327,7 @@ use session_status_hook::{
 };
 use settings::{
     RoleBinding, channel_upload_dir, cleanup_old_uploads, load_bot_settings,
-    load_last_session_path, resolve_role_binding, save_bot_settings,
+    load_last_session_path, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
 };
 pub(super) use skills_scan::scan_skills;
@@ -847,7 +847,7 @@ pub(super) struct DiscordBotSettings {
     pub(super) channel_node_overrides: std::collections::HashMap<String, String>,
     /// Discord user ID of the registered owner (must be configured explicitly)
     pub(super) owner_user_id: Option<u64>,
-    /// Additional authorized user IDs (bot settings; the owner can add them with `!adduser`)
+    /// Additional authorized user IDs (bot settings `allowed_user_ids`)
     pub(super) allowed_user_ids: Vec<u64>,
     /// When true, any Discord user may talk to this bot in allowed channels.
     pub(super) allow_all_users: bool,
@@ -1291,6 +1291,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         // preserved — the three members hoisted above the spawn calls are
         // side-effect-free constructors; see run_bot_build_shared_data).
         restart: RestartLifecycle {
+            replay_restart: std::sync::OnceLock::new(),
             recovering_channels: dashmap::DashMap::new(),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             intake_worker_lifecycle: Default::default(),

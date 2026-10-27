@@ -11,6 +11,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "check_doc_path_refs.py"
@@ -144,6 +145,27 @@ class MarkerTest(RepoCase):
         self.assertIn("nope.md -> link target missing", found[0])
 
 
+class ZeroTestCommandTest(RepoCase):
+    def test_bin_agentdesk_test_command_is_reported(self) -> None:
+        body = """
+        Run `cargo test --bin agentdesk high_risk_recovery::` first.
+        ```bash
+        cargo test --bin=agentdesk multinode_regression:: -- --test-threads=1
+        cargo nextest run --bin agentdesk foo
+        ```
+        """
+        found = self.findings(body)
+        self.assertEqual(len(found), 3)
+        self.assertTrue(all("runs 0 tests" in f for f in found))
+
+    def test_lib_and_other_commands_pass(self) -> None:
+        body = """
+        `cargo test --lib high_risk_recovery::` and `cargo build --bin agentdesk`.
+        `cargo test --lib x` builds the agentdesk binary with `--bin agentdesk` elsewhere.
+        """
+        self.assertEqual(self.findings(body), [])
+
+
 class BaselineTest(RepoCase):
     def run_main(self, *args: str) -> tuple[int, str]:
         err = io.StringIO()
@@ -151,6 +173,7 @@ class BaselineTest(RepoCase):
             code = CHECKER.main(["--root", str(self.root), *args])
         return code, err.getvalue()
 
+    @mock.patch.object(CHECKER, "BASELINE_MAX_ENTRIES", 10)
     def test_baseline_tolerates_listed_pairs_only(self) -> None:
         self.findings("`src/a.rs`\n`src/b.rs`\n")
         code, err = self.run_main()
@@ -162,10 +185,39 @@ class BaselineTest(RepoCase):
         self.assertIn("src/b.rs", err)
         self.assertNotIn("src/a.rs", err)
 
+    @mock.patch.object(CHECKER, "BASELINE_MAX_ENTRIES", 10)
+    def test_zero_test_command_cannot_be_baselined(self) -> None:
+        self.findings("`cargo test --bin agentdesk foo::`\n")
+        self.assertEqual(self.run_main("--write-baseline")[0], 0)
+        self.assertEqual(self.run_main()[0], 1)
+        self.write("scripts/doc_path_refs_baseline.txt", "docs/page.md\tcargo test --bin agentdesk\n")
+        code, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("runs 0 tests", err)
+
+    @mock.patch.object(CHECKER, "BASELINE_MAX_ENTRIES", 10)
     def test_write_baseline_then_pass(self) -> None:
         self.findings("`src/a.rs`\n")
         self.assertEqual(self.run_main("--write-baseline")[0], 0)
         self.assertEqual(self.run_main()[0], 0)
+
+    def test_baseline_cannot_grow_past_ceiling(self) -> None:
+        self.findings("`src/a.rs`\n")
+        self.write("scripts/doc_path_refs_baseline.txt", "docs/page.md\tsrc/a.rs\n")
+        code, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("only shrinks", err)
+
+    def test_write_baseline_refuses_entries_past_ceiling(self) -> None:
+        self.findings("`src/a.rs`\n")
+        code, err = self.run_main("--write-baseline")
+        self.assertEqual(code, 1)
+        self.assertIn("only shrinks", err)
+        self.assertFalse((self.root / "scripts/doc_path_refs_baseline.txt").exists())
+
+    def test_repo_baseline_is_within_ceiling(self) -> None:
+        entries = CHECKER.load_baseline(REPO_ROOT / CHECKER.BASELINE_REL)
+        self.assertLessEqual(len(entries), CHECKER.BASELINE_MAX_ENTRIES)
 
 
 if __name__ == "__main__":

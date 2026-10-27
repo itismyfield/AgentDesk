@@ -186,7 +186,7 @@ fn reevaluate_at(
         .map(|members| vec![None; members.len()])
         .collect::<Vec<_>>();
     for (source, ranges) in &by_source {
-        let scanned = store.for_each_frame(source, |frame| {
+        let scanned = store.for_each_frame(source, |frame, _| {
             let SpoolFrame::Record(record) = frame else {
                 return;
             };
@@ -248,9 +248,11 @@ pub(super) fn acked(ledger: &LedgerState, derived: &Derived) -> bool {
 
 /// One FIFO pass. A piece posts only under its exact episode permit; work of an episode it
 /// cannot identify stops the pass, and work behind held work of its episode or unit key waits.
+/// `delivered` runs after each settled work leaves the log.
 pub(crate) async fn deliver_owed<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
     writer: &mut ChannelWriter<P, L, A>,
     log: &mut OwedLog,
+    mut delivered: impl FnMut(&mut ChannelWriter<P, L, A>, &OwedLog),
 ) {
     let coordinates = log
         .work
@@ -304,6 +306,7 @@ pub(crate) async fn deliver_owed<P: DiscordPort, L: DeliveryLease, A: AlarmSink>
                     log.card_members.remove(key);
                 }
                 log.work.remove(at);
+                delivered(writer, log);
                 continue;
             }
             Step::Done | Step::Withheld => {}

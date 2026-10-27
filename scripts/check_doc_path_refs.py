@@ -17,6 +17,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_REL = Path("scripts") / "doc_path_refs_baseline.txt"
+# The baseline only shrinks; lower this as entries get fixed, never raise it.
+BASELINE_MAX_ENTRIES = 0
 EXCLUDED_PREFIXES = ("docs/generated/",)
 # Untracked outputs built inside a checkout. Docs may name them (saying how to
 # build them), but a Markdown link to one is dead on a fresh clone.
@@ -55,6 +57,9 @@ REMOVED_RE = re.compile(
     r"/?`?\s*\((?:removed|deleted|proposed|missing|삭제됨|제안|없음)(?:[ ,;][^)]*)?\)"
 )
 FENCE_RE = re.compile(r"^\s{0,3}(?:```|~~~)")
+# Every test lives in the lib, so a `--bin agentdesk` test run passes with 0 tests.
+ZERO_TEST_CMD_RE = re.compile(r"cargo\s+(?:test|nextest\s+run)\b[^`\n]*?--bin[\s=]+agentdesk\b")
+ZERO_TEST_REASON = "runs 0 tests (all tests are in the lib); use cargo test --lib <module::path>"
 CODE_SPAN_RE = re.compile(r"`[^`]+`")
 HAS_EXT_RE = re.compile(r"\.[A-Za-z0-9]+$")
 
@@ -224,6 +229,8 @@ def scan_doc(doc: str, text: str, index: RepoIndex) -> list[Finding]:
     external = _external_declarations(doc, lines, index, findings)
     links_only = _is_deprecated(lines)
     for lineno, raw in enumerate(lines, 1):
+        if ZERO_TEST_CMD_RE.search(raw):
+            findings.append(Finding(doc, lineno, "cargo test --bin agentdesk", ZERO_TEST_REASON))
         if ABSENT_DECL_RE.search(raw) or EXTERNAL_DECL_RE.search(raw):
             continue
         for prefix in external:
@@ -301,7 +308,9 @@ Scope: tracked *.md outside docs/generated/. Checked shapes:
     tracked (extensionless ones only inside code spans or fences);
   - path:N and path#LN (and a following `:N` code span) must name an existing
     file (partial paths match by suffix) and a line inside it;
-  - partial Rust paths (turn_bridge/mod.rs, outbox.rs) must match a tracked file.
+  - partial Rust paths (turn_bridge/mod.rs, outbox.rs) must match a tracked file;
+  - no `cargo test --bin agentdesk` command: it runs 0 tests and exits 0. This
+    one cannot be baselined.
 Prefer `path` + symbol name over path:N; line numbers drift with every edit.
 Markers for paths that intentionally do not exist:
   `path` (removed) / (proposed) / (missing), or (삭제됨) / (제안) / (없음);
@@ -309,9 +318,17 @@ Markers for paths that intentionally do not exist:
   (a declared path that exists is an error);
   <!-- doc-path-refs: external packages/x/ --> for another repo's paths.
 A doc with `deprecated: true` front matter is context only: links are checked.
-Globs and placeholders (*, <x>, {x}, $X, ...) are skipped. Known breakage owned
-by another lane is listed in scripts/doc_path_refs_baseline.txt.
+Globs and placeholders (*, <x>, {x}, $X, ...) are skipped.
+scripts/doc_path_refs_baseline.txt only shrinks (BASELINE_MAX_ENTRIES caps it):
+fix the doc or mark the path instead of adding a line.
 """
+
+
+def _ceiling_error(count: int) -> str:
+    return (
+        f"ERROR: baseline would hold {count} entries; it only shrinks "
+        f"(BASELINE_MAX_ENTRIES = {BASELINE_MAX_ENTRIES}). Fix the doc or mark the path."
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -329,10 +346,13 @@ def main(argv: list[str] | None = None) -> int:
 
     findings = scan_repo(root)
     if args.write_baseline:
-        keys = sorted({f.key() for f in findings})
+        keys = sorted({f.key() for f in findings if f.reason != ZERO_TEST_REASON})
+        if len(keys) > BASELINE_MAX_ENTRIES:
+            print(_ceiling_error(len(keys)), file=sys.stderr)
+            return 1
         header = (
             "# doc<TAB>ref pairs that scripts/check_doc_path_refs.py reports without failing.\n"
-            "# Only test-run docs awaiting their rewrite belong here; delete lines as they get fixed.\n"
+            "# It only shrinks (BASELINE_MAX_ENTRIES); fix the doc instead of adding a line.\n"
         )
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
         baseline_path.write_text(header + "".join(k + "\n" for k in keys), encoding="utf-8")
@@ -340,8 +360,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     baseline = load_baseline(baseline_path)
-    new = [f for f in findings if f.key() not in baseline]
-    tolerated = [f for f in findings if f.key() in baseline]
+    new = [f for f in findings if f.key() not in baseline or f.reason == ZERO_TEST_REASON]
+    tolerated = [f for f in findings if f not in new]
     stale = sorted(baseline - {f.key() for f in findings})
     for finding in tolerated:
         print(f"baseline: {finding.render()}")
@@ -352,6 +372,10 @@ def main(argv: list[str] | None = None) -> int:
     if new:
         print(f"{len(new)} broken doc path reference(s). Fix them as follows.", file=sys.stderr)
         print(RULES, file=sys.stderr)
+    if len(baseline) > BASELINE_MAX_ENTRIES:
+        print(_ceiling_error(len(baseline)), file=sys.stderr)
+        return 1
+    if new:
         return 1
     print(f"doc path refs OK ({len(tolerated)} baseline, {len(stale)} stale)")
     return 0

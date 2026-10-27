@@ -1,0 +1,85 @@
+# Targeted regression selectors the old high-risk and fast-targeted jobs ran on their own.
+# The single nextest run executes them; test_evidence requires every selector to match a planned test.
+# One cargo-test filter per line (substring of the test ID); a leading = means an exact test ID.
+
+[High-risk recovery: High-risk recovery lane]
+high_risk_recovery::
+services::discord::recovery_engine::state_extractors::tests
+services::discord::relay_health::tests
+services::discord::health::session_enrichment::tests
+services::discord::health::relay_dead_reattach::tests
+services::discord::relay_recovery::tests
+services::discord::terminal_ui_obligation::tests
+services::hang_forensics::tests
+services::discord::health::recovery::self_watchdog
+services::health_diagnostics::tests
+
+[High-risk recovery: Herdr recovery and admission regressions]
+services::session_host::herdr_gate::tests::root_replaced_tests::
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::
+services::tui_prompt_dedupe::hosted_source::tests::
+services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::
+
+[High-risk recovery: Operational alert intake admission regressions]
+services::discord::dispatch_policy::allowed_turn_sender_tests
+services::discord::formatting::delivery::attachment_delivery_tests
+=services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected
+services::discord::router::intake_gate::gate::tests
+server::outbox_actionable_delivery::tests
+server::policy_tick_logging::
+services::observability::events::
+server::policy_tick_schedule_tests::
+services::message_outbox::dedupe_key_tests
+=services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints
+
+[High-risk recovery: Accepted turn lifetime regressions]
+accepted_turn_tests
+child_exit_tests
+services::process::stream_child::stream_queue::tests
+services::process::process_group_tests
+services::process::simple_cancel_watcher_tests
+services::provider::cancel_token_cleanup::executor::tests
+accepted_quiet_turn_survives_virtual_day
+accepted_stream_runs_past_virtual_day_until_real_eof
+productive_turns_older_than_four_and_six_hours_defer_cleanup
+quiet_native_turn_resumes_after_virtual_day
+services::provider::cancel_watchdog::tests
+
+[High-risk recovery: Cancel-preserved queue observation regression]
+verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission
+services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::hold_detail_tests
+
+[High-risk recovery: Local model durable queue wake regression]
+services::discord::tui_prompt_relay::local_model_queue_wake_e2e
+
+[High-risk recovery: Transition-busy requeue spin regressions]
+services::discord::router::message_handler::intake_turn::race_loss::
+=services::discord::queue_io::presleep_tests::race_loss_recheck_fences_on_transition_without_parking_a_waiter_5170
+services::discord::queue_io::
+
+[High-risk recovery: Codex resume ownership regressions]
+services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::executed_resume::
+services::discord::router::message_handler::codex_resume_companion_queue_tests::
+services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::
+services::tui_o::writer::binding::terminal_tests::
+services::tui_o::writer::adoption::terminal_tests::
+services::tui_o::writer::source_read_tests::executed_resume::resume_companion_live_era_advances_past_exact_terminals_and_restarts_without_repost
+services::tui_o::writer::tests::actor::host_start::first_init::
+services::discord::turn_presence::activity::tests::codex_historical_terminals_remain_closed_in_next_incarnation
+services::discord::turn_presence::activity::tests::codex_unterminated_historical_pending_keeps_next_incarnation_queue_held
+services::tui_o::writer::tests::actor::rotation::retire_tests::codex_end_proof_tests::
+services::tui_o::store::codex_end::tests::
+services::discord::commands::control::clear_teardown::codex_end_tests::successor_tests::
+
+[Fast targeted tests: Footer-only marker regressions]
+task_notification
+services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests
+
+[Fast targeted tests: Trusted session forwarding tests]
+services::session_forwarding
+
+[Fast targeted tests: Terminal delivery evidence regressions]
+inflight::terminal_delivery_evidence_loss::tests
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests
+watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
+identity_guarded_save_rejects_stale_write_against_newer_turn

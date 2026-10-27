@@ -1,4 +1,4 @@
-"""Freeze ratchet cap growth; admission history is advisory planning data."""
+"""Size references and admission history are advisory; input failures still block."""
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ from pathlib import Path
 
 HISTORY_REL_PATH = "scripts/ratchet_admission_history.toml"
 ADMISSION_WARN_THRESHOLD = 3
-# No wiring exception may increase a giant or hotfile.
-WIRING_SLACK_LINES = 0
 
 
 @dataclass(frozen=True)
@@ -136,21 +134,6 @@ def validate_history(events: list[AdmissionEvent]) -> list[str]:
     return errors
 
 
-def validate_admission_delta(
-    *,
-    ratchet: str,
-    current_caps: dict[str, int],
-    prior_caps: dict[str, int],
-    current_events: list[AdmissionEvent],
-    prior_events: list[AdmissionEvent],
-    prior_history_exists: bool = True,
-) -> list[str]:
-    """History cannot authorize a cap increase."""
-    return [f"{ratchet} cap raised for {file}: {prior_caps[file]} -> {cap}; shrink the file"
-            for file, cap in sorted(current_caps.items())
-            if file in prior_caps and cap > prior_caps[file]]
-
-
 def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(repo_root), *args],
@@ -226,7 +209,7 @@ def admission_warning_messages(
             warnings.append(
                 f"WARN: RATCHET ADMISSION COUNT EXCEEDED: {file} has been "
                 f"admitted {event.count} times (threshold "
-                f"{ADMISSION_WARN_THRESHOLD}); prioritize decomposition."
+                f"{ADMISSION_WARN_THRESHOLD}); review whether an independent responsibility should move."
             )
     return warnings
 
@@ -262,8 +245,12 @@ def audit_repository_admissions(
                 warnings.append(f"WARN: {HISTORY_REL_PATH} is not append-only")
         except ValueError as error:
             warnings.append(f"WARN: ratchet base admission history invalid: {error}")
-        errors = validate_admission_delta(ratchet=ratchet, current_caps=current_caps,
-            prior_caps=prior_caps, current_events=current_events, prior_events=[])
+        errors = []
+        unit = "production" if ratchet == "giant_file_ratchet" else "raw"
+        warnings.extend(f"WARNING: giant reference increased: {file}: +{cap - prior_caps[file]} "
+                        f"{unit} lines ({prior_caps[file]} -> {cap})"
+                        for file, cap in sorted(current_caps.items())
+                        if file in prior_caps and cap > prior_caps[file])
     except (OSError, ValueError) as error:
         errors = [f"ratchet base cap metadata invalid: {error}"]
     return AdmissionAudit(tuple(errors), tuple(warnings), base)

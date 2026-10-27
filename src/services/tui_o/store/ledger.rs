@@ -1,7 +1,7 @@
 //! Delivery ledger: every piece O prepares and what became of it, appended and fsynced per entry.
 //! Replay rebuilds the anchor and outcomes; an ownership-invariant break is kept as a violation.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::Range;
@@ -18,6 +18,9 @@ use crate::services::tui_o::shadow::{SourceId, UnitKey};
 /// This build includes both the ledger reader and the guarded writer consumer.
 // CONSUMED-BY: scripts/deploy-release.sh via `agentdesk build-info` (src/cli/build_info.rs).
 pub const OPERATOR_RESUME_SUPPORTED: bool = true;
+
+/// Discord ids minted on different API nodes can trail creation order by about a second.
+const POST_ORDER_SKEW_MS: u64 = 30_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -149,6 +152,9 @@ pub enum PieceDisposition {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LedgerState {
     anchor: u64,
+    /// The initial anchor: no post of this writer can precede it.
+    floor: u64,
+    posted: HashSet<u64>,
     next_serial: u64,
     open_serial: Option<u64>,
     pieces: BTreeMap<u64, PieceRecord>,
@@ -162,6 +168,14 @@ pub struct LedgerState {
 }
 
 impl LedgerState {
+    fn starting_at(initial_anchor: u64) -> Self {
+        Self {
+            anchor: initial_anchor,
+            floor: initial_anchor,
+            ..Self::default()
+        }
+    }
+
     pub fn anchor(&self) -> u64 {
         self.anchor
     }
@@ -341,6 +355,13 @@ impl LedgerState {
         self.violation.get_or_insert(detail);
     }
 
+    /// A new post whose id Discord minted slightly behind the latest one.
+    fn reordered_post(&self, msg_id: u64) -> bool {
+        msg_id > self.floor
+            && !self.posted.contains(&msg_id)
+            && (self.anchor >> 22).saturating_sub(msg_id >> 22) <= POST_ORDER_SKEW_MS
+    }
+
     pub(super) fn apply(&mut self, at: DateTime<Utc>, entry: LedgerEntry) {
         match entry {
             LedgerEntry::OperatorResume {
@@ -449,11 +470,12 @@ impl LedgerState {
                 self.pieces.insert(serial, piece);
             }
             LedgerEntry::Posted { serial, msg_id } => {
-                if msg_id <= self.anchor {
-                    self.violate(format!("serial {serial} posted {msg_id} behind the anchor"));
-                } else {
+                if msg_id > self.anchor {
                     self.anchor = msg_id;
+                } else if !self.reordered_post(msg_id) {
+                    self.violate(format!("serial {serial} posted {msg_id} behind the anchor"));
                 }
+                self.posted.insert(msg_id);
                 self.resolve(serial, PieceOutcome::Posted(msg_id), at);
             }
             LedgerEntry::Rejected { serial, status } => {
@@ -550,10 +572,7 @@ fn line(at: DateTime<Utc>, entry: &LedgerEntry) -> Result<Vec<u8>, StoreError> {
 
 /// Operator snapshots use the same reducer without sweeping, cutting a tail or withdrawing a POST.
 pub(super) fn read_only(file: &mut File, initial_anchor: u64) -> Result<LedgerState, StoreError> {
-    let mut state = LedgerState {
-        anchor: initial_anchor,
-        ..LedgerState::default()
-    };
+    let mut state = LedgerState::starting_at(initial_anchor);
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     let mut offset = 0;
@@ -660,10 +679,7 @@ fn replay(
     unsent: Option<&Unsent>,
     mut before_truncate: impl FnMut(),
 ) -> Result<(LedgerState, bool), StoreError> {
-    let mut state = LedgerState {
-        anchor: initial_anchor,
-        ..LedgerState::default()
-    };
+    let mut state = LedgerState::starting_at(initial_anchor);
     let file = OpenOptions::new().read(true).write(true).open(path)?;
     // Refuse recovery while an operator is writing; replay, the withdraw check and every cut share
     // this handle.
@@ -764,10 +780,7 @@ mod tests {
     }
 
     fn replay(entries: Vec<LedgerEntry>) -> LedgerState {
-        let mut state = LedgerState {
-            anchor: 10,
-            ..LedgerState::default()
-        };
+        let mut state = LedgerState::starting_at(10);
         entries
             .into_iter()
             .for_each(|entry| state.apply(Utc::now(), entry));
@@ -822,6 +835,48 @@ mod tests {
         for entries in breaks {
             let state = replay(entries.clone());
             assert!(state.violation().is_some(), "no violation for {entries:?}");
+        }
+    }
+
+    /// Discord minted the second post's id 0.4 s behind the first one's (10-26, live channel).
+    #[test]
+    fn a_post_minted_slightly_behind_the_anchor_is_kept_without_a_violation() {
+        use LedgerEntry::Posted;
+        let (first, reordered) = (1_564_196_543_903_440_959, 1_564_196_542_175_383_656);
+        let state = replay(vec![
+            prepared(0, 10),
+            Posted {
+                serial: 0,
+                msg_id: first,
+            },
+            prepared(1, first),
+            Posted {
+                serial: 1,
+                msg_id: reordered,
+            },
+            prepared(2, first),
+        ]);
+        assert_eq!((state.violation(), state.anchor()), (None, first));
+        let far = first - ((POST_ORDER_SKEW_MS + 1_000) << 22);
+        for behind in [far, reordered, first, 9] {
+            let state = replay(vec![
+                prepared(0, 10),
+                Posted {
+                    serial: 0,
+                    msg_id: first,
+                },
+                prepared(1, first),
+                Posted {
+                    serial: 1,
+                    msg_id: reordered,
+                },
+                prepared(2, first),
+                Posted {
+                    serial: 2,
+                    msg_id: behind,
+                },
+            ]);
+            assert!(state.violation().is_some(), "no violation for {behind}");
         }
     }
 

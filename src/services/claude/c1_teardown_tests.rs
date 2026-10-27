@@ -117,6 +117,27 @@ fn a_fresh_refusal_or_uncertain_payload_keeps_its_session_and_owner_marker() {
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let tmux = FakeTmux::install(NAME);
+    // In front of the fake: the submission's pane read and load succeed, and its paste fails.
+    let front = tempfile::tempdir().unwrap();
+    let fake = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .next()
+        .unwrap();
+    let script = front.path().join("tmux");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncase \"$2\" in\ndisplay-message) case \"$*\" in *'#{{pane_id}}'*) echo %1; exit 0;; esac ;;\n\
+             load-buffer) echo load >> '{sends}'; exit 0 ;;\npaste-buffer) echo paste >> '{sends}'; exit 1 ;;\n\
+             esac\nexec '{fake}/tmux' \"$@\"\n",
+            sends = front.path().join("sends").display(),
+            fake = fake.display()
+        ),
+    )
+    .unwrap();
+    let executable = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+    std::fs::set_permissions(&script, executable).unwrap();
+    let _front =
+        crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(front.path());
     let dir = tempfile::tempdir().unwrap();
     let (owner, transcript) = (dir.path().join("owner"), dir.path().join("t.jsonl"));
     let rule = "─".repeat(80);
@@ -130,9 +151,8 @@ fn a_fresh_refusal_or_uncertain_payload_keeps_its_session_and_owner_marker() {
         ("sent then failed", None, false),
     ] {
         std::fs::write(&owner, "owner").unwrap();
-        let spy = SpyGuard::install(SpyState {
+        let _spy = SpyGuard::install(SpyState {
             captures: std::iter::repeat_n(Some(ready.clone()), 30).collect(),
-            fail_send: Some((0, Err("send-keys failed".to_string()))),
             ..SpyState::default()
         });
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -151,13 +171,11 @@ fn a_fresh_refusal_or_uncertain_payload_keeps_its_session_and_owner_marker() {
             )
         });
         let error = result.expect_err(label);
-        assert_eq!(
-            error.contains("held before submit"),
-            held,
-            "{label}: {error}"
-        );
-        let sent = spy.calls().iter().any(|call| call.starts_with("literal:"));
-        assert_eq!(sent, !held, "{label}: {:?}", spy.calls());
+        assert_eq!(error.contains("SubmissionFence"), held, "{label}: {error}");
+        let sends = std::fs::read_to_string(front.path().join("sends")).unwrap_or_default();
+        let _ = std::fs::remove_file(front.path().join("sends"));
+        let expected = if held { "" } else { "load\npaste\n" };
+        assert_eq!(sends, expected, "{label}: {error}");
         let calls = tmux.take_calls();
         assert!(!called(&calls, "kill-session"), "{label}: {calls:?}");
         assert!(!take_exit_reason(NAME), "{label}");
