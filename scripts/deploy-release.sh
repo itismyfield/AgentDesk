@@ -1918,12 +1918,25 @@ _wait_for_peer_deploy_verdict() {
 }
 
 _peer_binary_platform() {
+    local macos sdk
     [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || return 1
     printf 'arch=arm64\n'
     (cd "$REPO" && rustc -vV) || return 1
-    sw_vers -productVersion || return 1
-    xcrun --show-sdk-version || return 1
-    printf 'deployment_target=%s\n' "${MACOSX_DEPLOYMENT_TARGET:-default}"
+    macos="$(sw_vers -productVersion)" || return 1
+    sdk="$(xcrun --show-sdk-version)" || return 1
+    printf 'macos=%s\nsdk=%s\ndeployment_target=%s\n' "$macos" "$sdk" "${MACOSX_DEPLOYMENT_TARGET:-default}"
+}
+
+_peer_binary_platform_difference() {
+    python3 - "$1" "$2" "${3:-local}" "${4:-remote}" <<'PY'
+import itertools
+import sys
+
+left, right, left_name, right_name = sys.argv[1:]
+pairs = itertools.zip_longest(left.splitlines(), right.splitlines(), fillvalue='<missing>')
+differences = [f'{left_name}={a!r} {right_name}={b!r}' for a, b in pairs if a != b]
+print('; '.join(differences[:2]))
+PY
 }
 
 _peer_binary_signature() {
@@ -1936,11 +1949,14 @@ _peer_binary_signature() {
 }
 
 _verify_peer_binary() {
-    local directory="$1" sha="$2" platform signature
+    local directory="$1" sha="$2" platform signature failure
+    PEER_BINARY_FAILURE="platform probe failed"
     platform="$(_peer_binary_platform)" || return 1
+    PEER_BINARY_FAILURE="signature verification failed"
     signature="$(_peer_binary_signature "$directory/agentdesk")" || return 1
-    python3 - "$directory" "$sha" "$platform" "$signature" "$DEPLOY_BUILD_PROFILE" <<'PY'
+    if failure="$(python3 - "$directory" "$sha" "$platform" "$signature" "$DEPLOY_BUILD_PROFILE" <<'PY'
 import hashlib
+import itertools
 import json
 import os
 import subprocess
@@ -1955,6 +1971,10 @@ try:
                             ('profile', profile), ('signature', signature),
                             ('size', binary.stat().st_size)]:
         if manifest[field] != expected:
+            if field == 'platform':
+                pairs = itertools.zip_longest(manifest[field].splitlines(), platform.splitlines(), fillvalue='<missing>')
+                differences = [f'manifest={a!r} peer={b!r}' for a, b in pairs if a != b]
+                raise ValueError('platform mismatch: ' + '; '.join(differences[:2]))
             raise ValueError(field)
     digest = hashlib.sha256()
     with binary.open('rb') as stream:
@@ -1967,9 +1987,14 @@ try:
     subprocess.run([str(binary), 'build-info'], check=True, timeout=30,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-    print(f'[peer-binary] verification failed: {error}', file=sys.stderr)
+    print(str(error))
     raise SystemExit(1)
 PY
+)"; then
+        return 0
+    fi
+    PEER_BINARY_FAILURE="verification failed: $failure"
+    return 1
 }
 
 _cleanup_peer_binary() {
@@ -1984,19 +2009,32 @@ _cleanup_peer_binary() {
     esac
 }
 
+_cleanup_peer_binary_on_peer() {
+    local peer="$1" peer_root="$2" peer_binary_env="$3" command
+    command="$(declare -f _cleanup_peer_binary)
+ADK_REL=$(printf '%q' "$peer_root")
+${peer_binary_env}
+_cleanup_peer_binary"
+    ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$command")" || true
+}
+
 _select_peer_binary() {
     PEER_BINARY_ACCEPTED=0
     [ -n "${AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR:-}" ] || return 0
     local head started="$SECONDS"
     head="$(git -C "$REPO" rev-parse HEAD)" || head=""
-    if [ "${DEPLOY_PEER_INVOCATION:-0}" = 1 ] && [ -n "$head" ] \
-        && [ "$head" = "${DEPLOY_TARGET_SHA:-}" ] \
-        && _verify_peer_binary "$AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR" "$head"; then
+    if [ "${DEPLOY_PEER_INVOCATION:-0}" != 1 ]; then
+        PEER_BINARY_FAILURE="not a peer invocation"
+    elif [ -z "$head" ] || [ "$head" != "${DEPLOY_TARGET_SHA:-}" ]; then
+        PEER_BINARY_FAILURE="head/target mismatch: head=${head:-unavailable} target=${DEPLOY_TARGET_SHA:-unset}"
+    elif _verify_peer_binary "$AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR" "$head"; then
         SOURCE_BINARY="$AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR/agentdesk"
         PEER_BINARY_ACCEPTED=1
+    fi
+    if [ "$PEER_BINARY_ACCEPTED" = 1 ]; then
         echo "✓ [peer-binary] verified; using signed release binary (source=$head)"
     else
-        echo "▸ [peer-binary] fallback: verification failed; building on peer"
+        echo "▸ [peer-binary] fallback: $PEER_BINARY_FAILURE; building on peer"
         _cleanup_peer_binary
     fi
     echo "▸ [timing] phase=peer-verify seconds=$((SECONDS - started)) accepted=$PEER_BINARY_ACCEPTED"
@@ -2010,13 +2048,18 @@ _prepare_peer_binary() {
     [ -x "${DEPLOY_PEER_BINARY_SOURCE:-}" ] && [ "${DEPLOY_BUILT_SOURCE_SHA:-}" = "$sha" ] || return 1
     PEER_BINARY_FAILURE="platform/toolchain probe failed or changed since build"
     platform="$(_peer_binary_platform)" || return 1
-    [ -n "${DEPLOY_BINARY_PLATFORM:-}" ] && [ "$platform" = "$DEPLOY_BINARY_PLATFORM" ] || return 1
+    if [ -z "${DEPLOY_BINARY_PLATFORM:-}" ] || [ "$platform" != "$DEPLOY_BINARY_PLATFORM" ]; then
+        PEER_BINARY_FAILURE="platform changed since build: $(_peer_binary_platform_difference "${DEPLOY_BINARY_PLATFORM:-}" "$platform" built local)"
+        return 1
+    fi
     command="${remote_cd} && $(declare -f _peer_binary_platform)
 REPO=\"\$PWD\"
 _peer_binary_platform"
     remote_platform="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$command")")" || return 1
-    PEER_BINARY_FAILURE="platform/toolchain mismatch"
-    [ "$platform" = "$remote_platform" ] || return 1
+    if [ "$platform" != "$remote_platform" ]; then
+        PEER_BINARY_FAILURE="platform/toolchain mismatch: $(_peer_binary_platform_difference "$platform" "$remote_platform")"
+        return 1
+    fi
     echo "▸ [timing] phase=peer-compatibility peer=$peer seconds=$((SECONDS - started))"
     PEER_BINARY_FAILURE="local signature or manifest failed"
     signature="$(_peer_binary_signature "$DEPLOY_PEER_BINARY_SOURCE")" || return 1
@@ -2057,11 +2100,7 @@ PY
         if [ "$rc" = 0 ]; then
             PEER_BINARY_ENV="AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR=$(printf '%q' "$remote_dir")"
         else
-            command="$(declare -f _cleanup_peer_binary)
-ADK_REL=$(printf '%q' "$peer_root")
-AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR=$(printf '%q' "$remote_dir")
-_cleanup_peer_binary"
-            ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$command")" || true
+            _cleanup_peer_binary_on_peer "$peer" "$peer_root" "AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR=$(printf '%q' "$remote_dir")"
         fi
     else
         rc=1
@@ -2182,12 +2221,10 @@ echo \"\$port\"")"'')"; then
         fi
     fi
 
-    if [ -n "${DEPLOY_PEER_BINARY_SOURCE:-}" ]; then
-        if _prepare_peer_binary "$peer" "$remote_cd_command" "$peer_adk_rel" "$expected_repo_head"; then
-            env_prelude="$env_prelude $PEER_BINARY_ENV"
-        else
-            echo "▸ [peer-binary] fallback: $PEER_BINARY_FAILURE; building on peer $peer"
-        fi
+    if _prepare_peer_binary "$peer" "$remote_cd_command" "$peer_adk_rel" "$expected_repo_head"; then
+        env_prelude="$env_prelude $PEER_BINARY_ENV"
+    else
+        echo "▸ [peer-binary] fallback: $PEER_BINARY_FAILURE; building on peer $peer"
     fi
     # The child builds the checkout the cd above selected and pre-synced, whatever the peer login env says.
     remote_deploy_command="${remote_cd_command} && AGENTDESK_REPO_DIR=\"\$PWD\" ${env_prelude} AGENTDESK_DEPLOY_LOG=$(printf '%q' "$peer_log_path") bash scripts/deploy-release.sh${quoted_args}"
@@ -2196,6 +2233,9 @@ echo \"\$port\"")"'')"; then
     echo "▸ [peer:$peer] Running deploy-release.sh..."
     if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$remote_deploy_command")"; then
         echo "✗ [peer:$peer] deploy-release.sh failed"
+        if [ -n "$PEER_BINARY_ENV" ]; then
+            _cleanup_peer_binary_on_peer "$peer" "$peer_adk_rel" "$PEER_BINARY_ENV"
+        fi
         return 1
     fi
 

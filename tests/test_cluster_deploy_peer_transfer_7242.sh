@@ -18,11 +18,12 @@ extract_function() {
     ' "$DEPLOY_SH"
 }
 fail() { echo "FAIL: $*" >&2; exit 1; }
-for fn in _peer_binary_platform _peer_binary_signature _verify_peer_binary \
-    _prepare_peer_binary _select_peer_binary _cleanup_peer_binary \
+for fn in _peer_binary_platform _peer_binary_platform_difference _peer_binary_signature _verify_peer_binary \
+    _prepare_peer_binary _select_peer_binary _cleanup_peer_binary _cleanup_peer_binary_on_peer \
     _deploy_peer_env_prelude _deploy_to_one_peer _spawn_detached_helper; do
     body="$(extract_function "$fn")"
     [ -z "$body" ] || eval "$body"
+    printf '%s\n' "$body" >>"$WORK/functions.sh"
 done
 
 cat >"$WORK/tools/uname" <<'STUB'
@@ -51,7 +52,7 @@ fi
 STUB
 cat >"$WORK/tools/cargo" <<'STUB'
 #!/usr/bin/env bash
-echo build >>"$TRACE"
+echo "${BUILD_NODE:-build}" >>"$TRACE"
 cp "$WORK/good-binary" "$WORK/built"
 chmod +x "$WORK/built"
 STUB
@@ -67,6 +68,13 @@ case "$remote" in
 esac
 export FAKE_ARCH="${PEER_ARCH:-arm64}" FAKE_RUSTC="${PEER_RUSTC:-1.92.0}" FAKE_MACOS="${PEER_MACOS:-15.6}"
 export FAKE_SIGNATURE="${PEER_SIGNATURE:-ok}"
+case "$remote" in
+    *'bash scripts/deploy-release.sh'*)
+        [ "${LAUNCH_FAIL:-0}" != 1 ] || exit 255
+        export FAKE_MACOS="${PEER_RUNTIME_MACOS:-$FAKE_MACOS}" BUILD_NODE=build
+        ;;
+    *_cleanup_peer_binary*) echo remote-cleanup >>"$TRACE" ;;
+esac
 # Keep PATH stubs active; a login shell would replace PATH with host tools.
 bash -c "$remote"
 STUB
@@ -135,6 +143,12 @@ build = '# Build the release binary from HEAD by default;' + build.split('# The 
 stage = source.split('STAGED_BINARY="$(_staged_deploy_binary_path)"', 1)[1]
 stage = 'STAGED_BINARY="$(_staged_deploy_binary_path)"' + stage.split('sign_binary_with_fallback "$STAGED_BINARY"', 1)[0] + 'sign_binary_with_fallback "$STAGED_BINARY"\n'
 (work / 'stage-block').write_text(stage)
+leader_stage = source.split('STAGED_BINARY="$(_staged_deploy_binary_path)"', 1)[1]
+leader_stage = 'STAGED_BINARY="$(_staged_deploy_binary_path)"' + leader_stage.split('_clean_release_build_cache_after_staging', 1)[0]
+(work / 'leader-stage-block').write_text(leader_stage)
+promote = source.split('mv -f "$STAGED_BINARY" "$REL_BINARY"', 1)[1]
+promote = 'mv -f "$STAGED_BINARY" "$REL_BINARY"' + promote.split('# Swap policies with nothing fallible', 1)[0]
+(work / 'leader-promote-block').write_text(promote)
 smoke = source.split('# >>> BEGIN smoke-disposition region', 1)[1].split('\n', 1)[1]
 (work / 'smoke-block').write_text(smoke.split('# <<< END smoke-disposition region', 1)[0])
 PY
@@ -151,12 +165,7 @@ cp "$WORK/defaults.sh" "$WORK/repo/scripts/_defaults.sh"
 cat >"$WORK/repo/scripts/deploy-release.sh" <<'DRIVER'
 #!/usr/bin/env bash
 set -euo pipefail
-extract_function() {
-    awk -v start="^$1[(][)] [{]$" '$0 ~ start {p=1} p {print} p && /^}$/ {exit}' "$DEPLOY_SH"
-}
-for fn in _peer_binary_platform _peer_binary_signature _verify_peer_binary _select_peer_binary _cleanup_peer_binary; do
-    eval "$(extract_function "$fn")"
-done
+. "$WORK/functions.sh"
 REPO="$WORK/repo" ADK_REL="$PEER_ROOT" SCRIPT_DIR="$WORK/repo/scripts"
 DEPLOY_PEER_INVOCATION=1 DEPLOY_TARGET_SHA="$EXPECTED_SHA" DEPLOY_BUILD_PROFILE=release
 DEPLOY_LOCK_TIMEOUT_SECS=1 DEPLOY_BUILT_SOURCE_SHA="" DEPLOY_RUN_STARTED="$SECONDS"
@@ -169,7 +178,7 @@ _schema_order_peers() { :; }
 _staged_deploy_binary_path() { echo "$PEER_ROOT/bin/staged"; }
 sign_binary_with_fallback() { echo sign >>"$TRACE"; }
 xattr() { :; }
-git() { echo "$EXPECTED_SHA"; }
+git() { echo "${PEER_RUNTIME_HEAD:-$EXPECTED_SHA}"; }
 . "$WORK/build-block"
 . "$WORK/stage-block"
 mv "$STAGED_BINARY" "$PEER_ROOT/bin/agentdesk"
@@ -181,6 +190,37 @@ POST_DEPLOY_SMOKE_EVIDENCE=fixture
 . "$WORK/smoke-block"
 DRIVER
 chmod +x "$WORK/repo/scripts/deploy-release.sh"
+cat >"$WORK/leader-driver.sh" <<'DRIVER'
+#!/usr/bin/env bash
+set -euo pipefail
+. "$WORK/functions.sh"
+REPO="$WORK/repo" ADK_REL="$WORK/leader" SCRIPT_DIR="$WORK/repo/scripts"
+DEPLOY_PEER_INVOCATION=0 DEPLOY_TARGET_SHA="$EXPECTED_SHA" DEPLOY_BUILD_PROFILE=release
+DEPLOY_LOCK_TIMEOUT_SECS=1 DEPLOY_BUILT_SOURCE_SHA="" DEPLOY_RUN_STARTED="$SECONDS"
+DEPLOY_SSH_CONNECT_TIMEOUT=1
+export BUILD_NODE=leader-build
+unset DEPLOY_BINARY_PLATFORM DEPLOY_PEER_BINARY_SOURCE
+_ensure_dashboard_dependencies() { :; }
+_check_repo_remote_freshness() { :; }
+_external_artifact_would_skip_o_writer() { return 1; }
+_resolve_default_release_binary() { echo "$WORK/built"; }
+_schema_order_peers() { echo peer; }
+_staged_deploy_binary_path() { echo "$ADK_REL/bin/staged"; }
+sign_binary_with_fallback() { echo leader-sign >>"$TRACE"; }
+xattr() { :; }
+git() { echo "$EXPECTED_SHA"; }
+_extract_yaml_server_port_shell() { :; }
+_wait_for_peer_deploy_verdict() { echo peer-health >>"$TRACE"; }
+. "$WORK/build-block"
+STAGING_PHASE_STARTED="$SECONDS"
+. "$WORK/leader-stage-block"
+if [ "$1" = leader-live ]; then
+    REL_BINARY="$ADK_REL/bin/agentdesk"
+    . "$WORK/leader-promote-block"
+fi
+echo leader-ready >>"$TRACE"
+_deploy_to_one_peer peer
+DRIVER
 
 # shellcheck disable=SC2329
 _extract_yaml_server_port_shell() { :; }
@@ -196,10 +236,14 @@ git() { echo "$EXPECTED_SHA"; }
 run_case() (
     local scenario=$1
     export PEER_ARCH=arm64 PEER_RUSTC=1.92.0 PEER_MACOS=15.6 PEER_SIGNATURE=ok
-    export TRANSFER_FAIL=0 CORRUPT=""
+    export TRANSFER_FAIL=0 CORRUPT="" LAUNCH_FAIL=0
+    unset PEER_RUNTIME_MACOS PEER_RUNTIME_HEAD
     unset AGENTDESK_DEPLOY_BINARY AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR
     case "$scenario" in
-        success|stages|concurrency|detach) ;;
+        success|stages|concurrency|detach|leader-staged|leader-live|unavailable) ;;
+        launch-fail) export LAUNCH_FAIL=1 ;;
+        peer-platform) export PEER_RUNTIME_MACOS=14.0 ;;
+        head-target) export PEER_RUNTIME_HEAD=old-head ;;
         hash|size|execute|runtime|format|source|profile|signature-meta) export CORRUPT="$scenario" ;;
         optimized-hash) export CORRUPT=hash PYTHONOPTIMIZE=1 ;;
         arch) export PEER_ARCH=x86_64 ;;
@@ -258,12 +302,36 @@ PROBE
         echo "PASS $scenario"
         exit 0
     fi
-    echo leader-smoke >>"$TRACE"
-    _deploy_to_one_peer peer >"$WORK/$scenario.log" 2>&1 || fail "$scenario deploy failed: $(cat "$WORK/$scenario.log")"
+    local deploy_rc=0
+    case "$scenario" in
+        leader-staged|leader-live)
+            bash "$WORK/leader-driver.sh" "$scenario" >"$WORK/$scenario.log" 2>&1 || deploy_rc=$?
+            ;;
+        *)
+            [ "$scenario" != unavailable ] || unset DEPLOY_PEER_BINARY_SOURCE
+            echo leader-smoke >>"$TRACE"
+            _deploy_to_one_peer peer >"$WORK/$scenario.log" 2>&1 || deploy_rc=$?
+            ;;
+    esac
+    if [ "$scenario" = launch-fail ]; then
+        [ "$deploy_rc" != 0 ] || fail "$scenario reported success"
+        grep -qx transfer "$TRACE" || fail "$scenario did not transfer before launch"
+        grep -qx remote-cleanup "$TRACE" || fail "$scenario did not clean up remotely"
+        [ -z "$(find "$PEER_ROOT/bin" -name '.peer-transfer.*' -print)" ] || fail "$scenario left transfer staging"
+        ! grep -Eq '^(activate|peer-health|build)$' "$TRACE" || fail "$scenario continued after failed launch"
+        if [ -n "${AGENTDESK_TEST_LOG_DIR:-}" ]; then
+            mkdir -p "$AGENTDESK_TEST_LOG_DIR"
+            cp "$WORK/$scenario.log" "$AGENTDESK_TEST_LOG_DIR/$scenario.log"
+            cp "$TRACE" "$AGENTDESK_TEST_LOG_DIR/$scenario.trace"
+        fi
+        echo "PASS $scenario"
+        exit 0
+    fi
+    [ "$deploy_rc" = 0 ] || fail "$scenario deploy failed: $(cat "$WORK/$scenario.log")"
     grep -qx activate "$TRACE" || fail "$scenario did not activate"
     grep -qx peer-smoke "$TRACE" || fail "$scenario skipped peer smoke"
     grep -qx peer-health "$TRACE" || fail "$scenario skipped peer health"
-    if [ "$scenario" = success ] || [ "$scenario" = stages ]; then
+    if [ "$scenario" = success ] || [ "$scenario" = stages ] || [[ "$scenario" == leader-* ]]; then
         grep -qx transfer "$TRACE" || fail "$scenario did not transfer"
         ! grep -qx build "$TRACE" || fail "$scenario rebuilt on peer"
         cmp -s "$WORK/good-binary" "$PEER_ROOT/bin/agentdesk" || fail "$scenario activated different bytes"
@@ -275,11 +343,32 @@ PROBE
     case "$scenario" in
         arch|toolchain|os) ! grep -qx transfer "$TRACE" || fail "$scenario transferred incompatible binary" ;;
     esac
-    python3 - "$TRACE" <<'PY'
+    case "$scenario" in
+        os)
+            grep -E 'fallback:.*macos.*15[.]6.*14[.]0' "$WORK/$scenario.log" >/dev/null || fail "$scenario missing differing macos values in fallback"
+            ;;
+        toolchain)
+            grep -E 'fallback:.*rustc.*1[.]92[.]0.*1[.]91[.]0' "$WORK/$scenario.log" >/dev/null || fail "$scenario missing differing rustc values in fallback"
+            ;;
+        signature)
+            grep -E 'fallback:.*signature' "$WORK/$scenario.log" >/dev/null || fail "$scenario missing signature reason in fallback"
+            ;;
+        peer-platform)
+            grep -E 'fallback:.*platform.*manifest=.*macos.*15[.]6.*peer=.*14[.]0' "$WORK/$scenario.log" >/dev/null || fail "$scenario missing manifest/peer platform difference"
+            ;;
+        head-target)
+            grep -E 'fallback:.*head.*old-head.*target=' "$WORK/$scenario.log" >/dev/null || fail "$scenario missing head/target reason"
+            ;;
+        unavailable)
+            grep -E 'fallback:.*artifact unavailable' "$WORK/$scenario.log" >/dev/null || fail "$scenario missing artifact reason"
+            ;;
+    esac
+    python3 - "$TRACE" "$scenario" <<'PY'
 import sys
 from pathlib import Path
 trace = Path(sys.argv[1]).read_text().splitlines()
-assert trace.index('leader-smoke') < trace.index('presync') < trace.index('activate') < trace.index('peer-smoke') < trace.index('peer-health'), trace
+first = 'leader-ready' if sys.argv[2].startswith('leader-') else 'leader-smoke'
+assert trace.index(first) < trace.index('presync') < trace.index('activate') < trace.index('peer-smoke') < trace.index('peer-health'), trace
 PY
     [ -z "$(find "$PEER_ROOT/bin" -name '.peer-transfer.*' -print)" ] || fail "$scenario left transfer staging"
     if [ -n "${AGENTDESK_TEST_LOG_DIR:-}" ]; then
@@ -294,7 +383,7 @@ if [ "$#" -gt 0 ]; then
     run_case "$1"
 else
     count=0
-    for scenario in success hash arch transfer stages size signature execute runtime toolchain os format source profile signature-meta optimized-hash concurrency detach; do
+    for scenario in success hash arch transfer stages size signature execute runtime toolchain os format source profile signature-meta optimized-hash concurrency detach leader-staged leader-live unavailable launch-fail peer-platform head-target; do
         run_case "$scenario"
         count=$((count + 1))
     done
