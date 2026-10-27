@@ -314,7 +314,6 @@ fn role_binding_from_channel(
         model: channel.model(),
         reasoning_effort: channel.reasoning_effort(),
         peer_agents_enabled: channel.peer_agents().unwrap_or(true),
-        quality_feedback_injection_enabled: channel.quality_feedback_injection().unwrap_or(true),
         auth_profile: "default".to_string(),
         memory: resolve_agent_memory_settings(Some(agent)),
     }
@@ -328,7 +327,6 @@ fn role_binding_from_agent(agent: &crate::config::AgentDef, provider: ProviderKi
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: true,
-        quality_feedback_injection_enabled: true,
         auth_profile: "default".to_string(),
         memory: resolve_agent_memory_settings(Some(agent)),
     }

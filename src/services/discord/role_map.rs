@@ -53,7 +53,6 @@ fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
         model,
         reasoning_effort,
         peer_agents_enabled,
-        quality_feedback_injection_enabled: true,
         auth_profile: "default".to_string(),
         memory: resolve_memory_settings(None, memory_override.as_ref()),
     })

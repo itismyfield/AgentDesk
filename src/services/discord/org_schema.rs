@@ -702,7 +702,6 @@ pub(super) fn resolve_role_binding(
         model,
         reasoning_effort: None,
         peer_agents_enabled,
-        quality_feedback_injection_enabled: true,
         auth_profile,
         memory,
     })

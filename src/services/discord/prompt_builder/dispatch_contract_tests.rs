@@ -78,10 +78,150 @@ fn test_role_binding(role_id: &str) -> RoleBinding {
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: true,
-        quality_feedback_injection_enabled: true,
         auth_profile: "default".to_string(),
         memory: Default::default(),
     }
+}
+
+#[tokio::test]
+async fn rendered_system_prompts_omit_agent_performance_with_quality_data_pg() {
+    use crate::services::observability::{
+        QualityRankingMetric, QualityRankingWindow, query_agent_quality_ranking_with,
+        query_agent_quality_summary,
+    };
+
+    if crate::db::postgres::postgres_test_database_url_base().is_none() {
+        return;
+    }
+    // The direct API context is process-global; keep the fixture out of parallel tests.
+    const CHILD: &str = "ADK_PROMPT_QUALITY_FIXTURE_CHILD";
+    const TEST: &str = "services::discord::prompt_builder::dispatch_contract_tests::rendered_system_prompts_omit_agent_performance_with_quality_data_pg";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .expect("isolated quality fixture");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success()
+                && stdout.contains("1 passed; 0 failed")
+                && stderr.contains("quality fixture verified: 18 rendered prompts"),
+            "{stdout}\n{stderr}"
+        );
+        eprintln!("{stderr}");
+        return;
+    }
+
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "prompt_without_performance",
+        "system prompt quality fixture",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    sqlx::query(
+        "INSERT INTO agent_quality_daily
+            (agent_id, day, turn_success_rate_7d, turn_success_rate_30d,
+             turn_sample_size_7d, sample_size_7d, measurement_unavailable_7d, computed_at)
+         VALUES ('prompt-quality-fixture', CURRENT_DATE, 0.75, 0.90, 8, 8, FALSE,
+                 TIMESTAMPTZ '2026-10-27 00:00:00+00')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed existing quality metrics");
+    let summary = query_agent_quality_summary(Some(&pool), "prompt-quality-fixture", 30, 60)
+        .await
+        .expect("quality summary remains available");
+    assert!(!summary.fallback_from_events);
+    assert_eq!(summary.daily.len(), 1);
+    assert_eq!(
+        summary
+            .current
+            .as_ref()
+            .unwrap()
+            .rolling_7d
+            .turn_success_rate,
+        Some(0.75)
+    );
+    let ranking = query_agent_quality_ranking_with(
+        Some(&pool),
+        50,
+        QualityRankingMetric::TurnSuccessRate,
+        QualityRankingWindow::Seven,
+        5,
+    )
+    .await
+    .expect("quality ranking remains available");
+    assert_eq!(ranking.agents.len(), 1);
+    assert_eq!(ranking.agents[0].agent_id, "prompt-quality-fixture");
+    assert_eq!(ranking.agents[0].metric_value, Some(0.75));
+    for (label, mut payload) in [
+        ("summary", serde_json::to_value(&summary).unwrap()),
+        ("ranking", serde_json::to_value(&ranking).unwrap()),
+    ] {
+        payload.as_object_mut().unwrap().remove("generatedAt");
+        eprintln!("quality-{label}-fixture: {payload}");
+    }
+    super::super::internal_api::init(0, Some(pool.clone()));
+    let mut binding = test_role_binding("prompt-quality-fixture");
+    binding.peer_agents_enabled = false;
+
+    for queued_turn in [false, true] {
+        for profile in [
+            DispatchProfile::Full,
+            DispatchProfile::Lite,
+            DispatchProfile::ReviewLite,
+        ] {
+            for profiles in [
+                PromptProfiles::foreground(profile),
+                PromptProfiles::headless(profile),
+                PromptProfiles::inspection(profile),
+            ] {
+                let built = build_system_prompt_with_manifest(
+                    "ctx",
+                    &[],
+                    "/tmp",
+                    ChannelId::new(7_452),
+                    ChannelId::new(7_452),
+                    "tok",
+                    Some(&binding),
+                    queued_turn,
+                    profiles,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    None,
+                    Some("turn-without-agent-performance"),
+                );
+                assert!(
+                    !built.system_prompt.contains("[Agent Performance"),
+                    "{profiles:?}, queued={queued_turn}: obsolete quality block was injected"
+                );
+                let manifest = built.manifest.expect("prompt manifest");
+                assert!(manifest.layers.iter().all(|layer| {
+                    layer.layer_name != "agent_performance"
+                        && !layer
+                            .full_content
+                            .as_deref()
+                            .is_some_and(|content| content.contains("[Agent Performance"))
+                }));
+            }
+        }
+    }
+
+    super::super::internal_api::init(0, None);
+    pool.close().await;
+    db.drop().await;
+    eprintln!("quality fixture verified: 18 rendered prompts");
 }
 
 #[test]
@@ -834,7 +974,6 @@ fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: true,
-        quality_feedback_injection_enabled: true,
         auth_profile: "default".to_string(),
         memory: Default::default(),
     };
