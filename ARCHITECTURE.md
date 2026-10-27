@@ -944,7 +944,8 @@ src/
 │   │   │   └── composer_tests.rs
 │   │   ├── tui_session_launch/
 │   │   │   ├── launch_policy/
-│   │   │   │   └── fresh_tests.rs
+│   │   │   │   ├── fresh_tests.rs
+│   │   │   │   └── symlink_home_tests.rs
 │   │   │   └── launch_policy.rs
 │   │   ├── absence_launch.rs
 │   │   ├── actual_submit_tests.rs
