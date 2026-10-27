@@ -180,7 +180,7 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
         let config = crate::config::load().map_err(|e| format!("load config: {e}"))?;
         crate::services::discord_config_audit::LoadedRuntimeConfig {
             config,
-            path: std::path::PathBuf::from("config/agentdesk.yaml"),
+            path: crate::config::resolved_config_path(),
             existed: true,
         }
     };

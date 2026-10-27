@@ -206,9 +206,6 @@ fn blackout_exit_skips_blocked_dump_helper() {
 
 #[test]
 fn fast_exit_waits_for_dump_only_within_remaining_blackout_budget() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-    drop(listener);
     let policy = WatchdogPolicy {
         dump_limit: Duration::from_secs(5),
         ..policy()
@@ -231,7 +228,16 @@ fn fast_exit_waits_for_dump_only_within_remaining_blackout_budget() {
             state,
             deadline - Duration::from_millis(150),
             driver::Hooks {
-                probe: |deadline| driver::tcp_probe(&addr, "127.0.0.1", deadline),
+                // Socket refusal can consume the budget; this test isolates the dump wait.
+                probe: |_| {
+                    (
+                        HealthProbeOutcome::ConnectFailed {
+                            elapsed_ms: 0,
+                            error: "listener closed".into(),
+                        },
+                        Instant::now(),
+                    )
+                },
                 snapshot: scheduling,
                 dump,
                 log: move |_: &WatchdogState,

@@ -159,6 +159,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$*\" >>\"$FAKE_CALLS\"\n"
             "[ -z \"${FAKE_ENV:-}\" ] || printf '%s\\n' \"${SCCACHE_IDLE_TIMEOUT-unset}\" >>\"$FAKE_ENV\"\n"
+            "[ \"$1:$FAKE_MODE\" != nextest:missing_windows_refusal ] || exit 4\n"
             "[ \"$FAKE_MODE\" != identity ] || printf '# changed\\n' >>\"$FAKE_MANIFEST\"\n"
             "calls=$(wc -l <\"$FAKE_CALLS\")\n"
             "[ \"$FAKE_MODE\" != identity_race ] || [ \"$calls\" -ne 1 ] || printf '# changed\\n' >>\"$FAKE_IDENTITY\"\n"
@@ -282,6 +283,19 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             values = seen.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(values), len(outcome.calls))
             self.assertEqual(set(values), {"0"})
+
+    def test_runner_requires_the_windows_transcript_refusal(self) -> None:
+        expected = (
+            "nextest run --lib --profile ci --no-tests fail -E "
+            "test(=services::discord::health::turn_deliver::inject::queued_reconcile::"
+            "mismatched_file_identity_refuses_transcript_proof)"
+        )
+        success = self.run_fixture(runner=True)
+        self.assertEqual(success.result.returncode, 0, success.result.stderr)
+        self.assertEqual(success.calls[-1], expected)
+        missing = self.run_fixture(runner=True, mode="missing_windows_refusal")
+        self.assertEqual(missing.result.returncode, 4, missing.result.stderr)
+        self.assertEqual(missing.calls[-1], expected)
 
     def test_wrapper_selects_only_supported_path_interpreter(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
