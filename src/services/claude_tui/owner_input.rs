@@ -21,6 +21,7 @@ struct Scope {
     hold: Hold,
     allowed: AtomicBool,
     known_before: AtomicBool,
+    keyed: AtomicBool,
     #[cfg(unix)]
     epoch: Mutex<Option<crate::services::tui_input::target_epoch::LiveEpoch>>,
     refused: Mutex<Option<submission_fence::PreSubmitPersistenceRefused>>,
@@ -44,19 +45,70 @@ pub(crate) fn epoch() -> Option<PaneEpoch> {
     #[cfg(not(unix))]
     None
 }
-pub(crate) fn before_payload() -> Result<(), String> {
+/// Why the owner refused a leaf before C-s; either way no key reached the pane.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReadyRefusal {
+    /// The pinned server, pane, process or known execution is no longer the observed one.
+    Target(String),
+    /// The physical writer lease or the exact attempt binding was not granted.
+    Lease(String),
+}
+
+/// Before any C-s: the known execution, the server-side pane identity and the writer lease
+/// still hold. Commits nothing, so a refusal here leaves no key and no payload start.
+pub(crate) fn ready_payload() -> Result<(), ReadyRefusal> {
     let Some(scope) = current() else {
         return Ok(());
     };
-    let result = (|| {
-        if scope.target["host"] == "tmux" {
-            condition(scope.target["owner"].as_str().ok_or("missing owner")?, "1")?;
-        } else {
-            (scope.pin)(None, "herdr:conservative-writer".into())?;
-        }
-        (scope.commit)(epoch())
-    })();
+    let result = scope.ready();
+    if let Err(refusal) = &result {
+        let (ReadyRefusal::Target(reason) | ReadyRefusal::Lease(reason)) = refusal;
+        scope.refuse(format!("owner_refused: {reason}"));
+    }
+    result
+}
+
+/// After the optional C-s and before content: the idempotent payload-start commit.
+pub(crate) fn start_payload() -> Result<(), String> {
+    let Some(scope) = current() else {
+        return Ok(());
+    };
+    let result = (scope.commit)(epoch());
     scope.gate_result(result)
+}
+
+pub(crate) fn before_payload() -> Result<(), String> {
+    ready_payload().map_err(|refusal| format!("{refusal:?}"))?;
+    start_payload()
+}
+
+/// A key (C-s included) is about to reach the pane; no later refusal is a not-sent proof.
+pub(crate) fn keyed() {
+    if let Some(scope) = current() {
+        scope.keyed.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The text never became a tmux buffer, so no key followed.
+pub(crate) fn load_failed() {
+    if let Some(scope) = current() {
+        scope.refuse("load_failed".into());
+    }
+}
+
+/// The pinned pane id and the identity condition the tmux server checks atomically around an
+/// owner paste or Enter; `None` leaves the command as main runs it.
+#[cfg(unix)]
+pub(crate) fn pinned() -> Result<Option<(String, String)>, String> {
+    let Some(scope) = current() else {
+        return Ok(None);
+    };
+    if scope.target["host"] != "tmux" {
+        return Ok(None);
+    }
+    let owner = scope.target["owner"].as_str().ok_or("missing owner")?;
+    let pane = epoch().ok_or("epoch not observed")?.physical[3].clone();
+    Ok(Some((pane, condition(owner, "1")?)))
 }
 pub(crate) fn payload<R>(send: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
     before_payload()?;
@@ -83,15 +135,7 @@ pub(crate) fn observe_pin(
     if epoch.as_ref().is_some_and(|old| old.record() != record) {
         return Err("epoch changed during effect".into());
     }
-    let key = serde_json::to_string(&(
-        &record.host,
-        &record.endpoint,
-        &record.physical[0],
-        &record.physical[3],
-        &record.physical[4],
-    ))
-    .map_err(|e| e.to_string())?;
-    (scope.pin)(Some(record.clone()), key)?;
+    (scope.pin)(Some(record.clone()), pin_key(&record)?)?;
     *epoch = Some(live);
     Ok(())
 }
@@ -200,6 +244,7 @@ pub(crate) fn capture_scope<R>(
         hold,
         allowed: AtomicBool::new(false),
         known_before: AtomicBool::new(false),
+        keyed: AtomicBool::new(false),
         epoch: Mutex::new(None),
         refused: Mutex::new(None),
     });
@@ -215,6 +260,7 @@ pub(crate) fn capture_scope<R>(
         guarded_outcome::with_owner(Some(scope.clone()), run)
     });
     let proof = (!scope.allowed.load(Ordering::SeqCst)
+        && !scope.keyed.load(Ordering::SeqCst)
         && scope.known_before.load(Ordering::SeqCst))
     .then(|| scope.target.get("_attempt").cloned())
     .flatten()
@@ -270,16 +316,53 @@ impl Scope {
             Ok(()) => {
                 self.allowed.store(true, Ordering::SeqCst);
             }
-            Err(reason) => {
-                self.known_before.store(true, Ordering::SeqCst);
-                *self.refused.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some(submission_fence::PreSubmitPersistenceRefused {
-                        reason: reason.clone(),
-                    });
-            }
+            Err(reason) => self.refuse(reason.clone()),
         }
         result
     }
+    fn refuse(&self, reason: String) {
+        self.known_before.store(true, Ordering::SeqCst);
+        *self.refused.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(submission_fence::PreSubmitPersistenceRefused { reason });
+    }
+    fn ready(&self) -> Result<(), ReadyRefusal> {
+        if self.target["host"] != "tmux" {
+            return (self.pin)(None, "herdr:conservative-writer".into())
+                .map_err(ReadyRefusal::Lease);
+        }
+        #[cfg(unix)]
+        {
+            let owner = self.target["owner"].as_str().unwrap_or_default();
+            let observed =
+                crate::services::tui_input::submission_tmux::guarded::PaneIdentity::observe(owner)
+                    .ok_or_else(|| ReadyRefusal::Target("pane identity unavailable".into()))?;
+            let live = crate::services::tui_input::target_epoch::LiveEpoch::observe(
+                &self.provider,
+                &self.target,
+                &observed,
+            )
+            .map_err(ReadyRefusal::Target)?
+            .record();
+            if epoch().as_ref() != Some(&live) {
+                return Err(ReadyRefusal::Target("pinned pane identity changed".into()));
+            }
+            let key = pin_key(&live).map_err(ReadyRefusal::Lease)?;
+            (self.pin)(Some(live), key).map_err(ReadyRefusal::Lease)
+        }
+        #[cfg(not(unix))]
+        Err(ReadyRefusal::Target("live epoch unsupported".into()))
+    }
+}
+#[cfg(unix)]
+fn pin_key(record: &PaneEpoch) -> Result<String, String> {
+    serde_json::to_string(&(
+        &record.host,
+        &record.endpoint,
+        &record.physical[0],
+        &record.physical[3],
+        &record.physical[4],
+    ))
+    .map_err(|e| e.to_string())
 }
 #[cfg(test)]
 pub(crate) struct NotSentProof {
