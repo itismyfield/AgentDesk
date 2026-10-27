@@ -126,8 +126,6 @@ pub(crate) struct RoleBinding {
     pub reasoning_effort: Option<String>,
     /// Whether this role may see peer-agent handoff guidance in the system prompt.
     pub peer_agents_enabled: bool,
-    /// Whether hourly agent quality feedback may be injected into the system prompt.
-    pub quality_feedback_injection_enabled: bool,
     /// Resolved auth profile id (`default` when unset).
     pub auth_profile: String,
     pub memory: ResolvedMemorySettings,
