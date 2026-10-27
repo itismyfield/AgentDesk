@@ -5,22 +5,36 @@ use crate::services::claude_tui::busy_inject::Outcome;
 
 const OUTCOME_CALLER: &str = "managed_submission_outcome";
 
-/// A leaf result that reached no key: C-s, paste and Enter were all zero.
-pub(in crate::services::discord) struct NoContentProof(());
-
-impl NoContentProof {
-    pub(in crate::services::discord) fn from_leaf(outcome: Outcome) -> Option<Self> {
-        matches!(outcome, Outcome::NotSent(_)).then_some(Self(()))
-    }
+/// A leaf result that reached no key (C-s, paste and Enter all zero) on the birth that ran it.
+pub(in crate::services::discord) struct NoContentProof {
+    birth: InflightEpisodePin,
 }
 
 impl ManagedSubmission {
+    /// Runs one leaf under this attempt's fence; only a no-key result yields a proof, bound to
+    /// this birth.
+    pub(in crate::services::discord) fn run_leaf(
+        &self,
+        leaf: impl FnOnce() -> Outcome,
+    ) -> (Outcome, Option<NoContentProof>) {
+        let outcome =
+            crate::services::claude_tui::submission_fence::with_scope(Some(self.fence()), leaf);
+        let proof = matches!(outcome, Outcome::NotSent(_)).then(|| NoContentProof {
+            birth: self.0.birth.clone(),
+        });
+        (outcome, proof)
+    }
+
     /// Persists the not-submitted terminal on this exact birth, then closes this capability.
+    /// A proof from another birth's leaf is refused before the row is read.
     pub(in crate::services::discord) fn conclude_not_submitted(
         &self,
-        _proof: NoContentProof,
+        proof: NoContentProof,
     ) -> Result<(), String> {
         let attempt = &self.0;
+        if !proof.birth.is_same_episode_as(&attempt.birth) {
+            return Err("no-content proof belongs to another birth".into());
+        }
         let mut gate = attempt.gate.lock().unwrap_or_else(PoisonError::into_inner);
         if matches!(*gate, Gate::Refused(_)) {
             return Err("managed attempt already closed".into());
