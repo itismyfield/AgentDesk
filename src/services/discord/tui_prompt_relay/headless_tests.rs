@@ -189,6 +189,28 @@ fn the_idle_relay_tails_the_tui_transcript_instead_of_a_bound_headless_one() {
     pane.expect_bound_to_tui();
 }
 
+/// Input observed while the pane is bound to a headless SDK transcript, with no TUI transcript to
+/// move to, gets no output source rather than the headless file.
+#[test]
+fn an_input_on_a_headless_binding_without_a_tui_transcript_gets_no_headless_output() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let _reset = Reset;
+    let pane = HeadlessPane::new(root.path(), 7_564);
+    let binding = pane.bind_headless();
+    std::fs::remove_file(pane.path(&pane.tui)).unwrap();
+
+    let output = external_input_relay_output_path(
+        &pane.shared,
+        "claude",
+        &pane.tmux,
+        ChannelId::new(pane.channel),
+        Some(&binding),
+    );
+
+    assert_eq!(output, None);
+}
+
 #[test]
 fn a_restart_leaves_a_log_verified_headless_source_for_the_tui_transcript() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
