@@ -233,6 +233,7 @@ impl CapturedTerminalAdmission {
                 &path,
                 (local, &mut *baseline),
                 fresh,
+                can_deliver_directly,
                 (&result, canonical, &session),
                 (
                     (source_start, complete_record_end),
