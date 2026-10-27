@@ -1271,10 +1271,10 @@ mod tests {
         let _env = EnvRestore::set_agentdesk_root_and_host(dir.path(), "codex-marker-sync-host");
         let tmux = "AgentDesk-codex-marker-sync";
         let rollout = dir.path().join("rollout-sync.jsonl");
-        // (file bytes, marker start, marker after an equal-offset checkpoint)
+        // Without Unix file identity, migration must keep the original marker offset.
         let complete = [&[b'x'; 63][..], b"\n"].concat();
         for (bytes, marker, expected) in [
-            (complete.clone(), 0, 64),
+            (complete.clone(), 0, if cfg!(unix) { 64 } else { 0 }),
             (complete, 96, 96),
             (vec![b'x'; 64], 0, 0),
         ] {

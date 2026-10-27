@@ -20,12 +20,12 @@ def joined(line, match):
 
 def inventory(repo):
     root = repo / 'src/server/routes/docs/inventory/endpoints'
-    parts = re.findall(r'^mod (part_\d+);$', (root / 'mod.rs').read_text(), re.M)
+    parts = re.findall(r'^mod (part_\d+);$', (root / 'mod.rs').read_text(encoding='utf-8'), re.M)
     if not parts:
         raise ValueError('empty inventory')
     paths = set()
     for part in parts:
-        source = (root / (part + '.rs')).read_text()
+        source = (root / (part + '.rs')).read_text(encoding='utf-8')
         entries = re.findall(r'^\s*ep\(\s*"[^"\\]+"\s*,\s*"([^"\\]+)"\s*,', source, re.M)
         if len(entries) != len(re.findall(r'^\s*ep\(', source, re.M)):
             raise ValueError('unparsed endpoint')
@@ -70,7 +70,7 @@ def check(repo, prompts):
                 continue
             if not prompt.is_file():
                 continue
-            source = prompt.read_text()
+            source = prompt.read_text(encoding='utf-8')
             inspected += 1
             for number, path in candidates(source):
                 candidates_count += 1

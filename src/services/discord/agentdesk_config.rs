@@ -17,18 +17,7 @@ use crate::services::provider::ProviderKind;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
 fn load_agentdesk_config_with_path() -> Option<(Config, std::path::PathBuf)> {
-    let root = crate::config::runtime_root()?;
-    for path in [
-        crate::runtime_layout::config_file_path(&root),
-        crate::runtime_layout::legacy_config_file_path(&root),
-    ] {
-        if path.is_file() {
-            return crate::config::load_from_path(&path)
-                .ok()
-                .map(|config| (config, path));
-        }
-    }
-    None
+    crate::config::config_path::load_runtime_config_file()
 }
 
 #[derive(Clone, Debug)]
@@ -47,23 +36,13 @@ pub(crate) enum AgentSetupConfigMutation {
     Conflict(String),
 }
 
-pub(crate) fn agent_setup_config_path(root: &Path) -> PathBuf {
-    crate::runtime_layout::config_file_path(root)
-}
-
 pub(crate) fn load_agent_setup_config(root: &Path) -> Result<(Config, PathBuf, bool), String> {
-    for path in [
-        crate::runtime_layout::config_file_path(root),
-        crate::runtime_layout::legacy_config_file_path(root),
-    ] {
-        if path.is_file() {
-            let config = crate::config::load_from_path(&path)
-                .map_err(|error| format!("load '{}': {error}", path.display()))?;
-            return Ok((config, path, true));
-        }
+    let path = crate::config::config_path::config_path_in(root);
+    match crate::config::config_path::load_config_file(&path) {
+        Ok(Some(config)) => Ok((config, path, true)),
+        Ok(None) => Ok((Config::default(), path, false)),
+        Err(error) => Err(format!("load '{}': {error}", path.display())),
     }
-
-    Ok((Config::default(), agent_setup_config_path(root), false))
 }
 
 pub(crate) fn ensure_agent_setup_config(

@@ -652,19 +652,35 @@ mod tests {
             .expect("orphan root")
             .join(provider.as_str())
             .join(token_hash);
-        let original = fs::metadata(&store_dir)
-            .expect("orphan store")
-            .permissions();
-        let mut read_only = original.clone();
-        read_only.set_readonly(true);
-        fs::set_permissions(&store_dir, read_only).expect("read-only orphan store");
-        let probe = fs::File::create(store_dir.join(".fault-probe"));
+        #[cfg(unix)]
+        let restore: Box<dyn FnOnce()> = {
+            let original = fs::metadata(&store_dir)
+                .expect("orphan store")
+                .permissions();
+            let mut read_only = original.clone();
+            read_only.set_readonly(true);
+            fs::set_permissions(&store_dir, read_only).expect("read-only orphan store");
+            assert!(
+                fs::File::create(store_dir.join(".fault-probe")).is_err(),
+                "the read-only fault did not take effect (running as root?)"
+            );
+            Box::new(move || {
+                fs::set_permissions(store_dir, original).expect("writable orphan store");
+            })
+        };
+        #[cfg(windows)]
+        let restore: Box<dyn FnOnce()> = {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_SHARE_READ permits reads while blocking the pending-bind delete/replace.
+            let held = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(store_dir.join(format!("{channel_id}.json")))
+                .expect("hold orphan file without write/delete sharing");
+            Box::new(move || drop(held))
+        };
         let failed = release();
-        fs::set_permissions(&store_dir, original).expect("writable orphan store");
-        assert!(
-            probe.is_err(),
-            "the read-only fault did not take effect (running as root?)"
-        );
+        restore();
         assert_eq!(
             failed,
             SuppressedPanelRelease::Unverified(PendingBindCheckError::Write)
