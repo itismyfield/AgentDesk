@@ -325,7 +325,7 @@ class Gating(unittest.TestCase):
         for cell in driver.SUPPORTED_CELLS:
             for scenario in driver.load_scenarios(ROOT / "tests/e2e/tui_relay/scenarios", cell=cell):
                 self.assertFalse(any(midturn_kill.owns(step) for step in scenario.get("steps") or []))
-        scenario = midturn_kill.scenario("r" * 32)
+        scenario = midturn_kill.scenario("r" * 32, "codex-tui")
         self.assertTrue(driver.is_destructive(scenario))
         self.assertTrue(any("kill_provider_process" in step for step in scenario["steps"]))
 
@@ -348,7 +348,7 @@ class DriverRun(HostCase):
         host = self.host(cell)
         bot = assertions.provider_bot_id(host.provider)
         rows, ids = [], iter(range(10, 1000))
-        scenario = midturn_kill.scenario("r" * 32)
+        scenario = midturn_kill.scenario("r" * 32, cell)
         step = {key: value for item in scenario["steps"] for key, value in item.items()}
         ok = step["wait_for_provider_hold_state"]["ok_marker"]
         nxt = [s["send_prompt"] for s in scenario["steps"] if "send_prompt" in s][-1].rsplit(" ", 1)[-1]

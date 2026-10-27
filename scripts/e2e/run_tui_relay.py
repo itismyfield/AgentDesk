@@ -5161,7 +5161,7 @@ def main() -> int:
     print(f"[e2e] cell={cell} run_id={run_id} output={output_dir}")
 
     # The SIGKILL scenario never comes from YAML, so no default or filtered sweep can select it.
-    scenarios = [midturn_kill.scenario(run_id)] if getattr(args, "midturn_kill", False) else load_scenarios(scenarios_dir, cell=cell)
+    scenarios = [midturn_kill.scenario(run_id, cell)] if getattr(args, "midturn_kill", False) else load_scenarios(scenarios_dir, cell=cell)
     if not wanted:
         # E36 claims the whole phase (3540s, exclusive single scenario, a 20s provider hold)
         # and needs --e36-intake-log, so a default sweep cannot carry it. Run it as its own

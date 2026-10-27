@@ -74,18 +74,27 @@ def validate_arguments(parser, args) -> None:
         args.reset_before_each = False
 
 
-def hold_prompt(ok: str, late: str) -> str:
-    """Early marker, then a long shell command; Codex ended the turn on the shared E-18 wording."""
-    return (f"E2E {SCENARIO_ID} long-running turn fixture: two messages with one command between them. "
-            "Skipping the command fails the test.\n"
+# E2E worker roles forbid shell commands, so Claude holds the turn with a chain of Read calls.
+READ_CHAIN = ("/etc/services", "/etc/protocols", "/etc/hosts", "/etc/shells", "/etc/paths", "/etc/zshrc",
+              "/etc/bashrc", "/etc/profile", "/etc/networks", "/etc/services", "/etc/protocols", "/etc/hosts")
+
+
+def hold_prompt(ok: str, late: str, provider: str) -> str:
+    """Early marker, then provider tool calls that keep the turn running before the final marker."""
+    if provider == "claude":
+        hold = ("2. Then use your Read tool (not a shell) to read these files one at a time in this order, "
+                "writing no text between the reads: " + ", ".join(READ_CHAIN) + "\n")
+    else:
+        hold = ("2. Then run this exact command with your shell/terminal tool and wait until it exits "
+                f"(about {HOLD_SECONDS} seconds is intended):\n"
+                f"   python3 -c \"import time; time.sleep({HOLD_SECONDS})\"\n")
+    return (f"E2E {SCENARIO_ID} long-running turn fixture: two messages with tool calls between them. "
+            "Skipping the tool calls fails the test.\n"
             f"1. Before any tool call, post this progress line. It is NOT your final answer: {ok}\n"
-            "2. Then run this exact command with your shell/terminal tool and wait until it exits "
-            f"(about {HOLD_SECONDS} seconds is intended):\n"
-            f"   python3 -c \"import time; time.sleep({HOLD_SECONDS})\"\n"
-            f"3. Your final answer, only after the command exits, is exactly: {late}")
+            + hold + f"3. Your final answer, only after the last tool call, is exactly: {late}")
 
 
-def scenario(run_id: str) -> dict[str, Any]:
+def scenario(run_id: str, cell: str) -> dict[str, Any]:
     tag = run_id[:12]
     ok, late = f"[E2E:MK:{tag}:BEFORE]", f"[E2E:MK:{tag}:AFTER]"
     following = f"[E2E:MK:{tag}:NEXT:{uuid.uuid4().hex[:8]}]"
@@ -95,7 +104,7 @@ def scenario(run_id: str) -> dict[str, Any]:
         "report_marker_counts": [ok, late, following],
         "steps": [
             {"preflight_e2e_channel": {}},
-            {"send_prompt": hold_prompt(ok, late)},
+            {"send_prompt": hold_prompt(ok, late, cell.split("-", 1)[0])},
             {"wait_for_provider_hold_state": {"ok_marker": ok, "late_marker": late, "timeout_s": 240, "poll_interval_s": 1}},
             {"identify_provider_process": {}},
             {"kill_provider_process": {"ok_marker": ok}},
