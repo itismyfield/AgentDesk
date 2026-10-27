@@ -388,13 +388,18 @@ and `--filter` sweeps never select it, and YAML cannot use its steps.
   the provider inflight row with a tool running (`provider_hold_observed`) and
   the mailbox is busy. Right before `SIGKILL` it is read again; any change of
   pid, start time, cmdline, parent, pane or binding refuses without a signal.
+  The turn's inflight row is also read again: it must still be this turn, hold
+  the early marker without the final one, and have no committed terminal
+  delivery. A delivery-only busy mailbox does not license the kill.
 - Verdicts (`midturn_kill.capabilities` in the report): `provider_killed`,
   `turn_settled` (two polls in a row with a readable idle mailbox, empty queue
   files and no live processing status as any message's current text, within
-  300 s), `pre_kill_output_delivered` (the early marker in a provider-bot
-  body), `next_turn_new_provider` (a fresh marker answered by the provider bot
-  after the follow-up, by a process other than the killed pid/start time).
-  A missing behavior fails; the harness does not soften it.
+  300 s; a first idle poll at the deadline is not enough),
+  `pre_kill_output_delivered` (the early marker in a provider-bot body within
+  30 s of settlement; otherwise the run fails before the follow-up is sent),
+  `next_turn_new_provider` (a fresh marker answered by the provider bot after
+  the follow-up, by a process other than the killed pid/start time). Each
+  failing capability fails its own step, so the run cannot pass with one.
 
 Health waits parse the JSON payload, not just HTTP 2xx. By default a run is
 considered ready only when the health body is healthy (`status: healthy`, `ok`

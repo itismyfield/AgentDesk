@@ -64,6 +64,15 @@ class Host:
                    "owner_runtime_root": str(self.runtime.parent), "created_at": "2026-10-27T06:00:00Z", **overrides}
         self.binding.write_text(json.dumps(binding))
 
+    def write_inflight(self, **fields):
+        """The current turn's inflight row; returns the hold observation that points at it."""
+        path = self.runtime / "discord_inflight" / self.provider / f"{CHANNEL}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"channel_id": CHANNEL, "user_msg_id": "77", "full_response": "[OK]",
+                                    "any_tool_used": True, "terminal_delivery_committed": False, **fields}))
+        return {"classification": "provider_hold_observed", "path": str(path), "ok_marker": "[OK]",
+                "late_marker": "[LATE]", "turn_identity": {"channel_id": CHANNEL, "user_msg_id": "77"}}
+
     def kill(self, pid, sig):
         self.killed.append((pid, sig))
         self.procs.pop(pid, None)
@@ -148,7 +157,7 @@ class Identification(HostCase):
 
 
 def _mid_turn_record(host):
-    record = {"provider_hold_states": [{"classification": "provider_hold_observed"}]}
+    record = {"provider_hold_states": [host.write_inflight()]}
     with host.active():
         midturn_kill.run_step(driver, {"identify_provider_process": {}}, cell=host.cell, channel_id=CHANNEL,
                               args=_args(host), record=record, window=None, refresh=None)
@@ -209,6 +218,23 @@ class KillReverification(HostCase):
         with self.assertRaisesRegex(midturn_kill.Refused, "mid-turn"):
             self.kill(host, record)
         self.assertEqual(host.killed, [])
+
+    def test_a_turn_that_ended_after_the_hold_is_not_killed(self):
+        ended = {"late marker written": {"full_response": "[OK]\n[LATE]"},
+                 "terminal delivery committed": {"terminal_delivery_committed": True},
+                 "another turn's row": {"user_msg_id": "78"}, "row gone": None}
+        for label, fields in ended.items():
+            with self.subTest(case=label):
+                host = self.host("claude-tui")
+                record = _mid_turn_record(host)
+                if fields is None:
+                    Path(record["provider_hold_states"][-1]["path"]).unlink()
+                else:
+                    host.write_inflight(**fields)
+                # Only delivery is pending; that busy reason alone must not license a kill.
+                with self.assertRaisesRegex(midturn_kill.Refused, "inflight"):
+                    self.kill(host, record, busy=("relay_health.pending_discord_callback_msg_id=999",))
+                self.assertEqual(host.killed, [])
 
     def test_a_provider_that_survives_the_signal_fails(self):
         host = self.host("claude-tui")
@@ -299,6 +325,22 @@ class SettlementPolling(HostCase):
                                   cell="claude-tui", channel_id=CHANNEL, args=_args(host), record={},
                                   window=window, refresh=lambda: None)
 
+    def test_a_first_idle_poll_at_the_deadline_is_not_a_settled_turn(self):
+        host = self.host("claude-tui")
+        window = assertions.Window(setup_marker_id="1")
+        window.add(_msg(20, "[OK]", assertions.provider_bot_id("claude")))
+        # Busy through 298 s, first idle exactly at the 300 s deadline.
+        polls = iter([(1, ["agent_turn_status=active"])] * 150 + [(1, [])] * 1000)
+        clock, record = [0.0], {}
+        with patch.object(midturn_kill, "_mailbox_state", side_effect=lambda *a: next(polls)), \
+             patch.object(midturn_kill.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(midturn_kill.time, "sleep", side_effect=lambda t: clock.__setitem__(0, clock[0] + t)), \
+             self.assertRaisesRegex(assertions.AssertionError, "did not settle"):
+            midturn_kill.run_step(driver, {"await_killed_turn_settled": {"ok_marker": "[OK]", "timeout_s": 300}},
+                                  cell="claude-tui", channel_id=CHANNEL, args=_args(host), record=record,
+                                  window=window, refresh=lambda: None)
+        self.assertEqual(record["midturn_kill"]["capabilities"]["turn_settled"], "fail")
+
 
 class Replacement(unittest.TestCase):
     KILLED = {"pid": 101, "started": STARTED}
@@ -344,7 +386,7 @@ class Gating(unittest.TestCase):
 class DriverRun(HostCase):
     """The whole scenario through run_scenario: dispatch, report keys and verdicts."""
 
-    def run_cell(self, cell, *, settle=True, deliver=True):
+    def run_cell(self, cell, *, settle=True, deliver=True, deliver_on_follow_up=False, finish_before_kill=False):
         host = self.host(cell)
         bot = assertions.provider_bot_id(host.provider)
         rows, ids = [], iter(range(10, 1000))
@@ -352,7 +394,7 @@ class DriverRun(HostCase):
         step = {key: value for item in scenario["steps"] for key, value in item.items()}
         ok = step["wait_for_provider_hold_state"]["ok_marker"]
         nxt = [s["send_prompt"] for s in scenario["steps"] if "send_prompt" in s][-1].rsplit(" ", 1)[-1]
-        held = []
+        held, follow_ups = [], []
 
         def add(content):
             rows.append(_msg(next(ids), content, bot))
@@ -365,7 +407,10 @@ class DriverRun(HostCase):
                 if deliver:
                     add(ok)
             else:
+                follow_ups.append(sent)
                 host.respawn()
+                if deliver_on_follow_up:
+                    add(ok)
                 add(nxt)
             return {"turn_id": f"discord:{CHANNEL}:{9100095335028306400 + sent}"}
 
@@ -383,16 +428,25 @@ class DriverRun(HostCase):
                          queue_runtime_root=str(host.runtime), final_refetches=1, thread_channel_id=None,
                          midturn_kill=True)
         clock = [0.0]
-        mailbox = lambda *a, **kw: (1, ["agent_turn_status=active"] if held and not host.killed else [])  # noqa: E731
+        busy = ["relay_health.pending_discord_callback_msg_id=999"] if finish_before_kill else ["agent_turn_status=active"]
+        mailbox = lambda *a, **kw: (1, busy if held and not host.killed else [])  # noqa: E731
+
+        def hold_observed(**kwargs):
+            hold = host.write_inflight()
+            if finish_before_kill:
+                host.write_inflight(full_response="[OK]\n[LATE]", terminal_delivery_committed=True)
+                add("[LATE]")
+            return hold
         with host.active(), patch.dict("os.environ", {"AGENTDESK_E2E_ALLOW_DESTRUCTIVE": "1"}), \
              patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]), \
              patch.object(driver.time, "sleep", side_effect=lambda t: clock.__setitem__(0, clock[0] + t)), \
-             patch.object(driver, "wait_for_provider_hold_state", return_value={"classification": "provider_hold_observed"}), \
+             patch.object(driver, "wait_for_provider_hold_state", side_effect=hold_observed), \
              patch.object(midturn_kill, "_mailbox_state", side_effect=mailbox), \
              patch.object(driver, "assert_cell_idle", return_value={"status": "idle"}), \
              patch.object(driver, "_raise_if_tui_prompt_stuck_while_idle"), \
              patch.object(driver, "_collect_wait_timeout_diagnostics", return_value={}):
             result = driver.run_scenario(scenario, args=args, client=client, run_id="r" * 32)
+        self.follow_ups = follow_ups
         return host, result
 
     def test_a_settled_kill_with_a_new_provider_passes(self):
@@ -415,8 +469,20 @@ class DriverRun(HostCase):
     def test_pre_kill_output_that_never_reaches_discord_fails_as_lost(self):
         _, result = self.run_cell("claude-tui", deliver=False)
         self.assertEqual(result["status"], "fail")
-        self.assertIn("provider bot", result["reason"])
+        self.assertIn("pre-kill output", result["reason"])
         self.assertEqual(result["midturn_kill"]["capabilities"]["pre_kill_output_delivered"], "fail")
+
+    def test_pre_kill_output_first_seen_after_the_follow_up_still_fails(self):
+        _, result = self.run_cell("claude-tui", deliver=False, deliver_on_follow_up=True)
+        self.assertEqual(result["status"], "fail", result.get("reason"))
+        self.assertIn("pre-kill output", result["reason"])
+        self.assertEqual(self.follow_ups, [])
+
+    def test_a_turn_that_finished_before_the_kill_is_not_killed_or_passed(self):
+        host, result = self.run_cell("claude-tui", finish_before_kill=True)
+        self.assertEqual(result["status"], "fail", result.get("reason"))
+        self.assertIn("inflight", result["reason"])
+        self.assertEqual((host.killed, self.follow_ups), ([], []))
 
 
 if __name__ == "__main__":

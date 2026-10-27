@@ -247,6 +247,22 @@ def _alive(pid: int, started: str) -> bool:
     return proc is not None and proc.started == started and not proc.stat.startswith("Z")
 
 
+def _turn_still_running(driver, hold: dict[str, Any]) -> str | None:
+    """Why the held turn's inflight row no longer shows it mid-turn, or None while it still does."""
+    row = driver._read_provider_inflight(Path(str(hold.get("path") or "")))
+    if not isinstance(row, dict):
+        return "current turn inflight row is gone or unreadable"
+    mismatch = driver._provider_hold_identity_mismatch(row, hold.get("turn_identity") or {})
+    response = str(row.get("full_response") or "")
+    if mismatch:
+        return f"inflight row belongs to another turn: {mismatch}"
+    if hold.get("ok_marker") not in response or hold.get("late_marker") in response:
+        return "inflight row lost the early marker or already has the final marker"
+    if row.get("terminal_delivery_committed") is True:
+        return "inflight row already committed terminal delivery"
+    return None
+
+
 def judge(rows, *, deleted_ids, exclude_ids, mailbox_busy, health_error, marker, provider_author) -> dict[str, Any]:
     """Settled only with a readable idle mailbox and no live status left as any message's current text."""
     current = [row for row in rows if str(row.get("id") or "") not in deleted_ids]
@@ -295,6 +311,10 @@ def run_step(driver, step, *, cell, channel_id, args, record, window, refresh) -
         changed = {key: (baseline[key], current[key]) for key in IDENTITY_KEYS if baseline[key] != current[key]}
         if changed:
             raise Refused(f"provider identity changed since preflight: {changed}")
+        # Delivery-only busy reasons outlive the turn; the inflight row must still show it mid-turn.
+        ended = _turn_still_running(driver, hold)
+        if ended:
+            raise Refused(f"turn no longer mid-turn before kill: {ended}")
         _kill(current["pid"], signal.SIGKILL)
         state["kill"] = {"identity": current, "signal": "SIGKILL", "mailbox_busy_before": busy,
                          "killed_at": dt.datetime.now(dt.timezone.utc).isoformat()}
@@ -335,11 +355,19 @@ def run_step(driver, step, *, cell, channel_id, args, record, window, refresh) -
                                                         if str(row.get("id") or "").isdigit()])
         state["settlement"] = {**verdict, "elapsed_s": round(now - started, 1), "timeout_s": timeout,
                                "message_cursor": str(cursor)}
-        caps["turn_settled"] = "pass" if verdict["turn"] == "settled" else "fail"
-        caps["pre_kill_output_delivered"] = "pass" if verdict["pre_kill_output"] == "delivered" else "fail"
-        if verdict["turn"] != "settled":
-            message = f"killed turn did not settle within {timeout:.0f}s: {verdict['stuck_reasons']}"
+        # Loop exit and deadline exit share one success rule: two settled polls in a row.
+        settled = streak >= 2
+        delivered = verdict["pre_kill_output"] == "delivered"
+        state["settlement"]["consecutive_settled_polls"] = streak
+        caps["turn_settled"] = "pass" if settled else "fail"
+        caps["pre_kill_output_delivered"] = "pass" if settled and delivered else "fail"
+        if not settled:
+            reasons = verdict["stuck_reasons"] or [f"only {streak} consecutive settled poll at the deadline"]
+            message = f"killed turn did not settle within {timeout:.0f}s: {reasons}"
             raise (driver.HarnessEvidenceError if error and not verdict["live_status_messages"] else assertions.AssertionError)(message)
+        if not delivered:
+            raise assertions.AssertionError(f"pre-kill output {params['ok_marker']!r} not delivered by the provider bot "
+                                            f"within {DELIVERY_GRACE_S:.0f}s of settlement")
     elif "assert_provider_replaced" in step:
         marker = step["assert_provider_replaced"]["marker"]
         killed = state["kill"]["identity"]
