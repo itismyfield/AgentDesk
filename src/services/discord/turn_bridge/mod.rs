@@ -29,6 +29,7 @@ mod single_message_footer;
 mod skill_usage;
 mod stale_resume;
 pub(in crate::services::discord) fn is_stale_resume_error(message: &str, stderr: &str) -> bool {
+    let _ = std::mem::size_of::<super::tmux::WatcherClaimIncarnation>();
     stale_resume::stream_error_has_stale_resume_error(message, stderr)
 }
 
