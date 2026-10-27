@@ -20,11 +20,8 @@ pub(super) fn codex_veto_name(veto: codex_inject::Veto) -> &'static str {
     match veto {
         Veto::InvalidInput => "invalid_input",
         Veto::LockContended => "lock_contended",
-        Veto::HumanAttached => "human_attached",
-        Veto::AttachUnknown => "attach_unknown",
         Veto::PaneUnavailable => "pane_unavailable",
         Veto::Modal => "modal",
-        Veto::NoComposer => "no_composer",
         Veto::Draft => "draft",
         Veto::QueueShown => "queue_shown",
         Veto::NotSteerable => "not_steerable",
@@ -33,7 +30,6 @@ pub(super) fn codex_veto_name(veto: codex_inject::Veto) -> &'static str {
         Veto::TurnChanged => "turn_changed",
         Veto::TranscriptUnavailable => "transcript_unavailable",
         Veto::LoadFailed => "load_failed",
-        Veto::UnpredictableRender => "unpredictable_render",
         Veto::LedgerFull => "ledger_full",
     }
 }
@@ -42,10 +38,6 @@ pub(super) fn codex_unconfirmed_name(detail: codex_inject::Unconfirmed) -> &'sta
     use codex_inject::Unconfirmed;
     match detail {
         Unconfirmed::PasteFailed => "paste_failed",
-        Unconfirmed::AttachedAfterPaste => "attached_after_paste",
-        Unconfirmed::CaptureFailed => "capture_failed",
-        Unconfirmed::DraftNotOwned => "draft_not_owned",
         Unconfirmed::EnterFailed => "enter_failed",
-        Unconfirmed::NotObserved => "not_observed",
     }
 }

@@ -72,6 +72,13 @@ static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
 // Tests that also mutate process env must acquire `shared_test_env_lock()` before
 // this lock. Keep that env -> dedupe order globally to avoid AB/BA deadlocks.
 pub(crate) static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+#[cfg(test)]
+pub(crate) fn run_serial_test(future: impl std::future::Future<Output = ()>) {
+    crate::test_support::serial_runtime::run(
+        || TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner()),
+        future,
+    );
+}
 static OBSERVED_PROMPTS: LazyLock<broadcast::Sender<ObservedTuiPrompt>> =
     LazyLock::new(|| broadcast::channel(OBSERVED_PROMPT_BUFFER).0);
 
@@ -399,6 +406,9 @@ mod test_clock {
 
     // The shared state and Tokio workers must observe the same test clock.
     static OFFSET: Mutex<Duration> = Mutex::new(Duration::ZERO);
+    // Mimics a Windows host booted more recently than the instant being dated.
+    static BEFORE_BOOT_UNDATABLE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
 
     fn offset() -> std::sync::MutexGuard<'static, Duration> {
         OFFSET.lock().unwrap_or_else(|poison| poison.into_inner())
@@ -414,6 +424,12 @@ mod test_clock {
 
         pub(crate) fn reset() {
             *offset() = Duration::ZERO;
+            BEFORE_BOOT_UNDATABLE.store(false, Ordering::SeqCst);
+        }
+
+        /// Makes every `checked_sub` fail until the next `reset`.
+        pub(crate) fn refuse_dates_before_boot() {
+            BEFORE_BOOT_UNDATABLE.store(true, Ordering::SeqCst);
         }
 
         /// Moves the clock forward without restamping anything, so recorded entries age.
@@ -427,6 +443,13 @@ mod test_clock {
 
         pub(crate) fn duration_since(self, earlier: Self) -> Duration {
             self.0.duration_since(earlier.0)
+        }
+
+        pub(crate) fn checked_sub(self, by: Duration) -> Option<Self> {
+            if BEFORE_BOOT_UNDATABLE.load(Ordering::SeqCst) {
+                return None;
+            }
+            self.0.checked_sub(by).map(Self)
         }
     }
 

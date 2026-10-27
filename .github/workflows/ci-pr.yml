@@ -445,7 +445,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: ".nvmrc"
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
 
@@ -704,7 +704,7 @@ jobs:
             --archive "$NEXTEST_DIR/lib-tests.tar.zst" --workers 6 --sha "$GITHUB_SHA" --scope linux-lib \
             --rust-version 1.94.1 --nextest-version "$(cargo nextest --version | awk 'NR==1 {print $2}')" \
             --target x86_64-unknown-linux-gnu --build-option CARGO_PROFILE_DEV_DEBUG=0 \
-            --build-option CARGO_PROFILE_TEST_DEBUG=0 --output "$NEXTEST_DIR/plan"
+            --build-option CARGO_PROFILE_TEST_DEBUG=0 --retry-mode all-once --output "$NEXTEST_DIR/plan"
           python3 scripts/ci/nextest_ci.py selector-audit --plan "$NEXTEST_DIR/plan/plan.json"
       - name: Upload nextest plan
         uses: actions/upload-artifact@v4
@@ -885,7 +885,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py e85dd6104fefd77f5deba1aca46c26df868c45c9b40d0c3fb32ee469b8587405
-          pin scripts/check-ci-runner-hardening.sh 1d72e60ee5185681da84af34281023c065cff3fbca4044edc1b510127d4c54c1
+          pin scripts/check-ci-runner-hardening.sh c15a4803b9cd8c0c7ee2ed41e3f8fbe514f1be545e7de92383c7b9e3ddb142ba
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1032,7 +1032,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: ".nvmrc"
 
       - name: Policy JS unit tests
         run: npm run test:policies

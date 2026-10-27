@@ -3,8 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use crate::services::agent_protocol::StreamMessage;
-use crate::services::session_backend::{StreamLineState, process_stream_line};
+use crate::services::session_backend::{
+    StreamLineState, process_claude_transcript_line as process_stream_line,
+};
 use chrono::{DateTime, Utc};
+
+pub(crate) use crate::services::tui_o::shadow::identity::visible_assistant_block_text;
 
 // #3034: test-only replay surface — `replay_transcript_file` and its outcome
 // type are exercised by the transcript-parser regression suite but not wired to

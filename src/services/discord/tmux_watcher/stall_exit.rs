@@ -139,9 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn pinned_exit_preserves_newer_inflight_and_mailbox_on_identity_mismatch() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let _env = EnvGuard::set_root(temp.path());
 
@@ -228,9 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn pinned_exit_releases_matching_turn_through_finalizer() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let _env = EnvGuard::set_root(temp.path());
 

@@ -195,7 +195,10 @@ pub(crate) fn choices(
                 {
                     continue;
                 }
-                let Ok(meta) = entry.metadata() else { continue };
+                // DirEntry metadata lags an appended file on Windows; stat it without following links.
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
                 if !meta.is_file() {
                     continue;
                 }

@@ -475,9 +475,10 @@ mod host {
             // Before the spawned clear runs, D's runtime switches to another session's name.
             running_session(&shared, &pool, channel(td), &name(6), false, None).await;
             let slot_threads = [ta, tb, tc, td];
-            let runs = super::super::RUNTIME_CLEARS_DONE.lock().unwrap();
-            let early = runs.iter().any(|run| run.as_slice() == slot_threads);
-            drop(runs);
+            let early = {
+                let runs = super::super::RUNTIME_CLEARS_DONE.lock().unwrap();
+                runs.iter().any(|run| run.as_slice() == slot_threads)
+            };
             assert!(!early, "{ctx}: the rename runs before the spawned clear");
             assert_eq!(cleared, Ok(2), "{ctx}: only A's and D's rows are idled");
 
@@ -597,9 +598,10 @@ mod host {
             std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
             std::fs::write(&marker, "herdr").unwrap();
             let slot_threads = [te, tf];
-            let runs = super::super::RUNTIME_CLEARS_DONE.lock().unwrap();
-            let early = runs.iter().any(|run| run.as_slice() == slot_threads);
-            drop(runs);
+            let early = {
+                let runs = super::super::RUNTIME_CLEARS_DONE.lock().unwrap();
+                runs.iter().any(|run| run.as_slice() == slot_threads)
+            };
             assert!(
                 !early,
                 "{ctx}: the marker is written before the spawned clear"

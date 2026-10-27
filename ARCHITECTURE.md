@@ -105,6 +105,10 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── config/
+│   ├── reload_classes/
+│   │   ├── detect.rs
+│   │   ├── table.rs
+│   │   └── tests.rs
 │   ├── runtime_root_guard/
 │   │   ├── process_tests.rs
 │   │   └── test_process.rs
@@ -130,12 +134,14 @@ src/
 │   ├── late_live_reload_tests.rs
 │   ├── peer_filter.rs
 │   ├── readers_live_reload_tests.rs
+│   ├── reload_classes.rs
 │   ├── retired_relay_tests.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_root_guard.rs
 │   ├── runtime_root_tests.rs
 │   ├── runtime_settings.rs
 │   ├── runtime_validation.rs
+│   ├── server_surface.rs
 │   ├── session_hosts.rs
 │   ├── session_hosts_tests.rs
 │   ├── test_env.rs
@@ -602,6 +608,9 @@ src/
 │   │   ├── config_read.rs
 │   │   └── config_read_tests.rs
 │   ├── web_surface/
+│   │   ├── browser_guard.rs
+│   │   ├── browser_guard_tests.rs
+│   │   ├── host_allowlist.rs
 │   │   ├── peer_filter.rs
 │   │   └── tests.rs
 │   ├── worker_registry/
@@ -1229,6 +1238,9 @@ src/
 │   │   │   │   │   └── policy.rs
 │   │   │   │   ├── stop_judgement/
 │   │   │   │   │   └── judged_finish_tests.rs
+│   │   │   │   ├── watchdog_pass/
+│   │   │   │   │   ├── o_stall_tests.rs
+│   │   │   │   │   └── tick_tests.rs
 │   │   │   │   ├── channel_runtime.rs
 │   │   │   │   ├── inflight_repair.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
@@ -1242,6 +1254,7 @@ src/
 │   │   │   │   ├── stall_watchdog_task.rs
 │   │   │   │   ├── stop_judgement.rs
 │   │   │   │   ├── stop_result.rs
+│   │   │   │   ├── tick_mailboxes.rs
 │   │   │   │   ├── watchdog_decisions.rs
 │   │   │   │   ├── watchdog_pass.rs
 │   │   │   │   └── zombie_reclaim.rs
@@ -1257,6 +1270,11 @@ src/
 │   │   │   │   └── relay_probe.rs
 │   │   │   ├── stall_liveness/
 │   │   │   │   └── redrive_grace.rs
+│   │   │   ├── transcript_binding_stall/
+│   │   │   │   ├── o_relay_stall_tests.rs
+│   │   │   │   ├── o_verdict_tests.rs
+│   │   │   │   ├── o_witness.rs
+│   │   │   │   └── transition_log.rs
 │   │   │   ├── turn_deliver/
 │   │   │   │   ├── inject/
 │   │   │   │   │   ├── first_input/
@@ -1312,6 +1330,7 @@ src/
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── tail_evidence.rs
 │   │   │   ├── test_support.rs
+│   │   │   ├── tmux_preflight.rs
 │   │   │   ├── transcript_binding_stall.rs
 │   │   │   ├── turn_deliver.rs
 │   │   │   ├── unbound_owners.rs
@@ -2644,6 +2663,8 @@ src/
 │   │   │   │   │   ├── herdr_chain_tests.rs
 │   │   │   │   │   ├── hold_leaf.rs
 │   │   │   │   │   ├── hold_leaf_log_tests.rs
+│   │   │   │   │   ├── inflight_bound.rs
+│   │   │   │   │   ├── inflight_bound_tests.rs
 │   │   │   │   │   ├── legacy_divergence.rs
 │   │   │   │   │   ├── legacy_divergence_entry_tests.rs
 │   │   │   │   │   ├── legacy_divergence_tests.rs
@@ -2660,6 +2681,7 @@ src/
 │   │   │   │   │   ├── routine_owner.rs
 │   │   │   │   │   ├── routine_owner_tests.rs
 │   │   │   │   │   ├── routine_registered_receipt_tests.rs
+│   │   │   │   │   ├── session_hosts_reload_tests.rs
 │   │   │   │   │   ├── stale_binding_tests.rs
 │   │   │   │   │   ├── superseded_measurement_tests.rs
 │   │   │   │   │   ├── unit_tests.rs
@@ -3584,6 +3606,9 @@ src/
 │   │   │   ├── p5a2_actor_tests.rs
 │   │   │   ├── past_bind.rs
 │   │   │   ├── pieces.rs
+│   │   │   ├── progress.rs
+│   │   │   ├── progress_drain_actor_tests.rs
+│   │   │   ├── progress_drain_verified_tests.rs
 │   │   │   ├── readers_host_tests.rs
 │   │   │   ├── reclaim_tests.rs
 │   │   │   ├── recovery_tests.rs
@@ -3950,6 +3975,7 @@ src/
 ├── supervisor/
 │   └── mod.rs
 ├── test_support/
+│   ├── serial_runtime.rs
 │   └── source_text_tests.rs
 ├── ui/
 │   ├── ai_screen.rs

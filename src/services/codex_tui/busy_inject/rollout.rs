@@ -280,3 +280,48 @@ fn user_input(record: &Value) -> Option<(String, Option<String>)> {
         _ => None,
     }
 }
+
+/// Collect receipts without holding the composer lock or deciding whether injection succeeded.
+pub(super) fn observe(
+    request: &super::Request<'_>,
+    offset: u64,
+    frame: &str,
+    timing: &super::Timing,
+) {
+    let path = request.rollout.to_path_buf();
+    let session = request.session.to_string();
+    let nonce = request.nonce.to_string();
+    let target_turn = request.target_turn.to_string();
+    let frame = frame.to_string();
+    let window = timing.confirm_window;
+    let poll = timing.confirm_poll;
+    let _ = std::thread::Builder::new()
+        .name("codex-receipt".into())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + window;
+            loop {
+                if std::time::Instant::now() >= deadline {
+                    tracing::debug!(%nonce, "Codex injection receipt not observed within diagnostic window");
+                    return;
+                }
+                if let Some(observed_turn) = submitted(&path, offset, &nonce) {
+                    if let Some(row) = crate::services::tui_input::human_frame::history::receipt_row(
+                        &nonce, &path,
+                    ) {
+                        crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
+                            &session,
+                            &frame,
+                            Some(&row),
+                            observed_turn.as_deref(),
+                            chrono::Utc::now(),
+                        );
+                    }
+                    let joined = observed_turn.as_deref() == Some(target_turn.as_str());
+                    tracing::debug!(%nonce, ?observed_turn, joined, "Codex injection receipt diagnostic");
+                    return;
+                }
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                std::thread::sleep(poll.min(left));
+            }
+        });
+}

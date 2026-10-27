@@ -1,25 +1,2 @@
 # doc<TAB>ref pairs that scripts/check_doc_path_refs.py reports without failing.
-# Only test-run docs awaiting their rewrite belong here; delete lines as they get fixed.
-docs/agent-onboarding.md	src/integration_tests/tests/agents_setup_e2e.rs
-docs/ci/release-gates.md	library/test/src/formatters/pretty.rs
-docs/ci/release-gates.md	src/integration_tests/tests/high_risk_recovery.rs
-docs/high-risk-recovery-lane.md	src/integration_tests.rs
-docs/high-risk-recovery-lane.md	src/integration_tests/tests/high_risk_recovery.rs
-docs/high-risk-recovery-lane.md	src/services/discord/channel_mailbox.rs
-docs/high-risk-recovery-lane.md	src/services/discord/handoff.rs
-docs/high-risk-recovery-lane.md	src/services/discord/recovery.rs
-tests/TEST_PLAN.md	formatting_test.rs
-tests/TEST_PLAN.md	handoff_test.rs
-tests/TEST_PLAN.md	inflight_test.rs
-tests/TEST_PLAN.md	multi_channel.rs
-tests/TEST_PLAN.md	org_schema_test.rs
-tests/TEST_PLAN.md	pcd_test.rs
-tests/TEST_PLAN.md	provider_test.rs
-tests/TEST_PLAN.md	restart_recovery.rs
-tests/TEST_PLAN.md	restart_test.rs
-tests/TEST_PLAN.md	router_test.rs
-tests/TEST_PLAN.md	session_persistence.rs
-tests/TEST_PLAN.md	settings_test.rs
-tests/TEST_PLAN.md	src/integration_tests.rs
-tests/TEST_PLAN.md	src/integration_tests/tests/high_risk_recovery.rs
-tests/TEST_PLAN.md	src/server/routes/settings_tests.rs
+# It only shrinks (BASELINE_MAX_ENTRIES); fix the doc instead of adding a line.

@@ -42,7 +42,8 @@ use crate::services::provider::{
     poll_output_file_until_result,
 };
 use crate::services::session_backend::{
-    StreamLineState, process_stream_line, read_output_file_until_result_with_harvest,
+    StreamLineState, process_claude_transcript_line,
+    read_claude_tui_output_file_until_result_with_harvest as read_output_file_until_result_with_harvest,
 };
 use crate::services::session_host::{
     EvidenceGap, HerdrTarget, RestoreResume, SocketHerdrLaunchHost, herdr_endpoints,
@@ -691,7 +692,7 @@ impl HerdrTurnLines {
         } else if !self.prompt_seen {
             self.mixed |= is_turn_output(line);
         }
-        process_stream_line(line, sender, &mut self.stream)
+        process_claude_transcript_line(line, sender, &mut self.stream)
     }
 
     /// The turn's terminal: its interrupt marker is an abort, a result or turn end a completion.

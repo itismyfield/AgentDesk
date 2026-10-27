@@ -1,10 +1,7 @@
 //! Read-only Unbound evidence; no result here grants a start capability.
 use std::collections::BTreeMap;
 
-use crate::config::{
-    Config,
-    session_hosts::{BootSessionHosts, ChannelEndpoint},
-};
+use crate::config::{Config, session_hosts::ChannelEndpoint};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedObservation, HostedOwner, HostedRecord, HostedState,
 };
@@ -289,9 +286,6 @@ fn host_scope_result(reads: HostReads<'_>) -> Scope {
     {
         return hold("host_unsupported");
     }
-    let Ok(boot) = BootSessionHosts::from_config(reads.config) else {
-        return hold("probe_failed");
-    };
     let quiet = row.is_none()
         && evidence.inflight_locator == HostWitness::Absent
         && evidence.durable_runtime_kind.is_none()
@@ -307,16 +301,18 @@ fn host_scope_result(reads: HostReads<'_>) -> Scope {
                 target: None
             }
     );
-    if let Some(endpoint) = boot.herdr_endpoint(reads.channel) {
+    // Hosting is the boot section until restart, like every routing consumer.
+    if let Some(endpoint) = crate::config::session_hosts::herdr_endpoint(reads.channel) {
         let owner = reads.expected_owner;
         let (provider, token_hash) = (reads.provider, reads.token_hash);
+        let node = crate::config::session_hosts::local_node();
         if !local_owner(
             owner,
             provider,
             reads.channel,
             token_hash,
             reads.name,
-            boot.local_node(),
+            node.as_deref(),
         ) {
             return hold("herdr_owner_mismatch");
         }
@@ -325,7 +321,7 @@ fn host_scope_result(reads: HostReads<'_>) -> Scope {
             HostedLookup::Found(found)
                 if quiet
                     && retired_marker
-                    && herdr_record_at(found, HostedState::Retired, owner, endpoint) =>
+                    && herdr_record_at(found, HostedState::Retired, owner, &endpoint) =>
             {
                 Scope::HerdrRetired
             }
@@ -526,8 +522,7 @@ fn local_registration(config: &Config, channel: u64, provider: &ProviderKind) ->
                 .to_ascii_lowercase();
             name == provider.as_str() && channel_effective_tui_request(config, binding, &name)
         })
-        && BootSessionHosts::from_config(config)
-            .is_ok_and(|boot| boot.herdr_endpoint(channel).is_none())
+        && crate::config::session_hosts::herdr_endpoint(channel).is_none()
 }
 
 #[cfg(test)]

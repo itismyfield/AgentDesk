@@ -14,10 +14,10 @@ Claude Code concatenates matching `CLAUDE.md` content into its instruction strea
    - Scope: personal Claude Code add-ons (Subagent Strategy, Sidecar, RTK include, etc.).
    - Edit: the symlink target. Do not replace the symlink with inline content.
 
-2. **Repo root** — `<repo>/CLAUDE.md`
-   - Loaded when Claude Code's cwd is the AgentDesk repo root (including campaign worktrees created from the repo).
-   - In this repo the file is 12 lines and simply delegates to [`docs/source-of-truth.md`](source-of-truth.md). It deliberately does not re-encode operational paths.
-   - Edit: this file, for repo-local agent instructions only. All operational path mappings belong in `source-of-truth.md`.
+2. **Repo root** — `<repo>/CLAUDE.md` (absent in AgentDesk)
+   - Claude Code would load it when its cwd is a repo root, but the AgentDesk repo tracks no `CLAUDE.md` or `AGENTS.md` (`git ls-files CLAUDE.md AGENTS.md` prints nothing). This layer is empty for the AgentDesk repo and its campaign worktrees.
+   - AgentDesk agent instructions live in the Obsidian prompts instead: the shared prompt `~/ObsidianVault/RemoteVault/adk-config/agents/_shared.prompt.md` and the per-agent prompts beside it. Operational path mappings live in [`docs/source-of-truth.md`](source-of-truth.md).
+   - Edit: those Obsidian files. Do not add a repo-root `CLAUDE.md`.
 
 3. **Downstream workspace** — e.g. `~/CookingHeart/CLAUDE.md`
    - Only applies when Claude Code is launched from that workspace (i.e. not from the AgentDesk repo). Each workspace owns its own contract.
@@ -32,7 +32,8 @@ A workspace-local `CLAUDE.md` applies when it actually exists in the working dir
 For an agent running under AgentDesk the layers that actually affect behavior are, in order:
 
 - Layer 1 (`~/.claude/CLAUDE.md`) — always.
-- Layer 2 (`<repo>/CLAUDE.md`) — only when the agent is working inside the AgentDesk repo itself (i.e. campaign worktrees, release promotions). For agents working on CookingHeart or similar downstream repos, layer 2 is the workspace CLAUDE.md of that repo instead.
+- Layer 2 (`<repo>/CLAUDE.md`) — none for the AgentDesk repo itself (campaign worktrees, release promotions), which carries no such file. For agents working on CookingHeart or similar downstream repos, layer 2 is the workspace CLAUDE.md of that repo instead.
+- The AgentDesk shared prompt and per-agent prompt — always, through prompt composition rather than CLAUDE.md loading.
 
 Layer 3 is out of AgentDesk's scope — it belongs to the downstream workspace's own contract.
 
@@ -40,14 +41,14 @@ Layer 3 is out of AgentDesk's scope — it belongs to the downstream workspace's
 
 If the same instruction appears in more than one layer, keep it in the most-specific layer that needs it and remove it from the broader layers. Concretely:
 
-- Agent-identity content (role name, responsibilities, tool preferences) belongs in the per-agent prompt (`~/.adk/release/config/agents/<role>.prompt.md`, optionally mirrored from `~/ObsidianVault/RemoteVault/adk-config/agents/<role>.prompt.md`) — not in any `CLAUDE.md`.
+- Agent-identity content (role name, responsibilities, tool preferences) belongs in the per-agent prompt (canonical Obsidian `~/ObsidianVault/RemoteVault/adk-config/agents/<role>.prompt.md`, mirrored into `~/.adk/release/config/agents/<role>.prompt.md` by deploy) — not in any `CLAUDE.md`.
 - Project-specific instructions live in the target workspace repository’s own `CLAUDE.md`.
-- Repo-wide edit rules live in layer 2 (`<repo>/CLAUDE.md`).
+- AgentDesk-wide agent rules live in the Obsidian shared prompt (`~/ObsidianVault/RemoteVault/adk-config/agents/_shared.prompt.md`), not in a repo `CLAUDE.md`.
 - Personal Claude Code preferences live in layer 1 (`~/.claude/CLAUDE.md`).
 
 When removing a duplicate, leave a one-line commit note pointing at the surviving canonical location rather than an inline comment in the file.
 
 ## Related
 
-- [`source-of-truth.md`](source-of-truth.md) — canonical edit paths for all config, prompt, and memory surfaces, including global, repo, and downstream workspace CLAUDE.md files.
+- [`source-of-truth.md`](source-of-truth.md) — canonical edit paths for all config, prompt, and memory surfaces, including the global and downstream workspace CLAUDE.md files.
 - `scripts/archive-config-backups.sh` — archives legacy config snapshots (`*.pre-*`, `*.bak`, `*.migrated`) into `~/.adk/release/config/.backups/YYYY-MM-DD/`. Run during config cleanup; never leave snapshots beside canonical files.

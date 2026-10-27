@@ -114,145 +114,147 @@ fn output_line(kind: &str, payload: serde_json::Value) -> Vec<u8> {
     format!("{}\n", serde_json::json!({"type":kind,"payload":payload})).into_bytes()
 }
 
-#[tokio::test(start_paused = true)]
-async fn canary_alternate_legacy_and_herdr_owner_actor_capture_and_post() {
+#[test]
+fn canary_alternate_legacy_and_herdr_owner_actor_capture_and_post() {
     if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
         module_path!(),
         "::canary_alternate_legacy_and_herdr_owner_actor_capture_and_post"
     )) {
         return;
     }
-    exercise_actor(true).await;
+    exercise_actor(true);
 }
 
-#[tokio::test(start_paused = true)]
-async fn canary_without_authoritative_owner_actor_preserves_durable_unavailable_hold() {
+#[test]
+fn canary_without_authoritative_owner_actor_preserves_durable_unavailable_hold() {
     if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
         module_path!(),
         "::canary_without_authoritative_owner_actor_preserves_durable_unavailable_hold"
     )) {
         return;
     }
-    exercise_actor(false).await;
+    exercise_actor(false);
 }
 
-async fn exercise_actor(alternate_owner: bool) {
+fn exercise_actor(alternate_owner: bool) {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
-    let _fake_tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
-    dedupe::reset_state_for_tests();
-    dedupe::binding_events::set_test_root(Some(root.path()));
-    let (old_context, _, _) = durable_canary_without_launch_files(root.path());
-    let old_fold = dedupe::binding_events::codex::read_ownership(&old_context).unwrap();
-    for herdr in [false, true] {
+    dedupe::run_serial_test(async {
+        tokio::time::pause();
+        let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+        let _fake_tmux =
+            crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
         dedupe::reset_state_for_tests();
-        let logical = format!("alternate-codex-{}", uuid::Uuid::new_v4().simple());
-        if alternate_owner {
-            let alternate = context(root.path(), &logical, "legacy");
-            PreparedIncarnation::create(alternate.clone()).unwrap();
-            publish_nonce(&alternate);
-            if herdr {
-                dedupe::register_codex_herdr_placeholder(&logical, CANARY_CHANNEL);
-            } else {
-                dedupe::register_tmux_channel(&logical, CANARY_CHANNEL);
+        dedupe::binding_events::set_test_root(Some(root.path()));
+        let (old_context, _, _) = durable_canary_without_launch_files(root.path());
+        let old_fold = dedupe::binding_events::codex::read_ownership(&old_context).unwrap();
+        for herdr in [false, true] {
+            dedupe::reset_state_for_tests();
+            let logical = format!("alternate-codex-{}", uuid::Uuid::new_v4().simple());
+            if alternate_owner {
+                let alternate = context(root.path(), &logical, "legacy");
+                PreparedIncarnation::create(alternate.clone()).unwrap();
+                publish_nonce(&alternate);
+                if herdr {
+                    dedupe::register_codex_herdr_placeholder(&logical, CANARY_CHANNEL);
+                } else {
+                    dedupe::register_tmux_channel(&logical, CANARY_CHANNEL);
+                }
+                assert!(!dedupe::codex_verified_requires_proof(&logical));
             }
-            assert!(!dedupe::codex_verified_requires_proof(&logical));
-        }
-        let mut native = None;
-        let harness = Harness::build_channel(CANARY_CHANNEL, |runtime| {
-            let path = runtime.join("alternate.jsonl");
-            std::fs::write(&path, b"").unwrap();
-            let source = source_id_for("alternate-session", &path).unwrap();
-            native = Some((path, source.clone()));
-            vec![InitSource {
-                source_id: source,
-                delivery_start: 0,
-                prefix_hash: hex::encode(Sha256::digest(b"")),
-            }]
-        });
-        let (path, source) = native.unwrap();
-        assert_eq!(
-            dedupe::codex_verified_channel_delivery_allowed(CANARY_CHANNEL),
-            alternate_owner
-        );
-        assert_eq!(
-            dedupe::codex_verified_o_source_allowed(CANARY_CHANNEL, &source),
-            alternate_owner
-        );
-        let bindings = Arc::new(FakeBindings::new());
-        let mut event = bound(
-            1,
-            None,
-            BindingTarget::Source(source.clone()),
-            BindingCause::Startup,
-            None,
-        );
-        event.channel_id = CANARY_CHANNEL;
-        event.provider = ShadowProvider::Codex;
-        event.tmux_session = logical;
-        bindings.commit(event);
-        harness.gate.acquired();
-        let before = harness.channel().cursor(&source).unwrap().captured_through;
-        let turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let hook = super::host_start::CountedTurn(Arc::clone(&turns));
-        let writer = harness.writer().with_repost(Some(Box::new(hook)));
-        let (stop, task) = spawn_with(writer, ShadowProvider::Codex, bindings);
-        for line in [
-            output_line(
-                "event_msg",
-                serde_json::json!({"type":"task_started","turn_id":"t1"}),
-            ),
-            output_line(
-                "response_item",
-                serde_json::json!({"type":"message","role":"assistant","id":"m1",
-                "content":[{"type":"output_text","text":"alternate legacy output"}]}),
-            ),
-            output_line(
-                "event_msg",
-                serde_json::json!({"type":"task_complete","turn_id":"t1"}),
-            ),
-        ] {
-            append(&path, &line);
-        }
-        polls(6).await;
-        if alternate_owner {
+            let mut native = None;
+            let harness = Harness::build_channel(CANARY_CHANNEL, |runtime| {
+                let path = runtime.join("alternate.jsonl");
+                std::fs::write(&path, b"").unwrap();
+                let source = source_id_for("alternate-session", &path).unwrap();
+                native = Some((path, source.clone()));
+                vec![InitSource {
+                    source_id: source,
+                    delivery_start: 0,
+                    prefix_hash: hex::encode(Sha256::digest(b"")),
+                }]
+            });
+            let (path, source) = native.unwrap();
             assert_eq!(
-                harness.port.posts(),
-                ["alternate legacy output", "-# ✅ 완료"]
+                dedupe::codex_verified_channel_delivery_allowed(CANARY_CHANNEL),
+                alternate_owner
             );
-            assert!(harness.channel().cursor(&source).unwrap().captured_through > before);
-        } else {
-            assert!(harness.port.posts().is_empty());
             assert_eq!(
-                harness.channel().cursor(&source).unwrap().captured_through,
-                before
+                dedupe::codex_verified_o_source_allowed(CANARY_CHANNEL, &source),
+                alternate_owner
             );
-        }
-        assert!(harness.alarms.taken().is_empty());
-        // A channel held from delivery never runs its re-post turn; a delivering one does.
-        let turned = turns.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(turned > 0, alternate_owner, "re-post turns: {turned}");
-        halt(stop, task).await;
-        assert_eq!(
-            dedupe::binding_events::codex::read_ownership(&old_context).unwrap(),
-            old_fold
-        );
-        for ext in [
-            "spawn_nonce",
-            crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
-        ] {
-            assert!(
-                !Path::new(&crate::services::tmux_common::session_temp_path(
-                    CANARY_TMUX,
-                    ext
-                ))
-                .exists()
+            let bindings = Arc::new(FakeBindings::new());
+            let mut event = bound(
+                1,
+                None,
+                BindingTarget::Source(source.clone()),
+                BindingCause::Startup,
+                None,
             );
+            event.channel_id = CANARY_CHANNEL;
+            event.provider = ShadowProvider::Codex;
+            event.tmux_session = logical;
+            bindings.commit(event);
+            harness.gate.acquired();
+            let before = harness.channel().cursor(&source).unwrap().captured_through;
+            let turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let hook = super::host_start::CountedTurn(Arc::clone(&turns));
+            let writer = harness.writer().with_repost(Some(Box::new(hook)));
+            let (stop, task) = spawn_with(writer, ShadowProvider::Codex, bindings);
+            for line in [
+                output_line(
+                    "event_msg",
+                    serde_json::json!({"type":"task_started","turn_id":"t1"}),
+                ),
+                output_line(
+                    "response_item",
+                    serde_json::json!({"type":"message","role":"assistant","id":"m1",
+                    "content":[{"type":"output_text","text":"alternate legacy output"}]}),
+                ),
+                output_line(
+                    "event_msg",
+                    serde_json::json!({"type":"task_complete","turn_id":"t1"}),
+                ),
+            ] {
+                append(&path, &line);
+            }
+            polls(6).await;
+            if alternate_owner {
+                assert_eq!(
+                    harness.port.posts(),
+                    ["alternate legacy output", "-# ✅ 완료"]
+                );
+                assert!(harness.channel().cursor(&source).unwrap().captured_through > before);
+            } else {
+                assert!(harness.port.posts().is_empty());
+                assert_eq!(
+                    harness.channel().cursor(&source).unwrap().captured_through,
+                    before
+                );
+            }
+            assert!(harness.alarms.taken().is_empty());
+            // A channel held from delivery never runs its re-post turn; a delivering one does.
+            let turned = turns.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(turned > 0, alternate_owner, "re-post turns: {turned}");
+            halt(stop, task).await;
+            assert_eq!(
+                dedupe::binding_events::codex::read_ownership(&old_context).unwrap(),
+                old_fold
+            );
+            for ext in [
+                "spawn_nonce",
+                crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+            ] {
+                assert!(
+                    !Path::new(&crate::services::tmux_common::session_temp_path(
+                        CANARY_TMUX,
+                        ext
+                    ))
+                    .exists()
+                );
+            }
         }
-    }
-    dedupe::binding_events::forget_channel_for_tests(CANARY_CHANNEL);
-    dedupe::binding_events::set_test_root(None);
-    dedupe::reset_state_for_tests();
+        dedupe::binding_events::forget_channel_for_tests(CANARY_CHANNEL);
+        dedupe::binding_events::set_test_root(None);
+        dedupe::reset_state_for_tests();
+    });
 }

@@ -1151,10 +1151,11 @@ pub fn start_hot_reload(
                     break;
                 }
                 match rx.recv_timeout(Duration::from_millis(250)) {
-                    Ok(_event) => {
+                    Ok(event) => {
                         if stop_worker.load(Ordering::Acquire) {
                             break;
                         }
+                        crate::config::reload_classes::warn_restart_files(&event.paths);
                         // Debounce: skip if we reloaded recently
                         if last_reload.elapsed() < debounce {
                             // Drain remaining events in the debounce window
@@ -1162,7 +1163,6 @@ pub fn start_hot_reload(
                             continue;
                         }
 
-                        // Drain any queued events
                         while rx.try_recv().is_ok() {}
 
                         tracing::info!("Policy file change detected, pre-validating...");

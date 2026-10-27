@@ -24,15 +24,17 @@ case "$2" in
 display-message) echo "0,,80,24" ;;
 capture-pane) if [ -f "$d/pasted" ]; then cat "$d/cap.pasted"; else cat "$d/cap.before"; fi ;;
 load-buffer) for last do :; done; cp "$last" "$d/buffer" ;;
-if-shell)
-  echo "$7" >> "$d/keys"
-  case "$7" in
+paste-buffer|send-keys)
+  shift; echo "$*" >> "$d/keys"
+  case "$1" in
   paste-buffer*)
     touch "$d/pasted"
     { printf '\n\342\200\272 %s\n' "$(head -n 1 "$d/buffer")"
       awk 'NR > 1 { print "  " $0 }' "$d/buffer"
       printf '\n  tab to queue message    95%% context left\n'; } > "$d/cap.pasted" ;;
   send-keys*)
+    rm -f "$d/pasted"
+    [ -f "$d/skip_receipt" ] && exit 0
     python3 - "$d" <<'PY'
 import json, pathlib, sys
 d = pathlib.Path(sys.argv[1])
@@ -185,14 +187,46 @@ impl CodexPane {
         fs::read_to_string(self.path("receipt.id")).expect("native input record id")
     }
 
+    async fn observed_steer(&self) -> crate::services::tui_prompt_dedupe::PromptObservation {
+        use crate::services::tui_prompt_dedupe::{
+            PromptObservation, observe_codex_prompt_in_turn_at,
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let observed = observe_codex_prompt_in_turn_at(
+                &self.session(),
+                &self.header(),
+                Some(&self.receipt_id()),
+                Some(TURN),
+                chrono::Utc::now(),
+            );
+            if observed != PromptObservation::InjectedDeferred {
+                return observed;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "receipt observer did not settle"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
     async fn attempt(
         &self,
         shared: &std::sync::Arc<crate::services::discord::SharedData>,
     ) -> InjectAttempt {
+        self.attempt_text(shared, "status?").await
+    }
+
+    async fn attempt_text(
+        &self,
+        shared: &std::sync::Arc<crate::services::discord::SharedData>,
+        text: &str,
+    ) -> InjectAttempt {
         let request = HumanInputRequest {
             channel_id: ChannelId::new(self.channel),
             provider: ProviderKind::Codex,
-            text: "status?".to_string(),
+            text: text.to_string(),
             author_id: 200,
             source: "imessage".to_string(),
             metadata: None,
@@ -235,13 +269,7 @@ async fn codex_injection_reads_native_with_a_separate_relay_pg() {
     );
     assert_eq!(pane.keys(), "paste-buffer+send-keys");
     assert_eq!(
-        crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
-            &session,
-            &pane.header(),
-            Some(&pane.receipt_id()),
-            Some(TURN),
-            chrono::Utc::now(),
-        ),
+        pane.observed_steer().await,
         crate::services::tui_prompt_dedupe::PromptObservation::InjectedSteer,
     );
     assert!(
@@ -433,16 +461,8 @@ async fn an_enabled_codex_channel_steers_the_open_turn_quietly_pg() {
         (outcome, pane.keys()),
         (injected, "paste-buffer+send-keys".into())
     );
-    let observe = crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at;
-    let seen = observe(
-        &pane.session(),
-        &pane.header(),
-        Some(&pane.receipt_id()),
-        Some(TURN),
-        chrono::Utc::now(),
-    );
     assert_eq!(
-        seen,
+        pane.observed_steer().await,
         crate::services::tui_prompt_dedupe::PromptObservation::InjectedSteer
     );
     let draft = CodexPane::new(drafted, &steerable(), RuntimeHandoffKind::CodexTui);
@@ -1035,5 +1055,38 @@ fn main() {{
         result.status.success(),
         "cfg(not(test)) gate failed: {}",
         String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+/// A missing native receipt is local success and does not stop the next Discord input.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_missing_receipt_does_not_fail_or_lock_the_next_input_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool));
+    let ch = 7_386_201;
+    let pane = CodexPane::new(ch, &steerable(), RuntimeHandoffKind::CodexTui);
+    test_hook::enable_codex(ch);
+    pane.set("skip_receipt", "");
+    assert_eq!(
+        pane.attempt(&shared).await,
+        InjectAttempt::Injected { turn_id: None }
+    );
+    assert!(!pane.path("receipt.id").exists());
+    fs::remove_file(pane.path("skip_receipt")).unwrap();
+    assert_eq!(
+        pane.attempt_text(&shared, "next status?").await,
+        InjectAttempt::Injected { turn_id: None }
+    );
+    assert_eq!(pane.keys(), "paste-buffer+send-keys+paste-buffer+send-keys");
+    assert_eq!(
+        pane.observed_steer().await,
+        crate::services::tui_prompt_dedupe::PromptObservation::InjectedSteer
+    );
+    assert!(
+        super::inject_tests::queue_texts(&shared, ch)
+            .await
+            .is_empty()
     );
 }

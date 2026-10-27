@@ -71,7 +71,7 @@ fn read_optional(path: Option<std::path::PathBuf>) -> Result<Option<Vec<u8>>, St
     }
 }
 // Preserve registration precedence without config hardening or recovery-catalog mutation.
-fn registrations(config: &Config) -> Result<Vec<RegisteredChannelBinding>, String> {
+fn registrations() -> Result<Vec<RegisteredChannelBinding>, String> {
     let mut bindings = BTreeMap::new();
     if let Some(bytes) = read_optional(runtime_store::role_map_path())? {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -146,10 +146,6 @@ fn registrations(config: &Config) -> Result<Vec<RegisteredChannelBinding>, Strin
             continue;
         };
         let disk: Config = serde_yaml::from_slice(&bytes).map_err(|e| e.to_string())?;
-        let host = BootSessionHosts::from_config(&disk).map_err(|e| e.to_string())?;
-        if host != BootSessionHosts::from_config(config).map_err(|e| e.to_string())? {
-            return Err("host config awaits restart".into());
-        }
         for agent in &disk.agents {
             for (key, channel) in agent.channels.iter() {
                 if crate::services::provider::intern_provider_id(key).is_none() {
@@ -199,11 +195,10 @@ impl Files {
         provider: &ProviderKind,
         channel: u64,
         core: Option<&str>,
-        config: &Config,
         ports: &LivePorts,
     ) -> Result<Self, String> {
         ports.scoped(|| {
-            let fallback = registrations(config)?;
+            let fallback = registrations()?;
             let shadow = match provider {
                 ProviderKind::Claude => ShadowProvider::Claude,
                 _ => ShadowProvider::Codex,
@@ -328,12 +323,6 @@ impl Snapshot {
         ports: Arc<LivePorts>,
     ) -> Result<Self, String> {
         let config = crate::config_live_reload::current().ok_or("host config unavailable")?;
-        let boot = BootSessionHosts::from_config(&config).map_err(|e| e.to_string())?;
-        if !crate::config::session_hosts::with_boot(|actual| {
-            actual.map_or_else(|| boot.channels().is_empty(), |actual| actual == &boot)
-        }) {
-            return Err("host config awaits restart".into());
-        }
         let runtime_root = crate::config::runtime_root();
         let basis = shared
             .core
@@ -342,18 +331,13 @@ impl Snapshot {
             .sessions
             .get(&channel)
             .and_then(|s| s.channel_name.clone());
-        let (worker_ports, worker_provider, worker_basis, worker_config) = (
-            ports.clone(),
-            provider.clone(),
-            basis.clone(),
-            config.clone(),
-        );
+        let (worker_ports, worker_provider, worker_basis) =
+            (ports.clone(), provider.clone(), basis.clone());
         let mut files = tokio::task::spawn_blocking(move || {
             Files::collect(
                 &worker_provider,
                 channel.get(),
                 worker_basis.as_deref(),
-                &worker_config,
                 &worker_ports,
             )
         })
@@ -596,7 +580,6 @@ impl Snapshot {
             &self.provider,
             self.channel.get(),
             self.basis.as_deref(),
-            &self.config,
             &self.ports,
         ) else {
             return false;
@@ -707,9 +690,6 @@ impl Snapshot {
         let Ok(runtime) = trace.runtime else {
             return hold("probe_failed");
         };
-        let Ok(boot) = BootSessionHosts::from_config(&self.config) else {
-            return hold("probe_failed");
-        };
         let key =
             adk_session::build_namespaced_session_key(&shared.token_hash, &self.provider, name);
         let owner = HostedOwner {
@@ -717,7 +697,7 @@ impl Snapshot {
             discord_token_hash: shared.token_hash.clone(),
             channel_id: self.channel.to_string(),
             logical_key: name.into(),
-            owner_node: boot.local_node().unwrap_or_default().into(),
+            owner_node: crate::config::session_hosts::local_node().unwrap_or_default(),
             runtime_root: self
                 .runtime_root
                 .as_ref()
@@ -765,6 +745,8 @@ pub(in crate::services::discord::turn_presence::activity) struct Stamp {
 }
 #[path = "canonical_target.rs"]
 mod canonical_target;
+#[path = "inflight_bound.rs"]
+pub(in crate::services::discord::turn_presence::activity) mod inflight_bound;
 #[path = "legacy_divergence.rs"]
 mod legacy_divergence;
 #[path = "live_ownership.rs"]
