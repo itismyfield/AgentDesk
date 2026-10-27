@@ -116,8 +116,8 @@ fn broken_canonical_file_is_an_error_not_a_legacy_fallback() {
     );
 
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _root = TestEnv::set("AGENTDESK_ROOT_DIR", Some(root.path().as_os_str()));
-    let _explicit = TestEnv::set(EXPLICIT_ENV, None);
+    let _root = set_env("AGENTDESK_ROOT_DIR", Some(root.path().as_os_str()));
+    let _explicit = set_env(EXPLICIT_ENV, None);
     assert!(load_runtime_config_file().is_none());
 }
 
@@ -131,8 +131,8 @@ fn env_path_is_used_for_the_runtime_root_only() {
     write_config(&explicit, 2);
 
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _root = TestEnv::set("AGENTDESK_ROOT_DIR", Some(root.as_os_str()));
-    let _explicit = TestEnv::set(EXPLICIT_ENV, Some(explicit.as_os_str()));
+    let _root = set_env("AGENTDESK_ROOT_DIR", Some(root.as_os_str()));
+    let _explicit = set_env(EXPLICIT_ENV, Some(explicit.as_os_str()));
 
     let (config, path) = load_runtime_config_file().unwrap();
     assert_eq!((config.server.port, path), (2, explicit.clone()));
@@ -141,17 +141,13 @@ fn env_path_is_used_for_the_runtime_root_only() {
 }
 
 /// Sets or removes one variable while the caller holds the shared env lock.
-struct TestEnv(crate::config::TestEnvVarGuard);
-
-impl TestEnv {
-    fn set(key: &'static str, value: Option<&std::ffi::OsStr>) -> Self {
-        let guard = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(key);
-        match value {
-            Some(value) => unsafe { std::env::set_var(key, value) },
-            None => unsafe { std::env::remove_var(key) },
-        }
-        Self(guard)
+fn set_env(key: &'static str, value: Option<&std::ffi::OsStr>) -> crate::config::TestEnvVarGuard {
+    let guard = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(key);
+    match value {
+        Some(value) => unsafe { std::env::set_var(key, value) },
+        None => unsafe { std::env::remove_var(key) },
     }
+    guard
 }
 
 /// Production files that may still name a config file path themselves, and why.
@@ -235,14 +231,16 @@ fn production_lines(text: &str) -> Vec<(usize, &str)> {
     lines
 }
 
-/// Files and directories of modules declared under `#[cfg(test)]` in `file`.
-fn test_module_paths(file: &Path, text: &str) -> Vec<PathBuf> {
-    let dir = file.parent().unwrap();
-    let own_dir = match file.file_name().and_then(|name| name.to_str()) {
-        Some("mod.rs" | "lib.rs" | "main.rs") => dir.to_path_buf(),
-        _ => dir.join(file.file_stem().unwrap()),
-    };
-    let (mut paths, mut gated, mut attr) = (Vec::new(), false, None);
+/// One `mod name;` declaration in `file`.
+struct ModDecl {
+    file: PathBuf,
+    test_only: bool,
+    path_attr: Option<String>,
+    name: String,
+}
+
+fn mod_decls(file: &Path, text: &str) -> Vec<ModDecl> {
+    let (mut decls, mut gated, mut attr) = (Vec::new(), false, None);
     for line in text.lines() {
         let line = match after_test_cfg(line.trim()) {
             Some(rest) => {
@@ -256,32 +254,86 @@ fn test_module_paths(file: &Path, text: &str) -> Vec<PathBuf> {
         } else if let Some(found) = PATH_ATTR_RE.captures(line) {
             attr = Some(found[1].to_string());
         } else if let Some(found) = MOD_DECL_RE.captures(line) {
-            if gated {
-                match attr.take() {
-                    Some(path) => paths.push(dir.join(path)),
-                    None => {
-                        paths.push(own_dir.join(format!("{}.rs", &found[1])));
-                        paths.push(own_dir.join(&found[1]));
-                    }
-                }
-            }
-            (gated, attr) = (false, None);
+            decls.push(ModDecl {
+                file: file.to_path_buf(),
+                test_only: gated,
+                path_attr: attr.take(),
+                name: found[1].to_string(),
+            });
+            gated = false;
         } else if !line.trim().starts_with("#[") {
             (gated, attr) = (false, None);
         }
     }
-    let children: Vec<PathBuf> = paths
+    decls
+}
+
+/// `a/b/../c` as `a/c`, the way `#[path = "../c"]` resolves.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Files and directories that only test-only modules (and modules they declare) live in.
+fn test_only_paths(files: &[(PathBuf, String)]) -> Vec<PathBuf> {
+    let decls: Vec<ModDecl> = files
         .iter()
-        .filter(|path| path.extension().is_some())
-        .map(
-            |path| match path.file_name().and_then(|name| name.to_str()) {
-                Some("mod.rs") => path.parent().unwrap().to_path_buf(),
-                _ => path.with_extension(""),
-            },
-        )
+        .flat_map(|(path, text)| mod_decls(path, text))
         .collect();
-    paths.extend(children);
-    paths
+    // A `#[path]`-loaded file owns its directory like `mod.rs` does.
+    let path_loaded: BTreeSet<PathBuf> = decls
+        .iter()
+        .filter_map(|decl| Some(lexical(&decl.file.parent()?.join(decl.path_attr.as_ref()?))))
+        .collect();
+    let target = |decl: &ModDecl| {
+        let dir = decl.file.parent().unwrap();
+        let file = match &decl.path_attr {
+            Some(path) => lexical(&dir.join(path)),
+            None => {
+                let owns_dir = path_loaded.contains(&decl.file)
+                    || matches!(
+                        decl.file.file_name().and_then(|name| name.to_str()),
+                        Some("mod.rs" | "lib.rs" | "main.rs")
+                    );
+                let base = match owns_dir {
+                    true => dir.to_path_buf(),
+                    false => dir.join(decl.file.file_stem().unwrap()),
+                };
+                base.join(format!("{}.rs", decl.name))
+            }
+        };
+        let children = match file.file_name().and_then(|name| name.to_str()) {
+            Some("mod.rs") => file.parent().unwrap().to_path_buf(),
+            _ => file.with_extension(""),
+        };
+        [file, children]
+    };
+    let mut test_only: Vec<PathBuf> = Vec::new();
+    loop {
+        let before = test_only.len();
+        for decl in &decls {
+            let inside = test_only.iter().any(|prefix| decl.file.starts_with(prefix));
+            if decl.test_only || inside {
+                for path in target(decl) {
+                    if !test_only.contains(&path) {
+                        test_only.push(path);
+                    }
+                }
+            }
+        }
+        if test_only.len() == before {
+            return test_only;
+        }
+    }
 }
 
 fn source_files(root: &Path) -> Vec<(PathBuf, String)> {
@@ -305,10 +357,7 @@ fn source_files(root: &Path) -> Vec<(PathBuf, String)> {
 #[test]
 fn config_file_paths_are_built_only_by_the_resolver() {
     let files = source_files(Path::new(env!("CARGO_MANIFEST_DIR")));
-    let test_only: Vec<PathBuf> = files
-        .iter()
-        .flat_map(|(path, text)| test_module_paths(path, text))
-        .collect();
+    let test_only = test_only_paths(&files);
     let owners: BTreeSet<&str> = PATH_OWNERS.iter().map(|(path, _)| *path).collect();
     let mut bypasses = Vec::new();
     let mut owners_seen = BTreeSet::new();
@@ -344,18 +393,43 @@ fn bypass_scan_skips_test_items_and_follows_test_modules() {
         fn c() -> PathBuf { PathBuf::from(\"config/agentdesk.yaml\") }\n";
     assert_eq!(bypass_lines(text), vec![2, 17]);
 
-    let declarations = "#[cfg(test)]\n#[path = \"b/x_tests.rs\"]\nmod x;\n\
-        #[cfg(all(test, unix))]\npub(crate) mod y;\nmod z;\n";
-    let paths = test_module_paths(Path::new("src/a/b.rs"), declarations);
-    let expected: Vec<PathBuf> = [
-        "src/a/b/x_tests.rs",
-        "src/a/b/y.rs",
-        "src/a/b/y",
-        "src/a/b/x_tests",
-        "src/a/b/y",
+    let files: Vec<(PathBuf, String)> = [
+        (
+            "src/a/b.rs",
+            "#[cfg(test)]\n#[path = \"b_tests.rs\"]\nmod tests;\nmod prod;\n",
+        ),
+        (
+            "src/a/b_tests.rs",
+            "#[path = \"deep_tests.rs\"]\nmod deep;\nmod nested;\n",
+        ),
+        (
+            "src/a/c.rs",
+            "#[cfg(all(unix, test))]\npub(crate) mod c_tests;\n",
+        ),
+        (
+            "src/a/d/e.rs",
+            "#[cfg(test)]\n#[path = \"../../f_tests.rs\"]\nmod f;\n",
+        ),
     ]
-    .iter()
-    .map(PathBuf::from)
+    .into_iter()
+    .map(|(path, text)| (PathBuf::from(path), text.to_string()))
     .collect();
-    assert_eq!(paths, expected);
+    let test_only = test_only_paths(&files);
+    let covered = |path: &str| {
+        test_only
+            .iter()
+            .any(|prefix| Path::new(path).starts_with(prefix))
+    };
+    for path in [
+        "src/a/b_tests.rs",
+        "src/a/deep_tests.rs",
+        "src/a/nested.rs",
+        "src/a/c/c_tests.rs",
+        "src/a/c/c_tests/inner.rs",
+        "src/f_tests.rs",
+    ] {
+        assert!(covered(path), "{path} is test-only");
+    }
+    assert!(!covered("src/a/b/prod.rs"));
+    assert!(!covered("src/a/b.rs"));
 }
