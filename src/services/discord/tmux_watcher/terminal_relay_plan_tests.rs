@@ -850,6 +850,18 @@ fn the_call_site_operands_the_dead_letter_row_cannot_show_stay_pinned_5941() {
         .expect("the call must terminate")
         .0;
 
+    assert!(
+        call_site.contains("&orphan_facts,"),
+        "the recorder must receive the populated facts"
+    );
+    let facts = source
+        .split_once("let mut orphan_facts = orphan_terminal_frame::OrphanTerminalFrameFacts {")
+        .expect("the plan must populate the orphan facts")
+        .1
+        .split_once("\n        };")
+        .expect("the facts initializer must terminate")
+        .0;
+
     for operand in [
         "watcher_resend_committed,",
         "placeholder_msg_id,",
@@ -857,16 +869,16 @@ fn the_call_site_operands_the_dead_letter_row_cannot_show_stay_pinned_5941() {
         "duplicate_guard_refused_body: direct_terminal_response_decision",
     ] {
         assert!(
-            call_site.contains(operand),
-            "the seam must be fed `{operand}` from the frame being lost: {call_site}"
+            facts.contains(operand),
+            "the seam must be fed `{operand}` from the frame being lost: {facts}"
         );
     }
 
     // #5978 P1-1: the routed flag ANDs in the authorization this seam has already denied,
     // which makes the duplicate conjunct unfalsifiable while every test above stays green.
     assert!(
-        !call_site.contains("direct_terminal_response_refused_duplicate"),
-        "the duplicate conjunct must read the RAW guard verdict, not the routed flag: {call_site}"
+        !facts.contains("direct_terminal_response_refused_duplicate"),
+        "the duplicate conjunct must read the RAW guard verdict, not the routed flag: {facts}"
     );
 
     // The WARN and the counter MOVED with the seam — not duplicated, not
