@@ -525,6 +525,14 @@ pub(super) async fn resume_with_gateway(
     ) else {
         return Ok(false);
     };
+    #[cfg(unix)]
+    if o_owns_body {
+        super::super::super::outbound::completed_turn_ledger::o_pending::capture(
+            &provider,
+            &snapshot.local,
+        )
+        .await;
+    }
     let mut delivered = o_owns_body
         || snapshot.delivery_receipts.len() == chunks.len()
         || decision() == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
@@ -571,10 +579,19 @@ pub(super) async fn resume_with_gateway(
                 }
                 Ok::<(), String>(())
             };
+            #[cfg(all(test, unix))]
+            crate::services::discord::recovery_engine::o_settlement_tests::before_claim();
             match crate::services::tui_o::cutover::claim_then_send(Some(claim), post).await {
                 Ok(crate::services::tui_o::cutover::BodySend::Sent(posted)) => posted?,
                 // O took the channel since the peek: settle the custody as O's.
-                Ok(crate::services::tui_o::cutover::BodySend::OwnedByO) => {}
+                Ok(crate::services::tui_o::cutover::BodySend::OwnedByO) => {
+                    #[cfg(unix)]
+                    super::super::super::outbound::completed_turn_ledger::o_pending::capture(
+                        &provider,
+                        &snapshot.local,
+                    )
+                    .await;
+                }
                 Err(_) => return Ok(false),
             }
         }
@@ -676,3 +693,7 @@ pub(super) fn cancelled_terminal_response(
 #[cfg(test)]
 #[path = "cancelled_body_retirement_tests.rs"]
 mod cancelled_body_retirement_tests;
+
+#[cfg(all(test, unix))]
+#[path = "foreign_o_settlement_tests.rs"]
+mod o_settlement_tests;

@@ -121,6 +121,18 @@ class CensusGateTests(unittest.TestCase):
         self.write("src/services/discord/sink.rs", CUT_FILE + "fn probe() -> bool { o_owns_tui_output_for_channel(k, None) }\n")
         self.assert_fails_with("has ['deliver:claim', 'probe:claim'], expected ['deliver:claim', 'probe:peek']")
 
+    def test_a_quiet_capture_peek_keeps_the_same_gate_pin(self) -> None:
+        self.write("src/services/discord/sink.rs", CUT_FILE + "fn probe() -> bool { peek_o_owns_tui_output_for_channel_quiet(k, None) }\n")
+        self.maps["EXPECTED_GATES"]["src/services/discord/sink.rs"] = ("deliver:claim", "probe:peek")
+        ok, message = self.run_gate()
+        self.assertTrue(ok, message)
+        self.write("src/services/discord/sink.rs", CUT_FILE + "fn probe() -> bool { false }\n")
+        self.assert_fails_with("has ['deliver:claim'], expected ['deliver:claim', 'probe:peek']")
+
+    def test_a_cfg_gated_quiet_reexport_is_not_an_executable_probe(self) -> None:
+        text = "#[cfg(unix)]\npub(crate) use channel_gate::peek_o_owns_tui_output_for_channel_quiet;"
+        self.assertEqual(census._gate_sites(text), [])
+
     def test_gates_trading_roles_within_a_file_fail_with_unchanged_counts(self) -> None:
         paired = (
             "pub fn deliver(ch: u64, body: bool) {\n"

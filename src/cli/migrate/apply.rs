@@ -2721,6 +2721,8 @@ fn merge_imported_agents(
             voice: crate::config::AgentVoiceConfig::default(),
             provider,
             channels: AgentChannels::default(),
+            peer_keywords: Vec::new(),
+            peer_directory: true,
             keywords: Vec::new(),
             department: None,
             avatar_emoji: agent.avatar_emoji.clone(),

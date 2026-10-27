@@ -111,6 +111,10 @@ async fn collect_turn_stream_body(
         source_authority,
         &all_data,
     );
+    let mut mixed_read_provenance = decoded_data.mixed_read_provenance
+        || continuation
+            .as_ref()
+            .is_some_and(|turn| turn.mixed_read_provenance);
     let initial_source_authority =
         authority_for_decoded_text(source_authority, decoded_data.mixed_read_provenance);
     if initial_buffer_was_empty {
@@ -573,6 +577,7 @@ async fn collect_turn_stream_body(
                             channel_id,
                             watcher_instance_id: ctx.watcher_instance_id,
                             source_authority,
+                            mixed_read_provenance: &mut mixed_read_provenance,
                             retained_source: parser.retained_source.is_some(),
                             read_witness,
                             chunk: &chunk,
@@ -796,6 +801,7 @@ async fn collect_turn_stream_body(
         ..source_authority
     };
     return CollectOutcome::Fallthrough(CollectedTurnStream {
+        mixed_read_provenance,
         turn_data_start_offset,
         source_authority,
         split_trailing_turn_follows,

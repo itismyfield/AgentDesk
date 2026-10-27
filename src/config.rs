@@ -527,13 +527,6 @@ impl AgentChannel {
         }
     }
 
-    pub fn quality_feedback_injection(&self) -> Option<bool> {
-        match self {
-            Self::Legacy(_) => None,
-            Self::Detailed(config) => config.quality_feedback_injection,
-        }
-    }
-
     pub fn dispatch_profile(&self) -> Option<String> {
         match self {
             Self::Legacy(_) => None,

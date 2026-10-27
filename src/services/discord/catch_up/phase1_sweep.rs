@@ -69,8 +69,8 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         }
         paced_scan = true;
         let retry_checkpoint = retry_state.map(|state| state.checkpoint);
-        let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|entry| *entry);
-        let fetch_mode = catch_up_fetch_mode_for_scan(candidate, live_checkpoint, retry_checkpoint);
+        let progress = scan_progress::read(provider, channel_id);
+        let fetch_mode = catch_up_fetch_mode_for_scan(progress, retry_checkpoint);
         let scan_checkpoint = fetch_mode.checkpoint();
 
         match api.resolve_runtime_channel_binding_status(channel_id).await {
@@ -86,6 +86,7 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
                         .map(|path| path.display().to_string())
                         .unwrap_or_else(|| "no checkpoint".to_string())
                 );
+                scan_progress::remove(provider, channel_id);
                 if let Some(path) = candidate.checkpoint_path.as_ref() {
                     let _ = fs::remove_file(path);
                 }
@@ -124,10 +125,18 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         let known_snapshot = mailbox_snapshot(shared, channel_id).await;
         let (mut known_arms, mut existing_ids) = recovery_known_arms_and_ids(&known_snapshot);
         // The completed-turn ledger prevents DLQ for delivered ids and restores absorbed arms.
+        #[cfg(unix)]
+        super::super::outbound::completed_turn_ledger::o_pending::project(
+            shared,
+            provider,
+            channel_id.get(),
+        )
+        .await;
         let ledger = settled_ledger_consult::read(provider, channel_id);
         let settled_ids = ledger.settle(&known_snapshot, &mut known_arms, &mut existing_ids);
         let injected = inject_disposition::scan_view(provider);
         injected.merge(&mut known_arms, &mut existing_ids);
+        channel_scan.merge_dispatched(&mut known_arms, &mut existing_ids);
         injected.log_hits(
             "phase1",
             channel_id,
@@ -205,6 +214,24 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         // retires permanent skips without crossing work that still needs retry.
         let retained = frontier.retained_barrier(scan_checkpoint, retry_exhausted);
         if let Some(newest) = frontier.newest() {
+            scan_progress::advance(
+                provider,
+                channel_id,
+                newest,
+                scan_progress::Origin::ObservedFrontier,
+            );
+        } else if matches!(fetch_mode, CatchUpFetchMode::Recent)
+            && let Some(oldest) = messages.iter().map(|message| message.id.get()).min()
+        {
+            // This is a query floor before the first observed input, not completion evidence.
+            scan_progress::advance(
+                provider,
+                channel_id,
+                oldest.saturating_sub(1),
+                scan_progress::Origin::RecentLowerBound,
+            );
+        }
+        if let Some(newest) = frontier.newest() {
             advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
             if retry_checkpoint.is_some()
                 && shared
@@ -261,6 +288,7 @@ async fn fetch_messages<A: CatchUpDiscordApi + ?Sized>(
 ) -> ControlFlow<(), Vec<serenity::Message>> {
     let api = context.deps.api;
     let shared = context.deps.shared;
+    let provider = context.deps.provider;
     let scan_wall_time = context.scan_wall_time;
     let max_age = context.max_age;
     let channel_id = candidate.channel_id;
@@ -295,6 +323,7 @@ async fn fetch_messages<A: CatchUpDiscordApi + ?Sized>(
             }
             // #429: permanent errors — remove checkpoint to avoid retrying every restart
             if e.contains("Missing Access") || e.contains("Unknown Channel") {
+                scan_progress::remove(provider, channel_id);
                 if let Some(path) = candidate.checkpoint_path.as_ref() {
                     let _ = fs::remove_file(path);
                 }
@@ -528,9 +557,10 @@ async fn recover_messages<A: CatchUpDiscordApi + ?Sized>(
                 .consumed
                 .evidence(&intervention_text, msg.id, messages, current_bot_user_id);
         let outcome = match (outcome, command) {
-            (CatchUpClassification::Recover, TextCommandEvidence::Consumed) => {
-                CatchUpClassification::Settled
-            }
+            (
+                CatchUpClassification::Recover | CatchUpClassification::TooOld,
+                TextCommandEvidence::Consumed,
+            ) => CatchUpClassification::Settled,
             (CatchUpClassification::Recover, TextCommandEvidence::ReplierUnknown) => {
                 let retry_after = defer_unrecognized_command(&mut frontier, scan_checkpoint, mid);
                 retry_exhausted |= rearm_catch_up_retry_after_defer(
@@ -567,41 +597,65 @@ async fn recover_messages<A: CatchUpDiscordApi + ?Sized>(
         }
         if outcome != CatchUpClassification::Recover {
             if outcome == CatchUpClassification::TooOld {
+                let newly_recorded;
                 let hold_expired =
                     retry_state.is_some_and(|state| state.hold_expired_at(scan_instant));
                 if hold_expired {
-                    if frontier.retained_barrier(scan_checkpoint, false).is_some()
-                        || !record_exhausted_hold_expiry(api, shared, retry_state, msg)
-                    {
+                    if frontier.retained_barrier(scan_checkpoint, false).is_some() {
                         frontier.seal(mid);
                         break;
                     }
+                    let Some(recorded) =
+                        record_exhausted_hold_expiry(api, shared, retry_state, msg).await
+                    else {
+                        frontier.seal(mid);
+                        break;
+                    };
+                    newly_recorded =
+                        recorded == crate::db::relay_dead_letter::TooOldRecordOutcome::Inserted;
                     ttl_retired_channels.insert(channel_id);
                 } else {
-                    // Preserve every TooOld input as detached DLQ evidence.
-                    let _ = api.record_too_old_dead_letter(
-                        shared.pg_pool.as_ref(),
-                        crate::db::relay_dead_letter::RelayDeadLetterRecord {
-                            kind: crate::db::relay_dead_letter::KIND_CATCH_UP_TOO_OLD.to_string(),
-                            channel_id: channel_id.to_string(),
-                            author_id: Some(msg.author.id.get().to_string()),
-                            message_id: Some(mid.to_string()),
-                            content: text.clone(),
-                            reason: format!(
-                                "age_secs={age_secs} > max_age_secs={}",
-                                max_age.as_secs()
-                            ),
-                        },
-                    );
+                    let recorded = api
+                        .record_too_old_dead_letter(
+                            shared.pg_pool.as_ref(),
+                            crate::db::relay_dead_letter::RelayDeadLetterRecord {
+                                kind: crate::db::relay_dead_letter::KIND_CATCH_UP_TOO_OLD
+                                    .to_string(),
+                                channel_id: channel_id.to_string(),
+                                author_id: Some(msg.author.id.get().to_string()),
+                                message_id: Some(mid.to_string()),
+                                content: text.clone(),
+                                reason: format!(
+                                    "age_secs={age_secs} > max_age_secs={}",
+                                    max_age.as_secs()
+                                ),
+                            },
+                        )
+                        .await;
+                    let Some(recorded) = recorded else {
+                        frontier.seal(mid);
+                        arm_catch_up_retry_preserving_prior(
+                            shared,
+                            channel_id,
+                            frontier.retry_after(scan_checkpoint, mid),
+                            retry_state,
+                            clock,
+                        );
+                        break;
+                    };
+                    newly_recorded =
+                        recorded == crate::db::relay_dead_letter::TooOldRecordOutcome::Inserted;
                 }
-                if too_old_is_actionable(
-                    outcome,
-                    msg.author.id.get(),
-                    msg.author.bot,
-                    evidence.allowed_bot_ids,
-                    evidence.announce_bot_id,
-                    evidence.notify_bot_id,
-                ) {
+                if newly_recorded
+                    && too_old_is_actionable(
+                        outcome,
+                        msg.author.id.get(),
+                        msg.author.bot,
+                        evidence.allowed_bot_ids,
+                        evidence.announce_bot_id,
+                        evidence.notify_bot_id,
+                    )
+                {
                     actionable_too_old_count += 1;
                 }
             }

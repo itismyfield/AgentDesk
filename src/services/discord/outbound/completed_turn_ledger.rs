@@ -32,6 +32,9 @@
 //! Merged-head aliases: `H`, absorbed by episode `n` of head `P`, is settled only when one read
 //! holds both `alias(P, n, H)` and `entry(P, Some(n))`; a missing link duplicates, never loses.
 
+#[cfg(unix)]
+pub(in crate::services::discord) mod o_pending;
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};

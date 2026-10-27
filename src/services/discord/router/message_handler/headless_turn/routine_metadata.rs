@@ -107,7 +107,6 @@ pub(super) fn routine_metadata_role_binding(
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: true,
-        quality_feedback_injection_enabled: true,
         memory: settings::memory_settings_for_role(agent_id),
     })
 }

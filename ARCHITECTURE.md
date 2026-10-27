@@ -1057,6 +1057,9 @@ src/
 │   │   │   ├── policy.rs
 │   │   │   └── policy_tests.rs
 │   │   ├── catch_up/
+│   │   │   ├── frontier_sweep_tests/
+│   │   │   │   ├── dispatch_retirement_tests.rs
+│   │   │   │   └── scanner_progress_tests.rs
 │   │   │   ├── absorbed_active_tests.rs
 │   │   │   ├── api.rs
 │   │   │   ├── claim_cas_tests.rs
@@ -1072,6 +1075,7 @@ src/
 │   │   │   ├── handled_command.rs
 │   │   │   ├── handled_command_tests.rs
 │   │   │   ├── held_range.rs
+│   │   │   ├── i7441_tests.rs
 │   │   │   ├── injected_catch_up_tests.rs
 │   │   │   ├── merged_alias_tests.rs
 │   │   │   ├── phase1_sweep.rs
@@ -1079,6 +1083,7 @@ src/
 │   │   │   ├── phase2_age_tests.rs
 │   │   │   ├── phase2_sweep.rs
 │   │   │   ├── retry_state.rs
+│   │   │   ├── scan_progress.rs
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
 │   │   │   └── too_old_drop_pg_tests.rs
@@ -1480,6 +1485,8 @@ src/
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
+│   │   ├── inject_disposition/
+│   │   │   └── dispatched.rs
 │   │   ├── live_bridge/
 │   │   │   ├── guard_tests/
 │   │   │   │   └── source_guard_tests.rs
@@ -1499,6 +1506,9 @@ src/
 │   │   │   ├── bounded_cache_file.rs
 │   │   │   └── claude.rs
 │   │   ├── outbound/
+│   │   │   ├── completed_turn_ledger/
+│   │   │   │   ├── o_pending.rs
+│   │   │   │   └── o_pending_tests.rs
 │   │   │   ├── confirmation/
 │   │   │   │   └── terminal_notice_tests.rs
 │   │   │   ├── delivery_obligation/
@@ -1547,6 +1557,9 @@ src/
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── o_delivery_evidence.rs
+│   │   │   ├── o_delivery_evidence_tests.rs
+│   │   │   ├── o_delivery_manifest.rs
 │   │   │   ├── o_writer_io.rs
 │   │   │   ├── o_writer_late_tmux_tests.rs
 │   │   │   ├── o_writer_legacy.rs
@@ -1729,6 +1742,7 @@ src/
 │   │   │   ├── manual_rebind_override.rs
 │   │   │   ├── o_cut_recorder.rs
 │   │   │   ├── o_recovery_cut_tests.rs
+│   │   │   ├── o_settlement_tests.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
 │   │   │   ├── producer_resume.rs
@@ -1946,6 +1960,7 @@ src/
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
+│   │   │   │   ├── provider_isolation_seed_save_tests.rs
 │   │   │   │   ├── provider_isolation_source_guard_tests.rs
 │   │   │   │   ├── root_replaced_recovery_tests.rs
 │   │   │   │   ├── s1_entry_tests.rs
@@ -2232,6 +2247,7 @@ src/
 │   │   │   ├── o_capsule_origin_tests.rs
 │   │   │   ├── o_delegated_arm.rs
 │   │   │   ├── o_delegated_watcher_tests.rs
+│   │   │   ├── o_evidence_tests.rs
 │   │   │   ├── o_seed_install_tests.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── orphan_terminal_frame.rs
@@ -2558,7 +2574,8 @@ src/
 │   │   │   │   │   ├── provider_failure_tests.rs
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
-│   │   │   │   │   └── rowless_receipt_tests.rs
+│   │   │   │   │   ├── rowless_receipt_tests.rs
+│   │   │   │   │   └── settled_delivery_tests.rs
 │   │   │   │   ├── empty_response_recovery/
 │   │   │   │   │   ├── guidance.rs
 │   │   │   │   │   └── handler.rs
@@ -2570,6 +2587,7 @@ src/
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── delivery_epilogue_tests.rs
 │   │   │   │   ├── empty_response_recovery.rs
+│   │   │   │   ├── foreign_o_settlement_tests.rs
 │   │   │   │   ├── foreign_terminal_handoff.rs
 │   │   │   │   ├── prompt_too_long_guidance.rs
 │   │   │   │   ├── queue_retry_silence.rs
@@ -3512,6 +3530,7 @@ src/
 │   │   │   ├── codex_end_tests.rs
 │   │   │   ├── codex_provenance.rs
 │   │   │   ├── codex_provenance_tests.rs
+│   │   │   ├── delivery_evidence.rs
 │   │   │   ├── durable.rs
 │   │   │   ├── ledger.rs
 │   │   │   ├── ledger_lock_tests.rs

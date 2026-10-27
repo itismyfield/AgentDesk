@@ -79,6 +79,7 @@ async fn recent_catch_up_pages_back_to_a_buried_user_message_and_stops() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn checkpointed_catch_up_reads_the_page_just_past_the_cursor() {
     let (harness, ids) = harness_with_history(30).await;
+    harness.seed_scanner_checkpoint(ids[10]);
     harness
         .shared
         .last_message_ids
