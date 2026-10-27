@@ -19,17 +19,20 @@ pub(super) async fn sync_campaign_nodes(
     repo: &str,
     issues: &[GhIssue],
     adapter: &dyn GitHubAdapter,
-) {
+) -> IssueSyncReport {
     let campaigns = match issue_sync::active_campaigns(pool).await {
         Ok(campaigns) => campaigns,
         Err(error) => {
             tracing::warn!("[github-sync] {repo}: load active campaigns failed: {error}");
-            return;
+            return IssueSyncReport {
+                errors: 1,
+                ..IssueSyncReport::default()
+            };
         }
     };
     let linked = issue_sync::linked_numbers(&campaigns, repo);
     if linked.is_empty() {
-        return;
+        return IssueSyncReport::default();
     }
     let mut facts: HashMap<i64, IssueFact> = issues
         .iter()
@@ -43,7 +46,7 @@ pub(super) async fn sync_campaign_nodes(
             Ok(fetched) => facts.extend(fetched),
             Err(error) => {
                 fetch_errors += 1;
-                // Without a fresh read these issues cannot change a node this cycle.
+                // Dropping the listed facts too leaves these nodes entirely untouched this cycle.
                 for number in batch {
                     facts.remove(number);
                 }
@@ -61,17 +64,21 @@ pub(super) async fn sync_campaign_nodes(
         })
         .map(|campaign| campaign.id.clone())
         .collect();
-    let report: IssueSyncReport = issue_sync::apply_issue_facts(pool, repo, &facts, &ids).await;
-    if report != IssueSyncReport::default() || fetch_errors > 0 {
+    let report = IssueSyncReport {
+        fetch_errors,
+        ..issue_sync::apply_issue_facts(pool, repo, &facts, &ids).await
+    };
+    if report != IssueSyncReport::default() {
         tracing::info!(
             "[github-sync] {repo}: campaign nodes changed={}, deferred={}, errors={}, fetched_issues={}, fetch_errors={}",
             report.changed_nodes,
             report.deferred_nodes,
             report.errors,
             targets.len(),
-            fetch_errors
+            report.fetch_errors
         );
     }
+    report
 }
 
 fn parse_time(raw: Option<&str>) -> Option<DateTime<Utc>> {

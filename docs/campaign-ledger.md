@@ -140,6 +140,14 @@ change, are read by number together with the closing event.
   writer that read an older revision gets 409 and must reload. A node written
   after the issue was read waits for the next cycle. Paused, completed and other
   inactive campaigns are not touched, including reopen recovery.
+- Only a read by number made after an `issue_drift` report clears it once the
+  issue is closed; the synced issue list never does. When GitHub answers without
+  one of the issues, its listed state can still raise `issue_drift`, but the
+  node's status does not change.
+- A failed GitHub read leaves those nodes unchanged for that cycle. The sync
+  response carries `campaign_nodes` (`changed_nodes`, `deferred_nodes`, `errors`,
+  `fetch_errors`) and `campaign_nodes_failed`; the periodic sync logs the failure
+  and counts the cycle as failed. `deferred_nodes` alone is not a failure.
 
 Ready nodes that cannot be queued are listed in `waiting` with a reason:
 `no_issue_card`, `no_assigned_agent`, `previous_attempt_stopped` (its last queue

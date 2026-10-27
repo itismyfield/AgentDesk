@@ -716,6 +716,7 @@ async fn postgres_a_stale_github_observation_does_not_undo_a_newer_write_pg() {
         vec![
             node("restored", "running", "review", Some(51)),
             node("reopened-by-hand", "pending", "implement", Some(52)),
+            node("running-by-hand", "pending", "implement", Some(53)),
         ],
     )
     .await;
@@ -756,6 +757,127 @@ async fn postgres_a_stale_github_observation_does_not_undo_a_newer_write_pg() {
             .input
             .status,
         NodeStatus::Running
+    );
+
+    // A person set the node running; A read the old CLOSED, then B saw the reopen and
+    // consumed the record without restoring. That consumption is newer than A's read.
+    let closing_53 = closed(53, "COMPLETED", at(0), pr_closer(953), 0);
+    sync(&pool, &[], &ScriptedGitHub::new([closing_53.clone()])).await;
+    put_node(&pool, "stale", "running-by-hand", |node| {
+        node["status"] = json!("running")
+    })
+    .await
+    .unwrap();
+    let (a, release) = start_gated_sync(&pool, closing_53).await;
+    sync(&pool, &[], &ScriptedGitHub::new([reopened(53)])).await;
+    release.notify_one();
+    a.await.unwrap();
+    let kept = stored(&pool, "stale", "running-by-hand").await;
+    assert_eq!(kept.input.status, NodeStatus::Running);
+    assert!(kept.auto_closed_from.is_none());
+
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test]
+async fn postgres_a_stale_closed_list_keeps_the_report_of_a_reopened_node_pg() {
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    seed(
+        &pool,
+        "report",
+        "active",
+        vec![node("a", "running", "review", Some(71))],
+    )
+    .await;
+    let old_window = [listed(71, "CLOSED", Some(at(0)), &[])];
+    let github = ScriptedGitHub::new([closed(71, "COMPLETED", at(0), pr_closer(971), 0)]);
+    sync(&pool, &old_window, &github).await;
+    put_node(&pool, "report", "a", |node| {
+        node["status"] = json!("skipped")
+    })
+    .await
+    .unwrap();
+    github.script([reopened(71)]);
+    sync(&pool, &[], &github).await;
+    let reason = |node: &Node| node.issue_drift.as_ref().map(|drift| drift.reason);
+    assert_eq!(
+        reason(&stored(&pool, "report", "a").await),
+        Some(DriftReason::ChangedAfterAutoClose)
+    );
+
+    // An older list still shows the closing: without a fresh read it cannot clear the report,
+    // and a fresh read finds the issue open.
+    sync(&pool, &old_window, &ScriptedGitHub::default()).await;
+    sync(&pool, &old_window, &github).await;
+    sync(&pool, &[], &github).await;
+    let kept = stored(&pool, "report", "a").await;
+    assert_eq!(kept.input.status, NodeStatus::Skipped);
+    assert_eq!(reason(&kept), Some(DriftReason::ChangedAfterAutoClose));
+
+    // A real new closing, read by number, ends the report.
+    github.script([closed(71, "COMPLETED", at(120), pr_closer(972), 0)]);
+    sync(&pool, &[listed(71, "CLOSED", Some(at(120)), &[])], &github).await;
+    let resolved = stored(&pool, "report", "a").await;
+    assert_eq!(resolved.input.status, NodeStatus::Skipped);
+    assert_eq!(reason(&resolved), None);
+
+    pool.close().await;
+    fixture.drop().await;
+}
+
+#[tokio::test]
+async fn postgres_a_failed_campaign_issue_read_is_reported_and_changes_nothing_pg() {
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, repo_id, github_issue_number)
+         VALUES ('card-81', 'card-81', 'in_progress', $1, 81)",
+    )
+    .bind(REPO)
+    .execute(&pool)
+    .await
+    .unwrap();
+    seed(
+        &pool,
+        "outage",
+        "active",
+        vec![
+            node("closing", "pending", "implement", Some(81)),
+            node("auto", "running", "review", Some(82)),
+        ],
+    )
+    .await;
+    let github = ScriptedGitHub::new([closed(82, "COMPLETED", at(0), pr_closer(982), 0)]);
+    sync(&pool, &[], &github).await;
+    let before = campaigns::get(&pool, "outage").await.unwrap();
+    assert!(before.nodes[1].auto_closed_from.is_some());
+
+    // The card sync still works while every campaign issue read fails.
+    github.script([
+        closed(81, "COMPLETED", at(5), pr_closer(981), 0),
+        reopened(82),
+    ]);
+    github.fail.store(true, Ordering::SeqCst);
+    let result = sync_github_issues_for_repo_pg_with_adapter(
+        &pool,
+        REPO,
+        &[listed(81, "CLOSED", Some(at(5)), &[])],
+        &github,
+    )
+    .await
+    .expect("card sync succeeds");
+    assert_eq!(result.closed_count, 1);
+    assert_eq!(result.campaign_nodes.fetch_errors, 1);
+    assert_eq!(result.campaign_nodes.changed_nodes, 0);
+    assert!(result.campaign_nodes.failed());
+    let after = campaigns::get(&pool, "outage").await.unwrap();
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.nodes[0].input.status, NodeStatus::Pending);
+    assert_eq!(
+        after.nodes[1].auto_closed_from,
+        before.nodes[1].auto_closed_from
     );
 
     pool.close().await;

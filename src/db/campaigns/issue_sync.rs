@@ -47,16 +47,26 @@ pub struct IssueFact {
     pub closed_at: Option<DateTime<Utc>>,
     /// The closing event of the current closing; `None` when it could not be confirmed.
     pub closing: Option<ClosingEvent>,
-    /// Set for issues read by number. Only these may change a node's status or consume its
-    /// automatic-close record, and only if the node did not change after the read.
+    /// Set for issues read by number. Only these may change a node's status, consume its
+    /// automatic-close record or clear its drift report, and only if newer than that state.
+    /// A listed fact may still raise a drift report.
     pub fetched_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// `deferred_nodes` waited for a fresher read, which is normal; `errors` (campaign load or
+/// write) and `fetch_errors` (GitHub issue batches) are failures.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct IssueSyncReport {
     pub changed_nodes: usize,
     pub deferred_nodes: usize,
     pub errors: usize,
+    pub fetch_errors: usize,
+}
+
+impl IssueSyncReport {
+    pub fn failed(&self) -> bool {
+        self.errors > 0 || self.fetch_errors > 0
+    }
 }
 
 /// One completed or skipped node whose linked issue is open, for the campaign API.
@@ -133,12 +143,14 @@ pub fn fetch_targets(
             let may_change = if fact.open {
                 node.auto_closed_from.is_some()
             } else {
-                !is_finished(node.input.status)
-                    && node.input.post_merge_hold.is_none()
-                    && node
-                        .auto_closed_from
-                        .as_ref()
-                        .is_none_or(|auto| auto.issue_closed_at != fact.closed_at)
+                // Only a fresh read may clear a drift report.
+                node.issue_drift.is_some()
+                    || !is_finished(node.input.status)
+                        && node.input.post_merge_hold.is_none()
+                        && node
+                            .auto_closed_from
+                            .as_ref()
+                            .is_none_or(|auto| auto.issue_closed_at != fact.closed_at)
             };
             may_change.then_some(number)
         })
@@ -265,7 +277,11 @@ fn on_closed(
     fresh: bool,
     now: DateTime<Utc>,
 ) -> Decision {
-    let cleared = node.issue_drift.take().is_some();
+    // A listed or older read must not erase a report made after it.
+    let cleared = node
+        .issue_drift
+        .take_if(|drift| fact.fetched_at.is_some_and(|at| at > drift.observed_at))
+        .is_some();
     let unchanged = if cleared {
         Decision::Changed
     } else {
@@ -323,7 +339,9 @@ fn on_open(
         if !fresh {
             return Decision::Deferred;
         }
+        // Consuming the record is a write, so older reads must not act on this node any more.
         node.auto_closed_from = None;
+        node.updated_at = now;
         let untouched = !auto.manually_changed
             && node.input.status == auto.to_status
             && node.input.stage == auto.to_stage;
@@ -343,7 +361,6 @@ fn on_open(
                 recorded_at: Some(now),
                 references: vec![issue_url.to_owned()],
             });
-            node.updated_at = now;
         } else if is_finished(node.input.status) {
             node.issue_drift = Some(IssueDrift {
                 issue_url: issue_url.to_owned(),

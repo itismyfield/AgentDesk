@@ -195,8 +195,11 @@ pub(crate) async fn sync_github_issues_for_repo_pg_with_adapter(
     adapter: &dyn super::GitHubAdapter,
 ) -> Result<SyncResult, String> {
     let cards = sync_cards_for_repo_pg(pool, repo, issues, adapter).await;
-    campaign_nodes::sync_campaign_nodes(pool, repo, issues, adapter).await;
-    cards
+    let campaign_nodes = campaign_nodes::sync_campaign_nodes(pool, repo, issues, adapter).await;
+    cards.map(|result| SyncResult {
+        campaign_nodes,
+        ..result
+    })
 }
 
 async fn sync_cards_for_repo_pg(
@@ -1368,6 +1371,7 @@ pub struct SyncResult {
     pub stale_card_issue_check_count: usize,
     pub stale_card_issue_batch_count: usize,
     pub stale_card_issue_error_count: usize,
+    pub campaign_nodes: crate::db::campaigns::issue_sync::IssueSyncReport,
 }
 
 /// Reason code attached to terminal-card / OPEN-issue mismatch alerts so the
