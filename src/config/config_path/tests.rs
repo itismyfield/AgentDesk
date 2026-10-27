@@ -1,6 +1,8 @@
 use super::*;
+use regex::Regex;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 fn write_config(path: &Path, port: u16) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -182,41 +184,51 @@ const PATH_OWNERS: &[(&str, &str)] = &[
 
 const BYPASS: &str = r#"var(?:_os)?\(\s*"AGENTDESK_CONFIG"|config_file_path\(|\.join\(\s*"agentdesk\.yaml"\s*\)|"config/agentdesk\.yaml""#;
 
+static BYPASS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(BYPASS).unwrap());
+static TEST_CFG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^#\[cfg\((?:test|all\([^\]]*\btest\b[^\]]*)\)\]").unwrap());
+static MOD_DECL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;").unwrap());
+static PATH_ATTR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\s*#\[path\s*=\s*"([^"]+)"\]"#).unwrap());
+
 /// Line numbers of production code (outside `#[cfg(test)]` items) that build a config path.
 fn bypass_lines(text: &str) -> Vec<usize> {
-    let bypass = regex::Regex::new(BYPASS).unwrap();
     production_lines(text)
         .into_iter()
-        .filter(|(_, line)| bypass.is_match(line))
+        .filter(|(_, line)| BYPASS_RE.is_match(line))
         .map(|(number, _)| number)
         .collect()
 }
 
 /// The rest of `code` after a test-only `#[cfg(..)]` attribute, or `None` for other lines.
 fn after_test_cfg(code: &str) -> Option<&str> {
-    let attr = regex::Regex::new(r"^#\[cfg\((?:test|all\([^\]]*\btest\b[^\]]*)\)\]").unwrap();
-    let end = attr.find(code)?.end();
+    let end = TEST_CFG_RE.find(code)?.end();
     (!code[..end].contains("not(")).then(|| code[end..].split("//").next().unwrap().trim())
 }
 
 fn production_lines(text: &str) -> Vec<(usize, &str)> {
-    let braces = |line: &str| line.matches('{').count() as i64 - line.matches('}').count() as i64;
-    let (mut lines, mut gated, mut depth) = (Vec::new(), false, 0_i64);
+    let net = |line: &str, open, close| {
+        line.matches(open).count() as i64 - line.matches(close).count() as i64
+    };
+    let (mut lines, mut gated, mut depth, mut parens) = (Vec::new(), false, 0_i64, 0_i64);
     for (index, line) in text.lines().enumerate() {
         let mut code = line.trim();
         if depth > 0 {
-            depth += braces(line);
+            depth += net(line, '{', '}');
             continue;
         }
         if let Some(rest) = after_test_cfg(code) {
-            (gated, code) = (true, rest);
+            (gated, code, parens) = (true, rest, 0);
         } else if !gated {
             lines.push((index + 1, line));
             continue;
         }
-        if code.contains('{') {
-            (gated, depth) = (false, braces(code));
-        } else if code.ends_with(';') || code.ends_with(',') {
+        // A gated item ends at its body, or at `;`/`,` outside a parameter list.
+        parens += net(code, '(', ')');
+        if code.contains('{') && parens <= 0 {
+            (gated, depth) = (false, net(code, '{', '}'));
+        } else if parens <= 0 && (code.ends_with(';') || code.ends_with(',')) {
             gated = false;
         }
     }
@@ -225,8 +237,6 @@ fn production_lines(text: &str) -> Vec<(usize, &str)> {
 
 /// Files and directories of modules declared under `#[cfg(test)]` in `file`.
 fn test_module_paths(file: &Path, text: &str) -> Vec<PathBuf> {
-    let declaration = regex::Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;").unwrap();
-    let path_attr = regex::Regex::new(r#"^\s*#\[path\s*=\s*"([^"]+)"\]"#).unwrap();
     let dir = file.parent().unwrap();
     let own_dir = match file.file_name().and_then(|name| name.to_str()) {
         Some("mod.rs" | "lib.rs" | "main.rs") => dir.to_path_buf(),
@@ -243,9 +253,9 @@ fn test_module_paths(file: &Path, text: &str) -> Vec<PathBuf> {
         };
         if line.trim().is_empty() || line.trim().starts_with("//") {
             continue;
-        } else if let Some(found) = path_attr.captures(line) {
+        } else if let Some(found) = PATH_ATTR_RE.captures(line) {
             attr = Some(found[1].to_string());
-        } else if let Some(found) = declaration.captures(line) {
+        } else if let Some(found) = MOD_DECL_RE.captures(line) {
             if gated {
                 match attr.take() {
                     Some(path) => paths.push(dir.join(path)),
