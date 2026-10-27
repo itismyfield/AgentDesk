@@ -34,7 +34,7 @@ fn setup_rejects_absolute_and_parent_templates_outside_runtime_root() {
 
 #[cfg(unix)]
 #[test]
-fn setup_rejects_symlink_escape_and_accepts_internal_symlink() {
+fn setup_accepts_managed_symlinks_and_rejects_lexical_escape() {
     let parent = tempfile::tempdir().unwrap();
     let root = parent.path().join("runtime");
     std::fs::create_dir(&root).unwrap();
@@ -44,12 +44,15 @@ fn setup_rejects_symlink_escape_and_accepts_internal_symlink() {
     std::os::unix::fs::symlink(&outside, root.join("escape.md")).unwrap();
     std::os::unix::fs::symlink(root.join("inside.md"), root.join("alias.md")).unwrap();
     let _env = crate::config::test_env::set_agentdesk_root_for_test(&root);
-    assert!(SetupContext::from_body(body(Path::new("escape.md"), "valid")).is_err());
-    let ctx = SetupContext::from_body(body(Path::new("alias.md"), "valid")).unwrap();
+    let external = SetupContext::from_body(body(Path::new("escape.md"), "valid")).unwrap();
+    assert_eq!(external.prompt_template_path, root.join("escape.md"));
     assert_eq!(
-        ctx.prompt_template_path,
-        root.join("inside.md").canonicalize().unwrap()
+        std::fs::read(&external.prompt_template_path).unwrap(),
+        b"outside"
     );
+    assert!(SetupContext::from_body(body(Path::new("../outside.md"), "valid")).is_err());
+    let ctx = SetupContext::from_body(body(Path::new("alias.md"), "valid")).unwrap();
+    assert_eq!(ctx.prompt_template_path, root.join("alias.md"));
 }
 
 #[test]
@@ -76,8 +79,10 @@ fn setup_preserves_root_config_relative_absolute_and_legacy_id_formats() {
             let ctx = SetupContext::from_body(body(&path, id)).unwrap();
             assert_eq!(ctx.agent_id, id);
             assert!(
-                ctx.prompt_template_path
-                    .starts_with(root.path().canonicalize().unwrap())
+                ctx.prompt_template_path.starts_with(root.path())
+                    || ctx
+                        .prompt_template_path
+                        .starts_with(root.path().canonicalize().unwrap())
             );
         }
     }

@@ -400,7 +400,6 @@ pub(super) async fn get_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    validate_agent_id(&id).map_err(AppError::bad_request)?;
     if let Some(pool) = state.pg_pool_ref() {
         return match load_agent_pg(pool, &id).await {
             Ok(Some(agent)) => Ok((StatusCode::OK, Json(json!({ "agent": agent })))),
@@ -490,7 +489,6 @@ pub(super) async fn update_agent(
     Path(id): Path<String>,
     Json(body): Json<UpdateAgentBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    validate_agent_id(&id).map_err(AppError::bad_request)?;
     if let Some(pool) = state.pg_pool_ref() {
         let mut updated_any = false;
         let channel_patch_requested = body.discord_channel_id.is_some()
@@ -754,7 +752,6 @@ pub(super) async fn duplicate_agent(
     Json(body): Json<DuplicateAgentBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let new_agent_id = body.new_agent_id.trim().to_string();
-    validate_agent_id(&id).map_err(AppError::bad_request)?;
     validate_agent_id(&new_agent_id).map_err(AppError::bad_request)?;
     let Some(channel_id) = clean_optional_text(body.channel_id.clone()) else {
         return Err(AppError::bad_request("channel_id is required"));
@@ -907,7 +904,6 @@ pub(super) async fn delete_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    validate_agent_id(&id).map_err(AppError::bad_request)?;
     if let Some(pool) = state.pg_pool_ref() {
         match sqlx::query("DELETE FROM agents WHERE id = $1")
             .bind(&id)

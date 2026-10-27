@@ -2908,7 +2908,17 @@ mod input_validation_tests {
 
     #[test]
     fn onboarding_rejects_unsafe_workspace_agent_ids_before_effects() {
-        for id in ["", ".", "..", "../bad", "a/b", "a\\b", "a.b", "a b"] {
+        for id in [
+            "",
+            ".",
+            "..",
+            "../bad",
+            "a/b",
+            "a\\b",
+            "a.b",
+            "a b",
+            "요리사",
+        ] {
             assert!(
                 validate_complete_request(&request(id), "claude").is_err(),
                 "{id:?}"

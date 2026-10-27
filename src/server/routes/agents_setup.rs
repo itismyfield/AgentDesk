@@ -12,7 +12,9 @@ use crate::services::discord::agentdesk_config::{
     load_agent_setup_config,
 };
 use crate::services::provider::ProviderKind;
-use crate::utils::input_validation::{canonicalize_under_root, validate_agent_id};
+use crate::utils::input_validation::{
+    canonicalize_under_root, normalize_lexical_path, validate_agent_id,
+};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct AgentSetupBody {
@@ -1128,8 +1130,10 @@ fn is_safe_skill_name(value: &str) -> bool {
 }
 
 fn resolve_setup_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
+    let root = std::path::absolute(root)
+        .map_err(|error| format!("resolve runtime root '{}': {error}", root.display()))?;
     let expanded = crate::utils::format::expand_tilde_string(raw);
-    let candidate = PathBuf::from(&expanded);
+    let candidate = normalize_lexical_path(Path::new(&expanded))?;
     let candidate = if candidate.is_absolute() {
         candidate
     } else {
@@ -1137,10 +1141,10 @@ fn resolve_setup_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
         if root_candidate.exists() {
             root_candidate
         } else {
-            crate::runtime_layout::config_dir(root).join(candidate)
+            crate::runtime_layout::config_dir(&root).join(candidate)
         }
     };
-    canonicalize_under_root(root, &candidate)
+    canonicalize_under_root(&root, &candidate)
 }
 
 fn parent_can_be_created(path: &Path) -> bool {
