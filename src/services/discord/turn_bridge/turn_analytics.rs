@@ -337,7 +337,7 @@ pub(in crate::services::discord) fn persist_turn_analytics_row_with_handles(
         session_id: resolved_session_id,
         dispatch_id,
         started_at: Some(started_at),
-        finished_at: Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+        finished_at: Some(chrono::Utc::now().to_rfc3339()),
         duration_ms: Some(duration_ms),
         token_usage: resolved_token_usage,
     };

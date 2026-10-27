@@ -3,6 +3,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::db::session_agent_resolution::resolve_agent_id_for_session_pg;
+use crate::db::timestamps::parse_timestamp;
+
+#[cfg(all(test, unix))]
+#[path = "turns/timestamp_tests.rs"]
+mod timestamp_tests;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnTokenUsage {
@@ -111,8 +116,14 @@ async fn upsert_turn_owned_pg(pool: &PgPool, entry: &PersistTurnOwned) -> Result
     let provider = normalized_opt(entry.provider.as_deref());
     let session_id = normalized_opt(entry.session_id.as_deref());
     let dispatch_id = normalized_opt(entry.dispatch_id.as_deref());
-    let started_at = normalized_opt(entry.started_at.as_deref()).unwrap_or_else(now_string);
-    let finished_at = normalized_opt(entry.finished_at.as_deref()).unwrap_or_else(now_string);
+    let started_at = normalized_opt(entry.started_at.as_deref())
+        .map(|value| parse_timestamp(&value))
+        .transpose()?
+        .unwrap_or_else(chrono::Utc::now);
+    let finished_at = normalized_opt(entry.finished_at.as_deref())
+        .map(|value| parse_timestamp(&value))
+        .transpose()?
+        .unwrap_or_else(chrono::Utc::now);
     let agent_id = resolve_agent_id_for_session_pg(
         pool,
         entry.agent_id.as_deref(),
@@ -144,8 +155,7 @@ async fn upsert_turn_owned_pg(pool: &PgPool, entry: &PersistTurnOwned) -> Result
             output_tokens
          ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9,
-            CAST($10 AS timestamptz),
-            CAST($11 AS timestamptz),
+            $10, $11,
             $12, $13, $14, $15, $16
          )
          ON CONFLICT(turn_id) DO UPDATE SET
@@ -205,10 +215,6 @@ fn normalized_opt(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-}
-
-fn now_string() -> String {
-    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 fn u64_to_i64(value: u64) -> i64 {
