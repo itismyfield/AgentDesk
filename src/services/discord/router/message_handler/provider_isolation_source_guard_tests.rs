@@ -9,6 +9,28 @@ pub(super) const HEADLESS_TURN: &str = include_str!("headless_turn.rs");
 
 const RAW_SEED: &str = "prelaunch_inflight_runtime_seed_without_codex_raw(";
 const WATCHER_PATH: &str = "let watcher_output_path = prelaunch_watcher_output_path(";
+const INTAKE_SAVE: &str = "save_intake_inflight(";
+const DIRECT_SAVE: &str = "save_inflight_state_create_new(&inflight_state)";
+
+/// Intake saves its row once, through the helper that rechecks a Codex raw seed's source.
+pub(super) fn intake_save_gaps(intake: &str) -> Vec<String> {
+    let lexed = Lexed::new(intake);
+    let mut gaps = Vec::new();
+    if lexed.count(INTAKE_SAVE) != 1 {
+        gaps.push(format!("intake must save through {INTAKE_SAVE} once"));
+    }
+    if lexed.contains(DIRECT_SAVE) {
+        gaps.push(format!(
+            "intake bypasses the seed recheck with {DIRECT_SAVE}"
+        ));
+    }
+    gaps
+}
+
+#[test]
+fn intake_saves_through_the_seed_recheck() {
+    assert_eq!(intake_save_gaps(INTAKE_TURN), Vec::<String>::new());
+}
 
 /// Headless prelaunch seeds without Codex raw evidence.
 pub(super) fn raw_seed_gaps(headless: &str) -> Vec<String> {
@@ -34,6 +56,9 @@ fn caller_guards_reject_commented_calls() {
         let forged = forge(HEADLESS_TURN, RAW_SEED, forgery);
         assert!(forged.contains(RAW_SEED));
         assert_eq!(raw_seed_gaps(&forged).len(), 1, "{forgery:?}");
+        let forged = forge(INTAKE_TURN, INTAKE_SAVE, forgery);
+        assert!(forged.contains(INTAKE_SAVE));
+        assert_eq!(intake_save_gaps(&forged).len(), 1, "{forgery:?}");
         for index in 0..2 {
             let mut callers = [INTAKE_TURN, HEADLESS_TURN];
             let forged = forge(callers[index], WATCHER_PATH, forgery);

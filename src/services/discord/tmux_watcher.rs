@@ -487,6 +487,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             Ok(CollectOutcome::Fallthrough(collected)) => collected,
         };
         let CollectedTurnStream {
+            mixed_read_provenance,
             turn_data_start_offset,
             source_authority,
             split_trailing_turn_follows,
@@ -826,7 +827,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
 
         let terminal_relay_plan_outcome = {
+            let evidence_source = o_evidence_source(source_authority, mixed_read_provenance);
             let terminal_relay_plan_context = TerminalRelayPlanContext {
+                evidence_source,
                 http: &http,
                 shared: &shared,
                 channel_id,
@@ -2511,3 +2514,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 mod tests;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use self::tests::streaming_harness_tests::cancel_for_test;
+
+#[cfg(test)]
+#[path = "tmux_watcher/o_evidence_tests.rs"]
+pub(in crate::services::discord) mod o_evidence_tests;

@@ -14,6 +14,8 @@ pub(super) const TERMINAL_FRAME_OWNER_OR_RECORD_INVARIANT: &str =
 /// String; `data_start_offset`/`current_offset`/`terminal_event_consumed_offset` are JSONL
 /// offsets.
 pub(super) struct OrphanTerminalFrameFacts<'a> {
+    pub(super) o_tail_covered:
+        Option<&'a crate::services::discord::outbound::o_delivery_evidence::TailCovered>,
     pub(super) denial: Option<SoftTerminalAuthorityDenial>,
     pub(super) watcher_direct_fallback_requested: bool,
     pub(super) watcher_direct_fallback_authorized: bool,
@@ -60,6 +62,10 @@ impl OrphanTerminalFrameFacts<'_> {
     /// it: an ABSENCE of evidence, read as "the sink MAY have posted". A maybe is what the
     /// record exists for. The range conjunct is `> 0` for the #1216 leftover-buffer turn.
     pub(super) fn record_required(&self) -> bool {
+        self.existing_record_required() && self.o_tail_covered.is_none()
+    }
+
+    pub(super) fn existing_record_required(&self) -> bool {
         self.denial.is_some()
             && self.watcher_direct_fallback_requested
             && !self.watcher_direct_fallback_authorized
@@ -148,6 +154,18 @@ pub(super) fn observe_orphan_terminal_frame(
     }) else {
         return true;
     };
+    if facts.existing_record_required() && facts.o_tail_covered.is_some() {
+        crate::services::observability::metrics::record_relay_terminal_denial_cause(
+            channel_id.get(),
+            provider.as_str(),
+            denial.metric_name(),
+        );
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            "O terminal tail delivery verified"
+        );
+        return true;
+    }
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
         provider = provider.as_str(),
@@ -197,7 +215,7 @@ pub(super) fn observe_orphan_terminal_frame(
     let provider_name = provider.as_str().to_string();
     let session_key = facts.tmux_session_name.to_string();
     let violation_details = serde_json::json!({ "reason": reason.as_str() });
-    crate::db::relay_dead_letter::record_detached_reporting(
+    let _record_task = crate::db::relay_dead_letter::record_detached_reporting(
         shared.pg_pool.as_ref(),
         facts.dead_letter_record(channel_id, reason),
         move |recorded| {
@@ -219,5 +237,7 @@ pub(super) fn observe_orphan_terminal_frame(
             }
         },
     );
+    #[cfg(test)]
+    super::o_evidence_tests::retain_dlq_task(_record_task);
     held.load(std::sync::atomic::Ordering::Acquire)
 }

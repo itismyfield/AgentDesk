@@ -1,6 +1,6 @@
 //! The queued-head owner: a head already proven taken is consumed first, otherwise the first ready
 //! input is reserved, its paste recorded before it can start, typed once and settled by the actor.
-use super::queued_reconcile::transcript_session;
+use super::queued_provider::QueuedProvider;
 use super::queued_support::ATTEMPT_UNNAMED;
 use super::*;
 
@@ -12,10 +12,22 @@ pub(super) async fn queued_attempt(
     gate: fn(ChannelId, Option<ChannelId>) -> bool,
     source: Option<(String, SourceGuard)>,
 ) -> InjectAttempt {
+    #[cfg(test)]
+    if shared
+        .mailbox(request.channel_id)
+        .v2_request(|slot| Ok(slot.is_some()))
+        .await
+        .unwrap_or(false)
+    {
+        return v2_queued_attempt(shared, request, expected, source).await;
+    }
     // A head already proven taken is consumed before the busy check, so an idle pane is no veto.
     if let Some(mended) = super::queued_reconcile::mend(shared, request, parent, gate).await {
         return mended;
     }
+    let Some(provider) = QueuedProvider::select(&request.provider, request.channel_id.get()) else {
+        return InjectAttempt::NotSent("provider_unsupported");
+    };
     // Named before the session transition is held, which nothing then waits on.
     let primary = expected.primary;
     let named = match source.as_ref() {
@@ -98,7 +110,7 @@ pub(super) async fn queued_attempt(
             test_hook::before_queued(input.channel, "name_paste").await;
             // The paste is named before it can start, so a later Unknown can still be proven.
             let bound = target.binding.as_ref().map(|binding| binding.4.as_deref());
-            let session = bound.and_then(|bound| transcript_session(&target.transcript, bound));
+            let session = bound.and_then(|bound| provider.session(&target.transcript, bound));
             let held = ticket.as_mut().unwrap();
             if let Err(error) = held.name_paste(&input.nonce, &target.transcript, session) {
                 let channel_id = input.channel;
@@ -139,12 +151,13 @@ pub(super) async fn queued_attempt(
                     turn_id.clone(),
                 );
                 let herdr = target.herdr.clone();
+                let native_turn = target.native_turn.clone();
                 move || {
-                    run(
+                    provider.run(
                         (&pane(input.channel, &session), herdr.as_ref()),
-                        &session,
-                        &transcript,
+                        (&session, &transcript, native_turn.as_deref()),
                         turn_id,
+                        MessageId::new(primary),
                         &input,
                     )
                 }
@@ -215,6 +228,201 @@ pub(super) async fn queued_attempt(
 
 /// How long the author lookup may take; an input it cannot name in time is not typed.
 const NAME_LOOKUP: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[cfg(test)]
+async fn v2_queued_attempt(
+    shared: &Arc<SharedData>,
+    request: &HumanInputRequest,
+    expected: QueueIdentity,
+    source: Option<(String, SourceGuard)>,
+) -> InjectAttempt {
+    let mailbox = shared.mailbox(request.channel_id);
+    let (key, original_text, author) = match mailbox
+        .v2_request(|slot| {
+            let owner = slot.as_ref().ok_or("V2 not adopted")?;
+            let head = owner.snapshot.head_injection.as_ref().ok_or("no head")?;
+            Ok((
+                owner.active_attempt()?,
+                head.original.text.clone(),
+                head.original.author_id,
+            ))
+        })
+        .await
+    {
+        Ok((key, text, author)) if key.identity == expected => (key, text, author),
+        _ => return InjectAttempt::NotSent("v2_not_prepared"),
+    };
+    if author != request.author_id {
+        return InjectAttempt::NotSent(AUTHOR_MISMATCH);
+    }
+    let Some(provider) = QueuedProvider::select(&request.provider, request.channel_id.get()) else {
+        return InjectAttempt::NotSent("provider_unsupported");
+    };
+    let name = match source.as_ref() {
+        Some((name, _)) => Ok(name.clone()),
+        None => {
+            author_name(
+                shared,
+                request.channel_id,
+                expected.primary,
+                request.author_id,
+            )
+            .await
+        }
+    };
+    let name = match name {
+        Ok(name) => name,
+        Err(veto) => return InjectAttempt::NotSent(veto),
+    };
+    let target = match resolve(shared, request, true).await {
+        Ok(target) => target,
+        Err(veto) => return InjectAttempt::NotSent(veto),
+    };
+    let recorded = serde_json::to_value(&key.attempt).unwrap_or_default();
+    if !queued_target_matches(shared, request, &target, true).await
+        || !super::queued_reconcile::v2_record_matches(
+            &recorded,
+            &target,
+            provider,
+            &request.provider,
+        )
+    {
+        return InjectAttempt::NotSent(HOLDER_CHANGED);
+    }
+    let turn_id = Some(format!(
+        "discord:{}:{}",
+        request.channel_id, expected.primary
+    ));
+    let input = Input {
+        channel: request.channel_id.get(),
+        provider: request.provider.as_str().into(),
+        source: turn_id.clone().unwrap_or_default(),
+        author: request.author_id.to_string(),
+        name,
+        text: original_text,
+        nonce: key.attempt.nonce,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    let effect_turn = turn_id.clone();
+    let kind = request.provider.clone();
+    match mailbox
+        .v2_effect(now, move |_frame| {
+            let _source = source;
+            let target = target;
+            let delivered = matches!(
+                provider.run(
+                    (&pane(input.channel, &target.session), target.herdr.as_ref()),
+                    (
+                        &target.session,
+                        &target.transcript,
+                        target.native_turn.as_deref()
+                    ),
+                    effect_turn,
+                    MessageId::new(expected.primary),
+                    &input
+                ),
+                InjectAttempt::Injected { .. }
+            );
+            Ok(delivered
+                && super::queued_reconcile::v2_record_matches(&recorded, &target, provider, &kind))
+        })
+        .await
+    {
+        Ok(true) => InjectAttempt::Injected { turn_id },
+        _ => InjectAttempt::Unconfirmed {
+            turn_id,
+            detail: "v2_unconfirmed",
+        },
+    }
+}
+
+#[cfg(test)]
+struct EffectCompletion<K> {
+    attempt: K,
+    outcome: Result<bool, String>,
+}
+
+#[cfg(test)]
+impl crate::services::turn_orchestrator::ChannelMailboxHandle {
+    /// Uses the real mailbox and durable permit; production admission is intentionally absent.
+    pub(crate) async fn v2_effect(
+        &self,
+        now: u64,
+        effect: impl FnOnce(String) -> Result<bool, String> + Send + 'static,
+    ) -> Result<bool, String> {
+        self.v2_effect_clock(
+            now,
+            std::sync::Arc::new(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64
+            }),
+            effect,
+        )
+        .await
+    }
+    pub(crate) async fn v2_effect_clock(
+        &self,
+        now: u64,
+        clock: std::sync::Arc<dyn Fn() -> u64 + Send + Sync>,
+        effect: impl FnOnce(String) -> Result<bool, String> + Send + 'static,
+    ) -> Result<bool, String> {
+        let mailbox = self.clone();
+        tokio::spawn(async move {
+            let (key, permit, frame) = mailbox
+                .v2_request(move |slot| {
+                    let owner = slot.as_mut().ok_or("V2 not adopted")?;
+                    let key = owner.active_attempt()?;
+                    if key.attempt.target.host != "tmux"
+                        || !matches!(key.attempt.provider.as_str(), "claude" | "codex")
+                    {
+                        return Err("provider_unsupported".into());
+                    }
+                    let frame = owner
+                        .snapshot
+                        .head_injection
+                        .as_ref()
+                        .and_then(|h| h.payload.as_ref())
+                        .ok_or("unprepared payload")?
+                        .frame
+                        .clone();
+                    let permit = owner.arm(&key, now)?;
+                    Ok((key, permit, frame))
+                })
+                .await?;
+            let fallback = key.clone();
+            let completion = tokio::task::spawn_blocking(move || {
+                let outcome = permit.consume(&key).and_then(|_writer| effect(frame));
+                EffectCompletion {
+                    attempt: key,
+                    outcome,
+                }
+            })
+            .await
+            .unwrap_or_else(|e| EffectCompletion {
+                attempt: fallback,
+                outcome: Err(e.to_string()),
+            });
+            let identity = serde_json::to_value(&completion.attempt).map_err(|e| e.to_string())?;
+            mailbox
+                .v2_settle_exact(
+                    identity,
+                    completion.outcome.as_ref().copied().unwrap_or(false),
+                    clock(),
+                )
+                .await?;
+            completion.outcome
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+}
 /// No name was found for the head's author: the input stays queued.
 pub(super) const NAME_UNRESOLVED: &str = "queued_name_unresolved";
 /// The head's message, or the head claimed, is not the author's: the input stays queued.

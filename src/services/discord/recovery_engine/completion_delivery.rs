@@ -99,9 +99,16 @@ pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
     // O posts this channel's TUI body: consume the captured range without sending or recording it.
     match o_owns_recovery_body(state, state.channel_id) {
         Ok(false) => {}
-        Ok(true) => return RecoveryRelayOutcome::Delivered.into(),
+        Ok(true) => {
+            #[cfg(unix)]
+            super::super::outbound::completed_turn_ledger::o_pending::capture(provider, state)
+                .await;
+            return RecoveryRelayOutcome::Delivered.into();
+        }
         Err(_) => return RecoveryRelayOutcome::TransientFailure.into(),
     }
+    #[cfg(all(test, unix))]
+    super::o_settlement_tests::before_claim();
     let claim = carries_body(state, text).then(|| recovery_body_claim(state, state.channel_id));
     if !state.requires_pinned_terminal_recovery() {
         let relay = relay_recovery_terminal_notice_with_capture(
@@ -109,7 +116,12 @@ pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
         );
         return match relay.await {
             Ok(BodySend::Sent(delivery)) => delivery,
-            Ok(BodySend::OwnedByO) => RecoveryRelayOutcome::Delivered.into(),
+            Ok(BodySend::OwnedByO) => {
+                #[cfg(unix)]
+                super::super::outbound::completed_turn_ledger::o_pending::capture(provider, state)
+                    .await;
+                RecoveryRelayOutcome::Delivered.into()
+            }
             Err(_) => RecoveryRelayOutcome::TransientFailure.into(),
         };
     }
@@ -256,6 +268,13 @@ pub(super) async fn relay_recovery_body_to_placeholder(
     let Ok(marker) = o_recovery_marker(state, channel_id) else {
         return RecoveryRelayOutcome::TransientFailure;
     };
+    #[cfg(unix)]
+    if marker.is_some()
+        && let Some(provider) = state.provider_kind()
+    {
+        #[cfg(unix)]
+        super::super::outbound::completed_turn_ledger::o_pending::capture(&provider, state).await;
+    }
     let claim = (marker.is_none() && carries_body(state, text))
         .then(|| recovery_body_claim(state, channel_id.get()));
     let (text, recovery_context) = match marker.as_deref() {

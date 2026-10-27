@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 pub(crate) use crate::services::claude_tui::busy_inject::Pane;
 use crate::services::claude_tui::busy_inject::{MAX_INPUT_BYTES, at_offsets, frame};
-pub(crate) use rollout::{TurnVerdict, read_turn};
+pub(crate) use rollout::{TurnVerdict, read_turn, submitted};
 
 /// Why nothing reached the pane; the caller may queue the input instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,6 +216,9 @@ fn inject_locked(
         ledger.withdraw();
         crate::services::tui_input::human_frame::history::withdraw(request.nonce, request.rollout);
         return not_sent(Veto::PaneUnavailable);
+    }
+    if crate::services::claude_tui::owner_input::before_payload().is_err() {
+        return Outcome::Unconfirmed(Unconfirmed::PasteFailed);
     }
     // After a write is attempted, its failure cannot prove that the pane took no input.
     if pane

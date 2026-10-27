@@ -328,10 +328,10 @@ impl Fixture {
             .method(Method::POST)
             .uri("/agents/s2b-head-agent/turn/deliver")
             .header("content-type", "application/json")
+            .extension(crate::server::routes::auth::loopback_peer())
             .body(Body::from(
-                json!({ "text": text, "author_discord_user_id": "200",
-                "source": "imessage" })
-                .to_string(),
+                json!({ "text": text, "author_discord_user_id": "200", "source": "imessage" })
+                    .to_string(),
             ))
             .unwrap();
         let response = self.app.clone().oneshot(request).await.unwrap();
