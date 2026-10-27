@@ -224,6 +224,7 @@ impl TurnSummaryRun {
                 .or_else(|| value.get("sessionId").and_then(Value::as_str)),
         );
         vec![Derived::Piece(PieceWork {
+            output_origin: None,
             unit_key: key,
             index: 0,
             payload: render(outcome, elapsed, percent, quota),

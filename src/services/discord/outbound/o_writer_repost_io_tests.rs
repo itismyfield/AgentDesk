@@ -780,6 +780,7 @@ mod settle_over_http {
         let unit_key = unit(channel, 99);
         let payload = PAYLOAD.to_owned();
         let piece = Derived::Piece(PieceWork {
+            output_origin: None,
             unit_key: unit_key.clone(),
             index: 0,
             payload,

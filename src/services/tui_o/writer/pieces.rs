@@ -23,6 +23,8 @@ pub struct PieceWork {
     pub unit_key: UnitKey,
     pub index: u32,
     pub payload: String,
+    pub output_origin:
+        Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +56,8 @@ pub struct UnitDeriver {
     seals: SealRegistry,
     cards: Option<ToolCardRun>,
     summary: Option<TurnSummaryRun>,
+    output_origin:
+        Option<crate::services::cluster::intake_router_hook::owner_record::output::Origin>,
 }
 
 impl UnitDeriver {
@@ -65,7 +69,16 @@ impl UnitDeriver {
             seals,
             cards: None,
             summary: None,
+            output_origin: None,
         }
+    }
+
+    pub(crate) fn with_output_origin(
+        mut self,
+        origin: crate::services::cluster::intake_router_hook::owner_record::output::Origin,
+    ) -> Self {
+        self.output_origin = Some(origin);
+        self
     }
 
     /// Delivery actors opt in; identity and fork-boundary scratch derivation stays unchanged.
@@ -162,6 +175,13 @@ impl UnitDeriver {
                     if let Some(summary) = &mut self.summary {
                         summary.assistant(&value);
                     }
+                }
+            }
+        }
+        if let Some(origin) = &self.output_origin {
+            for item in &mut out {
+                if let Derived::Piece(piece) = item {
+                    piece.output_origin = Some(origin.seal(&piece.payload));
                 }
             }
         }
@@ -272,6 +292,7 @@ impl UnitDeriver {
                 let piece = |(index, (payload, _)): (usize, (String, usize))| {
                     let index = u32::try_from(index).unwrap_or(u32::MAX);
                     Derived::Piece(PieceWork {
+                        output_origin: None,
                         unit_key: unit_key.clone(),
                         index,
                         payload,

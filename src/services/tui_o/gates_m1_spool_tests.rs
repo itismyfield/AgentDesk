@@ -206,6 +206,7 @@ impl Fixture {
             .filter(|piece| piece.unit_key.kind != UnitKind::ToolResult)
             .map(|piece| {
                 Derived::Piece(PieceWork {
+                    output_origin: None,
                     unit_key: piece.unit_key.clone(),
                     index: piece.index,
                     payload: piece.payload.clone(),

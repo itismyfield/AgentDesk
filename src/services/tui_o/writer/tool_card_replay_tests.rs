@@ -311,6 +311,7 @@ async fn rollback_identity_mode_does_not_recreate_synthetic_card_or_turn_work() 
         })
         .unwrap();
     let summary = PieceWork {
+        output_origin: None,
         unit_key: UnitKey {
             native_key: "m1:0#turn_end".into(),
             ..tool_key("m1")

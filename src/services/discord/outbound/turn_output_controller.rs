@@ -667,6 +667,31 @@ where
     }
 }
 
+pub(in crate::services::discord) async fn deliver_turn_output_with_origin<G, L>(
+    gateway: &G,
+    ctx: TurnOutputCtx<'_, L>,
+    pool: Option<&sqlx::PgPool>,
+    provider: &str,
+    origin: Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+) -> DeliveryOutcome
+where
+    G: TurnGateway + ?Sized,
+    L: DeliveryLease + ?Sized,
+{
+    use crate::services::cluster::intake_router_hook::owner_record::output;
+    let scope = pool.map(|pool| output::Scope {
+        pool: pool.clone(),
+        provider: provider.into(),
+    });
+    let guarded = transport::OriginGateway {
+        inner: gateway,
+        scope,
+        origin,
+        body: ctx.body,
+    };
+    deliver_turn_output(&guarded, ctx).await
+}
+
 /// Keep fresh-send routing in the controller owner; ordinary transport lives in the child.
 async fn drive_transport<G: TurnGateway + ?Sized, L: DeliveryLease + ?Sized>(
     gateway: &G,
@@ -981,6 +1006,115 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, MessageId};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn output_origin_legacy_post_edit_delete_guard_pg() {
+        use crate::services::cluster::intake_router_hook::owner_record::output::tests::{
+            fixture, revoke,
+        };
+        for chunks in [true, false] {
+            let (_db, pool, origin) = fixture(if chunks { "7336904" } else { "7336905" }).await;
+            let artifact = origin.seal("answer");
+            let single = _db.single_pool().await;
+            let channel = ChannelId::new(if chunks { 7336904 } else { 7336905 });
+            for stale in [false, true] {
+                if stale {
+                    revoke(&pool, &origin).await;
+                }
+                let lease = Arc::new(RecordingLease::new(channel));
+                let gateway = ObservingGateway::new(
+                    lease.clone() as Arc<dyn DeliveryLease + Send + Sync>,
+                    true,
+                );
+                let controller = PlaceholderController::default();
+                let msg = MessageId::new(700);
+                if !chunks {
+                    prime_active(&controller, &gateway, placeholder_key(channel, msg)).await;
+                    gateway.fail_edits_from_now();
+                }
+                let advance = |_: (u64, u64)| {
+                    let key=crate::services::cluster::intake_router_hook::owner_record::OwnerIdentity::new("claude",&channel.get().to_string()).advisory_key();
+                    let free = crate::utils::async_bridge::block_on_pg_result(
+                        &pool,
+                        move |pool| async move {
+                            let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+                            let free: bool =
+                                sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+                                    .bind(key)
+                                    .fetch_one(&mut *tx)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                            tx.rollback().await.map_err(|e| e.to_string())?;
+                            Ok(free)
+                        },
+                        |error| error,
+                    )
+                    .unwrap();
+                    assert!(
+                        free,
+                        "state callback must run outside the raw request owner guard"
+                    );
+                    true
+                };
+                let outcome = deliver_turn_output_with_origin(
+                    &gateway,
+                    TurnOutputCtx {
+                        turn: turn_key(channel),
+                        lease_key: Some(lease_key(channel)),
+                        owner: RelayOwnerKind::Watcher,
+                        holder: LeaseHolder::Watcher { instance_id: 1 },
+                        lease: lease.as_ref(),
+                        channel_id: channel,
+                        placeholder_controller: &controller,
+                        placeholder: PlaceholderSlot::Active {
+                            message_id: msg,
+                            key: placeholder_key(channel, msg),
+                        },
+                        body: "answer",
+                        send_range: (0, 6),
+                        plan: if chunks {
+                            OutputPlan::SendNewChunks {
+                                chunk_count: 1,
+                                delete_anchor: true,
+                            }
+                        } else {
+                            OutputPlan::Replace {
+                                lifecycle: PlaceholderLifecycle::Completed,
+                            }
+                        },
+                        edit_fail_policy: EditFailPlaceholderPolicy::DeleteIfProvenStale,
+                        fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+                        acquire_failure_mode: AcquireFailureMode::Transient,
+                        advance: Some(&advance),
+                        heartbeat: None,
+                        body_claim: None,
+                    },
+                    Some(&single),
+                    "claude",
+                    Some(&artifact),
+                )
+                .await;
+                let deletes = gateway.delete_calls.load(Ordering::SeqCst);
+                let calls = gateway.send_step.load(Ordering::SeqCst)
+                    + gateway.post_count.load(Ordering::SeqCst)
+                    + deletes
+                    + usize::from(gateway.post_send_await_seen.load(Ordering::SeqCst));
+                if stale {
+                    assert_eq!(calls, 0, "revoked Legacy POST/EDIT/DELETE must all be zero");
+                    assert!(!matches!(
+                        outcome,
+                        DeliveryOutcome::Delivered { .. } | DeliveryOutcome::FreshDelivered { .. }
+                    ));
+                } else {
+                    assert!(calls > 0);
+                    assert_eq!(
+                        deletes, 1,
+                        "must exercise the actual anchor or post-finalize DELETE"
+                    );
+                }
+            }
+        }
+    }
 
     /// M4 commit recorder: a `DeliveryLease` that wraps the real
     /// `DeliveryLeaseCell` and counts EVERY `commit` and `release` call (with

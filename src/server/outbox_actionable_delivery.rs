@@ -65,10 +65,28 @@ async fn deliver_with_bot(
     row: &PendingMessageOutboxRow,
     bot: &str,
 ) -> (&'static str, String) {
-    let options = match delivery_options(row) {
+    let mut options = match delivery_options(row) {
         Ok(options) => options,
         Err(error) => return ("400 Bad Request", error.to_string()),
     };
+    if row.source == "headless_turn" {
+        let stored: Result<Option<serde_json::Value>, _> = sqlx::query_scalar(
+            "SELECT output_origin FROM message_outbox WHERE id=$1 AND target=$2 AND content=$3",
+        )
+        .bind(row.id)
+        .bind(&row.target)
+        .bind(&row.content)
+        .fetch_one(pg_pool)
+        .await;
+        options.output_origin = match stored {
+            Ok(Some(stamp)) => match serde_json::from_value(stamp) {
+                Ok(origin) => Some(origin),
+                Err(error) => return ("409 Conflict", error.to_string()),
+            },
+            Ok(None) => None,
+            Err(error) => return ("503 Service Unavailable", error.to_string()),
+        };
+    }
     let (correlation_id, semantic_event_id) = row.delivery_ids();
     let content = delivery_content(&row.content, &row.source, row.reason_code.as_deref());
     crate::services::discord::health::send_message_with_backends_and_delivery_options(
@@ -105,6 +123,13 @@ pub(super) async fn deliver(
         row.session_key.as_deref(),
     );
     let (status, error) = deliver_with_bot(registry, pg_pool, row, primary_bot.as_ref()).await;
+    if row.source == "headless_turn" && status == "409 Conflict" {
+        if let Err(error) = sqlx::query("UPDATE message_outbox SET status='held',error=$2,claim_owner=NULL,claimed_at=NULL WHERE id=$1 AND status='processing' AND claim_owner=$3 AND claimed_at=$4")
+            .bind(row.id).bind(format!("output origin withheld: {error}")).bind(&row.claim_owner).bind(row.claimed_at)
+            .execute(pg_pool).await {
+            return ("503 Service Unavailable".into(), error.to_string());
+        }
+    }
     if !should_fallback_to_notify(
         status,
         primary_bot.as_ref(),

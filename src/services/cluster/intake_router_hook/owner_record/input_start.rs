@@ -89,6 +89,20 @@ pub(crate) async fn prepare(
 }
 
 impl OwnerStartPermit {
+    pub(crate) fn output_origin(&self) -> super::output::Origin {
+        super::output::Origin {
+            delivery: self.delivery,
+            provider: self.identity.provider().into(),
+            channel: self.identity.raw_channel_id().into(),
+            executor: self.executor.clone(),
+            generation: self.generation,
+            receipt: self.source.attempt().receipt_id(),
+            nonce: self.source.attempt().nonce().into(),
+            incarnation: self.incarnation.clone(),
+            binding: self.binding.clone(),
+        }
+    }
+
     /// Move this entire future into the physical writer task; the guard lasts through its raw IO.
     pub(crate) async fn submit<R, F: Future<Output = R>>(
         self,

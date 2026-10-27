@@ -56,6 +56,8 @@ pub(crate) struct RepostEnvelope {
     content: String,
     ids: RepostIds,
     additional: bool,
+    pub(crate) output_origin:
+        Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
 }
 
 impl RepostEnvelope {
@@ -66,6 +68,7 @@ impl RepostEnvelope {
             content,
             ids,
             additional: false,
+            output_origin: None,
         }
     }
 
@@ -75,6 +78,10 @@ impl RepostEnvelope {
             additional: true,
             ..Self::original(channel, content, ids)
         }
+    }
+
+    pub(crate) fn payload(&self) -> &str {
+        &self.content
     }
 
     pub(crate) fn message(&self) -> CreateMessage {

@@ -30,6 +30,13 @@ pub(crate) trait RepostWriter {
     fn settle_open(&mut self) -> impl Future<Output = bool> + Send;
     /// Writer stop, violation, exclusion, delivery_allowed, s3act availability and drain.
     fn guard(&self) -> Result<(), String>;
+    fn output_origin(
+        &self,
+        _key: &PieceKey,
+    ) -> Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact> {
+        None
+    }
+
     fn try_lease(&self) -> Option<Self::Lease>;
     fn gate(&self) -> Arc<OwnershipGate>;
     /// Whether holder and run still let a request leave; read without the gate lock.
@@ -162,7 +169,8 @@ pub(crate) async fn start<W: RepostWriter>(
         return withdrawn(permit, "too little time left before the deadline");
     }
     let channel = permit.key().unit().channel_id;
-    let envelope = RepostEnvelope::additional(channel, permit.payload.clone(), ids);
+    let mut envelope = RepostEnvelope::additional(channel, permit.payload.clone(), ids);
+    envelope.output_origin = writer.output_origin(permit.key());
     let gate = writer.gate();
     let admitted = Arc::new(AtomicU64::new(0));
     let (observed, writer_live, deadline) = (gate.subscribe(), writer.live(), permit.deadline);

@@ -780,6 +780,11 @@
       "path": "migrations/postgres/0153_intake_routing_custody.sql",
       "sha256": "aff7f962743210f42e863062e0d56fd84237500320e05f3028a004a6fb24da24",
       "version": 153
+    },
+    {
+      "path": "migrations/postgres/0154_output_origin.sql",
+      "sha256": "5837484ea11ddcacc7b819e116e5f17d999c6e4b72d33d9ff65cb84769d06414",
+      "version": 154
     }
   ],
   "version": 1

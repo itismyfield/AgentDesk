@@ -39,6 +39,8 @@ pub(crate) struct DeliveryTransportOverrides {
     pub(crate) edit_message_id: Option<String>,
     pub(crate) reference: Option<DeliveryReferenceOverride>,
     pub(crate) limits: Option<OutboundPolicyLimits>,
+    pub(crate) output_scope:
+        Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -498,59 +500,75 @@ where
             "outbound delivery cancelled".into(),
         ));
     }
+    use crate::services::cluster::intake_router_hook::owner_record::output;
+    let guard = output::acquire(
+        overrides.output_scope.as_ref(),
+        target_channel,
+        &message.content,
+        message.output_origin.as_ref(),
+    )
+    .await
+    .map_err(|detail| DispatchMessagePostError::new(DispatchMessagePostErrorKind::Other, detail))?;
     let content = discord_safe_content(content);
-    match message.operation {
-        OutboundOperation::Edit { message_id } => {
-            let edit_message_id = overrides
-                .edit_message_id
-                .as_deref()
-                .map(Cow::Borrowed)
-                .unwrap_or_else(|| Cow::Owned(message_id.get().to_string()));
-            client
-                .edit_message(target_channel, edit_message_id.as_ref(), content.as_ref())
-                .await
-        }
-        OutboundOperation::Send => {
-            match (
-                resolve_reference(message.reference.as_ref(), overrides),
-                message.create_nonce.as_deref(),
-            ) {
-                (Some(reference), Some(nonce)) => {
+    guard
+        .run(async {
+            match message.operation {
+                OutboundOperation::Edit { message_id } => {
+                    let edit_message_id = overrides
+                        .edit_message_id
+                        .as_deref()
+                        .map(Cow::Borrowed)
+                        .unwrap_or_else(|| Cow::Owned(message_id.get().to_string()));
                     client
-                        .post_message_with_reference_and_nonce(
-                            target_channel,
-                            content.as_ref(),
-                            &reference.channel_id,
-                            &reference.message_id,
-                            nonce,
-                            message.enforce_nonce,
-                        )
+                        .edit_message(target_channel, edit_message_id.as_ref(), content.as_ref())
                         .await
                 }
-                (Some(reference), None) => {
-                    client
-                        .post_message_with_reference(
-                            target_channel,
-                            content.as_ref(),
-                            &reference.channel_id,
-                            &reference.message_id,
-                        )
-                        .await
+                OutboundOperation::Send => {
+                    match (
+                        resolve_reference(message.reference.as_ref(), overrides),
+                        message.create_nonce.as_deref(),
+                    ) {
+                        (Some(reference), Some(nonce)) => {
+                            client
+                                .post_message_with_reference_and_nonce(
+                                    target_channel,
+                                    content.as_ref(),
+                                    &reference.channel_id,
+                                    &reference.message_id,
+                                    nonce,
+                                    message.enforce_nonce,
+                                )
+                                .await
+                        }
+                        (Some(reference), None) => {
+                            client
+                                .post_message_with_reference(
+                                    target_channel,
+                                    content.as_ref(),
+                                    &reference.channel_id,
+                                    &reference.message_id,
+                                )
+                                .await
+                        }
+                        (None, Some(nonce)) => {
+                            client
+                                .post_message_with_nonce(
+                                    target_channel,
+                                    content.as_ref(),
+                                    nonce,
+                                    message.enforce_nonce,
+                                )
+                                .await
+                        }
+                        (None, None) => client.post_message(target_channel, content.as_ref()).await,
+                    }
                 }
-                (None, Some(nonce)) => {
-                    client
-                        .post_message_with_nonce(
-                            target_channel,
-                            content.as_ref(),
-                            nonce,
-                            message.enforce_nonce,
-                        )
-                        .await
-                }
-                (None, None) => client.post_message(target_channel, content.as_ref()).await,
             }
-        }
-    }
+        })
+        .await
+        .map_err(|detail| {
+            DispatchMessagePostError::new(DispatchMessagePostErrorKind::Other, detail)
+        })?
 }
 
 fn discord_safe_content(content: &str) -> Cow<'_, str> {

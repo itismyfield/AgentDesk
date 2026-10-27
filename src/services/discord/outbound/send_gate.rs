@@ -124,6 +124,8 @@ pub(in crate::services::discord) fn dm_default_agent_authorizes_unmapped_private
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ManualOutboundOptions {
+    pub(crate) output_origin:
+        Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     pub(crate) allow_unbound_internal_channel: bool,
     /// Grants the durable message-outbox producer access to its reserved
     /// delivery-id namespace and inline Discord nonce rollout. This is

@@ -24,6 +24,7 @@ const _: () = assert!(
 pub(crate) struct GatewayPort {
     http: Arc<serenity::Http>,
     bot_id: u64,
+    owner: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
     #[cfg(test)]
     repost_base: Option<String>,
 }
@@ -33,9 +34,18 @@ impl GatewayPort {
         Self {
             http,
             bot_id,
+            owner: None,
             #[cfg(test)]
             repost_base: None,
         }
+    }
+
+    pub(crate) fn with_owner_scope(
+        mut self,
+        scope: crate::services::cluster::intake_router_hook::owner_record::output::Scope,
+    ) -> Self {
+        self.owner = Some(scope);
+        self
     }
 
     #[cfg(test)]
@@ -48,9 +58,11 @@ impl GatewayPort {
     pub(crate) fn repost_http(&self) -> Result<RepostHttp, Unsupported> {
         #[cfg(test)]
         if let Some(base) = &self.repost_base {
-            return RepostHttp::at(Arc::clone(&self.http), base.clone());
+            return RepostHttp::at(Arc::clone(&self.http), base.clone())
+                .map(|port| port.with_owner_scope(self.owner.clone()));
         }
         RepostHttp::new(Arc::clone(&self.http))
+            .map(|port| port.with_owner_scope(self.owner.clone()))
     }
 
     /// The credentials that transport reads with, named without building it.
@@ -100,6 +112,35 @@ impl DiscordPort for GatewayPort {
                     PostOutcome::Refused,
                 ),
             }
+        }
+    }
+
+    fn post_origin(
+        &self,
+        channel: u64,
+        content: String,
+        origin: Option<
+            crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+        >,
+    ) -> impl Future<Output = PostOutcome> + Send + 'static {
+        let (scope, request) = (self.owner.clone(), self.post(channel, content.clone()));
+        async move {
+            use crate::services::cluster::intake_router_hook::owner_record::output;
+            let guard = match output::acquire(
+                scope.as_ref(),
+                &channel.to_string(),
+                &content,
+                origin.as_ref(),
+            )
+            .await
+            {
+                Ok(guard) => guard,
+                Err(error) => return PostOutcome::Withheld(error),
+            };
+            guard
+                .run(request)
+                .await
+                .unwrap_or_else(PostOutcome::Uncertain)
         }
     }
 

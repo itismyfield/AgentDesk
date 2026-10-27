@@ -312,3 +312,167 @@ where
         }
     }
 }
+
+/// Each raw request keeps the immutable artifact's guard; state callbacks run after it releases.
+pub(super) struct OriginGateway<'a, G: ?Sized> {
+    pub(super) inner: &'a G,
+    pub(super) scope:
+        Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
+    pub(super) origin:
+        Option<&'a crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    pub(super) body: &'a str,
+}
+
+impl<G: TurnGateway + ?Sized> OriginGateway<'_, G> {
+    async fn request<T, F: std::future::Future<Output = Result<T, String>>>(
+        &self,
+        channel: ChannelId,
+        raw: impl FnOnce() -> F,
+    ) -> Result<T, String> {
+        use crate::services::cluster::intake_router_hook::owner_record::output;
+        let hold = output::acquire(
+            self.scope.as_ref(),
+            &channel.get().to_string(),
+            self.body,
+            self.origin,
+        )
+        .await?;
+        hold.run(raw()).await?
+    }
+}
+
+impl<G: TurnGateway + ?Sized> TurnGateway for OriginGateway<'_, G> {
+    fn send_message<'a>(
+        &'a self,
+        c: ChannelId,
+        body: &'a str,
+    ) -> crate::services::discord::gateway::GatewayFuture<'a, Result<MessageId, String>> {
+        Box::pin(async move { self.request(c, || self.inner.send_message(c, body)).await })
+    }
+    fn send_notice_once<'a>(
+        &'a self,
+        c: ChannelId,
+        body: &'a str,
+    ) -> crate::services::discord::gateway::GatewayFuture<'a, Result<MessageId, String>> {
+        Box::pin(async move {
+            self.request(c, || self.inner.send_notice_once(c, body))
+                .await
+        })
+    }
+    fn send_long_message_with_rollback<'a>(
+        &'a self,
+        c: ChannelId,
+        anchor: MessageId,
+        body: &'a str,
+    ) -> crate::services::discord::gateway::GatewayFuture<'a, Result<Vec<MessageId>, String>> {
+        Box::pin(async move {
+            self.request(c, || {
+                self.inner.send_long_message_with_rollback(c, anchor, body)
+            })
+            .await
+        })
+    }
+    fn edit_message<'a>(
+        &'a self,
+        c: ChannelId,
+        id: MessageId,
+        body: &'a str,
+    ) -> crate::services::discord::gateway::GatewayFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.request(c, || self.inner.edit_message(c, id, body))
+                .await
+        })
+    }
+    fn delete_message<'a>(
+        &'a self,
+        c: ChannelId,
+        id: MessageId,
+    ) -> crate::services::discord::gateway::GatewayFuture<'a, Result<(), String>> {
+        Box::pin(async move { self.request(c, || self.inner.delete_message(c, id)).await })
+    }
+    fn replace_message_with_outcome<'a>(
+        &'a self,
+        c: ChannelId,
+        id: MessageId,
+        body: &'a str,
+    ) -> crate::services::discord::gateway::GatewayFuture<
+        'a,
+        Result<crate::services::discord::formatting::ReplaceLongMessageOutcome, String>,
+    > {
+        Box::pin(async move {
+            self.request(c, || self.inner.replace_message_with_outcome(c, id, body))
+                .await
+        })
+    }
+    fn replace_message_deferred<'a>(
+        &'a self,
+        c: ChannelId,
+        id: MessageId,
+        body: &'a str,
+    ) -> crate::services::discord::gateway::GatewayFuture<
+        'a,
+        Result<crate::services::discord::formatting::DeferredReplaceLongMessageOutcome, String>,
+    > {
+        Box::pin(async move {
+            self.request(c, || self.inner.replace_message_deferred(c, id, body))
+                .await
+        })
+    }
+    fn schedule_retry_with_history<'a>(
+        &'a self,
+        c: ChannelId,
+        id: MessageId,
+        text: &'a str,
+    ) -> crate::services::discord::gateway::GatewayFuture<'a, ()> {
+        self.inner.schedule_retry_with_history(c, id, text)
+    }
+    fn schedule_retry_with_history_with_completion<'a>(
+        &'a self,
+        c: ChannelId,
+        id: MessageId,
+        text: &'a str,
+        done: tokio::sync::oneshot::Sender<()>,
+    ) -> crate::services::discord::gateway::GatewayFuture<'a, ()> {
+        self.inner
+            .schedule_retry_with_history_with_completion(c, id, text, done)
+    }
+    fn schedule_exact_retry_with_history<'a>(
+        &'a self,
+        c: ChannelId,
+        retry: crate::services::discord::replay_policy::ExactRetry,
+    ) -> crate::services::discord::gateway::GatewayFuture<
+        'a,
+        crate::services::discord::replay_policy::ExactHandoff,
+    > {
+        self.inner.schedule_exact_retry_with_history(c, retry)
+    }
+    fn dispatch_queued_turn<'a>(
+        &'a self,
+        c: ChannelId,
+        request: &'a crate::services::discord::Intervention,
+        name: &'a str,
+        more: bool,
+        lease: Option<std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>>,
+    ) -> crate::services::discord::gateway::GatewayFuture<'a, Result<(), String>> {
+        self.inner
+            .dispatch_queued_turn(c, request, name, more, lease)
+    }
+    fn validate_live_routing<'a>(
+        &'a self,
+        c: ChannelId,
+    ) -> crate::services::discord::gateway::GatewayFuture<'a, Result<(), String>> {
+        self.inner.validate_live_routing(c)
+    }
+    fn requester_mention(&self) -> Option<String> {
+        self.inner.requester_mention()
+    }
+    fn can_chain_locally(&self) -> bool {
+        self.inner.can_chain_locally()
+    }
+    fn can_deliver_directly(&self) -> bool {
+        self.inner.can_deliver_directly()
+    }
+    fn bot_owner_provider(&self) -> Option<crate::services::provider::ProviderKind> {
+        self.inner.bot_owner_provider()
+    }
+}

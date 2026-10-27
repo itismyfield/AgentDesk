@@ -12,6 +12,7 @@ use std::future::Future;
 
 pub(crate) mod custody;
 pub(crate) mod input_start;
+pub(crate) mod output;
 
 /// Canonical identity uses Rust trim/lowercase; queries and advisory keys use these same bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
