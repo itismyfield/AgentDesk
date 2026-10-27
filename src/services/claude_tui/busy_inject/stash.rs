@@ -5,8 +5,8 @@ use std::io::Write;
 use super::super::owner_input;
 use super::{Outcome, Pane, Timing, Veto, WriteFailure};
 
-const PINNED_APPLIED: &str = "AGENTDESK_PINNED_APPLIED";
-const PINNED_HELD: &str = "AGENTDESK_PINNED_HELD";
+const PINNED_APPLIED: &str = "PINNED_KEY_APPLIED";
+const PINNED_HELD: &str = "PINNED_KEY_HELD";
 
 pub(in crate::services::claude_tui) fn submit(
     pane: &Pane,

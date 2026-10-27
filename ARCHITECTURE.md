@@ -764,6 +764,7 @@ src/
 │   │   │   ├── screen_identity_tests.rs
 │   │   │   ├── screen_tests.rs
 │   │   │   ├── stash.rs
+│   │   │   ├── stash_owner_tests.rs
 │   │   │   ├── stash_tests.rs
 │   │   │   └── submit.rs
 │   │   ├── busy_inject_tests/
@@ -1342,7 +1343,9 @@ src/
 │   │   │   ├── host_recovery_guard/
 │   │   │   │   └── log_state.rs
 │   │   │   ├── managed_submission/
-│   │   │   │   └── evidence.rs
+│   │   │   │   ├── evidence.rs
+│   │   │   │   ├── outcome.rs
+│   │   │   │   └── outcome_tests.rs
 │   │   │   ├── model/
 │   │   │   │   ├── circuit_evidence.rs
 │   │   │   │   ├── identity.rs
