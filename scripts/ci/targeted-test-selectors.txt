@@ -83,3 +83,7 @@ inflight::terminal_delivery_evidence_loss::tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests
 watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
 identity_guarded_save_rejects_stale_write_against_newer_turn
+
+[Fast targeted tests: Turn timestamp storage]
+db::timestamps::tests::
+=db::turns::timestamp_tests::utc_session_preserves_turn_instants_pg

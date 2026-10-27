@@ -412,6 +412,17 @@ impl HerdrRig {
         );
     }
 
+    /// The next pane read lists `first` in the foreground, every later one `then`.
+    pub(crate) fn foreground_then(&self, first: &[u32], then: &[u32]) {
+        let info = |listed: &[u32]| {
+            let pids: Vec<Value> = listed.iter().map(|pid| json!({"pid": pid})).collect();
+            let info = json!({"pane_id": PANE, "shell_pid": SHELL,
+                "foreground_process_group_id": listed.first(), "foreground_processes": pids});
+            json!({"type": "pane_process_info", "process_info": info})
+        };
+        self.answer_sequence("pane.process_info", [info(first), info(then)]);
+    }
+
     /// The server pid each later dial reaches, in order; the last one repeats.
     pub(crate) fn serve_as(&self, pids: &[u32]) {
         *self.servers.lock().unwrap() = pids.iter().copied().collect();
