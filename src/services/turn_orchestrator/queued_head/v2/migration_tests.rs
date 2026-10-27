@@ -61,7 +61,6 @@ fn envelope(items: Vec<PendingQueueItem>, attempted: bool) -> String {
     let meta = SnapshotMeta {
         head_injection: head,
         terminal_identities: vec![sources::identity(&item(99))],
-        ..Default::default()
     };
     snapshot_json(items, Some(&meta)).unwrap()
 }

@@ -233,6 +233,8 @@ fn cpu_us() -> u128 {
     0
 }
 
+type Measured<'a> = (&'static str, Box<dyn Fn() -> bool + 'a>);
+
 #[test]
 fn history_v2_cost_is_one_publish_per_change_at_zero_1024_and_5001_rows() {
     for rows in [0usize, 1024, 5001] {
@@ -256,7 +258,7 @@ fn history_v2_cost_is_one_publish_per_change_at_zero_1024_and_5001_rows() {
         let frame = idle("ann", "7", "measured");
         let a = key(560, &path, false);
         let snapshot = projection(None, &[], std::slice::from_ref(&a));
-        let steps: [(&str, Box<dyn Fn() -> bool>); 4] = [
+        let steps: [Measured; 4] = [
             (
                 "prepare",
                 Box::new(|| history.prepare("history-test", &input(&a, &frame)).is_ok()),
