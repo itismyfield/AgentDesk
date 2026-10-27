@@ -122,7 +122,8 @@ impl ChannelStore {
     }
 }
 
-#[cfg(test)]
+// Every case opens an enabled store, which Windows refuses without a directory fsync.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::services::tui_o::shadow::binding_reader::source_id_for;

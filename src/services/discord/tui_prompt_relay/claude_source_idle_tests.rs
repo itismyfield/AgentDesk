@@ -534,6 +534,57 @@ fn inflight_idle_does_not_register_another_panes_or_sdk_source() {
         });
 }
 
+/// A TUI `/clear` racing a headless `claude -p` turn in the same project dir: both new transcripts
+/// grow, the SDK one newest, and the idle relay follows the TUI continuation.
+#[test]
+fn a_tui_clear_racing_a_headless_turn_moves_the_idle_relay_to_the_tui_continuation() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    dedupe::reset_state_for_tests();
+    let _bindings = BindingRoot::at(root.path());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let pane = Pane::new(root.path(), 7_573);
+            let _tmux = FakeTmux::install(&pane.tmux);
+            super::super::super::inflight::save_inflight_state(&pane.row()).unwrap();
+            pane.replace();
+            modified(&pane.b_path(), 5);
+            let sdk = uuid::Uuid::new_v4().to_string();
+            let sdk_path = pane.path.with_file_name(format!("{sdk}.jsonl"));
+            let sdk_turn = |key, at| record(&sdk, key, at, "SDK_BODY", true);
+            std::fs::write(&sdk_path, sdk_turn("s1", "2026-10-01T02:00:30Z")).unwrap();
+            pane.idle().await;
+            pane.grow();
+            let mut sdk_file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&sdk_path)
+                .unwrap();
+            std::io::Write::write_all(
+                &mut sdk_file,
+                sdk_turn("s2", "2026-10-01T02:01:30Z").as_bytes(),
+            )
+            .unwrap();
+            pane.idle().await;
+            assert_eq!(
+                dedupe::runtime_binding_for_tmux_session(&pane.tmux)
+                    .unwrap()
+                    .output_path,
+                pane.b_path().display().to_string()
+            );
+            let events = binding_events::binding_events_since(pane.channel.get(), 0).unwrap();
+            assert!(
+                !events.iter().any(|event| matches!(&event.new,
+                    binding_events::BindingTarget::Source(source) if source.session_id == sdk)),
+                "the headless session is never published as the pane's source"
+            );
+            dedupe::reset_state_for_tests();
+        });
+}
+
 #[test]
 fn inflight_idle_resumes_a_retained_row_from_its_original_source_after_discovery() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();

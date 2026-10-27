@@ -369,7 +369,7 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
             recorder.calls().is_empty(),
             "no placeholder takeover before BODY"
         );
-        let respawned = discord::health::watcher_respawn::retry_pending_watcher_respawn(
+        let respawned = discord::health::watcher_respawn::retry_pending_watcher_respawn_for_tests(
             &registry,
             &provider,
             &[shared.clone()],
@@ -418,7 +418,7 @@ async fn t08_fallback_death_respawn_preserves_row_one_reader_and_body_before_nex
             "provider exit must not end bridge protection"
         );
         assert!(try_recovery(&provider, channel.get()).is_err());
-        let respawned = discord::health::watcher_respawn::retry_pending_watcher_respawn(
+        let respawned = discord::health::watcher_respawn::retry_pending_watcher_respawn_for_tests(
             &registry,
             &provider,
             &[shared.clone()],

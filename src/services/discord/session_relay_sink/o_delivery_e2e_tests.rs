@@ -291,7 +291,7 @@ async fn run(turn: Turn) {
     let source_id = stored.cursors().next().unwrap().source.clone();
     let mut captured = Vec::new();
     stored
-        .for_each_frame(&source_id, |frame| match frame {
+        .for_each_frame(&source_id, |frame, _| match frame {
             crate::services::tui_o::store::spool::SpoolFrame::Record(record) => {
                 captured.extend(record.line);
                 captured.push(b'\n');

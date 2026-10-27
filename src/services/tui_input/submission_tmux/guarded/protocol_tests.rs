@@ -1,9 +1,5 @@
 use super::*;
 
-fn classify_enter(result: Result<Output, String>) -> EffectOutcome {
-    classify_effect(result, APPLIED, HELD)
-}
-
 fn output(stdout: &[u8]) -> Output {
     Output {
         status: Default::default(),
@@ -64,71 +60,4 @@ fn cg_b2b_atomic_capture_requires_matching_first_snapshot_and_preserves_body() {
     let mut warning = output(format!("{good}\n{body}").as_bytes());
     warning.stderr = b"warning".into();
     assert!(read_capture(warning, &geometry).is_none());
-}
-
-#[test]
-fn cg_b2b_payload_acknowledgements_are_separate_from_enter() {
-    assert_eq!(
-        classify_effect(Ok(output(PAYLOAD_APPLIED)), PAYLOAD_APPLIED, PAYLOAD_HELD),
-        EffectOutcome::Applied
-    );
-    assert_eq!(
-        classify_effect(Ok(output(PAYLOAD_HELD)), PAYLOAD_APPLIED, PAYLOAD_HELD),
-        EffectOutcome::Held
-    );
-    for raw in [
-        APPLIED,
-        HELD,
-        b"CG_PAYLOAD_APPLIED",
-        b"CG_PAYLOAD_APPLIED\nextra",
-        b"",
-    ] {
-        assert!(matches!(
-            classify_effect(Ok(output(raw)), PAYLOAD_APPLIED, PAYLOAD_HELD),
-            EffectOutcome::Unknown(_)
-        ));
-    }
-}
-
-#[test]
-fn cg_b2a_only_exact_branch_acknowledgements_are_definite() {
-    assert_eq!(classify_enter(Ok(output(APPLIED))), EffectOutcome::Applied);
-    assert_eq!(classify_enter(Ok(output(HELD))), EffectOutcome::Held);
-    for raw in [
-        b"".as_slice(),
-        b"CG_ENTER_APPLIED",
-        b"CG_ENTER_APPLIED\nextra",
-        b"CG_ENTER_HELD\nCG_ENTER_APPLIED\n",
-        b"\xff",
-    ] {
-        assert!(
-            matches!(classify_enter(Ok(output(raw))), EffectOutcome::Unknown(_)),
-            "{raw:?}"
-        );
-    }
-    let mut failed = output(APPLIED);
-    failed.status = std::process::Command::new("sh")
-        .args(["-c", "exit 1"])
-        .status()
-        .unwrap();
-    assert!(matches!(
-        classify_enter(Ok(failed)),
-        EffectOutcome::Unknown(_)
-    ));
-    let mut warning = output(APPLIED);
-    warning.stderr = b"warning".into();
-    assert!(matches!(
-        classify_enter(Ok(warning)),
-        EffectOutcome::Unknown(_)
-    ));
-    for error in [
-        "spawn failed",
-        "timeout after possible send",
-        "I/O acknowledgement loss",
-    ] {
-        assert_eq!(
-            classify_enter(Err(error.into())),
-            EffectOutcome::Unknown(error.into())
-        );
-    }
 }

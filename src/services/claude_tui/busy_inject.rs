@@ -44,7 +44,6 @@ use crate::services::tui_input::bounded_tmux::{BoundedTmuxError, run_bounded_tmu
 /// Larger inputs are refused before any tmux call.
 pub(crate) const MAX_INPUT_BYTES: usize = 64 * 1024;
 const CAPTURE_SCROLLBACK: &str = "-80";
-const VETOED: &str = "agentdesk-busy-inject-vetoed";
 
 /// Why nothing reached the pane; the caller may queue the input instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,88 +306,6 @@ impl Pane {
             .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    pub(crate) fn state(&self) -> Option<PaneState> {
-        let out = self.ok(&[
-            "display-message",
-            "-p",
-            "-t",
-            &self.target,
-            "#{session_attached},#{session_last_attached},#{pane_width},#{pane_height}",
-        ])?;
-        let mut fields = out.trim_end_matches('\n').split(',');
-        let attached = fields.next()?.parse().ok()?;
-        // Never-attached sessions report an empty value, else epoch seconds. A reply without it is
-        // read as empty, which any past attach breaks, and its unknown size keeps the stash off.
-        let last = fields.next().unwrap_or_default().to_string();
-        if !last.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        let mut size = || fields.next().and_then(|field| field.parse::<usize>().ok());
-        Some(PaneState {
-            generation: Generation { attached, last },
-            size: size().zip(size()),
-        })
-    }
-
-    pub(crate) fn generation(&self) -> Option<Generation> {
-        self.state().map(|state| state.generation)
-    }
-
-    /// Keeps the non-stash callers' no-attached-client contract.
-    pub(crate) fn guarded(
-        &self,
-        g0: &Generation,
-        size: Option<(usize, usize)>,
-        command: &str,
-    ) -> Guard {
-        let attached = 0;
-        let vetoed = format!(
-            "display-message -p -t '{}' '{VETOED} #{{session_attached}} #{{session_last_attached}}'",
-            self.target
-        );
-        let mut condition = format!(
-            "#{{&&:#{{==:#{{session_attached}},{attached}}},#{{==:#{{session_last_attached}},{}}}}}",
-            g0.last
-        );
-        if let Some((width, height)) = size {
-            let sized = format!(
-                "#{{&&:#{{==:#{{pane_width}},{width}}},#{{==:#{{pane_height}},{height}}}}}"
-            );
-            condition = format!("#{{&&:{condition},{sized}}}");
-        }
-        let args = [
-            "if-shell",
-            "-F",
-            "-t",
-            &self.target,
-            &condition,
-            command,
-            &vetoed,
-        ];
-        let Some(out) = self.ok(&args) else {
-            return Guard::Failed;
-        };
-        // A sized guard with the same generation can only have failed its size comparison.
-        match out.trim().strip_prefix(VETOED).map(str::trim) {
-            None if out.trim().is_empty() => Guard::Applied,
-            None => Guard::Failed,
-            Some(rest) => {
-                let mut fields = rest.split_whitespace();
-                match fields.next().map(str::parse::<u32>) {
-                    Some(Ok(count))
-                        if count == attached
-                            && size.is_some()
-                            && fields.next().unwrap_or("") == g0.last =>
-                    {
-                        Guard::Resized
-                    }
-                    Some(Ok(_)) => Guard::Vetoed,
-                    _ => Guard::Gone,
-                }
-            }
-        }
-    }
-
     pub(crate) fn capture(&self) -> Option<String> {
         self.ok(&[
             "capture-pane",
@@ -402,35 +319,16 @@ impl Pane {
     }
 }
 
-pub(crate) enum Guard {
-    Applied,
-    Vetoed,
-    /// Only a sized guard: the pane is no longer the size the command was planned for.
-    Resized,
-    Gone,
-    Failed,
-}
-
-/// Attach count and last attach second; a change between two reads means a person could type.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Generation {
-    pub(crate) attached: u32,
-    pub(crate) last: String,
-}
-
-pub(crate) struct PaneState {
-    pub(crate) generation: Generation,
-    /// Columns and rows, which decide whether Claude folds or wraps a paste.
-    pub(crate) size: Option<(usize, usize)>,
-}
-
 fn modal(capture: &str) -> bool {
     screen::modal(capture)
 }
 
-/// Read once before any key: whether a visible draft may be parked with C-s. An unread composer
+/// Read once before any key: whether a visible draft is parked with C-s. An unread composer
 /// deliberately proceeds without C-s.
-pub(in crate::services::claude_tui) fn before_paste(pane: &Pane) -> Result<bool, Veto> {
+pub(in crate::services::claude_tui) fn before_paste(
+    pane: &Pane,
+    stash_allowed: bool,
+) -> Result<bool, Veto> {
     if pane
         .ok(&["display-message", "-p", "-t", pane.target(), "#{pane_dead}"])
         .is_none_or(|output| !pane_dead_is_live(&output))
@@ -443,7 +341,13 @@ pub(in crate::services::claude_tui) fn before_paste(pane: &Pane) -> Result<bool,
     if modal(&capture) {
         return Err(Veto::Modal);
     }
-    Ok(screen::parkable(&capture))
+    Ok(park_draft(stash_allowed, screen::parkable(&capture)))
+}
+
+/// The one rule for a visible draft: a listed channel parks it with C-s, any other channel
+/// pastes behind it.
+fn park_draft(stash_allowed: bool, parkable: bool) -> bool {
+    stash_allowed && parkable
 }
 
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.
@@ -490,12 +394,6 @@ pub(crate) fn at_offsets<T>(
     None
 }
 
-pub(crate) fn unix_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
-}
-
 fn inject_locked(
     pane: &Pane,
     request: &Request<'_>,
@@ -504,8 +402,8 @@ fn inject_locked(
     stash: bool,
     turn_gate: TurnGate,
 ) -> Report {
-    let parkable = match before_paste(pane) {
-        Ok(parkable) => parkable,
+    let park = match before_paste(pane, stash) {
+        Ok(park) => park,
         Err(veto) => return Report::not_sent(veto),
     };
     if matches!(turn_gate, TurnGate::BusyOnly)
@@ -527,7 +425,7 @@ fn inject_locked(
         return Report::not_sent(Veto::LoadFailed);
     }
     let report = Report {
-        outcome: stash::submit(pane, request.nonce, text, timing, stash && parkable),
+        outcome: stash::submit(pane, request.nonce, text, timing, park),
     };
     if report.outcome == Outcome::Injected {
         let request = (

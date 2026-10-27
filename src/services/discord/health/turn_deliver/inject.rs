@@ -829,19 +829,13 @@ fn run_codex(
     let alert = |detail| unconfirmed(input, session, turn_id.clone(), detail);
     match outcome {
         Ok(codex_inject::Outcome::NotSent(veto)) => InjectAttempt::NotSent(codex_veto_name(veto)),
-        Ok(codex_inject::Outcome::Injected {
-            observed_turn,
-            joined,
-        }) => {
-            // A turn other than the target means it ended before the Enter; the ledger settles it.
+        Ok(codex_inject::Outcome::Injected) => {
             tracing::info!(
                 channel_id = input.channel,
                 tmux_session = %session,
                 nonce = %nonce,
                 target_turn,
-                observed_turn = observed_turn.as_deref().unwrap_or(""),
-                joined,
-                "busy Codex turn took the human input"
+                "busy Codex paste and Enter sent"
             );
             InjectAttempt::Injected { turn_id }
         }

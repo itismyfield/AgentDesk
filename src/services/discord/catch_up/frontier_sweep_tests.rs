@@ -1482,7 +1482,10 @@ pub(super) mod exhausted_recovery_tests {
         let checkpoint_file = checkpoint_path(fx.root.path(), &fx.provider, channel_id);
         let times = std::fs::FileTimes::new()
             .set_modified(std::time::SystemTime::now() - Duration::from_secs(11 * 60));
-        std::fs::File::open(&checkpoint_file)
+        // Windows needs a writable handle to change file times.
+        std::fs::File::options()
+            .write(true)
+            .open(&checkpoint_file)
             .unwrap()
             .set_times(times)
             .unwrap();

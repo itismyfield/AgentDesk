@@ -58,41 +58,6 @@ pub(crate) fn readiness_failure(session: &str, error: String) -> SubmissionError
     guarded_outcome::readiness_error(session, error)
 }
 
-pub(super) fn changed(session: &str) -> String {
-    SubmissionError::Held(PreparationHold::before(
-        session,
-        "composer_changed",
-        "claude tui composer changed before follow-up mutation".into(),
-    ))
-    .into_legacy()
-}
-
-pub(super) fn stopped(session: &str, error: SubmissionError) -> SubmissionError {
-    use crate::services::tui_input::submission::Refusal;
-    use host_input::{InputRefusal, InputRun};
-    match error {
-        SubmissionError::Guarded(InputRun::Refused(InputRefusal::Composer(
-            Refusal::NotReady
-            | Refusal::CaptureUnavailable
-            | Refusal::OwnDraft
-            | Refusal::GeometryChanged
-            | Refusal::WriterContended
-            | Refusal::UnpredictableRender,
-        ))) => SubmissionError::Held(PreparationHold::before(
-            session,
-            "composer_not_ready",
-            "claude tui composer preparation held before payload".into(),
-        )),
-        SubmissionError::Guarded(run @ InputRun::Indeterminate { .. }) => {
-            SubmissionError::Held(PreparationHold::uncertain(
-                session,
-                format!("claude tui guarded submission held: {run:?}"),
-            ))
-        }
-        other => other,
-    }
-}
-
 #[cfg(unix)]
 pub(super) fn idle_stash_stopped(session: &str, error: SubmissionError) -> SubmissionError {
     use crate::services::tui_input::submission::Refusal;

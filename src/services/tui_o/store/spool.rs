@@ -22,9 +22,8 @@ use crate::services::tui_o::shadow::{CaptureBatch, CapturedRecord, IDENTITY_VERS
 pub const SEGMENT_MAX_BYTES: u64 = 64 << 20;
 /// Per-channel spool ceiling; reaching it pauses the source instead of dropping records.
 pub const SPOOL_CAP_BYTES: u64 = 1 << 30;
-/// Replayable versions: v3 reads Codex `turn_aborted` as Idle, v4 keys multi-block Claude rows and
-/// v5 skips Codex `additional_tools`, so older frames keep their unit keys. Appends roll forward.
-const READABLE_IDENTITY_VERSIONS: [u32; 4] = [2, 3, 4, 5];
+/// Replay keeps each segment's body-selection version; new appends roll forward to current rules.
+const READABLE_IDENTITY_VERSIONS: [u32; 5] = [2, 3, 4, 5, 6];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
@@ -577,7 +576,7 @@ impl ChannelStore {
     pub fn for_each_frame(
         &mut self,
         source: &SourceId,
-        mut visit: impl FnMut(SpoolFrame),
+        mut visit: impl FnMut(SpoolFrame, u32),
     ) -> Result<(), StoreError> {
         self.mutate(|store| {
             let spool = store
@@ -588,7 +587,7 @@ impl ChannelStore {
             for segment in &spool.segments {
                 scan_segment(&segment.path, |frame| {
                     if frame.end() <= through {
-                        visit(frame);
+                        visit(frame, segment.identity_version);
                     }
                 })?;
             }
@@ -734,7 +733,7 @@ mod tests {
     fn lines(channel: &mut ChannelStore, source: &SourceId) -> Vec<String> {
         let mut lines = Vec::new();
         channel
-            .for_each_frame(source, |frame| {
+            .for_each_frame(source, |frame, _| {
                 lines.push(match frame {
                     SpoolFrame::Record(record) => String::from_utf8(record.line).unwrap(),
                     SpoolFrame::Skipped { start, end } => format!("skip {start}..{end}"),
@@ -1055,7 +1054,7 @@ mod tests {
         let bytes = fs::read(&segment).unwrap();
         fs::remove_file(&segment).unwrap();
         fs::create_dir(&segment).unwrap();
-        let read = channel.for_each_frame(&fixture.source, |_| ());
+        let read = channel.for_each_frame(&fixture.source, |_, _| ());
         assert!(matches!(read, Err(StoreError::Io(_))));
         fs::remove_dir(&segment).unwrap();
         fs::write(&segment, bytes).unwrap();

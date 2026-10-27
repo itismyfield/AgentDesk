@@ -163,6 +163,8 @@ pub(in crate::services::discord) struct Reading {
     watch: Option<Arc<Mutex<Watch>>>,
     #[cfg(unix)]
     unbound: Option<unbound::live::Stamp>,
+    #[cfg(unix)]
+    admission: Option<unbound::live::inflight_bound::Admission>,
 }
 
 impl Reading {
@@ -187,6 +189,8 @@ impl Reading {
             watch,
             #[cfg(unix)]
             unbound: None,
+            #[cfg(unix)]
+            admission: None,
         }
     }
 
@@ -209,6 +213,12 @@ impl Reading {
         #[cfg(unix)]
         if let (Some(stamp), Some(watch)) = (&self.unbound, &self.watch) {
             return stamp.publish(watch, publish).await;
+        }
+        #[cfg(unix)]
+        if let Some(admission) = &self.admission
+            && !admission.current().await
+        {
+            return None;
         }
         let (Some(stamp), Some(watch)) = (&self.stamp, &self.watch) else {
             return Some(publish());
@@ -337,8 +347,17 @@ async fn read_now(
         .map(|watcher| watcher.tmux_session_name);
     // Decided before the Unbound read, which resets the watch a Bound judgment builds on.
     #[cfg(unix)]
+    let mut admission = None;
+    #[cfg(unix)]
     let bound = match bound {
-        None => unbound::herdr_bound::admitted(shared, provider, channel).await,
+        None => match unbound::herdr_bound::admitted(shared, provider, channel).await {
+            None => {
+                admission =
+                    unbound::live::inflight_bound::admitted(shared, provider, channel).await;
+                admission.as_ref().map(|admitted| admitted.name.clone())
+            }
+            herdr => herdr,
+        },
         bound => bound,
     };
     #[cfg(unix)]
@@ -359,6 +378,7 @@ async fn read_now(
                     stamp: None,
                     watch: Some(watch),
                     unbound: Some(stamp),
+                    admission: None,
                 };
             }
             #[cfg(not(unix))]
@@ -401,7 +421,11 @@ async fn read_now(
         answer
     });
     match judged.await {
-        Ok((observed, stamp)) => Reading::bound(observed, stamp, Some(watch), Some(&label)),
+        Ok((observed, stamp)) => Reading {
+            #[cfg(unix)]
+            admission,
+            ..Reading::bound(observed, stamp, Some(watch), Some(&label))
+        },
         Err(_) => unstamped(observed(Activity::Unknown, "probe_failed")),
     }
 }

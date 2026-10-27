@@ -113,7 +113,6 @@ fn command_supports_json(command: &Commands) -> bool {
         | Commands::ResetTmux
         | Commands::Ismcptool { .. }
         | Commands::Addmcptool { .. }
-        | Commands::InstallMementoSessionHook { .. }
         | Commands::Deploy
         | Commands::Migrate { .. }
         | Commands::ReleaseMigratePostgres
@@ -530,16 +529,6 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             super::utils::handle_addmcptool(&tools);
             Ok(())
         }
-        Commands::InstallMementoSessionHook {
-            settings_path,
-            dry_run,
-            uninstall,
-        } => super::utils::handle_install_memento_session_hook(
-            settings_path.as_deref(),
-            dry_run,
-            uninstall,
-        )
-        .map_err(anyhow::Error::msg),
         Commands::Status => {
             let invoke = super::client::cmd_status(json);
             if json {

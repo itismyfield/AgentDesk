@@ -196,33 +196,44 @@ fn tf2_hosts_without_input_stop_before_any_host_call() {
     }
 }
 
-/// A warm prompt held before submit ends the turn with the typed refusal: no payload, no
-/// recreate or retire, nothing streamed; the same pane without the refusal types the prompt.
+/// A warm prompt held before submit ends the turn with the typed fence refusal: no payload, no
+/// recreate or retire, nothing streamed; the same pane without the refusal takes one paste.
 #[test]
 fn warm_prompt_held_before_submit_neither_types_nor_recreates() {
+    use crate::services::claude_tui::input::submission::tests::ScriptedTmux;
     use crate::services::claude_tui::submission_fence::test_support::RefusingFence;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ScriptedTmux::new(EMPTY);
     let mut held = Scenario::tmux(true, vec![EMPTY; 12]);
     held.fence = Some(Arc::new(RefusingFence::default()));
     let (ended, calls, streamed) = follow_up("zp1-held", held);
     let Ended::Terminal(Err(error)) = &ended else {
         panic!("held prompt must end the turn: {ended:?}");
     };
-    assert!(error.contains("held before submit"), "{error}");
+    assert!(error.contains("SubmissionFence"), "{error}");
     assert!(
         !calls.iter().any(|c| c.starts_with("literal:")
             || c.starts_with("keys:")
             || c.starts_with("retire:")),
         "{calls:?}"
     );
+    assert!(tmux.sends().is_empty(), "{:?}", tmux.sends());
     assert_eq!(streamed, 0);
-    let (_, calls, _) = follow_up("zp1-control", Scenario::tmux(true, vec![EMPTY; 12]));
-    assert!(calls.contains(&format!("literal:{PROMPT}")), "{calls:?}");
+    // The control's Enter write fails, so the turn ends right after its one paste.
+    tmux.fail_send(2);
+    follow_up("zp1-control", Scenario::tmux(true, vec![EMPTY; 12]));
+    assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
+    assert_eq!(tmux.body(), PROMPT);
 }
 
 #[test]
 fn tf2_legacy_tmux_clear_then_submits_once() {
-    let mut scenario = Scenario::tmux(true, vec![DRAFT, DRAFT, DRAFT, EMPTY, EMPTY, EMPTY, EMPTY]);
-    scenario.cancel_on = Some(("literal:", 1));
+    use crate::services::claude_tui::input::submission::tests::ScriptedTmux;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ScriptedTmux::new(EMPTY);
+    // A failed Enter write ends the turn right after its one submission.
+    tmux.fail_send(2);
+    let scenario = Scenario::tmux(true, vec![DRAFT, DRAFT, DRAFT, EMPTY, EMPTY, EMPTY, EMPTY]);
     let (ended, calls, streamed) = follow_up("p6a2-cleared", scenario);
     let cleared = [
         read(),
@@ -234,15 +245,15 @@ fn tf2_legacy_tmux_clear_then_submits_once() {
     .concat();
     let (clear, submit) = calls.split_at(cleared.len().min(calls.len()));
     assert_eq!(clear, &cleared[..], "{calls:?}");
-    let literal = format!("literal:{PROMPT}");
-    assert_eq!(
-        submit.iter().filter(|c| **c == literal).count(),
-        1,
+    assert!(
+        !submit
+            .iter()
+            .any(|c| c.starts_with("keys:") || c.starts_with("literal:")),
         "{calls:?}"
     );
-    assert!(!submit.iter().any(|c| c.starts_with("keys:")), "{calls:?}");
-    assert_eq!(ended, Ended::Terminal(Ok(())));
-    stopped_without_side_effects("cancelled at submit", &ended, &calls, streamed);
+    assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
+    assert_eq!(tmux.body(), PROMPT);
+    stopped_without_side_effects("stopped at Enter", &ended, &calls, streamed);
 }
 
 #[test]

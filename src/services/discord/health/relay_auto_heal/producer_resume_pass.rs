@@ -1,15 +1,15 @@
 use super::*;
+use crate::services::discord::health::tick_mailboxes::TickMailboxes;
 
 pub(in crate::services::discord::health) async fn run_orphan_token_auto_heal_pass(
     registry: &HealthRegistry,
     provider: &ProviderKind,
-    runtimes: &[Arc<SharedData>],
+    tick: &TickMailboxes,
 ) -> usize {
     let mut applied = 0usize;
-    for shared in runtimes {
+    for (shared, mailboxes) in tick.mailboxes() {
         let mut redrive_channels = std::collections::HashSet::new();
-        let mailbox_snapshots = shared.mailboxes.snapshot_all().await;
-        for (channel_id, mailbox) in mailbox_snapshots {
+        for (&channel_id, mailbox) in mailboxes {
             redrive_channels.insert(channel_id);
             #[cfg(unix)]
             if provider == &ProviderKind::Codex {
@@ -18,6 +18,14 @@ pub(in crate::services::discord::health) async fn run_orphan_token_auto_heal_pas
                     channel_id,
                 );
             }
+            // An actor that did not answer is unknown, not idle: no cleanup or redrive this tick.
+            let Some(mailbox) = mailbox
+                .as_ref()
+                .ok()
+                .filter(|_| !tick.is_unknown(channel_id))
+            else {
+                continue;
+            };
             if mailbox.cancel_token.is_some() {
                 match apply_orphan_pending_token_cleanup(
                     registry,

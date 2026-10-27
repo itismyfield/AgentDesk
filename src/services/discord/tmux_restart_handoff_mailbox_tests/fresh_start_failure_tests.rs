@@ -18,9 +18,8 @@ use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 const NAME: &str = "adk-t05-claude-fresh-fail";
 const MESSAGE: u64 = 77_501;
 
-/// A tmux in front of `FakeTmux` that reports a version and makes a new session present
-/// without running it, plus a Claude CLI that resolves. With a `screen` file it also answers the
-/// managed pre-read with that screen and fails the paste after the fence, recording `sends`.
+/// A tmux before `FakeTmux` that launches a Claude TUI, answers the pre-paste read with `screen`,
+/// records `sends`, and with `die_after_enter` kills the fake's pane after the submit Enter.
 fn launchable_tmux() -> (tempfile::TempDir, Vec<crate::config::TestEnvVarGuard>) {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -41,7 +40,10 @@ fn launchable_tmux() -> (tempfile::TempDir, Vec<crate::config::TestEnvVarGuard>)
              case \"$1\" in display-message) for a do last=\"$a\"; done; \
              [ \"$last\" = '#{{pane_id}}' ] && {{ echo %1; exit 0; }} ;; \
              capture-pane) cat \"$d/screen\"; exit 0 ;; load-buffer|delete-buffer) exit 0 ;; \
-             paste-buffer|send-keys) echo \"$1\" >> \"$d/sends\"; [ \"$1\" = send-keys ]; exit $? ;; \
+             paste-buffer|send-keys) echo \"$1\" >> \"$d/sends\"; \
+             for a do last=\"$a\"; done; [ \"$1\" = send-keys ] && [ \"$last\" = Enter ] && \
+             [ -f \"$d/die_after_enter\" ] && : > '{fake}/pane_dead'; \
+             [ \"$1\" = send-keys ] || [ ! -f \"$d/paste_fails\" ]; exit $? ;; \
              esac; fi\nfor a do case \"$a\" in -V) echo 'tmux 3.5a'; exit 0 ;; \
              new-session) echo \"$*\" >> '{fake}/calls'; rm -f '{fake}/missing'; exit 0 ;; \
              esac; done\nexec '{fake}/tmux' \"$@\"\n"
@@ -77,10 +79,11 @@ fn fail_fresh_turn(
 ) -> Result<(), String> {
     let ready = ready_screen();
     if !uncertain {
-        let fake = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-            .nth(1)
+        // The pane dies only after the submit Enter, so the pre-paste read still sees it live.
+        let launch = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .next()
             .unwrap();
-        std::fs::write(fake.join("pane_dead"), "").unwrap();
+        std::fs::write(launch.join("die_after_enter"), "").unwrap();
     }
     // The driver registers this session in the prompt-dedupe tables the dedupe tests own.
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
@@ -88,7 +91,6 @@ fn fail_fresh_turn(
         .unwrap_or_else(|p| p.into_inner());
     let _spy = SpyGuard::install(SpyState {
         captures: std::iter::repeat_n(Some(ready), 64).collect(),
-        fail_send: uncertain.then(|| (0, Err("send-keys failed".to_string()))),
         ..SpyState::default()
     });
     let clearance = cleared(NAME);
@@ -238,8 +240,10 @@ async fn run_case(
     let tmux = FakeTmux::install(NAME);
     tmux.mark_missing();
     let (launch, _launch_env) = launchable_tmux();
+    // The A-plan reads the pane once before its paste, so this fixture answers that read.
+    std::fs::write(launch.path().join("screen"), ready_screen()).unwrap();
     if uncertain {
-        std::fs::write(launch.path().join("screen"), ready_screen()).unwrap();
+        std::fs::write(launch.path().join("paste_fails"), "").unwrap();
     }
     let _probe = FreshTmuxProbe::new();
     let workspace = tempfile::tempdir().unwrap();
@@ -361,6 +365,12 @@ async fn run_case(
             "uncertain payload retains its original durable custody"
         );
         assert_eq!(retained.turn_nonce, a_nonce);
+    } else {
+        let sends = std::fs::read_to_string(launch.path().join("sends")).unwrap_or_default();
+        assert_eq!(
+            sends, "paste-buffer\nsend-keys\n",
+            "one paste and one Enter reach the pane before it dies: {error}"
+        );
     }
     let calls = tmux.take_calls();
     let reason_path = crate::services::tmux_common::session_temp_path(NAME, "exit_reason");
