@@ -261,7 +261,8 @@ fn render_markdown() -> String {
          `restart` or `seeded-at-boot` field logs one WARN line naming the field.\n\n\
          Daemon snapshot readers retain the last validated boot/reload value when hot reload\n\
          is disabled or its watcher cannot start. The bot or standalone server owns the watcher;\n\
-         ending the HTTP task does not stop it.\n\n\
+         ending the HTTP task does not stop it. The config directory is polled every two\n\
+         seconds with content comparison, independently of native filesystem notifications.\n\n\
          - `live`: read from the live snapshot (or disk) at use time.\n\
          - `restart`: captured at boot or on first access; restart to apply.\n\
          - `seeded-at-boot`: copied into the DB/kv at boot, and runtime readers read that\n  \

@@ -1,8 +1,7 @@
 //! Live config file hot-reload.
 //!
-//! Mirrors the policies watcher (`engine::loader::start_hot_reload`) for the
-//! on-disk AgentDesk config file (`agentdesk.yaml`): a `notify` filesystem
-//! watcher debounces change events, the candidate file is **pre-validated**
+//! Polls the on-disk AgentDesk config file (`agentdesk.yaml`) without relying
+//! on native filesystem notifications. Change events are debounced, the candidate is **pre-validated**
 //! (parsed + runtime defaults applied via [`crate::config::load_from_path`]),
 //! and only on success is the new config **atomically swapped** into a shared
 //! process-global snapshot. A parse/validation failure keeps the currently
@@ -23,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{EventKind, PollWatcher, RecursiveMode, Watcher};
 
 use crate::config::Config;
 use crate::config::reload_classes::ReloadClass;
@@ -36,6 +35,10 @@ mod readers_tests;
 #[path = "config/daemon_snapshot_pg_tests.rs"]
 mod daemon_snapshot_pg_tests;
 
+#[cfg(test)]
+#[path = "config/poll_watcher_tests.rs"]
+mod poll_watcher_tests;
+
 /// Process-global live config snapshot. `None` until [`install`] runs at boot.
 static LIVE: OnceLock<RwLock<Arc<Config>>> = OnceLock::new();
 
@@ -47,6 +50,9 @@ static LIVE_UPDATES: OnceLock<tokio::sync::watch::Sender<Option<Arc<Config>>>> =
 /// Debounce window for collapsing bursts of filesystem events (editors emit
 /// several per save). Matches the policies watcher.
 const DEBOUNCE: Duration = Duration::from_millis(500);
+
+// Keep edits responsive while scanning only the immediate config directory.
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Outcome of a single reload attempt. Returned by [`reload_from_path`] so the
 /// watcher, an on-demand trigger, and tests can all share the same core path.
@@ -155,7 +161,7 @@ pub fn reload_from_path(path: &Path) -> ReloadOutcome {
 /// Guard returned by [`start`]; keeps the watcher and worker thread alive and
 /// joins the worker on drop. Mirrors `engine::loader::HotReloadGuard`.
 pub struct ConfigHotReloadGuard {
-    _watcher: Option<RecommendedWatcher>,
+    _watcher: Option<PollWatcher>,
     join: Option<std::thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
 }
@@ -196,17 +202,26 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
     // Watch the parent directory (not the file) so atomic rename-on-save —
     // write `agentdesk.yaml.tmp`, then rename over `agentdesk.yaml` — is still
     // observed; watching the inode directly misses the swap.
-    let mut watcher = match notify::recommended_watcher(
+    let mut watcher = match PollWatcher::new(
         move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res
-                && matches!(
-                    event.kind,
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                )
-            {
+            let event = match res {
+                Ok(event) => event,
+                Err(error) => {
+                    tracing::warn!(%error, "config hot-reload: file scan failed; keeping the last validated config");
+                    return;
+                }
+            };
+            if matches!(
+                event.kind,
+                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+            ) {
                 let _ = tx.send(event);
             }
         },
+        // Content comparison also catches saves that preserve the file mtime.
+        notify::Config::default()
+            .with_poll_interval(POLL_INTERVAL)
+            .with_compare_contents(true),
     ) {
         Ok(watcher) => watcher,
         Err(error) => {

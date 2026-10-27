@@ -18,7 +18,7 @@ fn write_config(path: &Path, config: &Config) {
 async fn edit_and_observe(path: &Path, config: &Config) {
     let mut updates = subscribe();
     write_config(path, config);
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(POLL_INTERVAL * 4 + DEBOUNCE, async {
         while expiry() != Some(config.cluster.gateway_lease_idle_expiry_secs) {
             updates.changed().await.unwrap();
         }
@@ -109,7 +109,7 @@ async fn standalone_scenario(config: &Config, path: &Path, pool: &sqlx::PgPool) 
     after_exit.cluster.gateway_lease_idle_expiry_secs = 97;
     write_config(path, &after_exit);
     assert!(
-        tokio::time::timeout(Duration::from_millis(1200), updates.changed())
+        tokio::time::timeout(POLL_INTERVAL * 2 + DEBOUNCE, updates.changed())
             .await
             .is_err(),
         "returning from the standalone server must drop its watcher"

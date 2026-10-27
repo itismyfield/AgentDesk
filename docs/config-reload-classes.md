@@ -9,7 +9,8 @@ valid edit in the live snapshot, but only `live` fields act on it. A change to a
 
 Daemon snapshot readers retain the last validated boot/reload value when hot reload
 is disabled or its watcher cannot start. The bot or standalone server owns the watcher;
-ending the HTTP task does not stop it.
+ending the HTTP task does not stop it. The config directory is polled every two
+seconds with content comparison, independently of native filesystem notifications.
 
 - `live`: read from the live snapshot (or disk) at use time.
 - `restart`: captured at boot or on first access; restart to apply.
