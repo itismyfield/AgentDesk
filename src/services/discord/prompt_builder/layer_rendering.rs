@@ -34,7 +34,7 @@ pub(super) fn tool_output_efficiency_guidance() -> &'static str {
 pub(super) fn api_friction_guidance(profile: DispatchProfile) -> Option<String> {
     (profile == DispatchProfile::Full).then_some(
         "\n\n[ADK API Usage]\n\
-         Before ADK API work, inspect `GET /api/docs` or `GET /api/docs/{category}`; docs override guessed CLI/source patterns. If missing or wrong, do not use sqlite fallback. Emit one standalone `API_FRICTION: {...}` final-response line with endpoint, friction_type, summary, workaround, and suggested_fix; runtime extracts it before delivery."
+         Before ADK API work, inspect `GET /api/docs` or `GET /api/docs/{group}/{category}`; docs override guessed CLI/source patterns. If missing or wrong, do not fall back to direct DB access. Emit one standalone `API_FRICTION: {...}` final-response line with endpoint, friction_type, summary, workaround, and suggested_fix; runtime extracts it before delivery."
             .to_string(),
     )
 }
