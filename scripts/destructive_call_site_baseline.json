@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "bfce2bca2f132ccbfd8d2acafa01825155eba7e2",
+  "measured_at_sha": "47359239844bab7b3b677586f986a61989d2dfb4",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -158,7 +158,8 @@
         "src/server/routes/voice_audio.rs": 2,
         "src/server/worker_recovery.rs": 1,
         "src/services/claude.rs": 7,
-        "src/services/claude/herdr_turn.rs": 2,
+        "src/services/claude/herdr_turn.rs": 1,
+        "src/services/claude/herdr_turn/first_input.rs": 1,
         "src/services/claude/process_session_launch.rs": 2,
         "src/services/claude/tui_session_launch.rs": 2,
         "src/services/claude_tui/hook_relay.rs": 4,
@@ -227,7 +228,8 @@
         "src/services/tui_prompt_dedupe/binding_context.rs": 3,
         "src/services/tui_prompt_dedupe/handoff.rs": 1,
         "src/services/turn_orchestrator/clear_channel.rs": 1,
-        "src/services/turn_orchestrator/pending_queue_persistence.rs": 4,
+        "src/services/turn_orchestrator/pending_queue_persistence.rs": 3,
+        "src/services/turn_orchestrator/pending_queue_persistence/snapshot_io.rs": 1,
         "src/voice/receiver/recording.rs": 1,
         "src/voice/stt.rs": 1,
         "src/voice/tts/edge.rs": 1,
