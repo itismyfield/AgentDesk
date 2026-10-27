@@ -425,7 +425,7 @@ impl HerdrTarget {
     pub(crate) fn send_text(&self, text: &str) -> Result<HostMutation, HostError> {
         let pane_id = self.0.pane.clone();
         let text = text.to_string();
-        self.send_pinned(HerdrRequest::PaneSendText { pane_id, text })
+        self.send_content(HerdrRequest::PaneSendText { pane_id, text })
     }
 
     /// One bracketed paste, as tmux `paste-buffer -p` delivers it; a body holding the end
@@ -447,7 +447,7 @@ impl HerdrTarget {
         }
         let (pane_id, text) = (self.0.pane.clone(), text.to_string());
         let keys = vec![herdr_key(HostKey::Enter).to_string()];
-        self.send_pinned(HerdrRequest::PaneSendInput {
+        self.send_content(HerdrRequest::PaneSendInput {
             pane_id,
             text,
             keys,
@@ -458,6 +458,23 @@ impl HerdrTarget {
         let pane_id = self.0.pane.clone();
         let keys = keys.iter().map(|key| herdr_key(*key).to_string()).collect();
         self.send_pinned(HerdrRequest::PaneSendKeys { pane_id, keys })
+    }
+
+    /// Content passes the owner fence first; a refused write drops its judgment unsent.
+    fn send_content(&self, request: HerdrRequest) -> Result<HostMutation, HostError> {
+        let mut sent = None;
+        let fence =
+            crate::services::tui_input::writer_lease::content("herdr", &self.0.pane, || {
+                sent = Some(self.send_pinned(request));
+                Ok(())
+            });
+        match (fence, sent) {
+            (Ok(()), Some(sent)) => sent,
+            _ => {
+                self.discard_pin();
+                Ok(refused("owner_content_fence"))
+            }
+        }
     }
 
     /// Sends `request` to the server the pinned judgment named, consuming it; without one

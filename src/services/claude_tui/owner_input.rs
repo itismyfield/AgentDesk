@@ -22,6 +22,7 @@ struct Scope {
     allowed: AtomicBool,
     known_before: AtomicBool,
     keyed: AtomicBool,
+    holder: crate::services::tui_input::writer_lease::Holder,
     #[cfg(unix)]
     epoch: Mutex<Option<crate::services::tui_input::target_epoch::LiveEpoch>>,
     refused: Mutex<Option<submission_fence::PreSubmitPersistenceRefused>>,
@@ -94,6 +95,25 @@ pub(crate) fn load_failed() {
     if let Some(scope) = current() {
         scope.refuse("load_failed".into());
     }
+}
+
+/// `None` without an owner on this thread; otherwise whether this owner may write `physical`,
+/// holding it for the owner's lifetime. A foreign host or tmux owner fails closed.
+pub(crate) fn hold_content(host: &str, physical: &str, key: &str) -> Option<Result<(), String>> {
+    let scope = current()?;
+    Some(if scope.target["host"] != host {
+        Err(format!(
+            "owner on {} cannot write {key}",
+            scope.target["host"]
+        ))
+    } else if host == "tmux" && scope.target["owner"] != physical {
+        Err(format!(
+            "owner {} cannot write {key}",
+            scope.target["owner"]
+        ))
+    } else {
+        scope.holder.hold(key)
+    })
 }
 
 /// The pinned pane id and the identity condition the tmux server checks atomically around an
@@ -244,10 +264,17 @@ pub(crate) fn capture_scope<R>(
         allowed: AtomicBool::new(false),
         known_before: AtomicBool::new(false),
         keyed: AtomicBool::new(false),
+        holder: Default::default(),
         epoch: Mutex::new(None),
         refused: Mutex::new(None),
     });
     let _restore = Restore(CURRENT.with(|v| v.replace(Some(scope.clone()))));
+    if scope.target["host"] == "tmux"
+        && let Some(session) = scope.target["owner"].as_str()
+    {
+        let key = crate::services::tui_input::writer_lease::key("tmux", session);
+        let _ = scope.holder.hold(&key);
+    }
     if scope.target["host"] == "tmux"
         && let Some(session) = scope.target["owner"].as_str()
         && let Some(pin) =
@@ -294,6 +321,7 @@ pub(crate) fn argv_payload<R>(
     context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
     send: impl FnOnce() -> Result<R, String>,
 ) -> Result<R, String> {
+    crate::services::tui_input::writer_lease::admits("tmux", &context.tmux_session)?;
     if let Some(scope) = current() {
         if context.provider != "codex"
             || scope.provider != "codex"

@@ -352,3 +352,36 @@ fn owner_refusal_after_a_key_never_proves_not_sent() {
     );
     assert_eq!(rig.events(), ["paste"], "one paste and no Enter");
 }
+
+/// A leaf on a thread without the owner's scope sends no key to the target that owner holds.
+#[test]
+fn an_unscoped_leaf_on_an_owner_held_target_sends_no_key() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = Rig::new("a4b-held-leaf");
+    let shim = rig.f.root.path().join("a4b-held-leaf-traced-tmux");
+    let name = rig.name.clone();
+    let before = move |_: &Rig| {
+        let (name, shim) = (name.clone(), shim.clone());
+        let spawned = std::thread::spawn(move || {
+            submit(
+                &Pane::with_program(&name, shim),
+                "4a0held",
+                TEXT,
+                &FAST,
+                false,
+            )
+        });
+        assert_eq!(
+            spawned.join().unwrap(),
+            Outcome::NotSent(Veto::LockContended)
+        );
+    };
+    let (outcome, _, _) = rig.run(&FAST, false, usize::MAX, false, before, || {});
+    assert_eq!(outcome, Outcome::Injected);
+    let steps = rig.steps();
+    assert_eq!(steps.iter().filter(|step| *step == "load").count(), 1);
+    assert_eq!(
+        after_load(&steps),
+        ["load", "pin", "start", "paste", "Enter"]
+    );
+}

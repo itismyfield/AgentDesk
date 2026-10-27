@@ -15,6 +15,10 @@ pub(in crate::services::claude_tui) fn submit(
     timing: &Timing,
     stash: bool,
 ) -> Outcome {
+    let session = pane.target().trim_start_matches('=').trim_end_matches(':');
+    if crate::services::tui_input::writer_lease::admits("tmux", session).is_err() {
+        return Outcome::NotSent(Veto::LockContended);
+    }
     let Ok(mut file) = tempfile::NamedTempFile::new() else {
         return load_failed();
     };
