@@ -670,7 +670,7 @@ mod herdr {
         }
 
         fn read_pane(&self, pane_id: &str) -> HerdrPaneReading {
-            if pane_id == self.pane && self.target.execution_alive() {
+            if pane_id == self.pane && self.target.execution_confirmed() {
                 return HerdrPaneReading::Present(self.evidence.clone());
             }
             HerdrPaneReading::Unreadable("the pane gate did not confirm the execution".into())
