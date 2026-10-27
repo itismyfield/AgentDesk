@@ -731,7 +731,7 @@ where
     }
     use crate::services::cluster::intake_router_hook::owner_record::output;
     let (scope, origin) = if let Some(pool) = gateway.output_pool() {
-        let Some(provider) = gateway.bot_owner_provider() else {
+        let Some(provider) = gateway.output_provider() else {
             return RevalidatedDeliveryOutcome::Delivery(DeliveryOutcome::Unknown {
                 fell_back: false,
             });
@@ -1071,6 +1071,21 @@ mod tests {
         };
         for chunks in [true, false] {
             let (_db, pool, origin) = fixture(if chunks { "7336904" } else { "7336905" }).await;
+            let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(
+                pool.clone(),
+            ));
+            let real = crate::services::discord::gateway::DiscordGateway::new(
+                Arc::new(poise::serenity_prelude::Http::new("Bot fixture")),
+                shared,
+                ProviderKind::Claude,
+                None,
+            );
+            assert!(real.bot_owner_provider().is_none());
+            assert_eq!(
+                real.output_provider(),
+                Some(ProviderKind::Claude),
+                "Legacy output does not need a live gateway turn"
+            );
             let artifact = origin.seal("answer");
             assert_eq!(crate::services::cluster::intake_router_hook::owner_record::output::source_artifact(Some(&pool),"claude",if chunks {"7336904"} else {"7336905"},"90001",None,"answer").await.unwrap(),Some(artifact));
             let single = _db.single_pool().await;
@@ -1514,6 +1529,9 @@ mod tests {
         fn output_pool(&self) -> Option<&sqlx::PgPool> {
             self.source_pool.as_ref()
         }
+        fn output_provider(&self) -> Option<ProviderKind> {
+            Some(ProviderKind::Claude)
+        }
         fn send_message<'a>(
             &'a self,
             _c: ChannelId,
@@ -1682,7 +1700,7 @@ mod tests {
             false
         }
         fn bot_owner_provider(&self) -> Option<ProviderKind> {
-            self.source_pool.as_ref().map(|_| ProviderKind::Claude)
+            None
         }
     }
 

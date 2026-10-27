@@ -57,6 +57,10 @@ pub(super) trait TurnGateway: Send + Sync {
         None
     }
 
+    fn output_provider(&self) -> Option<ProviderKind> {
+        self.bot_owner_provider()
+    }
+
     fn send_message<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -562,6 +566,10 @@ fn next_headless_message_id() -> MessageId {
 impl TurnGateway for DiscordGateway {
     fn output_pool(&self) -> Option<&sqlx::PgPool> {
         self.shared.pg_pool.as_ref()
+    }
+
+    fn output_provider(&self) -> Option<ProviderKind> {
+        Some(self.provider.clone())
     }
 
     fn send_notice_once<'a>(
