@@ -56,6 +56,23 @@ function payloads(path: string) {
     .map(([, init]) => JSON.parse(init.body));
 }
 
+it("keeps a Korean display name and assigns the ASCII custom-agent fallback", async () => {
+  const setAgents = vi.fn();
+  const args = await render({ customName: "요리사", setAgents, setExpandedAgent: vi.fn() });
+  await act(async () => { actions.addCustomAgent(); });
+  const added = setAgents.mock.calls[0][0]([]);
+  expect(added).toHaveLength(1);
+  expect(added[0]).toMatchObject({ id: "agent-1", name: "요리사", custom: true });
+  expect(args.setExpandedAgent).toHaveBeenLastCalledWith("agent-1");
+});
+
+it("uses ASCII parts of a mixed-language custom name as its ID", async () => {
+  const setAgents = vi.fn();
+  await render({ customName: "요리 Team 42", setAgents });
+  await act(async () => { actions.addCustomAgent(); });
+  expect(setAgents.mock.calls[0][0]([])[0].id).toBe("team-42");
+});
+
 it("uses the same normalized tokens for validation, channel lookup and completion", async () => {
   await render();
   await act(async () => { await actions.validateStep1(); await actions.fetchChannels(); await actions.handleComplete(); });
