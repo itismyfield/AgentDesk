@@ -65,7 +65,7 @@ impl OrphanTerminalFrameFacts<'_> {
         self.existing_record_required() && self.o_tail_covered.is_none()
     }
 
-    fn existing_record_required(&self) -> bool {
+    pub(super) fn existing_record_required(&self) -> bool {
         self.denial.is_some()
             && self.watcher_direct_fallback_requested
             && !self.watcher_direct_fallback_authorized

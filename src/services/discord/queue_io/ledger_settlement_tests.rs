@@ -1033,7 +1033,7 @@ async fn i7441b_real_late_settle_open_preserves_requeued_input_and_us_boundary()
         f.row.channel_id,
         crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
     )]);
-    completed_turn_ledger::o_pending::capture(&ProviderKind::Claude, &f.row);
+    completed_turn_ledger::o_pending::capture(&ProviderKind::Claude, &f.row).await;
     let posted_ms = MessageId::new(f.port.messages.lock().unwrap()[0].id)
         .created_at()
         .timestamp_millis() as u64;

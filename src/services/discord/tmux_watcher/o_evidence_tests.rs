@@ -34,9 +34,27 @@ async fn plan(
     mirrored: bool,
     start: u64,
 ) {
+    let authorized = before.as_ref().is_some_and(|row| {
+        row.turn_nonce == f.row.turn_nonce
+            && row.effective_relay_owner_kind()
+                != crate::services::discord::inflight::RelayOwnerKind::None
+            && start == row.turn_start_offset.unwrap_or(0)
+    });
     let provider = f.row.provider_kind().unwrap();
     let session = f.row.tmux_session_name.clone().unwrap();
     let output = f.source.path.display().to_string();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        &session,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: f.row.runtime_kind.unwrap(),
+            output_path: output.clone(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
     let context = TerminalRelayPlanContext {
         evidence_source: Some((f.source.dev, f.source.ino)),
         http,
@@ -94,9 +112,13 @@ async fn plan(
     else {
         panic!("orphan seam bypassed")
     };
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
     flush_dlq_tasks().await;
-    assert!(!result.watcher_direct_fallback_authorized);
-    assert!(!result.watcher_direct_fallback_after_session_bound_ack);
+    assert_eq!(result.watcher_direct_fallback_authorized, authorized);
+    assert_eq!(
+        result.watcher_direct_fallback_after_session_bound_ack,
+        authorized
+    );
     assert_eq!(
         f.sends.load(Ordering::SeqCst),
         sends,
@@ -242,6 +264,10 @@ async fn i7441b_claude_soft_frameaccepted_ack_and_o_lookup_share_deadline_pg() {
     let pool = db.connect_and_migrate().await;
     for proof in 0..3 {
         let mut f = Fixture::new(744160 + proof, ProviderKind::Claude, &["soft answer"]).await;
+        let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+            f.row.channel_id,
+            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        )]);
         let (http, _http_guard) = f.http().await;
         let shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
@@ -462,6 +488,10 @@ pub(in crate::services::discord) async fn assert_receipted_fixture_suppressed(
     f: &Fixture,
     pool: &sqlx::PgPool,
 ) {
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        f.row.channel_id,
+        f.row.runtime_kind.unwrap(),
+    )]);
     let (http, _http_guard) = f.http().await;
     let shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
@@ -567,7 +597,17 @@ pub(in crate::services::discord) async fn assert_uncovered_fixture_recorded(
     let (http, _guard) = f.http().await;
     let shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-    plan(f, &shared, &http, None, None, &mut None, false, 0).await;
+    plan(
+        f,
+        &shared,
+        &http,
+        None,
+        None,
+        &mut None,
+        false,
+        f.row.turn_start_offset.unwrap_or(0),
+    )
+    .await;
     let rows: Vec<String> = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let rows: Vec<String> =
@@ -585,4 +625,60 @@ pub(in crate::services::discord) async fn assert_uncovered_fixture_recorded(
     .await
     .unwrap();
     assert_eq!(rows, vec![f.body.clone()]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441b_authorized_direct_drops_unknown_evidence_before_one_second() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let mut f = Fixture::new(744202, ProviderKind::Claude, &["body"]).await;
+    f.row
+        .set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        f.row.channel_id,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    let _binding = crate::services::tui_o::cutover::test_override::bind_claude_tui_session(
+        f.row.tmux_session_name.as_ref().unwrap(),
+        f.source.path.to_str().unwrap(),
+    );
+    let (http, _http) = f.http().await;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    save_inflight_state(&f.row).unwrap();
+    f.port.messages.lock().unwrap().clear();
+    let mut target = None;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        plan(
+            &f,
+            &shared,
+            &http,
+            Some(f.row.clone()),
+            None,
+            &mut target,
+            false,
+            0,
+        ),
+    )
+    .await
+    .expect("authorized terminal must drop unresolved evidence");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441b_legacy_channel_never_uses_stale_o_receipts_pg() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7441b_legacy",
+        "stale O receipts",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    let f = Fixture::new(744204, ProviderKind::Claude, &["body"]).await;
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let reads = f.get_calls.load(Ordering::SeqCst);
+    assert_uncovered_fixture_recorded(&f, &pool).await;
+    assert_eq!(f.get_calls.load(Ordering::SeqCst), reads);
+    pool.close().await;
+    db.drop().await;
 }

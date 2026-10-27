@@ -377,7 +377,7 @@ async fn i7441b_pending_is_retried_only_at_next_eligible_projection_pg() {
         f.row.channel_id,
         crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
     )]);
-    completed_turn_ledger::o_pending::capture(&ProviderKind::Claude, &f.row);
+    completed_turn_ledger::o_pending::capture(&ProviderKind::Claude, &f.row).await;
     let pending = f
         .root
         .join("runtime/discord_pending_o_deliveries/claude")

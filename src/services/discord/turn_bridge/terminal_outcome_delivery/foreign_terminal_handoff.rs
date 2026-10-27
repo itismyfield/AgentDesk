@@ -525,11 +525,13 @@ pub(super) async fn resume_with_gateway(
     ) else {
         return Ok(false);
     };
+    #[cfg(unix)]
     if o_owns_body {
         super::super::super::outbound::completed_turn_ledger::o_pending::capture(
             &provider,
             &snapshot.local,
-        );
+        )
+        .await;
     }
     let mut delivered = o_owns_body
         || snapshot.delivery_receipts.len() == chunks.len()
@@ -583,10 +585,12 @@ pub(super) async fn resume_with_gateway(
                 Ok(crate::services::tui_o::cutover::BodySend::Sent(posted)) => posted?,
                 // O took the channel since the peek: settle the custody as O's.
                 Ok(crate::services::tui_o::cutover::BodySend::OwnedByO) => {
+                    #[cfg(unix)]
                     super::super::super::outbound::completed_turn_ledger::o_pending::capture(
                         &provider,
                         &snapshot.local,
-                    );
+                    )
+                    .await;
                 }
                 Err(_) => return Ok(false),
             }

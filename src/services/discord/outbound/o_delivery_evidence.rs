@@ -25,12 +25,12 @@ pub(super) struct EpisodeCovered {
 }
 
 async fn verify<P: DiscordPort>(
-    root: &Path,
     pool: Option<&sqlx::PgPool>,
     port: &P,
     plan: &Manifest,
     sent: usize,
     deadline: Instant,
+    local: Option<&crate::services::tui_o::store::ledger::LedgerState>,
 ) -> Option<u64> {
     if plan.version != crate::services::tui_o::shadow::IDENTITY_VERSION
         || !plan.body.is_char_boundary(sent)
@@ -39,7 +39,7 @@ async fn verify<P: DiscordPort>(
         return None;
     }
     let channel = plan.pieces.first()?.key.channel_id;
-    let local = delivery_evidence::local(root, channel);
+
     let required: Vec<_> = plan
         .pieces
         .iter()
@@ -49,44 +49,41 @@ async fn verify<P: DiscordPort>(
     if required.is_empty() {
         return None;
     }
-    let checks = required.into_iter().map(|piece| {
-        let local = &local;
-        async move {
-            let mut ids = Vec::new();
-            if let Some(local) = &local
-                && let Some((_, record)) = local.latest_piece(&piece.key, piece.index)
-                && record.payload == piece.payload
-                && let Some(PieceOutcome::Posted(id)) = record.outcome
-            {
-                ids.push(id);
-            }
-            for &id in &ids {
-                if let Some(time) = exact(port, channel, id, &piece.payload, deadline).await {
-                    return Some(time);
-                }
-            }
-            ids.clear();
-            if let (Some(pool), Some(key)) = (pool, PieceKey::new(piece.key.clone(), piece.index))
-                && let Ok(Ok(shared)) = tokio::time::timeout_at(
-                    deadline,
-                    delivery_candidates(pool, &key, port.bot_id(), &piece.payload),
-                )
-                .await
-            {
-                ids.extend(shared);
-            }
-            ids.sort_unstable();
-            ids.dedup();
-            for id in ids {
-                if Instant::now() >= deadline {
-                    return None;
-                }
-                if let Some(time) = exact(port, channel, id, &piece.payload, deadline).await {
-                    return Some(time);
-                }
-            }
-            None
+    let checks = required.into_iter().map(|piece| async move {
+        let mut ids = Vec::new();
+        if let Some(local) = &local
+            && let Some((_, record)) = local.latest_piece(&piece.key, piece.index)
+            && record.payload == piece.payload
+            && let Some(PieceOutcome::Posted(id)) = record.outcome
+        {
+            ids.push(id);
         }
+        for &id in &ids {
+            if let Some(time) = exact(port, channel, id, &piece.payload, deadline).await {
+                return Some(time);
+            }
+        }
+        ids.clear();
+        if let (Some(pool), Some(key)) = (pool, PieceKey::new(piece.key.clone(), piece.index))
+            && let Ok(Ok(shared)) = tokio::time::timeout_at(
+                deadline,
+                delivery_candidates(pool, &key, port.bot_id(), &piece.payload),
+            )
+            .await
+        {
+            ids.extend(shared);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            if let Some(time) = exact(port, channel, id, &piece.payload, deadline).await {
+                return Some(time);
+            }
+        }
+        None
     });
     let results: Vec<_> = futures::stream::iter(checks)
         .buffer_unordered(8)
@@ -129,9 +126,46 @@ pub(super) async fn episode<P: DiscordPort>(
     if !plan.completed || plan.input.is_none() {
         return None;
     }
-    verify(root, pool, port, plan, 0, deadline)
+    let local = tokio::time::timeout_at(
+        deadline,
+        local_snapshot(
+            root.to_path_buf(),
+            plan.pieces.first()?.key.channel_id,
+            None,
+        ),
+    )
+    .await
+    .ok()
+    .flatten()?;
+    verify(pool, port, plan, 0, deadline, local.1.as_deref())
         .await
         .map(|posted_ms| EpisodeCovered { posted_ms })
+}
+
+type LocalSnapshot = (
+    Option<std::time::SystemTime>,
+    Option<Arc<crate::services::tui_o::store::ledger::LedgerState>>,
+);
+
+async fn local_snapshot(
+    root: std::path::PathBuf,
+    channel: u64,
+    previous: Option<LocalSnapshot>,
+) -> Option<LocalSnapshot> {
+    tokio::task::spawn_blocking(move || {
+        let stamp = delivery_evidence::stamp(&root, channel);
+        if let Some(previous) = previous
+            && previous.0 == stamp
+        {
+            return previous;
+        }
+        (
+            stamp,
+            delivery_evidence::local(&root, channel).map(Arc::new),
+        )
+    })
+    .await
+    .ok()
 }
 
 pub(in crate::services::discord) struct Frame<'a> {
@@ -151,17 +185,33 @@ pub(in crate::services::discord) async fn tail(
     deadline: Instant,
 ) -> Option<TailCovered> {
     let root = crate::config::runtime_root()?;
-    let plan = manifest::build(
-        &root,
-        manifest::Query {
-            provider: frame.provider,
-            channel: frame.channel.get(),
-            path: frame.path,
-            file: frame.file,
-            range: frame.range,
-        },
+    let (build_root, provider, path) = (
+        root.clone(),
+        frame.provider.clone(),
+        frame.path.to_path_buf(),
+    );
+    let channel = frame.channel.get();
+    let (file, range) = (frame.file, frame.range);
+    let plan = tokio::time::timeout_at(
         deadline,
-    )?;
+        tokio::task::spawn_blocking(move || {
+            manifest::build(
+                &build_root,
+                manifest::Query {
+                    provider: &provider,
+                    channel,
+                    path: &path,
+                    file,
+                    range,
+                },
+                deadline,
+            )
+        }),
+    )
+    .await
+    .ok()?
+    .ok()
+    .flatten()?;
     if plan.body != frame.body {
         return None;
     }
@@ -172,19 +222,24 @@ pub(in crate::services::discord) async fn tail(
         .id
         .get();
     let port = GatewayPort::new(Arc::clone(http), bot);
+    let mut local = None;
     loop {
         if Instant::now() >= deadline {
             return None;
         }
+        local = tokio::time::timeout_at(deadline, local_snapshot(root.clone(), channel, local))
+            .await
+            .ok()
+            .flatten();
         if tokio::time::timeout_at(
             deadline,
             verify(
-                &root,
                 shared.pg_pool.as_ref(),
                 &port,
                 &plan,
                 frame.sent,
                 deadline,
+                local.as_ref().and_then(|snapshot| snapshot.1.as_deref()),
             ),
         )
         .await

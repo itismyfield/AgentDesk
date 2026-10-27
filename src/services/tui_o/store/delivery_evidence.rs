@@ -43,6 +43,14 @@ pub(crate) fn source(
     (cursor.source == source).then_some(cursor)
 }
 
+pub(crate) fn stamp(root: &Path, channel: u64) -> Option<std::time::SystemTime> {
+    let store = OStore::existing(root)?;
+    std::fs::metadata(store.channel_dir(channel).join(LEDGER_FILE))
+        .ok()?
+        .modified()
+        .ok()
+}
+
 pub(crate) fn local(root: &Path, channel: u64) -> Option<ledger::LedgerState> {
     let store = OStore::existing(root)?;
     let init = store.read_init(channel).ok()??;

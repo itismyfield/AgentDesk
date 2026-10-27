@@ -35,7 +35,8 @@ pub(super) async fn consume_delegated_terminal(
         crate::services::discord::outbound::completed_turn_ledger::o_pending::capture(
             arm.provider,
             row,
-        );
+        )
+        .await;
     }
     if let Some(context) = arm.task_card {
         super::task_response_authority::promote_delegated_task_card(

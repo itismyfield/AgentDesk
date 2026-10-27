@@ -279,9 +279,15 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         // Leave 100ms inside the 10s budget for the final terminal decision.
         let evidence_deadline =
             tokio::time::Instant::now() + std::time::Duration::from_millis(9900);
+        let lookup_candidate = relay_decision.should_direct_send
+            && !current_response.is_empty()
+            && crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
+                channel_id.get(),
+                Some(tmux_session_name),
+            ) == Ok(true);
         let o_evidence = async {
             let file = context.evidence_source?;
-            if !relay_decision.should_direct_send || current_response.is_empty() {
+            if !lookup_candidate {
                 return None;
             }
             crate::services::discord::outbound::o_delivery_evidence::tail(
@@ -333,8 +339,15 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                 false
             }
         };
-        let (session_bound_relay_owns_terminal_delivery, o_tail_covered) =
-            tokio::join!(ack_delivery, o_evidence);
+        let mut o_evidence = Box::pin(o_evidence);
+        let mut ack_delivery = Box::pin(ack_delivery);
+        let mut early_evidence = None;
+        let session_bound_relay_owns_terminal_delivery = tokio::select! {
+            biased;
+            proof = &mut o_evidence => { early_evidence = Some(proof); (&mut ack_delivery).await },
+            delivered = &mut ack_delivery => delivered,
+        };
+        drop(ack_delivery);
         let prompt_anchor_present = prompt_anchor_present_before_relay;
         let ssh_direct_pending = prompt_anchor_present
             || crate::services::tui_prompt_dedupe::is_ssh_direct_observation_pending(
@@ -627,43 +640,54 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         // per-conjunct counter move with the seam; what is new is that the body
         // goes to the dead-letter queue instead of vanishing, and that a frame
         // left with no record pages instead of reading as healthy.
+        let mut orphan_facts = orphan_terminal_frame::OrphanTerminalFrameFacts {
+            o_tail_covered: None,
+            denial: soft_terminal_authority_denial,
+            watcher_direct_fallback_requested,
+            watcher_direct_fallback_authorized,
+            session_bound_relay_owns_terminal_delivery,
+            // #5978: the RAW verdict. The routed `..._refused_duplicate` ANDs in
+            // `watcher_direct_fallback_after_session_bound_ack` — the authorization THIS
+            // seam has already denied — so feeding it here pins the record conjunct true
+            // and dead-letters bodies the #4081/#4714 guard just found on the channel.
+            // Same text either way: an unauthorized fallback keeps
+            // `session_bound_fallback_uses_full_body` false, so the decision read
+            // `current_response` itself.
+            duplicate_guard_refused_body: direct_terminal_response_decision.refused_duplicate(),
+            current_response,
+            response_sent_offset,
+            full_response_len: full_response.len(),
+            data_start_offset,
+            current_offset,
+            terminal_event_consumed_offset: watcher_resend_range_end,
+            watcher_resend_committed,
+            terminal_kind,
+            session_bound_ack_outcome,
+            inflight_present: inflight_before_relay.is_some(),
+            inflight_relay_owner: inflight_relay_owner_kind,
+            startup_snapshot_authority: startup_soft_terminal_authority
+                .startup_snapshot_authorized(),
+            tmux_session_name,
+            placeholder_msg_id,
+            request_owner_user_id: inflight_before_relay
+                .as_ref()
+                .map(|state| state.request_owner_user_id),
+        };
+        let o_tail_covered = if orphan_facts.existing_record_required() {
+            match early_evidence {
+                Some(proof) => proof,
+                None => o_evidence.await,
+            }
+        } else {
+            drop(o_evidence);
+            None
+        };
+        orphan_facts.o_tail_covered = o_tail_covered.as_ref();
         orphan_terminal_frame::observe_orphan_terminal_frame(
             shared,
             channel_id,
             watcher_provider,
-            &orphan_terminal_frame::OrphanTerminalFrameFacts {
-                o_tail_covered: o_tail_covered.as_ref(),
-                denial: soft_terminal_authority_denial,
-                watcher_direct_fallback_requested,
-                watcher_direct_fallback_authorized,
-                session_bound_relay_owns_terminal_delivery,
-                // #5978: the RAW verdict. The routed `..._refused_duplicate` ANDs in
-                // `watcher_direct_fallback_after_session_bound_ack` — the authorization THIS
-                // seam has already denied — so feeding it here pins the record conjunct true
-                // and dead-letters bodies the #4081/#4714 guard just found on the channel.
-                // Same text either way: an unauthorized fallback keeps
-                // `session_bound_fallback_uses_full_body` false, so the decision read
-                // `current_response` itself.
-                duplicate_guard_refused_body: direct_terminal_response_decision.refused_duplicate(),
-                current_response,
-                response_sent_offset,
-                full_response_len: full_response.len(),
-                data_start_offset,
-                current_offset,
-                terminal_event_consumed_offset: watcher_resend_range_end,
-                watcher_resend_committed,
-                terminal_kind,
-                session_bound_ack_outcome,
-                inflight_present: inflight_before_relay.is_some(),
-                inflight_relay_owner: inflight_relay_owner_kind,
-                startup_snapshot_authority: startup_soft_terminal_authority
-                    .startup_snapshot_authorized(),
-                tmux_session_name,
-                placeholder_msg_id,
-                request_owner_user_id: inflight_before_relay
-                    .as_ref()
-                    .map(|state| state.request_owner_user_id),
-            },
+            &orphan_facts,
         );
         // #3041 P1-3 (codex P1-3 R7): turn-boundary ACK reset. THIS turn's terminal
         // ACK has now been waited on (`session_bound_ack_outcome` is captured) and

@@ -393,12 +393,12 @@ async fn i7441b_local_native_receipts_require_whole_episode_and_exact_payload() 
         );
         assert!(
             verify(
-                &f.root,
                 None,
                 &*f.port,
                 &plan,
                 plan.body.len() - 4,
-                Instant::now() + std::time::Duration::from_secs(10)
+                Instant::now() + std::time::Duration::from_secs(10),
+                delivery_evidence::local(&f.root, f.row.channel_id).as_ref()
             )
             .await
             .is_some()
@@ -410,11 +410,11 @@ async fn i7441b_local_native_receipts_require_whole_episode_and_exact_payload() 
 async fn i7441b_source_prefix_and_deadline_budgets_fail_closed_pg() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
-    let f = Fixture::new(744103, ProviderKind::Claude, &["small body"]).await;
-    manifest::SOURCE_BYTES.with(|c| c.set(0));
+    let mut f = Fixture::new(744103, ProviderKind::Claude, &["small body"]).await;
+    manifest::SOURCE_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
     let _plan = f.plan();
     assert_eq!(
-        manifest::SOURCE_BYTES.with(|c| c.get()),
+        manifest::SOURCE_BYTES.load(std::sync::atomic::Ordering::Relaxed),
         f.row.last_offset as usize
     );
     let expired = manifest::build(
@@ -432,9 +432,11 @@ async fn i7441b_source_prefix_and_deadline_budgets_fail_closed_pg() {
     let raw = std::fs::read(&f.source.path).unwrap();
     let prefix = format!(
         "{}\n",
-        json!({"type":"metadata","padding":"x".repeat(3*1024*1024)})
+        json!({"type":"metadata","padding":"x".repeat(64*1024*1024 + 1)})
     );
     let joined = [prefix.as_bytes(), raw.as_slice()].concat();
+    f.row.turn_start_offset = Some(prefix.len() as u64);
+    f.row.last_offset = joined.len() as u64;
     std::fs::write(&f.source.path, &joined).unwrap();
     let cursor_path = f
         .root
@@ -450,7 +452,7 @@ async fn i7441b_source_prefix_and_deadline_budgets_fail_closed_pg() {
     cursor.captured_through = joined.len() as u64;
     cursor.prefix_hash = manifest::hash(&joined);
     std::fs::write(cursor_path, serde_json::to_vec(&cursor).unwrap()).unwrap();
-    manifest::SOURCE_BYTES.with(|c| c.set(0));
+    manifest::SOURCE_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
     assert!(
         manifest::build(
             &f.root,
@@ -465,19 +467,22 @@ async fn i7441b_source_prefix_and_deadline_budgets_fail_closed_pg() {
         )
         .is_none()
     );
-    assert_eq!(manifest::SOURCE_BYTES.with(|c| c.get()), 2 * 1024 * 1024);
+    assert_eq!(
+        manifest::SOURCE_BYTES.load(std::sync::atomic::Ordering::Relaxed),
+        64 * 1024 * 1024
+    );
     let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
         "i7441b_prefix",
         "bounded prefix orphan",
     )
     .await;
     let pool = db.connect_and_migrate().await;
-    crate::services::discord::tmux::tmux_watcher::o_evidence_tests::assert_uncovered_fixture_recorded(&f,&pool).await;
     let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
         f.row.channel_id,
         RuntimeHandoffKind::ClaudeTui,
     )]);
-    super::super::completed_turn_ledger::o_pending::capture(&ProviderKind::Claude, &f.row);
+    crate::services::discord::tmux::tmux_watcher::o_evidence_tests::assert_uncovered_fixture_recorded(&f,&pool).await;
+    super::super::completed_turn_ledger::o_pending::capture(&ProviderKind::Claude, &f.row).await;
     let pending = f
         .root
         .join("runtime/discord_pending_o_deliveries/claude")
@@ -710,12 +715,12 @@ async fn i7441b_multichunk_tail_proof_does_not_require_consumed_prefix() {
     );
     assert!(
         verify(
-            &f.root,
             None,
             &*f.port,
             &plan,
             sent,
-            Instant::now() + std::time::Duration::from_secs(10)
+            Instant::now() + std::time::Duration::from_secs(10),
+            delivery_evidence::local(&f.root, f.row.channel_id).as_ref()
         )
         .await
         .is_some()
@@ -898,14 +903,28 @@ async fn i7441b_read_only_ledger_torn_tail_wrong_sources_and_old_versions() {
     let mut empty = plan.clone();
     empty.pieces.clear();
     assert!(
-        verify(&f.root, None, &*f.port, &empty, 0, deadline)
-            .await
-            .is_none()
+        verify(
+            None,
+            &*f.port,
+            &empty,
+            0,
+            deadline,
+            delivery_evidence::local(&f.root, f.row.channel_id).as_ref()
+        )
+        .await
+        .is_none()
     );
     assert!(
-        verify(&f.root, None, &*f.port, &plan, plan.body.len(), deadline)
-            .await
-            .is_none()
+        verify(
+            None,
+            &*f.port,
+            &plan,
+            plan.body.len(),
+            deadline,
+            delivery_evidence::local(&f.root, f.row.channel_id).as_ref()
+        )
+        .await
+        .is_none()
     );
     assert!(
         manifest::build(
@@ -997,8 +1016,8 @@ async fn i7441b_prefix_suffix_budget_boundary_is_exact() {
         ));
     let mut cursor: crate::services::tui_o::store::spool::Cursor =
         serde_json::from_slice(&std::fs::read(&cursor_path).unwrap()).unwrap();
-    for extra in [0, 1] {
-        let padding_len = 2 * 1024 * 1024 + extra - raw.len();
+    for extra in [-1_i64, 1] {
+        let padding_len = (64_i64 * 1024 * 1024 + extra) as usize - e_start;
         let mut bytes = vec![b' '; padding_len];
         bytes[padding_len - 1] = b'\n';
         bytes.extend_from_slice(&raw);
@@ -1006,7 +1025,7 @@ async fn i7441b_prefix_suffix_budget_boundary_is_exact() {
         cursor.captured_through = (padding_len + e_start) as u64;
         cursor.prefix_hash = manifest::hash(&bytes[..cursor.captured_through as usize]);
         std::fs::write(&cursor_path, serde_json::to_vec(&cursor).unwrap()).unwrap();
-        manifest::SOURCE_BYTES.with(|c| c.set(0));
+        manifest::SOURCE_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
         let plan = manifest::build(
             &f.root,
             manifest::Query {
@@ -1016,13 +1035,91 @@ async fn i7441b_prefix_suffix_budget_boundary_is_exact() {
                 file: (f.source.dev, f.source.ino),
                 range: (padding_len as u64, bytes.len() as u64),
             },
-            Instant::now() + std::time::Duration::from_secs(2),
+            Instant::now() + std::time::Duration::from_secs(10),
         );
         assert_eq!(
             plan.is_some(),
-            extra == 0,
-            "one byte past the shared prefix/suffix budget is Unknown"
+            extra == -1,
+            "prefix cap is independent of the requested episode range"
         );
-        assert_eq!(manifest::SOURCE_BYTES.with(|c| c.get()), 2 * 1024 * 1024);
+        if let Some(plan) = &plan {
+            assert!(
+                super::episode(
+                    &f.root,
+                    None,
+                    &*f.port,
+                    plan,
+                    Instant::now() + std::time::Duration::from_secs(10)
+                )
+                .await
+                .is_some(),
+                "bounded prefix must reach whole-episode coverage"
+            );
+        }
+        assert_eq!(
+            manifest::SOURCE_BYTES.load(std::sync::atomic::Ordering::Relaxed),
+            if extra == -1 {
+                bytes.len()
+            } else {
+                64 * 1024 * 1024
+            }
+        );
+        manifest::SOURCE_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            manifest::build(
+                &f.root,
+                manifest::Query {
+                    provider: &ProviderKind::Claude,
+                    channel: f.row.channel_id,
+                    path: &f.source.path,
+                    file: (f.source.dev, f.source.ino),
+                    range: (0, bytes.len() as u64),
+                },
+                Instant::now() + std::time::Duration::from_secs(10)
+            )
+            .is_none()
+        );
+        assert_eq!(
+            manifest::SOURCE_BYTES.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
     }
+}
+
+#[tokio::test]
+async fn i7441b_local_snapshot_reuses_mtime_and_refreshes_changed_ledger() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let f = Fixture::new(744203, ProviderKind::Claude, &["body"]).await;
+    let first = super::local_snapshot(f.root.clone(), f.row.channel_id, None)
+        .await
+        .unwrap();
+    let first_state = first.1.clone().unwrap();
+    let cached = super::local_snapshot(f.root.clone(), f.row.channel_id, Some(first))
+        .await
+        .unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &first_state,
+        cached.1.as_ref().unwrap()
+    ));
+    let ledger = f
+        .root
+        .join("o_store")
+        .join(f.row.channel_id.to_string())
+        .join("ledger.jsonl");
+    let original = std::fs::read(&ledger).unwrap();
+    std::fs::remove_file(&ledger).unwrap();
+    let missing = super::local_snapshot(f.root.clone(), f.row.channel_id, Some(cached))
+        .await
+        .unwrap();
+    assert!(missing.1.is_none());
+    std::fs::write(&ledger, original).unwrap();
+    let refreshed = super::local_snapshot(f.root.clone(), f.row.channel_id, Some(missing))
+        .await
+        .unwrap();
+    assert!(refreshed.1.is_some());
+    assert!(!std::sync::Arc::ptr_eq(
+        &first_state,
+        refreshed.1.as_ref().unwrap()
+    ));
 }

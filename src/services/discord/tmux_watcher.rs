@@ -487,6 +487,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             Ok(CollectOutcome::Fallthrough(collected)) => collected,
         };
         let CollectedTurnStream {
+            mixed_read_provenance,
             turn_data_start_offset,
             source_authority,
             split_trailing_turn_follows,
@@ -826,12 +827,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
 
         let terminal_relay_plan_outcome = {
-            let evidence_source = match source_authority.source_file {
-                crate::services::cluster::stream_relay::SourceFileIdentity::Unix { dev, ino } => {
-                    Some((dev, ino))
-                }
-                _ => None,
-            };
+            let evidence_source = o_evidence_source(source_authority, mixed_read_provenance);
             let terminal_relay_plan_context = TerminalRelayPlanContext {
                 evidence_source,
                 http: &http,

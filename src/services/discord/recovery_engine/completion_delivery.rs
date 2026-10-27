@@ -101,7 +101,8 @@ pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
         Ok(false) => {}
         Ok(true) => {
             #[cfg(unix)]
-            super::super::outbound::completed_turn_ledger::o_pending::capture(provider, state);
+            super::super::outbound::completed_turn_ledger::o_pending::capture(provider, state)
+                .await;
             return RecoveryRelayOutcome::Delivered.into();
         }
         Err(_) => return RecoveryRelayOutcome::TransientFailure.into(),
@@ -117,7 +118,8 @@ pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
             Ok(BodySend::Sent(delivery)) => delivery,
             Ok(BodySend::OwnedByO) => {
                 #[cfg(unix)]
-                super::super::outbound::completed_turn_ledger::o_pending::capture(provider, state);
+                super::super::outbound::completed_turn_ledger::o_pending::capture(provider, state)
+                    .await;
                 RecoveryRelayOutcome::Delivered.into()
             }
             Err(_) => RecoveryRelayOutcome::TransientFailure.into(),
@@ -271,7 +273,7 @@ pub(super) async fn relay_recovery_body_to_placeholder(
         && let Some(provider) = state.provider_kind()
     {
         #[cfg(unix)]
-        super::super::outbound::completed_turn_ledger::o_pending::capture(&provider, state);
+        super::super::outbound::completed_turn_ledger::o_pending::capture(&provider, state).await;
     }
     let claim = (marker.is_none() && carries_body(state, text))
         .then(|| recovery_body_claim(state, channel_id.get()));

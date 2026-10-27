@@ -12,13 +12,19 @@ use crate::services::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::{fs::File, io::Read, path::Path};
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 use tokio::time::Instant;
 
 pub(super) const BODY_CAP: usize = 1024 * 1024;
 const SOURCE_CAP: usize = 2 * 1024 * 1024;
+pub(super) const PREFIX_CAP: usize = 64 * 1024 * 1024;
 #[cfg(test)]
-thread_local! { pub(super) static SOURCE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+pub(super) static SOURCE_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Piece {
@@ -65,60 +71,74 @@ pub(super) fn provider(kind: &ProviderKind) -> Option<ShadowProvider> {
 pub(super) fn build(root: &Path, query: Query<'_>, deadline: Instant) -> Option<Manifest> {
     let cursor = delivery_evidence::source(root, query.channel, query.path, query.file)?;
     let (start, end) = query.range;
-    if start >= end {
+    if start >= end || end - start > SOURCE_CAP as u64 {
         return None;
     }
     let mut file = File::open(query.path).ok()?;
     if shadow::capture::file_identity(&file.metadata().ok()?) != query.file {
         return None;
     }
+    let selection_start = start.saturating_sub(1);
     let mut bytes = Vec::new();
     let mut digest = Sha256::new();
     let mut chunk = [0; 8192];
-    while (bytes.len() as u64) < cursor.captured_through {
-        if Instant::now() >= deadline || bytes.len() >= SOURCE_CAP {
+    let mut position = 0_u64;
+    while position < cursor.captured_through {
+        if Instant::now() >= deadline || position >= PREFIX_CAP as u64 {
             return None;
         }
-        let remaining = (cursor.captured_through - bytes.len() as u64)
+        let remaining = (cursor.captured_through - position)
             .min(chunk.len() as u64)
-            .min((SOURCE_CAP - bytes.len()) as u64);
+            .min(PREFIX_CAP as u64 - position);
         let read = file.read(&mut chunk[..remaining as usize]).ok()?;
         if read == 0 {
             return None;
         }
         #[cfg(test)]
-        SOURCE_BYTES.with(|count| count.set(count.get() + read));
+        SOURCE_BYTES.fetch_add(read, std::sync::atomic::Ordering::Relaxed);
         digest.update(&chunk[..read]);
-        bytes.extend_from_slice(&chunk[..read]);
+        let from = selection_start.max(position);
+        let through = end.min(position + read as u64);
+        if from < through {
+            bytes.extend_from_slice(
+                &chunk[(from - position) as usize..(through - position) as usize],
+            );
+        }
+        position += read as u64;
     }
-    if hex::encode(digest.finalize()) != cursor.prefix_hash
-        || shadow::capture::file_identity(&file.metadata().ok()?) != query.file
+    if hex::encode(digest.finalize()) != cursor.prefix_hash || Instant::now() >= deadline {
+        return None;
+    }
+    position = position.max(selection_start);
+    file.seek(SeekFrom::Start(position)).ok()?;
+    while position < end {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let remaining = (end - position).min(chunk.len() as u64);
+        let read = file.read(&mut chunk[..remaining as usize]).ok()?;
+        if read == 0 {
+            return None;
+        }
+        #[cfg(test)]
+        SOURCE_BYTES.fetch_add(read, std::sync::atomic::Ordering::Relaxed);
+        bytes.extend_from_slice(&chunk[..read]);
+        position += read as u64;
+    }
+    if shadow::capture::file_identity(&file.metadata().ok()?) != query.file
         || Instant::now() >= deadline
     {
         return None;
     }
-    if end > cursor.captured_through {
-        while (bytes.len() as u64) < end {
-            if Instant::now() >= deadline || bytes.len() >= SOURCE_CAP {
-                return None;
-            }
-            let remaining = (end - bytes.len() as u64)
-                .min(chunk.len() as u64)
-                .min((SOURCE_CAP - bytes.len()) as u64);
-            let read = file.read(&mut chunk[..remaining as usize]).ok()?;
-            if read == 0 {
-                return None;
-            }
-            #[cfg(test)]
-            SOURCE_BYTES.with(|count| count.set(count.get() + read));
-            bytes.extend_from_slice(&chunk[..read]);
-        }
-        if shadow::capture::file_identity(&file.metadata().ok()?) != query.file {
+    let selected = if start > 0 {
+        if bytes.first() != Some(&b'\n') {
             return None;
         }
-    }
-    let selected = bytes.get(usize::try_from(start).ok()?..usize::try_from(end).ok()?)?;
-    if selected.last() != Some(&b'\n') || (start > 0 && bytes[start as usize - 1] != b'\n') {
+        bytes.get(1..)?
+    } else {
+        bytes.as_slice()
+    };
+    if selected.last() != Some(&b'\n') {
         return None;
     }
     derive(query, cursor.source, cursor.prefix_hash, selected, deadline)

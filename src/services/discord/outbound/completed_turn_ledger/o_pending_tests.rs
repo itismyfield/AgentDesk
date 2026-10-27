@@ -54,7 +54,7 @@ async fn i7441b_unresolved_context_stays_pending_without_completion() {
         f.row.channel_id,
         crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
     )]);
-    capture(&ProviderKind::Claude, &f.row);
+    capture(&ProviderKind::Claude, &f.row).await;
     let pending_path = path(&ProviderKind::Claude, f.row.channel_id).unwrap();
     let before = std::fs::read(&pending_path).unwrap();
     f.port.messages.lock().unwrap().clear();
@@ -79,11 +79,14 @@ async fn i7441b_fixed_manifest_projection_does_not_reread_past_source() {
         f.row.channel_id,
         crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
     )]);
-    capture(&ProviderKind::Claude, &f.row);
+    capture(&ProviderKind::Claude, &f.row).await;
     std::fs::remove_file(&f.source.path).unwrap();
-    manifest::SOURCE_BYTES.with(|c| c.set(0));
+    manifest::SOURCE_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
     project(&shared, &ProviderKind::Claude, f.row.channel_id).await;
-    assert_eq!(manifest::SOURCE_BYTES.with(|c| c.get()), 0);
+    assert_eq!(
+        manifest::SOURCE_BYTES.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
     assert!(
         read_ledger(&ProviderKind::Claude, f.row.channel_id)
             .unwrap()
@@ -113,7 +116,7 @@ async fn i7441b_pending_recheck_and_failed_ledger_publication_preserve_context()
         f.row.channel_id,
         crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
     )]);
-    capture(&ProviderKind::Claude, &f.row);
+    capture(&ProviderKind::Claude, &f.row).await;
     let pending_path = path(&ProviderKind::Claude, f.row.channel_id).unwrap();
     let mut replacement = read(&pending_path).unwrap();
     replacement[0].nonce = "new captured context".into();
@@ -169,7 +172,7 @@ async fn i7441b_capture_never_invents_old_nonce_or_non_input_completion() {
                     Some(crate::services::agent_protocol::NativeTerminalKind::Aborted)
             }
         }
-        capture(&ProviderKind::Claude, &row);
+        capture(&ProviderKind::Claude, &row).await;
         assert!(
             !path(&ProviderKind::Claude, f.row.channel_id)
                 .unwrap()
@@ -186,4 +189,72 @@ async fn i7441b_capture_never_invents_old_nonce_or_non_input_completion() {
     oversized.body = "x".repeat(8 * 1024 * 1024);
     assert!(save(&file, &[oversized]).is_none());
     assert_eq!(std::fs::read(&file).unwrap(), before);
+}
+
+#[test]
+fn i7441b_projection_preserves_nonmonotonic_a_append_order() {
+    let mut ledger = CompletedTurnLedger {
+        entries: vec![
+            CompletedTurnEntry {
+                user_msg_id: 1,
+                turn_nonce: Some("old".into()),
+                committed_at_epoch_ms: 1000,
+            },
+            CompletedTurnEntry {
+                user_msg_id: 1,
+                turn_nonce: Some("new".into()),
+                committed_at_epoch_ms: 900,
+            },
+        ],
+        ..Default::default()
+    };
+    assert_eq!(ledger.settled_commit_ms().get(&1), Some(&900));
+    insert(&mut ledger, &pending(2, "B"), 950);
+    assert_eq!(ledger.settled_commit_ms().get(&1), Some(&900));
+    insert(&mut ledger, &pending(1, "old"), 1100);
+    assert_eq!(ledger.settled_commit_ms().get(&1), Some(&900));
+}
+
+#[tokio::test]
+async fn i7441b_pending_byte_eviction_and_corrupt_quarantine() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let f = super::super::super::o_delivery_evidence::tests::Fixture::new(
+        744201,
+        ProviderKind::Claude,
+        &["body"],
+    )
+    .await;
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        f.row.channel_id,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    let file = path(&ProviderKind::Claude, f.row.channel_id).unwrap();
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let mut old = pending(1, "old");
+    old.body = "x".repeat(4 * 1024 * 1024);
+    let mut recent = pending(2, "recent");
+    recent.body = "x".repeat(3 * 1024 * 1024);
+    save(&file, &[old, recent]).unwrap();
+    let mut row = f.row.clone();
+    row.full_response = "x".repeat(2 * 1024 * 1024);
+    capture(&ProviderKind::Claude, &row).await;
+    let records = read(&file).unwrap();
+    assert!(!records.iter().any(|p| p.id == 1));
+    assert!(records.iter().any(|p| p.id == 2));
+    assert!(records.iter().any(|p| p.id == row.user_msg_id));
+    assert!(std::fs::metadata(&file).unwrap().len() <= 8 * 1024 * 1024);
+    std::fs::write(&file, b"corrupt pending").unwrap();
+    capture(&ProviderKind::Claude, &f.row).await;
+    assert_eq!(read(&file).unwrap().len(), 1);
+    let quarantined: Vec<_> = std::fs::read_dir(file.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .filter(|p| p.file_name().to_string_lossy().contains(".corrupt-"))
+        .collect();
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(
+        std::fs::read(quarantined[0].path()).unwrap(),
+        b"corrupt pending"
+    );
 }

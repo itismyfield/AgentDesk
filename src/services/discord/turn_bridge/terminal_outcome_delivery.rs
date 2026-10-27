@@ -87,7 +87,8 @@ pub(super) async fn run_terminal_outcome_delivery(
         super::super::outbound::completed_turn_ledger::o_pending::capture(
             &state.provider,
             &captured,
-        );
+        )
+        .await;
     }
     let claude_tui_followup_busy_readiness_timeout =
         bridge_claude_tui_followup_busy_readiness_timeout(

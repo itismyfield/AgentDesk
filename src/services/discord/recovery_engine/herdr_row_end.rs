@@ -256,7 +256,7 @@ async fn settle_row(
     #[cfg(test)]
     tests::hook("before_clear").await;
     if o_owned {
-        super::super::outbound::completed_turn_ledger::o_pending::capture(provider, &row);
+        super::super::outbound::completed_turn_ledger::o_pending::capture(provider, &row).await;
     }
     diagnostics::phase(provider, channel.get(), "clear");
     let (snapshot, owner) = (row.clone(), provider.clone());
