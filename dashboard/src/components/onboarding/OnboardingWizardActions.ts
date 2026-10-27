@@ -252,7 +252,7 @@ export function useOnboardingWizardActions({
     const id =
       name
         .toLowerCase()
-        .replace(/[^a-z0-9가-힣]/g, "-")
+        .replace(/[^a-z0-9]/g, "-")
         .replace(/-+/g, "-")
         .replace(/^-|-$/g, "") || `agent-${agents.length + 1}`;
     const prompt = `당신은 ${name}입니다. ${

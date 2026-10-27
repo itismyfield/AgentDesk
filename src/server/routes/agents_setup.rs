@@ -12,6 +12,9 @@ use crate::services::discord::agentdesk_config::{
     load_agent_setup_config,
 };
 use crate::services::provider::ProviderKind;
+use crate::utils::input_validation::{
+    canonicalize_under_root, normalize_lexical_path, validate_agent_id,
+};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct AgentSetupBody {
@@ -188,12 +191,8 @@ impl SetupContext {
         let provider = body.provider.trim().to_ascii_lowercase();
         let prompt_template = body.prompt_template_path.trim().to_string();
 
-        if !is_safe_segment(&agent_id) {
-            errors.push(setup_error(
-                "request",
-                "agent_id must be a non-empty path-safe identifier",
-                "validation",
-            ));
+        if let Err(error) = validate_agent_id(&agent_id) {
+            errors.push(setup_error("request", error, "validation"));
         }
         if channel_id.parse::<u64>().is_err() {
             errors.push(setup_error(
@@ -234,7 +233,8 @@ impl SetupContext {
             }
         };
 
-        let prompt_template_path = resolve_setup_path(&runtime_root, &prompt_template);
+        let prompt_template_path = resolve_setup_path(&runtime_root, &prompt_template)
+            .map_err(|error| vec![setup_error("request", error, "validation")])?;
         let prompt_dest_path = crate::runtime_layout::managed_agents_root(&runtime_root)
             .join(&agent_id)
             .join("IDENTITY.md");
@@ -1121,15 +1121,6 @@ fn normalize_skill_list(raw: Vec<String>, errors: &mut Vec<SetupError>) -> Vec<S
     skills
 }
 
-fn is_safe_segment(value: &str) -> bool {
-    !value.is_empty()
-        && value != "."
-        && value != ".."
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
-}
-
 fn is_safe_skill_name(value: &str) -> bool {
     !value.is_empty()
         && value != "."
@@ -1138,17 +1129,22 @@ fn is_safe_skill_name(value: &str) -> bool {
         && !value.contains('\\')
 }
 
-fn resolve_setup_path(root: &Path, raw: &str) -> PathBuf {
+fn resolve_setup_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
+    let root = std::path::absolute(root)
+        .map_err(|error| format!("resolve runtime root '{}': {error}", root.display()))?;
     let expanded = crate::utils::format::expand_tilde_string(raw);
-    let candidate = PathBuf::from(&expanded);
-    if candidate.is_absolute() {
-        return candidate;
-    }
-    let root_candidate = root.join(&candidate);
-    if root_candidate.exists() {
-        return root_candidate;
-    }
-    crate::runtime_layout::config_dir(root).join(candidate)
+    let candidate = normalize_lexical_path(Path::new(&expanded))?;
+    let candidate = if candidate.is_absolute() {
+        candidate
+    } else {
+        let root_candidate = root.join(&candidate);
+        if root_candidate.exists() {
+            root_candidate
+        } else {
+            crate::runtime_layout::config_dir(&root).join(candidate)
+        }
+    };
+    canonicalize_under_root(&root, &candidate)
 }
 
 fn parent_can_be_created(path: &Path) -> bool {
@@ -1355,6 +1351,10 @@ fn audit_path(ctx: &SetupContext) -> PathBuf {
 fn maybe_forced_failure(_step: &str) -> Result<(), SetupError> {
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "agents_setup_validation_tests.rs"]
+mod validation_tests;
 
 #[cfg(test)]
 mod config_secret_tests {

@@ -214,6 +214,7 @@ fn peer_filter_warnings(buffer: &LogBuffer) -> Vec<String> {
 async fn enforce_rejects_only_peers_outside_loopback_tailscale_and_private_lan() {
     let root = tempfile::tempdir().unwrap();
     let app = app_with_peer_filter(false, root.path(), PeerFilterMode::Enforce);
+    let (buffer, _guard) = capture_warnings();
     for peer in [
         "127.0.0.1",
         "127.255.0.9",
@@ -254,6 +255,83 @@ async fn enforce_rejects_only_peers_outside_loopback_tailscale_and_private_lan()
         assert_eq!(status, StatusCode::FORBIDDEN, "{peer} must be rejected");
         assert!(body.contains("peer_not_allowed"), "{peer}: {body}");
     }
+    let warnings = peer_filter_warnings(&buffer);
+    let classed = |class: &str| {
+        warnings
+            .iter()
+            .filter(|line| line.contains(&format!("peer_class={class}")))
+            .count()
+    };
+    // The nine private-LAN peers above are served but logged; the eleven outside peers are refused.
+    assert_eq!(
+        (classed("private_lan"), classed("outside"), warnings.len()),
+        (9, 11, 20),
+        "{warnings:#?}"
+    );
+}
+
+const PRIVATE_LAN_PEERS: [&str; 12] = [
+    "10.1.0.4",
+    "172.16.0.1",
+    "172.31.255.255",
+    "192.168.1.10",
+    "169.254.1.1",
+    "[fc00::1]",
+    "[fd00::1]",
+    "[fd7a:115c:a1e1::1]",
+    "[fd7a:115c:a1df:ffff::1]",
+    "[fe80::1]",
+    "[::ffff:192.168.1.10]",
+    "[::ffff:10.0.0.5]",
+];
+
+#[tokio::test]
+async fn private_lan_peers_are_served_unchanged_and_warned_in_every_filtering_mode() {
+    let root = tempfile::tempdir().unwrap();
+    let off = app_with_peer_filter(false, root.path(), PeerFilterMode::Off);
+    for mode in [PeerFilterMode::Log, PeerFilterMode::Enforce] {
+        let app = app_with_peer_filter(false, root.path(), mode);
+        let (buffer, _guard) = capture_warnings();
+        for peer in PRIVATE_LAN_PEERS {
+            let addr = format!("{peer}:50000");
+            let served = peer_probe(&app, &addr).await;
+            assert_eq!(served.0, StatusCode::UNAUTHORIZED, "{mode:?} {peer}");
+            assert_eq!(served, peer_probe(&off, &addr).await, "{mode:?} {peer}");
+        }
+        let warnings = peer_filter_warnings(&buffer);
+        assert_eq!(warnings.len(), PRIVATE_LAN_PEERS.len(), "{warnings:#?}");
+        for (line, peer) in warnings.iter().zip(PRIVATE_LAN_PEERS) {
+            let ip = peer.trim_start_matches('[').trim_end_matches(']');
+            assert!(line.contains(&format!("peer_ip={ip} ")), "{line}");
+            assert!(line.contains("peer_class=private_lan"), "{line}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn loopback_and_tailscale_peers_are_never_warned() {
+    let root = tempfile::tempdir().unwrap();
+    for mode in [PeerFilterMode::Log, PeerFilterMode::Enforce] {
+        let app = app_with_peer_filter(false, root.path(), mode);
+        let (buffer, _guard) = capture_warnings();
+        for peer in [
+            "127.0.0.1",
+            "127.255.0.9",
+            "[::1]",
+            "[::ffff:127.0.0.1]",
+            "100.64.0.0",
+            "100.127.255.255",
+            "100.71.169.10",
+            "[::ffff:100.64.0.1]",
+            "[fd7a:115c:a1e0::]",
+            "[fd7a:115c:a1e0:ffff:ffff:ffff:ffff:ffff]",
+        ] {
+            let (status, _) = peer_probe(&app, &format!("{peer}:50000")).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{mode:?} {peer}");
+        }
+        let warnings = peer_filter_warnings(&buffer);
+        assert!(warnings.is_empty(), "{mode:?} {warnings:#?}");
+    }
 }
 
 #[tokio::test]
@@ -274,12 +352,15 @@ async fn log_mode_serves_outside_peers_unchanged_and_warns_once_per_peer() {
         assert_eq!(peer_probe(&log, peer).await, unfiltered, "{peer}");
     }
     let warnings = peer_filter_warnings(&buffer);
-    assert_eq!(warnings.len(), 2, "{warnings:#?}");
-    assert!(warnings[0].contains("peer_ip=8.8.8.8"), "{warnings:#?}");
-    assert!(
-        warnings[1].contains("peer_ip=2606:4700::1111"),
-        "{warnings:#?}"
-    );
+    assert_eq!(warnings.len(), 3, "{warnings:#?}");
+    for (line, (ip, class)) in warnings.iter().zip([
+        ("8.8.8.8", "outside"),
+        ("2606:4700::1111", "outside"),
+        ("192.168.1.10", "private_lan"),
+    ]) {
+        assert!(line.contains(&format!("peer_ip={ip} ")), "{line}");
+        assert!(line.contains(&format!("peer_class={class}")), "{line}");
+    }
     assert!(warnings.iter().all(|line| line.contains("WARN")));
 }
 
