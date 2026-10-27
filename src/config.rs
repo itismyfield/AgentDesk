@@ -20,11 +20,13 @@ mod cluster_role;
 pub use cluster_role::ClusterRole;
 pub(crate) mod session_hosts;
 pub use session_hosts::SessionHostsConfig;
+pub mod config_path;
 pub(crate) mod disk_write;
 mod peer_filter;
 pub mod reload_classes;
 mod server_surface;
 mod tool_activity_display;
+pub use config_path::resolved_config_path;
 pub(crate) use disk_write::render_config_for_path;
 pub use disk_write::save_to_path;
 pub use peer_filter::PeerFilterMode;
@@ -2510,14 +2512,7 @@ impl Default for Config {
 
 pub fn load() -> Result<Config> {
     crate::utils::redact::register_common_env_secrets();
-    let path = resolve_graceful_config_path(
-        std::env::var("AGENTDESK_CONFIG")
-            .ok()
-            .map(std::path::PathBuf::from),
-        runtime_root(),
-        std::env::current_dir().ok(),
-        dirs::home_dir(),
-    );
+    let path = resolved_config_path();
     let path_display = path.display().to_string();
 
     let contents = std::fs::read_to_string(&path)
@@ -2537,22 +2532,6 @@ pub fn load() -> Result<Config> {
     std::fs::create_dir_all(&config.data.dir)?;
 
     Ok(config)
-}
-
-/// The on-disk config path the running server loaded from, resolved with the
-/// same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home).
-/// Used by the config file watcher so it reloads from the exact same file the
-/// boot path read. The returned path is the resolved canonical candidate even if
-/// it does not currently exist (matching the graceful resolver).
-pub fn resolved_config_path() -> PathBuf {
-    resolve_graceful_config_path(
-        std::env::var("AGENTDESK_CONFIG")
-            .ok()
-            .map(std::path::PathBuf::from),
-        runtime_root(),
-        std::env::current_dir().ok(),
-        dirs::home_dir(),
-    )
 }
 
 pub fn load_from_path(path: &Path) -> Result<Config> {
@@ -2810,107 +2789,10 @@ mod secret_bearing_config_file_tests {
     }
 }
 
-fn resolve_graceful_config_path(
-    explicit: Option<std::path::PathBuf>,
-    runtime_root: Option<std::path::PathBuf>,
-    cwd: Option<std::path::PathBuf>,
-    home_dir: Option<std::path::PathBuf>,
-) -> std::path::PathBuf {
-    if let Some(path) = explicit {
-        if path.exists() {
-            return path;
-        }
-
-        let mut candidates = Vec::new();
-        if let Some(root) = runtime_root.as_ref() {
-            let canonical = crate::runtime_layout::config_file_path(root);
-            let legacy = crate::runtime_layout::legacy_config_file_path(root);
-            if path == legacy {
-                candidates.push(canonical);
-            } else if path == canonical {
-                candidates.push(legacy);
-            }
-        }
-
-        if path.file_name() == Some(OsStr::new("agentdesk.yaml")) {
-            if let Some(parent) = path.parent() {
-                if parent.file_name() == Some(OsStr::new("config")) {
-                    if let Some(root) = parent.parent() {
-                        let legacy = root.join("agentdesk.yaml");
-                        if legacy != path {
-                            candidates.push(legacy);
-                        }
-                    }
-                } else {
-                    let canonical = parent.join("config").join("agentdesk.yaml");
-                    if canonical != path {
-                        candidates.push(canonical);
-                    }
-                }
-            }
-        }
-
-        if let Some(candidate) = candidates.into_iter().find(|candidate| candidate.exists()) {
-            return candidate;
-        }
-        return path;
-    }
-    if let Some(root) = runtime_root.as_ref() {
-        for path in [
-            crate::runtime_layout::config_file_path(root),
-            crate::runtime_layout::legacy_config_file_path(root),
-        ] {
-            if path.exists() {
-                return path;
-            }
-        }
-    }
-    if let Some(dir) = cwd {
-        for path in [
-            dir.join("config").join("agentdesk.yaml"),
-            dir.join("agentdesk.yaml"),
-        ] {
-            if path.exists() {
-                return path;
-            }
-        }
-    }
-    if let Some(home) = home_dir {
-        let release_root = home.join(".adk").join("release");
-        for path in [
-            crate::runtime_layout::config_file_path(&release_root),
-            crate::runtime_layout::legacy_config_file_path(&release_root),
-        ] {
-            if path.exists() {
-                return path;
-            }
-        }
-    }
-    runtime_root
-        .map(|root| crate::runtime_layout::config_file_path(&root))
-        .unwrap_or_else(|| std::path::PathBuf::from("config").join("agentdesk.yaml"))
-}
-
-/// Load config gracefully; invalid or missing files use the live snapshot or defaults.
-/// Searches:
-/// $AGENTDESK_CONFIG →
-/// $AGENTDESK_ROOT_DIR/config/agentdesk.yaml →
-/// $AGENTDESK_ROOT_DIR/agentdesk.yaml →
-/// CWD/config/agentdesk.yaml →
-/// CWD/agentdesk.yaml →
-/// ~/.adk/release/config/agentdesk.yaml →
-/// ~/.adk/release/agentdesk.yaml
+/// Load config gracefully from [`resolved_config_path`]; invalid or missing files use the
+/// live snapshot or defaults.
 pub fn load_graceful() -> Config {
-    let path = resolve_graceful_config_path(
-        std::env::var("AGENTDESK_CONFIG")
-            .ok()
-            .map(std::path::PathBuf::from),
-        std::env::var("AGENTDESK_ROOT_DIR")
-            .ok()
-            .map(|root| std::path::PathBuf::from(root.trim())),
-        std::env::current_dir().ok(),
-        dirs::home_dir(),
-    );
+    let path = resolved_config_path();
     let path_display = path.display().to_string();
 
     let config = match std::fs::read_to_string(&path) {

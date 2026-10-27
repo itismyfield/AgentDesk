@@ -1214,13 +1214,7 @@ mod credential_token_permission_tests {
 }
 
 fn onboarding_config_path(runtime_root: &Path) -> PathBuf {
-    let canonical = crate::runtime_layout::config_file_path(runtime_root);
-    let legacy = crate::runtime_layout::legacy_config_file_path(runtime_root);
-    if canonical.is_file() || !legacy.is_file() {
-        canonical
-    } else {
-        legacy
-    }
+    crate::config::config_path::config_path_in(runtime_root)
 }
 
 fn default_secondary_command_provider(primary_provider: &str) -> &'static str {
