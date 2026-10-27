@@ -115,6 +115,25 @@ fn the_environment_codex_writes_before_the_prompt_is_not_a_prompt() {
     );
 }
 
+/// The AGENTS.md instructions Codex writes with its environment as one user record before the
+/// prompt are not that prompt either.
+#[test]
+fn the_agents_md_record_codex_writes_before_the_prompt_is_not_a_prompt() {
+    let c = captured();
+    let agents = json!({"type":"response_item","payload":{"type":"message","role":"user",
+        "content":[
+            {"type":"input_text","text":"# AGENTS.md instructions\n\n<INSTRUCTIONS>\ndummy rule\n</INSTRUCTIONS>"},
+            {"type":"input_text","text":"<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>"}
+        ],
+        "internal_chat_message_metadata_passthrough":{
+            "content_item_kinds":["agents_md.instructions","environments.environment_context"]
+        }}})
+    .to_string();
+    let lines = after_meta(&[&c[1], &agents, &c[2], &c[3], &c[4]]);
+    let prompt_end = lines[..5].iter().map(|line| line.len() as u64 + 1).sum();
+    assert_eq!(eligible_prompt_end(&lines), Some(prompt_end));
+}
+
 /// Every shape that may follow Legacy output, another turn or input, or an unjudgeable record
 /// refuses the rollout; a torn tail or a missing header waits for the same rollout.
 #[test]
