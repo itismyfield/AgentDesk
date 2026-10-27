@@ -66,6 +66,7 @@ use self::voice::{run_bot_init_voice_workers, run_bot_rehydrate_voice_handoffs};
 use self::{orphan_recovery::*, restored_state::*, session_gc::*, startup_doctor::*};
 
 pub(crate) struct RunBotContext {
+    pub(crate) replay_restart: Option<crate::cli::dcserver::replay_recovery::OwnedRuntimeRoot>,
     pub(crate) global_active: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
@@ -144,6 +145,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         tracing::error!("invalid Codex source mode; new Codex launches are refused");
     }
     let RunBotContext {
+        replay_restart,
         global_active,
         global_finalizing,
         shutdown_remaining,
@@ -283,6 +285,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             codex_goals_reset_channels: &restored_codex_goals_reset_channels,
         },
     );
+    if let Some(root) = replay_restart {
+        let _ = shared.restart.replay_restart.set(root);
+    }
     // Sole boot owner of loader-verdict row retirement: every runtime shape
     // passes here after the generation is allocated and before any mint surface.
     // Only the utility branch leaves earlier: it builds no runtime or mint surface. Its

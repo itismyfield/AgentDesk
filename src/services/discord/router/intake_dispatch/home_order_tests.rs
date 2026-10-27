@@ -196,7 +196,13 @@ mod source_forwarding_tests {
         let _active = test_activation::activate(DELEGATED);
         let ctx =
             ReplayAdmissionContext::production(&pool, "p2b-source-leader", "source-incarnation")
-                .for_channel(&DELEGATED.to_string());
+                .for_scope(
+                    &DELEGATED.to_string(),
+                    "claude",
+                    "legacy-prompt",
+                    "owned_direct",
+                    false,
+                );
 
         for (offset, held_index) in [(0_u64, 0_usize), (10, 1)] {
             let first = DELEGATED * 100 + 1 + offset;

@@ -66,8 +66,23 @@ impl StartPermit {
         })
     }
 
+    pub(crate) fn hold_proof(&self) -> crate::db::replay_disposition::write::HoldProof {
+        self.attempt.hold_proof()
+    }
+
     pub(crate) fn attempt(&self) -> &ExactAttempt {
         &self.attempt
+    }
+
+    pub(crate) fn matches_start_scope(&self, driver: &str, runtime: &str) -> bool {
+        driver == "legacy-prompt"
+            && [("driver_scope", driver), ("runtime_scope", runtime)]
+                .iter()
+                .all(|(key, expected)| {
+                    self.binding
+                        .get(key)
+                        .is_some_and(|stored| stored.as_str() == Some(*expected))
+                })
     }
 
     /// Spends the permit on its own target and prepared input; a mismatch drops it without the effect.

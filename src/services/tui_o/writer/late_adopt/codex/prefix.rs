@@ -10,6 +10,7 @@ use crate::services::codex_tui::rollout_index::strict_parent_session;
 use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_o::shadow::identity::{RecordFact, classify};
 use crate::services::tui_o::shadow::{MAX_READ_BYTES, ShadowProvider, SourceId};
+use crate::services::tui_prompt_dedupe::is_codex_context_record;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Verdict {
@@ -125,7 +126,9 @@ impl Turn {
         for fact in classify(ShadowProvider::Codex, &value) {
             match fact {
                 RecordFact::TurnStart(id) if self.opener.is_none() => self.opener = Some(id),
-                RecordFact::Prompt(_, text) if self.prompt.is_none() && contextual(&text) => {}
+                // Codex's context items before the prompt are not it; Legacy never relays them.
+                RecordFact::Prompt(..)
+                    if self.prompt.is_none() && is_codex_context_record(&value["payload"]) => {}
                 RecordFact::Prompt(_, text) if self.prompt.is_none() => {
                     self.prompt = Some(Prompt { text, end });
                 }
@@ -195,12 +198,6 @@ impl Mirror {
             _ => None,
         }
     }
-}
-
-/// Codex writes its environment as a user-role item before the prompt; Legacy never relays it.
-fn contextual(text: &str) -> bool {
-    let text = text.trim();
-    text.starts_with("<environment_context>") && text.ends_with("</environment_context>")
 }
 
 fn output(fact: &RecordFact) -> &'static str {

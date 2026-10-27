@@ -493,6 +493,43 @@ fn late_first_prompt_retries_on_unchanged_binding_without_retroactive_other_sour
     );
 }
 
+/// Codex writes AGENTS.md instructions and its environment as a user record before the prompt.
+#[test]
+fn fresh_successor_seals_when_agents_md_context_precedes_the_first_prompt() {
+    let fixture = Fixture::new();
+    let pane = Pane::start(fixture.logs.path());
+    pane.end(true);
+    let _attempt = attempt::begin(Some(pane.channel), Some(&pane.name));
+    let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+    let prompt = "[User: tester (ID: 1)] first prompt after clear";
+    let (context, path, session) = fresh(&pane, Some(prompt));
+    let user = |texts: &[&str], kinds: &[&str]| {
+        let content: Vec<_> = texts
+            .iter()
+            .map(|text| serde_json::json!({"type":"input_text","text":text}))
+            .collect();
+        serde_json::json!({"type":"response_item","payload":{
+            "type":"message","role":"user","content":content,
+            "internal_chat_message_metadata_passthrough":{"content_item_kinds":kinds}
+        }})
+    };
+    let agents = "# AGENTS.md instructions\n\n<INSTRUCTIONS>\ndummy rule\n</INSTRUCTIONS>";
+    let env = "<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>";
+    let kinds = ["agents_md.instructions", "environments.environment_context"];
+    let rows = [
+        user(&[agents, env], &kinds),
+        user(&[prompt], &["user.text"]),
+    ];
+    let mut body = std::fs::read_to_string(&path).unwrap();
+    body.extend(rows.iter().map(|row| format!("{row}\n")));
+    std::fs::write(&path, body).unwrap();
+    spawn(&pane, &context, &mut observation);
+    let logs = capture_logs(|| publish(&pane, &path, &session, false));
+    let seal = successor(&pane).unwrap_or_else(|| panic!("the fresh launch must seal: {logs}"));
+    assert_eq!(seal["execution_nonce"], context.execution_nonce);
+    assert!(logs.contains("Codex successor Seal durable"), "{logs}");
+}
+
 #[test]
 fn next_begin_warns_once_when_discarding_bound_candidate() {
     let fixture = Fixture::new();
