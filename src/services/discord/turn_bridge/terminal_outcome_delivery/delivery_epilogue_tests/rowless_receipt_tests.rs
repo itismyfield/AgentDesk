@@ -1200,6 +1200,75 @@ async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_succe
         summary_assertions::assert_terminal_publications(&driver, !replace_actor);
     }
 }
+#[tokio::test]
+#[cfg(unix)]
+async fn o_capture_probe_is_quiet_but_body_identity_errors_still_alarm() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
+    use crate::services::tui_o::cutover::{self, BodyClaim, IdentityError};
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(CapturingWriter(buffer.clone()))
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let channel = DRIVER_CHANNEL_ID;
+    assert_eq!(
+        cutover::peek_o_owns_tui_output_for_channel_quiet(channel, Some(CodexTui)),
+        Err(IdentityError::MissingSnapshot)
+    );
+    assert!(buffer.lock().unwrap().is_empty());
+    let sent = std::cell::Cell::new(false);
+    let result =
+        cutover::claim_then_send(Some(BodyClaim::new(channel, Some(CodexTui))), || async {
+            sent.set(true);
+        })
+        .await;
+    assert_eq!(result, Err(IdentityError::MissingSnapshot));
+    assert!(!sent.get());
+    assert!(
+        String::from_utf8(buffer.lock().unwrap().clone())
+            .unwrap()
+            .contains("tui_o output identity held")
+    );
+    buffer.lock().unwrap().clear();
+    {
+        let _owned = cutover::test_override::force_channels(&[(channel, CodexTui)]);
+        let cases = [
+            (channel, Some(CodexTui), Ok(true)),
+            (channel + 1, None, Ok(false)),
+            (channel, None, Err(IdentityError::UnknownKind)),
+            (
+                channel,
+                Some(ClaudeTui),
+                Err(IdentityError::KindMismatch {
+                    expected: Some(CodexTui),
+                    actual: ClaudeTui,
+                }),
+            ),
+        ];
+        for (destination, kind, expected) in cases {
+            assert_eq!(
+                cutover::peek_o_owns_tui_output_for_channel_quiet(destination, kind),
+                expected
+            );
+            assert!(buffer.lock().unwrap().is_empty());
+        }
+    }
+    let _pending = cutover::test_override::force_candidates(&[(channel, CodexTui)]);
+    assert_eq!(
+        cutover::peek_o_owns_tui_output_for_channel_quiet(channel, Some(CodexTui)),
+        Ok(false)
+    );
+    assert_eq!(
+        cutover::peek_o_owns_tui_output_for_channel(channel, Some(CodexTui)),
+        Ok(false)
+    );
+    assert!(buffer.lock().unwrap().is_empty());
+}
+
 /// Custody parked before O owned the channel follows its real destination on resume: an
 /// O-owned destination settles without posting, and an unknown selected kind keeps the record.
 #[tokio::test]

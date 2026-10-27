@@ -25,7 +25,6 @@ use super::org_schema;
 use super::role_map::{
     is_known_agent as is_known_agent_from_role_map,
     list_registered_channel_bindings as list_registered_channel_bindings_from_role_map,
-    load_peer_agents as load_peer_agents_from_role_map,
     load_shared_prompt_path as load_shared_prompt_path_from_role_map,
     resolve_role_binding as resolve_role_binding_from_role_map,
     resolve_workspace as resolve_workspace_from_role_map,

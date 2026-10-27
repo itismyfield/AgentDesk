@@ -489,6 +489,8 @@ mod db_agent_drift_tests {
                 }
                 channels
             },
+            peer_keywords: Vec::new(),
+            peer_directory: true,
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,
@@ -654,6 +656,8 @@ mod voice_alias_precheck_tests {
             voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels,
+            peer_keywords: Vec::new(),
+            peer_directory: true,
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,

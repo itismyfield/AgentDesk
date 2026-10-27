@@ -10,6 +10,10 @@ use crate::services::discord::outbound::completed_turn_ledger;
 use crate::services::discord::queue_io::mailbox_enqueue_observed_intervention as observed_enqueue;
 use crate::services::discord::{self as discord, MailboxEnqueueOutcome, SharedData};
 use crate::services::turn_orchestrator::{ClaimObservation, EnqueueRefusalReason};
+#[path = "frontier_sweep_tests/dispatch_retirement_tests.rs"]
+mod dispatch_retirement_tests;
+#[path = "frontier_sweep_tests/scanner_progress_tests.rs"]
+mod scanner_progress_tests;
 
 #[derive(Clone, Copy)]
 enum Hook {
@@ -45,6 +49,8 @@ struct FetchRecord {
 type EnqueueRecord = (u64, bool, Option<EnqueueRefusalReason>);
 
 struct StrictApi {
+    unowned: bool,
+    fetch_failure: Option<(bool, String)>,
     shared: Arc<SharedData>,
     /// Channel history as `(message, first fetch call index that can see it)`.
     channels: HashMap<ChannelId, Vec<(serenity::Message, usize)>>,
@@ -56,6 +62,8 @@ struct StrictApi {
 impl StrictApi {
     fn new(shared: &Arc<SharedData>) -> Self {
         Self {
+            unowned: false,
+            fetch_failure: None,
             shared: Arc::clone(shared),
             channels: HashMap::new(),
             hooks: Mutex::new(HashMap::new()),
@@ -104,7 +112,11 @@ impl CatchUpDiscordApi for StrictApi {
         &self,
         _channel_id: ChannelId,
     ) -> RuntimeChannelBindingStatus {
-        RuntimeChannelBindingStatus::Owned
+        if self.unowned {
+            RuntimeChannelBindingStatus::Unowned
+        } else {
+            RuntimeChannelBindingStatus::Owned
+        }
     }
 
     async fn fetch_messages(
@@ -112,6 +124,11 @@ impl CatchUpDiscordApi for StrictApi {
         channel_id: ChannelId,
         request: CatchUpFetchRequest,
     ) -> Result<Vec<serenity::Message>, String> {
+        if let Some((recent_only, error)) = &self.fetch_failure
+            && (!recent_only || request.cursor.is_none())
+        {
+            return Err(error.clone());
+        }
         let mut fetches = self.fetches.lock().unwrap();
         let call = fetches.len();
         let mut visible: Vec<serenity::Message> = (self.channels.get(&channel_id))
@@ -872,6 +889,10 @@ async fn t9b_clear_during_a_synthetic_active_turn_keeps_later_messages_visible()
     let discard = super::super::retry_state::clear_channel_discarding_catch_up_backlog;
     discard(&fx.shared, &fx.provider, channel_id).await;
 
+    assert_eq!(
+        super::super::scan_progress::read(&fx.provider, channel_id),
+        Some(m.get())
+    );
     let expected = (Some(m.get()), Some(m.get()));
     assert_eq!(
         fx.surfaces(channel_id),
@@ -913,6 +934,10 @@ async fn t9c_clear_that_fails_to_persist_drops_the_retry_and_advances_the_checkp
     let discard = super::super::retry_state::clear_channel_discarding_catch_up_backlog;
     let cleared = discard(&fx.shared, &fx.provider, channel_id).await;
 
+    assert_eq!(
+        super::super::scan_progress::read(&fx.provider, channel_id),
+        Some(m.get().max(active.get()))
+    );
     assert_eq!(
         cleared.persistence.failed,
         ["queue_unlink", "queue_publish"]
@@ -1226,7 +1251,6 @@ pub(super) mod exhausted_recovery_tests {
         first_binding_unknown: std::sync::atomic::AtomicBool,
         fail_after_cursor: Option<u64>,
         failed_fetches: Mutex<Vec<CatchUpFetchRequest>>,
-        dlq_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     }
 
     impl RecordingApi {
@@ -1242,14 +1266,6 @@ pub(super) mod exhausted_recovery_tests {
                 first_binding_unknown: std::sync::atomic::AtomicBool::new(false),
                 fail_after_cursor: None,
                 failed_fetches: Mutex::new(Vec::new()),
-                dlq_tasks: Mutex::new(Vec::new()),
-            }
-        }
-
-        async fn flush_dead_letters(&self) {
-            let tasks = std::mem::take(&mut *self.dlq_tasks.lock().unwrap());
-            for task in tasks {
-                task.await.expect("detached DLQ writer completes");
             }
         }
 
@@ -1357,16 +1373,17 @@ pub(super) mod exhausted_recovery_tests {
             outcome
         }
 
-        fn record_too_old_dead_letter(
+        async fn record_too_old_dead_letter(
             &self,
             pool: Option<&sqlx::PgPool>,
             record: crate::db::relay_dead_letter::RelayDeadLetterRecord,
-        ) -> Option<tokio::task::JoinHandle<()>> {
+        ) -> Option<crate::db::relay_dead_letter::TooOldRecordOutcome> {
             self.dead_letters.lock().unwrap().push(record.clone());
-            if let Some(task) = crate::db::relay_dead_letter::record_detached(pool, record) {
-                self.dlq_tasks.lock().unwrap().push(task);
+            if pool.is_some() {
+                crate::db::relay_dead_letter::record_too_old(pool, record).await
+            } else {
+                Some(crate::db::relay_dead_letter::TooOldRecordOutcome::Inserted)
             }
-            None
         }
     }
 
@@ -1806,8 +1823,6 @@ pub(super) mod exhausted_recovery_tests {
             periodic_sweep(&first, &fx.shared, &fx.provider, &clock),
             periodic_sweep(&second, &fx.shared, &fx.provider, &clock),
         );
-        first.flush_dead_letters().await;
-        second.flush_dead_letters().await;
         assert_eq!(
             first.dead_letters.lock().unwrap().len() + second.dead_letters.lock().unwrap().len(),
             1
@@ -1838,7 +1853,6 @@ pub(super) mod exhausted_recovery_tests {
         clock.advance(1);
         let after = api(&fx.shared, channel_id, a, &[b], phase2, true);
         periodic_sweep(&after, &fx.shared, &fx.provider, &clock).await;
-        after.flush_dead_letters().await;
         assert!(after.dead_letters.lock().unwrap().is_empty());
         assert_eq!(dead_letter_count(&pool, b).await, 1);
         assert_eq!(fx.surfaces(channel_id), (Some(b.get()), Some(b.get())));
@@ -1847,7 +1861,6 @@ pub(super) mod exhausted_recovery_tests {
         let late_handed = HashMap::from([(channel_id, handed_retry)]);
         let deps = CatchUpDeps::new(&late_drain, &fx.shared, &fx.provider).with_clock(&clock);
         run_catch_up_sweep(deps.with_retry_checkpoints(&late_handed)).await;
-        late_drain.flush_dead_letters().await;
         assert_eq!(
             late_drain.accepted(b),
             0,
@@ -1882,7 +1895,6 @@ pub(super) mod exhausted_recovery_tests {
             clock.advance(offset);
             let scan = api(&fx.shared, channel_id, a, &[b], phase2, true);
             periodic_sweep(&scan, &fx.shared, &fx.provider, &clock).await;
-            scan.flush_dead_letters().await;
             if offset == 0 {
                 assert!(
                     scan.strict
@@ -1958,7 +1970,6 @@ pub(super) mod exhausted_recovery_tests {
             }
             let scan = unresolved_dispatch_api(&fx.shared, channel_id, a, b, phase2);
             periodic_sweep(&scan, &fx.shared, &fx.provider, &clock).await;
-            scan.flush_dead_letters().await;
             assert!(
                 scan.strict
                     .fetch_log()
@@ -1997,7 +2008,6 @@ pub(super) mod exhausted_recovery_tests {
         clock.advance(1);
         let expired = unresolved_dispatch_api(&fx.shared, channel_id, a, b, phase2);
         periodic_sweep(&expired, &fx.shared, &fx.provider, &clock).await;
-        expired.flush_dead_letters().await;
         assert!(
             expired
                 .strict
@@ -2025,7 +2035,6 @@ pub(super) mod exhausted_recovery_tests {
         clock.advance(1);
         let after = unresolved_dispatch_api(&fx.shared, channel_id, a, b, phase2);
         periodic_sweep(&after, &fx.shared, &fx.provider, &clock).await;
-        after.flush_dead_letters().await;
         assert!(after.dead_letters.lock().unwrap().is_empty());
         assert_eq!(after.accepted(b), 0);
         assert_eq!(dead_letter_count(&pool, b).await, 1);
@@ -2061,7 +2070,6 @@ pub(super) mod exhausted_recovery_tests {
         // The next page exposes only fresh C, so the expired arm must not authorize it.
         let fresh = unresolved_dispatch_api(&fx.shared, channel_id, a, c, phase2);
         periodic_sweep(&fresh, &fx.shared, &fx.provider, &clock).await;
-        fresh.flush_dead_letters().await;
         assert!(
             fresh
                 .strict
@@ -2488,7 +2496,7 @@ pub(super) mod exhausted_recovery_tests {
         };
         let recovered = build();
         periodic_sweep(&recovered, &fx.shared, &fx.provider, &clock).await;
-        assert_phase1_read(&recovered.strict, after(b), &[c]);
+        assert_phase1_read(&recovered.strict, after(a), &[b, c]);
         assert_eq!(
             *recovered.outcomes.lock().unwrap(),
             [(c.get(), true, false)]
@@ -2496,8 +2504,18 @@ pub(super) mod exhausted_recovery_tests {
         assert_eq!(recovered.accepted(c), 1);
         assert_eq!(recovered.accepted(b), 0);
         assert!(recovered.dead_letters.lock().unwrap().is_empty());
-        assert_eq!(fx.surfaces(channel_id), (Some(c.get()), Some(c.get())));
-        assert!(fx.pending(channel_id).is_none());
+        assert_eq!(fx.surfaces(channel_id), (Some(b.get()), Some(b.get())));
+        assert_eq!(
+            fx.pending(channel_id),
+            Some(CatchUpRetryState {
+                checkpoint: b.get(),
+                ..original
+            })
+        );
+        assert_eq!(
+            super::super::super::scan_progress::read(&fx.provider, channel_id),
+            Some(a.get())
+        );
         assert_eq!(sources(&stored()), [b, c]);
         clock.advance(60);
         let again = build();

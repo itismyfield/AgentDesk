@@ -588,27 +588,7 @@ pub(in crate::services::discord) fn is_known_agent(role_id: &str) -> bool {
     is_known_agent_from_role_map(role_id)
 }
 
-pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
-    let peers = agentdesk_config::load_peer_agents();
-    if !peers.is_empty() {
-        return peers;
-    }
-    if org_schema::org_schema_exists() {
-        let peers = org_schema::load_peer_agents();
-        if !peers.is_empty() {
-            return peers;
-        }
-    }
-    load_peer_agents_from_role_map()
-}
-
-/// #2663: process-local cache for the rendered `[Peer Agent Directory]`
-/// block. The peer agent directory is ~1.5KB and rebuilt every turn even
-/// though the underlying config files (`agentdesk.yaml`, `org_schema`,
-/// `role_map`) change once per deploy at most. The cache key is
-/// `(current_role_id, mtime_fingerprint)`; whenever any input file's mtime
-/// changes (or a file disappears) the fingerprint shifts and the next call
-/// re-renders.
+/// Cache peer guidance by role and the selected config file's modification time.
 fn peer_guidance_cache() -> &'static std::sync::Mutex<PeerGuidanceCacheState> {
     static CELL: std::sync::OnceLock<std::sync::Mutex<PeerGuidanceCacheState>> =
         std::sync::OnceLock::new();
@@ -622,34 +602,21 @@ struct PeerGuidanceCacheState {
     entries: std::collections::HashMap<String, Option<String>>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct PeerSourceFingerprint {
-    /// `Option<SystemTime>` per source path; `None` means the file does not
-    /// exist (deletion is also a cache-busting event).
-    parts: Vec<(std::path::PathBuf, Option<std::time::SystemTime>)>,
-}
-
-fn peer_source_paths() -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(root) = crate::config::runtime_root() {
-        paths.push(crate::config::config_path::config_path_in(&root));
-        paths.push(crate::runtime_layout::role_map_path(&root));
-        paths.push(crate::runtime_layout::org_schema_path(&root));
-    }
-    paths
+    path: Option<PathBuf>,
+    modified: Option<SystemTime>,
 }
 
 fn current_peer_source_fingerprint() -> PeerSourceFingerprint {
-    let parts = peer_source_paths()
-        .into_iter()
-        .map(|path| {
-            let mtime = std::fs::metadata(&path)
-                .and_then(|meta| meta.modified())
-                .ok();
-            (path, mtime)
-        })
-        .collect();
-    PeerSourceFingerprint { parts }
+    let path =
+        crate::config::runtime_root().map(|root| crate::config::config_path::config_path_in(&root));
+    let modified = path.as_ref().and_then(|path| {
+        fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+    PeerSourceFingerprint { path, modified }
 }
 
 /// #2663: test-only helper to drop the peer guidance cache between scenarios.
@@ -684,7 +651,7 @@ fn render_peer_agent_guidance_with_cache(current_role_id: &str, memoize: bool) -
         }
     }
 
-    let peers: Vec<PeerAgentInfo> = load_peer_agents()
+    let peers: Vec<PeerAgentInfo> = agentdesk_config::load_peer_agents()
         .into_iter()
         .filter(|agent| agent.role_id != current_role_id)
         .collect();

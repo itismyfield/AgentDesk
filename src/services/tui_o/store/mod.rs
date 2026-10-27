@@ -6,6 +6,8 @@ pub(crate) mod clear_end;
 #[cfg(unix)]
 pub(crate) mod codex_end;
 pub(crate) mod codex_provenance;
+#[cfg(unix)]
+pub(crate) mod delivery_evidence;
 mod durable;
 pub mod ledger;
 pub mod rotation;

@@ -102,12 +102,12 @@ pub(super) trait CatchUpDiscordApi: Sync {
         .await
     }
 
-    fn record_too_old_dead_letter(
+    async fn record_too_old_dead_letter(
         &self,
         pool: Option<&sqlx::PgPool>,
         record: crate::db::relay_dead_letter::RelayDeadLetterRecord,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        crate::db::relay_dead_letter::record_detached(pool, record)
+    ) -> Option<crate::db::relay_dead_letter::TooOldRecordOutcome> {
+        crate::db::relay_dead_letter::record_too_old(pool, record).await
     }
 
     async fn utility_bot_user_ids(

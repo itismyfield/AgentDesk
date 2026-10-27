@@ -462,6 +462,8 @@ mod tests {
             voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
             channels: AgentChannels::default(),
+            peer_keywords: Vec::new(),
+            peer_directory: true,
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,
