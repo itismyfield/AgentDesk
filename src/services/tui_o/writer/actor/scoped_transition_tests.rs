@@ -139,7 +139,11 @@ where
         .unwrap();
     for _ in 0..6 {
         actor.read_sources();
-        actor.deliver_owed().await;
+        actor
+            .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+                actor.writer.channel(),
+            ))
+            .await;
         actor.collect_settled();
         tokio::task::yield_now().await;
     }
@@ -263,7 +267,11 @@ where
         .unwrap();
     for _ in 0..6 {
         actor.read_sources();
-        actor.deliver_owed().await;
+        actor
+            .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+                actor.writer.channel(),
+            ))
+            .await;
         actor.collect_settled();
         actor.observe_waiting(true);
         tokio::task::yield_now().await;
@@ -327,7 +335,11 @@ where
         .resume(&mut actor.writer, &mut actor.deriver, &mut actor.owed)
         .unwrap();
     // Restore replays sealed records; the real writer removes those already Posted from owed.
-    actor.deliver_owed().await;
+    actor
+        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+            actor.writer.channel(),
+        ))
+        .await;
     assert!(
         actor.owed.is_empty(),
         "all restored native output was already Posted"

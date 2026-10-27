@@ -53,6 +53,8 @@ struct FakePort {
     /// A lazy request waits on this before it completes.
     hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     on_post: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// Each POST answers only after this long.
+    delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl FakePort {
@@ -132,7 +134,11 @@ impl DiscordPort for FakePort {
             let hold = self.hold.lock().unwrap().take();
             (Arc::clone(&self.started), hold)
         });
+        let delay = *self.delay.lock().unwrap();
         async move {
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             if let Some((started, hold)) = lazy {
                 started.lock().unwrap().push("http");
                 if let Some(hold) = hold {

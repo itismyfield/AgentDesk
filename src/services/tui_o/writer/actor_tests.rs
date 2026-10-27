@@ -1039,6 +1039,8 @@ mod canary_policy;
 mod local_retry;
 #[path = "operator_resume_actor_tests.rs"]
 mod operator_resume;
+#[path = "progress_drain_actor_tests.rs"]
+mod progress_drain;
 
 #[path = "repost_turn_tests.rs"]
 mod repost_turn;
