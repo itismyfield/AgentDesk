@@ -5,7 +5,34 @@
 
 use super::*;
 
+#[cfg(test)]
+pub(in crate::services::discord) static STREAM_TEST_EVENTS: std::sync::Mutex<Vec<(u64, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(in crate::services::discord) fn record_stream_test_event(
+    channel: u64,
+    event: impl Into<String>,
+) {
+    STREAM_TEST_EVENTS
+        .lock()
+        .unwrap()
+        .push((channel, event.into()));
+}
+
 const PROMPT_TOO_LONG_DETAIL_MARKER: &str = "__prompt too long__";
+
+pub(in crate::services::discord) fn stream_body_ownership_peek(
+    channel_id: ChannelId,
+    inflight: &InflightTurnState,
+    can_deliver_directly: bool,
+) -> Result<bool, crate::services::tui_o::cutover::IdentityError> {
+    terminal_controller_cutover::bridge_o_body_peek_decision(
+        channel_id,
+        inflight,
+        can_deliver_directly,
+    )
+}
 
 pub(super) fn prompt_too_long_guidance(detail: &str) -> String {
     crate::services::discord::commands::owner_error_response(

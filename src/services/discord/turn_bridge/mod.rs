@@ -23,6 +23,11 @@ pub(in crate::services::discord) mod recovery_text;
 #[cfg(test)]
 pub(crate) mod replay_policy;
 mod response_delivery;
+pub(super) use response_delivery::stream_body_ownership_peek;
+#[cfg(test)]
+pub(in crate::services::discord) use response_delivery::{
+    STREAM_TEST_EVENTS, record_stream_test_event,
+};
 mod retry_state;
 mod runtime_handoff_loop;
 mod single_message_footer;

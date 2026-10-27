@@ -84,6 +84,9 @@ pub(crate) enum Mutation {
     Terminate,
 }
 
+/// How long a read-only confirmation reads a pane again past a gap a short-lived process leaves.
+const CONFIRM_WINDOW: Duration = Duration::from_secs(2);
+
 /// Herdr key names a cancel judgment may carry.
 const CANCEL_KEYS: &[&str] = &["esc", "ctrl+c"];
 const PASTE_START: &str = "\x1b[200~";
@@ -425,7 +428,7 @@ impl HerdrTarget {
     pub(crate) fn send_text(&self, text: &str) -> Result<HostMutation, HostError> {
         let pane_id = self.0.pane.clone();
         let text = text.to_string();
-        self.send_pinned(HerdrRequest::PaneSendText { pane_id, text })
+        self.send_content(HerdrRequest::PaneSendText { pane_id, text })
     }
 
     /// One bracketed paste, as tmux `paste-buffer -p` delivers it; a body holding the end
@@ -447,7 +450,7 @@ impl HerdrTarget {
         }
         let (pane_id, text) = (self.0.pane.clone(), text.to_string());
         let keys = vec![herdr_key(HostKey::Enter).to_string()];
-        self.send_pinned(HerdrRequest::PaneSendInput {
+        self.send_content(HerdrRequest::PaneSendInput {
             pane_id,
             text,
             keys,
@@ -458,6 +461,27 @@ impl HerdrTarget {
         let pane_id = self.0.pane.clone();
         let keys = keys.iter().map(|key| herdr_key(*key).to_string()).collect();
         self.send_pinned(HerdrRequest::PaneSendKeys { pane_id, keys })
+    }
+
+    /// Content passes the owner fence first; a refused write drops its judgment unsent.
+    fn send_content(&self, request: HerdrRequest) -> Result<HostMutation, HostError> {
+        let mut sent = None;
+        let physical = format!(
+            "{}#{}",
+            self.0.endpoint.socket_path().display(),
+            self.0.pane
+        );
+        let fence = crate::services::tui_input::writer_lease::content("herdr", &physical, || {
+            sent = Some(self.send_pinned(request));
+            Ok(())
+        });
+        match (fence, sent) {
+            (Ok(()), Some(sent)) => sent,
+            _ => {
+                self.discard_pin();
+                Ok(refused("owner_content_fence"))
+            }
+        }
     }
 
     /// Sends `request` to the server the pinned judgment named, consuming it; without one
@@ -506,6 +530,22 @@ impl HerdrTarget {
             .server_witness()
             .is_ok_and(|witness| self.0.verify_pane(&witness).is_ok())
     }
+
+    /// The same read for an attach or reconnect: a gap a short-lived pane process leaves, as the
+    /// launch probe allows, is read again for a moment on the same server; each attempt is the whole proof.
+    pub(crate) fn execution_confirmed(&self) -> bool {
+        let witness = self.0.transport.server_witness();
+        let confirmed = witness
+            .map_err(|why| format!("{why:?}"))
+            .and_then(|witness| {
+                let verified = self.0.verify_pane_within(&witness, CONFIRM_WINDOW);
+                verified.map_err(|refusal| format!("{refusal:?}"))
+            });
+        if let Err(why) = &confirmed {
+            tracing::info!(pane = %self.0.pane, %why, "herdr gate: execution not confirmed");
+        }
+        confirmed.is_ok()
+    }
 }
 
 fn next_call(next_id: &AtomicU64, request: HerdrRequest) -> HerdrCall {
@@ -542,13 +582,14 @@ impl Reads<'_> {
         nonce: &str,
         os: &dyn ProcessOs,
         witness: &ServerWitness,
+        window: Duration,
     ) -> Result<ExpectedExecution, EvidenceGap> {
         let request = ProbeRequest {
             provider,
             nonce,
             launched_at: UNIX_EPOCH,
             witness,
-            window: Duration::ZERO,
+            window,
         };
         pane_probe::probe(&|| self.processes(), os, &request)
     }
@@ -641,7 +682,13 @@ impl HerdrPaneView {
         let provider = if foreground == [root.pid] {
             PaneProvider::Exited
         } else {
-            match reads.provider_on(&self.provider, &self.nonce, self.os.as_ref(), witness) {
+            match reads.provider_on(
+                &self.provider,
+                &self.nonce,
+                self.os.as_ref(),
+                witness,
+                Duration::ZERO,
+            ) {
                 Ok(now) if now.root == root => PaneProvider::Execution(now.provider_process),
                 Ok(_) => PaneProvider::Unverified("root shell changed between readings".into()),
                 Err(gap) => PaneProvider::Unverified(format!("{gap:?}")),
@@ -758,8 +805,12 @@ impl PaneGate {
         Ok(witness)
     }
 
-    /// The launch's provenance rule read once more on `witness`'s server.
-    fn provider_on(&self, witness: &ServerWitness) -> Result<ExpectedExecution, EvidenceGap> {
+    /// The launch's provenance rule read once more on `witness`'s server, within `window`.
+    fn provider_on(
+        &self,
+        witness: &ServerWitness,
+        window: Duration,
+    ) -> Result<ExpectedExecution, EvidenceGap> {
         let reads = Reads {
             transport: self.transport.as_ref(),
             next_id: &self.next_id,
@@ -770,19 +821,33 @@ impl PaneGate {
             &self.nonce,
             self.os.as_ref(),
             witness,
+            window,
         )
     }
 
     /// The provenance rule on `witness`'s server must name the recorded root shell and provider
     /// processes.
     fn verify_pane(&self, witness: &ServerWitness) -> Result<(), HerdrGateRefusal> {
+        self.verify_pane_within(witness, Duration::ZERO)
+    }
+
+    fn verify_pane_within(
+        &self,
+        witness: &ServerWitness,
+        window: Duration,
+    ) -> Result<(), HerdrGateRefusal> {
         #[cfg(test)]
         if self.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault {
             super::herdr::policy::permit::EVENTS
                 .with(|events| events.borrow_mut().push("exact_identity_probe"));
         }
-        let now = self.provider_on(witness).map_err(|gap| {
-            tracing::debug!(pane = %self.pane, ?gap, "herdr input gate: pane unverified");
+        let now = self.provider_on(witness, window).map_err(|gap| {
+            match window.is_zero() {
+                true => {
+                    tracing::debug!(pane = %self.pane, ?gap, "herdr input gate: pane unverified")
+                }
+                false => tracing::info!(pane = %self.pane, ?gap, "herdr gate: pane unconfirmed"),
+            }
             match gap {
                 EvidenceGap::ServerChanged => HerdrGateRefusal::ServerChanged,
                 EvidenceGap::NonceMissing | EvidenceGap::OtherNonce(_) => {

@@ -27,3 +27,8 @@ pub(crate) mod startup_dialog;
 pub(crate) mod submission_fence;
 pub mod transcript_tail;
 pub mod tui_relay;
+
+pub(crate) mod owner_input;
+
+#[cfg(all(test, unix))]
+mod owner_input_tests;

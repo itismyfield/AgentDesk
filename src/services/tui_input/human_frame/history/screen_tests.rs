@@ -87,21 +87,29 @@ fn confirmed_author_history_preserves_all_ten_idle_recovery_regressions() {
     let ledger = path().unwrap();
     let before = std::fs::read(&ledger).unwrap();
     let names = [
+        #[cfg(unix)]
         "services::claude::claude_tui_session_resolution_tests::stranded_followup_user_draft_below_finished_block_fires_recovery",
+        #[cfg(unix)]
         "services::claude::claude_tui_session_resolution_tests::stranded_followup_user_draft_below_zero_tool_block_fires_recovery",
+        #[cfg(unix)]
         "services::claude_tui::hosting::followup_support::claude_tui_prompt_buffer_tests::ignores_submitted_discord_history_prompt",
+        #[cfg(unix)]
         "services::claude_tui::hosting::host_draft::tests::tf2_legacy_tmux_clear_then_submits_once",
+        #[cfg(unix)]
         "services::claude_tui::hosting::host_draft::tests::tf2_legacy_tmux_recreates_only_after_retiring_the_session",
+        #[cfg(unix)]
         "services::claude_tui::hosting::host_draft::tests::tf2_swap_stop_or_lingering_draft_never_recreates",
         "services::claude_tui::input::tests::claude_prompt_draft_backspace_budget_ignores_submitted_discord_prompt_history",
         "services::tmux_common::sentinel_tests::claude_prompt_draft_detector_ignores_visibly_running_user_turn_with_spinner",
         "services::tmux_common::sentinel_tests::claude_prompt_draft_detector_recovers_stranded_followup_below_finished_block",
         "services::tmux_common::sentinel_tests::claude_prompt_draft_detector_recovers_stranded_followup_below_zero_tool_block",
     ];
+    let expected = if cfg!(unix) { 10 } else { 4 };
+    assert_eq!(names.len(), expected);
     let root = crate::config::runtime_root().unwrap();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(names)
-        .args(["--exact", "--test-threads=1", "--nocapture"])
+        .args(["--exact", "--nocapture", "--test-threads=1"])
         .env("ADK_TEST_FRAME_LEDGER_PATH", &ledger)
         .env("AGENTDESK_ROOT_DIR", &root)
         .env("AGENTDESK_CONFIG", root.join("config/agentdesk.yaml"))
@@ -114,8 +122,8 @@ fn confirmed_author_history_preserves_all_ten_idle_recovery_regressions() {
         String::from_utf8_lossy(&child.stderr)
     );
     assert!(
-        output.contains("10 passed; 0 failed; 0 ignored"),
-        "all ten original regressions must execute: {output}"
+        output.contains(&format!("{expected} passed; 0 failed; 0 ignored")),
+        "all {expected} platform-applicable regressions must execute: {output}"
     );
     println!("confirmed-history regressions:\n{output}");
     assert_eq!(

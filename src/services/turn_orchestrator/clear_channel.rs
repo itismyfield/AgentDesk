@@ -29,7 +29,7 @@ pub(super) fn dispatch(
     reply: super::closed_verdict::VerdictReply<ClearChannelResult>,
 ) {
     let result = clear_channel_state(state, channel_id, persistence, active);
-    if active == ActivePolicy::Release {
+    if active == ActivePolicy::Release && !result.persistence.failed.contains(&"queue_read_only") {
         super::mark_turn_finished_signal_done(channel_id);
     }
     let _ = reply.send(result);
@@ -42,7 +42,7 @@ pub(crate) struct ClearPersistence {
     pub(crate) retried: Vec<&'static str>,
     /// Writes that failed twice; a restart may restore what they would have removed.
     pub(crate) failed: Vec<&'static str>,
-    /// The mailbox did not answer or the dispatch marker was unreadable, so the count is unknown.
+    /// Durable input could not be counted, or the mailbox did not answer.
     pub(crate) count_unknown: bool,
     /// The running turn's ids with its absorbed sources and a starting turn's: never waiting.
     pub(crate) not_waiting: Vec<MessageId>,
@@ -79,6 +79,20 @@ pub(super) fn clear_channel_state(
     persistence: QueuePersistenceContext,
     active: ActivePolicy,
 ) -> ClearChannelResult {
+    if let Some(path) =
+        pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel_id)
+        && let Err(error) = queued_head::compat::require_legacy_write(&path)
+    {
+        tracing::warn!(%channel_id, path = %path.display(), %error, "read-only queue refused clear; preserve the original file and inspect with a V2-capable recovery binary");
+        return ClearChannelResult {
+            persistence: ClearPersistence {
+                failed: vec!["queue_read_only"],
+                count_unknown: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+    }
     state.last_persistence = Some(persistence.clone());
     let namespace = super::remint_fence::namespace(&persistence);
     let disk_trusted = state.remint_fence.trusts_queue(&namespace);

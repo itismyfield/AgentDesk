@@ -334,13 +334,7 @@ pub(super) fn execute_observed(
         .map_err(|error| error.to_string())?,
     };
 
-    let CodexTuiLaunchScript {
-        prepared,
-        script_path,
-        owner_path,
-        rollout_modified_since,
-        handoff: _handoff,
-    } = publish_codex_tui_launch_script(
+    let launch = publish_codex_tui_launch_script(
         tmux_session_name,
         session_id,
         prompt,
@@ -370,42 +364,16 @@ pub(super) fn execute_observed(
         inherited_verified,
     )
     .map_err(|error| error.to_string())?;
-    end_observation.prepare(&prepared.context);
-    let tmux_result = crate::services::platform::tmux::create_session(
-        tmux_session_name,
-        Some(working_dir),
-        &format!("bash {}", shell_escape(&script_path)),
-    )?;
-
-    if !tmux_result.status.success() {
-        let stderr = String::from_utf8_lossy(&tmux_result.stderr);
-        remove_failed_tui_launch_files(&owner_path, &script_path);
-        crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-            ProviderKind::Codex.as_str(),
+    let submitted =
+        tui_session_launch::first_input::create(tui_session_launch::first_input::Create {
             tmux_session_name,
+            working_dir,
             prompt,
-        );
-        return Err(format!("tmux error: {}", stderr));
-    }
-
-    crate::services::tmux_common::write_tmux_session_auth_profile(
-        tmux_session_name,
-        &auth_overlay.profile_id,
-    )?;
-
-    crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
-
-    // Before the spawn marker: the marker is restart evidence that these checks passed.
-    let validated_tail = crate::services::codex_tui::tail_launch::validate_selection(
-        &prepared.context,
-        &session_selection,
-    )?;
-    prepared.finish_spawn(crate::services::discord::stamp_spawn_markers(
-        tmux_session_name,
-        Some(&prepared),
-    ))?;
-
-    end_observation.spawned(&prepared.context);
+            auth_profile: &auth_overlay.profile_id,
+            launch,
+            selection: &session_selection,
+            end_observation: &mut end_observation,
+        })?;
 
     if let Some(replacement) = replacement {
         replacement.complete();
@@ -413,42 +381,16 @@ pub(super) fn execute_observed(
 
     wire_cancel_token_to_tmux_session(cancel_token.as_ref(), tmux_session_name);
 
-    // Tail dispatch owns one token clone; post-tail completion and failures share another.
-    let cancel_token_for_post_tail = cancel_token.clone();
     crate::services::codex_tui::tail_launch::record_resume_proof(
-        &prepared.context,
-        &validated_tail,
+        &submitted.prepared.context,
+        &submitted.validated_tail,
     )?;
-    let tail_result = crate::services::codex_tui::tail_launch::dispatch(
-        validated_tail,
+    tui_session_launch::first_input::observe(tui_session_launch::first_input::Observe {
+        submitted,
         working_dir,
-        rollout_modified_since,
-        sender.clone(),
+        sender,
         cancel_token,
         tmux_session_name,
         prompt,
-    );
-    #[cfg(test)]
-    let tail_result = if actual_submit_tests::take_tail_fault() {
-        Err("injected Codex transcript tail failure".to_owned())
-    } else {
-        tail_result
-    };
-    let tail_result = match resolve_codex_tui_tail_result(
-        tail_result,
-        cancel_token_for_post_tail.as_ref(),
-        tmux_session_name,
-    )? {
-        Some(result) => result,
-        // Cancel observed before the transcript was discovered: suppress the
-        // tail Err and defer tmux cleanup to the cancel path (return Ok(())).
-        None => return Ok(()),
-    };
-
-    emit_codex_tui_post_tail_handoff(
-        tail_result,
-        sender,
-        cancel_token_for_post_tail,
-        tmux_session_name,
-    )
+    })
 }

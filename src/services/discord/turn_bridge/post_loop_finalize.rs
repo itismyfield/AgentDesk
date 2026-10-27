@@ -96,6 +96,12 @@ pub(super) async fn run_post_loop_finalize(
     ctx: PostLoopFinalizeContext,
     state: PostLoopFinalizeState,
 ) -> PostLoopFinalizeOutput {
+    #[cfg(test)]
+    super::record_stream_test_event(ctx.channel_id.get(), "finalize");
+    #[cfg(test)]
+    if ctx.cancelled {
+        super::record_stream_test_event(ctx.channel_id.get(), "cancel-finalize");
+    }
     let shared_owned = ctx.shared_owned;
     let gateway = ctx.gateway;
     let channel_id = ctx.channel_id;

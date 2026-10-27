@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from scripts.check_prompt_api_routes import URL, check, inventory
 
 REPO = Path(__file__).resolve().parents[1]
@@ -194,6 +195,23 @@ class PromptRoutes(unittest.TestCase):
         self.assertTrue(any(route.fullmatch('/api/discord/send') for route in routes))
         self.assertFalse(any(route.fullmatch('/api/send') for route in routes))
         self.assertIn('.route("/discord/send",', (REPO / 'src/server/routes/domains/ops.rs').read_text())
+
+    def test_invalid_utf8_is_unavailable_even_with_a_legacy_locale(self):
+        self.prompt.write_text('http://localhost:1/api/discord/send', encoding='utf-8')
+        read_text = Path.read_text
+
+        def legacy_read(path, *args, **kwargs):
+            kwargs.setdefault('encoding', 'cp1252')
+            return read_text(path, *args, **kwargs)
+
+        for path in (self.prompt, self.parts / 'mod.rs', self.part):
+            before = path.read_bytes()
+            path.write_bytes(before + b'\n\xff\xfe')
+            with self.subTest(path=path.name), patch.object(Path, 'read_text', legacy_read):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(check(self.root, self.prompts), 2)
+                self.assertIn('inspection_unavailable', output.getvalue())
+            path.write_bytes(before)
 
     def test_no_inspected_prompt_files_is_unavailable(self):
         for symlink in (False, True):

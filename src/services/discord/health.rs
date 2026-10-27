@@ -72,8 +72,12 @@ pub(in crate::services::discord) use tail_evidence::TailObservation;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod tmux_preflight;
 mod transcript_binding_stall;
+#[cfg(test)]
+pub(in crate::services::discord) use recovery::run_stall_watchdog_pass;
 pub(crate) use tmux_preflight::attach_tmux_probe_preflight;
 pub(crate) use tmux_preflight::spawn as spawn_tmux_probe_preflight;
+#[cfg(test)]
+pub(in crate::services::discord) use transcript_binding_stall::o_witness_backdate_for_tests;
 mod turn_deliver;
 mod unbound_owners;
 mod unpaired_active_token;
@@ -402,6 +406,10 @@ impl UtilityBotUserIdResolution {
 }
 
 impl HealthRegistry {
+    #[cfg(test)]
+    pub(in crate::services::discord) fn age_for_tests(&mut self, seconds: i64) {
+        self.started_at_unix = chrono::Utc::now().timestamp() - seconds;
+    }
     pub fn new() -> Self {
         Self {
             providers: tokio::sync::Mutex::new(Vec::new()),

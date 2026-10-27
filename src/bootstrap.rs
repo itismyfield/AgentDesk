@@ -25,7 +25,7 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
         let config = crate::config::load().context("Failed to load config")?;
         crate::services::discord_config_audit::LoadedRuntimeConfig {
             config,
-            path: std::path::PathBuf::from("config/agentdesk.yaml"),
+            path: crate::config::resolved_config_path(),
             existed: true,
         }
     };

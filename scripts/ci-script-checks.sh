@@ -516,7 +516,8 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_known_gap \
   scripts.e2e.tui_relay.test_matrix_runner \
   scripts.e2e.tui_relay.test_post_deploy_relay_continuity \
-  scripts.e2e.tui_relay.test_post_deploy_turn_smoke
+  scripts.e2e.tui_relay.test_post_deploy_turn_smoke \
+  scripts.e2e.tui_relay.test_midturn_kill
 "$PYTHON" -m unittest scripts.e2e.test_voice_live_media_smoke
 "$PYTHON" -m unittest tests.test_e2e_scenario_lane_wiring
 fi
@@ -754,6 +755,7 @@ if run_check contracts "Shell test suites (tests/*.sh)"; then
 # owns script-level gates.
 SHELL_TESTS_FAILED=0
 required_shell_suites=(
+  tests/test_cluster_deploy_peer_transfer_7242.sh
   tests/test_cluster_deploy_peer_host_paths_6162.sh
   tests/test_cluster_deploy_peer_verdict_5189.sh
   tests/test_deploy_e2e_readers_gate_6577.sh

@@ -332,15 +332,7 @@ pub fn dcserver_instance_pids() -> Vec<u32> {
 }
 
 pub fn instance_agentdesk_config_path() -> Option<PathBuf> {
-    agentdesk_runtime_root().map(|root| {
-        let canonical = crate::runtime_layout::config_file_path(&root);
-        let legacy = crate::runtime_layout::legacy_config_file_path(&root);
-        if canonical.is_file() || !legacy.is_file() {
-            canonical
-        } else {
-            legacy
-        }
-    })
+    agentdesk_runtime_root().map(|root| crate::config::config_path::config_path_in(&root))
 }
 
 pub fn dcserver_stdout_log_path() -> Option<PathBuf> {

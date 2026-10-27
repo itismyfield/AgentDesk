@@ -209,6 +209,95 @@ pub async fn auth_middleware(
     unauthorized_response()
 }
 
+/// Who may speak for a human on the human-input route: a non-browser process on this host,
+/// or a holder of the server token. A body author is honored only behind one of these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HumanInputCaller {
+    LocalProcess,
+    ServerToken,
+}
+
+fn human_input_caller(
+    config: &crate::config::Config,
+    headers: &axum::http::HeaderMap,
+    peer: Option<SocketAddr>,
+) -> Option<HumanInputCaller> {
+    let token = config
+        .server
+        .auth_token
+        .as_deref()
+        .filter(|token| !token.is_empty());
+    if let (Some(expected), Some(supplied)) = (token, extract_bearer(headers))
+        && crate::utils::auth::constant_time_token_eq(expected, supplied)
+    {
+        return Some(HumanInputCaller::ServerToken);
+    }
+    if !peer?.ip().to_canonical().is_loopback() {
+        return None;
+    }
+    // A same-host proxy (e.g. Tailscale serve) arrives as loopback; its forwarded headers say so.
+    if headers.contains_key(axum::http::header::FORWARDED)
+        || headers.contains_key("x-forwarded-for")
+    {
+        return None;
+    }
+    let header = |name: &str| headers.get(name).map(|value| value.to_str().unwrap_or(""));
+    if header("sec-fetch-site").is_some_and(|site| {
+        !site.eq_ignore_ascii_case("same-origin") && !site.eq_ignore_ascii_case("none")
+    }) {
+        return None;
+    }
+    // Browsers send Origin on every POST, so a foreign page or a rebinding name shows up here.
+    if header(axum::http::header::ORIGIN.as_str()).is_some_and(|origin| {
+        !crate::utils::loopback_url::is_loopback_url(origin, Some(config.server.port))
+    }) {
+        return None;
+    }
+    Some(HumanInputCaller::LocalProcess)
+}
+
+impl axum::extract::FromRequestParts<AppState> for HumanInputCaller {
+    type Rejection = axum::response::Response;
+
+    /// Runs before the body extractor, so a refused caller's body is never read.
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+            .map(|info| info.0);
+        human_input_caller(&state.config, &parts.headers, peer)
+            .ok_or_else(|| refuse_human_input_caller(&parts.headers, peer))
+    }
+}
+
+fn refuse_human_input_caller(
+    headers: &axum::http::HeaderMap,
+    peer: Option<SocketAddr>,
+) -> axum::response::Response {
+    tracing::warn!(
+        peer_ip = peer.map(|peer| peer.ip().to_string()).as_deref(),
+        has_origin = headers.contains_key(axum::http::header::ORIGIN),
+        has_fetch_site = headers.contains_key("sec-fetch-site"),
+        has_forwarded = headers.contains_key(axum::http::header::FORWARDED)
+            || headers.contains_key("x-forwarded-for"),
+        "human input: caller is neither a local process nor a server token holder"
+    );
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        Json(json!({"ok": false, "error": "caller_not_allowed"})),
+    )
+        .into_response()
+}
+
+/// Loopback socket peer for tests that drive the HTTP routes in-process.
+#[cfg(test)]
+pub(crate) fn loopback_peer() -> axum::extract::ConnectInfo<SocketAddr> {
+    axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,5 +384,67 @@ mod tests {
 
         let request_no_peer = make_req("/internal/escalation/emit", None);
         assert_eq!(peer_addr_from_request(&request_no_peer), None);
+    }
+
+    #[test]
+    fn human_input_caller_is_a_native_local_process_or_a_server_token_holder() {
+        use HumanInputCaller::{LocalProcess, ServerToken};
+        let config = |token: Option<&str>| {
+            let mut config = crate::config::Config::default();
+            config.server.port = 8791;
+            config.server.auth_token = token.map(str::to_string);
+            config
+        };
+        let headers = |pairs: &[(&str, &str)]| {
+            let mut headers = axum::http::HeaderMap::new();
+            for (name, value) in pairs {
+                headers.insert(
+                    axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    HeaderValue::from_str(value).unwrap(),
+                );
+            }
+            headers
+        };
+        type Case<'a> = (
+            Option<&'a str>,
+            &'a [(&'a str, &'a str)],
+            Option<&'a str>,
+            Option<HumanInputCaller>,
+        );
+        #[rustfmt::skip]
+        let cases: &[Case] = &[
+            (Some("127.0.0.1:1"), &[], None, Some(LocalProcess)),
+            (Some("127.8.0.1:1"), &[], None, Some(LocalProcess)),
+            (Some("[::1]:1"), &[], None, Some(LocalProcess)),
+            (Some("[::ffff:127.0.0.1]:1"), &[], None, Some(LocalProcess)),
+            (Some("127.0.0.1:1"), &[("origin", "http://127.0.0.1:8791")], None, Some(LocalProcess)),
+            (Some("127.0.0.1:1"), &[("origin", "http://localhost:8791")], None, Some(LocalProcess)),
+            (Some("127.0.0.1:1"), &[("sec-fetch-site", "Same-Origin")], None, Some(LocalProcess)),
+            (Some("127.0.0.1:1"), &[("sec-fetch-site", "none")], None, Some(LocalProcess)),
+            (Some("127.0.0.1:1"), &[("origin", "http://localhost:5173")], None, None),
+            (Some("127.0.0.1:1"), &[("origin", "https://evil.example")], None, None),
+            (Some("127.0.0.1:1"), &[("origin", "null")], None, None),
+            (Some("127.0.0.1:1"), &[("sec-fetch-site", "cross-site")], None, None),
+            (Some("127.0.0.1:1"), &[("sec-fetch-site", "same-site")], None, None),
+            (Some("127.0.0.1:1"), &[("x-forwarded-for", "100.71.169.10")], None, None),
+            (Some("127.0.0.1:1"), &[("forwarded", "for=100.71.169.10")], None, None),
+            (Some("100.71.169.10:1"), &[], None, None),
+            (Some("192.168.0.5:1"), &[], None, None),
+            (Some("[::ffff:192.168.0.5]:1"), &[], None, None),
+            (None, &[], None, None),
+            (Some("100.71.169.10:1"), &[("authorization", "Bearer server-token")], Some("server-token"), Some(ServerToken)),
+            (None, &[("authorization", "Bearer server-token")], Some("server-token"), Some(ServerToken)),
+            (Some("100.71.169.10:1"), &[("authorization", "Bearer other")], Some("server-token"), None),
+            (Some("100.71.169.10:1"), &[("authorization", "Bearer ")], Some(""), None),
+            (Some("127.0.0.1:1"), &[("authorization", "Bearer ")], Some(""), Some(LocalProcess)),
+        ];
+        for (peer, pairs, token, expected) in cases {
+            let peer = peer.map(|peer| peer.parse::<SocketAddr>().unwrap());
+            assert_eq!(
+                human_input_caller(&config(*token), &headers(pairs), peer),
+                *expected,
+                "{peer:?} {pairs:?} token={token:?}"
+            );
+        }
     }
 }

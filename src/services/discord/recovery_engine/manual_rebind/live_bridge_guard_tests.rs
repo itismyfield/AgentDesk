@@ -99,17 +99,27 @@ fn rebind_writes_its_row_and_claims_its_watcher_through_either_entry() {
                 .await
             }
         };
-        let rebound = runtime.block_on(rebind).unwrap_or_else(|error| {
-            panic!("from_offset={from_offset} pinned={pinned}: rebind failed: {error:?}")
-        });
-
-        assert!(rebound.watcher_spawned, "pinned={pinned}");
-        assert_eq!(shared.tmux_watchers.len(), 1, "pinned={pinned}");
-        assert_ne!(
-            std::fs::read(&row).expect("rebound row"),
-            before,
-            "pinned={pinned}: the rebind rewrote its row"
-        );
+        let result = runtime.block_on(rebind);
+        #[cfg(not(unix))]
+        {
+            // Recovery has no tmux observer off Unix, even when test liveness is injected.
+            assert!(matches!(result, Err(RebindError::TmuxNotAlive { .. })));
+            assert_eq!(shared.tmux_watchers.len(), 0);
+            assert_eq!(std::fs::read(&row).expect("orphan row"), before);
+        }
+        #[cfg(unix)]
+        {
+            let rebound = result.unwrap_or_else(|error| {
+                panic!("from_offset={from_offset} pinned={pinned}: rebind failed: {error:?}")
+            });
+            assert!(rebound.watcher_spawned, "pinned={pinned}");
+            assert_eq!(shared.tmux_watchers.len(), 1, "pinned={pinned}");
+            assert_ne!(
+                std::fs::read(&row).expect("rebound row"),
+                before,
+                "pinned={pinned}: the rebind rewrote its row"
+            );
+        }
         drop(runtime);
     }
 }

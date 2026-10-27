@@ -358,9 +358,13 @@ pub(super) async fn handle_stream_tool_message(
                 // correlation keys, so the boundary rewrite is recorded with a
                 // joinable key instead of an anonymous one.
                 let body_correlation = BodyMutationCorrelation::from_inflight_row(&inflight_state);
-                chunk_compose::append_tool_boundary_separator(
+                let preserve_progress = !matches!(stream_body_ownership_peek(
+                    channel_id, inflight_state, gateway.can_deliver_directly(),
+                ), Ok(false));
+                chunk_compose::append_tool_boundary_separator_for_stream(
                     &mut full_response,
                     body_correlation,
+                    preserve_progress,
                 );
                 inflight_state.full_response = full_response.clone();
                 state_dirty = true;

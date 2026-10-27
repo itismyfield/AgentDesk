@@ -107,6 +107,28 @@ pub(super) fn append_tool_boundary_separator(
     );
 }
 
+// O's stream representation retains every consumed byte across tool boundaries.
+pub(super) fn append_tool_boundary_separator_for_stream(
+    full_response: &mut String,
+    correlation: body_mutation_telemetry::BodyMutationCorrelation<'_>,
+    preserve_progress: bool,
+) {
+    if !preserve_progress {
+        return append_tool_boundary_separator(full_response, correlation);
+    }
+    if full_response.is_empty() || full_response.ends_with("\n\n") {
+        return;
+    }
+    let before = full_response.clone();
+    full_response.push_str("\n\n");
+    body_mutation_telemetry::observe_body_mutation(
+        body_mutation_telemetry::BodyMutationSite::AppendToolBoundarySeparator,
+        correlation,
+        &before,
+        full_response,
+    );
+}
+
 #[cfg(test)]
 #[path = "chunk_compose_tests.rs"]
 mod chunk_boundary_blank_line_tests;

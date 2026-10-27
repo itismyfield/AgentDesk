@@ -193,12 +193,18 @@ python3() {{ {shlex.quote(sys.executable)} {shlex.quote(str(driver))} "$@"; }}
 BUILD_PROFILE={profile}
 DEPLOY_BUILD_PROFILE={profile}
 DEPLOY_LOCK_TIMEOUT_SECS=5
+DEPLOY_RUN_STARTED="$SECONDS"
 TARGET=aarch64-apple-darwin
 CARGO_TARGET_ARGS=(--target "$TARGET")
 _ensure_dashboard_dependencies() {{ :; }}
 _check_repo_remote_freshness() {{ :; }}
 _external_artifact_would_skip_o_writer() {{ return 1; }}
 _resolve_default_release_binary() {{ echo "$REPO/artifact"; }}
+# Exercise the source-build consumer without peers, transfers or a ledger floor.
+_schema_order_peers() {{ :; }}
+_peer_binary_platform() {{ return 1; }}
+_select_peer_binary() {{ PEER_BINARY_ACCEPTED=0; }}
+_binary_would_revert_o_ledger() {{ return 1; }}
 """ + start + fragment + "\n:\n")
             for installed in (False, True):
                 sccache = self.bin / "sccache"
@@ -211,6 +217,7 @@ _resolve_default_release_binary() {{ echo "$REPO/artifact"; }}
                     result = subprocess.run(["/bin/bash", str(scenario)], env=self.env,
                                             text=True, capture_output=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertNotIn("command not found", result.stderr)
                     seen = json.loads(self.output.read_text())
                     self.assertEqual(seen["PATH"], self.env["PATH"])
                     self.assertEqual(seen["SCCACHE_CACHE_SIZE"], "15G")

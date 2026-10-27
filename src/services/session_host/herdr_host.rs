@@ -105,6 +105,22 @@ impl<T: HerdrTransport> HerdrHost<T> {
     }
 
     /// One mutation, after E7, to the server E7 named; `request` is checked first.
+    /// Content passes the owner fence first; a refused write sends nothing.
+    fn mutate_content(&self, pane: &str, request: HerdrRequest) -> Result<HostMutation, HostError> {
+        let mut sent = None;
+        let physical = format!("{}#{pane}", self.endpoint.socket_path().display());
+        let fence = crate::services::tui_input::writer_lease::content("herdr", &physical, || {
+            sent = Some(self.mutate(pane, request));
+            Ok(())
+        });
+        match (fence, sent) {
+            (Ok(()), Some(sent)) => sent,
+            _ => Ok(HostMutation::Refused(HostRefusal::Precondition(
+                "owner_content_fence".to_string(),
+            ))),
+        }
+    }
+
     fn mutate(&self, pane: &str, request: HerdrRequest) -> Result<HostMutation, HostError> {
         let witness = match self.restore_off() {
             Ok(witness) => witness,
@@ -130,7 +146,7 @@ impl<T: HerdrTransport> HerdrHost<T> {
         }
         let text = format!("{PASTE_START}{text}{PASTE_END}");
         let pane_id = pane.to_string();
-        self.mutate(pane, HerdrRequest::PaneSendText { pane_id, text })
+        self.mutate_content(pane, HerdrRequest::PaneSendText { pane_id, text })
     }
 
     /// One line and Enter in a single input, so the text never lands without its Enter.
@@ -151,7 +167,7 @@ impl<T: HerdrTransport> HerdrHost<T> {
             text: text.to_string(),
             keys: vec!["enter".to_string()],
         };
-        self.mutate(pane, request)
+        self.mutate_content(pane, request)
     }
 
     fn exchange<R>(
@@ -226,7 +242,7 @@ impl<T: HerdrTransport> InteractiveSessionHost for HerdrHost<T> {
             pane_id: pane.to_string(),
             text: text.to_string(),
         };
-        self.mutate(pane, request)
+        self.mutate_content(pane, request)
     }
 
     /// Every key is mapped before any I/O; one unknown key sends none of them.

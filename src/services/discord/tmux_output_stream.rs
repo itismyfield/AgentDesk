@@ -738,6 +738,10 @@ fn strip_leading_tui_response_chrome_in_place(
 mod compact_summary_tests;
 
 #[cfg(test)]
+#[path = "tmux_output_stream/tests/section_replay_tests.rs"]
+mod section_replay_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::session_backend::StreamLineState;
