@@ -56,9 +56,10 @@ pub(crate) enum SpawnNonceMarker {
 }
 
 pub(crate) fn stable_host_identity() -> Option<String> {
-    crate::config::load_graceful()
+    crate::config::snapshot()
         .cluster
         .instance_id
+        .clone()
         .into_iter()
         .chain(std::env::var("AGENTDESK_INSTANCE_ID").ok())
         .map(|id| id.trim().to_owned())

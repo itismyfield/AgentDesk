@@ -22,8 +22,8 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
     pool: &PgPool,
     claim_owner: &str,
 ) -> Vec<DispatchOutboxRow> {
-    let cluster_config = crate::config::load_graceful().cluster;
-    claim_pending_dispatch_outbox_batch_with_cluster_config_pg(pool, claim_owner, &cluster_config)
+    let config = crate::config::snapshot();
+    claim_pending_dispatch_outbox_batch_with_cluster_config_pg(pool, claim_owner, &config.cluster)
         .await
 }
 

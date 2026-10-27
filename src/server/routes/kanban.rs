@@ -1539,7 +1539,7 @@ fn log_kanban_identity_consumption(
     principal: &Option<Extension<RequestPrincipal>>,
     consumed_agent_id: &str,
 ) {
-    let config = crate::config::load_graceful();
+    let config = crate::config::snapshot();
     log_identity_consumption(
         endpoint,
         request_principal_ref(principal),

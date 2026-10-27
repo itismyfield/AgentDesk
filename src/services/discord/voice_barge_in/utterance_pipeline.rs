@@ -38,7 +38,7 @@ impl VoiceBargeInRuntime {
         };
 
         let transcript = transcribed.text.trim();
-        let config_snapshot = crate::config::load_graceful();
+        let config_snapshot = crate::config::snapshot();
         let source_channel_id = effective_voice_source_channel(&config_snapshot, channel_id);
         let flight_context = VoiceFlightUtteranceContext::from_utterance(
             source_channel_id,

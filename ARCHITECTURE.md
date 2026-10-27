@@ -149,6 +149,7 @@ src/
 │   ├── server_surface.rs
 │   ├── session_hosts.rs
 │   ├── session_hosts_tests.rs
+│   ├── snapshot_tests.rs
 │   ├── test_env.rs
 │   ├── tool_activity_display.rs
 │   └── writer_channels_tests.rs
@@ -3941,6 +3942,7 @@ src/
 ├── supervisor/
 │   └── mod.rs
 ├── test_support/
+│   ├── production_scan.rs
 │   ├── serial_runtime.rs
 │   └── source_text_tests.rs
 ├── ui/

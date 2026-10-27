@@ -171,7 +171,7 @@ async fn list_online_node_choices(
             "Postgres pool is unavailable; cluster node registry cannot be read.".to_string(),
         );
     };
-    let lease_ttl_secs = crate::config::load_graceful().cluster.lease_ttl_secs.max(1);
+    let lease_ttl_secs = crate::config::snapshot().cluster.lease_ttl_secs.max(1);
     let mut nodes =
         crate::services::cluster::node_registry::list_worker_nodes(pool, lease_ttl_secs).await?;
     nodes.sort_by(|left, right| {

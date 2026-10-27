@@ -26,7 +26,8 @@ pub(crate) fn is_exhausted(error: &sqlx::Error) -> bool {
 }
 
 pub(crate) fn publish(caps: &mut serde_json::Map<String, Value>) {
-    let cluster = crate::config::load_graceful().cluster;
+    let config = crate::config::snapshot();
+    let cluster = &config.cluster;
     caps.remove("execution_capacity");
     if let Some(slots) = LOCAL
         .get()
@@ -44,14 +45,10 @@ pub(crate) fn publish(caps: &mut serde_json::Map<String, Value>) {
 }
 
 pub(crate) fn automatic_enabled() -> bool {
-    crate::config_live_reload::current()
-        .map(|config| config.cluster.intake_routing.capacity_aware)
-        .unwrap_or_else(|| {
-            crate::config::load_graceful()
-                .cluster
-                .intake_routing
-                .capacity_aware
-        })
+    crate::config::snapshot()
+        .cluster
+        .intake_routing
+        .capacity_aware
 }
 
 /// Order available bounded candidates by occupancy ratio, oldest assignment,
@@ -122,7 +119,7 @@ pub(crate) fn acquire(
     channel: u64,
     cancel: Arc<CancelToken>,
 ) -> Result<Option<ExecutionGuard>, String> {
-    let config = crate::config::load_graceful();
+    let config = crate::config::snapshot();
     if LOCAL.get().is_none()
         && (!config.cluster.enabled || config.cluster.execution_slots.is_none())
     {

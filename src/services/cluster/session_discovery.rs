@@ -151,11 +151,7 @@ async fn build_channel_directory_from_pg_for_live_sessions(
     live_session_names: &HashSet<String>,
     local_instance_id: Option<&str>,
 ) -> Result<ChannelDirectory, sqlx::Error> {
-    // load_graceful() does sync filesystem IO + yaml parse — push to a blocking
-    // thread so we don't stall the tokio runtime on every discovery tick.
-    let name_map = tokio::task::spawn_blocking(build_yaml_channel_name_map)
-        .await
-        .unwrap_or_default();
+    let name_map = build_yaml_channel_name_map();
     let session_tmux_segments =
         load_session_tmux_segments_pg(pool, live_session_names, local_instance_id).await?;
     build_channel_directory_from_pg_with_config(pool, name_map, session_tmux_segments).await
@@ -194,7 +190,7 @@ const SESSION_TMUX_SEGMENTS_QUERY: &str = "SELECT provider, channel_id, session_
 /// matching).
 pub fn build_yaml_channel_name_map() -> ChannelNameMap {
     let mut map: ChannelNameMap = ChannelNameMap::new();
-    let config = crate::config::load_graceful();
+    let config = crate::config::snapshot();
     for agent in &config.agents {
         for (provider_str, channel) in agent.channels.iter() {
             let Some(provider) = ProviderKind::from_str(provider_str) else {

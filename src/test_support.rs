@@ -1,6 +1,7 @@
 //! Test-only serialized runtimes and Rust source scanning for `include_str!` guards.
 //! The lexer handles comments and literals without resolving names or evaluating `cfg`.
 
+pub(crate) mod production_scan;
 pub(crate) mod serial_runtime;
 
 use std::fmt;

@@ -41,7 +41,7 @@ fn shared_discord_http_client() -> &'static reqwest::Client {
 }
 
 fn resolve_dispatch_thread_owner_user_id() -> Option<u64> {
-    crate::config::load_graceful().discord.owner_id
+    crate::config::snapshot().discord.owner_id
 }
 
 fn context_slot_index(dispatch_context: Option<&serde_json::Value>) -> Option<i64> {

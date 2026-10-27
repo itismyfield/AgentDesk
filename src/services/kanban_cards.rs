@@ -183,7 +183,7 @@ pub(crate) fn require_explicit_bearer_token(
     headers: &HeaderMap,
     operation: &str,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let config = crate::config::load_graceful();
+    let config = crate::config::snapshot();
     if let Some(expected_token) = config.server.auth_token.as_deref() {
         if !expected_token.is_empty() {
             let provided = trimmed_header_value(headers, "authorization")

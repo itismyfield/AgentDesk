@@ -126,7 +126,7 @@ impl SharedData {
                 provider.as_str(),
                 &channel_id.get().to_string(),
                 &local,
-                crate::config::load_graceful().cluster.lease_ttl_secs.max(1),
+                crate::config::snapshot().cluster.lease_ttl_secs.max(1),
                 false,
             )
             .await

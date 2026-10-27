@@ -23,7 +23,8 @@ pub(super) struct PreferredWaitWarning {
 
 impl PreferredWaitWarning {
     pub(super) fn start() -> Self {
-        let cluster = crate::config::load_graceful().cluster;
+        let config = crate::config::snapshot();
+        let cluster = &config.cluster;
         let after = cluster
             .gateway_lease_idle_expiry_secs
             .max(cluster.gateway_yield_grace_secs)

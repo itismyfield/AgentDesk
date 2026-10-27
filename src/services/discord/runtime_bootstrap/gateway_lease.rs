@@ -81,7 +81,7 @@ async fn resolve_self_instance_id_for_preference(cluster: &crate::config::Cluste
 }
 
 async fn gateway_preference() -> Option<GatewayPreference> {
-    let config = crate::config::load_graceful();
+    let config = crate::config::snapshot();
     // Cheap exits first: no clustering, or no preference configured. Neither needs
     // a self-id, and the `auto`-id path would otherwise block on bootstrap for
     // every node that never opted into a preference.
@@ -119,7 +119,7 @@ async fn preferred_gateway_is_waiting(
     preferred_instance_id: &str,
     provider: &ProviderKind,
 ) -> bool {
-    let lease_ttl_secs = crate::config::load_graceful().cluster.lease_ttl_secs.max(1);
+    let lease_ttl_secs = crate::config::snapshot().cluster.lease_ttl_secs.max(1);
     match crate::services::cluster::node_registry::list_worker_nodes(pool, lease_ttl_secs).await {
         Ok(nodes) => should_yield_to_preferred(&nodes, preferred_instance_id, provider.as_str()),
         Err(error) => {
@@ -274,7 +274,7 @@ pub(super) async fn try_acquire_discord_gateway_lease(
         discord_gateway_lock_id(token_hash),
         format!("discord gateway {}", provider.as_str()),
         gateway_lease_application_name(provider),
-        gateway_lease_idle_expiry(&crate::config::load_graceful().cluster),
+        gateway_lease_idle_expiry(&crate::config::snapshot().cluster),
     )
     .await
 }

@@ -414,10 +414,11 @@ fn write_launch_script(
     // #5935: an unset provider setting exports nothing — the inherited window is
     // still scrubbed, but Claude Code's own default and in-session `/autocompact`
     // remain in control instead of a hardcoded absolute value.
-    let runtime = crate::config::load_graceful().runtime;
     let compact_window =
         crate::services::claude_compact_context::tui_launch_auto_compact_window_from_setting(
-            runtime.context_compact_window_claude,
+            crate::config::snapshot()
+                .runtime
+                .context_compact_window_claude,
         );
     crate::services::claude_compact_context::append_auto_compact_window_shell_env(
         &mut env_exports,

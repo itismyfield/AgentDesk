@@ -33,7 +33,7 @@ use crate::config::reload_classes::ReloadClass;
 mod readers_tests;
 
 /// Process-global live config snapshot. `None` until [`install`] runs at boot.
-static LIVE: OnceLock<RwLock<Arc<Config>>> = OnceLock::new();
+static LIVE: RwLock<Option<Arc<Config>>> = RwLock::new(None);
 
 /// Every successfully installed snapshot, including a same-value reload.
 /// Consumers that must redo external validation subscribe here instead of
@@ -64,11 +64,9 @@ pub fn install(config: Config) {
 /// The current live config snapshot, or `None` if [`install`] has not run yet
 /// (callers should fall back to their boot-captured config in that case).
 pub fn current() -> Option<Arc<Config>> {
-    LIVE.get().map(|lock| {
-        lock.read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    })
+    LIVE.read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
 /// Safe fallback for transient invalid or missing on-disk configuration.
@@ -91,13 +89,16 @@ pub(crate) fn subscribe() -> tokio::sync::watch::Receiver<Option<Arc<Config>>> {
 }
 
 fn store(config: Arc<Config>) {
-    let lock = LIVE.get_or_init(|| RwLock::new(config.clone()));
-    *lock
+    publish(Some(config));
+}
+
+fn publish(config: Option<Arc<Config>>) {
+    *LIVE
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = config.clone();
     LIVE_UPDATES
         .get_or_init(|| tokio::sync::watch::channel(None).0)
-        .send_replace(Some(config));
+        .send_replace(config);
 }
 
 /// Paths of the non-live fields in [`crate::config::reload_classes::FIELDS`] whose
@@ -281,16 +282,26 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
     })
 }
 
+/// Restores the snapshot a test found, including none, so later tests in the same process
+/// still read their config files through `config::snapshot`.
 #[cfg(test)]
 pub(crate) struct TestLiveGuard {
-    previous: Config,
+    previous: Option<Arc<Config>>,
     _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+}
+
+#[cfg(test)]
+impl TestLiveGuard {
+    /// Clears the snapshot until the guard drops, as in a process that never installed one.
+    pub(crate) fn clear(&self) {
+        publish(None);
+    }
 }
 
 #[cfg(test)]
 impl Drop for TestLiveGuard {
     fn drop(&mut self) {
-        install(self.previous.clone());
+        publish(self.previous.take());
     }
 }
 
@@ -298,11 +309,8 @@ impl Drop for TestLiveGuard {
 pub(crate) fn test_live_guard(
     lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
 ) -> TestLiveGuard {
-    let previous = current()
-        .map(|config| (*config).clone())
-        .unwrap_or_default();
     TestLiveGuard {
-        previous,
+        previous: current(),
         _lock: lock,
     }
 }

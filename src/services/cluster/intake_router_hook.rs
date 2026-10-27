@@ -55,7 +55,7 @@ pub(crate) use model::{
 use placement::route_by_preference;
 
 fn worker_heartbeat_lease_secs() -> u64 {
-    crate::config::load_graceful().cluster.lease_ttl_secs.max(1)
+    crate::config::snapshot().cluster.lease_ttl_secs.max(1)
 }
 
 fn required_block(detail: String) -> IntakeRouterDecision {

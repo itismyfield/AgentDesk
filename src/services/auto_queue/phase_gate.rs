@@ -321,7 +321,7 @@ async fn create_activate_dispatch_pg_inner(
     let required_capabilities = crate::dispatch::dispatch_required_capabilities_from_routing(
         &context_with_strategy,
         dispatch_type,
-        &crate::config::load_graceful().cluster.dispatch_routing,
+        &crate::config::snapshot().cluster.dispatch_routing,
     );
     let mut tx = pool
         .begin()

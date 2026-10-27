@@ -1,5 +1,5 @@
-//! The claim's cluster config, read whole on a blocking thread: the file read, the YAML parse
-//! and the data-dir creation of `load_graceful` never run on a runtime worker.
+//! The claim's cluster config from `config::snapshot`, read on a blocking thread: in a process
+//! without a live snapshot that is a file read and YAML parse, which never run on a runtime worker.
 
 use sqlx::PgPool;
 
@@ -14,7 +14,7 @@ pub async fn claim_task_dispatches(
     pool: &PgPool,
     request: &TaskDispatchClaimRequest,
 ) -> Result<TaskDispatchClaimOutcome, String> {
-    claim_after_reading(pool, request, || crate::config::load_graceful().cluster).await
+    claim_after_reading(pool, request, || crate::config::snapshot().cluster.clone()).await
 }
 
 /// Claims only after `read` finished on a blocking thread; a read that panicked or was cancelled

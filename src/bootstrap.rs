@@ -139,6 +139,9 @@ pub(crate) async fn prepare_dcserver_boot(config: &crate::config::Config, pool: 
         eprintln!("  ✖ Failed to install boot snapshots: {error:#}");
         std::process::exit(1);
     }
+    // The bot starts beside the HTTP server, so `config::snapshot` must hold the validated
+    // boot config before either; the server's watcher replaces it on each valid edit.
+    crate::config_live_reload::install(config.clone());
     crate::cli::dcserver::startup::spawn_skill_manifest_audit(config, pool);
 }
 

@@ -2789,6 +2789,15 @@ mod secret_bearing_config_file_tests {
     }
 }
 
+/// The config a running daemon acts on: the validated live snapshot. A process that never
+/// installed one (CLI commands, most tests) reads the file through [`load_graceful`].
+pub fn snapshot() -> std::sync::Arc<Config> {
+    crate::config_live_reload::current().unwrap_or_else(|| std::sync::Arc::new(load_graceful()))
+}
+
+#[cfg(test)]
+mod snapshot_tests;
+
 /// Load config gracefully from [`resolved_config_path`]; invalid or missing files use the
 /// live snapshot or defaults.
 pub fn load_graceful() -> Config {
