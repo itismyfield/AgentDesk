@@ -150,34 +150,59 @@ fn set_env(key: &'static str, value: Option<&std::ffi::OsStr>) -> crate::config:
     guard
 }
 
-/// Production files that may still name a config file path themselves, and why.
-const PATH_OWNERS: &[(&str, &str)] = &[
-    ("src/config/config_path.rs", "the resolver"),
-    ("src/runtime_layout/paths.rs", "defines both layout paths"),
+/// Production functions that may still name a config file path themselves, and why.
+/// An empty signature covers the whole file.
+const PATH_OWNERS: &[(&str, &str, &str)] = &[
+    ("src/config/config_path.rs", "", "the resolver"),
+    (
+        "src/runtime_layout/paths.rs",
+        "pub fn config_file_path(",
+        "defines the canonical path",
+    ),
+    (
+        "src/runtime_layout/paths.rs",
+        "pub fn legacy_config_file_path(",
+        "defines the legacy path",
+    ),
     (
         "src/runtime_layout/legacy_migration.rs",
+        "fn create_legacy_backup(",
+        "backs up the legacy file before migration",
+    ),
+    (
+        "src/runtime_layout/legacy_migration.rs",
+        "fn normalize_agent_config_channels(",
+        "rewrites the migrated file in place",
+    ),
+    (
+        "src/runtime_layout/legacy_migration.rs",
+        "fn migrate_legacy_config_file(",
         "moves the legacy file into config/",
     ),
     (
         "src/runtime_layout/mod.rs",
+        "fn legacy_layout_needs_migration(",
         "detects a legacy layout to migrate",
     ),
     (
         "src/runtime_layout/config_merge.rs",
+        "fn merge_role_map_into_agentdesk_yaml(",
         "merges role_map into the migrated file",
     ),
     (
         "src/cli/migrate/plan.rs",
+        "fn load_existing_role_ids(",
         "reads both layouts as migration input",
     ),
-    ("src/cli/migrate/apply.rs", "writes the migrated file"),
     (
-        "src/cli/dcserver.rs",
-        "handle_dcserver's body is pinned by check_legacy_supervision_census",
+        "src/cli/migrate/apply.rs",
+        "fn apply_import_plan(",
+        "writes the migrated file",
     ),
     (
-        "src/services/discord/turn_presence/activity/unbound/live.rs",
-        "not converted yet",
+        "src/cli/dcserver.rs",
+        "pub fn handle_dcserver(",
+        "body pinned by check_legacy_supervision_census",
     ),
 ];
 
@@ -185,53 +210,99 @@ const BYPASS: &str = r#"var(?:_os)?\(\s*"AGENTDESK_CONFIG"|config_file_path\(|\.
 
 static BYPASS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(BYPASS).unwrap());
 static TEST_CFG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^#\[cfg\((?:test|all\([^\]]*\btest\b[^\]]*)\)\]").unwrap());
+    LazyLock::new(|| Regex::new(r"#\[cfg\((?:test|all\([^\]]*\btest\b[^\]]*)\)\]").unwrap());
+static TEST_FILE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*#!\[cfg\(test\)\]").unwrap());
 static MOD_DECL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;").unwrap());
 static PATH_ATTR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^\s*#\[path\s*=\s*"([^"]+)"\]"#).unwrap());
 
-/// Line numbers of production code (outside `#[cfg(test)]` items) that build a config path.
-fn bypass_lines(text: &str) -> Vec<usize> {
-    production_lines(text)
-        .into_iter()
-        .filter(|(_, line)| BYPASS_RE.is_match(line))
-        .map(|(number, _)| number)
-        .collect()
+/// What one file's scan found: bypass lines outside test items and owner functions, and
+/// the owner signatures whose function holds at least one bypass.
+#[derive(Debug, Default, PartialEq)]
+struct Scan<'a> {
+    lines: Vec<usize>,
+    owners_used: Vec<&'a str>,
+}
+
+/// Scans production code of `file`; `Err` when the source does not lex or an owner function
+/// is missing, so a scan never silently skips code.
+fn scan<'a>(file: &str, text: &str, owners: &[(&str, &'a str, &str)]) -> Result<Scan<'a>, String> {
+    let code = crate::test_support::rust_code_mask(text).map_err(|e| format!("{file}: {e:?}"))?;
+    let literals =
+        crate::test_support::strip_rust_comments(text).map_err(|e| format!("{file}: {e:?}"))?;
+    if TEST_FILE_RE.is_match(&code) {
+        return Ok(Scan::default());
+    }
+    let tests = test_item_spans(&code);
+    let mut owned = Vec::new();
+    for (owner, signature, _) in owners {
+        if *owner != file {
+            continue;
+        }
+        if signature.is_empty() {
+            return Ok(Scan::default());
+        }
+        let span = crate::test_support::braced_item_span(&code, signature)
+            .ok_or_else(|| format!("{file}: owner `{signature}` not found"))?;
+        owned.push((*signature, span));
+    }
+    let mut scan = Scan::default();
+    for found in BYPASS_RE.find_iter(&literals) {
+        let at = found.start();
+        if tests.iter().any(|span| span.contains(&at)) {
+            continue;
+        }
+        match owned.iter().find(|(_, span)| span.contains(&at)) {
+            Some((signature, _)) if !scan.owners_used.contains(signature) => {
+                scan.owners_used.push(signature)
+            }
+            Some(_) => {}
+            None => scan.lines.push(text[..at].matches('\n').count() + 1),
+        }
+    }
+    Ok(scan)
+}
+
+/// Byte ranges of items gated by a test-only `#[cfg(..)]` in a code mask.
+fn test_item_spans(code: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = code.as_bytes();
+    let mut spans = Vec::new();
+    for attr in TEST_CFG_RE.find_iter(code) {
+        if attr.as_str().contains("not(") {
+            continue;
+        }
+        let (mut parens, mut depth, mut end) = (0_i64, 0_i64, code.len());
+        for (index, &byte) in bytes.iter().enumerate().skip(attr.end()) {
+            match byte {
+                b'(' | b'[' => parens += 1,
+                b')' | b']' => parens -= 1,
+                b'{' if parens <= 0 => depth += 1,
+                b'}' if parens <= 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = index + 1;
+                        break;
+                    }
+                }
+                b';' | b',' if parens <= 0 && depth == 0 => {
+                    end = index + 1;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        spans.push(attr.start()..end);
+    }
+    spans
 }
 
 /// The rest of `code` after a test-only `#[cfg(..)]` attribute, or `None` for other lines.
 fn after_test_cfg(code: &str) -> Option<&str> {
-    let end = TEST_CFG_RE.find(code)?.end();
-    (!code[..end].contains("not(")).then(|| code[end..].split("//").next().unwrap().trim())
-}
-
-fn production_lines(text: &str) -> Vec<(usize, &str)> {
-    let net = |line: &str, open, close| {
-        line.matches(open).count() as i64 - line.matches(close).count() as i64
-    };
-    let (mut lines, mut gated, mut depth, mut parens) = (Vec::new(), false, 0_i64, 0_i64);
-    for (index, line) in text.lines().enumerate() {
-        let mut code = line.trim();
-        if depth > 0 {
-            depth += net(line, '{', '}');
-            continue;
-        }
-        if let Some(rest) = after_test_cfg(code) {
-            (gated, code, parens) = (true, rest, 0);
-        } else if !gated {
-            lines.push((index + 1, line));
-            continue;
-        }
-        // A gated item ends at its body, or at `;`/`,` outside a parameter list.
-        parens += net(code, '(', ')');
-        if code.contains('{') && parens <= 0 {
-            (gated, depth) = (false, net(code, '{', '}'));
-        } else if parens <= 0 && (code.ends_with(';') || code.ends_with(',')) {
-            gated = false;
-        }
-    }
-    lines
+    let found = TEST_CFG_RE.find(code).filter(|found| found.start() == 0)?;
+    (!found.as_str().contains("not("))
+        .then(|| code[found.end()..].split("//").next().unwrap().trim())
 }
 
 /// One `mod name;` declaration in `file`.
@@ -361,40 +432,61 @@ fn source_files(root: &Path) -> Vec<(PathBuf, String)> {
 fn config_file_paths_are_built_only_by_the_resolver() {
     let files = source_files(Path::new(env!("CARGO_MANIFEST_DIR")));
     let test_only = test_only_paths(&files);
-    let owners: BTreeSet<&str> = PATH_OWNERS.iter().map(|(path, _)| *path).collect();
     let mut bypasses = Vec::new();
-    let mut owners_seen = BTreeSet::new();
+    let mut used = BTreeSet::new();
     for (path, text) in &files {
         if test_only.iter().any(|prefix| path.starts_with(prefix)) {
             continue;
         }
-        let lines = bypass_lines(text);
         let name = path.to_str().unwrap();
-        if owners.contains(name) {
-            if !lines.is_empty() {
-                owners_seen.insert(name);
-            }
-        } else {
-            bypasses.extend(lines.iter().map(|line| format!("{name}:{line}")));
-        }
+        let scan = scan(name, text, PATH_OWNERS).unwrap();
+        bypasses.extend(scan.lines.iter().map(|line| format!("{name}:{line}")));
+        used.extend(
+            scan.owners_used
+                .iter()
+                .map(|signature| (name.to_string(), *signature)),
+        );
     }
     assert!(
         bypasses.is_empty(),
         "build config file paths with crate::config::config_path instead: {bypasses:?}"
     );
-    let stale: Vec<_> = owners.difference(&owners_seen).collect();
+    let stale: Vec<_> = PATH_OWNERS
+        .iter()
+        .filter(|(file, signature, _)| {
+            !signature.is_empty() && !used.contains(&(file.to_string(), *signature))
+        })
+        .collect();
     assert!(stale.is_empty(), "drop these from PATH_OWNERS: {stale:?}");
 }
 
 #[test]
 fn bypass_scan_skips_test_items_and_follows_test_modules() {
+    let lines = |text: &str| scan("src/x.rs", text, &[]).unwrap().lines;
     let text = "fn a() {\n    std::env::var_os(\"AGENTDESK_CONFIG\");\n}\n\
         #[cfg(test)]\nmod t {\n    fn b() { config_file_path(x); }\n}\n\
         #[cfg(test)]\nfn helper(\n    root: &Path,\n) -> PathBuf {\n    root.join(\"agentdesk.yaml\")\n}\n\
         #[cfg(all(unix, test))] use x::config_file_path;\n\
         #[cfg(test)] // note\nconst P: &str = \"config/agentdesk.yaml\";\n\
+        // config_file_path(x) in a comment\n\
         fn c() -> PathBuf { PathBuf::from(\"config/agentdesk.yaml\") }\n";
-    assert_eq!(bypass_lines(text), vec![2, 17]);
+    assert_eq!(lines(text), vec![2, 18]);
+    // A brace inside a test string must not hide the production code after it.
+    let brace = "#[cfg(test)]\nfn t() { let _ = Some(\"{\"); }\nfn prod(root: &Path) { config_file_path(root); }\n";
+    assert_eq!(lines(brace), vec![3]);
+    assert!(lines("#![cfg(test)]\nfn t() { config_file_path(x); }\n").is_empty());
+
+    // An owner covers its own function only, and a missing owner fails the scan.
+    let owners = [("src/x.rs", "fn migrate(", "migration input")];
+    let owned = "fn migrate(root: &Path) { legacy_config_file_path(root); }\n\
+        fn load(root: &Path) { legacy_config_file_path(root); }\n";
+    let found = scan("src/x.rs", owned, &owners).unwrap();
+    assert_eq!(
+        (found.lines, found.owners_used),
+        (vec![2], vec!["fn migrate("])
+    );
+    assert!(scan("src/x.rs", "fn other() {}\n", &owners).is_err());
+    assert!(scan("src/x.rs", "fn a() { let _ = \"unterminated; }\n", &[]).is_err());
 
     let files: Vec<(PathBuf, String)> = [
         (

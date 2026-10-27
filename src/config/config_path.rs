@@ -38,14 +38,19 @@ pub fn load_config_file(path: &Path) -> Result<Option<Config>> {
     if !path.is_file() {
         return Ok(None);
     }
-    super::load_from_path(path).map(Some).inspect_err(|error| {
-        if first_failure_of_this_version(path) {
-            tracing::warn!(
-                path = %path.display(),
-                "config file failed to load; no other candidate is tried: {error:#}"
-            );
-        }
-    })
+    super::load_from_path(path)
+        .map(Some)
+        .inspect_err(|error| warn_unloadable(path, format_args!("{error:#}")))
+}
+
+/// One WARN per file version for a resolved config file that failed to load.
+pub(crate) fn warn_unloadable(path: &Path, error: std::fmt::Arguments<'_>) {
+    if first_failure_of_this_version(path) {
+        tracing::warn!(
+            path = %path.display(),
+            "config file failed to load; no other candidate is tried: {error}"
+        );
+    }
 }
 
 fn first_failure_of_this_version(path: &Path) -> bool {
