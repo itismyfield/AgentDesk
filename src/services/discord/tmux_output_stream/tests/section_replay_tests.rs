@@ -280,3 +280,136 @@ fn section_replay_codex_script_failure_marks_the_exec_row_failed() {
     );
     assert!(panel.contains("실패 1") && panel.contains("✗ "), "{panel}");
 }
+
+// Replays one Claude tool call and returns the summary-mode card with mention breakers removed.
+fn summary_card(name: &str, input: Value) -> String {
+    let records = claude_tool("toolu_account", name, input);
+    let [panel, _] = replay(
+        ProviderKind::Claude,
+        &records,
+        ToolActivityDisplay::Summary,
+        "",
+    );
+    panel.replace('\u{200b}', "")
+}
+
+#[test]
+fn section_replay_cards_hide_account_operands_and_keep_package_versions() {
+    for (name, input, shown) in [
+        ("Bash", json!({"command":"su - LaneAlice"}), r"su - \*\*\*"),
+        (
+            "Bash",
+            json!({"command":"chown LaneAlice:staff build.log"}),
+            r"chown \*\*\* build.log",
+        ),
+        (
+            "Bash",
+            json!({"command":"sudo chown LaneAlice build.log"}),
+            r"sudo chown \*\*\* build.log",
+        ),
+        (
+            "Bash",
+            json!({"command":"ssh LaneAlice@v2 uptime"}),
+            r"ssh \*\*\*@v2 uptime",
+        ),
+        (
+            "Bash",
+            json!({"command":"ssh LaneAlice@canary uptime"}),
+            r"ssh \*\*\*@canary uptime",
+        ),
+        (
+            "Grep",
+            json!({"pattern":"sudo -u LaneAlice make"}),
+            r#""sudo -u \*\*\* make""#,
+        ),
+    ] {
+        let card = summary_card(name, input.clone());
+        assert!(
+            card.contains(shown) && !card.contains("LaneAlice"),
+            "{input}\n{card}"
+        );
+    }
+    for (name, input, shown) in [
+        (
+            "Bash",
+            json!({"command":"npm i react@18"}),
+            "npm i react@18",
+        ),
+        (
+            "Bash",
+            json!({"command":"npx next@canary build"}),
+            "npx next@canary build",
+        ),
+        (
+            "Bash",
+            json!({"command":"pnpm add react@experimental"}),
+            "pnpm add react@experimental",
+        ),
+        (
+            "Bash",
+            json!({"command":"npm i node-lib@18.x"}),
+            "npm i node-lib@18.x",
+        ),
+        (
+            "Bash",
+            json!({"command":"npm i some-lib@main"}),
+            "npm i some-lib@main",
+        ),
+        (
+            "Grep",
+            json!({"pattern":"ssh -L 8080:localhost:80 build-host"}),
+            r#""ssh -L 8080:localhost:80 build-host""#,
+        ),
+        (
+            "Grep",
+            json!({"pattern":"inspect chown handling"}),
+            r#""inspect chown handling""#,
+        ),
+    ] {
+        let card = summary_card(name, input.clone());
+        assert!(card.contains(shown), "{input}\n{card}");
+    }
+}
+
+#[test]
+fn section_replay_cards_reset_account_context_per_command_and_line() {
+    for (name, input, shown) in [
+        (
+            "Grep",
+            json!({"pattern":"ssh -oUser=LaneAlice build-host"}),
+            r#""ssh -oUser=\*\*\* build-host""#,
+        ),
+        (
+            "Bash",
+            json!({"command":"npm test && echo LaneAlice@canary"}),
+            r"npm test && echo \*\*\*@canary",
+        ),
+        (
+            "Bash",
+            json!({"command":"npm test; echo LaneAlice@main"}),
+            r"npm test; echo \*\*\*@main",
+        ),
+    ] {
+        let card = summary_card(name, input.clone());
+        assert!(
+            card.contains(shown) && !card.contains("LaneAlice"),
+            "{input}\n{card}"
+        );
+    }
+    let todos = json!({"todos":[
+        {"content":"chown LaneAlice:staff build.log","status":"pending","activeForm":"더미"},
+        {"content":"su - LaneAlice","status":"pending","activeForm":"더미"},
+        {"content":"fix su handling","status":"pending","activeForm":"더미"},
+        {"content":"npm i react@18","status":"pending","activeForm":"더미"},
+    ]});
+    let card = summary_card("TodoWrite", todos);
+    for shown in [
+        "- [ ] chown *** build.log",
+        "- [ ] su - ***",
+        "- [ ] fix su handling",
+        "- [ ] npm i react@18",
+    ] {
+        assert!(card.contains(shown), "{shown}\n{card}");
+    }
+    assert!(!card.contains("LaneAlice"), "{card}");
+}

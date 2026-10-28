@@ -185,10 +185,12 @@ fn credential_command_mode(input: &str, strict: bool) -> bool {
     false
 }
 
+/// One leading list or checklist marker (`-`, `[ ]`, `[x]`, `[-]`, `1.`, tool glyphs).
+const LIST_MARKER: &str = r"(?:[-*+•└▶✓✗?]|\[[ xX✓-]\]|\d+[.)])";
+
 fn credential_executable_line(line: &str) -> bool {
     static MARKERS: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^\s*(?:(?:[-*+•└▶✓✗?]|\[[ xX✓]\]|\d+[.)])(?:\s+|$))*")
-            .expect("leading list markers")
+        Regex::new(&format!(r"^\s*(?:{LIST_MARKER}(?:\s+|$))*")).expect("leading list markers")
     });
     let stripped = MARKERS.replace(line, "");
     credential_command_mode(&stripped, false) && shell_masked(&stripped, 0).is_none()
@@ -356,13 +358,14 @@ fn anonymize_accounts(input: &str) -> String {
     static LABEL: LazyLock<Option<Regex>> = LazyLock::new(|| {
         Regex::new(&format!(r"(?i)((?:\b(?:username|user|login|owner)[ \t]*[:=][ \t]*|--(?:owner|username)(?:=|[ \t]+)))({WORD})")).ok()
     });
-    // Account operands of `sudo -u` and `ssh -l`, scanning only the options before them.
+    // Account operands of `sudo -u` and `ssh -l`/`-oUser=`, scanning only the options before them.
     static SWITCH_USER: LazyLock<Option<Regex>> = LazyLock::new(|| {
-        Regex::new(&format!(r#"(?i)((?:^|[\s;&|('"])(?:\S*/)?(?:sudo(?:[ \t]+-\S+(?:[ \t]+[^\s-]\S*)?)*?[ \t]+(?:-[a-z]*u[ \t]*|--user(?:=|[ \t]+))|ssh(?:[ \t]+-\S+(?:[ \t]+[^\s-]\S*)?)*?[ \t]+(?-i:-l)[ \t]*))({WORD})"#)).ok()
+        Regex::new(&format!(r#"(?i)((?:^|[\s;&|('"])(?:\S*/)?(?:sudo(?:[ \t]+-\S+(?:[ \t]+[^\s-]\S*)?)*?[ \t]+(?:-[a-z]*u[ \t]*|--user(?:=|[ \t]+))|ssh(?:[ \t]+-\S+(?:[ \t]+[^\s-]\S*)?)*?[ \t]+(?:(?-i:-l)[ \t]*|-o[ \t]*user[ \t]*=[ \t]*)))({WORD})"#)).ok()
     });
-    // Account operands of `su` and `chown` in command position, so prose mentions stay readable.
+    // Account operands of `su` and `chown` at a line start (after list markers) or after a
+    // command separator, so prose mentions stay readable.
     static OWNER_ARG: LazyLock<Option<Regex>> = LazyLock::new(|| {
-        Regex::new(&format!(r#"(?i)((?:^|[;&|('"`]|\b(?:sudo|doas)\b[^\n;&|]*?[ \t])[ \t]*(?:\S*/)?(?:su(?:[ \t]+(?:-[cs]|--command|--shell)[ \t]+{WORD}|[ \t]+-\S*)*|chown(?:[ \t]+-\S+)*)[ \t]+)({WORD})"#)).ok()
+        Regex::new(&format!(r#"(?im)((?:^[ \t]*(?:{LIST_MARKER}[ \t]+)*|[;&|('"`]|\b(?:sudo|doas)\b[^\n;&|]*?[ \t])[ \t]*(?:\S*/)?(?:su(?:[ \t]+(?:-[cs]|--command|--shell)[ \t]+{WORD}|[ \t]+-\S*)*|chown(?:[ \t]+-\S+)*)[ \t]+)({WORD})"#)).ok()
     });
     static ADDRESS: LazyLock<Option<Regex>> = LazyLock::new(|| {
         Regex::new(r#"(?i)(?:^|[\s'"])([a-z0-9_.+-]+)@([a-z0-9][a-z0-9.-]*)"#).ok()
@@ -373,7 +376,8 @@ fn anonymize_accounts(input: &str) -> String {
     static TAG: LazyLock<Option<Regex>> = LazyLock::new(|| {
         Regex::new(r"(?i)^(?:v\d+(?:\.(?:\d+|x)){0,2}(?:[-+][0-9a-z.-]*)?|latest|next|beta|alpha|canary|rc|stable|nightly|lts|main|master|experimental|insiders|edge|dev|preview)$").ok()
     });
-    // The nearest command word before an address decides whether it names a login or a package.
+    // The nearest command word in the address's own command (after the last newline or `;&|`)
+    // decides whether it names a login or a package.
     static CONTEXT: LazyLock<Option<Regex>> = LazyLock::new(|| {
         Regex::new(r"(?i)(?:^|[\s;&|(])(?:\S*/)?(?:(ssh|scp|sftp|rsync|mosh|sshfs|ssh-copy-id)|(npm|npx|pnpm|pnpx|yarn|bun|bunx|uv|uvx|pip|pip3|pipx|cargo|go|deno|gem|brew|corepack|volta|nvm|fnm|asdf|mise))\b").ok()
     });
@@ -410,7 +414,11 @@ fn anonymize_accounts(input: &str) -> String {
     address
         .replace_all(&masked, |capture: &regex::Captures<'_>| {
             let before = &masked[..capture.get(1).map_or(0, |user| user.start())];
-            let command = context.captures_iter(before).last();
+            let segment = before
+                .rsplit(['\n', ';', '&', '|'])
+                .next()
+                .unwrap_or(before);
+            let command = context.captures_iter(segment).last();
             let login = command.as_ref().is_some_and(|c| c.get(1).is_some());
             let package = command.as_ref().is_some_and(|c| c.get(2).is_some());
             let host = &capture[2];
