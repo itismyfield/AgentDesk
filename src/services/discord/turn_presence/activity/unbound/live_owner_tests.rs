@@ -324,18 +324,383 @@ async fn post_start(
 /// The turn-start route answers such a channel with a started turn whose provider runs once.
 #[tokio::test(flavor = "current_thread")]
 async fn turn_start_route_runs_one_provider_turn_beside_unrelated_sessions_pg() {
+    route_starts_once(0).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completed_scheduled_binding_opens_turn_start_pg() {
+    route_starts_once(1).await;
+}
+
+fn scheduled_source(rig: &Rig, channel: u64, name: &str, native: &str, nonce: &str) {
+    use crate::services::tui_prompt_dedupe::binding_events as p5;
+    let marker = marker_path(name, "spawn_nonce");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(marker, nonce).unwrap();
+    let path = rig.root.path().join(format!("{channel}-{native}.jsonl"));
+    std::fs::write(&path, "{}\n").unwrap();
+    let source =
+        crate::services::tui_o::shadow::binding_reader::source_id_for(native, &path).unwrap();
+    let proposal = p5::Proposal {
+        channel_id: channel,
+        provider: "claude",
+        tmux_session: name,
+        session_id: Some(native),
+        path: path.to_str().unwrap(),
+        replaced: None,
+        cause: p5::CauseSource::Hook(p5::BindingCause::Startup),
+        hook: None,
+    };
+    assert_eq!(
+        p5::record_verified(&proposal, &source).unwrap(),
+        p5::Committed::Appended
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completed_scheduled_inventory_with_primary_binding_opens_turn_start_pg() {
+    route_starts_once(2).await;
+}
+
+async fn completed_scheduled(rig: &Rig, id: &str) -> String {
+    let provider = ProviderKind::Claude;
+    let name = provider.build_tmux_session_name(&format!("scheduled:{id}"));
+    scheduled_source(rig, rig.channel.get(), &name, "parent", "old");
+    let channel = rig.channel.to_string();
+    let pool = rig.shared.pg_pool.as_ref().unwrap();
+    let launch = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let finished = chrono::Utc::now();
+    sqlx::query("INSERT INTO agents (id, name, discord_channel_id) VALUES ('scheduled-owner', 'scheduled-owner', $1)")
+        .bind(&channel).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO scheduled_message_context_snapshots (id, source_channel_id, transcript_frontier, rendered_context, pair_count, content_digest) VALUES ('snapshot', $1, 0, 'frozen', 0, repeat('0', 64))")
+        .bind(&channel).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO scheduled_messages (id, content, target_channel_id, delivery_kind, agent_id, scheduled_at, context_strategy, context_snapshot_id, status) VALUES ($1, 'body', $2, 'agent', 'scheduled-owner', $3, 'snapshot', 'snapshot', 'sent')")
+        .bind(id).bind(&channel).bind(launch).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO scheduled_message_deliveries (id, scheduled_message_id, fire_scheduled_at, resume_scheduled_at, delivery_kind, status, claim_token, turn_id, launch_committed_at, turn_outcome, turn_outcome_at) VALUES ('delivery', $1, $2, $2, 'agent', 'sent', 'claim', 'scheduled-turn', $2, 'delivered', $3)")
+        .bind(id).bind(launch).bind(finished).execute(pool).await.unwrap();
+    let key = adk_session::build_namespaced_session_key(&rig.shared.token_hash, &provider, &name);
+    sqlx::query("INSERT INTO turns (turn_id, session_key, channel_id, provider, session_id, started_at, finished_at) VALUES ('scheduled-turn', $1, $2, 'claude', 'parent', $3, $4)")
+        .bind(key).bind(&channel).bind(launch).bind(finished).execute(pool).await.unwrap();
+    name
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg() {
+    let rig = Rig::new(69_183_106, false, false).await;
+    let _turn_mode = TestConfirmation::new(rig.channel.get());
+    let host = HostSessions::new(&rig).await;
+    host.start(MANUAL);
+    let name = completed_scheduled(&rig, "smsg_7513-evidence").await;
+    host.start(&name);
+    let registry = HealthRegistry::new();
+    registry.register("claude".into(), rig.shared.clone()).await;
+    let provider = ProviderKind::Claude;
+    let hold = || external_turn_hold_for_start(Some(&registry), &provider, rig.channel.get());
+    assert_eq!(hold().await, None, "completed control");
+    let (_, stamp, watch) = unbound(&rig).await;
+    let pool = rig.shared.pg_pool.as_ref().unwrap();
+    sqlx::query("INSERT INTO scheduled_message_deliveries (id, scheduled_message_id, fire_scheduled_at, resume_scheduled_at, delivery_kind, status, claim_token, turn_id, launch_committed_at) VALUES ('next-delivery', 'smsg_7513-evidence', NOW(), NOW(), 'agent', 'running', 'next-claim', 'next-turn', NOW())")
+        .execute(pool).await.unwrap();
+    assert_eq!(
+        hold().await,
+        Some(crate::services::discord::health::ExternalHold::Unknown),
+        "a launching recurrence cannot inherit its prior completion"
+    );
+    sqlx::query("DELETE FROM scheduled_message_deliveries WHERE id = 'next-delivery'")
+        .execute(pool)
+        .await
+        .unwrap();
+    {
+        let _failed =
+            crate::services::platform::tmux::session_inventory::tests::ChannelCommand::new(
+                rig.channel.get(),
+                "/usr/bin/false".into(),
+            );
+        assert_eq!(
+            hold().await,
+            Some(crate::services::discord::health::ExternalHold::Unknown),
+            "a failed inventory is not absence"
+        );
+    }
+    sqlx::query(
+        "UPDATE scheduled_message_deliveries SET turn_outcome = NULL, turn_outcome_at = NULL",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    assert!(
+        stamp.publish(&watch, || ()).await.is_none(),
+        "a changed completion published an old absence"
+    );
+    assert_eq!(
+        hold().await,
+        Some(crate::services::discord::health::ExternalHold::Unknown),
+        "unfinished delivery"
+    );
+    sqlx::query("UPDATE scheduled_message_deliveries SET turn_outcome = 'delivered', turn_outcome_at = NOW()")
+        .execute(pool).await.unwrap();
+    sqlx::query(
+        "ALTER TABLE scheduled_message_deliveries RENAME TO scheduled_message_deliveries_hidden",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        hold().await,
+        Some(crate::services::discord::health::ExternalHold::Unknown),
+        "unreadable completion evidence"
+    );
+    sqlx::query(
+        "ALTER TABLE scheduled_message_deliveries_hidden RENAME TO scheduled_message_deliveries",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    std::fs::write(marker_path(&name, "spawn_nonce"), "successor").unwrap();
+    assert_eq!(
+        hold().await,
+        Some(crate::services::discord::health::ExternalHold::Unknown),
+        "same-name successor without its binding"
+    );
+    std::fs::write(marker_path(&name, "spawn_nonce"), "old").unwrap();
+    let next_name = ProviderKind::Claude.build_tmux_session_name("scheduled:smsg_7513-next");
+    scheduled_source(&rig, rig.channel.get(), &next_name, "next", "next-nonce");
+    host.start(&next_name);
+    assert_eq!(
+        hold().await,
+        Some(crate::services::discord::health::ExternalHold::Unknown),
+        "new scheduled message cannot inherit the old completion"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scheduled_binding_with_inflight_stays_held_pg() {
+    let rig = Rig::new(69_183_107, false, false).await;
+    let _turn_mode = TestConfirmation::new(rig.channel.get());
+    let host = HostSessions::new(&rig).await;
+    host.start(MANUAL);
+    let name = completed_scheduled(&rig, "smsg_7513-inflight").await;
+    host.start(&name);
+    let row = InflightTurnState::new(
+        ProviderKind::Claude,
+        rig.channel.get(),
+        Some("parent".into()),
+        1,
+        0,
+        0,
+        "scheduled".into(),
+        None,
+        Some(name),
+        None,
+        None,
+        0,
+    );
+    let path = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Claude,
+        rig.channel.get(),
+    );
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, serde_json::to_vec(&row).unwrap()).unwrap();
+    assert!(
+        inflight::load_inflight_state_read_only_result(&ProviderKind::Claude, rig.channel.get())
+            .unwrap()
+            .is_some(),
+        "the inflight fixture was not visible to the production loader"
+    );
+    assert!(
+        unbound(&rig).await.0.activity != Activity::Idle,
+        "inflight reservation became idle"
+    );
+    let registry = HealthRegistry::new();
+    registry.register("claude".into(), rig.shared.clone()).await;
+    assert!(
+        external_turn_hold_for_start(Some(&registry), &ProviderKind::Claude, rig.channel.get())
+            .await
+            .is_some()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_primary_without_watcher_stays_unknown_pg() {
+    let rig = Rig::new(69_183_108, false, false).await;
+    let _turn_mode = TestConfirmation::new(rig.channel.get());
+    let host = HostSessions::new(&rig).await;
+    host.start(MANUAL);
+    let name = completed_scheduled(&rig, "smsg_7513-primary").await;
+    host.start(&name);
+    host.start(&ProviderKind::Claude.build_tmux_session_name(&format!("s1e-{}", rig.channel)));
+    assert_eq!(
+        unbound(&rig).await.0,
+        observed(Activity::Unknown, "watcher_unbound")
+    );
+    let registry = HealthRegistry::new();
+    registry.register("claude".into(), rig.shared.clone()).await;
+    assert_eq!(
+        external_turn_hold_for_start(Some(&registry), &ProviderKind::Claude, rig.channel.get())
+            .await,
+        Some(crate::services::discord::health::ExternalHold::Unknown)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completed_scheduled_inventory_resolves_other_channels_and_pins_foreign_binding_pg() {
+    let rig = Rig::new(69_183_111, false, false).await;
+    let other = ChannelId::new(69_183_112);
+    let _owner_mode = TestConfirmation::new(rig.channel.get());
+    let _other_mode = TestConfirmation::new(other.get());
+    let host = HostSessions::new(&rig).await;
+    host.start(MANUAL);
+    let _namespace =
+        crate::services::platform::tmux::session_inventory::tests::ChannelNamespace::new(
+            other.get(),
+            host.socket.clone(),
+        );
+    let name = completed_scheduled(&rig, "smsg_7513-foreign").await;
+    host.start(&name);
+    let primary = ProviderKind::Claude.build_tmux_session_name(&format!("s1e-{}", rig.channel));
+    scheduled_source(
+        &rig,
+        rig.channel.get(),
+        &primary,
+        "primary",
+        "primary-nonce",
+    );
+    let mut config = crate::config_live_reload::current()
+        .unwrap()
+        .as_ref()
+        .clone();
+    let mut agent = config.agents[0].clone();
+    agent.id = "other".into();
+    let mut binding = agent.channels.get("claude").unwrap().clone();
+    match &mut binding {
+        crate::config::AgentChannel::Detailed(binding) => {
+            binding.id = Some(other.to_string());
+            binding.name = Some(format!("s1e-{other}"));
+        }
+        _ => panic!("detailed channel fixture required"),
+    }
+    agent.channels.insert("claude", binding);
+    config.agents.push(agent);
+    std::fs::write(
+        crate::runtime_layout::config_file_path(rig.root.path()),
+        serde_yaml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    crate::config_live_reload::install(config);
+    crate::services::discord::host_defer_gate::tests::map_channel(
+        &rig.shared,
+        other,
+        &format!("s1e-{other}"),
+    )
+    .await;
+    let registry = HealthRegistry::new();
+    registry.register("claude".into(), rig.shared.clone()).await;
+    let provider = ProviderKind::Claude;
+    let hold = || external_turn_hold_for_start(Some(&registry), &provider, other.get());
+    assert_eq!(
+        hold().await,
+        None,
+        "a completed foreign reservation poisoned an unrelated channel"
+    );
+    let watch = Arc::new(Mutex::new(Watch::default()));
+    let (answer, stamp) = settled_owner_observation(
+        "foreign scheduled proof",
+        || read(&rig.shared, &provider, other, watch.clone()),
+        |sample| sample.0.reason == "superseded",
+    )
+    .await;
+    assert_eq!(answer, observed(Activity::Idle, "no_session"));
+    assert_eq!(
+        stamp.snapshot.as_ref().unwrap().owners.get(&name),
+        Some(&Some(rig.channel.get()))
+    );
+    let owners = stamp.snapshot.as_ref().unwrap().ownership.as_ref().unwrap();
+    assert!(owners.files_current());
+    assert!(owners.with_current(|| ()).is_ok());
+    use crate::services::tui_prompt_dedupe::binding_events as p5;
+    let path = rig.root.path().join("next-pending.jsonl");
+    p5::record_pending(&p5::Proposal {
+        channel_id: rig.channel.get(),
+        provider: "claude",
+        tmux_session: &name,
+        session_id: Some("new-native"),
+        path: path.to_str().unwrap(),
+        replaced: None,
+        cause: p5::CauseSource::Hook(p5::BindingCause::Startup),
+        hook: None,
+    })
+    .unwrap();
+    assert!(
+        !owners.files_current(),
+        "foreign binding changed without invalidating its file pin"
+    );
+    let published = std::sync::atomic::AtomicBool::new(false);
+    assert!(
+        owners
+            .with_current(|| published.store(true, std::sync::atomic::Ordering::SeqCst))
+            .is_err()
+    );
+    assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(stamp.publish(&watch, || ()).await.is_none());
+    assert_eq!(
+        hold().await,
+        Some(crate::services::discord::health::ExternalHold::Unknown),
+        "Pending inherited an earlier scheduled completion"
+    );
+}
+
+async fn route_starts_once(case: u8) {
     use crate::services::discord::router::message_handler::{
         CLAUDE_LEGACY_PROBE, INPUT_EFFECT_PROBE, InputEffectProbe,
     };
     use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
     use crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let rig = Rig::new(69_183_104, false, false).await;
+    let rig = Rig::new(
+        match case {
+            0 => 69_183_104,
+            1 => 69_183_109,
+            _ => 69_183_110,
+        },
+        false,
+        false,
+    )
+    .await;
     let _turn_mode = TestConfirmation::new(rig.channel.get());
     let host = HostSessions::new(&rig).await;
     host.start(MANUAL);
-    host.start(ROUTINE);
-    routine_ran(&rig, ROUTINE, THREAD).await;
+    if case != 0 {
+        let name = completed_scheduled(&rig, "smsg_8324cbeb-a266-49f6-b6fa-92d7c7513000").await;
+        host.start(&name);
+        if case == 2 {
+            let primary =
+                ProviderKind::Claude.build_tmux_session_name(&format!("s1e-{}", rig.channel));
+            scheduled_source(
+                &rig,
+                rig.channel.get(),
+                &primary,
+                "primary",
+                "primary-nonce",
+            );
+        }
+        assert!(
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, rig.channel.get())
+                .is_none()
+        );
+        let (answer, stamp, _) = unbound(&rig).await;
+        let Inventory::Sessions(names) = &stamp.namespace.as_ref().unwrap().inventory else {
+            panic!("successful session inventory required")
+        };
+        assert!(names.contains(&name));
+        assert!(!names.contains(
+            &ProviderKind::Claude.build_tmux_session_name(&format!("s1e-{}", rig.channel))
+        ));
+        assert_eq!(answer, observed(Activity::Idle, "no_session"));
+    } else {
+        host.start(ROUTINE);
+        routine_ran(&rig, ROUTINE, THREAD).await;
+    }
     let channel = rig.channel.get();
     let pool = rig.shared.pg_pool.clone().unwrap();
     let seed = crate::db::agents::insert_agent_channels_for_tests;
@@ -405,7 +770,12 @@ async fn turn_start_route_runs_one_provider_turn_beside_unrelated_sessions_pg() 
         Some(pool),
     );
 
-    let (status, body) = post_start(&app, "e1-route").await;
+    let (status, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        post_start(&app, "e1-route"),
+    )
+    .await
+    .expect("turn/start admission exceeded its bound");
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
     assert_eq!(
         (&body["ok"], &body["status"]),
