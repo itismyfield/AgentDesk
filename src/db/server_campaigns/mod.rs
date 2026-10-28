@@ -58,7 +58,7 @@ enum Request<'a> {
     Command(&'a Command),
 }
 
-/// B2 supplies a stable ID and a pure response renderer; replay uses the saved response.
+/// The caller supplies a stable ID and pure response renderer; replay uses the saved response.
 pub async fn create(
     pool: &PgPool,
     id: &str,

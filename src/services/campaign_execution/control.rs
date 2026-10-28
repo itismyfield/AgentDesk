@@ -99,6 +99,7 @@ pub fn stop_guard(state: &CampaignState) -> DecisionResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn validate_result_binding(
     state: &CampaignState,
     binding: &AttemptBinding,
