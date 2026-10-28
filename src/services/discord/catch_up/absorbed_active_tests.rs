@@ -130,10 +130,15 @@ async fn phase2_absorbed_refusal_keeps_the_retry_cursor_before_h() {
 
 /// T-F1a: H < X < P. P's claim absorbs H before H's enqueue and X defers; H
 /// stays below the retry, and once P ends undelivered the retry recovers H.
-#[tokio::test(flavor = "current_thread")]
-async fn t_f1a_undelivered_absorbing_turn_does_not_lose_h() {
+async fn t_f1a_undelivered_absorbing_turn_does_not_lose_h_case(with_dispatch_evidence: bool) {
     let fx = Fixture::new().await;
     let channel_id = ChannelId::new(4_603_543);
+    let _failure = (!with_dispatch_evidence).then(|| {
+        crate::services::discord::inject_disposition::dispatched::fail_writes_for_tests(
+            &fx.provider,
+            channel_id,
+        )
+    });
     let (checkpoint, h, x, p) = (id(1, 600), id(2, 200), id(3, 150), id(4, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
     let history = vec![
@@ -164,11 +169,40 @@ async fn t_f1a_undelivered_absorbing_turn_does_not_lose_h() {
     discord::mailbox_finish_turn(&fx.shared, &fx.provider, channel_id).await;
     let second = StrictApi::new(&fx.shared).with_history(channel_id, history);
     fx.retry_sweep(&second, channel_id).await;
-    assert!(
-        accepted(&second).contains(&h.get()),
-        "{:?}",
-        second.enqueue_log()
-    );
+    if with_dispatch_evidence {
+        assert_eq!(
+            accepted(&second)
+                .into_iter()
+                .filter(|id| *id == h.get())
+                .collect::<Vec<_>>(),
+            Vec::<u64>::new()
+        );
+    } else {
+        assert!(
+            accepted(&second).contains(&h.get()),
+            "{:?}",
+            second.enqueue_log()
+        );
+    }
+    if with_dispatch_evidence {
+        assert!(!accepted(&second).contains(&p.get()));
+        assert!(
+            !completed_turn_ledger::settled_user_msg_ids(&fx.provider, channel_id.get())
+                .contains(&h.get())
+        );
+    }
+}
+
+/// Without durable dispatch evidence the original race/recovery expectation remains.
+#[tokio::test(flavor = "current_thread")]
+async fn t_f1a_undelivered_absorbing_turn_does_not_lose_h() {
+    t_f1a_undelivered_absorbing_turn_does_not_lose_h_case(false).await;
+}
+
+/// Durable claim evidence prevents replay without proving delivery.
+#[tokio::test(flavor = "current_thread")]
+async fn t_f1a_undelivered_absorbing_turn_does_not_lose_h_with_dispatch_evidence_is_not_replayed() {
+    t_f1a_undelivered_absorbing_turn_does_not_lose_h_case(true).await;
 }
 
 /// T-F3a: a head absorbing 257 ids still names its oldest one; no ring evicts it.
@@ -211,10 +245,17 @@ async fn t_rel_release_forgets_the_absorbed_ids() {
 
 /// T-F5 (r8 repro): P's first episode was delivered; its second absorbs H and
 /// ends undelivered. The earlier ledger row must not settle H.
-#[tokio::test(flavor = "current_thread")]
-async fn t_f5_an_earlier_episode_row_does_not_settle_a_later_absorption() {
+async fn t_f5_an_earlier_episode_row_does_not_settle_a_later_absorption_case(
+    with_dispatch_evidence: bool,
+) {
     let fx = Fixture::new().await;
     let channel_id = ChannelId::new(4_603_546);
+    let _failure = (!with_dispatch_evidence).then(|| {
+        crate::services::discord::inject_disposition::dispatched::fail_writes_for_tests(
+            &fx.provider,
+            channel_id,
+        )
+    });
     let (checkpoint, h, p) = (id(1, 600), id(3, 150), id(4, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
     let token = Arc::new(crate::services::provider::CancelToken::new());
@@ -233,15 +274,52 @@ async fn t_f5_an_earlier_episode_row_does_not_settle_a_later_absorption() {
 
     fx.sweep(&api).await;
 
-    assert!(accepted(&api).contains(&h.get()), "{:?}", api.enqueue_log());
+    if with_dispatch_evidence {
+        assert_eq!(
+            accepted(&api)
+                .into_iter()
+                .filter(|id| *id == h.get())
+                .collect::<Vec<_>>(),
+            Vec::<u64>::new()
+        );
+    } else {
+        assert!(accepted(&api).contains(&h.get()), "{:?}", api.enqueue_log());
+    }
+    if with_dispatch_evidence {
+        assert!(!accepted(&api).contains(&p.get()));
+        assert!(
+            !completed_turn_ledger::settled_user_msg_ids(&fx.provider, channel_id.get())
+                .contains(&h.get())
+        );
+    }
+}
+
+/// Without durable dispatch evidence the original race/recovery expectation remains.
+#[tokio::test(flavor = "current_thread")]
+async fn t_f5_an_earlier_episode_row_does_not_settle_a_later_absorption() {
+    t_f5_an_earlier_episode_row_does_not_settle_a_later_absorption_case(false).await;
+}
+
+/// Durable claim evidence prevents replay without proving delivery.
+#[tokio::test(flavor = "current_thread")]
+async fn t_f5_an_earlier_episode_row_does_not_settle_a_later_absorption_with_dispatch_evidence_is_not_replayed()
+ {
+    t_f5_an_earlier_episode_row_does_not_settle_a_later_absorption_case(true).await;
 }
 
 /// A2: a long absorbing turn plus a repeatedly deferred N exhausts the rearm
 /// budget; H is never leapt, and the periodic backstop recovers it afterwards.
-#[tokio::test(flavor = "current_thread")]
-async fn a2_exhausted_rearm_budget_leaves_h_to_the_periodic_backstop() {
+async fn a2_exhausted_rearm_budget_leaves_h_to_the_periodic_backstop_case(
+    with_dispatch_evidence: bool,
+) {
     let fx = Fixture::new().await;
     let channel_id = ChannelId::new(4_603_547);
+    let _failure = (!with_dispatch_evidence).then(|| {
+        crate::services::discord::inject_disposition::dispatched::fail_writes_for_tests(
+            &fx.provider,
+            channel_id,
+        )
+    });
     let (checkpoint, h, n, p) = (id(1, 600), id(2, 200), id(3, 150), id(4, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
     absorb_and_claim(&fx.shared, &fx.provider, channel_id, &[h], p).await;
@@ -284,11 +362,41 @@ async fn a2_exhausted_rearm_budget_leaves_h_to_the_periodic_backstop() {
     let backstop = StrictApi::new(&fx.shared).with_history(channel_id, history);
     fx.sweep(&backstop).await;
     assert_phase1_read(&backstop, after(checkpoint), &[h]);
-    assert!(
-        accepted(&backstop).contains(&h.get()),
-        "{:?}",
-        backstop.enqueue_log()
-    );
+    if with_dispatch_evidence {
+        assert_eq!(
+            accepted(&backstop)
+                .into_iter()
+                .filter(|id| *id == h.get())
+                .collect::<Vec<_>>(),
+            Vec::<u64>::new()
+        );
+    } else {
+        assert!(
+            accepted(&backstop).contains(&h.get()),
+            "{:?}",
+            backstop.enqueue_log()
+        );
+    }
+    if with_dispatch_evidence {
+        assert!(!accepted(&backstop).contains(&p.get()));
+        assert!(
+            !completed_turn_ledger::settled_user_msg_ids(&fx.provider, channel_id.get())
+                .contains(&h.get())
+        );
+    }
+}
+
+/// Without durable dispatch evidence the original race/recovery expectation remains.
+#[tokio::test(flavor = "current_thread")]
+async fn a2_exhausted_rearm_budget_leaves_h_to_the_periodic_backstop() {
+    a2_exhausted_rearm_budget_leaves_h_to_the_periodic_backstop_case(false).await;
+}
+
+/// Durable claim evidence prevents replay without proving delivery.
+#[tokio::test(flavor = "current_thread")]
+async fn a2_exhausted_rearm_budget_leaves_h_to_the_periodic_backstop_with_dispatch_evidence_is_not_replayed()
+ {
+    a2_exhausted_rearm_budget_leaves_h_to_the_periodic_backstop_case(true).await;
 }
 
 /// Only the checkpoint reply is on the phase-1 page; `ids` reach phase 2 alone.
@@ -307,6 +415,7 @@ async fn assert_phase2_open_h_is_held_then_reoffered(
     channel_id: ChannelId,
     (checkpoint, h): (MessageId, MessageId),
     ids: &[MessageId],
+    with_dispatch_evidence: bool,
 ) {
     let held = (Some(checkpoint.get()), Some(checkpoint.get()));
     assert_eq!(
@@ -326,17 +435,40 @@ async fn assert_phase2_open_h_is_held_then_reoffered(
     history.extend(ids.iter().map(|id| human(channel_id, *id)));
     let second = StrictApi::new(&fx.shared).with_history(channel_id, history);
     fx.retry_sweep(&second, channel_id).await;
-    assert!(
-        accepted(&second).contains(&h.get()),
-        "{:?}",
-        second.enqueue_log()
-    );
+    if with_dispatch_evidence {
+        assert_eq!(
+            accepted(&second)
+                .into_iter()
+                .filter(|id| *id == h.get())
+                .collect::<Vec<_>>(),
+            Vec::<u64>::new()
+        );
+    } else {
+        assert!(
+            accepted(&second).contains(&h.get()),
+            "{:?}",
+            second.enqueue_log()
+        );
+    }
+    if with_dispatch_evidence {
+        assert!(
+            !completed_turn_ledger::settled_user_msg_ids(&fx.provider, channel_id.get())
+                .contains(&h.get())
+        );
+    }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn phase2_absorbed_refusal_then_accepted_x_does_not_leap_h() {
+async fn phase2_absorbed_refusal_then_accepted_x_does_not_leap_h_case(
+    with_dispatch_evidence: bool,
+) {
     let fx = Fixture::new().await;
     let channel_id = ChannelId::new(4_603_548);
+    let _failure = (!with_dispatch_evidence).then(|| {
+        crate::services::discord::inject_disposition::dispatched::fail_writes_for_tests(
+            &fx.provider,
+            channel_id,
+        )
+    });
     let (checkpoint, h, x, p) = (id(1, 400), id(2, 150), id(3, 130), id(4, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
     let api = phase2_only(&fx, channel_id, &[h, x, p]).with_hooks(h, &[Hook::AbsorbInto(p)]);
@@ -347,14 +479,41 @@ async fn phase2_absorbed_refusal_then_accepted_x_does_not_leap_h() {
         api.enqueue_log()[..2],
         [(h.get(), false, ABSORBED), (x.get(), true, None)]
     );
-    assert_phase2_open_h_is_held_then_reoffered(&fx, channel_id, (checkpoint, h), &[h, x, p]).await;
+    assert_phase2_open_h_is_held_then_reoffered(
+        &fx,
+        channel_id,
+        (checkpoint, h),
+        &[h, x, p],
+        with_dispatch_evidence,
+    )
+    .await;
+}
+
+/// Without durable dispatch evidence the original race/recovery expectation remains.
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_absorbed_refusal_then_accepted_x_does_not_leap_h() {
+    phase2_absorbed_refusal_then_accepted_x_does_not_leap_h_case(false).await;
+}
+
+/// Durable claim evidence prevents replay without proving delivery.
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_absorbed_refusal_then_accepted_x_does_not_leap_h_with_dispatch_evidence_is_not_replayed()
+ {
+    phase2_absorbed_refusal_then_accepted_x_does_not_leap_h_case(true).await;
 }
 
 /// The membership-skip variant: P's merged head already absorbed H.
-#[tokio::test(flavor = "current_thread")]
-async fn phase2_absorbed_membership_then_accepted_x_does_not_leap_h() {
+async fn phase2_absorbed_membership_then_accepted_x_does_not_leap_h_case(
+    with_dispatch_evidence: bool,
+) {
     let fx = Fixture::new().await;
     let channel_id = ChannelId::new(4_603_549);
+    let _failure = (!with_dispatch_evidence).then(|| {
+        crate::services::discord::inject_disposition::dispatched::fail_writes_for_tests(
+            &fx.provider,
+            channel_id,
+        )
+    });
     let (checkpoint, h, x, p) = (id(1, 400), id(2, 150), id(3, 130), id(4, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
     absorb_and_claim(&fx.shared, &fx.provider, channel_id, &[h], p).await;
@@ -363,7 +522,27 @@ async fn phase2_absorbed_membership_then_accepted_x_does_not_leap_h() {
     fx.sweep(&api).await;
 
     assert_eq!(api.enqueue_log()[0], (x.get(), true, None));
-    assert_phase2_open_h_is_held_then_reoffered(&fx, channel_id, (checkpoint, h), &[h, x, p]).await;
+    assert_phase2_open_h_is_held_then_reoffered(
+        &fx,
+        channel_id,
+        (checkpoint, h),
+        &[h, x, p],
+        with_dispatch_evidence,
+    )
+    .await;
+}
+
+/// Without durable dispatch evidence the original race/recovery expectation remains.
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_absorbed_membership_then_accepted_x_does_not_leap_h() {
+    phase2_absorbed_membership_then_accepted_x_does_not_leap_h_case(false).await;
+}
+
+/// Durable claim evidence prevents replay without proving delivery.
+#[tokio::test(flavor = "current_thread")]
+async fn phase2_absorbed_membership_then_accepted_x_does_not_leap_h_with_dispatch_evidence_is_not_replayed()
+ {
+    phase2_absorbed_membership_then_accepted_x_does_not_leap_h_case(true).await;
 }
 
 /// The queue-membership arm: a queued M seen only on the phase-2 page holds

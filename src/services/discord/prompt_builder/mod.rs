@@ -21,8 +21,8 @@ pub(crate) use manifest::RecoveryContextManifestInput;
 
 use dispatch_contract::{render_current_task_section, render_dispatch_contract};
 use layer_rendering::{
-    agent_performance_prompt_section, api_friction_guidance, context_compression_guidance,
-    render_channel_participants, shared_agent_rules_lookup, tool_output_efficiency_guidance,
+    api_friction_guidance, context_compression_guidance, render_channel_participants,
+    shared_agent_rules_lookup, tool_output_efficiency_guidance,
 };
 use manifest::{
     build_prompt_manifest, channel_recent_context_manifest_layer, current_task_manifest_layer,
@@ -580,31 +580,6 @@ pub(super) fn build_system_prompt_with_manifest(
             api_friction_guidance.trim_start_matches("\n\n"),
         ));
     }
-    let performance_section = if inspection {
-        role_binding
-            .filter(|binding| {
-                profile == DispatchProfile::Full && binding.quality_feedback_injection_enabled
-            })
-            .and_then(|binding| {
-                super::internal_api::get_agent_quality_prompt_section(&binding.role_id)
-                    .ok()
-                    .flatten()
-            })
-    } else {
-        agent_performance_prompt_section(role_binding, profile)
-    };
-    if let Some(performance_section) = performance_section {
-        system_prompt_owned.push_str("\n\n");
-        system_prompt_owned.push_str(&performance_section);
-        prompt_manifest_layers.push(prompt_manifest_layer(
-            "agent_performance",
-            "prompt_builder.agent_performance_prompt_section",
-            None,
-            PromptContentVisibility::AdkProvided,
-            &performance_section,
-        ));
-    }
-
     if queued_turn {
         let queued_rules = "[Queued Turn Rules]\n\
              This user message was queued while another turn was running.\n\

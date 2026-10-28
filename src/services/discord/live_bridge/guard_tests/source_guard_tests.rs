@@ -9,19 +9,21 @@ pub(super) const HEADLESS_TURN: &str =
     include_str!("../../router/message_handler/headless_turn.rs");
 pub(super) const RESTORE: &str = include_str!("../../recovery_engine/restore_inflight.rs");
 
-pub(super) const ENTRIES: [(&str, &str, &str); 2] = [
+/// Entry item, registration call and durable create call of each original turn entry.
+pub(super) const ENTRIES: [(&str, &str, &str, &str); 2] = [
     (
         INTAKE_TURN,
         "pub(super) async fn handle_text_message(",
         "register_or_requeue(",
+        "save_intake_inflight(",
     ),
     (
         HEADLESS_TURN,
         "async fn start_reserved_headless_turn_admitted(",
         "register_headless_original(",
+        "save_inflight_state_create_new(",
     ),
 ];
-const CREATE: &str = "save_inflight_state_create_new(";
 const PRODUCER: &str = "spawn_blocking(move ||";
 const HELD: &str = "let _original_registration = producer_registration;";
 const CLONED: &str = "producer_registration = original_registration.clone()";
@@ -36,16 +38,21 @@ const READERS: [(&str, &str); 2] = [
 
 /// Registration → durable create → producer inside the entry, no transcript work between
 /// registration and create, and the producer holds the cloned registration.
-pub(super) fn admission_order_gaps(source: &str, entry: &str, call: &str) -> Vec<String> {
+pub(super) fn admission_order_gaps(
+    source: &str,
+    entry: &str,
+    call: &str,
+    create_call: &str,
+) -> Vec<String> {
     let Some(body) = Lexed::new(source).block(entry) else {
         return vec![format!("missing {entry}")];
     };
     let register = body.find(call);
-    let create = register.and_then(|at| body.find_after(at, CREATE));
+    let create = register.and_then(|at| body.find_after(at, create_call));
     let producer = create.and_then(|at| body.find_after(at, PRODUCER));
     let (Some(register), Some(create), Some(producer)) = (register, create, producer) else {
         return vec![format!(
-            "{entry}: {call} → {CREATE} → {PRODUCER} order broken"
+            "{entry}: {call} → {create_call} → {PRODUCER} order broken"
         )];
     };
     let mut gaps = Vec::new();
@@ -84,18 +91,18 @@ pub(super) fn restore_reader_gaps(restore: &str) -> Vec<String> {
 
 #[test]
 fn admission_order_guards_reject_commented_and_reordered_steps() {
-    for (source, entry, call) in ENTRIES {
-        for needle in [entry, call, CREATE, PRODUCER, HELD, CLONED] {
+    for (source, entry, call, create) in ENTRIES {
+        for needle in [entry, call, create, PRODUCER, HELD, CLONED] {
             for forgery in CommentForgery::ALL {
                 let forged = forge(source, needle, forgery);
                 assert!(
-                    !admission_order_gaps(&forged, entry, call).is_empty(),
+                    !admission_order_gaps(&forged, entry, call, create).is_empty(),
                     "{forgery:?} commented `{needle}` still passes"
                 );
             }
         }
-        let late_register = swap(source, call, CREATE);
-        assert!(!admission_order_gaps(&late_register, entry, call).is_empty());
+        let late_register = swap(source, call, create);
+        assert!(!admission_order_gaps(&late_register, entry, call, create).is_empty());
     }
     for needle in [RESTORE_ENTRY]
         .into_iter()
@@ -120,12 +127,12 @@ fn admission_order_guards_reject_commented_and_reordered_steps() {
 
 #[test]
 fn admission_order_guard_counts_coded_transcript_work_but_not_comments() {
-    let (source, entry, call) = ENTRIES[0];
-    let create = "let row = super::super::super::inflight::save_inflight_state_create_new(";
+    let (source, entry, call, create_call) = ENTRIES[0];
+    let create = "let row = save_intake_inflight(";
     let prose = source.replacen(create, &format!("// transcript_turns\n        {create}"), 1);
     assert_ne!(prose, source);
     assert_eq!(
-        admission_order_gaps(&prose, entry, call),
+        admission_order_gaps(&prose, entry, call, create_call),
         Vec::<String>::new()
     );
     let coded = source.replacen(
@@ -133,5 +140,8 @@ fn admission_order_guard_counts_coded_transcript_work_but_not_comments() {
         &format!("let _ = transcript_turns;\n        {create}"),
         1,
     );
-    assert_eq!(admission_order_gaps(&coded, entry, call).len(), 1);
+    assert_eq!(
+        admission_order_gaps(&coded, entry, call, create_call).len(),
+        1
+    );
 }

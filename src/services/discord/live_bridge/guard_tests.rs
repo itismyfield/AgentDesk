@@ -797,9 +797,9 @@ async fn row_loss_keeps_original_registration_and_blocks_self_heal_until_both_ow
 #[test]
 fn original_and_restore_source_coverage_preserves_admission_order() {
     use source_guard_tests::{ENTRIES, RESTORE, admission_order_gaps, restore_reader_gaps};
-    for (source, entry, call) in ENTRIES {
+    for (source, entry, call, create) in ENTRIES {
         assert_eq!(
-            admission_order_gaps(source, entry, call),
+            admission_order_gaps(source, entry, call, create),
             Vec::<String>::new()
         );
     }

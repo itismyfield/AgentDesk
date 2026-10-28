@@ -5,10 +5,8 @@ use poise::serenity_prelude::ChannelId;
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::role_map_path;
 use super::settings::{
-    MemoryConfigOverride, PeerAgentInfo, RegisteredChannelBinding, RoleBinding,
-    resolve_memory_settings,
+    MemoryConfigOverride, RegisteredChannelBinding, RoleBinding, resolve_memory_settings,
 };
-use crate::services::agent_identity::{identity_from_parts, identity_label};
 use crate::services::provider::ProviderKind;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
@@ -53,7 +51,6 @@ fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
         model,
         reasoning_effort,
         peer_agents_enabled,
-        quality_feedback_injection_enabled: true,
         auth_profile: "default".to_string(),
         memory: resolve_memory_settings(None, memory_override.as_ref()),
     })
@@ -514,55 +511,6 @@ pub(super) fn is_known_agent(role_id: &str) -> bool {
         }
     }
     false
-}
-
-pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
-    let Some(json) = load_role_map_json() else {
-        return Vec::new();
-    };
-    let agents = match json
-        .get("meeting")
-        .and_then(|meeting| meeting.get("available_agents"))
-    {
-        Some(value) => value
-            .as_array()
-            .map(|available| {
-                available
-                    .iter()
-                    .filter_map(meeting_agent_from_json)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default(),
-        None => collect_role_map_binding_agents(&json),
-    };
-
-    let mut seen = std::collections::HashSet::new();
-    let mut result = Vec::new();
-    for agent in agents {
-        if !seen.insert(agent.role_id.clone()) {
-            continue;
-        }
-
-        let provider = agent.provider.clone();
-        let identity = identity_from_parts(
-            &agent.role_id,
-            &agent.display_name,
-            provider
-                .clone()
-                .unwrap_or_else(|| ProviderKind::Unsupported("unknown".into())),
-            agent.model.clone(),
-            None,
-        );
-        result.push(PeerAgentInfo {
-            role_id: agent.role_id,
-            display_name: agent.display_name,
-            keywords: agent.keywords,
-            provider,
-            identity_label: identity_label(&identity),
-        });
-    }
-
-    result
 }
 
 fn parse_summary_agent_config(value: &serde_json::Value) -> Option<SummaryAgentConfig> {

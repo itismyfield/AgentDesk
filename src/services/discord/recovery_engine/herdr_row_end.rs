@@ -255,6 +255,9 @@ async fn settle_row(
     let report = super::restart_report::load_restart_report(provider, row.channel_id);
     #[cfg(test)]
     tests::hook("before_clear").await;
+    if o_owned {
+        super::super::outbound::completed_turn_ledger::o_pending::capture(provider, &row).await;
+    }
     diagnostics::phase(provider, channel.get(), "clear");
     let (snapshot, owner) = (row.clone(), provider.clone());
     let clear = move || snapshot.clear_restarted_herdr_row(&owner, current, silent);

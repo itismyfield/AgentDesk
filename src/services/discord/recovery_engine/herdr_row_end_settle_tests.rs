@@ -41,6 +41,28 @@ async fn assert_silent(run: &Run) {
         "O owns the body: {texts:?}"
     );
     assert!(!herdr::held(), "the execution's input hold is released");
+    let pending = crate::services::discord::runtime_store::runtime_root()
+        .unwrap()
+        .join("discord_pending_o_deliveries")
+        .join(run.provider.as_str())
+        .join(format!("{}.json", run.row.channel_id));
+    let pending: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(pending).unwrap()).unwrap();
+    assert!(
+        pending
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == run.row.user_msg_id
+                && p["nonce"] == run.row.turn_nonce.as_deref().unwrap())
+    );
+    assert!(
+        !crate::services::discord::outbound::completed_turn_ledger::settled_user_msg_ids(
+            &run.provider,
+            run.row.channel_id
+        )
+        .contains(&run.row.user_msg_id)
+    );
 }
 
 /// The turn's own card was deleted once, off the clear's path.

@@ -111,10 +111,17 @@ async fn assert_refused_then_reclassified(
 
 /// P absorbs, claims and delivers unknown H before H's enqueue lands: P is never
 /// requeued; H is re-offered once (alias settlement is out of scope).
-#[tokio::test(flavor = "current_thread")]
-async fn t_f2a_delivered_race_is_refused_and_p_settles_on_its_row() {
+async fn t_f2a_delivered_race_is_refused_and_p_settles_on_its_row_case(
+    with_dispatch_evidence: bool,
+) {
     let fx = Fixture::new().await;
     let channel_id = ChannelId::new(4_603_561);
+    let _failure = (!with_dispatch_evidence).then(|| {
+        crate::services::discord::inject_disposition::dispatched::fail_writes_for_tests(
+            &fx.provider,
+            channel_id,
+        )
+    });
     let ids @ (checkpoint, h, p) = (id(1, 600), id(2, 200), id(3, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
     let delivered = Hook::AbsorbAndEnd {
@@ -127,7 +134,28 @@ async fn t_f2a_delivered_race_is_refused_and_p_settles_on_its_row() {
 
     fx.sweep(&api).await;
 
-    assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[h], &[&[h]]).await;
+    if with_dispatch_evidence {
+        assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[], &[]).await;
+        assert!(
+            !completed_turn_ledger::settled_user_msg_ids(&fx.provider, channel_id.get())
+                .contains(&h.get())
+        );
+    } else {
+        assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[h], &[&[h]]).await;
+    }
+}
+
+/// Without durable dispatch evidence the original race/recovery expectation remains.
+#[tokio::test(flavor = "current_thread")]
+async fn t_f2a_delivered_race_is_refused_and_p_settles_on_its_row() {
+    t_f2a_delivered_race_is_refused_and_p_settles_on_its_row_case(false).await;
+}
+
+/// Durable claim evidence prevents replay without proving delivery.
+#[tokio::test(flavor = "current_thread")]
+async fn t_f2a_delivered_race_is_refused_and_p_settles_on_its_row_with_dispatch_evidence_is_not_replayed()
+ {
+    t_f2a_delivered_race_is_refused_and_p_settles_on_its_row_case(true).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -149,10 +177,17 @@ async fn delivered_nonce_race_is_refused_then_both_sources_settle() {
 
 /// The same race, but P ends undelivered; the fresh snapshot recovers
 /// both ids instead of refusing them again.
-#[tokio::test(flavor = "current_thread")]
-async fn t_f2b_undelivered_race_is_recovered_from_a_fresh_snapshot() {
+async fn t_f2b_undelivered_race_is_recovered_from_a_fresh_snapshot_case(
+    with_dispatch_evidence: bool,
+) {
     let fx = Fixture::new().await;
     let channel_id = ChannelId::new(4_603_562);
+    let _failure = (!with_dispatch_evidence).then(|| {
+        crate::services::discord::inject_disposition::dispatched::fail_writes_for_tests(
+            &fx.provider,
+            channel_id,
+        )
+    });
     let ids @ (checkpoint, h, p) = (id(1, 600), id(2, 200), id(3, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
     let undelivered = Hook::AbsorbAndEnd {
@@ -165,15 +200,43 @@ async fn t_f2b_undelivered_race_is_recovered_from_a_fresh_snapshot() {
 
     fx.sweep(&api).await;
 
-    assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[h, p], &[&[h, p]]).await;
+    if with_dispatch_evidence {
+        assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[], &[]).await;
+        assert!(
+            !completed_turn_ledger::settled_user_msg_ids(&fx.provider, channel_id.get())
+                .contains(&h.get())
+        );
+    } else {
+        assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[h, p], &[&[h, p]]).await;
+    }
+}
+
+/// Without durable dispatch evidence the original race/recovery expectation remains.
+#[tokio::test(flavor = "current_thread")]
+async fn t_f2b_undelivered_race_is_recovered_from_a_fresh_snapshot() {
+    t_f2b_undelivered_race_is_recovered_from_a_fresh_snapshot_case(false).await;
+}
+
+/// Durable claim evidence prevents replay without proving delivery.
+#[tokio::test(flavor = "current_thread")]
+async fn t_f2b_undelivered_race_is_recovered_from_a_fresh_snapshot_with_dispatch_evidence_is_not_replayed()
+ {
+    t_f2b_undelivered_race_is_recovered_from_a_fresh_snapshot_case(true).await;
 }
 
 /// After a purge, fresh actor B claims from seq 0: A's observation must not
 /// pass on B, and a fresh snapshot of B recovers both ids.
-#[tokio::test(flavor = "current_thread")]
-async fn t_f6_an_observation_of_a_purged_actor_refuses_on_its_successor() {
+async fn t_f6_an_observation_of_a_purged_actor_refuses_on_its_successor_case(
+    with_dispatch_evidence: bool,
+) {
     let fx = Fixture::new().await;
     let channel_id = ChannelId::new(4_603_563);
+    let _failure = (!with_dispatch_evidence).then(|| {
+        crate::services::discord::inject_disposition::dispatched::fail_writes_for_tests(
+            &fx.provider,
+            channel_id,
+        )
+    });
     let ids @ (checkpoint, h, p) = (id(1, 600), id(3, 200), id(4, 120));
     fx.seed_checkpoint(channel_id, checkpoint);
     claim_and_finish(&fx, channel_id, id(2, 900)).await;
@@ -183,7 +246,28 @@ async fn t_f6_an_observation_of_a_purged_actor_refuses_on_its_successor() {
 
     fx.sweep(&api).await;
 
-    assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[h, p], &[&[h, p]]).await;
+    if with_dispatch_evidence {
+        assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[], &[]).await;
+        assert!(
+            !completed_turn_ledger::settled_user_msg_ids(&fx.provider, channel_id.get())
+                .contains(&h.get())
+        );
+    } else {
+        assert_refused_then_reclassified(&fx, &api, (channel_id, h, p), &[h, p], &[&[h, p]]).await;
+    }
+}
+
+/// Without durable dispatch evidence the original race/recovery expectation remains.
+#[tokio::test(flavor = "current_thread")]
+async fn t_f6_an_observation_of_a_purged_actor_refuses_on_its_successor() {
+    t_f6_an_observation_of_a_purged_actor_refuses_on_its_successor_case(false).await;
+}
+
+/// Durable claim evidence prevents replay without proving delivery.
+#[tokio::test(flavor = "current_thread")]
+async fn t_f6_an_observation_of_a_purged_actor_refuses_on_its_successor_with_dispatch_evidence_is_not_replayed()
+ {
+    t_f6_an_observation_of_a_purged_actor_refuses_on_its_successor_case(true).await;
 }
 
 /// A snapshot that saw no actor trusts any actor minted after it — unless a
