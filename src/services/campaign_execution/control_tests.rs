@@ -177,7 +177,16 @@ fn acknowledge(state: &CampaignState) -> CampaignState {
 
 #[test]
 fn restored_action_without_sessions_requires_exact_fence_and_initiation_classification() {
-    let original = with_action(ActionState::StartPending, false);
+    let mut original = with_action(ActionState::StartPending, false);
+    original
+        .run
+        .as_mut()
+        .unwrap()
+        .actions
+        .get_mut("action")
+        .unwrap()
+        .target
+        .gate = "effect-gate".into();
     let restored: CampaignState =
         serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
     let requested = stop(&restored, StopMode::FinishStage);
@@ -191,6 +200,13 @@ fn restored_action_without_sessions_requires_exact_fence_and_initiation_classifi
             .unwrap()
             .targets
             .contains(&run.actions["action"].target)
+    );
+    assert!(
+        run.stop
+            .as_ref()
+            .unwrap()
+            .targets
+            .contains(&binding(&requested).session.gate)
     );
     assert!(run.stop.as_ref().unwrap().confirmed_event.is_none());
     error(
@@ -239,7 +255,20 @@ fn restored_action_without_sessions_requires_exact_fence_and_initiation_classifi
         Command::ConfirmStopped,
         RejectionCode::FenceIncomplete,
     );
-    let fenced = step(&acknowledge(&classified), Command::ConfirmStopFence);
+    let acknowledged = acknowledge(&classified);
+    error(
+        &acknowledged,
+        Command::ConfirmStopFence,
+        RejectionCode::FenceIncomplete,
+    );
+    let acknowledged = step(
+        &acknowledged,
+        Command::AcknowledgeFence {
+            target: binding(&classified).session.gate,
+            control_version: 2,
+        },
+    );
+    let fenced = step(&acknowledged, Command::ConfirmStopFence);
     assert_eq!(fenced.control, CampaignControl::Stopping);
     assert!(
         fenced

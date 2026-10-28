@@ -364,6 +364,12 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
                 .actions
                 .values()
                 .map(|a| a.target.clone())
+                .chain(
+                    run.actions
+                        .values()
+                        .filter(|a| matches!(a.kind, ActionKind::Launch | ActionKind::DeliverStage))
+                        .map(|a| a.binding.session.gate.clone()),
+                )
                 .chain(run.sessions.iter().map(|s| s.identity.gate.clone()))
                 .chain(run.stop.iter().flat_map(|s| s.targets.iter().cloned()))
                 .collect();
