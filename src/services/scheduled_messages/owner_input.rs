@@ -35,6 +35,7 @@ pub(super) async fn consume_start(
     match disposition {
         #[cfg(test)]
         AgentTurnStartDisposition::Accepted | AgentTurnStartDisposition::Pending => {
+            release_to_poller(pool, fire, turn_id).await;
             return disposition;
         }
         AgentTurnStartDisposition::Consumed(_) | AgentTurnStartDisposition::SnapshotInvalid(_) => {
@@ -73,6 +74,11 @@ pub(super) async fn consume_start(
             ),
         }
     }
+    release_to_poller(pool, fire, turn_id).await;
+    disposition
+}
+
+async fn release_to_poller(pool: &PgPool, fire: &ClaimedFire, turn_id: &str) {
     match db::release_agent_delivery_to_poller_pg(pool, &fire.delivery_id, &fire.claim_token).await
     {
         Ok(true) => {}
@@ -87,7 +93,6 @@ pub(super) async fn consume_start(
             "[smsg] failed to release started turn to poller; lease adoption will recover it: {error}"
         ),
     }
-    disposition
 }
 
 pub(super) async fn may_observe(
@@ -116,7 +121,7 @@ pub(super) async fn may_observe(
             .try_with(Clone::clone)
             .map_err(|_| anyhow::anyhow!("scheduled owner unavailable"))?;
         let bound = input
-            .may_observe(&handle)
+            .may_observe(&handle, started.is_none())
             .await
             .map_err(anyhow::Error::msg)?;
         Ok(bound && started.is_some_and(|started| delivery.started_at >= started))
@@ -168,19 +173,47 @@ pub(super) async fn start_owned(
         ChannelMailboxHandle::new_owner_input(&original, &namespace, provider, context.clone())
     };
     let encoded = format!("owner-input:{}", serde_json::to_string(&input)?);
+    let mut committed_input = input.clone();
+    committed_input.admission_committed = Some(true);
+    let committed = format!("owner-input:{}", serde_json::to_string(&committed_input)?);
     let updated=sqlx::query("UPDATE scheduled_message_deliveries SET error=$4,updated_at=NOW() WHERE id=$1 AND claim_token=$2 AND turn_id=$3 AND status='running' AND launch_committed_at IS NOT NULL")
         .bind(&fire.delivery_id).bind(&fire.claim_token).bind(turn_id).bind(&encoded).execute(pool).await?;
     if updated.rows_affected() != 1 {
         anyhow::bail!("scheduled owner intent lost claim fence");
     }
-    Ok(match input.confirm_admission(&handle).await {
+    let disposition = match input.confirm_admission(&handle).await {
         Ok(true) => AgentTurnStartDisposition::Accepted,
         Ok(false) => AgentTurnStartDisposition::Pending,
         Err(reason) => {
             tracing::warn!(%reason,"scheduled owner intent held");
             AgentTurnStartDisposition::Pending
         }
-    })
+    };
+    if matches!(disposition, AgentTurnStartDisposition::Accepted) {
+        let projected = sqlx::query(
+            "UPDATE scheduled_message_deliveries SET error=$5,updated_at=NOW()
+            WHERE id=$1 AND claim_token=$2 AND turn_id=$3 AND status='running' AND error=$4",
+        )
+        .bind(&fire.delivery_id)
+        .bind(&fire.claim_token)
+        .bind(turn_id)
+        .bind(&encoded)
+        .bind(committed)
+        .execute(pool)
+        .await;
+        match projected {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => tracing::warn!(
+                delivery_id = fire.delivery_id,
+                "scheduled admission projection lost its fence; existing owner intent retained"
+            ),
+            Err(error) => {
+                tracing::warn!(delivery_id=fire.delivery_id,%error,"scheduled admission committed; projection will retain its original ticket")
+            }
+        }
+    }
+    release_to_poller(pool, fire, turn_id).await;
+    Ok(disposition)
 }
 
 #[cfg(test)]

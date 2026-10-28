@@ -136,6 +136,21 @@ async fn scenario(retry: bool, fallback: bool) {
     assert_eq!(checkpoint, Some(json!({"old":true})));
     let snapshot: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!(snapshot["admission_sequence"], 1);
+    if fallback {
+        let attempts: Value = sqlx::query_scalar("SELECT attempts FROM routine_runs WHERE id=$1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            attempts_include_fallback(&attempts),
+            "owner attempts must preserve fallback metadata"
+        );
+        assert_eq!(
+            attempts.as_array().unwrap().last().unwrap()["agent_id"],
+            "fallback"
+        );
+    }
     pool.close().await;
     db.drop().await;
 }
@@ -240,7 +255,19 @@ async fn custody_projection_cut_and_stale_completion_stay_on_the_same_ticket_pg(
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO session_transcripts(turn_id,assistant_message) VALUES($1,'stale before actual observer')").bind(&turn).execute(&pool).await.unwrap();
+    let intent_at = run
+        .attempts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event"] == "input_pending")
+        .unwrap()["at"]
+        .as_str()
+        .unwrap()
+        .parse::<DateTime<Utc>>()
+        .unwrap();
+    sqlx::query("INSERT INTO session_transcripts(turn_id,assistant_message,created_at) VALUES($1,'stale before intent',$2)")
+        .bind(&turn).bind(intent_at-Duration::seconds(1)).execute(&pool).await.unwrap();
     sqlx::query("UPDATE routine_runs SET started_at=NOW()-INTERVAL '2 hours',lease_expires_at=NOW()-INTERVAL '1 second',next_retry_at=NOW()-INTERVAL '1 second' WHERE id=$1").bind(&run.run_id).execute(&pool).await.unwrap();
     LEGACY_TEARDOWNS.scope(std::cell::Cell::new(0), OWNER.scope(restarted.clone(),async {
         assert!(executor.poll_agent_runs(&store,10,false).await.unwrap().is_empty());
@@ -273,3 +300,6 @@ async fn custody_projection_cut_and_stale_completion_stay_on_the_same_ticket_pg(
 
 #[path = "owner_custody_tests.rs"]
 mod custody_tests;
+
+#[path = "owner_review_tests.rs"]
+mod review_tests;

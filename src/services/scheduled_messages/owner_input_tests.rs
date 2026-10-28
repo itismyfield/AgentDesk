@@ -42,8 +42,14 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
         let input=ChannelMailboxHandle::restore_owner_input(serde_json::from_str(error.strip_prefix("owner-input:").unwrap()).unwrap()).unwrap();
         assert!(input.original["text"].as_str().unwrap().contains("Frozen snapshot"));
         assert!(input.context["scheduled_snapshot_session_label"].is_string());
-        assert!(db::release_agent_delivery_to_poller_pg(&pool,&fire.delivery_id,&fire.claim_token).await.unwrap());
-        let running=db::list_running_agent_deliveries_pg(&pool,"owner-poller",LEASE_SECS,10).await.unwrap().pop().unwrap();
+        let running=db::list_running_agent_deliveries_pg(&pool,"owner-poller",LEASE_SECS,10).await.unwrap().pop().expect("accepted input must be released to the poller in this tick");
+        let empty_registry=ChannelMailboxRegistry::default();
+        let empty=empty_registry.handle(poise::serenity_prelude::ChannelId::new(123456789));
+        let empty_path=path.with_file_name("empty-scheduled-owner.json");
+        empty.v2_adopt(empty_path.clone(),"scheduled-owner".into()).await.unwrap();
+        let before=std::fs::read(&empty_path).unwrap();
+        assert!(!owner_input::OWNER.scope(empty,poll_agent_delivery(&pool,running.clone())).await);
+        assert_eq!(before,std::fs::read(&empty_path).unwrap(),"known scheduled admission cannot be recreated after owner loss");
         assert!(turn_completion::record(&pool,&turn,turn_completion::ScheduledTurnOutcome::Delivered).await.unwrap().is_evidence());
         assert!(!poll_agent_delivery(&pool,running.clone()).await,"recorded output alone cannot bypass the owner bind");
         handle.v2_arm_head_for_tests("actual-scheduled-attempt").await.unwrap();

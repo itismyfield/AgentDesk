@@ -358,8 +358,12 @@ impl RoutineAgentExecutor {
                 continue;
             }
 
+            let retry_allowed = owner_input::retry_allowed(self, &run).await;
             if let Some(completion) = self.find_turn_completion(&run).await? {
                 if let Some(provider_error) = provider_error_from_completion(&completion) {
+                    if !retry_allowed {
+                        continue;
+                    }
                     let message = format!(
                         "routine provider returned an error-only response: {provider_error}"
                     );
@@ -439,6 +443,9 @@ impl RoutineAgentExecutor {
                 continue;
             }
 
+            if !retry_allowed {
+                continue;
+            }
             if let Some((status, message)) = self.fresh_run_failure(&run).await? {
                 let result_json = Some(merge_pending_result(&run, status, Some(&message), None));
                 self.teardown_fresh_agent_session(

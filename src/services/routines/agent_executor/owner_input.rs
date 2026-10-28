@@ -45,17 +45,61 @@ pub(super) async fn reconcile_run(
     }
     #[cfg(test)]
     {
-        if !custody::may_observe(executor, store, &run).await? {
-            return Ok(None);
+        match custody::may_observe(executor, store, &run).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(None),
+            Err(error) => {
+                tracing::warn!(run_id=%run.run_id,%error,"owner run held without blocking the remaining poll batch");
+                return Ok(None);
+            }
         }
         let mut bound = run;
-        bound.started_at = current_attempt_started_at(&bound);
+        bound.started_at = intent_started_at(&bound);
         Ok(Some(bound))
     }
     #[cfg(not(test))]
     {
         let _ = (executor, store);
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+fn intent_started_at(run: &RunningAgentRoutineRun) -> DateTime<Utc> {
+    run.attempts
+        .as_array()
+        .and_then(|events| {
+            events.iter().rev().find(|event| {
+                event["event"] == "input_pending"
+                    && event["turn_id"].as_str() == run.turn_id.as_deref()
+            })
+        })
+        .and_then(|event| event["at"].as_str())
+        .and_then(|at| at.parse::<DateTime<Utc>>().ok())
+        .unwrap_or(run.started_at)
+}
+
+pub(super) async fn retry_allowed(
+    executor: &RoutineAgentExecutor,
+    run: &RunningAgentRoutineRun,
+) -> bool {
+    if !needs_owner(run) {
+        return true;
+    }
+    #[cfg(test)]
+    {
+        match custody::retry_allowed(executor, run).await {
+            Ok(allowed) => allowed,
+            Err(error) => {
+                tracing::warn!(run_id=%run.run_id,%error,"owner retry held until the exact attempt settles");
+                false
+            }
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let _ = executor;
+        false
     }
 }
 
@@ -239,7 +283,7 @@ pub(super) mod custody {
         }
         let handle = handle(executor, &input.provider, input.channel).await?;
         let may_observe = input
-            .may_observe(&handle)
+            .may_observe(&handle, result["status"] == "input_pending")
             .await
             .map_err(anyhow::Error::msg)?;
         if result["status"] == "input_pending"
@@ -261,6 +305,20 @@ pub(super) mod custody {
                 .await?;
         }
         Ok(may_observe)
+    }
+
+    pub(in crate::services::routines::agent_executor) async fn retry_allowed(
+        executor: &RoutineAgentExecutor,
+        run: &RunningAgentRoutineRun,
+    ) -> Result<bool> {
+        let input = ChannelMailboxHandle::restore_owner_input(
+            run.result_json
+                .as_ref()
+                .ok_or_else(|| anyhow!("missing input intent"))?["owner_input"]
+                .clone(),
+        )?;
+        let handle = handle(executor, &input.provider, input.channel).await?;
+        input.may_retry(&handle).await.map_err(anyhow::Error::msg)
     }
 
     pub(in crate::services::routines::agent_executor) async fn bind_observer(

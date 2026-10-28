@@ -16,6 +16,8 @@ pub(crate) struct OwnerInput {
     pub(crate) context: Value,
     #[serde(default)]
     pub(crate) bind: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) admission_committed: Option<bool>,
 }
 
 impl OwnerInput {
@@ -33,6 +35,7 @@ impl OwnerInput {
             original: serde_json::to_value(original).expect("queue original serializes"),
             context,
             bind: None,
+            admission_committed: None,
         }
     }
 
@@ -72,7 +75,11 @@ impl OwnerInput {
     }
 
     /// NotArmed only means no arm occurred; it does not guarantee automatic progress.
-    pub(crate) async fn may_observe(&self, handle: &ChannelMailboxHandle) -> Result<bool, String> {
+    pub(crate) async fn may_observe(
+        &self,
+        handle: &ChannelMailboxHandle,
+        allow_admit: bool,
+    ) -> Result<bool, String> {
         self.check_address(handle).await?;
         let original: PendingQueueItem = serde_json::from_value(self.original.clone())
             .map_err(|e| format!("stored original: {e}"))?;
@@ -89,6 +96,9 @@ impl OwnerInput {
         match found {
             TurnBind::Unknown | TurnBind::NotArmed => Ok(false),
             TurnBind::Absent => {
+                if !allow_admit || self.admission_committed == Some(true) {
+                    return Ok(false);
+                }
                 match admission::status(handle, &ticket).await? {
                     AdmissionState::Committed => {}
                     AdmissionState::Pending | AdmissionState::Absent => {
@@ -108,6 +118,19 @@ impl OwnerInput {
                 }))
             }
         }
+    }
+
+    pub(crate) async fn may_retry(&self, handle: &ChannelMailboxHandle) -> Result<bool, String> {
+        if !self.may_observe(handle, false).await? {
+            return Ok(false);
+        }
+        let original = serde_json::from_value(self.original.clone())
+            .map_err(|e| format!("stored original: {e}"))?;
+        Ok(matches!(
+            admission::exact_turn(handle, &AdmissionTicket::stored(&self.ticket), &original)
+                .await?,
+            TurnBind::Settled(_)
+        ))
     }
 
     /// The existing observer supplies its logical turn and exact attempt before completion is read.
@@ -265,7 +288,7 @@ mod tests {
             TurnBind::Unknown
         ));
         let before = std::fs::read(&path).unwrap();
-        assert!(!input.may_observe(&handle).await.unwrap());
+        assert!(!input.may_observe(&handle, false).await.unwrap());
         assert_eq!(before, std::fs::read(&path).unwrap());
     }
     #[tokio::test]

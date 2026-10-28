@@ -82,7 +82,7 @@ impl RoutineStore {
     ) -> Result<bool> {
         let updated = sqlx::query("UPDATE routine_runs SET action='agent',turn_id=$3,result_json=$4,
             next_retry_at=NULL,owned_tmux_session=NULL,lease_expires_at=NOW()+($5::bigint*INTERVAL '1 second'),
-            attempts=COALESCE(attempts,'[]'::jsonb)||jsonb_build_array(jsonb_build_object('event','input_pending','turn_id',$3::text,'execution_mode',$4->'execution_mode','provider',$4->'provider','channel_id',$4->'channel_id','owner_input',$4->'owner_input','at',NOW())),updated_at=NOW()
+            attempts=COALESCE(attempts,'[]'::jsonb)||jsonb_build_array(jsonb_build_object('event','input_pending','agent_id',$4->>'agent_id','kind',$4->>'attempt_kind','turn_id',$3::text,'execution_mode',$4->'execution_mode','provider',$4->'provider','channel_id',$4->'channel_id','owner_input',$4->'owner_input','at',NOW())),updated_at=NOW()
             WHERE id=$1 AND status='running' AND turn_id IS NOT DISTINCT FROM $2
               AND (result_json->'owner_input' IS NULL
                    OR (result_json->>'status'='started' AND result_json#>'{owner_input,bind}' IS NOT NULL
@@ -101,7 +101,7 @@ impl RoutineStore {
     ) -> Result<bool> {
         let updated = sqlx::query("UPDATE routine_runs SET result_json=$4,
             attempts=CASE WHEN $4->>'status'='started' AND result_json->>'status' IS DISTINCT FROM 'started'
-                THEN COALESCE(attempts,'[]'::jsonb)||jsonb_build_array(jsonb_build_object('event','started','turn_id',$2::text,'execution_mode',$4->'execution_mode','provider',$4->'provider','channel_id',$4->'channel_id','owner_input',$4->'owner_input','at',NOW()))
+                THEN COALESCE(attempts,'[]'::jsonb)||jsonb_build_array(jsonb_build_object('event','started','agent_id',$4->>'agent_id','kind',$4->>'attempt_kind','turn_id',$2::text,'execution_mode',$4->'execution_mode','provider',$4->'provider','channel_id',$4->'channel_id','owner_input',$4->'owner_input','at',NOW()))
                 ELSE attempts END,updated_at=NOW()
             WHERE id=$1 AND turn_id=$2 AND status='running' AND action='agent'
               AND result_json#>>'{owner_input,ticket}'=$3
