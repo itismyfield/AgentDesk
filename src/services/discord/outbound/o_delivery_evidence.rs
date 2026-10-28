@@ -30,7 +30,7 @@ async fn verify<P: DiscordPort>(
     plan: &Manifest,
     sent: usize,
     deadline: Instant,
-    local: Option<&crate::services::tui_o::store::ledger::LedgerState>,
+    local: Option<&delivery_evidence::LocalEvidence>,
 ) -> Option<u64> {
     if plan.version != crate::services::tui_o::shadow::IDENTITY_VERSION
         || !plan.body.is_char_boundary(sent)
@@ -131,6 +131,11 @@ pub(super) async fn episode<P: DiscordPort>(
         local_snapshot(
             root.to_path_buf(),
             plan.pieces.first()?.key.channel_id,
+            plan.pieces
+                .iter()
+                .map(|p| (p.key.clone(), p.index))
+                .collect(),
+            deadline,
             None,
         ),
     )
@@ -144,12 +149,14 @@ pub(super) async fn episode<P: DiscordPort>(
 
 type LocalSnapshot = (
     Option<std::time::SystemTime>,
-    Option<Arc<crate::services::tui_o::store::ledger::LedgerState>>,
+    Option<Arc<delivery_evidence::LocalEvidence>>,
 );
 
 async fn local_snapshot(
     root: std::path::PathBuf,
     channel: u64,
+    requested: Vec<(crate::services::tui_o::shadow::UnitKey, u32)>,
+    deadline: Instant,
     previous: Option<LocalSnapshot>,
 ) -> Option<LocalSnapshot> {
     tokio::task::spawn_blocking(move || {
@@ -161,7 +168,7 @@ async fn local_snapshot(
         }
         (
             stamp,
-            delivery_evidence::local(&root, channel).map(Arc::new),
+            delivery_evidence::local(&root, channel, &requested, deadline).map(Arc::new),
         )
     })
     .await
@@ -270,10 +277,22 @@ pub(in crate::services::discord) async fn tail(
                 ),
             );
         }
-        local = tokio::time::timeout_at(deadline, local_snapshot(root.clone(), channel, local))
-            .await
-            .ok()
-            .flatten();
+        local = tokio::time::timeout_at(
+            deadline,
+            local_snapshot(
+                root.clone(),
+                channel,
+                plan.pieces
+                    .iter()
+                    .map(|p| (p.key.clone(), p.index))
+                    .collect(),
+                deadline,
+                local,
+            ),
+        )
+        .await
+        .ok()
+        .flatten();
         let covered = tokio::time::timeout_at(
             deadline,
             verify(

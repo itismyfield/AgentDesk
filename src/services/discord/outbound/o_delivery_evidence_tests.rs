@@ -437,7 +437,7 @@ async fn i7441b_local_native_receipts_require_whole_episode_and_exact_payload() 
                 &plan,
                 plan.body.len() - 4,
                 Instant::now() + std::time::Duration::from_secs(10),
-                delivery_evidence::local(&f.root, f.row.channel_id).as_ref()
+                fixture_local(&f).as_ref()
             )
             .await
             .is_some()
@@ -589,7 +589,7 @@ async fn i7441b_pg_only_runner_receipt_is_read_without_repairing_local_ledger_pg
         .join(f.row.channel_id.to_string())
         .join("ledger.jsonl");
     let before = std::fs::read(&local_path).unwrap();
-    let local = delivery_evidence::local(&f.root, f.row.channel_id).unwrap();
+    let local = fixture_local(&f).unwrap();
     assert!(matches!(
         local
             .latest_piece(&piece.key, piece.index)
@@ -773,7 +773,7 @@ async fn i7441b_multichunk_tail_proof_does_not_require_consumed_prefix() {
             &plan,
             sent,
             Instant::now() + std::time::Duration::from_secs(10),
-            delivery_evidence::local(&f.root, f.row.channel_id).as_ref()
+            fixture_local(&f).as_ref()
         )
         .await
         .is_some()
@@ -814,7 +814,7 @@ async fn i7441b_mixed_local_and_pg_receipts_cover_all_pieces_pg() {
     let piece = &plan.pieces[1];
     let key = PieceKey::new(piece.key.clone(), piece.index).unwrap();
     assert!(matches!(
-        delivery_evidence::local(&f.root, f.row.channel_id)
+        fixture_local(&f)
             .unwrap()
             .latest_piece(&piece.key, piece.index)
             .unwrap()
@@ -918,7 +918,7 @@ async fn i7441b_read_only_ledger_torn_tail_wrong_sources_and_old_versions() {
         .unwrap();
     let bytes = std::fs::read(&ledger).unwrap();
     let mtime = std::fs::metadata(&ledger).unwrap().modified().unwrap();
-    let _ = delivery_evidence::local(&f.root, f.row.channel_id);
+    let _ = fixture_local(&f);
     assert_eq!(std::fs::read(&ledger).unwrap(), bytes);
     assert_eq!(
         std::fs::metadata(&ledger).unwrap().modified().unwrap(),
@@ -962,7 +962,7 @@ async fn i7441b_read_only_ledger_torn_tail_wrong_sources_and_old_versions() {
             &empty,
             0,
             deadline,
-            delivery_evidence::local(&f.root, f.row.channel_id).as_ref()
+            fixture_local(&f).as_ref()
         )
         .await
         .is_none()
@@ -974,7 +974,7 @@ async fn i7441b_read_only_ledger_torn_tail_wrong_sources_and_old_versions() {
             &plan,
             plan.body.len(),
             deadline,
-            delivery_evidence::local(&f.root, f.row.channel_id).as_ref()
+            fixture_local(&f).as_ref()
         )
         .await
         .is_none()
@@ -1289,4 +1289,199 @@ async fn i7441c2_prefix_edit_keeps_the_input_prefix_contract_strict() {
     let frame = manifest::build_terminal(&f.root, query(), deadline).unwrap();
     assert_eq!(frame.body, f.body);
     assert!(frame.prefix.starts_with("terminal-frame-v1:"));
+}
+
+fn fixture_local(f: &Fixture) -> Option<delivery_evidence::LocalEvidence> {
+    let plan = f.plan();
+    delivery_evidence::local(
+        &f.root,
+        f.row.channel_id,
+        &plan
+            .pieces
+            .iter()
+            .map(|p| (p.key.clone(), p.index))
+            .collect::<Vec<_>>(),
+        Instant::now() + std::time::Duration::from_secs(10),
+    )
+}
+
+#[tokio::test]
+async fn i7441c3_streaming_reader_legacy_limits_and_latest_attempt() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let f = Fixture::new(744390, ProviderKind::Claude, &["legacy receipt"]).await;
+    let plan = f.plan();
+    let key = &plan.pieces[0];
+    let path = f
+        .root
+        .join("o_store")
+        .join(f.row.channel_id.to_string())
+        .join("ledger.jsonl");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let mut lines: Vec<serde_json::Value> = original
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    for line in &mut lines {
+        line["entry"].as_object_mut().unwrap().remove("local_retry");
+    }
+    let legacy = lines.iter().map(|l| format!("{l}\n")).collect::<String>();
+    std::fs::write(&path, &legacy).unwrap();
+    let local = fixture_local(&f).unwrap();
+    assert_eq!(
+        local.retained_payload_bytes,
+        plan.pieces.iter().map(|p| p.payload.len()).sum::<usize>()
+    );
+    assert!(local.max_line_bytes < 1024 * 1024);
+    assert!(matches!(
+        local.latest_piece(&key.key, key.index).unwrap().1.outcome,
+        Some(PieceOutcome::Posted(_))
+    ));
+    let query = vec![(key.key.clone(), key.index)];
+    let expired = Instant::now();
+    assert!(delivery_evidence::local(&f.root, f.row.channel_id, &query, expired).is_none());
+    assert!(
+        delivery_evidence::local(
+            &f.root,
+            f.row.channel_id,
+            &vec![query[0].clone(); 257],
+            expired + std::time::Duration::from_secs(5)
+        )
+        .is_none()
+    );
+    for tail in [
+        b"{torn".as_slice(),
+        b"{invalid}\n",
+        &vec![b'x'; 1024 * 1024 + 1],
+    ] {
+        std::fs::write(&path, &legacy).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(tail)
+            .unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        assert!(fixture_local(&f).is_none());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), before.len());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before.modified().unwrap()
+        );
+    }
+    std::fs::write(&path, &legacy).unwrap();
+    let serial = lines
+        .iter()
+        .filter_map(|l| l["entry"]["serial"].as_u64())
+        .max()
+        .unwrap()
+        + 1;
+    let mut budget_keys = Vec::new();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    for index in 0..3 {
+        budget_keys.push((key.key.clone(), index + 100));
+        let entry = serde_json::json!({"at":"2026-10-28T00:00:00Z", "entry":{
+            "type":"prepared", "serial":serial + u64::from(index), "unit_key":key.key,
+            "piece_index":index + 100, "payload":"x".repeat(800_000), "anchor_id":0, "epoch":1
+        }});
+        writeln!(file, "{entry}").unwrap();
+    }
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let subset =
+        delivery_evidence::local(&f.root, f.row.channel_id, &budget_keys[..2], deadline).unwrap();
+    assert_eq!(subset.retained_payload_bytes, 1_600_000);
+    assert!(subset.max_line_bytes < 1024 * 1024);
+    assert!(delivery_evidence::local(&f.root, f.row.channel_id, &budget_keys, deadline).is_none());
+    let mut large_key = key.key.clone();
+    large_key.native_key = "x".repeat(64 * 1024 + 1);
+    assert!(
+        delivery_evidence::local(&f.root, f.row.channel_id, &[(large_key, 0)], deadline).is_none()
+    );
+    drop(file);
+    std::fs::write(&path, &legacy).unwrap();
+
+    let retry = serde_json::json!({"at":"2026-10-28T00:00:00Z", "entry":{
+        "type":"prepared", "serial":serial, "unit_key":key.key, "piece_index":key.index,
+        "payload":key.payload, "anchor_id":lines.iter().filter_map(|l| l["entry"]["msg_id"].as_u64()).max().unwrap(), "epoch":1
+    }});
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+        "{retry}"
+    )
+    .unwrap();
+    let local = fixture_local(&f).unwrap();
+    assert_eq!(local.latest_piece(&key.key, key.index).unwrap().0, serial);
+    assert!(
+        local
+            .latest_piece(&key.key, key.index)
+            .unwrap()
+            .1
+            .outcome
+            .is_none()
+    );
+    assert!(
+        verify(
+            None,
+            &*f.port,
+            &plan,
+            0,
+            Instant::now() + std::time::Duration::from_secs(1),
+            Some(&local)
+        )
+        .await
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn i7441c3_streaming_reader_append_snapshot_and_replacement() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let f = Fixture::new(744391, ProviderKind::Claude, &["stable posted receipt"]).await;
+    let path = f
+        .root
+        .join("o_store")
+        .join(f.row.channel_id.to_string())
+        .join("ledger.jsonl");
+    let original = std::fs::read(&path).unwrap();
+    let write_path = path.clone();
+    delivery_evidence::AFTER_SNAPSHOT.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(write_path)
+                .unwrap()
+                .write_all(b"{partial")
+                .unwrap();
+        }))
+    });
+    assert!(
+        fixture_local(&f).is_some(),
+        "only the initial complete snapshot is read"
+    );
+    assert!(
+        fixture_local(&f).is_none(),
+        "the next snapshot refuses an incomplete append"
+    );
+    std::fs::write(&path, &original).unwrap();
+    let write_path = path.clone();
+    delivery_evidence::AFTER_SNAPSHOT.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let replacement = write_path.with_extension("replacement");
+            std::fs::write(&replacement, b"").unwrap();
+            std::fs::rename(replacement, write_path).unwrap();
+        }))
+    });
+    assert!(
+        fixture_local(&f).is_none(),
+        "path replacement must not keep old file candidates"
+    );
 }

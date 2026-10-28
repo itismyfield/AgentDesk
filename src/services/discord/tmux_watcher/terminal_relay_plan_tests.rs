@@ -1164,6 +1164,16 @@ async fn i7441c2_same_inode_windows_and_get_races_remain_fail_closed_pg() {
     bounded_terminal_cases(&[2, 3, 4, 5, 6, 7, 8]).await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c3_large_ledger_covers_only_posted_terminal_pg() {
+    bounded_terminal_cases(&[9]).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c3_large_ledger_unposted_body_remains_orphan_pg() {
+    bounded_terminal_cases(&[10]).await;
+}
+
 async fn bounded_terminal_cases(cases: &[u8]) {
     use crate::services::discord::inflight::load_inflight_state;
     use crate::services::discord::outbound::o_delivery_evidence::tests::Fixture;
@@ -1180,7 +1190,7 @@ async fn bounded_terminal_cases(cases: &[u8]) {
     let pool = db.connect_and_migrate().await;
     let body = "background task finished. ".repeat(270);
     for &mode in cases {
-        let delivered = matches!(mode, 0 | 2 | 3 | 7);
+        let delivered = matches!(mode, 0 | 2 | 3 | 7 | 9);
         let prefix = if mode < 2 || mode == 3 {
             107_680_321
         } else {
@@ -1195,7 +1205,7 @@ async fn bounded_terminal_cases(cases: &[u8]) {
             file.seek(SeekFrom::Start(at)).unwrap();
             file.write_all(b"X").unwrap();
         };
-        if mode == 1 {
+        if mode == 1 || mode == 10 {
             f.port.messages.lock().unwrap().clear();
         }
         if mode == 2 || mode == 3 {
@@ -1243,6 +1253,63 @@ async fn bounded_terminal_cases(cases: &[u8]) {
                 }
             }));
         }
+        if mode >= 9 {
+            let ledger = f
+                .root
+                .join("o_store")
+                .join(f.row.channel_id.to_string())
+                .join("ledger.jsonl");
+            let original = std::fs::read_to_string(&ledger).unwrap();
+            let entries: Vec<serde_json::Value> = original
+                .lines()
+                .map(|line| {
+                    serde_json::from_str::<serde_json::Value>(line).unwrap()["entry"].clone()
+                })
+                .collect();
+            let prepared: Vec<_> = entries
+                .iter()
+                .filter(|entry| entry["type"] == "prepared")
+                .collect();
+            let mut key = prepared[0]["unit_key"].clone();
+            let mut serial = prepared
+                .iter()
+                .map(|entry| entry["serial"].as_u64().unwrap())
+                .max()
+                .unwrap()
+                + 1;
+            let mut anchor = entries
+                .iter()
+                .filter_map(|entry| entry["msg_id"].as_u64())
+                .max()
+                .unwrap();
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&ledger)
+                .unwrap();
+            let mut size = file.metadata().unwrap().len();
+            while size < 36_878_824 {
+                key["native_key"] = serde_json::json!(format!("unrelated-history-{serial}"));
+                for entry in [
+                    serde_json::json!({"type": "prepared", "serial": serial, "unit_key": key, "piece_index": 0,
+                        "payload": "한".repeat(1333), "anchor_id": anchor, "epoch": 1}),
+                    serde_json::json!({"type": "posted", "serial": serial, "msg_id": anchor + (1 << 22)}),
+                ] {
+                    let mut line = serde_json::to_vec(
+                        &serde_json::json!({"at": "2026-10-28T00:00:00Z", "entry": entry}),
+                    )
+                    .unwrap();
+                    line.push(b'\n');
+                    file.write_all(&line).unwrap();
+                    size += line.len() as u64;
+                }
+                anchor += 1 << 22;
+                serial += 1;
+            }
+            eprintln!(
+                "C3_LEDGER mode={mode} bytes={size} posted_pieces={} historical_records={serial}",
+                prepared.len()
+            );
+        }
         let (http, _http) = f.http().await;
         let shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
@@ -1261,6 +1328,8 @@ async fn bounded_terminal_cases(cases: &[u8]) {
             },
             if mode == 8 {
                 began
+            } else if mode >= 9 {
+                began + std::time::Duration::from_millis(9900)
             } else {
                 began + std::time::Duration::from_millis(250)
             },
@@ -1272,7 +1341,7 @@ async fn bounded_terminal_cases(cases: &[u8]) {
             began.elapsed().as_micros(),
             f.get_calls.load(Ordering::SeqCst)
         );
-        assert!(began.elapsed() < std::time::Duration::from_secs(1));
+        assert!(began.elapsed() < std::time::Duration::from_secs(if mode >= 9 { 11 } else { 1 }));
         let facts = OrphanTerminalFrameFacts {
             o_tail_covered: proof.as_ref(),
             denial: Some(SoftTerminalAuthorityDenial::NoInflightRow),
