@@ -104,7 +104,9 @@ impl DiscordPort for GatewayPort {
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
         let http = Arc::clone(&self.http);
         async move {
-            let message = CreateMessage::new().content(content);
+            let message = CreateMessage::new()
+                .content(content)
+                .allowed_mentions(super::super::http::relay_allowed_mentions());
             match ChannelId::new(channel).send_message(&*http, message).await {
                 Ok(message) => PostOutcome::Created(seen(message)),
                 Err(error) => refusal(http_status(&error)).map_or_else(

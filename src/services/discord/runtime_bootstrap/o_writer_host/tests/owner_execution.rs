@@ -3,10 +3,10 @@ use crate::db::{auto_queue::test_support::TestPostgresDb, intake_outbox as outbo
 use crate::services::cluster::intake_router_hook::owner_record::{input_start, output};
 use crate::services::tui_o::writer::{DiscordPort, PostOutcome};
 use crate::services::tui_o::{channel_policy::BootChannels, cutover, ownership::execution};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 
 struct Discord {
@@ -35,6 +35,11 @@ impl Discord {
         let http = Arc::new(
             serenity::HttpBuilder::new("test-token")
                 .proxy(format!("http://{}", listener.local_addr().unwrap()))
+                .default_allowed_mentions(
+                    serenity::CreateAllowedMentions::new()
+                        .everyone(true)
+                        .all_roles(true),
+                )
                 .ratelimiter_disabled(true)
                 .build(),
         );
@@ -112,12 +117,16 @@ async fn origin(
         .unwrap()
         .unwrap();
     assert_eq!(row.id, delivery);
-    assert!(outbox::mark_accepted(pool, delivery, "owner-http")
-        .await
-        .unwrap());
-    assert!(outbox::mark_spawned(pool, delivery, "owner-http")
-        .await
-        .unwrap());
+    assert!(
+        outbox::mark_accepted(pool, delivery, "owner-http")
+            .await
+            .unwrap()
+    );
+    assert!(
+        outbox::mark_spawned(pool, delivery, "owner-http")
+            .await
+            .unwrap()
+    );
     use crate::services::tui_prompt_dedupe::binding_context::{
         BindingContext, PreparedIncarnation,
     };
@@ -397,12 +406,15 @@ async fn owner_http_unregistered_runtime_is_not_advertised_as_ready_pg() {
 fn owner_host_boot_wires_every_runtime_role_without_native_end_on_transport_loss() {
     let boot = include_str!("../../../runtime_bootstrap.rs");
     let spawn = "o_writer_host::spawn_execution(&shared, &provider, boot_config.tui_o.as_ref());";
-    assert!(boot
-        [boot.find("if !modules.gateway {").unwrap()..boot.find("let voice_receiver").unwrap()]
-        .contains(spawn));
-    assert!(boot[boot.find("GatewayLeaseOutcome::Standby =>").unwrap()
-        ..boot.find("GatewayLeaseOutcome::Failed =>").unwrap()]
-        .contains(spawn));
+    assert!(
+        boot[boot.find("if !modules.gateway {").unwrap()..boot.find("let voice_receiver").unwrap()]
+            .contains(spawn)
+    );
+    assert!(
+        boot[boot.find("GatewayLeaseOutcome::Standby =>").unwrap()
+            ..boot.find("GatewayLeaseOutcome::Failed =>").unwrap()]
+            .contains(spawn)
+    );
     let transport = include_str!("../../gateway_lease.rs");
     let fence = &transport[transport.find("async fn self_fence_gateway(").unwrap()
         ..transport
@@ -412,4 +424,96 @@ fn owner_host_boot_wires_every_runtime_role_without_native_end_on_transport_loss
     assert!(fence.contains("mailbox_restart_drain_all(shared, provider)"));
     assert!(!fence.contains("transfer_owner"));
     assert!(!fence.contains("normal_end"));
+}
+
+#[tokio::test]
+async fn owner_http_wire_mentions_override_unsafe_client_defaults() {
+    let discord = Discord::new().await;
+    let port = GatewayPort::new(discord.http.clone(), 1);
+    let outcome = port.post(73369470, "@everyone <@&42> <@43>".into()).await;
+    assert!(matches!(outcome, PostOutcome::Created(_)));
+    let requests = discord.posts.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["allowed_mentions"]["parse"], json!(["users"]));
+}
+
+#[tokio::test]
+async fn owner_host_fence_serializes_current_generation_with_one_connection_pg() {
+    if !cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::owner_host_fence_serializes_current_generation_with_one_connection_pg"
+    )) {
+        return;
+    }
+    use crate::services::cluster::intake_router_hook::owner_record::{OwnerIdentity, custody};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let setup = db.connect_and_migrate().await;
+    let channel = 73369471;
+    let _selected = select(&ProviderKind::Claude, channel, "mac-b", "mac-a");
+    execution::tests::admission(&setup, "claude", channel, "mac-b").await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(2))
+        .connect(&db.database_url)
+        .await
+        .unwrap();
+    let snapshot = cutover::boot_snapshot().unwrap();
+    snapshot.install_execution(
+        channel,
+        Some(Ok(execution::read(
+            &pool,
+            "claude",
+            channel,
+            "mac-b",
+            || Ok(false),
+        )
+        .await
+        .unwrap()
+        .unwrap())),
+    );
+    let (_registry, shared) = runtime(&pool, ProviderKind::Claude, channel, "standby").await;
+    let io = parts_with_rest(&shared, &ProviderKind::Claude, None, None).io;
+    let fence = tokio::time::timeout(
+        Duration::from_secs(3),
+        io.intake_fence(channel, ShadowProvider::Claude),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(fence.facts.open_intake, 0);
+    let competing = setup.clone();
+    let mut changing = tokio::spawn(async move {
+        let mut tx = competing.begin().await.unwrap();
+        custody::lock(&mut tx, &OwnerIdentity::new("claude", &channel.to_string()))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE intake_session_owners SET generation=generation+1 WHERE provider='claude' AND raw_channel_id=$1")
+            .bind(channel.to_string()).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(75), &mut changing)
+            .await
+            .is_err()
+    );
+    fence.hold.release().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), changing)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        io.intake_fence(channel, ShadowProvider::Claude)
+            .await
+            .is_err(),
+        "a pinned old generation must not initialize after ownership changes"
+    );
+    pool.close().await;
+    assert!(
+        io.intake_fence(channel, ShadowProvider::Claude)
+            .await
+            .is_err(),
+        "PG errors must not restore old authority"
+    );
+    setup.close().await;
 }

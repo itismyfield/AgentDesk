@@ -16,6 +16,8 @@ pub(crate) async fn facts(
     custody::lock(&mut tx, &OwnerIdentity::new(provider, channel)).await?;
     let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND owner_instance_id=$3 AND generation=$4 AND status='active')")
         .bind(provider).bind(channel).bind(executor).bind(generation).fetch_one(&mut *tx).await?;
+    #[cfg(test)]
+    let valid = valid || crate::services::tui_o::ownership::execution::tests::mutant("fence");
     if !valid {
         return Err(sqlx::Error::RowNotFound);
     }

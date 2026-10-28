@@ -990,6 +990,13 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
             let Some((serial, open)) = self.store.ledger().unresolved() else {
                 return;
             };
+            #[cfg(test)]
+            if super::super::ownership::execution::tests::mutant("repost-record")
+                && matches!(report.outcome, WireOutcome::Withheld(_))
+            {
+                let _ = self.record(LedgerEntry::NotSent { serial });
+                return;
+            }
             if matches!(
                 report.outcome,
                 WireOutcome::Unsent(_) | WireOutcome::Throttled

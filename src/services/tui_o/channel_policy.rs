@@ -339,6 +339,10 @@ impl BootChannels {
     }
 
     pub(crate) fn execution(&self, channel: u64) -> Option<super::ownership::execution::View> {
+        #[cfg(test)]
+        if super::ownership::execution::tests::mutant("gateway") {
+            return None;
+        }
         self.execution
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -358,6 +362,14 @@ impl BootChannels {
         permit: Option<Result<Arc<super::ownership::execution::OwnerPermit>, String>>,
     ) {
         use super::ownership::execution::View;
+        #[cfg(test)]
+        let permit = if super::ownership::execution::tests::mutant("unknown")
+            && matches!(permit.as_ref(), Some(Err(_)))
+        {
+            None
+        } else {
+            permit
+        };
         let _install = self
             .execution_install
             .lock()

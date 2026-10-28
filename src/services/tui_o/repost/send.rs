@@ -88,6 +88,7 @@ impl RepostEnvelope {
         let nonce = serenity::model::channel::Nonce::String(self.ids.nonce.clone());
         let message = CreateMessage::new()
             .content(self.content.clone())
+            .allowed_mentions(crate::services::discord::http::relay_allowed_mentions())
             .nonce(nonce)
             .enforce_nonce(true);
         if !self.additional {

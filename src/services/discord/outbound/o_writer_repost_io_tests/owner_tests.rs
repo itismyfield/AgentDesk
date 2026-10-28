@@ -44,10 +44,6 @@ async fn owner_repost_real_http_revocation_preserves_unresolved_and_stops_pg() {
     assert_eq!(good.counted, 1);
     output::tests::revoke(&pool, &origin).await;
     let denied = send_within(&port, &envelope, always(), Duration::from_secs(5)).await;
-    assert!(
-        matches!(denied.outcome, WireOutcome::Withheld(_)),
-        "origin refusal must not be an ordinary Unsent"
-    );
     assert_eq!(denied.wire, 0);
     assert_eq!(mock.seen.lock().unwrap().len(), 1);
     let runtime = tempfile::tempdir().unwrap();
@@ -98,6 +94,11 @@ async fn owner_repost_real_http_revocation_preserves_unresolved_and_stops_pg() {
     );
     let mut writer = ChannelWriter::new(opened, gate, gateway, Lease, alarms.clone());
     RepostWriter::record(&mut writer, &denied).await;
+    assert!(
+        matches!(denied.outcome, WireOutcome::Withheld(_)),
+        "origin refusal must not be an ordinary Unsent"
+    );
+
     assert!(matches!(
         writer.store().ledger().piece(0).unwrap().outcome,
         Some(PieceOutcome::Unresolved(_))
@@ -108,4 +109,26 @@ async fn owner_repost_real_http_revocation_preserves_unresolved_and_stops_pg() {
     ));
     assert!(writer.is_stopped());
     pool.close().await;
+}
+
+#[tokio::test]
+async fn owner_repost_wire_mentions_override_unsafe_client_defaults() {
+    let mock = Mock::start(vec![created(Some(MARKER))]).await;
+    let http = Arc::new(
+        serenity::HttpBuilder::new("test-token")
+            .default_allowed_mentions(
+                serenity::CreateAllowedMentions::new()
+                    .everyone(true)
+                    .all_roles(true),
+            )
+            .build(),
+    );
+    let port = RepostHttp::at(http, mock.base.clone()).unwrap();
+    let report = send_within(&port, &envelope(), always(), Duration::from_secs(5)).await;
+    assert!(matches!(report.outcome, WireOutcome::Created(_)));
+    assert_eq!(report.counted, 1);
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].1).unwrap();
+    assert_eq!(body["allowed_mentions"]["parse"], json!(["users"]));
 }

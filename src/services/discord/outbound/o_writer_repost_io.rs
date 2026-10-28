@@ -195,11 +195,7 @@ impl BoundedTransport for RepostHttp {
             envelope.payload().to_owned(),
         );
         let channel_id = ChannelId::new(envelope.channel);
-        // Legacy's send_message fills in the client's default mentions the same way.
-        let mut message = envelope.message();
-        if let Some(mentions) = &self.http.default_allowed_mentions {
-            message = message.allowed_mentions(mentions.clone());
-        }
+        let message = envelope.message();
         let body = serde_json::to_vec(&message);
         async move {
             use crate::services::cluster::intake_router_hook::owner_record::output;
@@ -212,7 +208,13 @@ impl BoundedTransport for RepostHttp {
             .await
             {
                 Ok(hold) => hold,
-                Err(error) => return WireOutcome::Withheld(error.to_string()),
+                Err(error) => {
+                    #[cfg(test)]
+                    if crate::services::tui_o::ownership::execution::tests::mutant("repost-class") {
+                        return WireOutcome::Unsent(error.to_string());
+                    }
+                    return WireOutcome::Withheld(error.to_string());
+                }
             };
             hold.run(async move {
                 let body = match body {

@@ -29,6 +29,10 @@ pub(super) async fn open(
             .get_current_user()
             .await
             .map_err(|error| format!("owner REST identity: {error}"))?;
+        #[cfg(test)]
+        if crate::services::tui_o::ownership::execution::tests::mutant("scope") {
+            return Ok(Arc::new(GatewayPort::new(http, user.id.get())));
+        }
         let port = GatewayPort::new(http, user.id.get()).with_owner_scope(Scope {
             pool: permit.pool.clone(),
             provider: permit.identity.provider().into(),

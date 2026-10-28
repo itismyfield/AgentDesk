@@ -231,6 +231,8 @@ src/
 │   │   ├── mod.rs
 │   │   ├── soft_delete.rs
 │   │   └── transitions.rs
+│   ├── o_channel_activation/
+│   │   └── owner.rs
 │   ├── postgres/
 │   │   ├── advisory_lock.rs
 │   │   ├── advisory_lock_tests.rs
@@ -1563,6 +1565,8 @@ src/
 │   │   │   │   ├── image_delivery_tests.rs
 │   │   │   │   ├── production_nonce_tests.rs
 │   │   │   │   └── resolved.rs
+│   │   │   ├── o_writer_repost_io_tests/
+│   │   │   │   └── owner_tests.rs
 │   │   │   ├── turn_output_controller/
 │   │   │   │   ├── fresh_send.rs
 │   │   │   │   ├── fresh_send_tests.rs
@@ -2020,19 +2024,23 @@ src/
 │   │   │   ├── intake_delivery_sweep/
 │   │   │   │   └── tests.rs
 │   │   │   ├── o_writer_host/
-│   │   │   │   └── fence_tests/
-│   │   │   │       ├── b1b_fresh_launch_tests/
-│   │   │   │       │   ├── ordinary_restart_tests/
-│   │   │   │       │   │   ├── boot_gate_alarm_tests.rs
-│   │   │   │       │   │   ├── fresh_process_tests.rs
-│   │   │   │       │   │   └── fresh_scope_restart_tests.rs
-│   │   │   │       │   ├── discord_mock_tests.rs
-│   │   │   │       │   └── ordinary_restart_tests.rs
-│   │   │   │       ├── b1b_fresh_launch_tests.rs
-│   │   │   │       ├── b1b_joint_owner_tests.rs
-│   │   │   │       ├── b1b_repeated_absence_tests.rs
-│   │   │   │       ├── b1b_restart_phase_tests.rs
-│   │   │   │       └── b1b_terminal_tests.rs
+│   │   │   │   ├── fence_tests/
+│   │   │   │   │   ├── b1b_fresh_launch_tests/
+│   │   │   │   │   │   ├── ordinary_restart_tests/
+│   │   │   │   │   │   │   ├── boot_gate_alarm_tests.rs
+│   │   │   │   │   │   │   ├── fresh_process_tests.rs
+│   │   │   │   │   │   │   └── fresh_scope_restart_tests.rs
+│   │   │   │   │   │   ├── discord_mock_tests.rs
+│   │   │   │   │   │   └── ordinary_restart_tests.rs
+│   │   │   │   │   ├── b1b_fresh_launch_tests.rs
+│   │   │   │   │   ├── b1b_joint_owner_tests.rs
+│   │   │   │   │   ├── b1b_repeated_absence_tests.rs
+│   │   │   │   │   ├── b1b_restart_phase_tests.rs
+│   │   │   │   │   └── b1b_terminal_tests.rs
+│   │   │   │   ├── owner_execution_tests/
+│   │   │   │   ├── tests/
+│   │   │   │   │   └── owner_execution.rs
+│   │   │   │   └── owner_port.rs
 │   │   │   ├── owner_execution/
 │   │   │   │   └── tests/
 │   │   │   │       └── mod.rs

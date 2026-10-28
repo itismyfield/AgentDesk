@@ -43,6 +43,10 @@ pub(crate) async fn inspect_at_boot(
             reason,
         });
     }
+    #[cfg(test)]
+    if crate::services::tui_o::ownership::execution::tests::mutant("seed") {
+        issues.clear();
+    }
     let mut published = registry.channel_home_seed_issues.lock().await;
     published.retain(|issue| issue.runtime != runtime || issue.provider != provider.as_str());
     published.extend(issues);
