@@ -468,8 +468,8 @@ fn legacy_seq_uuid_receipts_keep_their_verdicts_beside_tickets() {
     let late = Ticket::new("run-c").unwrap();
     assert_eq!(
         Custody::with_ticket(&legacy, late.clone()).advance(&mut owner),
-        Ok(Admitted::Duplicate),
-        "an input admitted before tickets is neither copied nor a conflict"
+        Err(AdmitError::SourceAlreadyKnown),
+        "an input admitted before tickets is neither copied under the ticket nor a conflict"
     );
     assert_eq!(owner.admission_status(&late), TicketStatus::Absent);
     assert_eq!(
@@ -484,4 +484,254 @@ fn legacy_seq_uuid_receipts_keep_their_verdicts_beside_tickets() {
         .collect();
     assert_eq!(texts, ["legacy body", "ticketed body"]);
     assert_eq!(owner.snapshot.admission_receipts[0], old[0]);
+}
+
+/// The owner's snapshot, unconfirmed candidate, sequence and receipts, compared whole.
+async fn whole(handle: &Handle) -> (serde_json::Value, Option<serde_json::Value>) {
+    handle
+        .v2_request(|slot| {
+            let owner = slot.as_ref().ok_or("no owner")?;
+            let candidate =
+                (owner.pending.as_ref()).map(|(_, next)| serde_json::to_value(next).unwrap());
+            Ok((owner.json()?, candidate))
+        })
+        .await
+        .unwrap()
+}
+
+/// A ticket is accepted only once it names its original: a source admitted earlier without the
+/// ticket is refused under it, so a later original can still take the ticket, and then only that one.
+#[tokio::test]
+async fn a_source_admitted_without_the_ticket_is_not_accepted_under_it() {
+    let _root = TestRuntimeRootGuard::new();
+    let (_registry, handle) = ticket_owner(727_384, "tickets").await;
+    let ticket = || "run-7272-d".to_string();
+    let legacy = original(727_384_001, "legacy original");
+    let custody = Arc::new(Mutex::new(Custody::new(&legacy)));
+    assert_eq!(handle.v2_admit(custody).await, Ok(Admitted::Queued));
+    assert_eq!(
+        handle.v2_admit_ticket(legacy, ticket()).await,
+        Err(AdmitError::SourceAlreadyKnown)
+    );
+    assert_eq!(
+        handle.v2_admission_status(ticket()).await,
+        Ok(TicketStatus::Absent)
+    );
+    let fresh = original(727_384_002, "ticketed original");
+    assert_eq!(
+        handle.v2_admit_ticket(fresh, ticket()).await,
+        Ok(Admitted::Queued)
+    );
+    assert_eq!(
+        handle.v2_admission_status(ticket()).await,
+        Ok(TicketStatus::Committed)
+    );
+    let other = original(727_384_003, "a third original");
+    assert!(matches!(
+        handle.v2_admit_ticket(other, ticket()).await,
+        Err(AdmitError::Conflict(_))
+    ));
+    let (texts, receipts) = held(&handle).await;
+    assert_eq!(texts, ["legacy original", "ticketed original"]);
+    assert_eq!(receipts.len(), 2);
+}
+
+/// Inputs that share a synthetic identity, even with one body, are told apart by the ticket each
+/// was admitted under, as it moves from the queue to the head.
+#[tokio::test]
+async fn an_exact_turn_follows_its_ticket_not_a_shared_identity() {
+    let _root = TestRuntimeRootGuard::new();
+    let (_registry, handle) = ticket_owner(727_385, "tickets").await;
+    let id = 8_000_000_000_000_001_850;
+    let (a, b) = (original(id, "A"), original(id, "B"));
+    for (input, ticket) in [(&a, "run-a"), (&b, "run-b"), (&a, "run-a-again")] {
+        assert_eq!(
+            handle.v2_admit_ticket(input.clone(), ticket.into()).await,
+            Ok(Admitted::Queued)
+        );
+    }
+    handle.v2_arm_head_for_tests("attempt-a").await.unwrap();
+    let turn =
+        |input: &PendingQueueItem, ticket: &str| handle.v2_exact_turn(input.clone(), ticket.into());
+    assert_eq!(
+        turn(&a, "run-a").await,
+        Ok(TurnBind::Armed {
+            attempt: "attempt-a".into(),
+            source: None
+        })
+    );
+    assert_eq!(turn(&b, "run-b").await, Ok(TurnBind::NotArmed));
+    assert_eq!(turn(&a, "run-a-again").await, Ok(TurnBind::NotArmed));
+    assert!(turn(&b, "run-a").await.is_err(), "the ticket names A");
+}
+
+/// A ticket that names another original is refused before any recovery, with the fault still in
+/// place and after it is gone, and the refusal changes neither the snapshot nor the candidate.
+#[tokio::test]
+async fn a_conflicting_ticket_is_refused_before_recovery() {
+    let _root = TestRuntimeRootGuard::new();
+    let path = fixture_path(727_386);
+    let (_registry, handle) = ticket_owner(727_386, "tickets").await;
+    let ticket = || "run-7272-e".to_string();
+    let watch = Watch::new(
+        &path,
+        Plan {
+            fail: vec![Step::ParentSync],
+            ..Default::default()
+        },
+    );
+    let first = original(8_000_000_000_000_001_860, "first original");
+    assert_eq!(
+        handle.v2_admit_ticket(first, ticket()).await,
+        Err(AdmitError::Pending)
+    );
+    let before = whole(&handle).await;
+    assert!(before.1.is_some());
+    let other = original(8_000_000_000_000_001_860, "another original");
+    let refused = || async {
+        assert!(matches!(
+            handle.v2_admit_ticket(other.clone(), ticket()).await,
+            Err(AdmitError::Conflict(_))
+        ));
+        assert_eq!(whole(&handle).await, before);
+    };
+    refused().await;
+    drop(watch);
+    refused().await;
+}
+
+/// The receipt names what runs: reply, attachments and a source's route or origin each make another
+/// original, while a retry that differs only in recomputed times and diagnostics is the same one.
+#[tokio::test]
+async fn the_receipt_names_every_field_that_changes_what_runs() {
+    let _root = TestRuntimeRootGuard::new();
+    let (_registry, handle) = ticket_owner(727_387, "tickets").await;
+    let id = 8_000_000_000_000_001_870_u64;
+    let with = |source: serde_json::Value, extra: serde_json::Value| {
+        let mut value = json!({"author_id":7,"message_id":id,"channel_id":7272,
+            "source_message_ids":[id],"queued_generation":5,"text":"run the report",
+            "source_message_queued_generations":[source]});
+        let map = value.as_object_mut().unwrap();
+        map.extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<PendingQueueItem>(value).unwrap()
+    };
+    let source = json!({"message_id":id,"queued_generation":5,"origin":"routine"});
+    let ticket = || "run-7272-f".to_string();
+    assert_eq!(
+        handle
+            .v2_admit_ticket(with(source.clone(), json!({})), ticket())
+            .await,
+        Ok(Admitted::Queued)
+    );
+    let before = whole(&handle).await;
+    let route = json!({"target":7272,"parent":null,"role":null});
+    for (field, variant) in [
+        (
+            "reply",
+            with(source.clone(), json!({"reply_context":"another reply"})),
+        ),
+        (
+            "attachment",
+            with(source.clone(), json!({"pending_uploads":["/tmp/a.png"]})),
+        ),
+        (
+            "route",
+            with(
+                json!({"message_id":id,"queued_generation":5,"origin":"routine",
+            "route":route}),
+                json!({}),
+            ),
+        ),
+        (
+            "origin",
+            with(
+                json!({"message_id":id,"queued_generation":5,"origin":"http"}),
+                json!({}),
+            ),
+        ),
+    ] {
+        let refused = handle.v2_admit_ticket(variant, ticket()).await;
+        assert!(
+            matches!(refused, Err(AdmitError::Conflict(_))),
+            "{field}: {refused:?}"
+        );
+        assert_eq!(whole(&handle).await, before, "{field}");
+    }
+    let retried = with(
+        json!({"message_id":id,"queued_generation":5,"origin":"routine",
+            "enqueued_at_epoch_us":1_234}),
+        json!({"created_at_wall_time_ms":99,"channel_name":"renamed"}),
+    );
+    assert_eq!(
+        handle.v2_admit_ticket(retried, ticket()).await,
+        Ok(Admitted::Duplicate)
+    );
+    let unsettled = with(source, json!({"queued_generation":0}));
+    let refused = handle.v2_admit_ticket(unsettled, "run-7272-g".into()).await;
+    assert!(
+        matches!(&refused, Err(AdmitError::NotCommitted(why)) if why.contains("generation")),
+        "{refused:?}"
+    );
+    assert_eq!(whole(&handle).await, before);
+}
+
+/// A restart right after Pending, with no retry or recovery in between, reads the ticket from the
+/// published snapshot alone: committed, acknowledged as a duplicate, held once.
+#[tokio::test]
+async fn a_restart_right_after_pending_reads_the_published_ticket() {
+    let _root = TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(727_388);
+    let path = fixture_path(channel.get());
+    let (first, handle) = ticket_owner(channel.get(), "tickets").await;
+    let input = original(8_000_000_000_000_001_880, "routine prompt");
+    let ticket = || "run-7272-h".to_string();
+    let watch = Watch::new(
+        &path,
+        Plan {
+            fail: vec![Step::ParentSync],
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        handle.v2_admit_ticket(input.clone(), ticket()).await,
+        Err(AdmitError::Pending)
+    );
+    let (committed, candidate) = handle
+        .v2_request(|slot| {
+            let owner = slot.as_ref().ok_or("no owner")?;
+            let named =
+                |receipts: &[String]| receipts.iter().any(|r| r.starts_with("tk:run-7272-h:"));
+            let candidate = owner
+                .pending
+                .as_ref()
+                .map(|(_, next)| named(&next.admission_receipts));
+            Ok((named(&owner.snapshot.admission_receipts), candidate))
+        })
+        .await
+        .unwrap();
+    assert_eq!((committed, candidate), (false, Some(true)));
+    drop((handle, first, watch));
+
+    let registry = ChannelMailboxRegistry::default();
+    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &crate::services::provider::ProviderKind::Claude,
+        "s3b",
+        None,
+    );
+    let adopted = super::super::projection::readopt(&registry, &persistence, "tickets")
+        .await
+        .unwrap();
+    assert!(adopted.contains(&Ok(channel)), "{adopted:?}");
+    let restarted = registry.handle(channel);
+    assert_eq!(
+        restarted.v2_admission_status(ticket()).await,
+        Ok(TicketStatus::Committed)
+    );
+    assert_eq!(
+        restarted.v2_admit_ticket(input, ticket()).await,
+        Ok(Admitted::Duplicate)
+    );
+    let (texts, receipts) = held(&restarted).await;
+    assert_eq!(texts, ["routine prompt"]);
+    assert_eq!(receipts.len(), 1);
 }

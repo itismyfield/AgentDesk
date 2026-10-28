@@ -216,6 +216,7 @@ fn adoption_forgets_the_ledger_entry_of_a_proven_unsent_paste() {
             namespace: Some(format!("migration-{channel}")),
             admission_receipts: vec![],
             admission_sequence: 0,
+            admission_binds: Vec::new(),
         };
         let file = seed(channel, &serde_json::to_string_pretty(&snapshot).unwrap());
         let register = || {

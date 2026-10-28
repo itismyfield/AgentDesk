@@ -160,16 +160,24 @@ fn enqueue(
         queue_exit_events: Vec::new(),
         persistence_error,
     };
-    // One logical input keeps one receipt across its Pending retries; its sources name it.
-    let mut custody = Custody::with_ticket(&item, Ticket::of_sources(&item));
+    // Only a real source names one logical input, so only its Pending retries can share a receipt;
+    // a synthetic id may name several inputs and keeps one custody per call.
+    let real = (sources::identity(&item).sources.iter())
+        .all(|s| crate::services::tui_input::input_key::is_discord_key(s.message_id));
+    let mut custody = match real {
+        true => Custody::with_ticket(&item, Ticket::of_sources(&item)),
+        false => Custody::new(&item),
+    };
     match custody.advance(owner) {
         Ok(Admitted::Queued | Admitted::RetainedOpaque) => result(true, None, None),
         // Its sources are already admitted, under this receipt or with another body.
-        Ok(Admitted::Duplicate) | Err(AdmitError::Conflict(_)) => result(
-            false,
-            Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
-            None,
-        ),
+        Ok(Admitted::Duplicate) | Err(AdmitError::Conflict(_) | AdmitError::SourceAlreadyKnown) => {
+            result(
+                false,
+                Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+                None,
+            )
+        }
         Err(error) => result(
             false,
             None,
@@ -195,6 +203,7 @@ fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult
         None => (None, None),
         Some(at) => {
             let item = next.items.remove(at + first);
+            next.unbind_item(at + first);
             match owner.commit(next) {
                 Ok(()) => {
                     let (now, instant) = (SystemTime::now(), Instant::now());

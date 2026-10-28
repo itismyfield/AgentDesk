@@ -401,3 +401,81 @@ fn enqueue_keeps_one_custody_across_pending_retries() {
         );
     });
 }
+
+/// A synthetic id can name several logical inputs, so each enqueue is its own admission: a second
+/// input under the same id, and one after the first has run, are both queued.
+#[test]
+fn synthetic_inputs_sharing_an_id_are_separate_admissions() {
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    let _root = TestRuntimeRootGuard::new();
+    let synthetic = |text: &str| {
+        let id = 8_000_000_000_000_007_272_u64;
+        let item: PendingQueueItem = serde_json::from_value(json!({"author_id":7,
+            "message_id":id,"channel_id":7272,"source_message_ids":[id],"queued_generation":5,
+            "text":text}))
+        .unwrap();
+        pending_queue_item_to_intervention(item, SystemTime::now(), Instant::now())
+    };
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(7_272_692);
+        let path = super::super::super::pending_queue_file_path(
+            &ctx().provider,
+            &ctx().token_hash,
+            channel,
+        )
+        .unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let handle = registry.handle(channel);
+        handle
+            .v2_adopt(path.clone(), "control".into())
+            .await
+            .unwrap();
+        let watch = Watch::new(
+            &path,
+            Plan {
+                fail: vec![Step::ParentSync],
+                ..Default::default()
+            },
+        );
+        let first = handle.enqueue(synthetic("A"), ctx()).await;
+        assert!(!first.enqueued && first.persistence_error.is_some());
+        drop(watch);
+        let retry = handle.enqueue(synthetic("A"), ctx()).await;
+        assert!(!retry.enqueued, "a retry never admits a second copy");
+        handle
+            .v2_request(|slot| slot.as_mut().ok_or("no owner")?.recover())
+            .await
+            .unwrap();
+        let texts = |snapshot: &Value| -> Vec<String> {
+            let items = snapshot["items"].as_array().unwrap();
+            items
+                .iter()
+                .map(|i| i["text"].as_str().unwrap().into())
+                .collect()
+        };
+        let snapshot = v2(&handle).await;
+        assert_eq!(texts(&snapshot), ["A"]);
+        assert_eq!(snapshot["admission_receipts"].as_array().unwrap().len(), 1);
+
+        let second = handle.enqueue(synthetic("B"), ctx()).await;
+        assert!(second.enqueued, "{:?}", second.refusal_reason);
+        handle
+            .v2_request(|slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                let payload = PreparedPayload {
+                    frame: "frame".into(),
+                    digest: "digest".into(),
+                    attribution: json!({}),
+                };
+                let key = owner.reserve(attempt(7272), payload)?;
+                drop(owner.arm(&key, 0)?);
+                owner.settle(&key, true, 1)
+            })
+            .await
+            .unwrap();
+        let after = handle.enqueue(synthetic("C"), ctx()).await;
+        assert!(after.enqueued, "{:?}", after.refusal_reason);
+        assert_eq!(texts(&v2(&handle).await), ["B", "C"]);
+    });
+}

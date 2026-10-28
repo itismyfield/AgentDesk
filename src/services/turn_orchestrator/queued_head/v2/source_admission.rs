@@ -9,6 +9,8 @@ pub(crate) enum AdmitError {
     Pending,
     /// The ticket already names another original; nothing is admitted under it.
     Conflict(String),
+    /// Its sources were admitted earlier without this ticket, so the ticket names nothing.
+    SourceAlreadyKnown,
 }
 
 impl AdmitError {
@@ -67,9 +69,36 @@ impl Ticket {
     }
 
     fn receipt(&self, original: &PendingQueueItem) -> String {
-        let named = (sources::identity(original), original.text.as_str());
-        format!("{}{}", self.prefix(), digest(&named))
+        self.receipt_for(&canonical(original))
     }
+
+    /// The receipt naming this ticket and one canonical original.
+    fn receipt_for(&self, canonical: &serde_json::Value) -> String {
+        format!("{}{}", self.prefix(), digest(canonical))
+    }
+}
+
+/// The original as stored, without the fields a retry recomputes: wall-clock times and diagnostics.
+/// Every other field, including one added later, changes what runs and so names another original.
+fn canonical(original: &PendingQueueItem) -> serde_json::Value {
+    let mut value = serde_json::to_value(original).expect("queue item serializes");
+    if let Some(map) = value.as_object_mut() {
+        for field in [
+            "created_at_wall_time_ms",
+            "channel_name",
+            "override_channel_id",
+        ] {
+            map.remove(field);
+        }
+        if let Some(serde_json::Value::Array(sources)) =
+            map.get_mut("source_message_queued_generations")
+        {
+            for source in sources.iter_mut().filter_map(|s| s.as_object_mut()) {
+                source.remove("enqueued_at_epoch_us");
+            }
+        }
+    }
+    value
 }
 
 fn digest(value: &impl serde::Serialize) -> String {
@@ -86,6 +115,54 @@ pub(crate) enum TicketStatus {
     /// Only an unconfirmed publish names it.
     Pending,
     Absent,
+}
+
+/// What the owner holds for a committed ticket's original; each case has one meaning.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TurnBind {
+    /// An attempt may have sent it.
+    Armed {
+        attempt: String,
+        source: Option<serde_json::Value>,
+    },
+    /// Queued, reserved, or retained as proven or opaque unsent.
+    NotArmed,
+    Settled {
+        attempt: String,
+        source: Option<serde_json::Value>,
+    },
+    /// Committed, but the owner no longer keeps a record of it; never re-issue.
+    Unknown,
+    /// No committed admission under this ticket.
+    Absent,
+}
+
+impl TurnBind {
+    pub(crate) fn armed(&self) -> bool {
+        matches!(self, Self::Armed { .. })
+    }
+
+    pub(crate) fn settled(&self) -> bool {
+        matches!(self, Self::Settled { .. })
+    }
+
+    pub(crate) fn not_armed(&self) -> bool {
+        *self == Self::NotArmed
+    }
+
+    pub(crate) fn unknown(&self) -> bool {
+        *self == Self::Unknown
+    }
+
+    /// The attempt nonce and bound source of an armed or settled turn.
+    pub(crate) fn into_bind(self) -> Option<(String, Option<serde_json::Value>)> {
+        match self {
+            Self::Armed { attempt, source } | Self::Settled { attempt, source } => {
+                Some((attempt, source))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl TicketStatus {
@@ -179,41 +256,45 @@ impl Custody {
         owner: &mut Owner,
     ) -> Result<Admitted, AdmitError> {
         let receipt = ticket.receipt(&self.original);
-        if owner.pending.is_some() && owner.recover().is_err() && owner.pending.is_some() {
+        let prefix = ticket.prefix();
+        let named = |receipts: &[String]| receipts.iter().find(|r| r.starts_with(&prefix)).cloned();
+        // Read before any recovery: a refusal leaves the snapshot and the candidate as they were.
+        let committed = named(&owner.snapshot.admission_receipts);
+        let candidate =
+            (owner.pending.as_ref()).and_then(|(_, next)| named(&next.admission_receipts));
+        if [&committed, &candidate]
+            .into_iter()
+            .flatten()
+            .any(|found| *found != receipt)
+        {
+            return Err(AdmitError::Conflict(
+                "the ticket already names another original".into(),
+            ));
+        }
+        let unsettled = committed.is_none() && owner.pending.is_some();
+        if unsettled && owner.recover().is_err() && owner.pending.is_some() {
             return Err(AdmitError::Pending);
         }
-        let prefix = ticket.prefix();
-        let named = (owner.snapshot.admission_receipts.iter())
-            .find(|r| r.starts_with(&prefix))
-            .cloned();
-        match named {
-            Some(found) if found == receipt => {
+        if owner.snapshot.admission_receipts.contains(&receipt) {
+            self.state = State::Done;
+            return Ok(owner.acknowledge(&receipt).unwrap_or(Admitted::Duplicate));
+        }
+        owner.unacknowledged.retain(|(r, _)| *r != receipt);
+        let (next, outcome) = owner.fresh_candidate(&self.original)?;
+        let Some(mut next) = next else {
+            return Err(AdmitError::SourceAlreadyKnown);
+        };
+        next.bind_admitted(&receipt, outcome);
+        match owner.admit_commit(next, Some(receipt.clone())) {
+            Ok(()) => {
                 self.state = State::Done;
-                Ok(owner.acknowledge(&receipt).unwrap_or(Admitted::Duplicate))
+                Ok(outcome)
             }
-            Some(_) => Err(AdmitError::Conflict(
-                "the ticket already names another original".into(),
-            )),
-            None => {
-                owner.unacknowledged.retain(|(r, _)| *r != receipt);
-                let (next, outcome) = owner.fresh_candidate(&self.original)?;
-                let Some(next) = next else {
-                    // Its sources were admitted earlier under another receipt.
-                    self.state = State::Done;
-                    return Ok(outcome);
-                };
-                match owner.admit_commit(next, Some(receipt.clone())) {
-                    Ok(()) => {
-                        self.state = State::Done;
-                        Ok(outcome)
-                    }
-                    Err(AdmitError::Pending) => {
-                        owner.unacknowledged.push((receipt, outcome));
-                        Err(AdmitError::Pending)
-                    }
-                    Err(error) => Err(error),
-                }
+            Err(AdmitError::Pending) => {
+                owner.unacknowledged.push((receipt, outcome));
+                Err(AdmitError::Pending)
             }
+            Err(error) => Err(error),
         }
     }
 }
@@ -239,24 +320,167 @@ impl Owner {
         }
     }
 
-    /// The attempt nonce and bound source of the committed `original`, while it is the head or a
-    /// retained input; an input the admission partitioned keeps another identity.
+    /// Where the ticket's committed original stands, followed through the binds its admission left.
     pub(crate) fn exact_turn(
         &self,
         ticket: &Ticket,
         original: &PendingQueueItem,
-    ) -> Option<(String, Option<serde_json::Value>)> {
+    ) -> Result<TurnBind, String> {
         let receipt = ticket.receipt(original);
-        if !self.snapshot.admission_receipts.contains(&receipt) {
-            return None;
+        let prefix = ticket.prefix();
+        match (self.snapshot.admission_receipts.iter()).find(|r| r.starts_with(&prefix)) {
+            None => return Ok(TurnBind::Absent),
+            Some(found) if *found != receipt => {
+                return Err("the ticket names another original".into());
+            }
+            Some(_) => {}
         }
-        let identity = sources::identity(original);
-        let retained = self.snapshot.retained_inputs.iter().map(|r| &r.input);
-        let input = (self.snapshot.head_injection.iter().chain(retained))
-            .find(|input| input.identity == identity)?;
-        let nonce = input.attempt.as_ref()?.nonce.clone();
-        Some((nonce, input.resolved_source.clone()))
+        let snapshot = &self.snapshot;
+        let binds: Vec<_> = (snapshot.admission_binds.iter())
+            .filter(|b| b.receipt == receipt)
+            .collect();
+        let live = || {
+            let retained = snapshot.retained_inputs.iter().map(|r| &r.input);
+            snapshot.head_injection.iter().chain(retained)
+        };
+        for bind in &binds {
+            if let BindAt::Attempt { identity, attempt } = &bind.at
+                && let Some(input) =
+                    live().find(|i| i.identity == *identity && i.attempt.as_ref() == Some(attempt))
+            {
+                return Ok(match input.phase {
+                    HeadPhase::MayHaveSent | HeadPhase::Unknown => TurnBind::Armed {
+                        attempt: attempt.nonce.clone(),
+                        source: input.resolved_source.clone(),
+                    },
+                    HeadPhase::Reserved => TurnBind::NotArmed,
+                });
+            }
+        }
+        let held = binds.iter().any(|bind| match &bind.at {
+            BindAt::Queued { index, item } => snapshot.queued_digest(*index).as_ref() == Some(item),
+            BindAt::Opaque => (snapshot.retained_inputs.iter()).any(|r| {
+                matches!(r.disposition, Some(RetainedDisposition::OpaqueUnsent))
+                    && ticket.receipt(&r.input.original) == receipt
+            }),
+            _ => false,
+        });
+        if held {
+            return Ok(TurnBind::NotArmed);
+        }
+        Ok(binds
+            .iter()
+            .find_map(|bind| match &bind.at {
+                BindAt::Settled {
+                    attempt, source, ..
+                } => Some(TurnBind::Settled {
+                    attempt: attempt.clone(),
+                    source: source.clone(),
+                }),
+                _ => None,
+            })
+            .unwrap_or(TurnBind::Unknown))
     }
+}
+
+/// Binds follow their input: a queued index shifts with removals before it, an attempt moves with
+/// its input between head and retained, and a delivery leaves a settled bind.
+impl SnapshotV2 {
+    fn queued_digest(&self, index: usize) -> Option<String> {
+        self.items.get(index).map(|item| digest(&canonical(item)))
+    }
+
+    fn bind_admitted(&mut self, receipt: &str, outcome: Admitted) {
+        let at = match outcome {
+            Admitted::Queued => {
+                self.prune_binds();
+                let index = self.items.len() - 1;
+                let item = self.queued_digest(index).expect("admitted item is queued");
+                BindAt::Queued { index, item }
+            }
+            Admitted::RetainedOpaque => BindAt::Opaque,
+            Admitted::Duplicate => return,
+        };
+        let receipt = receipt.to_string();
+        self.admission_binds.push(AdmissionBind { receipt, at });
+    }
+
+    /// Drops queued binds past the end, which a cut of the queue's tail left; run before a push.
+    pub(super) fn prune_binds(&mut self) {
+        let len = self.items.len();
+        let stale =
+            |b: &AdmissionBind| matches!(b.at, BindAt::Queued { index, .. } if index >= len);
+        self.admission_binds.retain(|b| !stale(b));
+    }
+
+    /// Follows the removal of the queued item at `removed`.
+    pub(super) fn unbind_item(&mut self, removed: usize) {
+        self.admission_binds
+            .retain(|b| !matches!(b.at, BindAt::Queued { index, .. } if index == removed));
+        for bind in &mut self.admission_binds {
+            if let BindAt::Queued { index, .. } = &mut bind.at
+                && *index > removed
+            {
+                *index -= 1;
+            }
+        }
+    }
+
+    /// Carries the reserved head's queued bind to its attempt; attempts no input holds are dropped.
+    pub(super) fn bind_reserved(&mut self) {
+        let (Some(head), Some(first)) = (&self.head_injection, self.queued_digest(0)) else {
+            return;
+        };
+        let Some(attempt) = head.attempt.clone() else {
+            return;
+        };
+        let identity = head.identity.clone();
+        let receipt = (self.admission_binds.iter()).find_map(|b| match &b.at {
+            BindAt::Queued { index: 0, item } if *item == first => Some(b.receipt.clone()),
+            _ => None,
+        });
+        let live: Vec<(QueueIdentity, AttemptIdentity)> = (self.retained_inputs.iter())
+            .filter_map(|r| Some((r.input.identity.clone(), r.input.attempt.clone()?)))
+            .collect();
+        self.admission_binds.retain(|b| match &b.at {
+            BindAt::Attempt { identity, attempt } => {
+                live.contains(&(identity.clone(), attempt.clone()))
+            }
+            _ => true,
+        });
+        if let Some(receipt) = receipt {
+            let at = BindAt::Attempt { identity, attempt };
+            self.admission_binds.push(AdmissionBind { receipt, at });
+        }
+    }
+}
+
+/// The delivered attempt's binds become settled ones, keeping its nonce and bound source.
+pub(super) fn settle_binds(snapshot: &mut SnapshotV2, key: &AttemptRef, now: u64) {
+    let retained = snapshot.retained_inputs.iter().map(|r| &r.input);
+    let source = (snapshot.head_injection.iter().chain(retained))
+        .find(|input| key.matches(input))
+        .and_then(|input| input.resolved_source.clone());
+    for bind in &mut snapshot.admission_binds {
+        if let BindAt::Attempt { identity, attempt } = &bind.at
+            && *identity == key.identity
+            && *attempt == key.attempt
+        {
+            bind.at = BindAt::Settled {
+                attempt: key.attempt.nonce.clone(),
+                source: source.clone(),
+                settled_at_ms: now,
+            };
+        }
+    }
+}
+
+/// Settled binds leave with the terminal identities, after the same window.
+pub(super) fn expire_binds(snapshot: &mut SnapshotV2, now: u64) {
+    snapshot.admission_binds.retain(|b| match b.at {
+        BindAt::Settled { settled_at_ms, .. } => now.saturating_sub(settled_at_ms) < 86_400_000,
+        _ => true,
+    });
 }
 
 impl Owner {
@@ -412,6 +636,13 @@ impl super::super::super::ChannelMailboxHandle {
         ticket: String,
     ) -> Result<Admitted, AdmitError> {
         let ticket = Ticket::new(&ticket).map_err(AdmitError::NotCommitted)?;
+        // A generation of 0 is replaced by the process's own, so it names another input after a
+        // restart; the caller settles it before asking.
+        if original.queued_generation == 0 {
+            return Err(AdmitError::NotCommitted(
+                "the original's queued generation is unsettled".into(),
+            ));
+        }
         self.v2_admit(Arc::new(Mutex::new(Custody::resume(&original, ticket))))
             .await
     }
@@ -426,10 +657,20 @@ impl super::super::super::ChannelMailboxHandle {
         .await
     }
 
-    /// Test fixture: reserves and arms the queue head under `nonce`, as a pump does before its
-    /// effect.
+    /// Test fixture: reserves the queue head under `nonce` and arms it, as a pump does before its
+    /// effect; an already reserved head is only armed.
     #[cfg(test)]
     pub(crate) async fn v2_arm_head_for_tests(&self, nonce: &str) -> Result<(), String> {
+        self.v2_reserve_head_for_tests(nonce, true).await
+    }
+
+    /// Test fixture: reserves the queue head under `nonce`, arming it when `arm` is set.
+    #[cfg(test)]
+    pub(crate) async fn v2_reserve_head_for_tests(
+        &self,
+        nonce: &str,
+        arm: bool,
+    ) -> Result<(), String> {
         use super::super::v2_types::{
             AttemptIdentity, AttemptSource, PreparedPayload, TargetIdentity,
         };
@@ -457,23 +698,28 @@ impl super::super::super::ChannelMailboxHandle {
                 digest: "digest".into(),
                 attribution: serde_json::json!({}),
             };
-            let key = owner.reserve(attempt, payload)?;
-            drop(owner.arm(&key, 0)?);
+            let key = match owner.active_attempt() {
+                Ok(key) => key,
+                Err(_) => owner.reserve(attempt, payload)?,
+            };
+            if arm {
+                drop(owner.arm(&key, 0)?);
+            }
             Ok(())
         })
         .await
     }
 
-    /// The attempt and bound source the owner holds for the ticket's committed original.
+    /// Where the ticket's committed original stands; a ticket naming another original is an error.
     pub(crate) async fn v2_exact_turn(
         &self,
         original: PendingQueueItem,
         ticket: String,
-    ) -> Result<Option<(String, Option<serde_json::Value>)>, String> {
+    ) -> Result<TurnBind, String> {
         let ticket = Ticket::new(&ticket)?;
         self.v2_request(move |slot| {
             let owner = slot.as_ref().ok_or("V2 not adopted")?;
-            Ok(owner.exact_turn(&ticket, &original))
+            owner.exact_turn(&ticket, &original)
         })
         .await
     }
