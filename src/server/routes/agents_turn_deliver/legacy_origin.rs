@@ -3,7 +3,7 @@
 use sqlx::PgPool;
 
 use super::{
-    HealthRegistry, HumanInputRequest, RouteResponse, delivery_response, observed_delivery,
+    HealthRegistry, HumanInputRequest, RouteResponse, delivery_response, observed_execution,
     preflight_human_input,
 };
 use crate::services::imsg_reply::{AdmissionInput, admission};
@@ -14,14 +14,30 @@ pub(super) async fn deliver(
     input: &AdmissionInput<'_>,
     request: HumanInputRequest,
 ) -> RouteResponse {
-    let provider = request.provider.clone();
     let channel = request.channel_id;
+    if let Err(error) =
+        preflight_human_input(registry, channel, &request.provider, input.author_id).await
+    {
+        return delivery_response(channel.get(), Err(error));
+    }
+    if let Some(response) = admission::replay_existing(pool, input, "external").await {
+        return response;
+    }
+    let prepared = match registry.prepare_external_human_input(request).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            // A concurrent winner still owns its response if readiness changed during preparation.
+            return admission::replay_existing(pool, input, "external")
+                .await
+                .unwrap_or_else(|| delivery_response(channel.get(), Err(error)));
+        }
+    };
     admission::deliver_once(
         pool,
         input,
         "external",
-        || preflight_human_input(registry, channel, &provider, input.author_id),
-        || observed_delivery(registry, request, None),
+        || async { Ok(()) },
+        || observed_execution(prepared),
         |result| delivery_response(channel.get(), result),
     )
     .await

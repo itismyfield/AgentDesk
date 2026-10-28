@@ -1435,6 +1435,7 @@ mod s1a {
             );
             assert_eq!(f.row(guid).await.episode_key, Some(episode));
             end_turn(&f.shared, f.channel).await;
+            let _gateway = f.shared.gateway_ready_for_tests(&[f.channel]).await;
             let off = f
                 .call(false, input(Some("p:0/START-OFF"), "status?", 200))
                 .await;

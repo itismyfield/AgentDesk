@@ -1327,7 +1327,8 @@ src/
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   ├── inject_codex_v2_tests.rs
-│   │   │   │   └── inject_tests.rs
+│   │   │   │   ├── inject_tests.rs
+│   │   │   │   └── prepared.rs
 │   │   │   ├── unbound_owners/
 │   │   │   │   └── tests.rs
 │   │   │   ├── watcher_respawn/

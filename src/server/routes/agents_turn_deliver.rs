@@ -66,6 +66,18 @@ async fn observed_delivery(
     request: HumanInputRequest,
     reply: Option<imsg_reply::ReplyObligation>,
 ) -> Result<HumanInputDelivery, HumanInputError> {
+    observed_execution(async {
+        match reply {
+            Some(reply) => deliver_with_reply(registry, request, reply).await,
+            None => deliver_human_input(registry, request).await,
+        }
+    })
+    .await
+}
+
+async fn observed_execution(
+    delivery: impl std::future::Future<Output = Result<HumanInputDelivery, HumanInputError>>,
+) -> Result<HumanInputDelivery, HumanInputError> {
     #[cfg(test)]
     if let Ok(probe) = DELIVERY_PROBE_FOR_TEST.try_with(Clone::clone) {
         probe
@@ -78,10 +90,7 @@ async fn observed_delivery(
             release.notified().await;
         }
     }
-    match reply {
-        Some(reply) => deliver_with_reply(registry, request, reply).await,
-        None => deliver_human_input(registry, request).await,
-    }
+    delivery.await
 }
 
 fn failure(status: StatusCode, error: &str) -> RouteResponse {

@@ -87,6 +87,40 @@ fn replay(
     }
 }
 
+/// Existing admissions are authorized and replayed before a new delivery needs readiness.
+pub(crate) async fn replay_existing(
+    pool: &PgPool,
+    input: &AdmissionInput<'_>,
+    source: &str,
+) -> Option<AdmissionResponse> {
+    let Ok(person_id) = i64::try_from(input.author_id) else {
+        return Some(failure(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_author_id",
+        ));
+    };
+    let row = match read_obligation(pool, input.origin_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return None,
+        Err(_) => {
+            return Some(failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "admission_unavailable",
+            ));
+        }
+    };
+    let channel_id = input.channel_id.to_string();
+    let hash = request_hash(input);
+    let identity = AdmissionIdentity {
+        origin_id: input.origin_id,
+        agent_id: input.agent_id,
+        channel_id: &channel_id,
+        person_id,
+        request_hash: &hash,
+    };
+    Some(replay(&row, &identity, source, &legacy_request_hash(input)))
+}
+
 /// Authorize before reserving an origin; only the INSERT winner can enter the backend.
 pub(crate) async fn deliver_once<A, AF, D, DF, S>(
     pool: &PgPool,

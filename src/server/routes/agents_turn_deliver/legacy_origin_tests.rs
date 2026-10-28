@@ -13,9 +13,12 @@ use tokio::sync::Notify;
 use super::tests::{deliver, router};
 use super::{ADMISSION_ENABLED_FOR_TEST, DELIVERY_PROBE_FOR_TEST, DeliveryProbe};
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::SharedData;
 use crate::services::discord::health::{
-    HealthRegistry, InjectPane, register_bot_auth_for_tests, register_inject_runtime,
+    HealthRegistry, InjectPane, inflight_rows_for_tests, queue_texts, register_bot_auth_for_tests,
+    register_inject_runtime, seed_external_turn_row_for_tests,
 };
+use crate::services::provider::ProviderKind;
 
 const AGENT: &str = "legacy-origin-agent";
 
@@ -23,6 +26,7 @@ struct Fixture {
     db: TestPostgresDb,
     pool: PgPool,
     registry: Arc<HealthRegistry>,
+    shared: Arc<SharedData>,
     app: Router,
     channel: u64,
     calls: Arc<AtomicUsize>,
@@ -42,12 +46,14 @@ impl Fixture {
         )
         .await;
         let registry = Arc::new(HealthRegistry::new());
-        register_inject_runtime(&registry, &[channel, channel + 100], Some(pool.clone())).await;
+        let shared =
+            register_inject_runtime(&registry, &[channel, channel + 100], Some(pool.clone())).await;
         let app = router(Some(pool.clone()), Some(registry.clone()));
         Self {
             db,
             pool,
             registry,
+            shared,
             app,
             channel,
             calls: Arc::new(AtomicUsize::new(0)),
@@ -66,9 +72,17 @@ impl Fixture {
         call(&self.app, AGENT, self.probe(), body).await
     }
 
+    async fn admission_count(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM imsg_reply_obligations")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+    }
+
     async fn close(self) {
         drop(self.app);
         drop(self.registry);
+        drop(self.shared);
         self.pool.close().await;
         self.db.drop().await;
     }
@@ -101,6 +115,155 @@ async fn call_enabled(
 
 fn input(origin: Option<&str>) -> Value {
     json!({"text": "status?", "author_discord_user_id": "200", "source": "external", "origin_id": origin})
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_http_unready_start_preserves_origin_until_a_pane_can_deliver_pg() {
+    let f = Fixture::create(9_727_408).await;
+    let body = input(Some("legacy-boot-unready"));
+    let unregistered = router(Some(f.pool.clone()), Some(Arc::new(HealthRegistry::new())));
+    let absent = call(&unregistered, AGENT, f.probe(), &body).await;
+    assert_eq!(absent.0, StatusCode::SERVICE_UNAVAILABLE, "{}", absent.1);
+    assert_eq!(absent.1["error"], "runtime_unavailable");
+    assert!(
+        absent.1["detail"]
+            .as_str()
+            .unwrap()
+            .contains("provider runtime not registered")
+    );
+    assert_eq!(f.admission_count().await, 0);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+    assert!(queue_texts(&f.shared, f.channel).await.is_empty());
+    assert_eq!(
+        inflight_rows_for_tests(&ProviderKind::Claude, &[f.channel]),
+        0
+    );
+    drop(unregistered);
+    let first = f.call(&body).await;
+    assert_eq!(first.0, StatusCode::SERVICE_UNAVAILABLE, "{}", first.1);
+    assert_eq!(first.1["error"], "runtime_unavailable");
+    assert_eq!(first.1["detail"], "provider runtime is not ready");
+    let first_admissions = f.admission_count().await;
+    let first_calls = f.calls.load(Ordering::SeqCst);
+    let first_queue = queue_texts(&f.shared, f.channel).await;
+    let first_inflight = inflight_rows_for_tests(&ProviderKind::Claude, &[f.channel]);
+
+    let pane = InjectPane::new(f.channel, "external");
+    let ready = f.call(&body).await;
+    eprintln!(
+        "boot retry first_status={} admission_rows={first_admissions} backend_calls={first_calls} next_status={} next_body={}",
+        first.0, ready.0, ready.1
+    );
+    assert_eq!(ready.0, StatusCode::OK, "ready retry: {}", ready.1);
+    assert_eq!(ready.1["delivery"], "injected");
+    assert_eq!(
+        first_admissions, 0,
+        "unready start must not reserve the origin"
+    );
+    assert_eq!(first_calls, 0, "preparation must stop before the backend");
+    assert!(first_queue.is_empty());
+    assert_eq!(first_inflight, 0, "unready start has no turn effect");
+    assert_eq!(pane.records().len(), 1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.call(&body).await, ready);
+    assert_eq!(pane.records().len(), 1);
+    let different = f.call(&input(Some("legacy-boot-distinct"))).await;
+    assert_eq!(different.0, StatusCode::OK, "{}", different.1);
+    assert_eq!(pane.records().len(), 2);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 2);
+    drop(pane);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_http_saved_replay_and_authorization_precede_new_start_readiness_pg() {
+    let f = Fixture::create(9_727_409).await;
+    let pane = InjectPane::new(f.channel, "external");
+    let body = input(Some("legacy-cached-before-readiness"));
+    let first = f.call(&body).await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(first.1["delivery"], "injected");
+    assert_eq!(pane.records().len(), 1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    drop(pane);
+    assert!(crate::services::discord::clear_inflight_state(
+        &ProviderKind::Claude,
+        f.channel,
+    ));
+    assert_eq!(
+        inflight_rows_for_tests(&ProviderKind::Claude, &[f.channel]),
+        0
+    );
+    let fresh_unready = f.call(&input(Some("legacy-new-while-unready"))).await;
+    assert_eq!(
+        fresh_unready.0,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        fresh_unready.1
+    );
+    assert_eq!(fresh_unready.1["detail"], "provider runtime is not ready");
+    assert_eq!(f.admission_count().await, 1);
+    assert_eq!(f.call(&body).await, first);
+    let mut changed = body.clone();
+    changed["text"] = json!("different body");
+    let conflict = f.call(&changed).await;
+    assert_eq!(conflict.0, StatusCode::CONFLICT, "{}", conflict.1);
+    assert_eq!(conflict.1["error"], "origin_conflict");
+    let mut unauthorized = body.clone();
+    unauthorized["author_discord_user_id"] = json!("300");
+    let refused = f.call(&unauthorized).await;
+    assert_eq!(refused.0, StatusCode::FORBIDDEN, "{}", refused.1);
+    assert_eq!(refused.1["error"], "author_not_allowed");
+    for (state, error) in [
+        ("admitting", "admission_pending"),
+        ("unknown", "admission_unknown"),
+    ] {
+        sqlx::query("UPDATE imsg_reply_obligations SET admission=$2 WHERE origin_id=$1")
+            .bind("legacy-cached-before-readiness")
+            .bind(state)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let pending = f.call(&body).await;
+        assert_eq!(pending.0, StatusCode::ACCEPTED, "{}", pending.1);
+        assert_eq!(pending.1["error"], error);
+    }
+    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert!(queue_texts(&f.shared, f.channel).await.is_empty());
+    assert_eq!(f.admission_count().await, 1);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_http_external_hold_can_queue_without_gateway_context_pg() {
+    let f = Fixture::create(9_727_410).await;
+    seed_external_turn_row_for_tests(&ProviderKind::Claude, f.channel);
+    let body = input(Some("legacy-queue-without-context"));
+    let first = f.call(&body).await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(first.1["delivery"], "queued");
+    assert_eq!(first.1["reason"], "external_turn_active");
+    assert_eq!(queue_texts(&f.shared, f.channel).await, ["status?"]);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.call(&body).await, first);
+    assert_eq!(queue_texts(&f.shared, f.channel).await, ["status?"]);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    let mut distinct = input(Some("legacy-queue-distinct"));
+    distinct["text"] = json!("next status?");
+    let different = f.call(&distinct).await;
+    assert_eq!(different.0, StatusCode::OK, "{}", different.1);
+    assert_eq!(different.1["delivery"], "queued");
+    assert_eq!(
+        queue_texts(&f.shared, f.channel).await,
+        ["status?", "next status?"]
+    );
+    assert_eq!(f.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(f.admission_count().await, 2);
+    assert_eq!(
+        inflight_rows_for_tests(&ProviderKind::Claude, &[f.channel]),
+        1
+    );
+    f.close().await;
 }
 
 #[tokio::test(flavor = "current_thread")]

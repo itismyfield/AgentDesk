@@ -6,6 +6,7 @@ mod inject;
 mod inject_codex_tests;
 #[cfg(all(test, unix))]
 pub(crate) mod inject_tests;
+mod prepared;
 
 use std::sync::Arc;
 use std::time::Instant;
