@@ -393,6 +393,11 @@ if run_check guards "TUI O writer census: Legacy send sites and cutover gates"; 
 "$PYTHON" -m unittest tests.test_retired_panel_boot_wiring
 fi
 
+if run_check guards "Config snapshot disk-reader zero guard"; then
+"$PYTHON" scripts/check_config_snapshot_readers.py
+"$PYTHON" -m unittest tests.test_config_snapshot_readers
+fi
+
 if run_check guards "Dormant boot retirement census"; then
 "$PYTHON" scripts/check_legacy_supervision_census.py
 "$PYTHON" -m unittest tests.test_check_legacy_supervision_census

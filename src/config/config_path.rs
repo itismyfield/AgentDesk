@@ -2,7 +2,6 @@
 //! existing candidate wins; one that then fails to load never hands over to the next.
 
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -10,8 +9,14 @@ use std::time::SystemTime;
 use anyhow::Result;
 
 use super::Config;
-use crate::runtime_layout::{config_file_path, legacy_config_file_path};
+use crate::runtime_layout::config_file_path;
+#[cfg(test)]
+use crate::runtime_layout::legacy_config_file_path;
 
+pub(crate) mod selection;
+use selection::{explicit_env, resolve_with, search};
+
+#[cfg(test)]
 const EXPLICIT_ENV: &str = "AGENTDESK_CONFIG";
 
 /// The file `load`, `load_graceful` and the config watcher use: `$AGENTDESK_CONFIG`,
@@ -68,59 +73,6 @@ pub fn load_runtime_config_file() -> Option<(Config, PathBuf)> {
     let path = config_path_in(&super::runtime_root()?);
     let config = load_config_file(&path).ok()??;
     Some((config, path))
-}
-
-fn explicit_env() -> Option<PathBuf> {
-    std::env::var_os(EXPLICIT_ENV)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-fn resolve_with(
-    explicit: Option<PathBuf>,
-    runtime_root: Option<PathBuf>,
-    cwd: Option<PathBuf>,
-    home: Option<PathBuf>,
-) -> PathBuf {
-    let release_root = home.map(|home| home.join(".adk").join("release"));
-    let roots: Vec<PathBuf> = [runtime_root.clone(), cwd, release_root]
-        .into_iter()
-        .flatten()
-        .collect();
-    search(explicit, &roots).unwrap_or_else(|| match runtime_root {
-        Some(root) => config_file_path(&root),
-        None => config_file_path(Path::new("")),
-    })
-}
-
-/// An explicit path always decides (its other-layout sibling stands in only when the
-/// path itself is missing); otherwise the first existing file under `roots`.
-fn search(explicit: Option<PathBuf>, roots: &[PathBuf]) -> Option<PathBuf> {
-    if let Some(path) = explicit {
-        if path.is_file() {
-            return Some(path);
-        }
-        let sibling = other_layout(&path).filter(|sibling| sibling.is_file());
-        return Some(sibling.unwrap_or(path));
-    }
-    roots
-        .iter()
-        .flat_map(|root| [config_file_path(root), legacy_config_file_path(root)])
-        .find(|path| path.is_file())
-}
-
-/// `<root>/config/agentdesk.yaml` and `<root>/agentdesk.yaml` name the same file in the
-/// two layouts.
-fn other_layout(path: &Path) -> Option<PathBuf> {
-    if path.file_name()? != OsStr::new("agentdesk.yaml") {
-        return None;
-    }
-    let parent = path.parent()?;
-    if parent.file_name() == Some(OsStr::new("config")) {
-        parent.parent().map(legacy_config_file_path)
-    } else {
-        Some(config_file_path(parent))
-    }
 }
 
 #[cfg(test)]

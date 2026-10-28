@@ -217,21 +217,13 @@ fn effective_intake_routing_config_for(
 }
 
 pub(crate) fn effective_intake_routing_config() -> EffectiveIntakeRoutingConfig {
-    let (config, owner_authority_config_known) = match crate::config_live_reload::current() {
+    let (config, owner_authority_config_known) = match crate::config::snapshot() {
         Some(config) => (config.cluster.intake_routing.clone(), true),
         None => {
-            let path = crate::config::resolved_config_path();
-            match crate::config::load_from_path(&path) {
-                Ok(config) => (config.cluster.intake_routing, true),
-                Err(error) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        %error,
-                        "[intake_router] routing config unavailable; keeping owner-authority fence"
-                    );
-                    (ClusterIntakeRoutingConfig::default(), false)
-                }
-            }
+            tracing::warn!(
+                "[intake_router] routing config unavailable; keeping owner-authority fence"
+            );
+            (ClusterIntakeRoutingConfig::default(), false)
         }
     };
     let env_override = std::env::var("ADK_INTAKE_ROUTING_MODE").ok();

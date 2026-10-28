@@ -128,11 +128,20 @@ impl Fixture {
         uncertain: u8,
         ending: Option<serde_json::Value>,
     ) -> Self {
-        Self::new_scoped(channel, provider, bodies, uncertain, ending, None).await
+        Self::new_scoped(channel, provider, bodies, uncertain, ending, None, 0).await
     }
 
     pub async fn injected_with_prefix(channel: u64, bodies: &[&str], prefix: usize) -> Self {
-        Self::new_scoped(channel, ProviderKind::Claude, bodies, 0, None, Some(prefix)).await
+        Self::new_scoped(
+            channel,
+            ProviderKind::Claude,
+            bodies,
+            0,
+            None,
+            Some(prefix),
+            0,
+        )
+        .await
     }
 
     async fn new_scoped(
@@ -142,6 +151,7 @@ impl Fixture {
         uncertain: u8,
         ending: Option<serde_json::Value>,
         prefix: Option<usize>,
+        padding: usize,
     ) -> Self {
         let root = crate::config::runtime_root().unwrap();
         std::fs::create_dir_all(&root).unwrap();
@@ -156,6 +166,10 @@ impl Fixture {
             ProviderKind::Codex => { values.push(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}));
                 values.push(json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"input"}]}})); },
             _ => panic!("native fixture provider"),
+        }
+        if padding > 0 {
+            values
+                .push(json!({"type":"system","subtype":"metadata","padding":"x".repeat(padding)}));
         }
         let mut body = String::new();
         for (index, text) in bodies.iter().enumerate() {
@@ -449,7 +463,7 @@ async fn i7441b_local_native_receipts_require_whole_episode_and_exact_payload() 
                 &plan,
                 plan.body.len() - 4,
                 Instant::now() + std::time::Duration::from_secs(10),
-                delivery_evidence::local(&f.root, f.row.channel_id).as_ref()
+                fixture_local(&f).as_ref()
             )
             .await
             .is_some()
@@ -601,7 +615,7 @@ async fn i7441b_pg_only_runner_receipt_is_read_without_repairing_local_ledger_pg
         .join(f.row.channel_id.to_string())
         .join("ledger.jsonl");
     let before = std::fs::read(&local_path).unwrap();
-    let local = delivery_evidence::local(&f.root, f.row.channel_id).unwrap();
+    let local = fixture_local(&f).unwrap();
     assert!(matches!(
         local
             .latest_piece(&piece.key, piece.index)
@@ -785,7 +799,7 @@ async fn i7441b_multichunk_tail_proof_does_not_require_consumed_prefix() {
             &plan,
             sent,
             Instant::now() + std::time::Duration::from_secs(10),
-            delivery_evidence::local(&f.root, f.row.channel_id).as_ref()
+            fixture_local(&f).as_ref()
         )
         .await
         .is_some()
@@ -826,7 +840,7 @@ async fn i7441b_mixed_local_and_pg_receipts_cover_all_pieces_pg() {
     let piece = &plan.pieces[1];
     let key = PieceKey::new(piece.key.clone(), piece.index).unwrap();
     assert!(matches!(
-        delivery_evidence::local(&f.root, f.row.channel_id)
+        fixture_local(&f)
             .unwrap()
             .latest_piece(&piece.key, piece.index)
             .unwrap()
@@ -930,7 +944,7 @@ async fn i7441b_read_only_ledger_torn_tail_wrong_sources_and_old_versions() {
         .unwrap();
     let bytes = std::fs::read(&ledger).unwrap();
     let mtime = std::fs::metadata(&ledger).unwrap().modified().unwrap();
-    let _ = delivery_evidence::local(&f.root, f.row.channel_id);
+    let _ = fixture_local(&f);
     assert_eq!(std::fs::read(&ledger).unwrap(), bytes);
     assert_eq!(
         std::fs::metadata(&ledger).unwrap().modified().unwrap(),
@@ -974,7 +988,7 @@ async fn i7441b_read_only_ledger_torn_tail_wrong_sources_and_old_versions() {
             &empty,
             0,
             deadline,
-            delivery_evidence::local(&f.root, f.row.channel_id).as_ref()
+            fixture_local(&f).as_ref()
         )
         .await
         .is_none()
@@ -986,7 +1000,7 @@ async fn i7441b_read_only_ledger_torn_tail_wrong_sources_and_old_versions() {
             &plan,
             plan.body.len(),
             deadline,
-            delivery_evidence::local(&f.root, f.row.channel_id).as_ref()
+            fixture_local(&f).as_ref()
         )
         .await
         .is_none()
@@ -1156,13 +1170,33 @@ async fn i7441b_local_snapshot_reuses_mtime_and_refreshes_changed_ledger() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let f = Fixture::new(744203, ProviderKind::Claude, &["body"]).await;
-    let first = super::local_snapshot(f.root.clone(), f.row.channel_id, None)
-        .await
-        .unwrap();
+    let requested = || {
+        f.plan()
+            .pieces
+            .into_iter()
+            .map(|p| (p.key, p.index))
+            .collect()
+    };
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    let first = super::local_snapshot(
+        f.root.clone(),
+        f.row.channel_id,
+        requested(),
+        deadline,
+        None,
+    )
+    .await
+    .unwrap();
     let first_state = first.1.clone().unwrap();
-    let cached = super::local_snapshot(f.root.clone(), f.row.channel_id, Some(first))
-        .await
-        .unwrap();
+    let cached = super::local_snapshot(
+        f.root.clone(),
+        f.row.channel_id,
+        requested(),
+        deadline,
+        Some(first),
+    )
+    .await
+    .unwrap();
     assert!(std::sync::Arc::ptr_eq(
         &first_state,
         cached.1.as_ref().unwrap()
@@ -1174,17 +1208,338 @@ async fn i7441b_local_snapshot_reuses_mtime_and_refreshes_changed_ledger() {
         .join("ledger.jsonl");
     let original = std::fs::read(&ledger).unwrap();
     std::fs::remove_file(&ledger).unwrap();
-    let missing = super::local_snapshot(f.root.clone(), f.row.channel_id, Some(cached))
-        .await
-        .unwrap();
+    let missing = super::local_snapshot(
+        f.root.clone(),
+        f.row.channel_id,
+        requested(),
+        deadline,
+        Some(cached),
+    )
+    .await
+    .unwrap();
     assert!(missing.1.is_none());
     std::fs::write(&ledger, original).unwrap();
-    let refreshed = super::local_snapshot(f.root.clone(), f.row.channel_id, Some(missing))
-        .await
-        .unwrap();
+    let refreshed = super::local_snapshot(
+        f.root.clone(),
+        f.row.channel_id,
+        requested(),
+        deadline,
+        Some(missing),
+    )
+    .await
+    .unwrap();
     assert!(refreshed.1.is_some());
     assert!(!std::sync::Arc::ptr_eq(
         &first_state,
         refreshed.1.as_ref().unwrap()
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c2_terminal_manifest_cost_at_operational_size() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    for (index, prefix) in [0, 107_680_321].into_iter().enumerate() {
+        let f =
+            Fixture::injected_with_prefix(744280 + index as u64, &["background result"], prefix)
+                .await;
+        for budget in [9900, 250] {
+            manifest::SOURCE_BYTES.store(0, Ordering::SeqCst);
+            let began = Instant::now();
+            let result = manifest::build_terminal(
+                &f.root,
+                manifest::Query {
+                    provider: &ProviderKind::Claude,
+                    channel: f.row.channel_id,
+                    path: &f.source.path,
+                    file: (f.source.dev, f.source.ino),
+                    range: (f.row.turn_start_offset.unwrap(), f.row.last_offset),
+                },
+                began + std::time::Duration::from_millis(budget),
+            );
+            eprintln!(
+                "C2_SOURCE_COST prefix={prefix} frame={} budget_ms={budget} elapsed_us={} bytes={} covered={}",
+                f.row.last_offset - prefix as u64,
+                began.elapsed().as_micros(),
+                manifest::SOURCE_BYTES.load(Ordering::SeqCst),
+                result.is_some()
+            );
+            assert!(began.elapsed() < std::time::Duration::from_secs(11));
+            assert!(result.is_some());
+            assert!(
+                manifest::SOURCE_BYTES.load(Ordering::SeqCst)
+                    <= (f.row.last_offset - prefix as u64) as usize + 8192
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c2_frame_read_bound_and_expired_deadline_are_exact() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    for (index, (prefix, padding)) in [(0, 0), (107_680_321, 0), (107_680_321, 800_000)]
+        .into_iter()
+        .enumerate()
+    {
+        let f = Fixture::new_scoped(
+            744290 + index as u64,
+            ProviderKind::Claude,
+            &["bounded answer"],
+            0,
+            None,
+            Some(prefix),
+            padding,
+        )
+        .await;
+        let query = || manifest::Query {
+            provider: &ProviderKind::Claude,
+            channel: f.row.channel_id,
+            path: &f.source.path,
+            file: (f.source.dev, f.source.ino),
+            range: (f.row.turn_start_offset.unwrap(), f.row.last_offset),
+        };
+        manifest::SOURCE_BYTES.store(0, Ordering::SeqCst);
+        let began = Instant::now();
+        let plan =
+            manifest::build_terminal(&f.root, query(), began + std::time::Duration::from_secs(1))
+                .unwrap();
+        let bytes = manifest::SOURCE_BYTES.load(Ordering::SeqCst);
+        let frame = f.row.last_offset as usize - prefix;
+        assert_eq!(bytes, frame + 2 * prefix.min(4096));
+        assert_eq!(plan.body, f.body);
+        eprintln!(
+            "C2_BOUNDED_SOURCE prefix={prefix} frame={frame} bytes={bytes} elapsed_us={}",
+            began.elapsed().as_micros()
+        );
+        manifest::SOURCE_BYTES.store(0, Ordering::SeqCst);
+        assert!(manifest::build_terminal(&f.root, query(), Instant::now()).is_none());
+        assert_eq!(manifest::SOURCE_BYTES.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c2_prefix_edit_keeps_the_input_prefix_contract_strict() {
+    use std::io::{Seek, SeekFrom, Write};
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let f = Fixture::injected_with_prefix(744295, &["already posted"], 16384).await;
+    let query = || manifest::Query {
+        provider: &ProviderKind::Claude,
+        channel: f.row.channel_id,
+        path: &f.source.path,
+        file: (f.source.dev, f.source.ino),
+        range: (f.row.turn_start_offset.unwrap(), f.row.last_offset),
+    };
+    let deadline = Instant::now() + std::time::Duration::from_secs(1);
+    assert!(manifest::build(&f.root, query(), deadline).is_some());
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&f.source.path)
+        .unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.write_all(b"X").unwrap();
+    assert_eq!(
+        crate::services::tui_o::shadow::capture::file_identity(&file.metadata().unwrap()),
+        (f.source.dev, f.source.ino)
+    );
+    assert!(manifest::build(&f.root, query(), deadline).is_none());
+    let frame = manifest::build_terminal(&f.root, query(), deadline).unwrap();
+    assert_eq!(frame.body, f.body);
+    assert!(frame.prefix.starts_with("terminal-frame-v1:"));
+}
+
+fn fixture_local(f: &Fixture) -> Option<delivery_evidence::LocalEvidence> {
+    let plan = f.plan();
+    delivery_evidence::local(
+        &f.root,
+        f.row.channel_id,
+        &plan
+            .pieces
+            .iter()
+            .map(|p| (p.key.clone(), p.index))
+            .collect::<Vec<_>>(),
+        Instant::now() + std::time::Duration::from_secs(10),
+    )
+}
+
+#[tokio::test]
+async fn i7441c3_streaming_reader_legacy_limits_and_latest_attempt() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let f = Fixture::new(744390, ProviderKind::Claude, &["legacy receipt"]).await;
+    let plan = f.plan();
+    let key = &plan.pieces[0];
+    let path = f
+        .root
+        .join("o_store")
+        .join(f.row.channel_id.to_string())
+        .join("ledger.jsonl");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let mut lines: Vec<serde_json::Value> = original
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    for line in &mut lines {
+        line["entry"].as_object_mut().unwrap().remove("local_retry");
+    }
+    let legacy = lines.iter().map(|l| format!("{l}\n")).collect::<String>();
+    std::fs::write(&path, &legacy).unwrap();
+    let local = fixture_local(&f).unwrap();
+    assert_eq!(
+        local.retained_payload_bytes,
+        plan.pieces.iter().map(|p| p.payload.len()).sum::<usize>()
+    );
+    assert!(local.max_line_bytes < 1024 * 1024);
+    assert!(matches!(
+        local.latest_piece(&key.key, key.index).unwrap().1.outcome,
+        Some(PieceOutcome::Posted(_))
+    ));
+    let query = vec![(key.key.clone(), key.index)];
+    let expired = Instant::now();
+    assert!(delivery_evidence::local(&f.root, f.row.channel_id, &query, expired).is_none());
+    assert!(
+        delivery_evidence::local(
+            &f.root,
+            f.row.channel_id,
+            &vec![query[0].clone(); 257],
+            expired + std::time::Duration::from_secs(5)
+        )
+        .is_none()
+    );
+    for tail in [
+        b"{torn".as_slice(),
+        b"{invalid}\n",
+        &vec![b'x'; 1024 * 1024 + 1],
+    ] {
+        std::fs::write(&path, &legacy).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(tail)
+            .unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        assert!(fixture_local(&f).is_none());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), before.len());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before.modified().unwrap()
+        );
+    }
+    std::fs::write(&path, &legacy).unwrap();
+    let serial = lines
+        .iter()
+        .filter_map(|l| l["entry"]["serial"].as_u64())
+        .max()
+        .unwrap()
+        + 1;
+    let mut budget_keys = Vec::new();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    for index in 0..3 {
+        budget_keys.push((key.key.clone(), index + 100));
+        let entry = serde_json::json!({"at":"2026-10-28T00:00:00Z", "entry":{
+            "type":"prepared", "serial":serial + u64::from(index), "unit_key":key.key,
+            "piece_index":index + 100, "payload":"x".repeat(800_000), "anchor_id":0, "epoch":1
+        }});
+        writeln!(file, "{entry}").unwrap();
+    }
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let subset =
+        delivery_evidence::local(&f.root, f.row.channel_id, &budget_keys[..2], deadline).unwrap();
+    assert_eq!(subset.retained_payload_bytes, 1_600_000);
+    assert!(subset.max_line_bytes < 1024 * 1024);
+    assert!(delivery_evidence::local(&f.root, f.row.channel_id, &budget_keys, deadline).is_none());
+    let mut large_key = key.key.clone();
+    large_key.native_key = "x".repeat(64 * 1024 + 1);
+    assert!(
+        delivery_evidence::local(&f.root, f.row.channel_id, &[(large_key, 0)], deadline).is_none()
+    );
+    drop(file);
+    std::fs::write(&path, &legacy).unwrap();
+
+    let retry = serde_json::json!({"at":"2026-10-28T00:00:00Z", "entry":{
+        "type":"prepared", "serial":serial, "unit_key":key.key, "piece_index":key.index,
+        "payload":key.payload, "anchor_id":lines.iter().filter_map(|l| l["entry"]["msg_id"].as_u64()).max().unwrap(), "epoch":1
+    }});
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+        "{retry}"
+    )
+    .unwrap();
+    let local = fixture_local(&f).unwrap();
+    assert_eq!(local.latest_piece(&key.key, key.index).unwrap().0, serial);
+    assert!(
+        local
+            .latest_piece(&key.key, key.index)
+            .unwrap()
+            .1
+            .outcome
+            .is_none()
+    );
+    assert!(
+        verify(
+            None,
+            &*f.port,
+            &plan,
+            0,
+            Instant::now() + std::time::Duration::from_secs(1),
+            Some(&local)
+        )
+        .await
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn i7441c3_streaming_reader_append_snapshot_and_replacement() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let f = Fixture::new(744391, ProviderKind::Claude, &["stable posted receipt"]).await;
+    let path = f
+        .root
+        .join("o_store")
+        .join(f.row.channel_id.to_string())
+        .join("ledger.jsonl");
+    let original = std::fs::read(&path).unwrap();
+    let write_path = path.clone();
+    delivery_evidence::AFTER_SNAPSHOT.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(write_path)
+                .unwrap()
+                .write_all(b"{partial")
+                .unwrap();
+        }))
+    });
+    assert!(
+        fixture_local(&f).is_some(),
+        "only the initial complete snapshot is read"
+    );
+    assert!(
+        fixture_local(&f).is_none(),
+        "the next snapshot refuses an incomplete append"
+    );
+    std::fs::write(&path, &original).unwrap();
+    let write_path = path.clone();
+    delivery_evidence::AFTER_SNAPSHOT.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let replacement = write_path.with_extension("replacement");
+            std::fs::write(&replacement, b"").unwrap();
+            std::fs::rename(replacement, write_path).unwrap();
+        }))
+    });
+    assert!(
+        fixture_local(&f).is_none(),
+        "path replacement must not keep old file candidates"
+    );
 }

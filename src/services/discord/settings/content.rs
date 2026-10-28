@@ -588,7 +588,7 @@ pub(in crate::services::discord) fn is_known_agent(role_id: &str) -> bool {
     is_known_agent_from_role_map(role_id)
 }
 
-/// Cache peer guidance by role and the selected config file's modification time.
+/// Cache peer guidance by role and the installed config snapshot.
 fn peer_guidance_cache() -> &'static std::sync::Mutex<PeerGuidanceCacheState> {
     static CELL: std::sync::OnceLock<std::sync::Mutex<PeerGuidanceCacheState>> =
         std::sync::OnceLock::new();
@@ -602,21 +602,44 @@ struct PeerGuidanceCacheState {
     entries: std::collections::HashMap<String, Option<String>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct PeerSourceFingerprint {
+    snapshot: Option<std::sync::Arc<crate::config::Config>>,
     path: Option<PathBuf>,
     modified: Option<SystemTime>,
 }
 
+impl PartialEq for PeerSourceFingerprint {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.modified == other.modified
+            && match (&self.snapshot, &other.snapshot) {
+                (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for PeerSourceFingerprint {}
+
 fn current_peer_source_fingerprint() -> PeerSourceFingerprint {
-    let path =
-        crate::config::runtime_root().map(|root| crate::config::config_path::config_path_in(&root));
+    let snapshot = crate::config::snapshot();
+    let path = if snapshot.is_some() {
+        None
+    } else {
+        crate::config::runtime_root().map(|root| crate::config::config_path::config_path_in(&root))
+    };
     let modified = path.as_ref().and_then(|path| {
         fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .ok()
     });
-    PeerSourceFingerprint { path, modified }
+    PeerSourceFingerprint {
+        snapshot,
+        path,
+        modified,
+    }
 }
 
 /// #2663: test-only helper to drop the peer guidance cache between scenarios.
@@ -636,9 +659,7 @@ pub(in crate::services::discord) fn render_peer_agent_guidance(
 }
 
 fn render_peer_agent_guidance_with_cache(current_role_id: &str, memoize: bool) -> Option<String> {
-    // #2663: fast path — same role, unchanged source files → reuse cached
-    // rendering (a String clone is much cheaper than the load+filter+format
-    // pipeline below).
+    // Reuse a rendering only while its captured config is still installed.
     let fingerprint = current_peer_source_fingerprint();
     if memoize {
         let guard = peer_guidance_cache()
@@ -651,7 +672,11 @@ fn render_peer_agent_guidance_with_cache(current_role_id: &str, memoize: bool) -
         }
     }
 
-    let peers: Vec<PeerAgentInfo> = agentdesk_config::load_peer_agents()
+    let configured_peers = match fingerprint.snapshot.as_deref() {
+        Some(config) => agentdesk_config::peer_agents_from_config(config),
+        None => agentdesk_config::load_peer_agents(),
+    };
+    let peers: Vec<PeerAgentInfo> = configured_peers
         .into_iter()
         .filter(|agent| agent.role_id != current_role_id)
         .collect();
@@ -696,10 +721,7 @@ fn render_peer_agent_guidance_with_cache(current_role_id: &str, memoize: bool) -
     }
 
     let rendered = lines.join("\n");
-    // #2663: store the freshly-rendered block under the current fingerprint.
-    // If the fingerprint changed since the fast-path check, we reset the
-    // role-keyed map so we never serve a rendering produced against an
-    // out-of-date source file.
+    // A new snapshot invalidates all role renderings.
     if memoize {
         let mut guard = peer_guidance_cache()
             .lock()
@@ -777,3 +799,7 @@ pub(in crate::services::discord) fn cleanup_channel_uploads(channel_id: ChannelI
         let _ = fs::remove_dir_all(dir);
     }
 }
+
+#[cfg(test)]
+#[path = "content_snapshot_tests.rs"]
+mod snapshot_tests;

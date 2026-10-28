@@ -255,3 +255,134 @@ fn every_gateway_lease_release_path_closes_o_admission_first() {
     });
     assert!(fence.is_some_and(|at| lines[at - 1] == "gate.lost();"));
 }
+
+fn snapshot_root() -> (
+    tempfile::TempDir,
+    crate::config_live_reload::TestLiveGuard,
+    [crate::config::TestEnvVarGuard; 2],
+) {
+    let root = tempfile::tempdir().unwrap();
+    let live = crate::config_live_reload::test_live_guard(
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
+    );
+    let paths = [
+        crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        ),
+        crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+            &root.path().join("config.yaml"),
+        ),
+    ];
+    (root, live, paths)
+}
+
+#[tokio::test]
+async fn gateway_snapshot_preference_and_application_name_ignore_disk_edits() {
+    let (root, _live, _paths) = snapshot_root();
+    let mut live = crate::config::Config::default();
+    live.data.dir = root.path().join("data");
+    live.cluster.enabled = true;
+    live.cluster.instance_id = Some("snapshot-node".into());
+    live.cluster.gateway_preferred_instance_id = Some("snapshot-node".into());
+    live.cluster.gateway_yield_grace_secs = 7;
+    let mut disk = live.clone();
+    disk.cluster.instance_id = Some("disk-node".into());
+    disk.cluster.gateway_preferred_instance_id = Some("disk-preferred".into());
+    disk.cluster.gateway_yield_grace_secs = 99;
+    crate::config::save_to_path(&root.path().join("config.yaml"), &disk).unwrap();
+    crate::config_live_reload::install(live);
+    let preference = gateway_preference().await.unwrap();
+    assert!(preference.self_is_preferred());
+    assert_eq!(preference.preferred_instance_id, "snapshot-node");
+    assert_eq!(preference.yield_grace, Duration::from_secs(7));
+    let recovery =
+        super::super::gateway_lease_recovery::gateway_lease_application_name(&ProviderKind::Claude);
+    let expected = super::super::gateway_lease_recovery::gateway_lease_application_name_for(
+        "snapshot-node",
+        std::process::id(),
+        "claude",
+    );
+    assert_eq!(
+        recovery, expected,
+        "gateway identity must use the installed snapshot"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn gateway_snapshot_wait_warning_uses_captured_live_timing() {
+    use std::io::{Read, Seek, SeekFrom};
+    let (root, _live, _paths) = snapshot_root();
+    let mut live = crate::config::Config::default();
+    live.data.dir = root.path().join("data");
+    live.cluster.gateway_lease_idle_expiry_secs = 0;
+    live.cluster.gateway_yield_grace_secs = 0;
+    let mut disk = live.clone();
+    disk.cluster.gateway_lease_idle_expiry_secs = 200;
+    disk.cluster.gateway_yield_grace_secs = 100;
+    crate::config::save_to_path(&root.path().join("config.yaml"), &disk).unwrap();
+    crate::config_live_reload::install(live);
+    let file = tempfile::tempfile().unwrap();
+    let mut reader = file.try_clone().unwrap();
+    crate::logging::test_capture::pin_callsite_interest();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || file.try_clone().unwrap())
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy_with(
+        sqlx::postgres::PgConnectOptions::new_without_pgpass()
+            .socket(root.path().join("closed-postgres")),
+    );
+    pool.close().await;
+    let mut warning = expiry::PreferredWaitWarning::start();
+    crate::config_live_reload::install(disk);
+    tokio::time::advance(Duration::from_secs(59)).await;
+    warning.observe(&pool, 1, &ProviderKind::Claude).await;
+    let mut logs = String::new();
+    reader.seek(SeekFrom::Start(0)).unwrap();
+    reader.read_to_string(&mut logs).unwrap();
+    assert!(!logs.contains("preferred node has waited longer"));
+    tokio::time::advance(Duration::from_secs(1)).await;
+    warning.observe(&pool, 1, &ProviderKind::Claude).await;
+    logs.clear();
+    reader.seek(SeekFrom::Start(0)).unwrap();
+    reader.read_to_string(&mut logs).unwrap();
+    assert_eq!(logs.matches("preferred node has waited longer").count(), 1);
+    tokio::time::advance(Duration::from_secs(599)).await;
+    warning.observe(&pool, 1, &ProviderKind::Claude).await;
+    logs.clear();
+    reader.seek(SeekFrom::Start(0)).unwrap();
+    reader.read_to_string(&mut logs).unwrap();
+    assert_eq!(logs.matches("preferred node has waited longer").count(), 1);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    warning.observe(&pool, 1, &ProviderKind::Claude).await;
+    logs.clear();
+    reader.seek(SeekFrom::Start(0)).unwrap();
+    reader.read_to_string(&mut logs).unwrap();
+    assert_eq!(logs.matches("preferred node has waited longer").count(), 2);
+}
+
+#[tokio::test]
+async fn gateway_snapshot_preferred_waiter_uses_live_lease_ttl_pg() {
+    let (root, _live, _paths) = snapshot_root();
+    let mut live = crate::config::Config::default();
+    live.data.dir = root.path().join("data");
+    live.cluster.lease_ttl_secs = 600;
+    let mut disk = live.clone();
+    disk.cluster.lease_ttl_secs = 1;
+    crate::config::save_to_path(&root.path().join("config.yaml"), &disk).unwrap();
+    crate::config_live_reload::install(live);
+    let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    sqlx::query("INSERT INTO worker_nodes(instance_id,status,last_heartbeat_at,capabilities) VALUES ('snapshot-preferred','online',NOW()-INTERVAL '10 seconds',$1)")
+        .bind(json!({"discord_gateway":{"waiting_providers":["claude"]}}))
+        .execute(&pool).await.unwrap();
+    let waiting =
+        preferred_gateway_is_waiting(&pool, "snapshot-preferred", &ProviderKind::Claude).await;
+    pool.close().await;
+    fixture.drop().await;
+    assert!(waiting, "snapshot TTL keeps the known waiter online");
+}

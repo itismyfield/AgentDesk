@@ -3744,8 +3744,12 @@ fn check_disk_usage() -> Check {
     }
 }
 
+fn report_config() -> config::Config {
+    config::runtime_config()
+}
+
 pub(crate) fn run_doctor_report(options: DoctorOptions) -> Result<DoctorReport, String> {
-    let cfg = config::load_graceful();
+    let cfg = report_config();
     let mut actions = Vec::new();
     if options.fix {
         actions = managed_herdr_config::fixed(&cfg, apply_safe_fixes(&cfg, &options));
@@ -4006,3 +4010,6 @@ mod profile_filter_tests {
         assert_eq!(evidence[0]["resolved_checksum"], "newchecksum");
     }
 }
+
+#[cfg(test)]
+mod snapshot_reader_tests;

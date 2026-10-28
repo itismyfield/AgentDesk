@@ -138,13 +138,23 @@ fn registrations() -> Result<Vec<RegisteredChannelBinding>, String> {
         }
     }
     let root = crate::config::runtime_root().ok_or("runtime root unavailable")?;
-    let path = crate::config::config_path::config_path_in(&root);
-    if let Some(bytes) = read_optional(Some(path.clone()))? {
-        let disk: Config = serde_yaml::from_slice(&bytes).map_err(|error| {
-            crate::config::config_path::warn_unloadable(&path, format_args!("{error}"));
-            error.to_string()
-        })?;
-        for agent in &disk.agents {
+    let config = if let Some(config) = crate::config::snapshot() {
+        Some(config)
+    } else {
+        let path = crate::config::config_path::config_path_in(&root);
+        read_optional(Some(path.clone()))?
+            .map(|bytes| {
+                serde_yaml::from_slice::<Config>(&bytes)
+                    .map(Arc::new)
+                    .map_err(|error| {
+                        crate::config::config_path::warn_unloadable(&path, format_args!("{error}"));
+                        error.to_string()
+                    })
+            })
+            .transpose()?
+    };
+    if let Some(config) = config {
+        for agent in &config.agents {
             for (key, channel) in agent.channels.iter() {
                 if crate::services::provider::intern_provider_id(key).is_none() {
                     continue;
@@ -941,3 +951,7 @@ impl super::super::Reading {
             && self.publish_if_current(|| ()).await.is_some()
     }
 }
+
+#[cfg(test)]
+#[path = "live_snapshot_tests.rs"]
+mod snapshot_tests;
