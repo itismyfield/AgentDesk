@@ -743,12 +743,17 @@ async fn compact_summary_mixed_v6_v7_spool_replays_historical_summaries_once() {
     let mut original = VecDeque::new();
     for record in &batch.records {
         for item in deriver.derive_with_version(record, 6) {
-            assert_eq!(writer.deliver(&item).await, Step::Done);
+            // Keep the summary pending across the upgrade after its body is Posted.
+            if !matches!(&item, Derived::Piece(piece) if piece.unit_key.native_key.ends_with("#turn_end"))
+            {
+                assert_eq!(writer.deliver(&item).await, Step::Done);
+            }
             original.push_back(item);
         }
     }
     let old_payloads = payloads(&original);
     assert_eq!(old_payloads, ["old", "-# ⏱️ 5초"]);
+    assert_eq!(harness.port.posts(), ["old"]);
     drop(writer);
     let old_segment = segments(&harness).pop().unwrap();
     header_version(&old_segment, Some(6));
@@ -762,7 +767,8 @@ async fn compact_summary_mixed_v6_v7_spool_replays_historical_summaries_once() {
         .resume(&mut writer, &mut deriver, &mut owed)
         .unwrap();
     sources.follow(&mut writer).unwrap();
-    assert_eq!(payloads(&owed), old_payloads);
+    assert_eq!(payloads(&owed), ["-# ⏱️ 5초"]);
+    assert_eq!(sources.replayed.posted, 1);
     while let Some(item) = owed.pop_front() {
         assert_eq!(writer.deliver(&item).await, Step::Done);
     }
@@ -780,7 +786,7 @@ async fn compact_summary_mixed_v6_v7_spool_replays_historical_summaries_once() {
     let mixed = segments(&harness);
     assert_eq!(mixed.len(), 2);
     assert_eq!(header_version(&mixed[0], None), 6);
-    assert_eq!(header_version(&mixed[1], None), 7);
+    assert_eq!(header_version(&mixed[1], None), u64::from(IDENTITY_VERSION));
     assert_eq!(std::fs::read(&old_segment).unwrap(), old_bytes);
     let ledger_before = std::fs::read(ledger_path(&harness)).unwrap();
     let mut writer = harness.writer();
@@ -789,10 +795,11 @@ async fn compact_summary_mixed_v6_v7_spool_replays_historical_summaries_once() {
     sources
         .resume(&mut writer, &mut deriver, &mut owed)
         .unwrap();
-    assert_eq!(payloads(&owed), expected);
-    while let Some(item) = owed.pop_front() {
-        assert_eq!(writer.deliver(&item).await, Step::Done);
-    }
+    assert!(
+        owed.is_empty(),
+        "durably posted pieces leave the replay queue"
+    );
+    assert_eq!(sources.replayed.posted, expected.len());
     assert_eq!(harness.port.posts(), expected);
     assert_eq!(std::fs::read(ledger_path(&harness)).unwrap(), ledger_before);
     assert_eq!(harness.alarms.taken(), []);
