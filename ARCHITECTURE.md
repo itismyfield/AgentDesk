@@ -3355,6 +3355,8 @@ src/
 │   │   │   └── root_replaced_tests.rs
 │   │   ├── herdr_host_tests/
 │   │   │   └── teardown_census_tests.rs
+│   │   ├── herdr_socket_rig_tests/
+│   │   │   └── s5_effect_tests.rs
 │   │   ├── consumer_guard.rs
 │   │   ├── herdr_gate.rs
 │   │   ├── herdr_gate_tests.rs
@@ -3836,6 +3838,8 @@ src/
 │   │   │   ├── queued_recovery_tests.rs
 │   │   │   └── snapshot_io.rs
 │   │   ├── queued_head/
+│   │   │   ├── compat_tests/
+│   │   │   │   └── s5_fixture_tests.rs
 │   │   │   ├── v2/
 │   │   │   │   ├── owner_tests/
 │   │   │   │   │   ├── fixtures/
@@ -4025,6 +4029,12 @@ src/
 ├── supervisor/
 │   └── mod.rs
 ├── test_support/
+│   ├── input_owner/
+│   │   └── tests/
+│   │       ├── scenarios_tests.rs
+│   │       ├── strict_effect_tests.rs
+│   │       ├── tests.rs
+│   │       └── transport_tests.rs
 │   ├── serial_runtime.rs
 │   └── source_text_tests.rs
 ├── ui/

@@ -6,10 +6,12 @@ use std::thread::{ThreadId, current};
 
 use serde_json::Value;
 
+#[path = "transport_tests.rs"]
 mod transport;
 #[cfg(unix)]
 pub(crate) use transport::herdr;
 pub(crate) use transport::{load_buffer, tmux};
+#[path = "scenarios_tests.rs"]
 pub(crate) mod scenarios;
 mod tests;
 #[cfg(unix)]
@@ -204,6 +206,8 @@ impl StrictOwnerEffectGuard {
                 ))
             })
             .collect::<Result<_, String>>()?;
+        let expected_source: Value =
+            serde_json::from_str(&attempt.native_source).map_err(|error| error.to_string())?;
         let window = &head["payload_window"];
         let started = window["kind"] == "started"
             || (window.is_null() && head["confirmation_deadline_ms"].as_u64().is_some());
@@ -212,7 +216,7 @@ impl StrictOwnerEffectGuard {
             || value["namespace"] != attempt.target.namespace
             || actual["nonce"] != attempt.nonce
             || actual["provider"] != attempt.target.provider
-            || actual["source"].to_string() != attempt.native_source
+            || actual["source"] != expected_source
             || target["host"] != attempt.target.host
             || target["owner"] != attempt.target.physical
             || target["root"] != attempt.target.root
@@ -446,8 +450,8 @@ fn s5_b0_durable_proof_rejects_missing_and_foreign_fields_without_effects() {
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
     }
-    std::fs::remove_file(&path).unwrap();
-    assert!(guard.observe_durable(&attempt, &path).is_err());
+    let missing = root.path().join("missing.json");
+    assert!(guard.observe_durable(&attempt, &missing).is_err());
     assert!(guard.counts().owner_content.is_empty());
 }
 

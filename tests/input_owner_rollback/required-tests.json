@@ -1,7 +1,7 @@
 {
   "platform_meaning": "source compilation universe; Linux execution required, macOS/Windows native execution separate",
   "generated_by": "python3 tests/input_owner_rollback/generate_required.py",
-  "source": "scripts/ci/rust_test_sources.py platform_tests; ci-pr.yml archive and PG15 jobs",
+  "source": "scripts/ci/rust_test_sources.py platform_tests; ci-pr.yml rust_build/rust_tests",
   "tests": [
     {
       "id": "services::session_host::herdr_socket_rig_tests::s5_effect_tests::s5_b0_real_herdr_socket_text_paste_line_and_enter_are_observed",
@@ -10,7 +10,7 @@
         "macos"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -20,7 +20,7 @@
         "macos"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -30,7 +30,7 @@
         "macos"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -40,7 +40,7 @@
         "macos"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -50,7 +50,7 @@
         "macos"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -60,7 +60,7 @@
         "macos"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -69,8 +69,8 @@
         "linux",
         "macos"
       ],
-      "run_mode": "pg15-required",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "run_mode": "unfiltered-lib-with-required-postgres",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -80,7 +80,7 @@
         "macos"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -91,7 +91,7 @@
         "windows"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -102,7 +102,7 @@
         "windows"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -113,7 +113,7 @@
         "windows"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -124,7 +124,7 @@
         "windows"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -135,7 +135,7 @@
         "windows"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -146,7 +146,7 @@
         "windows"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -157,7 +157,7 @@
         "windows"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -168,7 +168,7 @@
         "windows"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -178,7 +178,7 @@
         "macos"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -188,7 +188,7 @@
         "macos"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -198,7 +198,7 @@
         "macos"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -209,7 +209,7 @@
         "windows"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -220,7 +220,7 @@
         "windows"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -231,7 +231,7 @@
         "windows"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     },
     {
@@ -242,7 +242,7 @@
         "windows"
       ],
       "run_mode": "unfiltered-lib",
-      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
       "ignored": false
     }
   ]

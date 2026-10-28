@@ -63,11 +63,13 @@ history/outbox/migration paths, and report failed attempts as well.
 
 ## Required selection
 
-The current head uses `scripts/ci/rust_test_sources.py`, unfiltered nextest archive
-selection, and `scripts/ci/pg15_required_ids.txt`; the older lib inventory and
-required-ID exception files have been retired and are not recreated here.
-All new tests are reachable from cfg(test) parents. New `_pg` tests have an exact
-row in the PG15 required list. Regenerate `required-tests.json` with `python3 tests/input_owner_rollback/generate_required.py` for IDs, path gates,
+The current required Linux `rust_build`/`rust_tests` archive and plan select all
+new IDs, including the PG fixture. Each worker starts its own PostgreSQL server
+with `AGENTDESK_REQUIRE_PG=1`; absence of a real server cannot skip this fixture.
+The Windows path gate covers `src/test_support/**`. All helpers are reachable
+through cfg(test) parents and use the repository's `_tests.rs` classification.
+The retired lib inventory and exception files are not recreated.
+Regenerate `required-tests.json` with `python3 tests/input_owner_rollback/generate_required.py` for IDs, path gates,
 run mode and platforms. Linux runs are required locally. Durable-writer and Unix transport tests
 compile on Linux/macOS; registry/scenario tests also compile on Windows. Windows has no directory-flush guarantee, so it cannot run the writable-owner fixture path.
 macOS/Windows execution and actual future 4f acceptance remain separate evidence.

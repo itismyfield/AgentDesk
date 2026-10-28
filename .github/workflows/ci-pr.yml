@@ -288,6 +288,7 @@ jobs:
               # session_host/'s TmuxHost has a not(unix) stub Windows compiles.
               - 'src/services/qwen/**'
               - 'src/services/session_host/**'
+              - 'src/test_support/**'
               # The Herdr close owner is unix-gated production code.
               - 'src/services/termination_audit/**'
               - 'src/services/turn_summary_line/quota_tests.rs'

@@ -19,15 +19,15 @@ for platform, (compiled, ignored) in module.platform_tests(root).items():
         row = rows.setdefault(test_id, {
             "id": test_id,
             "platforms": [],
-            "run_mode": "pg15-required" if test_id.endswith("_pg") else "unfiltered-lib",
-            "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+            "run_mode": "unfiltered-lib-with-required-postgres" if test_id.endswith("_pg") else "unfiltered-lib",
+            "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
             "ignored": False,
         })
         row["platforms"].append(platform)
         assert test_id not in ignored
 assert rows, "preparation must register positive test IDs"
 output = {"platform_meaning": "source compilation universe; Linux execution required, macOS/Windows native execution separate", "generated_by": "python3 tests/input_owner_rollback/generate_required.py",
-          "source": "scripts/ci/rust_test_sources.py platform_tests; ci-pr.yml archive and PG15 jobs",
+          "source": "scripts/ci/rust_test_sources.py platform_tests; ci-pr.yml rust_build/rust_tests",
           "tests": sorted(rows.values(), key=lambda row: row["id"])}
 (root / "tests/input_owner_rollback/required-tests.json").write_text(json.dumps(output, indent=2) + "\n")
 print(f"S5_REQUIRED_IDS {len(rows)}")
