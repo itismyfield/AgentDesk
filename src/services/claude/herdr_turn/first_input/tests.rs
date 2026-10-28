@@ -139,6 +139,8 @@ fn run_case(refuse_commit: bool) {
                     row: None,
                     prompt: &frame,
                     working_dir: "/tmp",
+                    requested_session_id: None,
+                    force_fresh: false,
                     system_prompt: None,
                     model: None,
                     hook_endpoint: None,

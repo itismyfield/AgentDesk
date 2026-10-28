@@ -1110,6 +1110,20 @@ pub fn session_temp_path(session_name: &str, extension: &str) -> String {
     )
 }
 
+/// Names the canonical session file without creating or changing the sessions directory.
+#[cfg(unix)]
+pub(crate) fn session_temp_path_read_only(session_name: &str, extension: &str) -> String {
+    let directory = persistent_sessions_dir().unwrap_or_else(std::env::temp_dir);
+    directory
+        .join(format!(
+            "{}.{}",
+            session_temp_prefix(session_name),
+            extension
+        ))
+        .display()
+        .to_string()
+}
+
 /// Canonical marker written by tmux pane/session hooks when a session's pane
 /// exits. Watchers treat this as an explicit "tmux died" wake-up; the legacy
 /// liveness probe remains as a hook-miss safety net.

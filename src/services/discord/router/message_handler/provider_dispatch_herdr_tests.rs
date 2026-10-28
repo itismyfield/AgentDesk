@@ -460,6 +460,7 @@ impl Fixture {
         // The receiver stays on this thread; the executor takes only what it shares.
         let (rt, rig, pool) = (&self.rt, &self.rig, &self.pool);
         let (owner, endpoint, cwd) = (self.owner.clone(), self.endpoint(), self.cwd.path());
+        let tracing = tracing::dispatcher::get_default(Clone::clone);
         let finished = &self.finished;
         finished.store(false, Ordering::SeqCst);
         let log_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
@@ -475,6 +476,7 @@ impl Fixture {
         });
         std::thread::scope(|scope| {
             let executor = scope.spawn(move || {
+                let _tracing = tracing::dispatcher::set_default(&tracing);
                 let _runtime = rt.enter();
                 crate::services::tui_prompt_dedupe::binding_events::set_test_root(
                     log_root.as_deref(),
@@ -491,6 +493,8 @@ impl Fixture {
                     row: Some(row),
                     prompt: "질문",
                     working_dir: cwd.to_str().unwrap(),
+                    requested_session_id: None,
+                    force_fresh: false,
                     system_prompt: None,
                     model: None,
                     hook_endpoint: Some("http://127.0.0.1:1".into()),
@@ -1421,3 +1425,6 @@ pub(super) mod live_end;
 
 #[path = "provider_dispatch_herdr_start_offset_tests.rs"]
 mod start_offset_tests;
+
+#[path = "provider_dispatch_herdr_migration_boot_tests.rs"]
+mod migration_boot;

@@ -18,6 +18,8 @@ pub(crate) use codex_policy::{
 };
 mod codex_hook;
 pub use binding_access::register_provider_session;
+#[cfg(unix)]
+pub(crate) use binding_access::runtime_observation_for_kind_under_source_authority;
 use binding_access::same_runtime_source;
 pub(crate) use binding_access::{
     RuntimeObservation, codex_verified_marker_metadata, codex_verified_publication_allowed,

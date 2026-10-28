@@ -135,6 +135,8 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
             row: None,
             prompt: "preserve queued input",
             working_dir: "/tmp",
+            requested_session_id: None,
+            force_fresh: false,
             system_prompt: None,
             model: None,
             hook_endpoint: None,

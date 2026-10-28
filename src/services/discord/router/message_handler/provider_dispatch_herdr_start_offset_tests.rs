@@ -172,6 +172,21 @@ fn run(source: Source) {
     let fx = Fixture::new(&format!("offset-{source:?}"), None);
     let launcher = Arc::new(Launcher::default());
     let restored_selector = matches!(source, Source::RestoredSelector).then(uuid);
+    let restored_source = restored_selector.as_ref().map(|restored| {
+        let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            fx.cwd.path(),
+            restored,
+            None,
+        )
+        .unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        append(
+            &path,
+            &records(restored, chrono::Utc::now() - chrono::Duration::seconds(5)),
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        (path, bytes)
+    });
     if let Some(restored) = restored_selector.as_ref() {
         fx.rt.block_on(async {
             let updated = crate::db::dispatched_sessions::rebind_session_provider_pg(
@@ -201,8 +216,45 @@ fn run(source: Source) {
             );
         });
     }
+    let shadow = super::migration_boot::ShadowCapture::default();
+    let dispatcher = shadow.dispatch();
+    let _trace = tracing::dispatcher::set_default(&dispatcher);
     let (messages, live, token, session, path, expected_start) = first_turn(&fx, &launcher, source);
     if let Some(restored) = restored_selector {
+        let plans = shadow.plans();
+        let nonce = launcher.nonces.lock().unwrap()[0].clone();
+        let actual = crate::services::tui_prompt_dedupe::binding_context::execution_context(
+            "claude", &nonce,
+        )
+        .unwrap();
+        let planned_context = plans
+            .first()
+            .and_then(|plan| plan.get("context"))
+            .filter(|context| !context.is_null())
+            .cloned()
+            .unwrap_or_else(|| serde_json::to_value(&actual).unwrap());
+        assert_eq!(
+            planned_context["expected_native_session_id"].as_str(),
+            Some(restored.as_str()),
+            "the immutable plan keeps the valid old session, even while production launches fresh"
+        );
+        assert!(
+            !plans.is_empty(),
+            "the actual turn reached the shadow planning root"
+        );
+        assert_eq!(plans[0]["decision"], "resume");
+        let (old_path, old_bytes) = restored_source.unwrap();
+        assert_eq!(
+            planned_context["exact_source"]["path"].as_str(),
+            old_path.to_str(),
+            "the immutable plan keeps the exact old transcript path"
+        );
+        assert_eq!(std::fs::read(old_path).unwrap(), old_bytes);
+        assert_eq!(actual.launch_mode, "fresh");
+        assert_eq!(
+            actual.expected_native_session_id.as_deref(),
+            Some(session.as_str())
+        );
         assert_ne!(
             session, restored,
             "a restored selector still creates a fresh native Herdr session"

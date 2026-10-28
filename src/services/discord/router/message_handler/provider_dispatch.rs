@@ -523,6 +523,8 @@ mod herdr {
             row: plan.row.as_ref().map(|observed| &observed.record),
             prompt: turn.prompt,
             working_dir: turn.working_dir,
+            requested_session_id: turn.session_id,
+            force_fresh: turn.force_fresh,
             system_prompt: turn.system_prompt.filter(|prompt| !prompt.is_empty()),
             model: turn.model,
             hook_endpoint: crate::services::claude_tui::hook_server::current_hook_endpoint(),

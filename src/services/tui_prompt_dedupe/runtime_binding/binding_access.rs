@@ -32,6 +32,22 @@ pub(crate) enum RuntimeObservation {
 pub(crate) fn runtime_observation_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
 ) -> RuntimeObservation {
+    observe_runtime(authority, None)
+}
+
+/// Rejects another runtime kind before consulting its provider-specific publication evidence.
+#[cfg(unix)]
+pub(crate) fn runtime_observation_for_kind_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    kind: RuntimeHandoffKind,
+) -> RuntimeObservation {
+    observe_runtime(authority, Some(kind))
+}
+
+fn observe_runtime(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    kind: Option<RuntimeHandoffKind>,
+) -> RuntimeObservation {
     let raw = {
         let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
         state.runtime_by_tmux.get(authority.session()).map(|entry| {
@@ -44,6 +60,9 @@ pub(crate) fn runtime_observation_under_source_authority(
     match raw {
         None => RuntimeObservation::Missing,
         Some((binding, true)) => RuntimeObservation::Expired(binding),
+        Some((binding, false)) if kind.is_some_and(|kind| binding.runtime_kind != kind) => {
+            RuntimeObservation::Withheld(binding)
+        }
         Some((binding, false)) if observation_allowed(authority, &binding) => {
             RuntimeObservation::Present(binding)
         }

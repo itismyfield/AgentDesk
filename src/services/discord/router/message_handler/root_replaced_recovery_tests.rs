@@ -302,6 +302,8 @@ fn fresh_turn_first_read(case: &Case, prompt: &str, first: &[u32]) -> (Arc<Launc
                         row: Some(&row),
                         prompt,
                         working_dir: working_dir.to_str().unwrap(),
+                        requested_session_id: None,
+                        force_fresh: false,
                         system_prompt: None,
                         model: None,
                         hook_endpoint: Some("http://127.0.0.1:1".into()),

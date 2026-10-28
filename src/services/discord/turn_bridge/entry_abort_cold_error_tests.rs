@@ -288,6 +288,8 @@ impl Cold {
                     row: None,
                     prompt: "cold",
                     working_dir: ".",
+                    requested_session_id: None,
+                    force_fresh: false,
                     system_prompt: None,
                     model: None,
                     hook_endpoint: None,

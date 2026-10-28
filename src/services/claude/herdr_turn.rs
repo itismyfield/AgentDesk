@@ -101,8 +101,33 @@ impl HerdrLaunchHost for Boot<'_> {
 
 /// The boot registry's launch host, on its endpoints only.
 pub(crate) fn boot_launch_host() -> Option<Arc<dyn HerdrLaunchHost>> {
+    #[cfg(test)]
+    if let Some(host) = TEST_LAUNCH_HOST.with(|host| host.borrow().clone()) {
+        return Some(host);
+    }
     let host = herdr_endpoints().launch_host()?;
     Some(Arc::new(Boot(host)))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_LAUNCH_HOST: std::cell::RefCell<Option<Arc<dyn HerdrLaunchHost>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_launch_host<T>(
+    host: Arc<dyn HerdrLaunchHost>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Arc<dyn HerdrLaunchHost>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_LAUNCH_HOST.with(|host| host.replace(self.0.take()));
+        }
+    }
+    let _restore = Restore(TEST_LAUNCH_HOST.with(|slot| slot.replace(Some(host))));
+    run()
 }
 
 /// One turn; `row` is the record the turn host read for the channel's sessions row.
@@ -114,6 +139,8 @@ pub(crate) struct HerdrTurn<'a> {
     pub row: Option<&'a HostedRecord>,
     pub prompt: &'a str,
     pub working_dir: &'a str,
+    pub requested_session_id: Option<&'a str>,
+    pub force_fresh: bool,
     pub system_prompt: Option<&'a str>,
     pub model: Option<&'a str>,
     /// The hook receiver a launch reports to; only a launch needs it.
@@ -154,6 +181,36 @@ struct Attached {
     bound: bool,
 }
 
+fn observe_resume_plan(turn: &HerdrTurn<'_>, runtime: &Handle) {
+    let session_key = format!(
+        "claude/{}/{}:{}",
+        turn.owner.discord_token_hash, turn.owner.owner_node, turn.owner.logical_key,
+    );
+    let plan = runtime.block_on(super::herdr_resume_plan::resolve(
+        turn.pool,
+        super::herdr_resume_plan::Request {
+            session_key: &session_key,
+            discord_token_hash: &turn.owner.discord_token_hash,
+            logical_key: &turn.owner.logical_key,
+            channel_id: turn.channel_id,
+            working_dir: Path::new(turn.working_dir),
+            requested_session_id: turn.requested_session_id,
+            force_fresh: turn.force_fresh,
+            claude_home: None,
+        },
+    ));
+    let diagnostic = plan.diagnostic();
+    // Planning carries no launch authority; the existing execution path remains authoritative.
+    tracing::info!(
+        target: "agentdesk::claude_migration_shadow",
+        channel = turn.channel_id,
+        classification = diagnostic["decision"].as_str().unwrap_or("hold"),
+        expected_native_session_id = diagnostic["expected_native_session_id"].as_str().unwrap_or(""),
+        plan = %diagnostic,
+        "Claude migration plan only"
+    );
+}
+
 /// Runs one turn on a blocking thread inside the runtime; every error leaves the pane as it is.
 pub(crate) fn execute(
     turn: HerdrTurn<'_>,
@@ -179,6 +236,11 @@ pub(crate) fn execute(
             },
         );
     }
+    // Preserve the stopped fast path; the execution check runs again after diagnostic I/O.
+    if before_start::prelaunch_closed(turn.cancel.as_deref())? {
+        return Ok(());
+    }
+    observe_resume_plan(&turn, &runtime);
     before_start::observed_execution(turn.cancel.as_deref(), || {
         let attached = match turn.row {
             Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {

@@ -68,6 +68,32 @@ pub(crate) fn activity_with_observed_growth(
     activity
 }
 
+/// Samples the chooser's existing growth evidence without advancing its shared observation cache.
+#[cfg(unix)]
+pub(crate) fn activity_with_read_only_growth(
+    selector: &str,
+    mut activity: SelectorFileActivity,
+    persisted_len_watermark: Option<u64>,
+    persisted_growth_proven: bool,
+) -> SelectorFileActivity {
+    let observed = normalized(Some(selector)).is_some_and(|selector| {
+        let observations = SELECTOR_OBSERVATIONS
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        observations.get(selector).is_some_and(|previous| {
+            previous.observed_at.elapsed()
+                <= Duration::from_secs(SELECTOR_OBSERVATION_RETENTION_SECS)
+                && activity.len > previous.len
+        })
+    });
+    activity.observed_growth_since_previous_sample = activity.exists
+        && activity.len > 0
+        && (persisted_growth_proven
+            || persisted_len_watermark.is_some_and(|watermark| activity.len > watermark)
+            || observed);
+    activity
+}
+
 fn selector_file_observed_growth(selector: &str, activity: SelectorFileActivity) -> bool {
     let Some(selector) = normalized(Some(selector)) else {
         return false;

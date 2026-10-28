@@ -57,6 +57,8 @@ mod backend_routing;
 #[cfg(test)]
 mod c1_teardown_tests;
 #[cfg(unix)]
+pub(crate) mod herdr_resume_plan;
+#[cfg(unix)]
 pub(crate) mod herdr_turn;
 pub(crate) mod host_gate;
 mod stream_result;

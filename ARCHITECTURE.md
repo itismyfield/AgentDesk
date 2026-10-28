@@ -753,6 +753,8 @@ src/
 │   ├── claude/
 │   │   ├── first_input/
 │   │   │   └── tests.rs
+│   │   ├── herdr_resume_plan/
+│   │   │   └── resolver_tests.rs
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
 │   │   │   │   └── tests.rs
@@ -773,6 +775,7 @@ src/
 │   │   ├── backend_routing.rs
 │   │   ├── c1_teardown_tests.rs
 │   │   ├── first_input.rs
+│   │   ├── herdr_resume_plan.rs
 │   │   ├── herdr_turn.rs
 │   │   ├── host_gate.rs
 │   │   ├── host_gate_tests.rs
@@ -1954,6 +1957,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_migration_boot_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs

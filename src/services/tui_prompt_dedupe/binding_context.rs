@@ -96,10 +96,22 @@ pub(crate) fn context_presence(provider: &str, nonce: &str) -> ContextPresence {
 }
 
 pub(crate) fn observe_spawn_nonce_marker(tmux: &str) -> SpawnNonceMarker {
-    for path in [
+    observe_nonce_paths([
         tc::session_temp_path(tmux, "spawn_nonce"),
         tc::legacy_tmp_session_path(tmux, "spawn_nonce"),
-    ] {
+    ])
+}
+
+#[cfg(unix)]
+pub(crate) fn observe_spawn_nonce_marker_read_only(tmux: &str) -> SpawnNonceMarker {
+    observe_nonce_paths([
+        tc::session_temp_path_read_only(tmux, "spawn_nonce"),
+        tc::legacy_tmp_session_path(tmux, "spawn_nonce"),
+    ])
+}
+
+fn observe_nonce_paths(paths: [String; 2]) -> SpawnNonceMarker {
+    for path in paths {
         match fs::read_to_string(path) {
             Ok(s) if !s.trim().is_empty() => return SpawnNonceMarker::Known(s.trim().to_owned()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
