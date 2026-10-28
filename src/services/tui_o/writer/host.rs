@@ -41,6 +41,19 @@ pub trait HostIo: Send + Sync + 'static {
     type Bindings: BindingEvents;
     /// Resolves once the gateway's HTTP client and the bot's own id are known.
     fn port(&self) -> impl Future<Output = Arc<Self::Port>> + Send;
+    fn port_for(
+        &self,
+        _channel: u64,
+    ) -> impl Future<Output = Result<Arc<Self::Port>, String>> + Send {
+        Box::pin(async move { Ok(self.port().await) })
+    }
+    fn execution_permit(
+        &self,
+        _channel: u64,
+    ) -> Option<Result<Arc<crate::services::tui_o::ownership::execution::OwnerPermit>, String>>
+    {
+        None
+    }
     fn lease(&self) -> Self::Lease;
     /// A channel's writer stopped for good; the shared lease turns its verified episodes Unknown.
     fn writer_unavailable(&self, channel: u64) {
@@ -353,7 +366,7 @@ pub struct HostParts<I> {
 
 /// Whether the gateway gate owns this writer now.
 pub(super) fn owned_now(gate: &OwnershipGate) -> bool {
-    matches!(gate.current(), GatewayOwnership::Owned { .. })
+    gate.current().epoch().is_some()
 }
 
 /// Spawns one host per channel this bot may adopt. A missing PG gateway lease holds the
@@ -502,7 +515,13 @@ pub fn start_managed<I: HostIo>(
         let keep = Arc::new(AtomicBool::new(false));
         let reservation = candidate.late_cleanup_guard(channel, runtime_root.clone());
         let reservation = reservation.map(|guard| guard.kept_by(Arc::clone(&keep)));
-        let root = match (pg_gateway, &runtime_root) {
+        let execution = io.execution_permit(channel);
+        let authorized = match &execution {
+            Some(Ok(_)) => true,
+            Some(Err(_)) => false,
+            None => pg_gateway,
+        };
+        let root = match (authorized, &runtime_root) {
             (false, _) => Err("no PG gateway lease"),
             (true, None) => Err("runtime root unresolved"),
             (true, Some(root)) => Ok(root.clone()),
@@ -516,7 +535,10 @@ pub fn start_managed<I: HostIo>(
                 continue;
             }
         };
-        let gate = Arc::clone(&gate);
+        let gate = match execution {
+            Some(Ok(permit)) => permit.gate(),
+            _ => Arc::clone(&gate),
+        };
         #[cfg(test)]
         let generation = claim.generation;
         #[cfg(test)]
@@ -665,8 +687,13 @@ async fn host_channel<I: HostIo>(
     }
     super::deliver::seed_last_posted(channel, store.ledger());
     let phase = boot.phase("port");
-    let Some(port) = unless_stopped(&stopping, io.port()).await else {
-        return;
+    let port = match unless_stopped(&stopping, io.port_for(channel)).await {
+        Some(Ok(port)) => port,
+        Some(Err(reason)) => {
+            phase.finish("held");
+            return hold(&alarms, channel, &reason);
+        }
+        None => return,
     };
     phase.finish("ok");
     let bindings = bindings.unwrap_or_else(|| io.bindings(channel, provider));
@@ -862,7 +889,7 @@ impl<I: HostIo> Hosted<'_, I> {
 /// Returns once the gate is Owned; a gate not yet acquired at startup is waited on, not held.
 pub(super) async fn until_owned(gate: &OwnershipGate) {
     let mut watch = gate.subscribe();
-    while !matches!(*watch.borrow_and_update(), GatewayOwnership::Owned { .. }) {
+    while watch.borrow_and_update().epoch().is_none() {
         if watch.changed().await.is_err() {
             std::future::pending::<()>().await;
         }
@@ -880,7 +907,7 @@ async fn publish(
     let readiness = &claim.readiness;
     let mut on_resumed = Some(on_resumed);
     let ended = loop {
-        let owned = matches!(*gate.borrow_and_update(), GatewayOwnership::Owned { .. });
+        let owned = gate.borrow_and_update().epoch().is_some();
         let up = *resumed.borrow_and_update();
         if up && let Some(on_resumed) = on_resumed.take() {
             on_resumed();

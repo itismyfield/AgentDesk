@@ -36,6 +36,24 @@ impl OwnerPermit {
     pub(crate) fn gate(&self) -> Arc<OwnershipGate> {
         Arc::clone(&self.gate)
     }
+    pub(crate) fn first_binding(&self, other: &Self) -> Option<Arc<Self>> {
+        if self.identity != other.identity
+            || self.executor != other.executor
+            || self.generation != other.generation
+            || !matches!(self.session_ref, SessionRef::Fresh)
+            || !matches!(other.session_ref, SessionRef::Bound(_))
+        {
+            return None;
+        }
+        Some(Arc::new(Self {
+            pool: other.pool.clone(),
+            identity: other.identity.clone(),
+            executor: other.executor.clone(),
+            generation: other.generation,
+            session_ref: other.session_ref.clone(),
+            gate: self.gate(),
+        }))
+    }
     pub(crate) fn same_execution(&self, other: &Self) -> bool {
         self.identity == other.identity
             && self.executor == other.executor

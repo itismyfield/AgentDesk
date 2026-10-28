@@ -160,7 +160,7 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
         if let Some(channel) = channel
             && let Some(view) = snapshot.execution(channel)
         {
-            return view.permit.map(|_| ()).map_err(|reason| reason);
+            return view.permit.map(|_| ());
         }
         if let Site::Foreign { home } = snapshot.site() {
             let channel = channel.map_or("an unknown channel".into(), |c| c.to_string());

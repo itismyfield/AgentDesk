@@ -212,7 +212,7 @@ impl BoundedTransport for RepostHttp {
             .await
             {
                 Ok(hold) => hold,
-                Err(error) => return WireOutcome::Unsent(error.to_string()),
+                Err(error) => return WireOutcome::Withheld(error.to_string()),
             };
             hold.run(async move {
                 let body = match body {

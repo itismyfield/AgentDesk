@@ -118,6 +118,7 @@ pub(crate) struct CreatedMessage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WireOutcome {
     Created(CreatedMessage),
+    Withheld(String),
     /// 400, 403 or 404: the channel refuses the bot.
     Refused(u16),
     /// Only confirmed 429s without a usable retry time: Discord created nothing.

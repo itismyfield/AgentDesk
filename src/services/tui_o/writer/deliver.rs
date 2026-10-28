@@ -982,6 +982,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
                 content: created.content.clone(),
             }),
             WireOutcome::Refused(status) => PostOutcome::Refused(*status),
+            WireOutcome::Withheld(reason) => PostOutcome::Withheld(reason.clone()),
             other => PostOutcome::Uncertain(format!("{other:?}")),
         };
         async move {

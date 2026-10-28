@@ -40,7 +40,6 @@ impl GatewayPort {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_owner_scope(
         mut self,
         scope: crate::services::cluster::intake_router_hook::owner_record::output::Scope,

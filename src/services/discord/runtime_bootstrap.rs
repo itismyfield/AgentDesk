@@ -337,6 +337,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         #[cfg(unix)]
         spawns::run_bot_spawn_reachability_observation(&shared, &provider);
         run_bot_spawn_sigterm_handler(&shared, provider.clone());
+        o_writer_host::spawn_execution(&shared, &provider, boot_config.tui_o.as_ref());
         // REST workers persist the same mailbox state as Gateway runtimes.
         // Restore it before polling new intake; never replay Discord history.
         queued_recovery::restore_worker_queues(&shared, &provider).await;
@@ -394,6 +395,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             // a routing/config race fail closed instead of restoring the old
             // health-blind empty registry.
             register_standby_and_settle_reconcile(&health_registry, &provider, &shared).await;
+            o_writer_host::spawn_execution(&shared, &provider, boot_config.tui_o.as_ref());
             // Standby intake can execute a full turn, so it gets the same
             // marker fence and acknowledgement path as a gateway runtime.
             spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);

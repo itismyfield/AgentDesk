@@ -369,6 +369,22 @@ impl BootChannels {
         {
             return;
         }
+        if let (Some(old), Some(Ok(new))) = (&old, &permit)
+            && let Ok(prior) = &old.permit
+            && let Some(bound) = prior.first_binding(new)
+        {
+            self.execution
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(
+                    channel,
+                    View {
+                        permit: Ok(bound),
+                        candidate: old.candidate.clone(),
+                    },
+                );
+            return;
+        }
         if let Some(old) = old
             && let Ok(old) = old.permit
         {

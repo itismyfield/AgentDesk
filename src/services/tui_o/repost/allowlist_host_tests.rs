@@ -91,6 +91,7 @@ async fn d4b_two_hosted_channels_repost_by_default_with_wire_controls_pg() {
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         let io = Arc::new(RealHost {
             gateway: GatewayHost {
+                execution: Default::default(),
                 shared,
                 alarms: Arc::new(AlarmRouter::for_process(None, None)),
                 self_id_wait: Duration::ZERO,

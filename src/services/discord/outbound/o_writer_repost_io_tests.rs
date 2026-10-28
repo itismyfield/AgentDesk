@@ -175,6 +175,7 @@ fn summary(report: &DispatchReport) -> Summary {
         WireOutcome::Refused(_) => "refused",
         WireOutcome::Throttled => "throttled",
         WireOutcome::Uncertain(_) => "uncertain",
+        WireOutcome::Withheld(_) => "withheld",
         WireOutcome::Unsent(_) => "unsent",
         WireOutcome::TimedOut => "timed_out",
     };
@@ -949,3 +950,6 @@ mod settle_over_http {
 #[cfg(unix)]
 #[path = "local_retry_io_tests.rs"]
 mod local_retry_io_tests;
+
+#[path = "o_writer_repost_io_tests/owner_tests.rs"]
+mod owner_tests;

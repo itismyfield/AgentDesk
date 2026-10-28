@@ -70,3 +70,8 @@ pub(super) async fn prepare(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
 
 #[cfg(test)]
 mod tests;
+
+/// Transport restart fences Legacy; PG execution owners and their native sessions stay intact.
+pub(super) fn gateway_transport_lost(shared: &SharedData) {
+    shared.restart.legacy_lease_lost();
+}

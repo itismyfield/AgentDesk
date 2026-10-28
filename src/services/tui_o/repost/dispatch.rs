@@ -249,7 +249,9 @@ impl Started {
                 WireOutcome::Created(_) => AttemptResult::Created,
                 WireOutcome::Refused(_) => AttemptResult::Rejected,
                 WireOutcome::Throttled | WireOutcome::Unsent(_) => AttemptResult::NotSent,
-                WireOutcome::Uncertain(_) | WireOutcome::TimedOut => AttemptResult::Uncertain,
+                WireOutcome::Withheld(_) | WireOutcome::Uncertain(_) | WireOutcome::TimedOut => {
+                    AttemptResult::Uncertain
+                }
             },
         };
         if let DispatchEnd::Sent(report) = &end {
@@ -275,6 +277,7 @@ impl Started {
                 WireOutcome::Refused(_) => ("refused", None),
                 WireOutcome::Throttled => ("throttled", None),
                 WireOutcome::Uncertain(_) => ("uncertain", None),
+                WireOutcome::Withheld(_) => ("withheld", None),
                 WireOutcome::Unsent(_) => ("unsent", None),
                 WireOutcome::TimedOut => ("timed_out", None),
             };

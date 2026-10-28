@@ -2,15 +2,18 @@
 //! delivery lease cells, the process alarm router and the facts a first activation checks.
 
 use super::*;
-
+use crate::services::tui_o::ownership::execution::OwnerPermit;
+use std::collections::BTreeMap;
+mod owner_port;
+type ExecutionPermits = BTreeMap<u64, Result<Arc<OwnerPermit>, String>>;
 use std::future::Future;
 use std::time::Duration;
 
 use crate::services::discord::outbound::o_writer_io::{ChannelLeases, GatewayPort};
 use crate::services::discord::outbound::o_writer_legacy::LegacyRelay;
 use crate::services::tui_o::alarm::AlarmRouter;
-use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::shadow::tap::TuiOConfig;
+use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::turn_mode::TurnConfig;
 use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::actor::POLL_INTERVAL;
@@ -23,6 +26,7 @@ const SELF_ID_WAIT: Duration = Duration::from_secs(10);
 
 struct GatewayHost {
     shared: Arc<SharedData>,
+    execution: ExecutionPermits,
     alarms: Arc<AlarmRouter>,
     self_id_wait: Duration,
     /// `cluster.instance_id` as the home judgement read it; `None` without clustering.
@@ -90,21 +94,54 @@ impl HostIo for GatewayHost {
     /// Waits for the context the gateway caches on ready.
     fn port(&self) -> impl Future<Output = Arc<GatewayPort>> + Send {
         let shared = Arc::clone(&self.shared);
+        let scope = self.shared.pg_pool.clone().map(|pool| {
+            crate::services::cluster::intake_router_hook::owner_record::output::Scope {
+                pool,
+                provider: self.shared.provider.as_str().into(),
+            }
+        });
         #[cfg(test)]
         let rest = self.rest.clone();
         async move {
             #[cfg(test)]
             if let Some(http) = rest {
-                return rest_port(http).await;
+                let mut port = rest_port(http).await;
+                if let Some(scope) = scope {
+                    let original =
+                        Arc::try_unwrap(port).unwrap_or_else(|_| unreachable!("new REST port"));
+                    port = Arc::new(original.with_owner_scope(scope));
+                }
+                return port;
             }
             loop {
                 if let Some(ctx) = shared.http.cached_serenity_ctx.get() {
                     let bot_id = ctx.cache.current_user().id.get();
-                    return Arc::new(GatewayPort::new(Arc::clone(&ctx.http), bot_id));
+                    let mut port = GatewayPort::new(Arc::clone(&ctx.http), bot_id);
+                    if let Some(scope) = scope {
+                        port = port.with_owner_scope(scope);
+                    }
+                    return Arc::new(port);
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
         }
+    }
+
+    fn execution_permit(&self, channel: u64) -> Option<Result<Arc<OwnerPermit>, String>> {
+        self.execution.get(&channel).cloned()
+    }
+
+    fn port_for(
+        &self,
+        channel: u64,
+    ) -> impl Future<Output = Result<Arc<GatewayPort>, String>> + Send {
+        Box::pin(async move {
+            match self.execution_permit(channel) {
+                Some(Ok(permit)) => owner_port::open(self, channel, &permit).await,
+                Some(Err(reason)) => Err(reason),
+                None => Ok(self.port().await),
+            }
+        })
     }
 
     fn lease(&self) -> ChannelLeases {
@@ -133,7 +170,14 @@ impl HostIo for GatewayHost {
     ) -> impl Future<Output = Result<ActivationFacts, String>> + Send {
         let (shared, self_id_wait) = (Arc::clone(&self.shared), self.self_id_wait);
         let configured = self.configured_id.clone();
+        let execution = self.execution_permit(channel);
         async move {
+            if let Some(execution) = execution {
+                let permit = execution?;
+                let FencedFacts { hold, facts, .. } = owner_port::facts(&permit).await?;
+                hold.release().await.map_err(|e| e.to_string())?;
+                return Ok(facts);
+            }
             let pool = shared.pg_pool.clone().ok_or("no PG pool")?;
             let id = channel.to_string();
             let local = local_id(configured.as_deref(), self_id_wait).await?;
@@ -161,6 +205,10 @@ impl HostIo for GatewayHost {
         channel: u64,
         _provider: ShadowProvider,
     ) -> Result<FencedFacts, String> {
+        if let Some(execution) = self.execution_permit(channel) {
+            let permit = execution?;
+            return owner_port::facts(&permit).await;
+        }
         let pool = self.shared.pg_pool.as_ref().ok_or("no PG pool")?;
         let id = channel.to_string();
         let local = local_id(self.configured_id.as_deref(), self.self_id_wait).await?;
@@ -304,13 +352,24 @@ fn parts(
     config: Option<&TuiOConfig>,
 ) -> host::HostParts<GatewayHost> {
     let alarms = Arc::new(AlarmRouter::for_process(config, shared.pg_pool.clone()));
-    let boot = crate::services::tui_o::channel_policy::boot();
+    let boot = crate::services::tui_o::cutover::boot_snapshot();
     let configured_id = boot
+        .as_ref()
         .and_then(|boot| boot.configured_id())
         .map(str::to_owned);
     host::HostParts {
         io: Arc::new(GatewayHost {
             shared: Arc::clone(shared),
+            execution: boot
+                .as_ref()
+                .map(|snapshot| {
+                    snapshot
+                        .channels()
+                        .iter()
+                        .filter_map(|ch| snapshot.execution(*ch).map(|view| (*ch, view.permit)))
+                        .collect()
+                })
+                .unwrap_or_default(),
             alarms,
             self_id_wait: SELF_ID_WAIT,
             configured_id,
@@ -370,6 +429,7 @@ pub(super) mod test_host {
             turn: TurnConfig::default(),
             rest: None,
             boot: None,
+            execution: BTreeMap::new(),
         }
     }
 }
@@ -467,6 +527,7 @@ mod fence_tests {
             turn: TurnConfig::default(),
             rest: None,
             boot: None,
+            execution: BTreeMap::new(),
         };
         let fenced =
             tokio::time::timeout(Duration::from_secs(3), host.intake_fence(673702, Claude))
@@ -535,8 +596,36 @@ mod repost_tests {
                 turn: TurnConfig::default(),
                 rest: None,
                 boot: None,
+                execution: BTreeMap::new(),
             };
             assert_eq!(gateway.repost(1, &port).is_some(), pool.is_some());
         }
+    }
+}
+
+#[cfg(test)]
+#[path = "o_writer_host/tests/owner_execution.rs"]
+mod owner_execution_tests;
+
+/// Non-gateway boots start only channels with a PG execution view.
+pub(super) fn spawn_execution(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    config: Option<&TuiOConfig>,
+) {
+    let Some(shadow) = shadow_of(provider) else {
+        return;
+    };
+    let snapshot = crate::services::tui_o::cutover::boot_snapshot();
+    let owned = crate::services::tui_o::cutover::boot_ownership()
+        .into_iter()
+        .filter(|(ch, _, _)| {
+            snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.execution(*ch).is_some())
+        })
+        .collect();
+    for handle in host::start_managed(shadow, false, owned, || parts(shared, provider, config)) {
+        drop(handle.into_detached());
     }
 }
