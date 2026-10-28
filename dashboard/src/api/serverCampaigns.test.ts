@@ -7,6 +7,7 @@ import {
   type ServerCampaignDetailResponse, type ServerCampaignListResponse,
 } from "./serverCampaigns";
 import { serverCampaignFixtures as fixtures } from "./serverCampaignsFixtures";
+import sharedPreparedDetail from "../../../tests/fixtures/server_campaigns/detail-prepared.json";
 
 const listUrl = "/api/server-campaigns";
 const detailUrl = `${listUrl}/release`;
@@ -49,6 +50,18 @@ it.each(Object.entries(fixtures))("parses the %s fixture through an actual fetch
   const parsed = await getServerCampaign("release");
   expect(parsed).toEqual(fixture);
   expect(readCachedGet<ServerCampaignDetailResponse>(detailUrl)?.data.campaign).toEqual(parsed);
+});
+
+it("parses the shared B prepared detail fixture through the GET adapter and schema boundary", async () => {
+  fetchMock.mockResolvedValueOnce(response(sharedPreparedDetail));
+  const parsed = await getServerCampaign(sharedPreparedDetail.campaign.view.campaign_id);
+  expect(fetchMock).toHaveBeenCalledExactlyOnceWith("/api/server-campaigns/campaign", expect.objectContaining({ method: "GET" }));
+  expect(parsed).toEqual(sharedPreparedDetail.campaign);
+  expect(parsed.view).toMatchObject({
+    execution_mode: "server", control: "prepared", display: "prepared", execution_readiness: "unavailable",
+  });
+  expect(parsed.view.commands).toContainEqual({ command: "edit_definition", rejection: null });
+  expect(parsed.view.commands).toContainEqual({ command: "start", rejection: "execution_unavailable" });
 });
 
 function change(path: string, value: unknown, omit = false): unknown {
