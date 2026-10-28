@@ -87,3 +87,7 @@ identity_guarded_save_rejects_stale_write_against_newer_turn
 [Fast targeted tests: Turn timestamp storage]
 db::timestamps::tests::
 =db::turns::timestamp_tests::utc_session_preserves_turn_instants_pg
+
+[High-risk recovery: O writer restart replay]
+services::tui_o::writer::tests::actor::host_start::managed::restart_replay::
+services::tui_o::writer::owed::tests::verified::tool_card_provenance::replay_metadata::

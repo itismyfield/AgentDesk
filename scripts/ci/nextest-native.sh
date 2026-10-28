@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Native macOS/Windows lib tests through the PR worker path on one worker: archive, list, source
 # compare, selection, plan, verify-archive, run with exit-code/JUnit record, audit and summary.
-# Usage: nextest-native.sh <platform> <scope> pg-classifier
+# Usage: nextest-native.sh <platform> <scope> pg-classifier [prepare|run|all]
 set -euo pipefail
 
-platform="$1" scope="$2" selection="$3"
+platform="$1" scope="$2" selection="$3" phase="${4:-all}"
+case "$phase" in
+  prepare|run|all) ;;
+  *) echo "ERROR unknown phase $phase" >&2; exit 2 ;;
+esac
+[ "$selection" = pg-classifier ] || { echo "ERROR unknown selection $selection" >&2; exit 2; }
 dir="$RUNNER_TEMP/nextest"
 archive="$dir/lib-tests.tar.zst"
 record="$dir/results/worker-0"
@@ -14,19 +19,24 @@ ci() { python3 scripts/ci/nextest_ci.py "$@"; }
 # nextest extracts only into a directory that already exists.
 mkdir -p "$dir/extract"
 
-cargo nextest archive --lib --archive-file "$archive"
-cargo nextest list --archive-file "$archive" --workspace-remap "$GITHUB_WORKSPACE" \
-  --ignore-default-filter --message-format json >"$dir/universe.json"
-python3 scripts/ci/rust_test_sources.py compare --platform "$platform" --list "$dir/universe.json" \
-  --json-out "$dir/compare.json"
-[ "$selection" = pg-classifier ] || { echo "ERROR unknown selection $selection" >&2; exit 2; }
-python3 scripts/ci/pg_test_classifier.py classify --list "$dir/universe.json" --json-out "$dir/selection.json"
-ci plan --universe "$dir/universe.json" --only "$dir/selection.json" --archive "$archive" \
-  --workers 1 --sha "$sha" --scope "$scope" --rust-version 1.94.1 \
-  --nextest-version "$(cargo nextest --version | awk 'NR==1 {print $2}')" \
-  --target "$(rustc -vV | sed -n 's/^host: //p')" --output "$dir/plan"
+if [ "$phase" != run ]; then
+  cargo nextest archive --lib --archive-file "$archive"
+  cargo nextest list --archive-file "$archive" --workspace-remap "$GITHUB_WORKSPACE" \
+    --ignore-default-filter --message-format json >"$dir/universe.json"
+  python3 scripts/ci/rust_test_sources.py compare --platform "$platform" --list "$dir/universe.json" \
+    --json-out "$dir/compare.json"
+  python3 scripts/ci/pg_test_classifier.py classify --list "$dir/universe.json" --json-out "$dir/selection.json"
+  ci plan --universe "$dir/universe.json" --only "$dir/selection.json" --archive "$archive" \
+    --workers 1 --sha "$sha" --scope "$scope" --rust-version 1.94.1 \
+    --nextest-version "$(cargo nextest --version | awk 'NR==1 {print $2}')" \
+    --target "$(rustc -vV | sed -n 's/^host: //p')" --output "$dir/plan"
+fi
+# Verify again at the run boundary so changed or absent preparation cannot execute tests.
 ci verify-archive --plan "$dir/plan/plan.json" --worker 0 --archive "$archive" \
   --config "$dir/plan/worker-0.toml" --sha "$sha" --record "$record"
+if [ "$phase" = prepare ]; then
+  exit 0
+fi
 
 code=0
 env -u AGENTDESK_ROOT_DIR cargo nextest run --archive-file "$archive" --workspace-remap "$GITHUB_WORKSPACE" \
