@@ -503,7 +503,13 @@ async fn terminate_scoped(
         let (fence, proof) = tokio::task::spawn_blocking(move || probe.confirm())
             .await
             .map_err(|error| Indeterminate(error.to_string()))?
-            .map_err(Refused)?;
+            .map_err(|error| {
+                let retryable = error.retryable();
+                #[cfg(test)]
+                let retryable = retryable && !crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant("retired-read-refused");
+                if retryable { Indeterminate(format!("{error:?}")) }
+                else { Refused(format!("{error:?}")) }
+            })?;
         if !proof.matches(record) {
             return Err(Refused("retired execution changed".into()));
         }

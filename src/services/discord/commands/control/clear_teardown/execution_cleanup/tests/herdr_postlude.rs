@@ -53,6 +53,12 @@ fn case(name: &str, channel: u64, interrupted: bool) {
             assert_ne!(fx.row().await.routing_cleanup_state,"ended");
             fx.wake().await;
             row=cleanup::claim(&fx.pool,&fx.row().await).await.unwrap().unwrap();
+            rig.fail_next_process_read();
+            assert_eq!(run(&shared,&row).await,Response::Retry,"a failed retired read must remain retryable");
+            assert!(cleanup::respond(&fx.pool,&row,Response::Retry).await.unwrap());
+            fx.wake().await;
+            assert!(cleanup::due(&fx.pool,"claude",herdr::NODE).await.unwrap().iter().any(|next|next.id==row.id));
+            row=cleanup::claim(&fx.pool,&fx.row().await).await.unwrap().unwrap();
         }
         assert_eq!(run(&shared,&row).await,Response::Ended);
         let writes=rig.writes();
