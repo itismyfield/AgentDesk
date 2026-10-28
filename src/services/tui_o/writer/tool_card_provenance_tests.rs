@@ -222,3 +222,6 @@ async fn members_with_one_exact_origin_allow_a_card_despite_repeated_identical_c
     assert!(verified.collector.log.work.is_empty());
     assert_eq!(verified.writer.store().ledger().violation(), None);
 }
+
+#[path = "replay_metadata_tests.rs"]
+mod replay_metadata;

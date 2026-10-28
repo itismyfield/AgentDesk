@@ -12,11 +12,22 @@ use crate::services::tui_o::store::spool::source_key;
 /// Receives every owed record with its stored source, even when derivation yields nothing.
 pub trait Owe {
     fn owe(&mut self, source: &SourceId, record: &CapturedRecord, derived: Vec<Derived>);
+    fn finish_replay(
+        &mut self,
+        ledger: &crate::services::tui_o::store::ledger::LedgerState,
+    ) -> super::super::ReplaySummary;
 }
 
 impl Owe for VecDeque<Derived> {
     fn owe(&mut self, _: &SourceId, _: &CapturedRecord, derived: Vec<Derived>) {
         self.extend(derived);
+    }
+
+    fn finish_replay(
+        &mut self,
+        ledger: &crate::services::tui_o::store::ledger::LedgerState,
+    ) -> super::super::ReplaySummary {
+        super::super::replay::filter(ledger, |keep| self.retain(keep))
     }
 }
 

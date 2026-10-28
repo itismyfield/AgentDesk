@@ -81,6 +81,7 @@ pub(in crate::services::discord) async fn try_busy(
     deps: &router::IntakeDeps<'_>,
     provider: &ProviderKind,
     channel: ChannelId,
+    known_parent: Option<Option<ChannelId>>,
     gate: Option<fn(ChannelId, Option<ChannelId>) -> bool>,
     trigger: &'static str,
 ) -> bool {
@@ -88,9 +89,13 @@ pub(in crate::services::discord) async fn try_busy(
     if !health::InjectOrigin::queued_head_ready(provider, channel) {
         return false;
     }
-    let parent = session_runtime::resolve_thread_parent(deps.http, channel)
-        .await
-        .map(|(id, _)| id);
+    // Some(None) records a validated non-thread; only unresolved callers perform a lookup.
+    let parent = match known_parent {
+        Some(parent) => parent,
+        None => session_runtime::resolve_thread_parent(deps.http, channel)
+            .await
+            .map(|(id, _)| id),
+    };
     if !health::InjectOrigin::queued_head_gate_enabled(provider, channel, parent, gate) {
         return false;
     }

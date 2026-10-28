@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 135
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 136
 - Platform and third-party variables: 30
 
 ## AgentDesk variables
@@ -131,6 +131,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_RECOVERY_ANCHOR_REPOST` | `src/services/discord/recovery_paths/shared.rs` | #3610 PR-2: gate for the recovery anchor-repost fallback (`AGENTDESK_RECOVERY_ANCHOR_REPOST`). |
 | `AGENTDESK_RELAY_CIRCUIT_STAMP` | `src/services/discord/relay_recovery_circuit_alert_producer.rs` |  |
 | `AGENTDESK_RELEASE_TMUX_SESSION` | `src/cli/dcserver.rs` |  |
+| `AGENTDESK_REPLAY_MUTANT` | `src/services/tui_o/writer/replay.rs` | AGENTDESK_REPLAY_MUTANT selects faults only in dedicated mutation test builds. |
 | `AGENTDESK_REPORT_CHANNEL_ID` | `src/services/discord/restart_report.rs` |  |
 | `AGENTDESK_REPORT_PROVIDER` | `src/services/discord/restart_report.rs` |  |
 | `AGENTDESK_REPO_DIR` | `src/services/git/repo_resolver.rs` | Priority: `AGENTDESK_REPO_DIR` env -> scan all known roots for a git workspace -> `~/AgentDesk`. |

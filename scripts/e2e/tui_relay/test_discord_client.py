@@ -279,6 +279,25 @@ class DiscordClientSendPrompt(unittest.TestCase):
             "final [E2E:EDIT]",
         ])
 
+    def test_wait_returns_first_match_and_observes_poll_tail_edits(self):
+        client = DiscordClient(base_url="http://offline.invalid")
+        pending = {"id": "10", "content": "pending"}
+        old_tail = {"id": "12", "content": "tail-old"}
+        match = {"id": "11", "content": "target"}
+        edited_tail = {"id": "12", "content": "tail-new", "edited_timestamp": "edited"}
+        second_match = {"id": "13", "content": "target-again"}
+        predicate = mock.Mock(side_effect=lambda message: message["content"].startswith("target"))
+        with mock.patch.object(DiscordClient, "fetch_messages", side_effect=[
+                [old_tail, pending], [second_match, edited_tail, match]]) as fetch, \
+                mock.patch("time.sleep") as sleep:
+            found, observed = client.wait_for_message(
+                "41", predicate=predicate, after_id="9", timeout_s=30, poll_interval_s=7)
+        self.assertIs(found, match)
+        self.assertEqual(observed, [pending, old_tail, match, edited_tail, second_match])
+        self.assertEqual(predicate.call_args_list, [mock.call(pending), mock.call(old_tail), mock.call(match)])
+        self.assertEqual(fetch.call_args_list, [mock.call("41", after_id="9", limit=100)] * 2)
+        sleep.assert_called_once_with(7)
+
 
 class DiscordClientFetchMessages(unittest.TestCase):
     def setUp(self):

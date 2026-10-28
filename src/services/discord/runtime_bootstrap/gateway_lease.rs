@@ -407,6 +407,8 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                 Ok(Some(lease)) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
+                        provider = provider.as_str(),
+                        stage = "lease_acquired",
                         "  [{ts}] 🔐 GATEWAY-LEASE: {} acquired singleton lease",
                         provider.display_name()
                     );
@@ -562,7 +564,13 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
     let mut current_lease = Some(lease);
     // O admission follows this gate; each transition below lands before its lease effect.
     let gate = crate::services::tui_o::ownership::gate(provider.as_str());
-    gate.acquired();
+    let epoch = gate.acquired();
+    tracing::info!(
+        provider = provider.as_str(),
+        epoch,
+        stage = "gate_owned",
+        "[tui_o] gateway admission owned"
+    );
     tokio::spawn(async move {
         // Resolved once, inside the task because it may await bootstrap (#4356):
         // the self-id is stable for the life of the process, and a hot config

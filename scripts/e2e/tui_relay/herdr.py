@@ -405,7 +405,8 @@ def _run_checked(driver, scenario, args, client, run_id, result):
             return found
 
         def provider_author(step):
-            return assertions.provider_bot_id(driver.cell_provider(args.cell)) if step.get("relay_author") == "provider" else None
+            return assertions.provider_bot_id(driver.cell_provider(args.cell)) if (
+                step.get("relay_author") == "provider" or "wait_for_provider_hold_state" in step) else None
 
         def open_gap(index, marker=None):
             nonlocal gap_token
@@ -501,8 +502,10 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                     time.sleep(1)
             elif "wait_for_provider_hold_state" in step:
                 params = step["wait_for_provider_hold_state"]
-                wait(params["ok_marker"], float(params.get("timeout_s", 180)))
-                if params["late_marker"] in "\n".join(r.get("content", "") for r in window.raw_messages):
+                author = provider_author(step)
+                wait(params["ok_marker"], float(params.get("timeout_s", 180)), author=author)
+                if any(params["late_marker"] in r.get("content", "") for r in window.raw_messages
+                       if str((r.get("author") or {}).get("id") or "") == author):
                     raise assertions.AssertionError("Herdr hold already ended before operation")
                 result["herdr_observations"].append(observe(driver, args))
             elif "send_text_stop" in step:
