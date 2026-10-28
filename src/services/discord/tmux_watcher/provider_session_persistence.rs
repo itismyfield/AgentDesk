@@ -29,24 +29,32 @@ pub(super) fn resolve_persistable_provider_session_id(
     nonempty(observed_session_id).or_else(|| nonempty(cached_session_id))
 }
 
+/// Returns the selector persisted under this tmux session's own key.
 pub(super) async fn persist_watcher_provider_session_id(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     provider: &ProviderKind,
     tmux_session_name: &str,
     session_id: Option<&str>,
-) {
+    effects: crate::services::discord::scheduled_turn::ChannelEffects,
+) -> Option<String> {
     // #3095: when the TUI did not re-emit a session id this turn, fall back to
     // the durable in-memory selector so the DB row is refreshed on every
     // committed turn — not only on the rare turns that print the id.
+    // An isolated scheduled turn never reads or writes the channel's
+    // session; only its own observed id reaches its own tmux key.
+    let isolated = effects.suppressed();
     let session_id = {
         let mut data = shared.core.lock().await;
-        let session = data.sessions.get_mut(&channel_id).filter(|s| !s.cleared);
+        let session = data
+            .sessions
+            .get_mut(&channel_id)
+            .filter(|s| !s.cleared && !isolated);
         let cached_session_id = session.as_ref().and_then(|s| s.session_id.clone());
         let Some(session_id) =
             resolve_persistable_provider_session_id(session_id, cached_session_id.as_deref())
         else {
-            return;
+            return None;
         };
         if let Some(session) = session {
             session.restore_provider_session(Some(session_id.clone()));
@@ -97,6 +105,7 @@ pub(super) async fn persist_watcher_provider_session_id(
         tmux_session_name,
         channel_id.get()
     );
+    Some(session_id)
 }
 
 #[cfg(test)]
@@ -145,3 +154,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "provider_session_persistence_tests.rs"]
+mod isolation_tests;

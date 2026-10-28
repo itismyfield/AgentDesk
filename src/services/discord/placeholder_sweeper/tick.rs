@@ -1,4 +1,5 @@
-//! The sweeper task loop and the tick it runs: the row pass, then the durable drains.
+//! The sweeper task loop and the tick it runs: the row pass, then the durable drains. Orphan
+//! message deletes are drained by every execution runtime's own retry task, not here.
 
 use std::sync::Arc;
 
@@ -36,13 +37,12 @@ pub(in crate::services::discord) fn spawn_placeholder_sweeper(
             if should_log_sweep_report(tick.pass, sweeps_since_heartbeat) || tick.drained_any() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={} drained_abort_markers={} drained_abandon_requests={} swept_busy_retry_bindings={} swept_orphan_anchors={}",
+                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_abort_markers={} drained_abandon_requests={} swept_busy_retry_bindings={} swept_orphan_anchors={}",
                     provider.as_str(),
                     tick.pass.scanned,
                     tick.pass.stalled,
                     tick.pass.abandoned,
                     tick.pass.reclaimed_panels,
-                    tick.drained_orphans,
                     tick.drained_abort_markers,
                     tick.drained_abandon_requests,
                     tick.swept_busy_retry_bindings,
@@ -58,7 +58,6 @@ pub(in crate::services::discord) fn spawn_placeholder_sweeper(
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct TickReport {
     pass: SweepPassReport,
-    drained_orphans: usize,
     drained_abort_markers: usize,
     swept_orphan_anchors: usize,
     drained_abandon_requests: usize,
@@ -67,8 +66,7 @@ pub(super) struct TickReport {
 
 impl TickReport {
     fn drained_any(&self) -> bool {
-        self.drained_orphans > 0
-            || self.drained_abort_markers > 0
+        self.drained_abort_markers > 0
             || self.drained_abandon_requests > 0
             || self.swept_busy_retry_bindings > 0
             || self.swept_orphan_anchors > 0
@@ -83,12 +81,6 @@ pub(super) async fn run_placeholder_sweeper_tick(
     stalled_tracker: &mut StalledEditTracker,
 ) -> TickReport {
     let pass = run_placeholder_sweep_pass(http, shared, provider, stalled_tracker).await;
-    // #3003: retry any durably-queued orphan status-panel deletes whose
-    // inline reclaim failed transiently (and whose inflight row is gone, so
-    // there is no per-turn handle left). Independent of inflight lifecycle.
-    let drained_orphans =
-        super::super::status_panel_orphan_store::drain(http, shared, provider, &shared.token_hash)
-            .await;
     // #3296: reconcile durable aborted-anchor markers — retry the ✅ for
     // markers a terminal commit already covered, and apply the TTL'd
     // `⏳ → ⚠` fallback for anchors nothing ever covered (held while a
@@ -113,7 +105,6 @@ pub(super) async fn run_placeholder_sweeper_tick(
     let swept_busy_retry_bindings = super::super::busy_followup_retry_store::sweep_expired();
     TickReport {
         pass,
-        drained_orphans,
         drained_abort_markers,
         swept_orphan_anchors,
         drained_abandon_requests,
@@ -138,7 +129,7 @@ mod tests {
         Answer, MockDiscord, age_file, message_json, seed_backfill_row, tree_fingerprint,
     };
     use crate::services::discord::inflight::{InflightTurnState, save_inflight_state};
-    use crate::services::discord::{SharedData, runtime_store, status_panel_orphan_store};
+    use crate::services::discord::{SharedData, runtime_store};
     use crate::services::provider::ProviderKind;
 
     const PROVIDER: ProviderKind = ProviderKind::Codex;
@@ -227,9 +218,9 @@ mod tests {
         }
     }
 
-    /// Seeds the row-pass, orphan-panel, abort-marker and abandon fixtures on one channel
-    /// group (`base + 1..=6`); returns the channels touched.
-    fn seed_group(shared: &SharedData, base: u64) -> [u64; 5] {
+    /// Seeds the row-pass, abort-marker and abandon fixtures on one channel group
+    /// (`base + 1..=5`); returns the channels touched.
+    fn seed_group(shared: &SharedData, base: u64) -> [u64; 4] {
         let token = shared.token_hash.as_str();
         // Row pass: a stalled placeholder row.
         let row_channel = base + 1;
@@ -240,16 +231,6 @@ mod tests {
             &crate::services::discord::inflight::inflight_state_path(&root, &PROVIDER, row_channel),
             600,
         );
-        // Orphan panels: a pending bind and a stranded delete.
-        let panel_channel = base + 2;
-        status_panel_orphan_store::enqueue_pending_bind(
-            &PROVIDER,
-            token,
-            panel_channel,
-            panel_channel * 10 + 1,
-            None,
-        );
-        status_panel_orphan_store::enqueue(&PROVIDER, token, panel_channel, panel_channel * 10 + 4);
         // Abort marker store: a corrupt marker.
         let marker_channel = base + 3;
         write_corrupt_abort_marker(marker_channel);
@@ -271,18 +252,14 @@ mod tests {
         newer.full_response = "streamed".into();
         seed_backfill_row(&newer);
         abandon_request_store::enqueue(&PROVIDER, token, owner_channel, abandon(msg, 77)).unwrap();
-        for dir in ["discord_status_panel_orphans", "discord_abandon_requests"] {
-            for entry in walk(&runtime_store::runtime_root().unwrap().join(dir)) {
-                age_file(&entry, 3_600);
-            }
+        for entry in walk(
+            &runtime_store::runtime_root()
+                .unwrap()
+                .join("discord_abandon_requests"),
+        ) {
+            age_file(&entry, 3_600);
         }
-        [
-            row_channel,
-            panel_channel,
-            marker_channel,
-            abandon_channel,
-            owner_channel,
-        ]
+        [row_channel, marker_channel, abandon_channel, owner_channel]
     }
 
     fn walk(dir: &Path) -> Vec<PathBuf> {
@@ -299,7 +276,7 @@ mod tests {
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", temp.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
         let discord = MockDiscord::start_with(probe_answer()).await;
-        let [row, panel, marker, abandon_ch, owner] = seed_group(&shared, 6_325_400_200);
+        let [row, marker, abandon_ch, owner] = seed_group(&shared, 6_325_400_200);
         let runtime = runtime_store::runtime_root().unwrap();
 
         let mut tracker = StalledEditTracker::default();
@@ -311,24 +288,6 @@ mod tests {
         assert!(
             calls.iter().any(|c| c.starts_with("PATCH")),
             "stalled edit: {calls:?}"
-        );
-        assert_eq!(
-            discord.calls_for(panel),
-            vec![format!(
-                "DELETE /api/v10/channels/{panel}/messages/{}",
-                panel * 10 + 4
-            )]
-        );
-        let pending_bind = std::fs::read_to_string(
-            runtime
-                .join("discord_status_panel_orphans/codex")
-                .join(&shared.token_hash)
-                .join(format!("{panel}.json")),
-        )
-        .unwrap();
-        assert!(
-            pending_bind.contains("\"pending_bind_drain_cycles\": 2"),
-            "{pending_bind}"
         );
         assert!(
             channel_records(&runtime, marker).is_empty(),

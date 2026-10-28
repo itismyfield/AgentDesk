@@ -561,6 +561,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Coordinate origin and install state of a legacy restart replay; absent on every other row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_replay_coordinate: Option<LegacyReplayCoordinate>,
+    /// Scheduled-delivery isolation and committed outcome; `Legacy` on older rows.
+    #[serde(default)]
+    pub scheduled: crate::services::discord::scheduled_turn::ScheduledTurnMark,
 }
 
 #[cfg(test)]
@@ -1127,6 +1130,7 @@ impl InflightTurnState {
             replay_receipt_id: None,
             replay_hold_reasons: Vec::new(),
             legacy_replay_coordinate: None,
+            scheduled: crate::services::discord::scheduled_turn::ScheduledTurnMark::NotScheduled,
         }
     }
 

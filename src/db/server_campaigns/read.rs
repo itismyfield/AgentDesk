@@ -39,29 +39,42 @@ pub struct EvidenceRecord {
 }
 
 // One joined statement gives a coherent projection even during command commits.
-const PROJECTION: &str = "SELECT d.*, r.document AS run_document FROM server_campaign_definitions d \
-    LEFT JOIN server_campaign_runs r ON r.campaign_id = d.campaign_id AND r.run_id = d.run_id";
+const PROJECTION_BY_ID: &str = "SELECT d.*, r.document AS run_document FROM server_campaign_definitions d \
+    LEFT JOIN server_campaign_runs r ON r.campaign_id = d.campaign_id AND r.run_id = d.run_id \
+    WHERE d.campaign_id = $1";
+const PROJECTION_PAGE: &str = "SELECT d.*, r.document AS run_document FROM server_campaign_definitions d \
+    LEFT JOIN server_campaign_runs r ON r.campaign_id = d.campaign_id AND r.run_id = d.run_id \
+    ORDER BY d.campaign_id LIMIT $1 OFFSET $2";
 
-fn decode(row: sqlx::postgres::PgRow) -> StoreResult<CampaignState> {
-    let revision: i64 = row.try_get("revision")?;
-    let sequence: i64 = row.try_get("event_sequence")?;
-    let run: Option<Json<Run>> = row.try_get("run_document")?;
+#[derive(sqlx::FromRow)]
+struct Projection {
+    campaign_id: String,
+    revision: i64,
+    definition: Json<ValidatedDefinition>,
+    control: Json<CampaignControl>,
+    run_document: Option<Json<Run>>,
+    nodes: Json<BTreeMap<String, NodeRuntime>>,
+    event_sequence: i64,
+    last_event_at: Option<DateTime<Utc>>,
+}
+
+fn decode(row: Projection) -> StoreResult<CampaignState> {
     Ok(CampaignState {
-        id: row.try_get("campaign_id")?,
-        definition_revision: u64::try_from(revision).map_err(|_| StoreError::InconsistentState)?,
-        definition: row.try_get::<Json<ValidatedDefinition>, _>("definition")?.0,
-        control: row.try_get::<Json<CampaignControl>, _>("control")?.0,
-        run: run.map(|v| v.0),
-        nodes: row
-            .try_get::<Json<BTreeMap<String, NodeRuntime>>, _>("nodes")?
-            .0,
-        event_sequence: u64::try_from(sequence).map_err(|_| StoreError::InconsistentState)?,
-        last_event_at: row.try_get("last_event_at")?,
+        id: row.campaign_id,
+        definition_revision: u64::try_from(row.revision)
+            .map_err(|_| StoreError::InconsistentState)?,
+        definition: row.definition.0,
+        control: row.control.0,
+        run: row.run_document.map(|v| v.0),
+        nodes: row.nodes.0,
+        event_sequence: u64::try_from(row.event_sequence)
+            .map_err(|_| StoreError::InconsistentState)?,
+        last_event_at: row.last_event_at,
     })
 }
 
 pub async fn get(pool: &PgPool, id: &str) -> StoreResult<Option<CampaignState>> {
-    sqlx::query(&format!("{PROJECTION} WHERE d.campaign_id = $1"))
+    sqlx::query_as::<_, Projection>(PROJECTION_BY_ID)
         .bind(id)
         .fetch_optional(pool)
         .await?
@@ -73,7 +86,7 @@ pub(super) async fn get_in(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
 ) -> StoreResult<Option<CampaignState>> {
-    sqlx::query(&format!("{PROJECTION} WHERE d.campaign_id = $1"))
+    sqlx::query_as::<_, Projection>(PROJECTION_BY_ID)
         .bind(id)
         .fetch_optional(&mut **tx)
         .await?
@@ -82,32 +95,27 @@ pub(super) async fn get_in(
 }
 
 pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> StoreResult<Vec<CampaignState>> {
-    sqlx::query(&format!(
-        "{PROJECTION} ORDER BY d.campaign_id LIMIT $1 OFFSET $2"
-    ))
-    .bind(limit.clamp(1, 100))
-    .bind(offset.max(0))
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(decode)
-    .collect()
+    sqlx::query_as::<_, Projection>(PROJECTION_PAGE)
+        .bind(limit.clamp(1, 100))
+        .bind(offset.max(0))
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(decode)
+        .collect()
 }
 
 #[cfg(test)]
 pub async fn revisions(pool: &PgPool, id: &str) -> StoreResult<Vec<DefinitionRevision>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query_as::<_, (i64, Json<ValidatedDefinition>, Option<Json<ChangeReason>>)>(
         "SELECT revision, definition, change FROM server_campaign_revisions WHERE campaign_id = $1 ORDER BY revision DESC LIMIT 10",
     ).bind(id).fetch_all(pool).await?;
     rows.into_iter()
-        .map(|row| {
-            let revision: i64 = row.try_get("revision")?;
+        .map(|(revision, Json(definition), change)| {
             Ok(DefinitionRevision {
                 revision: u64::try_from(revision).map_err(|_| StoreError::InconsistentState)?,
-                definition: row.try_get::<Json<ValidatedDefinition>, _>("definition")?.0,
-                change: row
-                    .try_get::<Option<Json<ChangeReason>>, _>("change")?
-                    .map(|v| v.0),
+                definition,
+                change: change.map(|v| v.0),
             })
         })
         .collect()
@@ -141,7 +149,15 @@ pub async fn run_history(
     after: i64,
     limit: i64,
 ) -> StoreResult<Vec<RunSnapshot>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            Json<Run>,
+            Json<BTreeMap<String, NodeRuntime>>,
+            Json<ValidatedDefinition>,
+        ),
+    >(
         "SELECT sequence, document, nodes, definition_pin FROM server_campaign_run_history \
          WHERE campaign_id = $1 AND run_id = $2 AND sequence > $3 ORDER BY sequence LIMIT $4",
     )
@@ -152,17 +168,12 @@ pub async fn run_history(
     .fetch_all(pool)
     .await?;
     rows.into_iter()
-        .map(|row| {
-            let sequence: i64 = row.try_get("sequence")?;
+        .map(|(sequence, Json(run), Json(nodes), Json(definition_pin))| {
             Ok(RunSnapshot {
                 sequence: u64::try_from(sequence).map_err(|_| StoreError::InconsistentState)?,
-                run: row.try_get::<Json<Run>, _>("document")?.0,
-                nodes: row
-                    .try_get::<Json<BTreeMap<String, NodeRuntime>>, _>("nodes")?
-                    .0,
-                definition_pin: row
-                    .try_get::<Json<ValidatedDefinition>, _>("definition_pin")?
-                    .0,
+                run,
+                nodes,
+                definition_pin,
             })
         })
         .collect()
@@ -170,19 +181,16 @@ pub async fn run_history(
 
 #[cfg(test)]
 pub async fn attempts(pool: &PgPool, id: &str, run: &str) -> StoreResult<Vec<AttemptRecord>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query_as::<_, (Json<Attempt>, Json<ValidatedDefinition>)>(
         "SELECT document, definition_pin FROM server_campaign_attempts WHERE campaign_id = $1 AND run_id = $2 ORDER BY attempt_id",
     ).bind(id).bind(run).fetch_all(pool).await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(AttemptRecord {
-                attempt: row.try_get::<Json<Attempt>, _>("document")?.0,
-                definition_pin: row
-                    .try_get::<Json<ValidatedDefinition>, _>("definition_pin")?
-                    .0,
-            })
+    Ok(rows
+        .into_iter()
+        .map(|(Json(attempt), Json(definition_pin))| AttemptRecord {
+            attempt,
+            definition_pin,
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]

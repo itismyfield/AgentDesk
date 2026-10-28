@@ -1,5 +1,6 @@
 use super::production_nonce_tests::discord_message_json;
 use super::*;
+use crate::services::discord::outbound::outbound_fingerprint;
 use axum::{
     Json, Router,
     body::Body,
@@ -13,6 +14,138 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 type WirePayload = (Value, Vec<u8>);
+
+const MENTION_CONTENT: &str = "<@1234> @everyone @here <@&5678> 한국어";
+
+fn assert_user_only_mentions(payload: &Value) {
+    assert_eq!(
+        payload["allowed_mentions"]["parse"],
+        serde_json::json!(["users"])
+    );
+    assert!(payload["content"].as_str().unwrap().contains("<@1234>"));
+}
+
+async fn text_mentions_on_wire(
+    content: &str,
+    bot: &str,
+    summary: Option<&str>,
+    nonce: bool,
+) -> Vec<WirePayload> {
+    let (state, client, task) = client().await;
+    let (status, body) = send_resolved_manual_message(
+        &client,
+        &OutboundDeduper::new(),
+        ResolvedManualMessage {
+            channel_id_raw: 7001,
+            target: "channel:7001",
+            pg_pool: None,
+            record_transcript: false,
+            transcript_source_label: None,
+            notification: ManualNotification {
+                channel_id: "7001",
+                content,
+                bot,
+                source: "headless_turn",
+                summary,
+                delivery_id: nonce.then_some(ManualOutboundDeliveryId {
+                    correlation_id: "message_outbox:headless_turn:test:channel:7001",
+                    semantic_event_id: "message_outbox:41:deliver",
+                }),
+                headless_nonce_enabled: nonce,
+                attachment: None,
+            },
+        },
+    )
+    .await;
+    assert_eq!(status, "200 OK", "wire delivery failed: {body}");
+    let payloads = state.payloads.lock().unwrap().clone();
+    task.abort();
+    payloads
+}
+
+#[tokio::test]
+async fn plain_wire_allowed_mentions_preserve_users() {
+    let payloads = text_mentions_on_wire(MENTION_CONTENT, "notify", None, false).await;
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0].0["content"], MENTION_CONTENT);
+    assert!(payloads[0].0.get("nonce").is_none());
+    assert_user_only_mentions(&payloads[0].0);
+}
+
+#[tokio::test]
+async fn nonce_wire_allowed_mentions_preserve_users_and_nonce() {
+    let payloads = text_mentions_on_wire(MENTION_CONTENT, "notify", None, true).await;
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0].0["content"], MENTION_CONTENT);
+    assert_eq!(
+        payloads[0].0["nonce"],
+        outbound_fingerprint(&["headless-message-outbox-delivery", "41"])
+    );
+    assert_eq!(payloads[0].0["enforce_nonce"], true);
+    assert_user_only_mentions(&payloads[0].0);
+}
+
+#[tokio::test]
+async fn chunked_wire_allowed_mentions_preserve_users_in_every_request() {
+    let content = format!("{MENTION_CONTENT}\n").repeat(100);
+    let payloads = text_mentions_on_wire(&content, "notify", None, false).await;
+    let expected = split_message(&content);
+    assert!(payloads.len() > 1);
+    assert_eq!(payloads.len(), expected.len());
+    for ((payload, _), chunk) in payloads.iter().zip(expected) {
+        assert_eq!(payload["content"], chunk);
+        assert_user_only_mentions(payload);
+    }
+}
+
+#[tokio::test]
+async fn text_attachment_wire_allowed_mentions_preserve_summary_users() {
+    let content = MENTION_CONTENT.repeat(100);
+    let payloads = text_mentions_on_wire(&content, "announce", Some(MENTION_CONTENT), false).await;
+    assert_eq!(payloads.len(), 1);
+    let (payload, body) = &payloads[0];
+    assert_user_only_mentions(payload);
+    assert_eq!(payload["attachments"].as_array().unwrap().len(), 1);
+    assert!(String::from_utf8_lossy(body).contains("name=\"payload_json\""));
+    assert!(
+        body.windows(content.len())
+            .any(|bytes| bytes == content.as_bytes())
+    );
+}
+
+#[tokio::test]
+async fn image_wire_allowed_mentions_preserve_users_and_scheduled_nonce() {
+    let options = super::super::send_gate::ManualOutboundOptions {
+        trusted_internal_outbox: true,
+        image_attachment: Some(Arc::new(
+            crate::services::message_outbox::StoredOutboxAttachment {
+                filename: "image.png".into(),
+                content_type: "image/png".into(),
+                data: b"image bytes".to_vec(),
+            },
+        )),
+        ..Default::default()
+    };
+    let (status, body, payloads) = deliver_options_on_wire(
+        options,
+        MENTION_CONTENT,
+        "message_outbox:scheduled_message:test:channel:7001",
+        "message_outbox:41:deliver",
+    )
+    .await;
+    assert_eq!(status, "200 OK", "wire delivery failed: {body}");
+    assert_eq!(payloads.len(), 1);
+    let (payload, body) = &payloads[0];
+    assert_eq!(payload["content"], MENTION_CONTENT);
+    assert_eq!(
+        payload["nonce"],
+        outbound_fingerprint(&["scheduled-image-message-outbox-delivery", "41"])
+    );
+    assert_eq!(payload["enforce_nonce"], true);
+    assert_eq!(payload["attachments"].as_array().unwrap().len(), 1);
+    assert!(String::from_utf8_lossy(body).contains("name=\"payload_json\""));
+    assert_user_only_mentions(payload);
+}
 
 #[derive(Clone, Default)]
 struct Wire {

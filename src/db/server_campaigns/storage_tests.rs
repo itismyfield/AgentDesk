@@ -830,3 +830,119 @@ async fn execution_stays_unavailable_and_legacy_crud_cas_issue_sync_unchanged_pg
     }
     h.close().await;
 }
+
+#[tokio::test]
+async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
+    use crate::db::{campaigns as legacy, postgres};
+    use sqlx::migrate::Migrator;
+
+    let fixture = TestPostgresDb::create().await;
+    let pool = postgres::connect_test_pool(&fixture.database_url, "server campaign upgrade")
+        .await
+        .unwrap();
+    let embedded = sqlx::migrate!("./migrations/postgres");
+    let version = 156;
+    let main = Migrator::with_migrations(
+        embedded
+            .iter()
+            .filter(|m| m.version != version)
+            .cloned()
+            .collect(),
+    );
+    let main_max = main.iter().map(|m| m.version).max().unwrap();
+    assert_eq!(main_max, 155);
+    assert!(version > main_max);
+    main.run(&pool).await.unwrap();
+    let input = serde_json::from_value(serde_json::json!({
+        "title": "Legacy before upgrade", "status": "active", "round": 1,
+        "nodes": [{"id": "a", "title": "A", "status": "pending", "stage": "plan", "round": 1}]
+    }))
+    .unwrap();
+    let saved = legacy::create(&pool, "legacy-before-upgrade".into(), input)
+        .await
+        .unwrap();
+    let saved = serde_json::to_value(saved).unwrap();
+    type MigrationRow = (i64, Vec<u8>, bool, DateTime<Utc>, i64);
+    const RECORDS: &str = "SELECT version, checksum, success, installed_on, execution_time FROM _sqlx_migrations ORDER BY version";
+    const TABLES: &str = "SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public' AND tablename LIKE 'server_campaign_%'";
+    let before = sqlx::query_as::<_, MigrationRow>(RECORDS)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(before.last().unwrap().0, main_max);
+    assert!(before.iter().all(|row| row.2));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(TABLES)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        postgres::migration_status(&pool)
+            .await
+            .unwrap()
+            .pending_versions,
+        vec![version]
+    );
+
+    // Run the production migrator over real main records, without editing its journal.
+    postgres::migrate(&pool).await.unwrap();
+    let after = sqlx::query_as::<_, MigrationRow>(RECORDS)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        after
+            .iter()
+            .filter(|row| row.0 != version)
+            .cloned()
+            .collect::<Vec<_>>(),
+        before
+    );
+    let added = after.iter().find(|row| row.0 == version).unwrap();
+    let migration = embedded.iter().find(|m| m.version == version).unwrap();
+    assert!(added.2);
+    assert_eq!(added.1.as_slice(), migration.checksum.as_ref());
+    assert_eq!(after.len(), before.len() + 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(TABLES)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        11
+    );
+    assert_eq!(
+        serde_json::to_value(legacy::get(&pool, "legacy-before-upgrade").await.unwrap()).unwrap(),
+        saved
+    );
+    assert_eq!(
+        serde_json::to_value(
+            legacy::history(&pool, "legacy-before-upgrade")
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::json!([saved])
+    );
+    let status = postgres::migration_status(&pool).await.unwrap();
+    assert!(status.pending_versions.is_empty());
+    assert!(status.missing_from_resolved.is_empty());
+    postgres::migrate(&pool).await.unwrap();
+    assert_eq!(
+        sqlx::query_as::<_, MigrationRow>(RECORDS)
+            .fetch_all(&pool)
+            .await
+            .unwrap(),
+        after
+    );
+    assert!(
+        postgres::migration_status(&pool)
+            .await
+            .unwrap()
+            .pending_versions
+            .is_empty()
+    );
+    pool.close().await;
+    fixture.drop().await;
+}

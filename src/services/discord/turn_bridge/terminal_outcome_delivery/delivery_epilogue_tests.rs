@@ -332,6 +332,7 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
             bridge_relay_delegated_to_watcher: false,
             watcher_delivery_pin: None,
             inflight_generation: 0,
+            transcript_terminal_error: false,
         },
         DeliveryEpilogueState {
             response_sent_offset: &mut response_sent_offset,
@@ -816,6 +817,7 @@ impl TerminalDeliveryDriver {
                 bridge_tui_gate_outcome_early: Some(
                     crate::services::discord::tmux::TuiCompletionGateOutcome::NotGated,
                 ),
+                transcript_terminal_error: false,
             },
             TerminalOutcomeDeliveryState {
                 shared_owned: Arc::clone(&self.shared),
@@ -1883,5 +1885,49 @@ fn bundle_external_completion_requires_the_admitted_native_user_range() {
             _ => unreachable!(),
         }
         assert!(!confirmed(&changed), "native proof refuses {defect}");
+    }
+}
+
+/// The delivery commit stores the scheduled outcome from the same transcript
+/// facts the postlude classifies, so a restart settles the turn the same way.
+#[tokio::test]
+async fn the_delivery_commit_stores_the_scheduled_outcome_of_its_transcript() {
+    use crate::services::discord::scheduled_turn::ScheduledTurnMark;
+    use crate::services::scheduled_messages::turn_completion::ScheduledTurnOutcome as Outcome;
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    for (terminal_error, cancelled, expected) in [
+        (false, false, Some(Outcome::Delivered)),
+        (true, false, Some(Outcome::ProviderError)),
+        (false, true, None),
+    ] {
+        let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+        driver.inflight.scheduled = ScheduledTurnMark::Scheduled {
+            turn_id: "terminal-delivery-driver-5191".to_string(),
+            isolated: true,
+            outcome: None,
+        };
+        crate::services::discord::inflight::save_inflight_state(&driver.inflight).unwrap();
+        driver.inflight = crate::services::discord::inflight::load_inflight_state(
+            &ProviderKind::Claude,
+            DRIVER_CHANNEL_ID,
+        )
+        .expect("marked driver row");
+        let (mut ctx, state) = driver.parts();
+        ctx.transcript_terminal_error = terminal_error;
+        ctx.cancelled = cancelled;
+        let output =
+            tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+                .await
+                .expect("terminal outcome delivery must not hang");
+        let case = format!("terminal_error={terminal_error} cancelled={cancelled}");
+        if !cancelled {
+            assert!(output.terminal_delivery_committed, "{case}");
+        }
+        let stored = crate::services::discord::inflight::load_inflight_state(
+            &ProviderKind::Claude,
+            DRIVER_CHANNEL_ID,
+        )
+        .and_then(|row| row.scheduled.outcome());
+        assert_eq!(stored, expected, "{case}");
     }
 }

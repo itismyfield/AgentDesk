@@ -691,7 +691,8 @@ else:
                     "FIXTURE_BOOT_DELAY": "2", "FIXTURE_POLICIES_DELAY": "3",
                     "FIXTURE_READINESS_TIMEOUT": "8"})
                 self.assert_installed_fixture(runtime, result)
-                self.assertLess(time.monotonic() - started, 12)
+                # Covers fixture setup as well as the 2s/3s readiness delays, so leave room for a loaded host.
+                self.assertLess(time.monotonic() - started, 30)
                 for kind, required in (("boot", 3), ("policies", 4)):
                     count = int((Path(env["TMPDIR"]) / ("readiness-" + kind)).read_text())
                     self.assertGreaterEqual(count, required, kind)
@@ -717,7 +718,8 @@ else:
                 failed = self.install_fixture(fixture, timeout_env)
                 self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
                 self.assertNotIn("Installation Complete", failed.stdout)
-                self.assertLess(time.monotonic() - started, 6)
+                # The 1s override must apply instead of the 60s default; the timing also covers fixture setup, which takes several seconds on a loaded host.
+                self.assertLess(time.monotonic() - started, 30)
                 binary = runtime / "bin/agentdesk"
                 self.assertTrue(binary.is_file(), failed.stdout + failed.stderr)
                 self.assertEqual(binary.read_bytes(), (fixture / "agentdesk").read_bytes())

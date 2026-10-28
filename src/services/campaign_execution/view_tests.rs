@@ -198,15 +198,16 @@ fn stop_requested_confirmed_and_stopped_serialize_separately_with_unknown_lock()
         rejection(&missing, PublicCommand::EditDefinition),
         Some(RejectionCode::SessionsNotGone)
     );
-    let mut unknown = stopped.clone();
-    unknown.run.as_mut().unwrap().sessions.push(SessionRecord {
-        identity: binding(&stopped).session,
-        attempt_id: "attempt".into(),
-        observation: SessionObservation::Unknown {
-            reason: "host unreachable".into(),
-            last_observed_at: None,
+    let unknown = step(
+        &stopped,
+        Command::ObserveSession {
+            identity: binding(&stopped).session,
+            observation: SessionObservation::Unknown {
+                reason: "host unreachable".into(),
+                last_observed_at: None,
+            },
         },
-    });
+    );
     let projected = view(&unknown, now());
     assert!(projected.unknown);
     assert_eq!(
