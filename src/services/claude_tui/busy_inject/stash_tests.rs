@@ -65,6 +65,7 @@ const FAST: Timing = Timing {
 /// A scripted Claude TUI behind `tmux`: composer, stash, the single-slot C-s, a submit handing the
 /// stash back, attach generation, a person, a barrier, and a faint idle placeholder only `-e` keeps.
 /// `drop.Enter` counts Enters the TUI ignores; `mute` loses the record, `late` lands it at a capture.
+/// An idle Enter on an empty composer submits the shown placeholder, counted in `suggested`.
 pub(crate) const FAKE_TUI: &str = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
@@ -87,7 +88,12 @@ cs() {
   elif [ -f "$d/stash" ]; then restore; fi
 }
 enter() {
-  [ -s "$d/composer" ] || return 0
+  if [ ! -s "$d/composer" ]; then
+    if [ -s "$d/placeholder" ] && ! grep -q 'esc to interrupt' "$d/head"; then
+      { cat "$d/placeholder"; echo; } >> "$d/suggested"
+    fi
+    return 0
+  fi
   rec='@T@'; [ ! -f "$d/late" ] || rec="$d/late.rec"; [ ! -f "$d/mute" ] || rec=/dev/null
   # The acceptance record carries what the composer held at Enter.
   awk 'BEGIN { printf "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\"" }

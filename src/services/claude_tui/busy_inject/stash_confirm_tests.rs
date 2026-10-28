@@ -141,3 +141,23 @@ fn a_held_composer_lock_keeps_the_finishing_enter_off() {
     assert_eq!(result, MISSING);
     assert_eq!(tui.applied(), ["paste", "Enter"]);
 }
+
+/// The first Enter took the paste, its record is lost and the turn ends: the idle box shows a
+/// faint suggestion, even one drawn exactly like this paste's chip, and it takes no Enter.
+#[test]
+fn a_faint_suggestion_after_the_turn_takes_no_enter() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let lines = frame("iMessage", "200", "ann", "", LONG)
+        .matches('\n')
+        .count();
+    let chip = format!("[Pasted text #1 +{lines} lines]");
+    for suggestion in ["Try \"edit <filepath> to...\"", chip.as_str()] {
+        let tui = folded("");
+        tui.put("mute", "1");
+        tui.put("placeholder", suggestion);
+        let idle = || tui.put("head", "⏺ Done.\n\n");
+        assert_eq!(submit(&tui, false, idle), MISSING, "{suggestion}");
+        assert_eq!(tui.applied(), ["paste", "Enter"], "{suggestion}");
+        assert_eq!(tui.get("suggested"), None, "{suggestion}");
+    }
+}

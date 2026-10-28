@@ -93,3 +93,63 @@ fn a_previous_same_author_drain_does_not_contaminate_the_next_receipt() {
     );
     assert_eq!(receipts[0]["row"], "enqueue-b");
 }
+
+/// A previous frame that extends the next one is that attempt's drain, never the next receipt.
+#[test]
+fn a_previous_frame_containing_the_next_one_is_not_its_receipt() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    std::fs::write(&path, "").unwrap();
+    let session = format!("receipt-prefix-{}", uuid::Uuid::new_v4());
+    let body = "첫 줄\n둘째 줄\n셋째 줄";
+    let first = frame(
+        "discord",
+        "720205",
+        "ann",
+        "ca720261",
+        &format!("{body}\n추가 지시"),
+    );
+    let second = frame("discord", "720205", "ann", "ca720262", body);
+    assert!(first.contains(&second));
+    let append = |record: serde_json::Value| {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{record}").unwrap();
+    };
+    history::register(("claude", &session, "ca720261", "720205"), &path, 0, &first).unwrap();
+    append(json!({
+        "type": "queue-operation", "operation": "enqueue",
+        "uuid": "enqueue-a", "content": first,
+    }));
+    let offset = std::fs::metadata(&path).unwrap().len();
+    history::register(
+        ("claude", &session, "ca720262", "720205"),
+        &path,
+        offset,
+        &second,
+    )
+    .unwrap();
+    append(json!({
+        "type": "attachment",
+        "attachment": {
+            "type": "queued_command", "commandMode": "prompt",
+            "source_uuid": "command-a", "prompt": first,
+        },
+    }));
+    assert_eq!(
+        transcript_submission(&path, offset, "ca720262", Some(&second)),
+        None,
+        "A's drain contains B's frame but is A's"
+    );
+    append(json!({
+        "type": "queue-operation", "operation": "enqueue",
+        "uuid": "enqueue-b", "content": second,
+    }));
+    assert_eq!(
+        transcript_submission(&path, offset, "ca720262", Some(&second)),
+        Some(true)
+    );
+}

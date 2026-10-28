@@ -783,8 +783,13 @@ fn run_with(
             busy_inject::inject_report
         };
         let report = report(pane, &request, Some(input.channel), &busy_inject::TIMING);
-        let confirm = || busy_inject::confirm(pane, &request, &report, &busy_inject::TIMING);
-        (report.outcome, received.then(confirm).flatten())
+        let timing = &busy_inject::TIMING;
+        if !received {
+            busy_inject::collect_receipt(&request, &report, timing);
+            return (report.outcome, None);
+        }
+        let receipt = busy_inject::confirm(pane, &request, &report, timing);
+        (report.outcome, receipt)
     };
     // A panic may come after the paste, so it is reported like any later failure.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));

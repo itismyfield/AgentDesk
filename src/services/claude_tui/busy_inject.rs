@@ -227,7 +227,10 @@ pub(super) fn transcript_submission(
                     {
                         return Some(confirmed);
                     }
-                } else if text.contains(expected) {
+                } else if text.contains(expected)
+                    // A row that is another attempt's whole frame is that attempt's drain.
+                    && !crate::services::tui_input::human_frame::history::known(&text)
+                {
                     return Some(false);
                 }
             }
@@ -470,6 +473,28 @@ fn inject_locked(
         );
     }
     report
+}
+
+/// Records a sent paste's receipt in the frame ledger off the caller's thread; the result stays
+/// Enter-terminal, so nothing is retried and a missing receipt confirms nothing.
+pub(crate) fn collect_receipt(request: &Request<'_>, report: &Report, timing: &Timing) {
+    let Some(sent) = report.sent.clone() else {
+        return;
+    };
+    let (path, nonce) = (request.transcript.to_path_buf(), request.nonce.to_string());
+    let (window, poll) = (timing.confirm_window, timing.confirm_poll);
+    let _ = std::thread::Builder::new()
+        .name("claude-receipt".into())
+        .spawn(move || {
+            let receipt = (
+                path.as_path(),
+                sent.offset,
+                nonce.as_str(),
+                sent.text.as_str(),
+            );
+            let result = await_receipt(receipt, Instant::now() + window, poll);
+            tracing::debug!(%nonce, ?result, "Claude injection receipt diagnostic");
+        });
 }
 
 /// The transcript's answer to a sent paste: one window, at most one finishing Enter under the
