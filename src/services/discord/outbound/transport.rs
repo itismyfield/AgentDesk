@@ -330,6 +330,7 @@ pub(crate) struct HttpOutboundClient {
     client: reqwest::Client,
     token: String,
     discord_api_base: String,
+    allowed_mentions: Option<serenity::CreateAllowedMentions>,
 }
 
 impl HttpOutboundClient {
@@ -342,7 +343,16 @@ impl HttpOutboundClient {
             client,
             token: token.into(),
             discord_api_base: discord_api_base.into(),
+            allowed_mentions: None,
         }
+    }
+
+    pub(in crate::services::discord) fn with_allowed_mentions(
+        mut self,
+        allowed_mentions: serenity::CreateAllowedMentions,
+    ) -> Self {
+        self.allowed_mentions = Some(allowed_mentions);
+        self
     }
 }
 
@@ -358,6 +368,7 @@ impl DiscordOutboundClient for HttpOutboundClient {
             &self.discord_api_base,
             target_channel,
             content,
+            self.allowed_mentions.as_ref(),
         )
         .await
     }

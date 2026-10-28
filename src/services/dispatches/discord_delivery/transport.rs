@@ -1,3 +1,4 @@
+use poise::serenity_prelude::CreateAllowedMentions;
 use sqlx::PgPool;
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
@@ -292,13 +293,18 @@ pub(crate) async fn post_raw_message_once(
     base_url: &str,
     channel_id: &str,
     message: &str,
+    allowed_mentions: Option<&CreateAllowedMentions>,
 ) -> Result<String, DispatchMessagePostError> {
     let message_url = discord_api_url(base_url, &format!("/channels/{channel_id}/messages"));
+    let mut payload = serde_json::json!({"content": message});
+    if let Some(allowed_mentions) = allowed_mentions {
+        payload["allowed_mentions"] = serde_json::json!(allowed_mentions);
+    }
     let response = send_with_rate_limit_retry(|| {
         client
             .post(&message_url)
             .header("Authorization", format!("Bot {}", token))
-            .json(&serde_json::json!({"content": message}))
+            .json(&payload)
     })
     .await
     .map_err(|error| {

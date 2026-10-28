@@ -126,12 +126,14 @@ pub(in crate::services::discord) async fn send_channel_message(
     dispatch_channel_message(http, channel_id, message).await
 }
 
-async fn dispatch_channel_message(
+pub(in crate::services::discord) async fn dispatch_channel_message(
     http: &serenity::Http,
     channel_id: ChannelId,
     message: CreateMessage,
 ) -> serenity::Result<Message> {
-    channel_id.send_message(http, message).await
+    channel_id
+        .send_message(http, message.allowed_mentions(relay_allowed_mentions()))
+        .await
 }
 
 /// Send an idempotent create. With `enforce_nonce`, Discord returns the
