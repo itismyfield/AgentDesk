@@ -186,29 +186,41 @@ fn observe_resume_plan(turn: &HerdrTurn<'_>, runtime: &Handle) {
         "claude/{}/{}:{}",
         turn.owner.discord_token_hash, turn.owner.owner_node, turn.owner.logical_key,
     );
-    let plan = runtime.block_on(super::herdr_resume_plan::resolve(
-        turn.pool,
-        super::herdr_resume_plan::Request {
-            session_key: &session_key,
-            discord_token_hash: &turn.owner.discord_token_hash,
-            logical_key: &turn.owner.logical_key,
-            channel_id: turn.channel_id,
-            working_dir: Path::new(turn.working_dir),
-            requested_session_id: turn.requested_session_id,
-            force_fresh: turn.force_fresh,
-            claude_home: None,
-        },
-    ));
-    let diagnostic = plan.diagnostic();
+    let started = std::time::Instant::now();
+    let diagnostic = if let Some(HostedRecord::Known(record)) = turn.row
+        && matches!(record.state, HostedState::Bound | HostedState::Pending)
+    {
+        serde_json::json!({"mode":"plan_only", "decision":"existing_hosted", "state":record.state})
+    } else {
+        let plan = runtime.block_on(super::herdr_resume_plan::resolve(
+            turn.pool,
+            super::herdr_resume_plan::Request {
+                session_key: &session_key,
+                discord_token_hash: &turn.owner.discord_token_hash,
+                logical_key: &turn.owner.logical_key,
+                channel_id: turn.channel_id,
+                working_dir: Path::new(turn.working_dir),
+                requested_session_id: turn.requested_session_id,
+                force_fresh: turn.force_fresh,
+                claude_home: None,
+            },
+        ));
+        plan.diagnostic()
+    };
     // Planning carries no launch authority; the existing execution path remains authoritative.
     tracing::info!(
         target: "agentdesk::claude_migration_shadow",
         channel = turn.channel_id,
+        resolver_elapsed_us = started.elapsed().as_micros() as u64,
         classification = diagnostic["decision"].as_str().unwrap_or("hold"),
         expected_native_session_id = diagnostic["expected_native_session_id"].as_str().unwrap_or(""),
         plan = %diagnostic,
         "Claude migration plan only"
     );
+    #[cfg(test)]
+    tracing::debug!(target: "agentdesk::claude_migration_dispatch_timing",
+        observer_elapsed_us = started.elapsed().as_micros() as u64,
+        "Shadow observer completed");
 }
 
 /// Runs one turn on a blocking thread inside the runtime; every error leaves the pane as it is.

@@ -307,15 +307,52 @@ pub(crate) enum CorruptKind {
 /// Every record of `channel_id`, or the first line that is unreadable or out of `seq` order.
 /// A torn tail is not corruption: it was never published and the writer cuts it off on load.
 pub(crate) fn records_strict(channel_id: u64) -> io::Result<Result<Vec<BindingEvent>, Corrupt>> {
+    read_strict_snapshot(channel_id, |event: &BindingEvent| event.seq, false)
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct StrictBindingRecord {
+    pub event: BindingEvent,
+    pub verified: bool,
+}
+
+#[cfg(unix)]
+pub(crate) fn records_strict_verified(
+    channel_id: u64,
+) -> io::Result<Result<Vec<StrictBindingRecord>, Corrupt>> {
+    read_strict_snapshot(channel_id, |record: &Logged| record.event.seq, true).map(|records| {
+        records.map(|records| {
+            records
+                .into_iter()
+                .map(|record| StrictBindingRecord {
+                    event: record.event,
+                    verified: record.verified,
+                })
+                .collect()
+        })
+    })
+}
+
+fn read_strict_snapshot<T: DeserializeOwned>(
+    channel_id: u64,
+    seq: impl Fn(&T) -> u64,
+    timed: bool,
+) -> io::Result<Result<Vec<T>, Corrupt>> {
     let Some(path) = log_path(channel_id)? else {
         return Ok(Ok(Vec::new()));
     };
-    let _logs = lock_logs();
+    let waiting = std::time::Instant::now();
+    let logs = lock_logs();
+    let acquired = std::time::Instant::now();
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error),
     };
+    let lock_hold_us = acquired.elapsed().as_micros() as u64;
+    // Only the committed byte snapshot needs the mutex; parsing owns those bytes.
+    drop(logs);
     let complete = bytes
         .iter()
         .rposition(|b| *b == b'\n')
@@ -323,16 +360,27 @@ pub(crate) fn records_strict(channel_id: u64) -> io::Result<Result<Vec<BindingEv
     let lines = bytes[..complete].split(|b| *b == b'\n');
     let mut records = Vec::new();
     for (line, text) in (1..).zip(lines.filter(|l| !l.is_empty())) {
-        let Ok(record) = serde_json::from_slice::<BindingEvent>(text) else {
-            let kind = CorruptKind::Unparseable;
-            return Ok(Err(Corrupt { line, kind }));
+        let Ok(record) = serde_json::from_slice::<T>(text) else {
+            return Ok(Err(Corrupt {
+                line,
+                kind: CorruptKind::Unparseable,
+            }));
         };
-        if record.seq != line {
-            let (expected, found) = (line, record.seq);
-            let kind = CorruptKind::SeqGap { expected, found };
-            return Ok(Err(Corrupt { line, kind }));
+        if seq(&record) != line {
+            return Ok(Err(Corrupt {
+                line,
+                kind: CorruptKind::SeqGap {
+                    expected: line,
+                    found: seq(&record),
+                },
+            }));
         }
         records.push(record);
+    }
+    if timed {
+        tracing::debug!(target: "agentdesk::claude_migration_history_timing",
+            lock_wait_us = acquired.duration_since(waiting).as_micros() as u64,
+            lock_hold_us, bytes = bytes.len(), records = records.len(), "Strict binding history read");
     }
     Ok(Ok(records))
 }

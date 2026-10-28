@@ -734,3 +734,324 @@ fn a_shadow_nonce_probe_neither_creates_nor_chmods_the_session_directory() {
         0o755
     );
 }
+
+fn source(fx: &Fixture, sid: &str) -> SourceId {
+    let path = fx.transcript(&fx.cwd, sid);
+    let file = read_file(&path).unwrap().unwrap();
+    SourceId {
+        session_id: sid.into(),
+        path,
+        dev: file.dev,
+        ino: file.ino,
+    }
+}
+
+fn transition_fixture(clear: bool) -> (Fixture, BindingContext, Vec<BindingEvent>) {
+    use crate::services::tui_prompt_dedupe::binding_events::BindingCause;
+    let fx = Fixture::new();
+    let first = source(&fx, &uuid::Uuid::new_v4().to_string());
+    let next = source(&fx, &fx.sid);
+    let mut own = context(&fx);
+    own.expected_native_session_id = Some(first.session_id.clone());
+    let start = event(&fx, first.clone(), &own.execution_nonce);
+    let mut switched = event(&fx, next.clone(), &own.execution_nonce);
+    switched.seq = if clear { 3 } else { 2 };
+    switched.old = Some(first.clone());
+    switched.cause = if clear {
+        BindingCause::Clear
+    } else {
+        BindingCause::Unknown
+    };
+    switched.evidence.hook_event = Some(
+        if clear {
+            "session_start"
+        } else {
+            "user_prompt_submit"
+        }
+        .into(),
+    );
+    let mut history = vec![start];
+    if clear {
+        let mut pending = switched.clone();
+        pending.seq = 2;
+        pending.new = BindingTarget::Pending {
+            payload_session_id: next.session_id.clone(),
+            payload_transcript_path: Some(next.path.display().to_string()),
+        };
+        history.push(pending);
+        switched.new = BindingTarget::Resolved {
+            pending_seq: 2,
+            source: next,
+        };
+    }
+    history.push(switched);
+    (fx, own, history)
+}
+
+#[test]
+fn completed_clear_and_continuation_reconcile_the_immutable_launch_selector() {
+    for clear in [false, true] {
+        let (fx, own, history) = transition_fixture(clear);
+        let plan = evaluate_verified(
+            fx.request(),
+            Ok(Some(fx.database())),
+            RuntimeObservation::Present(fx.binding(&fx.path(&fx.cwd, &fx.sid))),
+            Ok(Some(own)),
+            Ok(history
+                .into_iter()
+                .map(|event| StrictBindingRecord {
+                    event,
+                    verified: true,
+                })
+                .collect()),
+        );
+        assert!(
+            matches!(&plan, Plan::Resume(source, ..) if source.session_id == fx.sid),
+            "clear={clear}: {:?}",
+            plan.diagnostic()
+        );
+    }
+}
+
+#[test]
+fn a_different_old_provider_root_is_not_definite_transcript_absence() {
+    let fx = Fixture::new();
+    let old_home = fx.root.path().join("old-home");
+    let path = old_home
+        .join("projects")
+        .join(encode_project_path(&fx.cwd))
+        .join(format!("{}.jsonl", fx.sid));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "{}\n").unwrap();
+    let mut own = context(&fx);
+    own.provider_root = Some(old_home.join("projects"));
+    for new_exists in [false, true] {
+        if new_exists {
+            fx.transcript(&fx.cwd, &fx.sid);
+        }
+        let plan = evaluate(
+            fx.request(),
+            Ok(Some(fx.database())),
+            RuntimeObservation::Missing,
+            Ok(Some(own.clone())),
+            Ok(Vec::new()),
+        );
+        assert!(
+            matches!(&plan, Plan::Hold(..)),
+            "new_exists={new_exists}: {:?}",
+            plan.diagnostic()
+        );
+    }
+}
+
+#[test]
+fn source_transitions_require_verified_links_pending_proof_and_one_nonce() {
+    for clear in [false, true] {
+        for fault in [
+            "unverified",
+            "missing",
+            "wrong_old",
+            "nonce",
+            "aba",
+            "pending_sid",
+            "pending_path",
+            "pending_seq",
+        ] {
+            if !clear && fault.starts_with("pending_") {
+                continue;
+            }
+            let (fx, own, mut history) = transition_fixture(clear);
+            let mut verified = true;
+            match fault {
+                "unverified" => verified = false,
+                "missing" => {
+                    history.remove(0);
+                }
+                "wrong_old" => history.last_mut().unwrap().old = None,
+                "nonce" => history.last_mut().unwrap().execution_nonce = Some("b".repeat(32)),
+                "aba" => {
+                    let mut prior = history[0].clone();
+                    let mut other = prior.clone();
+                    other.execution_nonce = Some("b".repeat(32));
+                    prior.old = None;
+                    history.insert(0, other);
+                    history.insert(0, prior);
+                }
+                "pending_sid" => {
+                    if let BindingTarget::Pending {
+                        payload_session_id, ..
+                    } = &mut history[1].new
+                    {
+                        *payload_session_id = uuid::Uuid::new_v4().to_string();
+                    }
+                }
+                "pending_path" => {
+                    if let BindingTarget::Pending {
+                        payload_transcript_path,
+                        ..
+                    } = &mut history[1].new
+                    {
+                        *payload_transcript_path = Some("/wrong/source.jsonl".into());
+                    }
+                }
+                "pending_seq" => {
+                    if let BindingTarget::Resolved { pending_seq, .. } = &mut history[2].new {
+                        *pending_seq = 99;
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let history = history
+                .into_iter()
+                .map(|event| StrictBindingRecord { event, verified })
+                .collect();
+            let plan = evaluate_verified(
+                fx.request(),
+                Ok(Some(fx.database())),
+                RuntimeObservation::Missing,
+                Ok(Some(own)),
+                Ok(history),
+            );
+            assert!(
+                matches!(plan, Plan::Hold(..)),
+                "clear={clear} fault={fault}: {:?}",
+                plan.diagnostic()
+            );
+        }
+    }
+}
+
+#[test]
+fn an_unreadable_old_root_is_a_hold_and_same_root_absence_stays_fresh() {
+    let fx = Fixture::new();
+    let own = context(&fx);
+    let plan = evaluate(
+        fx.request(),
+        Ok(Some(fx.database())),
+        RuntimeObservation::Missing,
+        Ok(Some(own.clone())),
+        Ok(Vec::new()),
+    );
+    assert!(matches!(
+        plan,
+        Plan::Fresh(FreshReason::TranscriptAbsent, ..)
+    ));
+    let _fault = Fault;
+    CANONICAL_ERROR.with_borrow_mut(|fault| {
+        *fault = Some((
+            own.provider_root.clone().unwrap(),
+            io::ErrorKind::PermissionDenied,
+        ))
+    });
+    let plan = evaluate(
+        fx.request(),
+        Ok(Some(fx.database())),
+        RuntimeObservation::Missing,
+        Ok(Some(own)),
+        Ok(Vec::new()),
+    );
+    assert!(matches!(plan, Plan::Hold(HoldReason::FileIo { .. }, ..)));
+}
+
+#[test]
+fn canonical_aliases_of_the_same_provider_root_preserve_resume() {
+    let fx = Fixture::new();
+    fx.transcript(&fx.cwd, &fx.sid);
+    let alias = fx.root.path().join("home-alias");
+    std::os::unix::fs::symlink(&fx.home, &alias).unwrap();
+    let mut own = context(&fx);
+    own.provider_root = Some(alias.join("projects"));
+    let plan = evaluate(
+        fx.request(),
+        Ok(Some(fx.database())),
+        RuntimeObservation::Missing,
+        Ok(Some(own)),
+        Ok(Vec::new()),
+    );
+    assert!(matches!(plan, Plan::Resume(..)));
+}
+
+#[test]
+fn strict_history_keeps_verified_evidence_and_old_records_default_to_unverified() {
+    use crate::services::tui_prompt_dedupe::binding_events as events;
+    let fx = Fixture::new();
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            events::set_test_root(None);
+        }
+    }
+    let _reset = Reset;
+    events::set_test_root(Some(fx.root.path()));
+    let dir = fx.root.path().join(events::BINDING_EVENTS_DIR);
+    fs::create_dir_all(&dir).unwrap();
+    let a = event(&fx, source(&fx, &fx.sid), &"a".repeat(32));
+    let mut b = a.clone();
+    b.seq = 2;
+    let mut b = serde_json::to_value(b).unwrap();
+    b["verified"] = true.into();
+    let path = dir.join(format!("{}.log", fx.request().channel_id));
+    fs::write(
+        &path,
+        format!("{}\n{}\n{{torn", serde_json::to_string(&a).unwrap(), b),
+    )
+    .unwrap();
+    let before = fs::read(&path).unwrap();
+    let records = records_strict_verified(fx.request().channel_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(records.len(), 2);
+    assert!(!records[0].verified);
+    assert!(records[1].verified);
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        before,
+        "strict read cannot truncate a torn tail"
+    );
+    b["seq"] = 4.into();
+    fs::write(
+        &path,
+        format!("{}\n{}\n", serde_json::to_string(&a).unwrap(), b),
+    )
+    .unwrap();
+    assert!(
+        records_strict_verified(fx.request().channel_id)
+            .unwrap()
+            .is_err()
+    );
+}
+
+#[test]
+fn event_only_strict_read_keeps_legacy_metadata_compatibility() {
+    use crate::services::tui_prompt_dedupe::binding_events as events;
+    let fx = Fixture::new();
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            events::set_test_root(None);
+        }
+    }
+    let _reset = Reset;
+    events::set_test_root(Some(fx.root.path()));
+    let dir = fx.root.path().join(events::BINDING_EVENTS_DIR);
+    fs::create_dir_all(&dir).unwrap();
+    let a = event(&fx, source(&fx, &fx.sid), &"a".repeat(32));
+    let mut raw = serde_json::to_value(&a).unwrap();
+    raw["verified"] = "old-format-extension".into();
+    fs::write(
+        dir.join(format!("{}.log", fx.request().channel_id)),
+        format!("{raw}\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        events::records_strict(fx.request().channel_id)
+            .unwrap()
+            .unwrap(),
+        vec![a]
+    );
+    assert!(
+        events::records_strict_verified(fx.request().channel_id)
+            .unwrap()
+            .is_err()
+    );
+}

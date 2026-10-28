@@ -23,11 +23,13 @@ use crate::services::tui_prompt_dedupe::binding_context::{
     BindingContext, SpawnNonceMarker, execution_context, observe_spawn_nonce_marker_read_only,
 };
 use crate::services::tui_prompt_dedupe::binding_events::{
-    BindingEvent, BindingTarget, SourceId, records_strict,
+    BindingEvent, BindingTarget, SourceId, StrictBindingRecord, records_strict_verified,
 };
 use crate::services::tui_prompt_dedupe::{
     RuntimeObservation, runtime_observation_for_kind_under_source_authority,
 };
+
+mod history;
 
 pub(crate) struct Request<'a> {
     pub session_key: &'a str,
@@ -87,6 +89,7 @@ pub(crate) struct ReadSet {
     runtime: Option<RuntimeRead>,
     old_context: Option<BindingContext>,
     latest_binding: Option<BindingEvent>,
+    reconciled_source: Option<SourceId>,
     files: Vec<FileRead>,
     missing_files: Vec<PathBuf>,
 }
@@ -154,6 +157,7 @@ impl ReadSet {
             runtime: None,
             old_context: None,
             latest_binding: None,
+            reconciled_source: None,
             files: Vec::new(),
             missing_files: Vec::new(),
         }
@@ -206,10 +210,10 @@ pub(crate) async fn resolve(pool: &PgPool, request: Request<'_>) -> Plan {
             (runtime, context)
         },
     );
-    let history = records_strict(request.channel_id)
+    let history = records_strict_verified(request.channel_id)
         .map_err(|error| error.to_string())
         .and_then(|records| records.map_err(|error| format!("{error:?}")));
-    evaluate(request, database, runtime, context, history)
+    evaluate_verified(request, database, runtime, context, history)
 }
 
 async fn load_canonical_database(
@@ -256,12 +260,12 @@ async fn load_canonical_database(
         .ok_or_else(|| "canonical selector row disappeared or changed provider".into())
 }
 
-fn evaluate(
+fn evaluate_verified(
     request: Request<'_>,
     database: Result<Option<ProviderSessionIds>, String>,
     runtime: RuntimeObservation,
     context: Result<Option<BindingContext>, String>,
-    history: Result<Vec<BindingEvent>, String>,
+    history: Result<Vec<StrictBindingRecord>, String>,
 ) -> Plan {
     let mut readset = ReadSet::new(&request);
     if request.force_fresh {
@@ -312,11 +316,21 @@ fn evaluate(
         Ok(history) => history,
         Err(error) => return readset.hold(HoldReason::History(error)),
     };
-    readset.latest_binding = history.into_iter().rev().find(|event| {
-        event.provider == "claude"
-            && event.tmux_session == request.logical_key
-            && !matches!(event.new, BindingTarget::Rejected { .. })
-    });
+    if let Some(context) = &readset.old_context {
+        readset.reconciled_source = match history::reconcile(context, &history) {
+            Ok(source) => source,
+            Err(reason) => return readset.hold(reason),
+        };
+    }
+    readset.latest_binding = history
+        .into_iter()
+        .map(|record| record.event)
+        .rev()
+        .find(|event| {
+            event.provider == "claude"
+                && event.tmux_session == request.logical_key
+                && !matches!(event.new, BindingTarget::Rejected { .. })
+        });
     if let (Some(context), Some(event)) = (&readset.old_context, &readset.latest_binding)
         && event.execution_nonce.as_deref() != Some(context.execution_nonce.as_str())
     {
@@ -351,6 +365,61 @@ fn evaluate(
     }
 }
 
+#[cfg(test)]
+fn evaluate(
+    request: Request<'_>,
+    database: Result<Option<ProviderSessionIds>, String>,
+    runtime: RuntimeObservation,
+    context: Result<Option<BindingContext>, String>,
+    history: Result<Vec<BindingEvent>, String>,
+) -> Plan {
+    evaluate_verified(
+        request,
+        database,
+        runtime,
+        context,
+        history.map(|events| {
+            events
+                .into_iter()
+                .map(|event| StrictBindingRecord {
+                    event,
+                    verified: false,
+                })
+                .collect()
+        }),
+    )
+}
+
+fn check_provider_root(
+    request: &Request<'_>,
+    context: Option<&BindingContext>,
+) -> Result<(), HoldReason> {
+    let Some(old) = context.and_then(|context| context.provider_root.as_deref()) else {
+        return Ok(());
+    };
+    let current = request
+        .claude_home
+        .map(Path::to_path_buf)
+        .or_else(default_claude_home)
+        .ok_or_else(|| HoldReason::Context("Claude home is unavailable".into()))?
+        .join("projects");
+    if !old.is_absolute() || !current.is_absolute() {
+        return Err(HoldReason::Context("provider root is not absolute".into()));
+    }
+    let root = |path: &Path| match canonicalize(path) {
+        Ok(root) => Ok(Some(root)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(file_error(path, error)),
+    };
+    match (root(old)?, root(&current)?) {
+        (Some(a), Some(b)) if a == b => Ok(()),
+        (None, None) if old == current => Ok(()),
+        _ => Err(HoldReason::Conflict(
+            "old provider root differs from current launch root".into(),
+        )),
+    }
+}
+
 fn runtime_read(
     state: &'static str,
     binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
@@ -369,6 +438,7 @@ fn select(
     runtime: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
     readset: &mut ReadSet,
 ) -> Result<Option<SourceId>, HoldReason> {
+    check_provider_root(request, readset.old_context.as_ref())?;
     let requested = checked_selector(request.requested_session_id)?;
     let cached = database
         .map(|db| checked_selector(db.claude_session_id.as_deref()))
@@ -467,6 +537,10 @@ fn select(
         .as_ref()
         .and_then(|context| context.expected_native_session_id.as_deref())
         .is_some_and(|expected| expected != selector)
+        && readset
+            .reconciled_source
+            .as_ref()
+            .is_none_or(|source| source.session_id != selector)
     {
         return Err(HoldReason::Conflict(
             "context and selected native selector differ".into(),
@@ -707,3 +781,6 @@ fn missing_activity() -> SelectorFileActivity {
 #[cfg(test)]
 #[path = "herdr_resume_plan/resolver_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod legacy_handoff;

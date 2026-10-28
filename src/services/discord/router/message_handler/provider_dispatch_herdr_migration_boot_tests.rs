@@ -16,7 +16,11 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 
 #[derive(Clone, Default)]
-pub(super) struct ShadowCapture(Arc<Mutex<Vec<Value>>>, Arc<Mutex<Option<OnPlan>>>);
+pub(super) struct ShadowCapture(
+    Arc<Mutex<Vec<Value>>>,
+    Arc<Mutex<Option<OnPlan>>>,
+    Arc<Mutex<Vec<Value>>>,
+);
 
 type OnPlan = Box<dyn FnOnce() + Send>;
 
@@ -38,6 +42,19 @@ impl Visit for Fields {
 
 impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+        if event.metadata().target() == "agentdesk::claude_migration_dispatch_timing" {
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            self.0.0.lock().unwrap().last_mut().unwrap()["observer_elapsed_us"] =
+                fields.0["observer_elapsed_us"].clone();
+            return;
+        }
+        if event.metadata().target() == "agentdesk::claude_migration_history_timing" {
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            self.0.2.lock().unwrap().push(Value::Object(fields.0));
+            return;
+        }
         if event.metadata().target() != "agentdesk::claude_migration_shadow" {
             return;
         }
@@ -56,6 +73,7 @@ impl ShadowCapture {
         Self(
             Arc::default(),
             Arc::new(Mutex::new(Some(Box::new(callback)))),
+            Arc::default(),
         )
     }
     pub(super) fn dispatch(&self) -> tracing::Dispatch {
@@ -178,7 +196,7 @@ impl LegacyView for Delivered {
     }
 }
 
-fn in_boot_child() -> bool {
+fn in_boot_child(name: &str) -> bool {
     const CHILD: &str = "ADK_TEST_CLAUDE_MIGRATION_BOOT";
     if std::env::var_os(CHILD).is_some() {
         return true;
@@ -186,13 +204,7 @@ fn in_boot_child() -> bool {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            concat!(
-                module_path!(),
-                "::r13_boot_first_init_and_actual_dispatch_keep_main_effects_pg"
-            )
-            .split_once("::")
-            .unwrap()
-            .1,
+            &format!("{}::{name}", module_path!().split_once("::").unwrap().1),
             "--nocapture",
         ])
         .env(CHILD, "1")
@@ -369,6 +381,7 @@ fn actual_dispatch(
     launcher: &Arc<Launcher>,
     session: &str,
     capture: &ShadowCapture,
+    stop_on_plan: bool,
 ) -> Result<(), String> {
     let (runtime, pool, finished, rig) = (&fx.rt, &fx.pool, &fx.finished, &fx.rig);
     let owner = fx.owner.clone();
@@ -379,6 +392,16 @@ fn actual_dispatch(
     let launcher_thread = launcher.clone();
     let token = Arc::new(CancelToken::new());
     *fx.cancel.lock().unwrap() = token.clone();
+    if stop_on_plan {
+        let stopped = token.clone();
+        *capture.1.lock().unwrap() = Some(Box::new(move || {
+            stopped
+                .herdr_interrupt_state()
+                .unwrap()
+                .user_stop
+                .store(true, Ordering::Release);
+        }));
+    }
     finished.store(false, Ordering::SeqCst);
     std::thread::scope(|scope| {
         let worker = scope.spawn(move || {
@@ -392,7 +415,7 @@ fn actual_dispatch(
             let crate::db::dispatched_sessions::hosted_execution::HostedLookup::Found(row) = row else {
                 panic!("the dispatcher reads the canonical Legacy row");
             };
-            assert!(matches!(row.record, HostedRecord::Legacy));
+            if !stop_on_plan { assert!(matches!(row.record, HostedRecord::Legacy)); }
             let host = TurnHost::Herdr(Box::new(HerdrTurnPlan { endpoint, row: Some(row) }));
             let provider = ProviderKind::Claude;
             let turn = StreamingTurn {
@@ -432,7 +455,7 @@ fn actual_dispatch(
 
 #[test]
 fn r13_boot_first_init_and_actual_dispatch_keep_main_effects_pg() {
-    if !in_boot_child() {
+    if !in_boot_child("r13_boot_first_init_and_actual_dispatch_keep_main_effects_pg") {
         return;
     }
     let fx = Fixture::new("r13", None);
@@ -560,7 +583,10 @@ fn r13_boot_first_init_and_actual_dispatch_keep_main_effects_pg() {
     );
     let launcher = Arc::new(Launcher::default());
     let capture = ShadowCapture::default();
-    assert_eq!(actual_dispatch(&fx, &launcher, &old, &capture), Ok(()));
+    assert_eq!(
+        actual_dispatch(&fx, &launcher, &old, &capture, false),
+        Ok(())
+    );
     // These are main's fresh effects, not a migration handoff: one new UUID and one normal prompt.
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     assert_eq!(fx.rig.sends(), prompt_sends());
@@ -661,4 +687,105 @@ fn r13_boot_first_init_and_actual_dispatch_keep_main_effects_pg() {
     fx.rt
         .block_on(async { handles.pop().unwrap().stop_and_join().await })
         .unwrap();
+}
+
+#[test]
+fn actual_dispatch_shadow_latency_and_history_lock_samples_pg() {
+    if !in_boot_child("actual_dispatch_shadow_latency_and_history_lock_samples_pg") {
+        return;
+    }
+    use std::io::Write;
+    let fx = Fixture::new("shadow-cost", None);
+    let config = boot_config(&fx);
+    fx.rt
+        .block_on(crate::bootstrap::prepare_and_install_boot_snapshots(
+            &config,
+            Some(&fx.pool),
+        ))
+        .unwrap();
+    let (sid, path, _) = old_source(&fx);
+    let source = source_id_for(&sid, &path).unwrap();
+    let events_root = dedupe::binding_events::test_root().unwrap();
+    let dir = events_root.join(dedupe::binding_events::BINDING_EVENTS_DIR);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join(format!("{CHANNEL}.log"));
+    let bound = fx.bound();
+    let pending = pending_on(&fx.owner, NONCE, bound.location.clone(), None);
+    dedupe::register_tmux_runtime_binding(fx.logical(), claude(&path, &sid));
+    let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+        "http://127.0.0.1:1".into(),
+    );
+    for count in [0, 1_000, 10_000] {
+        let mut file = std::fs::File::create(&log).unwrap();
+        for seq in 1..=count {
+            writeln!(file, "{}", json!({"seq":seq,"channel_id":CHANNEL,"provider":"claude","tmux_session":fx.logical(),"execution_nonce":NONCE,"old":null,"new":{"source":source},"cause":"resume","parent_hint":null,"evidence":{"hook_event":"session_start","received_at":chrono::Utc::now()},"committed_at":chrono::Utc::now(),"verified":true})).unwrap();
+        }
+        drop(file);
+        for kind in ["legacy", "bound", "pending"] {
+            match kind {
+                "legacy" => {
+                    fx.rt
+                        .block_on(
+                            sqlx::query(
+                                "UPDATE sessions SET hosted_execution=NULL WHERE channel_id=$1",
+                            )
+                            .bind(CHANNEL.to_string())
+                            .execute(&fx.pool),
+                        )
+                        .unwrap();
+                }
+                "bound" => fx.store(&bound),
+                _ => fx.store(&pending),
+            }
+            let mut elapsed = Vec::new();
+            let mut holds = Vec::new();
+            let mut waits = Vec::new();
+            for _ in 0..10 {
+                let launcher = Arc::new(Launcher::default());
+                let capture = ShadowCapture::default();
+                assert_eq!(
+                    actual_dispatch(&fx, &launcher, &sid, &capture, true),
+                    Ok(())
+                );
+                let events = capture.records();
+                assert_eq!(events.len(), 1, "actual dispatch must reach resolver");
+                let plans = capture.plans();
+                let value = |v: &Value| v.as_str().unwrap().parse::<u64>().unwrap();
+                elapsed.push(value(&events[0]["observer_elapsed_us"]));
+                let history = capture.2.lock().unwrap();
+                if kind == "legacy" {
+                    assert_eq!(
+                        plans[0]["decision"], "resume",
+                        "measurement must use a valid old source"
+                    );
+                    assert_eq!(plans[0]["source"]["session_id"], sid);
+                    assert_eq!(plans[0]["source"]["path"], path.display().to_string());
+                    assert_eq!(history.len(), 1, "actual strict reader must acquire LOGS");
+                    assert_eq!(value(&history[0]["records"]), count);
+                    assert_eq!(
+                        value(&history[0]["bytes"]),
+                        std::fs::metadata(&log).unwrap().len()
+                    );
+                    holds.push(value(&history[0]["lock_hold_us"]));
+                    waits.push(value(&history[0]["lock_wait_us"]));
+                } else {
+                    assert_eq!(plans[0]["decision"], "existing_hosted");
+                    assert!(
+                        history.is_empty(),
+                        "existing Herdr rows do not need migration history reads"
+                    );
+                    holds.push(0);
+                    waits.push(0);
+                }
+                assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
+            }
+            elapsed.sort_unstable();
+            holds.sort_unstable();
+            waits.sort_unstable();
+            eprintln!(
+                "P2_COST {}",
+                json!({"kind":kind,"records":count,"samples":elapsed.len(),"observer_median_us":elapsed[elapsed.len()/2],"observer_max_us":elapsed.last(),"lock_hold_median_us":holds[holds.len()/2],"lock_hold_max_us":holds.last(),"lock_wait_max_us":waits.last()})
+            );
+        }
+    }
 }

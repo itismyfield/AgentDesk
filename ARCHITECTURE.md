@@ -756,6 +756,9 @@ src/
 │   │   ├── first_input/
 │   │   │   └── tests.rs
 │   │   ├── herdr_resume_plan/
+│   │   │   ├── history.rs
+│   │   │   ├── legacy_handoff.rs
+│   │   │   ├── legacy_handoff_tests.rs
 │   │   │   └── resolver_tests.rs
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/

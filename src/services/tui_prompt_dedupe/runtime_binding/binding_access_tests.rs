@@ -190,3 +190,58 @@ fn verified_runtime_observation_checks_durable_proof_and_exact_marker_without_pu
     binding_events::set_test_root(None);
     reset_state_for_tests();
 }
+
+#[test]
+fn a_claude_kind_observation_never_enters_a_cached_codex_filesystem_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _state_lock = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (_root, _env) = binding_context::tests::fixture_after_shared_test_env_lock();
+    reset_state_for_tests();
+    let logical = "readonly-codex-kind-boundary";
+    let value = binding(PathBuf::from("/nonexistent/test-rollout.jsonl"));
+    let at = Instant::now();
+    STATE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .runtime_by_tmux
+        .insert(
+            logical.into(),
+            TimedValue {
+                value: value.clone(),
+                recorded_at: at,
+            },
+        );
+    let sessions = tc::persistent_sessions_dir().unwrap();
+    assert!(!sessions.exists(), "fixture must begin without sessions");
+    for present in [false, true] {
+        if present {
+            fs::create_dir_all(&sessions).unwrap();
+            fs::set_permissions(&sessions, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        tc::with_tmux_source_authority(logical, |authority| {
+            assert_eq!(
+                runtime_observation_for_kind_under_source_authority(
+                    authority,
+                    RuntimeHandoffKind::ClaudeTui
+                ),
+                RuntimeObservation::Withheld(value.clone())
+            );
+        });
+        if present {
+            assert_eq!(
+                fs::metadata(&sessions).unwrap().permissions().mode() & 0o777,
+                0o755,
+                "observation cannot chmod another provider's sessions"
+            );
+            assert_eq!(fs::read_dir(&sessions).unwrap().count(), 0);
+        } else {
+            assert!(
+                !sessions.exists(),
+                "observation cannot create another provider's sessions"
+            );
+        }
+        assert_eq!(runtime_binding_recorded_at_for_tests(logical), Some(at));
+    }
+    reset_state_for_tests();
+}
