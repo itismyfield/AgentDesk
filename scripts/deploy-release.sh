@@ -1939,7 +1939,7 @@ PY
 _peer_binary_signature() {
     local details
     codesign --verify --strict "$1" 2>/dev/null || return 1
-    details="$(codesign -dvv "$1" 2>&1)" || return 1
+    details="$(codesign -dvvv "$1" 2>&1)" || return 1
     printf '%s\n' "$details" | grep -q '^CDHash=.' || return 1
     printf '%s\n' "$details" | grep -q '^Identifier=.' || return 1
     printf '%s\n' "$details" | grep -E '^(Identifier=|CDHash=|Authority=|Signature=)'
