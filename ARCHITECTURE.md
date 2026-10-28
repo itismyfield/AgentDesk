@@ -548,6 +548,8 @@ src/
 │   │   │   │   ├── types.rs
 │   │   │   │   └── validation.rs
 │   │   │   └── auto_queue_preflight_harness_tests.rs
+│   │   ├── voice_conductor/
+│   │   │   └── accepted_tests.rs
 │   │   ├── agent_input_tests.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
@@ -1052,6 +1054,8 @@ src/
 │   ├── discord/
 │   │   ├── abandon_request_store/
 │   │   │   └── probe_contract_tests.rs
+│   │   ├── agent_handoff/
+│   │   │   └── accepted_tests.rs
 │   │   ├── busy_followup_retry_store/
 │   │   │   ├── hold_release_tests.rs
 │   │   │   ├── policy.rs
@@ -1325,7 +1329,8 @@ src/
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   ├── inject_codex_v2_tests.rs
-│   │   │   │   └── inject_tests.rs
+│   │   │   │   ├── inject_tests.rs
+│   │   │   │   └── start_outcome_tests.rs
 │   │   │   ├── unbound_owners/
 │   │   │   │   └── tests.rs
 │   │   │   ├── watcher_respawn/
