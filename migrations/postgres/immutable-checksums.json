@@ -782,9 +782,14 @@
       "version": 155
     },
     {
-      "path": "migrations/postgres/0156_server_campaigns.sql",
-      "sha256": "ce84944787b4b464f184c8a8e5a272845c4a1057026d824e36bc153bedde3fa8",
+      "path": "migrations/postgres/0156_turn_execution_receipt.sql",
+      "sha256": "ee61a92c65ca656ba7a9faa5a84b7037dc047761b1cdb3fa332a140f75a0a0ed",
       "version": 156
+    },
+    {
+      "path": "migrations/postgres/0157_server_campaigns.sql",
+      "sha256": "ce84944787b4b464f184c8a8e5a272845c4a1057026d824e36bc153bedde3fa8",
+      "version": 157
     }
   ],
   "version": 1

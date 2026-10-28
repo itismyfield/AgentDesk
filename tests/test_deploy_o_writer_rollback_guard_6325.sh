@@ -41,10 +41,10 @@ extract_function() {
     ' "$DEPLOY_SH"
 }
 
-for fn in _rollback_release_binary _signal_release_lock_pid _wait_release_stopped \
+for fn in _rollback_release_binary _cleanup_on_exit _signal_release_lock_pid _wait_release_stopped \
     _binary_build_flag _manifest_o_tui_writer \
     _rollback_would_revert_o_ledger _binary_would_revert_o_ledger \
-    _rollback_would_revert_o_writer _write_release_source_manifest \
+    _rollback_would_revert_o_writer _rollback_would_revert_o_spool _write_release_source_manifest \
     _external_artifact_would_skip_o_writer; do
     body="$(extract_function "$fn")"
     if [ -z "$body" ] || ! bash -n <<<"$body" 2>/dev/null; then
@@ -65,14 +65,41 @@ launchctl() {
     echo "launchctl $*" >>"$TMP_ROOT/calls"
     [ "$1" != print ]
 }
-chflags() { return 0; }
-tmux() { return 0; }
+chflags() { echo "chflags $*" >>"$TMP_ROOT/calls"; return 0; }
+tmux() { echo "tmux $*" >>"$TMP_ROOT/calls"; return 0; }
 xattr() { return 0; }
 _launchd_domain() { echo "gui/501"; }
 start_release_tmux_fallback() { return 0; }
 wait_for_http_service_health() { return 0; }
 _latest_postgres_migration_path() { return 0; }
 _sha256_file() { return 0; }
+_cleanup_owned_pg_tunnel_preflight() { return 0; }
+_rollback_pg_tunnel_migration() { return 0; }
+_emit_terminal_deploy_marker() { return 0; }
+_finalize_detached_helper() { return 0; }
+_deploy_wait_with_allow_degraded() { return 1; }
+health_failure="$(awk '
+    /^REL_HEALTHY=false$/ { printing = 1 }
+    /^DEPLOY_OK=1$/ { exit }
+    printing { print }
+' "$DEPLOY_SH")"
+[ -n "$health_failure" ] && bash -n <<<"$health_failure" || exit 1
+run_failed_readiness() (
+    export ROLLBACK_ARMED=1 DEPLOY_OK=0
+    trap '_cleanup_on_exit "$?"' EXIT
+    eval "$health_failure"
+)
+snapshot_release() {
+    python3 - "$ADK_REL" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+for path in sorted(root.rglob("*")):
+    if path.is_file():
+        print(path.relative_to(root), hashlib.sha256(path.read_bytes()).hexdigest())
+PY
+}
 
 # shellcheck disable=SC2034  # Read by the production functions loaded through eval.
 PLIST_REL="com.agentdesk.test"
@@ -110,23 +137,30 @@ make_binary() {
 
 marker() { sed -n 2p "$1" 2>/dev/null; }
 
-# $1 new binary's build-info ("" = none), $2 manifest JSON ("" = none).
+# $1 current build-info, $2 manifest, optional $3 target build-info (empty = no command).
 setup_case() {
     clean_paths "$ADK_REL" "$REPO" "$TMP_ROOT/calls"
     mkdir -p "$ADK_REL/bin" "$ADK_REL/runtime" "$REPO"
     make_binary "$REL_BINARY" new "$1"
-    make_binary "$REL_BINARY_BACKUP" old ""
+    make_binary "$REL_BINARY_BACKUP" old "${3-$SWITCH_ON}"
     [ -z "$2" ] || printf '%s\n' "$2" >"$MANIFEST"
 }
 
 # $1 label, $2 expected: rolled_back | refused
 expect() {
-    local label="$1" expected="$2" out actual
-    out="$(_rollback_release_binary 2>&1)"
+    local label="$1" expected="$2" out actual before status=0
+    before="$(snapshot_release)"
+    if [ "${3:-direct}" = readiness ]; then
+        out="$(run_failed_readiness 2>&1)" || status=$?
+        [ "$status" -eq 1 ] || fail "$label → readiness exit was $status instead of 1"
+    else
+        out="$(_rollback_release_binary 2>&1)"
+    fi
     if [ "$(marker "$REL_BINARY")" = "# old" ] && [ ! -e "$REL_BINARY_BACKUP" ]; then
         actual=rolled_back
     elif [ "$(marker "$REL_BINARY")" = "# new" ] && [ "$(marker "$REL_BINARY_BACKUP")" = "# old" ] \
-        && ! grep -q bootout "$TMP_ROOT/calls" 2>/dev/null \
+        && [ ! -s "$TMP_ROOT/calls" ] \
+        && [ "$before" = "$(snapshot_release)" ] \
         && printf '%s' "$out" | grep -q "ROLLBACK REFUSED"; then
         actual=refused
     else
@@ -135,8 +169,8 @@ expect() {
     if [ "$actual" = "$expected" ]; then pass "$label → $expected"; else fail "$label → expected $expected, got $actual: $out"; fi
 }
 
-SWITCH_OFF='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":false}'
-SWITCH_ON='{"schema":1,"o_tui_writer":true,"o_ledger_operator_resume":false}'
+SWITCH_OFF='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":false,"o_spool_write_version":7,"o_spool_readable_versions":[2,3,4,5,6,7]}'
+SWITCH_ON='{"schema":1,"o_tui_writer":true,"o_ledger_operator_resume":false,"o_spool_write_version":7,"o_spool_readable_versions":[2,3,4,5,6,7]}'
 CAPABLE='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":true}'
 OLD_MANIFEST='{"repo_head":"abc","latest_postgres_migration":"0001_init.sql"}'
 LEGACY_MANIFEST='{"repo_head":"abc","o_tui_writer":"false"}'
@@ -177,6 +211,62 @@ setup_case "$SWITCH_ON" '{"o_tui_writer":"true","o_ledger_operator_resume":true}
 mkdir -p "$ADK_REL/o_store"
 printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
 expect "floor, compatible target" rolled_back
+
+echo "== failed initial readiness respects the target spool reader =="
+SPOOL_V6='{"schema":1,"o_tui_writer":true,"o_spool_write_version":6,"o_spool_readable_versions":[2,3,4,5,6]}'
+seed_v7_store() {
+    mkdir -p "$ADK_REL/o_store/42/spool"
+    printf '{"identity_version":7}\nretained frame\n' >"$ADK_REL/o_store/42/spool/0001.jsonl"
+    printf 'retained ledger\n' >"$ADK_REL/o_store/42/ledger.jsonl"
+}
+setup_case "$SWITCH_ON" "$O_MANIFEST" "$SPOOL_V6"
+seed_v7_store
+AGENTDESK_DEPLOY_FORCE_ROLLBACK=1 expect "v7 current, v6 target, failed readiness preserves all bytes" refused readiness
+setup_case "$SWITCH_ON" "$O_MANIFEST"
+seed_v7_store
+store_before="$(snapshot_release | grep o_store/)"
+expect "v7 current, compatible target, failed readiness rolls back" rolled_back readiness
+if [ "$store_before" = "$(snapshot_release | grep o_store/)" ] \
+    && grep -q 'launchctl bootout' "$TMP_ROOT/calls" \
+    && grep -q 'launchctl bootstrap' "$TMP_ROOT/calls"; then
+    pass "compatible rollback restarts and preserves spool/ledger bytes"
+else
+    fail "compatible rollback did not restart or changed store bytes"
+fi
+for target in '{"schema":1}' 'not json' '[]' \
+    '{"schema":2,"o_spool_readable_versions":[7]}' \
+    '{"schema":1,"o_spool_readable_versions":"7"}' \
+    '{"schema":1,"o_spool_readable_versions":[]}' \
+    '{"schema":1,"o_spool_readable_versions":["7"]}' \
+    '{"schema":1,"o_spool_readable_versions":[7,true]}' ""; do
+    setup_case "$SWITCH_ON" "$O_MANIFEST" "$target"
+    seed_v7_store
+    expect "unavailable/malformed target capability: $target" refused readiness
+done
+setup_case "$SWITCH_ON" "$O_MANIFEST"
+printf '#!/bin/sh\n# old\nexit 0\n' >"$REL_BINARY_BACKUP"
+expect "empty successful target build-info" refused readiness
+setup_case "$SWITCH_ON" "$O_MANIFEST"
+chmod -x "$REL_BINARY_BACKUP"
+expect "target build-info execution denied" refused readiness
+setup_case '{"schema":1,"o_tui_writer":true}' "$O_MANIFEST"
+expect "current write version missing" refused readiness
+setup_case '{"schema":1,"o_tui_writer":true,"o_spool_write_version":true}' "$O_MANIFEST"
+expect "current write version is not an integer" refused readiness
+
+for current in "" 'not json' \
+    '{"schema":1,"o_tui_writer":true,"o_spool_write_version":"7"}' \
+    '{"schema":1,"o_tui_writer":true,"o_spool_write_version":7.0}'; do
+    setup_case "$current" "$O_MANIFEST"
+    expect "unavailable/malformed current capability: $current" refused readiness
+done
+setup_case "$SWITCH_ON" "$O_MANIFEST"
+python3() {
+    [ "${2:-}" != "$REL_BINARY" ] || return 127
+    command python3 "$@"
+}
+expect "capability probe cannot execute Python" refused readiness
+unset -f python3
 
 echo "== an unreadable switch counts as on =="
 setup_case "" "$LEGACY_MANIFEST"

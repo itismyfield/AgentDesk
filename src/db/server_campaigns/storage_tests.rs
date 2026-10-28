@@ -841,7 +841,7 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
         .await
         .unwrap();
     let embedded = sqlx::migrate!("./migrations/postgres");
-    let version = 156;
+    let version = 157;
     let main = Migrator::with_migrations(
         embedded
             .iter()
@@ -850,7 +850,7 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
             .collect(),
     );
     let main_max = main.iter().map(|m| m.version).max().unwrap();
-    assert_eq!(main_max, 155);
+    assert_eq!(main_max, 156);
     assert!(version > main_max);
     main.run(&pool).await.unwrap();
     let input = serde_json::from_value(serde_json::json!({
