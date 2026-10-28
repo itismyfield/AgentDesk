@@ -517,3 +517,38 @@ async fn owner_host_fence_serializes_current_generation_with_one_connection_pg()
     );
     setup.close().await;
 }
+
+#[tokio::test]
+async fn owner_cleanup_legacy_port_open_before_management_keeps_scope_pg() {
+    if !cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::owner_cleanup_legacy_port_open_before_management_keeps_scope_pg"
+    )) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = 73369120;
+    let discord = Discord::new().await;
+    let _selection = select(&ProviderKind::Claude, channel, "mac-a", "mac-a");
+    let (_registry, shared) = runtime(&pool, ProviderKind::Claude, channel, "gateway").await;
+    let host = parts_with_rest(
+        &shared,
+        &ProviderKind::Claude,
+        None,
+        Some(discord.http.clone()),
+    );
+    let port = host.io.port().await;
+    assert!(matches!(
+        port.post_origin(channel, "before".into(), None).await,
+        PostOutcome::Created(_)
+    ));
+    execution::tests::admission(&pool, "claude", channel, "mac-a").await;
+    assert!(matches!(
+        port.post_origin(channel, "after".into(), None).await,
+        PostOutcome::Withheld(_)
+    ));
+    assert_eq!(discord.posts.lock().unwrap().len(), 1);
+    pool.close().await;
+}

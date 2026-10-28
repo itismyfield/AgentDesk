@@ -73,16 +73,32 @@ async fn published_self_id(max_wait: Duration) -> Option<String> {
 
 #[cfg(test)]
 /// A port over the REST client once it names its bot; a failed lookup is retried.
-async fn rest_port(http: Arc<serenity::Http>) -> Arc<GatewayPort> {
+async fn rest_port(http: Arc<serenity::Http>) -> u64 {
     loop {
         match http.get_current_user().await {
-            Ok(user) => return Arc::new(GatewayPort::new(Arc::clone(&http), user.id.get())),
+            Ok(user) => return user.id.get(),
             Err(error) => {
                 tracing::warn!(%error, "[tui_o] REST writer port: bot user lookup failed")
             }
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+fn scoped_port(
+    http: Arc<serenity::Http>,
+    bot_id: u64,
+    scope: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
+) -> Arc<GatewayPort> {
+    let port = GatewayPort::new(http, bot_id);
+    #[cfg(test)]
+    if crate::services::tui_o::ownership::execution::tests::mutant("legacy-scope") {
+        return Arc::new(port);
+    }
+    Arc::new(match scope {
+        Some(scope) => port.with_owner_scope(scope),
+        None => port,
+    })
 }
 
 impl HostIo for GatewayHost {
@@ -105,22 +121,13 @@ impl HostIo for GatewayHost {
         async move {
             #[cfg(test)]
             if let Some(http) = rest {
-                let mut port = rest_port(http).await;
-                if let Some(scope) = scope {
-                    let original =
-                        Arc::try_unwrap(port).unwrap_or_else(|_| unreachable!("new REST port"));
-                    port = Arc::new(original.with_owner_scope(scope));
-                }
-                return port;
+                let port = rest_port(Arc::clone(&http)).await;
+                return scoped_port(http, port, scope);
             }
             loop {
                 if let Some(ctx) = shared.http.cached_serenity_ctx.get() {
                     let bot_id = ctx.cache.current_user().id.get();
-                    let mut port = GatewayPort::new(Arc::clone(&ctx.http), bot_id);
-                    if let Some(scope) = scope {
-                        port = port.with_owner_scope(scope);
-                    }
-                    return Arc::new(port);
+                    return scoped_port(Arc::clone(&ctx.http), bot_id, scope);
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
             }

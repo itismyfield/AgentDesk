@@ -113,7 +113,8 @@ pub(crate) async fn read(
         .bind(identity.provider()).bind(identity.raw_channel_id()).bind(local).bind(generation).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
     let session_ref = match binding {
         Some(binding) => {
-            validate_local(provider, channel, local, &binding)?;
+            validate_local(provider, channel, local, &binding)
+                .map_err(|error| format!("original native incarnation ref: {error:?}"))?;
             SessionRef::Bound(binding)
         }
         None if legacy_present()? => {
@@ -132,12 +133,19 @@ pub(crate) async fn read(
     })))
 }
 
-fn validate_local(
+#[derive(Debug)]
+pub(crate) enum NativeRefFailure {
+    Malformed,
+    Unavailable,
+    Changed,
+}
+
+pub(crate) fn validate_local(
     provider: &str,
     channel: u64,
     local: &str,
     binding: &Value,
-) -> Result<(), String> {
+) -> Result<(), NativeRefFailure> {
     #[cfg(test)]
     if tests::mutant("native") {
         return Ok(());
@@ -145,24 +153,31 @@ fn validate_local(
     use crate::services::tui_prompt_dedupe::binding_context::{self, SpawnNonceMarker};
     let owner = binding["owner"]
         .as_str()
-        .ok_or("original native owner unknown")?;
+        .ok_or(NativeRefFailure::Malformed)?;
     let nonce = binding["execution_nonce"]
         .as_str()
-        .ok_or("original native nonce unknown")?;
+        .ok_or(NativeRefFailure::Malformed)?;
     if !matches!(binding["host"].as_str(), Some("tmux" | "process" | "herdr")) {
-        return Err("original native host unknown".into());
+        return Err(NativeRefFailure::Malformed);
     }
     if binding_context::observe_spawn_nonce_marker(owner) != SpawnNonceMarker::Known(nonce.into()) {
-        return Err("original local native incarnation unavailable".into());
+        return Err(
+            if binding_context::observe_spawn_nonce_marker(owner) == SpawnNonceMarker::Unreadable {
+                NativeRefFailure::Unavailable
+            } else {
+                NativeRefFailure::Changed
+            },
+        );
     }
-    let context = binding_context::execution_context(provider, nonce)?;
+    let context = binding_context::execution_context(provider, nonce)
+        .map_err(|_| NativeRefFailure::Unavailable)?;
     if context.tmux_session != owner
         || context.channel_id != Some(channel)
         || context.host.as_deref() != Some(local)
         || binding["root"] != context.owner_runtime_root
         || context.owner_runtime_root != crate::services::tmux_common::current_tmux_owner_marker()
     {
-        return Err("original native context is not local to this owner".into());
+        return Err(NativeRefFailure::Changed);
     }
     Ok(())
 }

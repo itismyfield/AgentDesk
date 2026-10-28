@@ -785,6 +785,11 @@
       "path": "migrations/postgres/0154_output_origin.sql",
       "sha256": "5837484ea11ddcacc7b819e116e5f17d999c6e4b72d33d9ff65cb84769d06414",
       "version": 154
+    },
+    {
+      "path": "migrations/postgres/0155_execution_cleanup.sql",
+      "sha256": "ec3b055ec391d18d53faa2ca38f58a1d0bbf1f8c7f13509da0aa99c98c0d04ab",
+      "version": 155
     }
   ],
   "version": 1

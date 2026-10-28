@@ -1,5 +1,5 @@
-//! Writer membership is fixed for the process. The configured O home carries adoption state
-//! for selected or locally committed channels; other nodes only report their local store state.
+//! Writer membership is fixed for the process. Gateway placement seeds legacy adoption;
+//! PG execution authority is read separately before foreign-store diagnostics.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -35,6 +35,7 @@ pub(crate) struct BootChannels {
     site: Site,
     configured_id: Option<String>,
     candidates: BTreeMap<u64, Candidate>,
+    foreign_stores: BTreeSet<u64>,
     execution: Arc<Mutex<BTreeMap<u64, super::ownership::execution::View>>>,
     execution_install: Arc<Mutex<()>>,
 }
@@ -233,6 +234,7 @@ impl BootChannels {
             site,
             configured_id,
             candidates: BTreeMap::new(),
+            foreign_stores: BTreeSet::new(),
             execution: Arc::default(),
             execution_install: Arc::default(),
         })
@@ -275,14 +277,33 @@ impl BootChannels {
             }
             Site::Foreign { home } => {
                 let states = stored(&self.selected, false)?;
-                let detail = format!("non-home node ignores its local O store; O home is {home}");
-                let alarm = WriterAlarm::Halted { detail };
-                for (&channel, _) in states.iter().filter(|(_, s)| **s != Adoption::Pending) {
-                    alarms.raise_at(channel, &alarm, Instant::now());
+                self.foreign_stores = states
+                    .iter()
+                    .filter(|(_, state)| **state != Adoption::Pending)
+                    .map(|(&channel, _)| channel)
+                    .collect();
+                #[cfg(test)]
+                if super::ownership::execution::tests::mutant("diagnostic-early") {
+                    for &channel in &self.foreign_stores {
+                        self.foreign_store_alarm(channel);
+                    }
                 }
+                let _ = home;
             }
         }
         Ok(self)
+    }
+
+    fn foreign_store_alarm(&self, channel: u64) {
+        if let Site::Foreign { home } = &self.site {
+            AlarmRouter::for_process(None, None).raise_at(
+                channel,
+                &WriterAlarm::Halted {
+                    detail: format!("non-home node ignores its local O store; O home is {home}"),
+                },
+                Instant::now(),
+            );
+        }
     }
 
     fn seed_candidate(&self, channel: u64, state: Adoption) -> Candidate {
@@ -362,6 +383,10 @@ impl BootChannels {
         permit: Option<Result<Arc<super::ownership::execution::OwnerPermit>, String>>,
     ) {
         use super::ownership::execution::View;
+        if self.foreign_stores.contains(&channel) && !matches!(&permit, Some(Ok(_))) {
+            self.foreign_store_alarm(channel);
+        }
+
         #[cfg(test)]
         let permit = if super::ownership::execution::tests::mutant("unknown")
             && matches!(permit.as_ref(), Some(Err(_)))

@@ -34,6 +34,43 @@ fn payload(channel: &str, message: &str, gateway: &str) -> outbox::InsertPending
         provider: "claude".into(),
     }
 }
+async fn promote_fixture(
+    pool: &sqlx::PgPool,
+    delivery: i64,
+    target: &str,
+    expected: Option<(&str, i64)>,
+    readiness: custody::SwitchReadiness,
+) -> Result<bool, sqlx::Error> {
+    if let Some((owner, generation)) = expected
+        && readiness != Wait
+    {
+        use crate::services::cluster::intake_router_hook::owner_record::{OwnerIdentity, cleanup};
+        let (provider, channel): (String, String) =
+            sqlx::query_as("SELECT provider,channel_id FROM intake_outbox WHERE id=$1")
+                .bind(delivery)
+                .fetch_one(pool)
+                .await?;
+        sqlx::query(
+            "UPDATE intake_outbox SET target_instance_id=$2 WHERE id=$1 AND routing_state='held'",
+        )
+        .bind(delivery)
+        .bind(target)
+        .execute(pool)
+        .await?;
+        cleanup::request(
+            pool,
+            &OwnerIdentity::new(&provider, &channel),
+            (owner, generation),
+            delivery,
+            target,
+            12,
+        )
+        .await?;
+        sqlx::query("UPDATE intake_session_owners SET routing_cleanup_deadline=NOW()-INTERVAL '1 second' WHERE provider=$1 AND raw_channel_id=$2 AND generation=$3").bind(provider).bind(channel).bind(generation).execute(pool).await?;
+    }
+    custody::promote(pool, delivery, target, expected, readiness).await
+}
+
 async fn stage(
     pool: &sqlx::PgPool,
     p: &outbox::InsertPendingPayload,
@@ -137,7 +174,7 @@ async fn custody_pg_old_open_accepted_spawned_local_claim_and_old_effect_zero_pg
         let m1 = payload(&channel, "101", old);
         let first = stage(&pool, &m1, None, 0).await;
         assert!(
-            custody::promote(&pool, first, old, None, Wait)
+            promote_fixture(&pool, first, old, None, Wait)
                 .await
                 .unwrap()
         );
@@ -178,7 +215,7 @@ async fn custody_pg_old_open_accepted_spawned_local_claim_and_old_effect_zero_pg
         let m2 = payload(&channel, "102", new);
         let second = stage(&pool, &m2, Some(0), 300).await;
         assert!(
-            !custody::promote(&pool, second, new, Some((old, 0)), Unavailable)
+            !promote_fixture(&pool, second, new, Some((old, 0)), Unavailable)
                 .await
                 .unwrap(),
             "deadline cannot be skipped"
@@ -191,7 +228,7 @@ async fn custody_pg_old_open_accepted_spawned_local_claim_and_old_effect_zero_pg
         .await
         .unwrap();
         assert!(
-            custody::promote(&pool, second, new, Some((old, 0)), Unavailable)
+            promote_fixture(&pool, second, new, Some((old, 0)), Unavailable)
                 .await
                 .unwrap()
         );
@@ -323,7 +360,7 @@ async fn custody_pg_start_guard_serializes_switch_and_rejects_old_native_and_fra
         let p = payload(&channel, "201", "gateway");
         let id = stage(&pool, &p, None, 0).await;
         assert!(
-            custody::promote(&pool, id, "executor", None, Wait)
+            promote_fixture(&pool, id, "executor", None, Wait)
                 .await
                 .unwrap()
         );
@@ -461,7 +498,7 @@ async fn custody_pg_bundle_pin_put_load_cleanup_and_head_revision_cas_pg() {
     let later = payload("733650", "302", "gateway");
     let second = stage(&pool, &later, None, 0).await;
     assert!(
-        !custody::promote(&pool, second, "executor", None, Wait)
+        !promote_fixture(&pool, second, "executor", None, Wait)
             .await
             .unwrap(),
         "oldest held first"
@@ -474,7 +511,7 @@ async fn custody_pg_bundle_pin_put_load_cleanup_and_head_revision_cas_pg() {
     );
     let restarted = db.connect_and_migrate().await;
     assert!(
-        custody::promote(&restarted, id, "executor", None, Wait)
+        promote_fixture(&restarted, id, "executor", None, Wait)
             .await
             .unwrap()
     );
@@ -552,7 +589,7 @@ async fn custody_pg_bundle_pin_put_load_cleanup_and_head_revision_cas_pg() {
     .unwrap();
     tx.commit().await.unwrap();
     assert!(
-        !custody::promote(&restarted, stale_revision, "executor", None, Wait)
+        !promote_fixture(&restarted, stale_revision, "executor", None, Wait)
             .await
             .unwrap(),
         "home revision is the only failed predicate on this ownerless channel"
@@ -629,7 +666,7 @@ async fn custody_pg_preexisting_unreceipted_open_delivery_is_preserved_not_repla
         let p = payload(&channel, "402", "gateway");
         let fresh = stage(&pool, &p, Some(0), 0).await;
         assert!(
-            custody::promote(&pool, fresh, "home", Some(("old", 0)), Unavailable)
+            promote_fixture(&pool, fresh, "home", Some(("old", 0)), Unavailable)
                 .await
                 .unwrap()
         );
@@ -763,7 +800,7 @@ async fn lifecycle_case(released: bool) {
     seed(&pool).await;
     let first = stage(&pool, &payload("733699", "601", "gateway"), None, 0).await;
     assert!(
-        custody::promote(&pool, first, "executor", None, Wait)
+        promote_fixture(&pool, first, "executor", None, Wait)
             .await
             .unwrap()
     );
@@ -783,7 +820,7 @@ async fn lifecycle_case(released: bool) {
     }
     let second = stage(&pool, &payload("733699", "602", "gateway"), Some(0), 0).await;
     assert!(
-        custody::promote(
+        promote_fixture(
             &pool,
             second,
             "executor",
@@ -853,7 +890,7 @@ async fn custody_pg_refresh_preserves_sources_and_deadline_after_owner_change_pg
     );
     tx.rollback().await.unwrap();
     assert!(
-        custody::promote(&pool, first, "first", None, Wait)
+        promote_fixture(&pool, first, "first", None, Wait)
             .await
             .unwrap()
     );
@@ -879,8 +916,14 @@ async fn custody_pg_refresh_preserves_sources_and_deadline_after_owner_change_pg
     );
     let second = stage(&pool, &payload("733698", "702", "gateway"), Some(0), 0).await;
     let third = stage(&pool, &payload("733698", "703", "gateway"), Some(0), 0).await;
+    let original_sql = "SELECT jsonb_build_array(routing_receipt_id,provider,channel_id,user_msg_id,user_text,replay_source_message_ids,attachment_refs,reply_context) FROM intake_outbox WHERE id=$1";
+    let original: serde_json::Value = sqlx::query_scalar(original_sql)
+        .bind(third)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert!(
-        custody::promote(&pool, second, "second", Some(("first", 0)), Unavailable)
+        promote_fixture(&pool, second, "second", Some(("first", 0)), Unavailable)
             .await
             .unwrap()
     );
@@ -904,10 +947,22 @@ async fn custody_pg_refresh_preserves_sources_and_deadline_after_owner_change_pg
             .await
             .unwrap()
     );
-    assert!(
-        !custody::promote(&pool, third, "second", Some(("second", 1)), Wait)
+    let rebased: Option<i64> =
+        sqlx::query_scalar("SELECT routing_wait_owner_generation FROM intake_outbox WHERE id=$1")
+            .bind(third)
+            .fetch_one(&pool)
             .await
-            .unwrap()
+            .unwrap();
+    assert_eq!(
+        rebased,
+        Some(1),
+        "remaining held inputs follow the new owner"
+    );
+    assert!(
+        !promote_fixture(&pool, third, "second", Some(("first", 0)), Wait)
+            .await
+            .unwrap(),
+        "a stale owner cannot admit the rebased input"
     );
     let mut tx = pool.begin().await.unwrap();
     assert!(
@@ -943,7 +998,7 @@ async fn custody_pg_refresh_preserves_sources_and_deadline_after_owner_change_pg
             .unwrap();
     assert_eq!(deadline, unchanged);
     assert!(
-        custody::promote(&pool, third, "second", Some(("second", 1)), Wait)
+        promote_fixture(&pool, third, "second", Some(("second", 1)), Wait)
             .await
             .unwrap()
     );
@@ -967,6 +1022,15 @@ async fn custody_pg_refresh_preserves_sources_and_deadline_after_owner_change_pg
         .await
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let preserved: serde_json::Value = sqlx::query_scalar(original_sql)
+        .bind(third)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        original, preserved,
+        "routing changes preserve the raw input"
+    );
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM intake_outbox WHERE routing_receipt_id IS NOT NULL",
     )
@@ -999,7 +1063,7 @@ async fn custody_pg_existing_withheld_result_survives_owner_loss_pg() {
     let old:i64=sqlx::query_scalar("INSERT INTO intake_outbox(target_instance_id,forwarded_by_instance_id,channel_id,user_msg_id,request_owner_id,user_text,turn_kind,agent_id,provider,status,replay_disposition,replay_source_message_ids,replay_hold_reason,replay_preserved) VALUES('old','gateway','733697','801','100','old input','foreground','custody-agent','claude','spawned','withheld',ARRAY['801'],'partial_failure',$1) RETURNING id").bind(&preserved).fetch_one(&pool).await.unwrap();
     let fresh = stage(&pool, &payload("733697", "802", "gateway"), Some(0), 0).await;
     assert!(
-        custody::promote(&pool, fresh, "home", Some(("old", 0)), Unavailable)
+        promote_fixture(&pool, fresh, "home", Some(("old", 0)), Unavailable)
             .await
             .unwrap()
     );
@@ -1036,4 +1100,219 @@ async fn custody_pg_existing_withheld_result_survives_owner_loss_pg() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     pool.close().await;
     db.drop().await;
+}
+
+#[tokio::test]
+async fn owner_cleanup_unclaimed_legacy_pending_keeps_fifo_and_executes_once_pg() {
+    let _runtime = RuntimeRoot::new();
+    use crate::services::cluster::intake_router_hook::owner_record::{
+        OwnerIdentity, acquire_owner_in_tx,
+    };
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    seed(&pool).await;
+    for (index, (old, target)) in [("mac-a", "mac-b"), ("mac-b", "mac-a")]
+        .into_iter()
+        .enumerate()
+    {
+        let channel = (73369410 + index).to_string();
+        let identity = OwnerIdentity::new("claude", &channel);
+        let mut tx = pool.begin().await.unwrap();
+        acquire_owner_in_tx(&mut tx, &identity, old, |_| true)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let original = payload(&channel, "701", old);
+        let old_id = outbox::insert_pending(&pool, &original, 1, None)
+            .await
+            .unwrap();
+        let newer = payload(&channel, "702", "gateway");
+        let later = stage(&pool, &newer, Some(0), 0).await;
+        assert!(
+            !promote_fixture(&pool, later, target, Some((old, 0)), Unavailable)
+                .await
+                .unwrap(),
+            "older unstarted input must remain first"
+        );
+        let preserved: (String, String, serde_json::Value) = sqlx::query_as(
+            "SELECT status,user_text,attachment_refs FROM intake_outbox WHERE id=$1",
+        )
+        .bind(old_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            preserved,
+            (
+                "unknown".into(),
+                original.user_text.clone(),
+                original.attachment_refs.clone()
+            )
+        );
+        assert!(
+            outbox::claim_pending_for_target_except(&pool, old, "claude", "old-control", &[])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            promote_fixture(&pool, old_id, target, Some((target, 1)), Wait)
+                .await
+                .unwrap()
+        );
+        let row = claim(&pool, target).await;
+        assert_eq!(row.id, old_id);
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let http = Arc::new(serenity::Http::new("fixture"));
+        assert!(matches!(
+            execute_intake_turn_core(&http, &shared, "fixture", request(&row), vec![])
+                .await
+                .unwrap(),
+            IntakeExecution::Deferred
+        ));
+        assert!(
+            outbox::mark_accepted(&pool, old_id, "worker-token")
+                .await
+                .unwrap()
+        );
+        let counter = AtomicUsize::new(0);
+        let permit = prepare(&pool, old_id, target, &row.user_text).await;
+        permit
+            .submit(
+                &row.user_text,
+                &json!({"native":"exact-session","driver":"tui"}),
+                |_| async {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "actual first effect must run once after handoff"
+        );
+        assert!(
+            outbox::claim_pending_for_target_except(&pool, old, "claude", "old-control", &[])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !promote_fixture(&pool, later, target, Some((target, 1)), Wait)
+                .await
+                .unwrap(),
+            "newer source must wait while older delivery is open"
+        );
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn owner_cleanup_bundle_live_pin_and_withheld_seven_day_retention_pg() {
+    use crate::services::cluster::attachment_transfer::{self as attachments, store};
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    seed(&pool).await;
+    let identity = attachments::AttachmentMessageIdentity {
+        provider: "claude".into(),
+        channel_id: "73369420".into(),
+        user_msg_id: "711".into(),
+    };
+    let bytes = b"preserved attachment";
+    let bundle = attachments::validate_attachment_bundle_v1(
+        attachments::AttachmentBundleV1 {
+            version: attachments::ATTACHMENT_BUNDLE_V1,
+            identity: identity.clone(),
+            source_attachment_count: 1,
+            entries: vec![attachments::AttachmentEntryV1 {
+                filename: "input.txt".into(),
+                bytes: bytes.to_vec(),
+                sha256: attachments::attachment_sha256_hex(bytes),
+            }],
+        },
+        &identity,
+    )
+    .unwrap();
+    let reference = store::put(&pool, &bundle).await.unwrap();
+    let mut input = payload(&identity.channel_id, &identity.user_msg_id, "gateway");
+    input.attachment_refs = json!([reference]);
+    let first = stage(&pool, &input, None, 0).await;
+    sqlx::query(
+        "UPDATE intake_attachment_bundles SET expires_at=NOW()-INTERVAL '1 day' WHERE id=$1",
+    )
+    .bind(reference.bundle_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(store::cleanup(&pool).await.unwrap(), 0);
+    assert_eq!(
+        store::load(&pool, &reference)
+            .await
+            .unwrap()
+            .as_bundle()
+            .entries[0]
+            .bytes,
+        bytes
+    );
+    store::put(&pool, &bundle).await.unwrap();
+    assert!(
+        promote_fixture(&pool, first, "mac-a", None, Wait)
+            .await
+            .unwrap()
+    );
+    let row = claim(&pool, "mac-a").await;
+    assert!(
+        outbox::mark_accepted(&pool, row.id, "worker-token")
+            .await
+            .unwrap()
+    );
+    let second = stage(
+        &pool,
+        &payload(&identity.channel_id, "712", "gateway"),
+        Some(0),
+        0,
+    )
+    .await;
+    assert!(
+        promote_fixture(&pool, second, "mac-b", Some(("mac-a", 0)), Unavailable)
+            .await
+            .unwrap()
+    );
+    if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant("pin") {
+        sqlx::query("CREATE OR REPLACE FUNCTION intake_routing_bundle_pinned(bundle UUID) RETURNS BOOLEAN LANGUAGE SQL STABLE AS $$ SELECT EXISTS(SELECT 1 FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.routing_state IS NOT NULL AND r.replay_disposition<>'classified_normal' AND d.attachment_refs @> jsonb_build_array(jsonb_build_object('bundle_id',bundle::TEXT))) $$").execute(&pool).await.unwrap();
+    }
+    let retained: bool = sqlx::query_scalar(
+        "SELECT expires_at>=NOW()+INTERVAL '6 days' FROM intake_attachment_bundles WHERE id=$1",
+    )
+    .bind(reference.bundle_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(retained);
+    assert_eq!(store::cleanup(&pool).await.unwrap(), 0);
+    assert_eq!(
+        store::load(&pool, &reference)
+            .await
+            .unwrap()
+            .as_bundle()
+            .entries[0]
+            .bytes,
+        bytes
+    );
+    sqlx::query(
+        "UPDATE intake_attachment_bundles SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+    )
+    .bind(reference.bundle_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        store::cleanup(&pool).await.unwrap(),
+        1,
+        "withheld custody must not pin bytes permanently"
+    );
+    assert!(store::load(&pool, &reference).await.is_err());
+    pool.close().await;
 }

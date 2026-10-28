@@ -77,3 +77,81 @@ fn owner_bootstrap_read_is_wired_before_shared_watchers_and_role_branches() {
         );
     }
 }
+
+#[tokio::test]
+async fn owner_cleanup_boot_diagnostics_wait_for_execution_read_pg() {
+    if !cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::owner_cleanup_boot_diagnostics_wait_for_execution_read_pg"
+    )) {
+        return;
+    }
+    use crate::services::tui_o::{
+        alarm,
+        topology::{HostRole, gateway_only_channels},
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for (offset, mode) in ["local", "unmanaged", "foreign", "database"]
+        .into_iter()
+        .enumerate()
+    {
+        let channel = 73369110 + offset as u64;
+        if mode != "unmanaged" {
+            execution::tests::admission(
+                &pool,
+                "claude",
+                channel,
+                if mode == "foreign" { "mac-b" } else { "mac-a" },
+            )
+            .await;
+        }
+        let config:crate::config::Config=serde_json::from_value(serde_json::json!({"server":{},
+            "cluster":{"enabled":true,"instance_id":"mac-a","gateway_preferred_instance_id":"mac-b"},
+            "agents":[{"id":"custody-agent","name":"owner","channels":{"claude":{"id":channel.to_string(),"runtime":"tui"}}}],
+            "tui_o":{"writer":{"channels":[channel]}}})).unwrap();
+        let root = crate::config::runtime_root().unwrap();
+        let store = crate::services::tui_o::store::OStore::open_if_enabled(
+            &crate::services::tui_o::store::StoreConfig { enabled: true },
+            &root,
+        )
+        .unwrap()
+        .unwrap();
+        store
+            .init_channel(&crate::services::tui_o::store::Initialized {
+                channel,
+                sources: vec![],
+                initial_anchor: 0,
+                build_digest: "fixture".into(),
+                at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let boot = BootChannels::validate(&config)
+            .unwrap()
+            .seeded(true, &config, |selected, _| {
+                Ok(crate::services::tui_o::channel_policy::stored(
+                    Some(&root),
+                    selected,
+                ))
+            })
+            .unwrap();
+        let _channels = cutover::test_override::force_boot(boot);
+        let broken = sqlx::PgPool::connect_lazy("postgres://invalid@127.0.0.1:1/unused").unwrap();
+        broken.close().await;
+        prepare(
+            &ProviderKind::Claude,
+            Some(if mode == "database" { &broken } else { &pool }),
+        )
+        .await;
+        let snapshot = cutover::boot_snapshot().unwrap();
+        let halted = alarm::health_reasons().contains(&format!("tui_o:halted:{channel}"));
+        assert_eq!(halted, mode != "local", "{mode} foreign-store diagnostic");
+        assert_eq!(
+            gateway_only_channels(true, "claude", HostRole::Standby, Some(&snapshot)),
+            Some(usize::from(mode != "local")),
+            "{mode} gateway-only diagnostic"
+        );
+    }
+    pool.close().await;
+}

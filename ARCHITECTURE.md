@@ -897,6 +897,10 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
 │   │   │   ├── owner_record/
+│   │   │   │   ├── cleanup/
+│   │   │   │   │   └── tests/
+│   │   │   │   │       └── mod.rs
+│   │   │   │   ├── cleanup.rs
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── input_start.rs
 │   │   │   │   ├── output.rs
@@ -1123,10 +1127,14 @@ src/
 │   │   │   │   │   │   ├── capture_fold_tests.rs
 │   │   │   │   │   │   ├── reader_retirement_tests.rs
 │   │   │   │   │   │   └── successor_tests.rs
+│   │   │   │   │   ├── execution_cleanup/
+│   │   │   │   │   │   └── tests/
+│   │   │   │   │   │       └── mod.rs
 │   │   │   │   │   ├── clear_end_record.rs
 │   │   │   │   │   ├── clear_end_record_tests.rs
 │   │   │   │   │   ├── codex_end_record.rs
-│   │   │   │   │   └── codex_end_tests.rs
+│   │   │   │   │   ├── codex_end_tests.rs
+│   │   │   │   │   └── execution_cleanup.rs
 │   │   │   │   ├── codex_clear_relaunch_tests/
 │   │   │   │   │   ├── absent_launch_tests/
 │   │   │   │   │   │   ├── auxiliary_tests/
@@ -2074,6 +2082,7 @@ src/
 │   │   │   ├── o_writer_host_takeover_tests.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── orphan_recovery_fence_tests.rs
+│   │   │   ├── owner_cleanup.rs
 │   │   │   ├── owner_execution.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs

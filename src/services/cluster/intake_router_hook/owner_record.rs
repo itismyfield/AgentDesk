@@ -10,6 +10,7 @@ use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use sqlx::{PgPool, Postgres, Transaction};
 use std::future::Future;
 
+pub(crate) mod cleanup;
 pub(crate) mod custody;
 pub(crate) mod input_start;
 pub(crate) mod output;

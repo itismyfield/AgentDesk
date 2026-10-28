@@ -17,6 +17,7 @@ mod intake_delivery_reconciler;
 mod intake_delivery_sweep;
 mod o_writer_host;
 mod orphan_recovery;
+mod owner_cleanup;
 mod owner_execution;
 mod queued_placeholders;
 mod queued_recovery;

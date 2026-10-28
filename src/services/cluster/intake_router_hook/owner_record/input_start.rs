@@ -49,7 +49,7 @@ pub(crate) async fn prepare(
     pool: &PgPool,
     request: StartRequest<'_>,
 ) -> Result<OwnerStartPermit, String> {
-    let row: Ready = sqlx::query_as("SELECT d.provider,d.channel_id,d.owner_generation,d.routing_receipt_id,r.replay_episode_nonce FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id JOIN intake_session_owners o ON o.provider=d.provider AND o.raw_channel_id=d.channel_id AND o.owner_instance_id=d.owner_instance_id AND o.generation=d.owner_generation AND o.status='active' WHERE d.id=$1 AND d.routing_state='admitted' AND d.status='spawned' AND d.target_instance_id=$2 AND d.claim_owner=$3 AND r.replay_disposition='registered_not_started'")
+    let row: Ready = sqlx::query_as("SELECT d.provider,d.channel_id,d.owner_generation,d.routing_receipt_id,r.replay_episode_nonce FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id JOIN intake_session_owners o ON o.provider=d.provider AND o.raw_channel_id=d.channel_id AND o.owner_instance_id=d.owner_instance_id AND o.generation=d.owner_generation AND o.status='active' AND o.routing_cleanup IS NULL WHERE d.id=$1 AND d.routing_state='admitted' AND d.status='spawned' AND d.target_instance_id=$2 AND d.claim_owner=$3 AND r.replay_disposition='registered_not_started'")
         .bind(request.delivery_id).bind(request.executor).bind(request.claim_owner).fetch_one(pool).await.map_err(error)?;
     let target = EffectTarget::ProviderStart {
         provider: row.provider.clone(),
@@ -121,9 +121,13 @@ impl OwnerStartPermit {
         custody::lock(&mut tx, &self.identity)
             .await
             .map_err(error)?;
-        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id JOIN intake_session_owners o ON o.provider=d.provider AND o.raw_channel_id=d.channel_id AND o.owner_instance_id=d.owner_instance_id AND o.generation=d.owner_generation AND o.status='active' WHERE d.id=$1 AND d.routing_state='admitted' AND d.status='spawned' AND d.owner_instance_id=$2 AND d.owner_generation=$3 AND d.claim_owner=$4 AND r.id=$5 AND r.replay_episode_nonce=$6 AND r.replay_owner_incarnation=$7 AND r.replay_disposition='started_unclassified')")
+        #[cfg(test)]
+        let closing_allowed = super::cleanup::tests::mutant("start-freeze");
+        #[cfg(not(test))]
+        let closing_allowed = false;
+        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id JOIN intake_session_owners o ON o.provider=d.provider AND o.raw_channel_id=d.channel_id AND o.owner_instance_id=d.owner_instance_id AND o.generation=d.owner_generation AND o.status='active' AND (o.routing_cleanup IS NULL OR $8::BOOLEAN) WHERE d.id=$1 AND d.routing_state='admitted' AND d.status='spawned' AND d.owner_instance_id=$2 AND d.owner_generation=$3 AND d.claim_owner=$4 AND r.id=$5 AND r.replay_episode_nonce=$6 AND r.replay_owner_incarnation=$7 AND r.replay_disposition='started_unclassified')")
             .bind(self.delivery).bind(&self.executor).bind(self.generation).bind(&self.claim_owner)
-            .bind(self.source.attempt().receipt_id()).bind(self.source.attempt().nonce()).bind(&self.incarnation)
+            .bind(self.source.attempt().receipt_id()).bind(self.source.attempt().nonce()).bind(&self.incarnation).bind(closing_allowed)
             .fetch_one(&mut *tx).await.map_err(error)?;
         if !valid {
             return Err("owner or source no longer current".into());
