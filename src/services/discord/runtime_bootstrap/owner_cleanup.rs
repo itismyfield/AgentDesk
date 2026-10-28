@@ -19,7 +19,7 @@ pub(super) fn spawn(shared: &Arc<SharedData>, provider: &ProviderKind) {
                 if let Err(error) = cleanup::advance_pending(&pool, provider.as_str()).await {
                     tracing::warn!(%error,"stored owner transition remains pending");
                 }
-                super::owner_execution::prepare(&provider, Some(&pool)).await;
+                super::owner_execution::refresh(&provider, Some(&pool)).await;
                 if let Some(config) = crate::config_live_reload::current() {
                     super::o_writer_host::spawn_execution(
                         &shared,

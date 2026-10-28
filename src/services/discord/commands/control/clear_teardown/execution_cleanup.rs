@@ -103,17 +103,32 @@ where
                 return Response::Retry;
             }
             drop(transition);
-            return match terminate_explicit_herdr(
-                OperatorTerminate {
-                    session_key: owner.into(),
-                    execution_nonce: nonce.into(),
-                },
-                shared.clone(),
-                pool,
-            )
-            .await
-            {
-                TerminationResult::Retired => Response::Ended,
+            let (answer, result) = tokio::sync::oneshot::channel();
+            let finish_shared = shared.clone();
+            let finish_row = row.clone();
+            let request = OperatorTerminate {
+                session_key: owner.into(),
+                execution_nonce: nonce.into(),
+            }
+            .after_retire(move |exclusion| async move {
+                let response = finish_herdr(&finish_shared, &finish_row, &exclusion).await;
+                let _ = answer.send(response);
+                if response == Response::Ended {
+                    TerminationResult::Retired
+                } else {
+                    TerminationResult::Indeterminate(format!(
+                        "owner cleanup retained: {response:?}"
+                    ))
+                }
+            });
+            let terminated = terminate_explicit_herdr(request, shared.clone(), pool).await;
+            #[cfg(test)]
+            eprintln!("owner cleanup Herdr termination: {terminated:?}");
+            if let Ok(response) = result.await {
+                return response;
+            }
+            return match terminated {
+                TerminationResult::Retired => Response::Retry,
                 TerminationResult::Disabled | TerminationResult::Refused(_) => {
                     Response::NeedsOperator
                 }
@@ -188,6 +203,69 @@ where
         transition
     };
     end(owner.into(), transition).await
+}
+
+#[cfg(unix)]
+async fn finish_herdr(
+    shared: &Arc<SharedData>,
+    row: &Record,
+    exclusion: &discord::herdr_terminate::RetiredExclusion,
+) -> Response {
+    use crate::db::dispatched_sessions::hosted_execution::{
+        self, HostedLookup, HostedLookupKey, HostedRecord, HostedState,
+    };
+    let Some(binding) = &row.routing_cleanup.native else {
+        return Response::NeedsOperator;
+    };
+    let (Some(key), Some(nonce), Some(original)) = (
+        binding["owner"].as_str(),
+        binding["execution_nonce"].as_str(),
+        exclusion.execution(),
+    ) else {
+        return Response::NeedsOperator;
+    };
+    if exclusion.provider().as_str() != row.provider
+        || shared.provider.as_str() != row.provider
+        || exclusion.channel().get().to_string() != row.raw_channel_id
+        || original.owner.owner_node != row.owner_instance_id
+        || original.owner.discord_token_hash != shared.token_hash
+        || original.execution_nonce != nonce
+        || binding["endpoint"] != row.owner_instance_id
+        || binding["root"] != crate::services::tmux_common::current_tmux_owner_marker()
+        || crate::config::runtime_root()
+            .is_none_or(|root| root.to_string_lossy() != original.owner.runtime_root)
+    {
+        return Response::IdentityChanged;
+    }
+    let Some(pool) = &shared.pg_pool else {
+        return Response::Retry;
+    };
+    let mut expected = original.clone();
+    expected.state = HostedState::Retired;
+    match hosted_execution::load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await {
+        HostedLookup::Found(current) if matches!(current.record, HostedRecord::Known(ref record) if record == &expected) =>
+            {}
+        HostedLookup::Unknown(_) => return Response::Retry,
+        _ => return Response::IdentityChanged,
+    }
+    #[cfg(test)]
+    if cleanup::tests::mutant("herdr-postlude") {
+        return Response::Ended;
+    }
+    let response = archive_completed(shared, row).await;
+    if response != Response::Ended {
+        return response;
+    }
+    if let Some(session) = shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .get_mut(&exclusion.channel())
+    {
+        session.clear_provider_session();
+    }
+    Response::Ended
 }
 
 async fn normal_end(
@@ -305,7 +383,7 @@ async fn inflight_ready(
             .is_none();
     #[cfg(not(unix))]
     let gone = false;
-    if fenced && disposition == "withheld" && (gone || native_completed(shared, &state)) {
+    if fenced && disposition == "withheld" && (gone || native_completed(shared, &state)?) {
         return Ok(Some(state));
     }
     Err(Response::Busy)
@@ -314,7 +392,15 @@ async fn inflight_ready(
 fn native_completed(
     shared: &Arc<SharedData>,
     state: &discord::inflight::InflightTurnState,
-) -> bool {
+) -> Result<bool, Response> {
+    read_native_completion(shared, state, 64)
+}
+
+fn read_native_completion(
+    shared: &Arc<SharedData>,
+    state: &discord::inflight::InflightTurnState,
+    max_chunks: usize,
+) -> Result<bool, Response> {
     use crate::services::tui_o::{
         shadow::{SourceBinding, SourceId},
         writer::input_facts::{InputFacts, TurnState},
@@ -325,7 +411,7 @@ fn native_completed(
         state.turn_start_offset,
         state.tui_terminal_source_file_identity,
     ) else {
-        return false;
+        return Ok(false);
     };
     let source = SourceId {
         session_id: session.clone(),
@@ -340,7 +426,7 @@ fn native_completed(
         crate::services::provider::ProviderKind::Codex => {
             crate::services::tui_o::shadow::ShadowProvider::Codex
         }
-        _ => return false,
+        _ => return Ok(false),
     };
     let Ok(mut facts) = InputFacts::open_at(
         SourceBinding {
@@ -350,16 +436,24 @@ fn native_completed(
         },
         offset,
     ) else {
-        return false;
+        return Err(Response::Retry);
     };
-    facts
-        .poll(1024 * 1024)
-        .is_ok_and(|fact| fact.state == TurnState::Idle)
-        && shared.turn_finalizer.completion_signal_state(
-            &shared.provider,
-            Some(state.runtime_kind_for_recovery()),
-            std::path::Path::new(path),
-        ) == discord::turn_finalizer::CompletionSignal::Done
+    for _ in 0..max_chunks {
+        let fact = facts.poll(1024 * 1024).map_err(|_| Response::Retry)?;
+        if facts.caught_up().map_err(|_| Response::Retry)? {
+            return Ok(fact.state == TurnState::Idle
+                && shared.turn_finalizer.completion_signal_state(
+                    &shared.provider,
+                    Some(state.runtime_kind_for_recovery()),
+                    std::path::Path::new(path),
+                ) == discord::turn_finalizer::CompletionSignal::Done);
+        }
+        #[cfg(test)]
+        if cleanup::tests::mutant("single-poll") {
+            return Ok(false);
+        }
+    }
+    Err(Response::Retry)
 }
 
 async fn archive_completed(shared: &Arc<SharedData>, row: &Record) -> Response {

@@ -30,6 +30,34 @@ pub(crate) struct OperatorTerminate {
     pub(crate) session_key: String,
     pub(crate) execution_nonce: String,
 }
+
+type Postlude = Box<
+    dyn FnOnce(RetiredExclusion) -> futures::future::BoxFuture<'static, TerminationResult> + Send,
+>;
+pub(crate) struct ExplicitTerminate {
+    request: OperatorTerminate,
+    after: Option<Postlude>,
+}
+impl From<OperatorTerminate> for ExplicitTerminate {
+    fn from(request: OperatorTerminate) -> Self {
+        Self {
+            request,
+            after: None,
+        }
+    }
+}
+impl OperatorTerminate {
+    pub(crate) fn after_retire<F, Fut>(self, after: F) -> ExplicitTerminate
+    where
+        F: FnOnce(RetiredExclusion) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = TerminationResult> + Send + 'static,
+    {
+        ExplicitTerminate {
+            request: self,
+            after: Some(Box::new(move |held| after(held).boxed())),
+        }
+    }
+}
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TerminationResult {
     /// The live switch is off; nothing was read or written.
@@ -359,12 +387,22 @@ async fn confirm_captured_released(
 }
 /// Production callers: [`terminate_registered_herdr`] and a user clear of a Herdr channel.
 pub(crate) async fn terminate_explicit_herdr(
-    request: OperatorTerminate,
+    request: impl Into<ExplicitTerminate> + Send,
     shared: Arc<SharedData>,
     pool: &PgPool,
 ) -> TerminationResult {
-    match terminate_scoped(request, shared, pool, None).await {
+    let ExplicitTerminate { request, after } = request.into();
+    let resume_retired = after.is_some();
+    #[cfg(test)]
+    let resume_retired = resume_retired
+        && !crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
+            "retired-resume",
+        );
+    match terminate_scoped(request, shared, pool, None, resume_retired).await {
         Ok(exclusion) => {
+            if let Some(after) = after {
+                return after(exclusion).await;
+            }
             drop(exclusion);
             TerminationResult::Retired
         }
@@ -379,6 +417,7 @@ async fn terminate_scoped(
     shared: Arc<SharedData>,
     pool: &PgPool,
     expected: Option<http_force::Expected>,
+    resume_retired: bool,
 ) -> Result<RetiredExclusion, TerminationResult> {
     use TerminationResult::{Indeterminate, Refused};
     if !terminate_enabled() {
@@ -390,7 +429,7 @@ async fn terminate_scoped(
     };
     if record.execution_nonce != request.execution_nonce
         || expected.as_ref().is_some_and(|e| e.owner != record.owner)
-        || record.state == HostedState::Retired
+        || (record.state == HostedState::Retired && !resume_retired)
         || record.owner.discord_token_hash != shared.token_hash
         || Some(record.owner.owner_node.clone()) != crate::config::session_hosts::local_node()
         || record
@@ -441,69 +480,107 @@ async fn terminate_scoped(
     {
         return Err(Refused("captured turn runs another dispatch".into()));
     }
-    let Some(target) = herdr_endpoints().target(record) else {
-        return Err(Refused("missing launch evidence".into()));
+    let retired = record.state == HostedState::Retired;
+    let target = if retired {
+        None
+    } else {
+        Some(
+            herdr_endpoints()
+                .target(record)
+                .ok_or_else(|| Refused("missing launch evidence".into()))?,
+        )
     };
-    let fence = match target.termination_fence() {
-        Ok(fence) => Arc::new(fence),
-        Err(e) => return Err(Refused(format!("{e:?}"))),
+    let fence = if let Some(target) = &target {
+        Arc::new(
+            target
+                .termination_fence()
+                .map_err(|error| Refused(format!("{error:?}")))?,
+        )
+    } else {
+        let probe = herdr_endpoints()
+            .retired_probe(record)
+            .ok_or_else(|| Refused("missing retired endpoint".into()))?;
+        let (fence, proof) = tokio::task::spawn_blocking(move || probe.confirm())
+            .await
+            .map_err(|error| Indeterminate(error.to_string()))?
+            .map_err(Refused)?;
+        if !proof.matches(record) {
+            return Err(Refused("retired execution changed".into()));
+        }
+        Arc::new(fence)
     };
-    let unsent = UnsentClose(Some(fence.clone()));
+    let unsent = UnsentClose((!retired).then(|| fence.clone()));
     #[cfg(test)]
     run_probe(&AFTER_FENCE).await;
     if load(pool, &request.session_key).await.as_ref() != Ok(&row)
         || !http_force::dispatch_holds(pool, &row, expected.as_ref()).await
     {
-        fence.reopen();
+        if !retired {
+            fence.reopen();
+        }
         return Err(Refused("row changed under fence".into()));
     }
-    let read_target = target.clone();
-    match tokio::task::spawn_blocking(move || read_target.revalidate_termination_reads()).await {
-        Ok(Ok(_)) => {}
-        other => {
-            fence.reopen();
-            return Err(Refused(format!("termination provenance: {other:?}")));
+    if let Some(target) = target {
+        let read_target = target.clone();
+        match tokio::task::spawn_blocking(move || read_target.revalidate_termination_reads()).await
+        {
+            Ok(Ok(_)) => {}
+            other => {
+                if !retired {
+                    fence.reopen();
+                }
+                return Err(Refused(format!("termination provenance: {other:?}")));
+            }
+        }
+        let Some(view) = herdr_endpoints().view(record) else {
+            if !retired {
+                fence.reopen();
+            }
+            return Err(Refused("no local endpoint".into()));
+        };
+        let read = record.clone();
+        let ended =
+            match tokio::task::spawn_blocking(move || view.ended(&read, &view.read_execution()))
+                .await
+            {
+                Ok(ended) => ended,
+                Err(e) => {
+                    if !retired {
+                        fence.reopen();
+                    }
+                    return Err(Indeterminate(e.to_string()));
+                }
+            };
+        unsent.disarm();
+        if !ended && record.state != HostedState::Retired {
+            // Blocking socket work remains outside the async executor; the fence stays owned here.
+            let close_target = target.clone();
+            let close_fence = fence.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                terminate_herdr_once(OperatorTerminateWarrant::issue_fenced(
+                    close_target,
+                    &close_fence,
+                ))
+            })
+            .await
+            .map_err(|e| Indeterminate(e.to_string()))?;
+            if !matches!(
+                result,
+                HerdrTerminateResult::Acknowledged | HerdrTerminateResult::Indeterminate(_)
+            ) {
+                if !retired {
+                    fence.reopen();
+                }
+                return Err(TerminationResult::Close(result));
+            }
+        }
+        #[cfg(test)]
+        run_probe(&AFTER_CLOSE).await;
+        read_end(target, record.clone()).await?;
+        if record.state != HostedState::Retired {
+            retire_confirmed(pool, &row, record).await?;
         }
     }
-    let Some(view) = herdr_endpoints().view(record) else {
-        fence.reopen();
-        return Err(Refused("no local endpoint".into()));
-    };
-    let read = record.clone();
-    let ended = match tokio::task::spawn_blocking(move || view.ended(&read, &view.read_execution()))
-        .await
-    {
-        Ok(ended) => ended,
-        Err(e) => {
-            fence.reopen();
-            return Err(Indeterminate(e.to_string()));
-        }
-    };
-    unsent.disarm();
-    if !ended {
-        // Blocking socket work remains outside the async executor; the fence stays owned here.
-        let close_target = target.clone();
-        let close_fence = fence.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            terminate_herdr_once(OperatorTerminateWarrant::issue_fenced(
-                close_target,
-                &close_fence,
-            ))
-        })
-        .await
-        .map_err(|e| Indeterminate(e.to_string()))?;
-        if !matches!(
-            result,
-            HerdrTerminateResult::Acknowledged | HerdrTerminateResult::Indeterminate(_)
-        ) {
-            fence.reopen();
-            return Err(TerminationResult::Close(result));
-        }
-    }
-    #[cfg(test)]
-    run_probe(&AFTER_CLOSE).await;
-    read_end(target, record.clone()).await?;
-    retire_confirmed(pool, &row, record).await?;
     let token = turn.as_ref().map(|turn| turn.token.clone());
     let nonce = record.execution_nonce.clone();
     let exclusion = (transition, fence);

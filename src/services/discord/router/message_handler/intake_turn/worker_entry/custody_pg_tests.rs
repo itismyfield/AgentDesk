@@ -915,7 +915,34 @@ async fn custody_pg_refresh_preserves_sources_and_deadline_after_owner_change_pg
             .unwrap()
     );
     let second = stage(&pool, &payload("733698", "702", "gateway"), Some(0), 0).await;
-    let third = stage(&pool, &payload("733698", "703", "gateway"), Some(0), 0).await;
+    use crate::services::cluster::attachment_transfer::{self as attachments, store};
+    let identity = attachments::AttachmentMessageIdentity {
+        provider: "claude".into(),
+        channel_id: "733698".into(),
+        user_msg_id: "703".into(),
+    };
+    let bytes = b"rebase preserves this actual attachment";
+    let bundle = attachments::validate_attachment_bundle_v1(
+        attachments::AttachmentBundleV1 {
+            version: attachments::ATTACHMENT_BUNDLE_V1,
+            identity: identity.clone(),
+            source_attachment_count: 1,
+            entries: vec![attachments::AttachmentEntryV1 {
+                filename: "rebase.txt".into(),
+                bytes: bytes.to_vec(),
+                sha256: attachments::attachment_sha256_hex(bytes),
+            }],
+        },
+        &identity,
+    )
+    .unwrap();
+    let reference = store::put(&pool, &bundle).await.unwrap();
+    let mut third_payload = payload("733698", "703", "gateway");
+    third_payload.attachment_refs = json!([reference]);
+    third_payload.reply_context =
+        Some(json!({"message_id":"699","content":"original reply"}).to_string());
+    third_payload.replay_source_message_ids = Some(vec!["703".into(), "704".into()]);
+    let third = stage(&pool, &third_payload, Some(0), 0).await;
     let original_sql = "SELECT jsonb_build_array(routing_receipt_id,provider,channel_id,user_msg_id,user_text,replay_source_message_ids,attachment_refs,reply_context) FROM intake_outbox WHERE id=$1";
     let original: serde_json::Value = sqlx::query_scalar(original_sql)
         .bind(third)
@@ -1030,6 +1057,15 @@ async fn custody_pg_refresh_preserves_sources_and_deadline_after_owner_change_pg
     assert_eq!(
         original, preserved,
         "routing changes preserve the raw input"
+    );
+    assert_eq!(
+        store::load(&pool, &reference)
+            .await
+            .unwrap()
+            .as_bundle()
+            .entries[0]
+            .bytes,
+        bytes
     );
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM intake_outbox WHERE routing_receipt_id IS NOT NULL",

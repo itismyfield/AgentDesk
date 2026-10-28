@@ -70,6 +70,7 @@ impl OwnerPermit {
 pub(crate) struct View {
     pub(crate) permit: Result<Arc<OwnerPermit>, String>,
     pub(crate) candidate: Candidate,
+    pub(crate) retained: Option<Arc<OwnerPermit>>,
 }
 
 impl View {
@@ -77,6 +78,33 @@ impl View {
         Self {
             permit: Err(reason),
             candidate: Candidate::new(crate::services::tui_o::channel_policy::Adoption::Held),
+            retained: None,
+        }
+    }
+    pub(crate) fn verified(&self) -> Option<Arc<OwnerPermit>> {
+        self.permit
+            .as_ref()
+            .ok()
+            .cloned()
+            .or_else(|| self.retained.clone())
+    }
+}
+
+pub(crate) struct ReadError {
+    pub(crate) reason: String,
+    pub(crate) temporary: bool,
+}
+impl ReadError {
+    pub(crate) fn temporary(reason: impl ToString) -> Self {
+        Self {
+            reason: reason.to_string(),
+            temporary: true,
+        }
+    }
+    fn identity(reason: impl ToString) -> Self {
+        Self {
+            reason: reason.to_string(),
+            temporary: false,
         }
     }
 }
@@ -89,40 +117,59 @@ pub(crate) async fn read(
     local: &str,
     legacy_present: impl FnOnce() -> Result<bool, String>,
 ) -> Result<Option<Arc<OwnerPermit>>, String> {
+    read_observation(pool, provider, channel, local, legacy_present)
+        .await
+        .map_err(|e| e.reason)
+}
+
+pub(crate) async fn read_observation(
+    pool: &PgPool,
+    provider: &str,
+    channel: u64,
+    local: &str,
+    legacy_present: impl FnOnce() -> Result<bool, String>,
+) -> Result<Option<Arc<OwnerPermit>>, ReadError> {
     let identity = OwnerIdentity::new(provider, &channel.to_string());
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let mut tx = pool.begin().await.map_err(ReadError::temporary)?;
     sqlx::query("SET LOCAL lock_timeout='2s'")
         .execute(&mut *tx)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(ReadError::temporary)?;
     custody::lock(&mut tx, &identity)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(ReadError::temporary)?;
     let managed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND routing_receipt_id IS NOT NULL)")
-        .bind(identity.provider()).bind(identity.raw_channel_id()).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
+        .bind(identity.provider()).bind(identity.raw_channel_id()).fetch_one(&mut *tx).await.map_err(ReadError::temporary)?;
     if !managed {
         return Ok(None);
     }
     let owner: Option<(String, i64)> = sqlx::query_as("SELECT owner_instance_id,generation FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND status='active'")
-        .bind(identity.provider()).bind(identity.raw_channel_id()).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
-    let (executor, generation) = owner.ok_or("managed channel has no active execution owner")?;
+        .bind(identity.provider()).bind(identity.raw_channel_id()).fetch_optional(&mut *tx).await.map_err(ReadError::temporary)?;
+    let (executor, generation) = owner
+        .ok_or_else(|| ReadError::identity("managed channel has no active execution owner"))?;
     if executor != local {
-        return Err(format!("channel execution owner is {executor}"));
+        return Err(ReadError::identity(format!(
+            "channel execution owner is {executor}"
+        )));
     }
     let binding: Option<Value> = sqlx::query_scalar("SELECT r.replay_preserved #> '{projection,binding}' FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id WHERE d.provider=$1 AND d.channel_id=$2 AND d.owner_instance_id=$3 AND d.owner_generation=$4 AND r.replay_preserved #> '{projection,binding}' IS NOT NULL ORDER BY d.id DESC LIMIT 1")
-        .bind(identity.provider()).bind(identity.raw_channel_id()).bind(local).bind(generation).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
+        .bind(identity.provider()).bind(identity.raw_channel_id()).bind(local).bind(generation).fetch_optional(&mut *tx).await.map_err(ReadError::temporary)?;
     let session_ref = match binding {
         Some(binding) => {
-            validate_local(provider, channel, local, &binding)
-                .map_err(|error| format!("original native incarnation ref: {error:?}"))?;
+            validate_local(provider, channel, local, &binding).map_err(|error| ReadError {
+                temporary: matches!(error, NativeRefFailure::Unavailable),
+                reason: format!("original native incarnation ref: {error:?}"),
+            })?;
             SessionRef::Bound(binding)
         }
-        None if legacy_present()? => {
-            return Err("local live session requires committed adoption".into());
+        None if legacy_present().map_err(ReadError::temporary)? => {
+            return Err(ReadError::identity(
+                "local live session requires committed adoption",
+            ));
         }
         None => SessionRef::Fresh,
     };
-    tx.rollback().await.map_err(|e| e.to_string())?;
+    tx.rollback().await.map_err(ReadError::temporary)?;
     Ok(Some(Arc::new(OwnerPermit {
         pool: pool.clone(),
         identity,

@@ -15,6 +15,66 @@ pub(crate) enum ReturnEndRefusal {
 #[derive(Debug)]
 pub(crate) struct RetiredEnd(HostedExecution);
 
+/// A retired execution's endpoint reads and nonce exclusion; it exposes no pane mutation.
+pub(crate) struct RetiredProbe {
+    endpoint: HerdrEndpoint,
+    transport: Arc<dyn HerdrTransport>,
+    record: HostedExecution,
+    os: Arc<dyn ProcessOs>,
+}
+
+impl RetiredProbe {
+    pub(crate) fn new(
+        endpoint: HerdrEndpoint,
+        transport: Arc<dyn HerdrTransport>,
+        record: &HostedExecution,
+    ) -> Option<Self> {
+        let location = record.location.as_ref()?;
+        if record.state != HostedState::Retired || !on_endpoint(location, &endpoint) {
+            return None;
+        }
+        Some(Self {
+            endpoint,
+            transport,
+            record: record.clone(),
+            os: Arc::new(HostOs),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_os(mut self, os: Arc<dyn ProcessOs>) -> Self {
+        self.os = os;
+        self
+    }
+
+    pub(crate) fn confirm(self) -> Result<(TerminationFence, RetiredEnd), String> {
+        let location = self
+            .record
+            .location
+            .as_ref()
+            .ok_or("missing retired location")?;
+        let fence = execution_fence(
+            &self.endpoint,
+            &location.pane_id,
+            &self.record.execution_nonce,
+        );
+        let permit = fence
+            .acquire(Mutation::Terminate)
+            .map_err(|error| format!("{error:?}"))?;
+        let was_closing = {
+            let mut state = fence.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let closing = state.1;
+            state.1 = true;
+            closing
+        };
+        let held = TerminationFence(permit, was_closing);
+        let proof =
+            RetiredEnd::observe_with_os(&self.endpoint, self.transport, &self.record, self.os)
+                .map_err(|error| format!("{error:?}"))?;
+        Ok((held, proof))
+    }
+}
+
 impl RetiredEnd {
     pub(crate) fn matches(&self, record: &HostedExecution) -> bool {
         self.0 == *record

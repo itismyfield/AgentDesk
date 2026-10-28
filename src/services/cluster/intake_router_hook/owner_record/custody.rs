@@ -220,8 +220,29 @@ pub(crate) async fn promote(
         sqlx::query("UPDATE intake_session_owners SET routing_cleanup_deferred=TRUE WHERE provider=$1 AND raw_channel_id=$2 AND generation=$3")
             .bind(id.provider()).bind(id.raw_channel_id()).bind(prior).execute(&mut *tx).await?;
     }
-    sqlx::query("UPDATE intake_outbox SET routing_wait_owner_generation=$3 WHERE provider=$1 AND channel_id=$2 AND routing_state='held'")
-        .bind(id.provider()).bind(id.raw_channel_id()).bind(generation).execute(&mut *tx).await?;
+    let rebase = "UPDATE intake_outbox SET routing_wait_owner_generation=$3 WHERE provider=$1 AND channel_id=$2 AND routing_state='held'";
+    #[cfg(test)]
+    let rebase_storage = if super::cleanup::tests::mutant("rebase-clear-attachments") {
+        rebase.replace(
+            "SET routing_wait_owner_generation=$3",
+            "SET routing_wait_owner_generation=$3,attachment_refs='[]'",
+        )
+    } else if super::cleanup::tests::mutant("rebase-clear-reply") {
+        rebase.replace(
+            "SET routing_wait_owner_generation=$3",
+            "SET routing_wait_owner_generation=$3,reply_context=NULL",
+        )
+    } else {
+        rebase.to_owned()
+    };
+    #[cfg(test)]
+    let rebase = sqlx::AssertSqlSafe(rebase_storage);
+    sqlx::query(rebase)
+        .bind(id.provider())
+        .bind(id.raw_channel_id())
+        .bind(generation)
+        .execute(&mut *tx)
+        .await?;
     let head:Option<i64> = sqlx::query_scalar("SELECT id FROM intake_outbox WHERE provider=$1 AND channel_id=$2 AND routing_state='held' ORDER BY id LIMIT 1")
         .bind(id.provider()).bind(id.raw_channel_id()).fetch_optional(&mut *tx).await?;
     if head != Some(delivery) {

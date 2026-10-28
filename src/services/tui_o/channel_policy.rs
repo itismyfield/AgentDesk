@@ -418,6 +418,7 @@ impl BootChannels {
                     View {
                         permit: Ok(bound),
                         candidate: old.candidate.clone(),
+                        retained: None,
                     },
                 );
             return;
@@ -443,6 +444,7 @@ impl BootChannels {
                 View {
                     permit: Ok(permit),
                     candidate: self.seed_candidate(channel, state),
+                    retained: None,
                 }
             }
         };
@@ -450,6 +452,78 @@ impl BootChannels {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(channel, view);
+    }
+
+    pub(crate) fn suspend_execution(&self, channel: u64, reason: String, temporary: bool) {
+        use super::ownership::execution::View;
+        let _install = self
+            .execution_install
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let old = self.execution(channel);
+        let prior = old.as_ref().and_then(View::verified);
+        if let Some(prior) = &prior {
+            if temporary {
+                prior.gate().uncertain();
+            } else {
+                prior.gate().close();
+            }
+        }
+        let candidate = old
+            .map(|view| view.candidate)
+            .unwrap_or_else(|| View::held(reason.clone()).candidate);
+        self.execution
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                channel,
+                View {
+                    permit: Err(reason),
+                    candidate,
+                    retained: prior.filter(|_| temporary),
+                },
+            );
+    }
+
+    pub(crate) fn resume_execution(
+        &self,
+        channel: u64,
+        next: &Arc<super::ownership::execution::OwnerPermit>,
+    ) -> bool {
+        use super::ownership::execution::View;
+        let _install = self
+            .execution_install
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(old) = self.execution(channel) else {
+            return false;
+        };
+        let Some(prior) = old.verified() else {
+            return false;
+        };
+        let restored = if prior.same_execution(next) {
+            Some(prior)
+        } else {
+            prior.first_binding(next)
+        };
+        let Some(restored) = restored else {
+            return false;
+        };
+        if restored.gate().current().epoch().is_none() && restored.gate().reacquired().is_none() {
+            return false;
+        }
+        self.execution
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                channel,
+                View {
+                    permit: Ok(restored),
+                    candidate: old.candidate,
+                    retained: None,
+                },
+            );
+        true
     }
 
     /// Every selected channel starts in `state`, as `seeded` would leave it on the home.

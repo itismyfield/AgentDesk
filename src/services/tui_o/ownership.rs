@@ -146,6 +146,28 @@ impl OwnershipGate {
         self.set(&mut state, GatewayOwnership::Lost);
     }
 
+    pub(crate) async fn execution_retired(&self) {
+        #[cfg(test)]
+        if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
+            "no-retire-stop",
+        ) {
+            std::future::pending::<()>().await;
+        }
+        let mut updates = self.subscribe();
+        loop {
+            let retired = {
+                let state = self.locked();
+                state.execution_generation.is_some() && state.closed
+            };
+            if retired {
+                return;
+            }
+            if updates.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
     /// Runs `hand_off` under the gate lock only while `Owned`; it must hand the request to the
     /// HTTP client without awaiting, so a transition never waits on a response.
     pub fn admit<T>(&self, hand_off: impl FnOnce(u64) -> T) -> Option<T> {

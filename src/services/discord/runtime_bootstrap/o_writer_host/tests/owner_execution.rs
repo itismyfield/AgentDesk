@@ -16,14 +16,24 @@ struct Discord {
 }
 impl Discord {
     async fn new() -> Self {
+        Self::with_hold(None).await
+    }
+    async fn with_hold(
+        hold: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Semaphore>)>,
+    ) -> Self {
         let posts = Arc::new(Mutex::new(Vec::new()));
         let recorded = posts.clone();
         let app = axum::Router::new().fallback(axum::routing::any(move |method:axum::http::Method,uri:axum::http::Uri,body:axum::body::Bytes| {
-            let recorded=recorded.clone();async move {
+            let recorded=recorded.clone();let hold=hold.clone();async move {
                 if uri.path().ends_with("/users/@me") { return axum::Json(json!({"id":"1","username":"fixture","discriminator":"0001","avatar":null,"bot":true})); }
                 if method==axum::http::Method::GET { return axum::Json(json!([])); }
                 assert_eq!(method,axum::http::Method::POST);
                 let payload:Value=serde_json::from_slice(&body).unwrap();recorded.lock().unwrap().push(payload.clone());
+                let first = recorded.lock().unwrap().len() == 1;
+                if first && let Some((entered, release)) = hold {
+                    entered.notify_one();
+                    release.acquire_owned().await.unwrap().forget();
+                }
                 let channel=uri.path().split('/').nth(4).unwrap();
                 axum::Json(json!({"id":"9001","channel_id":channel,"content":payload["content"],
                     "author":{"id":"1","username":"fixture","discriminator":"0001","avatar":null,"bot":true},
@@ -552,3 +562,6 @@ async fn owner_cleanup_legacy_port_open_before_management_keeps_scope_pg() {
     assert_eq!(discord.posts.lock().unwrap().len(), 1);
     pool.close().await;
 }
+
+#[path = "owner_execution/refresh_tests.rs"]
+mod refresh_tests;

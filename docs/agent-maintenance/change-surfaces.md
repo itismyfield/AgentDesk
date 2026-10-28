@@ -2515,6 +2515,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/discord/router/message_handler/intake_turn.rs`
 - `src/services/discord/standby_relay.rs`
 - `src/services/discord/tmux_watcher.rs`
+- `src/services/discord/turn_bridge/completion_postlude.rs`
 - `src/services/discord/turn_bridge/terminal_controller_cutover.rs`
 - `src/services/dispatches/discord_delivery/orchestration.rs`
 - `src/services/dispatches/outbox_route.rs`

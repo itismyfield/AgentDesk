@@ -548,18 +548,29 @@ pub fn start_managed<I: HostIo>(
         #[cfg(test)]
         let settled = Arc::clone(&claim.settled);
         let (stop, stopping) = watch::channel(false);
+        let retired_stop = stop.clone();
         let io = Arc::clone(&io);
         let host = tokio::spawn(async move {
-            host_channel(
-                io,
-                channel,
-                candidate,
-                provider,
-                root,
-                gate,
-                (&claim, stopping),
-            )
-            .await;
+            let retirement = Arc::clone(&gate);
+            {
+                let run = host_channel(
+                    io,
+                    channel,
+                    candidate,
+                    provider,
+                    root,
+                    gate,
+                    (&claim, stopping),
+                );
+                tokio::pin!(run);
+                tokio::select! {
+                    () = &mut run => {},
+                    () = retirement.execution_retired() => {
+                        retired_stop.send_replace(true);
+                        run.await;
+                    }
+                }
+            }
             drop(reservation);
             if claim.settled.load(Ordering::SeqCst) {
                 claim.release();

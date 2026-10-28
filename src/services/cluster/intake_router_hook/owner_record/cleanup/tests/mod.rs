@@ -22,16 +22,24 @@ impl Fixture {
         provider: &str,
         native: Option<Value>,
     ) -> Self {
+        Self::on_executor(channel, provider, native, "mac-a").await
+    }
+    pub(crate) async fn on_executor(
+        channel: u64,
+        provider: &str,
+        native: Option<Value>,
+        executor: &str,
+    ) -> Self {
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let id = OwnerIdentity::new(provider, &channel.to_string());
-        let old = execution::tests::admission(&pool, provider, channel, "mac-a").await;
+        let old = execution::tests::admission(&pool, provider, channel, executor).await;
         if let Some(binding) = native {
             use crate::db::intake_outbox;
             use crate::services::cluster::intake_router_hook::owner_record::input_start;
             let claimed = intake_outbox::claim_pending_for_target_except(
                 &pool,
-                "mac-a",
+                executor,
                 provider,
                 "cleanup-fixture",
                 &[],
@@ -54,7 +62,7 @@ impl Fixture {
                 &pool,
                 input_start::StartRequest {
                     delivery_id: old,
-                    executor: "mac-a",
+                    executor,
                     claim_owner: "cleanup-fixture",
                     incarnation: "cleanup-runtime",
                     frame: "old frame",
@@ -92,7 +100,7 @@ impl Fixture {
             .await
             .unwrap();
         assert!(
-            request(&pool, &id, ("mac-a", 0), pending, "mac-b", 12)
+            request(&pool, &id, (executor, 0), pending, "mac-b", 12)
                 .await
                 .unwrap()
         );

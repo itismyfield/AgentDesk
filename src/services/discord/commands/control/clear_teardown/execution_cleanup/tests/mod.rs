@@ -386,6 +386,59 @@ async fn owner_cleanup_completed_inflight_restart_archives_exact_source_before_f
         .await
         .unwrap()
         .unwrap();
+    let transcript = root.join("completed-large.jsonl");
+    let mut large = String::new();
+    for index in 0..2500 {
+        large.push_str(&json!({"type":"assistant","uuid":format!("large-{index}"),"apiBlockIndex":0,
+            "message":{"id":format!("large-{index}"),"content":[{"type":"text","text":"x".repeat(512)}]}}).to_string());
+        large.push('\n');
+    }
+    std::fs::write(
+        &transcript,
+        format!("{large}{{\"type\":\"result\",\"subtype\":\"success\"}}\n"),
+    )
+    .unwrap();
+    let source = crate::services::tui_o::shadow::binding_reader::source_id_for(
+        "completed-source",
+        &transcript,
+    )
+    .unwrap();
+    let mut observed = state.clone();
+    observed.terminal_delivery_committed = false;
+    observed.session_id = Some("completed-source".into());
+    observed.output_path = Some(transcript.to_string_lossy().into());
+    observed.turn_start_offset = Some(0);
+    observed.tui_terminal_source_file_identity = Some((source.dev, source.ino));
+    observed.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+    std::fs::write(&path, serde_json::to_vec(&observed).unwrap()).unwrap();
+    let mut tx = fx.pool.begin().await.unwrap();
+    sqlx::query("UPDATE intake_session_owners SET status='superseded' WHERE id=$1")
+        .bind(row.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    crate::db::replay_disposition::write::withhold_owner_loss_on_tx(&mut tx, receipt)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    fake.mark_present();
+    assert_eq!(native_completed(&shared, &observed), Ok(true));
+    let completed = inflight_ready(&shared, &row).await;
+    assert!(
+        completed.is_ok(),
+        "a fenced completed large turn must escape Busy: {completed:?}"
+    );
+    std::fs::write(&transcript, &large).unwrap();
+    assert!(
+        matches!(inflight_ready(&shared, &row).await, Err(Response::Busy)),
+        "no strict completion still retains the old turn"
+    );
+    fake.mark_missing();
+    sqlx::query("UPDATE intake_session_owners SET status='active' WHERE id=$1")
+        .bind(row.id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
     state.terminal_delivery_committed = false;
     std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
     assert_eq!(
@@ -410,33 +463,49 @@ async fn owner_cleanup_completed_inflight_restart_archives_exact_source_before_f
         Response::Retry,
         "existing before-start receipt protection must survive cleanup"
     );
-    std::fs::write(&path, &bytes).unwrap();
-    let mut barrier = fx.pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE intake_outbox IN ACCESS EXCLUSIVE MODE")
-        .execute(&mut *barrier)
-        .await
-        .unwrap();
-    let task_shared = shared.clone();
-    let task_row = row.clone();
-    let archived = tokio::spawn(async move { archive_completed(&task_shared, &task_row).await });
-    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+    let selected = std::env::var("ADK_PCD_ARCHIVE_CASE").ok();
+    let mut exercised = 0;
+    for fault in ["generation", "malformed", "eio"] {
+        if selected.as_deref().is_some_and(|chosen| chosen != fault) {
+            continue;
+        }
+        exercised += 1;
+        std::fs::write(&path, &bytes).unwrap();
+        let mut barrier = fx.pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE intake_outbox IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *barrier)
+            .await
+            .unwrap();
+        let task_shared = shared.clone();
+        let task_row = row.clone();
+        let archived =
+            tokio::spawn(async move { archive_completed(&task_shared, &task_row).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
         loop {
             let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT r.replay_disposition%')").fetch_one(&fx.pool).await.unwrap();
             if blocked {break}
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }).await.expect("archive must load the original snapshot before its PG authority read");
-    state.save_generation += 1;
-    let updated = serde_json::to_vec(&state).unwrap();
-    std::fs::write(&path, &updated).unwrap();
-    barrier.rollback().await.unwrap();
-    assert_eq!(
-        archived.await.unwrap(),
-        Response::Retry,
-        "a newer save generation must make archive a no-op"
-    );
-    assert_eq!(std::fs::read(&path).unwrap(), updated);
-    assert!(!root.join("archive").exists());
+        state.save_generation += 1;
+        let updated = match fault {
+            "malformed" => b"{not valid json".to_vec(),
+            "eio" => bytes.clone(),
+            _ => serde_json::to_vec(&state).unwrap(),
+        };
+        let _read_error =
+            (fault == "eio").then(|| discord::inflight::inject_archive_read_error(&path));
+        std::fs::write(&path, &updated).unwrap();
+        barrier.rollback().await.unwrap();
+        assert_eq!(
+            archived.await.unwrap(),
+            Response::Retry,
+            "a changed or unreadable final snapshot must make archive a no-op"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), updated);
+        assert!(!root.join("archive").exists());
+    }
+    assert!(exercised > 0);
     std::fs::write(&path, &bytes).unwrap();
     assert_eq!(
         run(&shared, &row).await,
@@ -506,24 +575,48 @@ async fn owner_cleanup_native_observer_requires_original_file_and_own_turn_end()
     state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
     state.tui_terminal_source_file_identity = Some((source.dev, source.ino));
     assert!(
-        !native_completed(&shared, &state),
+        !matches!(native_completed(&shared, &state), Ok(true)),
         "an earlier turn's terminator cannot close this source"
     );
     let current = "{\"type\":\"assistant\",\"uuid\":\"a\",\"apiBlockIndex\":0,\"message\":{\"id\":\"message-a\",\"content\":[{\"type\":\"text\",\"text\":\"still working\"}]}}\n";
     std::fs::write(&path, format!("{previous}{current}")).unwrap();
     assert!(
-        !native_completed(&shared, &state),
+        !matches!(native_completed(&shared, &state), Ok(true)),
         "assistant prose is not native completion"
     );
     std::fs::write(&path, format!("{previous}{current}{previous}")).unwrap();
     assert!(
-        native_completed(&shared, &state),
+        native_completed(&shared, &state).unwrap(),
         "original source's strict terminator completes the turn"
+    );
+    let mut large = String::from(previous);
+    for index in 0..2500 {
+        large.push_str(&json!({"type":"assistant","uuid":format!("large-{index}"),"apiBlockIndex":0,
+            "message":{"id":format!("large-{index}"),"content":[{"type":"text","text":"x".repeat(512)}]}}).to_string());
+        large.push('\n');
+    }
+    assert!(large.len() > 1024 * 1024);
+    std::fs::write(&path, format!("{large}{previous}")).unwrap();
+    assert_eq!(
+        read_native_completion(&shared, &state, 1),
+        Err(Response::Retry)
+    );
+    assert!(
+        native_completed(&shared, &state).unwrap(),
+        "completion beyond the first chunk"
+    );
+    std::fs::write(&path, &large).unwrap();
+    assert!(
+        !matches!(native_completed(&shared, &state), Ok(true)),
+        "a large unfinished turn is still busy"
     );
     std::fs::rename(&path, temp.path().join("old.jsonl")).unwrap();
     std::fs::write(&path, previous).unwrap();
     assert!(
-        !native_completed(&shared, &state),
+        !matches!(native_completed(&shared, &state), Ok(true)),
         "a replacement pathname is not the admitted transcript"
     );
 }
+
+#[cfg(unix)]
+mod herdr_postlude;
