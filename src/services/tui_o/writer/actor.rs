@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 use super::binding::BindingEvents;
 use super::deliver::{ChannelWriter, Step, StopCause};
 use super::pieces::{Derived, UnitDeriver};
-use super::rotation::Sources;
+use super::rotation::{Owe, Sources};
 use super::transition_port;
 use super::{AlarmSink, DeliveryLease, DiscordPort, ReaderConfig, WriterAlarm, WriterConfig};
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey};
@@ -166,6 +166,7 @@ where
 }
 
 struct Actor<P, L, A, B> {
+    replay_deferred: bool,
     writer: ChannelWriter<P, L, A>,
     deriver: UnitDeriver,
     owed: VecDeque<Derived>,
@@ -265,6 +266,7 @@ where
     let ready = admission::owed_delivery_ready(writer.channel());
     let verified = ready.then(|| super::owed::OwedLog::new(writer.channel(), provider));
     let mut actor = Actor {
+        replay_deferred: false,
         writer,
         deriver,
         owed,
@@ -322,6 +324,7 @@ where
             break;
         }
         if !sources_resumed && actor.sources_allowed() {
+            let phase = actor.writer.boot.phase("resume");
             let (writer, deriver) = (&mut actor.writer, &mut actor.deriver);
             let restored = match &mut actor.verified {
                 Some(log) => actor.sources.resume(writer, deriver, log),
@@ -330,6 +333,12 @@ where
             if let Err(alarm) = restored {
                 actor.writer.stop(alarm);
             }
+            actor.replay_deferred = actor.verified.is_none() && actor.sources.replayed.deferred;
+            phase.finish(if actor.writer.is_stopped() {
+                "stopped"
+            } else {
+                "ok"
+            });
             sources_resumed = true;
             if !actor.writer.is_stopped() {
                 actor.boot_previous_nonce = None;
@@ -338,12 +347,37 @@ where
             }
         }
         actor.observe_waiting(false);
+        let drain = actor.writer.boot.first_drain();
+        let serial_before = drain
+            .as_ref()
+            .map(|_| actor.writer.store().ledger().next_serial());
         let now = actor.utc_now();
         if actor.delivery_allowed() {
             actor.writer.retry_local(now).await;
+            actor.refilter_after_open();
         }
         if !actor.writer.has_local_retry() {
             actor.deliver_owed(&progress).await;
+        }
+        if let Some(drain) = drain {
+            let prepared = actor
+                .writer
+                .store()
+                .ledger()
+                .next_serial()
+                .saturating_sub(serial_before.unwrap_or(0));
+            drain.finish_with(
+                if actor.writer.is_stopped() {
+                    "stopped"
+                } else {
+                    "ok"
+                },
+                super::boot::Details {
+                    done: actor.writer.boot.done(),
+                    prepared,
+                    ..super::boot::Details::default()
+                },
+            );
         }
         // Re-post runs in this same turn and only once nothing is owed, so it never sends beside
         // a piece of this channel. It holds no exact permit, so a verified channel never runs it.
@@ -572,6 +606,22 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         self.writer.delivery_allowed(owing)
     }
 
+    fn refilter_after_open(&mut self) -> bool {
+        let summary = if let Some(log) = &mut self.verified {
+            log.refilter_after_open(self.writer.store().ledger())
+        } else if super::replay::after_open(&mut self.replay_deferred, self.writer.store().ledger())
+        {
+            Some(self.owed.finish_replay(self.writer.store().ledger()))
+        } else {
+            None
+        };
+        if let Some(summary) = summary {
+            self.writer.boot.replay("refilter", 0, summary, 0);
+            return true;
+        }
+        false
+    }
+
     /// Verified sources are restored apart from delivery permission, which each piece proves.
     fn sources_allowed(&mut self) -> bool {
         if self.verified.is_none() {
@@ -604,8 +654,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             // Legacy retries in `owed` have no provenance, so they stay Unknown here.
             return super::owed::deliver_owed(&mut self.writer, log, delivered).await;
         }
+        let mut budget = super::replay::Budget::new();
         while !self.owed.is_empty() {
-            if !self.delivery_allowed() {
+            if self.writer.stopping() || !self.delivery_allowed() {
                 return;
             }
             let Some(item) = self.owed.front() else {
@@ -613,11 +664,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             };
             match self.writer.deliver(item).await {
                 Step::Done => {
-                    self.owed.pop_front();
+                    self.writer.boot.drained();
+                    if !self.refilter_after_open() {
+                        self.owed.pop_front();
+                    }
                     progress.publish(self.progress());
                     if self.writer.has_local_retry() {
                         return;
                     }
+                    budget.yield_if_due().await;
                 }
                 Step::LeaseBusy | Step::NoGateway | Step::Stopped | Step::Withheld => return,
             }
@@ -786,6 +841,7 @@ mod test_support {
     {
         let channel = writer.channel();
         let mut actor = Actor {
+            replay_deferred: false,
             writer,
             deriver: UnitDeriver::new(channel, provider),
             owed: VecDeque::new(),

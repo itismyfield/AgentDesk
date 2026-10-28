@@ -51,7 +51,13 @@ pub(super) async fn post_suppressed_injection_note(
     } else {
         format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt)
     };
-    match channel_id.say(&**notify_http, note).await {
+    match super::super::http::dispatch_channel_message(
+        notify_http,
+        channel_id,
+        serenity::CreateMessage::new().content(note),
+    )
+    .await
+    {
         Ok(message) => {
             record_prompt_id_after_post(prompt, None);
             tracing::info!(
@@ -140,7 +146,12 @@ pub(super) async fn post_passive_prompt_notice(
             &prompt.prompt,
         ),
     };
-    let posted = channel.say(&*gate.notify_http, content).await;
+    let posted = super::super::http::dispatch_channel_message(
+        &gate.notify_http,
+        channel,
+        serenity::CreateMessage::new().content(content),
+    )
+    .await;
     record_prompt_id_after_post(prompt, posted.as_ref().err());
     None
 }
@@ -221,7 +232,13 @@ pub(super) async fn post_steer_echo(
         &prompt.tmux_session_name,
         &prompt.prompt,
     );
-    if let Err(error) = channel_id.say(&*http, content).await {
+    if let Err(error) = super::super::http::dispatch_channel_message(
+        &http,
+        channel_id,
+        serenity::CreateMessage::new().content(content),
+    )
+    .await
+    {
         tracing::warn!(channel_id = channel_id.get(), %error, "failed to send steer echo");
     }
 }

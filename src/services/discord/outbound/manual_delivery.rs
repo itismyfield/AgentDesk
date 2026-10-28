@@ -13,6 +13,7 @@ use sqlx::PgPool;
 use crate::db::session_transcripts::{PersistSessionTranscript, persist_turn_db};
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::formatting::{build_long_message_attachment, split_message};
+use crate::services::discord::http::dispatch_channel_message;
 use crate::services::discord::outbound::delivery::{
     deliver_outbound as deliver_v3_outbound, first_raw_message_id,
 };
@@ -205,11 +206,14 @@ impl DiscordOutboundClient for SerenityManualOutboundClient {
                     format!("invalid discord channel id {target_channel}: {error}"),
                 )
             })?;
-        channel_id
-            .send_message(&*self.http, CreateMessage::new().content(content))
-            .await
-            .map(|message| message.id.get().to_string())
-            .map_err(map_serenity_post_error)
+        dispatch_channel_message(
+            &self.http,
+            channel_id,
+            CreateMessage::new().content(content),
+        )
+        .await
+        .map(|message| message.id.get().to_string())
+        .map_err(map_serenity_post_error)
     }
 
     async fn post_message_with_nonce(
@@ -228,17 +232,17 @@ impl DiscordOutboundClient for SerenityManualOutboundClient {
                     format!("invalid discord channel id {target_channel}: {error}"),
                 )
             })?;
-        channel_id
-            .send_message(
-                &*self.http,
-                CreateMessage::new()
-                    .content(content)
-                    .nonce(serenity::model::channel::Nonce::String(nonce.to_string()))
-                    .enforce_nonce(enforce_nonce),
-            )
-            .await
-            .map(|message| message.id.get().to_string())
-            .map_err(map_serenity_post_error)
+        dispatch_channel_message(
+            &self.http,
+            channel_id,
+            CreateMessage::new()
+                .content(content)
+                .nonce(serenity::model::channel::Nonce::String(nonce.to_string()))
+                .enforce_nonce(enforce_nonce),
+        )
+        .await
+        .map(|message| message.id.get().to_string())
+        .map_err(map_serenity_post_error)
     }
 
     async fn resolve_dm_channel(&self, user_id: &str) -> Result<String, DispatchMessagePostError> {
@@ -722,8 +726,7 @@ impl SerenityManualOutboundClient {
         channel_id: ChannelId,
         message: CreateMessage,
     ) -> Result<String, DispatchMessagePostError> {
-        channel_id
-            .send_message(&*self.http, message)
+        dispatch_channel_message(&self.http, channel_id, message)
             .await
             .map(|message| message.id.get().to_string())
             .map_err(|error| {

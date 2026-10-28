@@ -4,6 +4,9 @@
 use super::*;
 use crate::services::tui_o::writer::host::{ManagedWriterHandle, WriterStopped, start_managed};
 
+#[path = "restart_replay_host_tests.rs"]
+mod restart_replay;
+
 #[tokio::test(start_paused = true)]
 async fn operator_resume_managed_restart_joins_old_generation_and_runs_approved_retry() {
     let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);

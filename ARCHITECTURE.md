@@ -445,6 +445,8 @@ src/
 │   │   ├── agents_crud/
 │   │   │   └── agent_read.rs
 │   │   ├── agents_turn_deliver/
+│   │   │   ├── legacy_origin.rs
+│   │   │   ├── legacy_origin_tests.rs
 │   │   │   └── pg_tests.rs
 │   │   ├── auth/
 │   │   │   ├── tailnet_peer.rs
@@ -1330,6 +1332,7 @@ src/
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   ├── inject_codex_v2_tests.rs
 │   │   │   │   ├── inject_tests.rs
+│   │   │   │   ├── prepared.rs
 │   │   │   │   └── start_outcome_tests.rs
 │   │   │   ├── unbound_owners/
 │   │   │   │   └── tests.rs
@@ -1922,6 +1925,8 @@ src/
 │   │   │   │   │   ├── runtime_transition.rs
 │   │   │   │   │   ├── session_preparation.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
+│   │   │   │   │   ├── start_placeholder.rs
+│   │   │   │   │   ├── start_placeholder_tests.rs
 │   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
@@ -3080,6 +3085,7 @@ src/
 │   ├── herdr_launch_tests/
 │   │   └── retired_hold_tests.rs
 │   ├── imsg_reply/
+│   │   ├── admission.rs
 │   │   ├── contract.rs
 │   │   ├── episode.rs
 │   │   └── mod.rs
@@ -3623,6 +3629,7 @@ src/
 │   │   │   ├── always_on_repost_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── bo_post_tests.rs
+│   │   │   ├── boot.rs
 │   │   │   ├── boundary_pending_health_tests.rs
 │   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_end_empty_session_tests.rs
@@ -3690,7 +3697,10 @@ src/
 │   │   │   ├── recovery_tests.rs
 │   │   │   ├── renumber_tests.rs
 │   │   │   ├── renumbered.rs
+│   │   │   ├── replay.rs
+│   │   │   ├── replay_metadata_tests.rs
 │   │   │   ├── repost_turn_tests.rs
+│   │   │   ├── restart_replay_host_tests.rs
 │   │   │   ├── resume.rs
 │   │   │   ├── resume_tests.rs
 │   │   │   ├── retire_tests.rs
