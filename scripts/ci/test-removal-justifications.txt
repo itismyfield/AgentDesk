@@ -2,3 +2,5 @@
 #   <binary-id> <test> | removed|runnable->ignored | <reason>
 # A row must match a loss the base diff reports for this change, and a loss with no row fails.
 # Rows for tests absent from base and head only warn after landing; clear them in any later PR.
+agentdesk services::codex_tui::busy_inject::inject_tests::a_plan_narrow_and_clipped_screens_reach_enter | removed | Replaced by a_plan_unread_composers_fall_back_and_known_empty_composers_submit: unread/clipped composers now fall back before effects; readable empty composers still submit once.
+agentdesk services::codex_tui::busy_inject::inject_tests::a_plan_post_paste_read_failure_does_not_block_next_input | removed | Replaced by a_plan_unread_next_snapshot_falls_back_and_recovers_without_retyping: post-paste diagnostics do not withhold Enter; a later unread composer falls back and readable recovery proves lock release.
