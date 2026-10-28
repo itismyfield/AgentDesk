@@ -447,12 +447,20 @@ impl Snapshot {
         }
         names.sort();
         names.dedup();
-        let first =
-            ownership::OwnerInputs::collect(shared, membership.clone(), epoch, &names).await?;
+        let first = ownership::OwnerInputs::collect(
+            shared,
+            membership.clone(),
+            epoch,
+            &names,
+            before.ports.clone(),
+        )
+        .await?;
         before.owners = first.effective_owners(channel.get());
         before.ownership = Some(first);
         let mut after = Self::collect(shared, provider, channel, ports).await?;
-        let next = ownership::OwnerInputs::collect(shared, membership, epoch, &names).await?;
+        let next =
+            ownership::OwnerInputs::collect(shared, membership, epoch, &names, after.ports.clone())
+                .await?;
         after.owners = next.effective_owners(channel.get());
         after.ownership = Some(next);
         Ok((before, inventory, after))
@@ -473,8 +481,29 @@ impl Snapshot {
             }
     }
     fn verdict(&self, shared: &SharedData, inventory: &Inventory) -> Verdict {
-        let candidates = self.files.candidates.clone();
-        let inventory_names = match inventory {
+        let mut candidates = self.files.candidates.clone();
+        let mut inventory = inventory.clone();
+        if matches!(self.scope(shared).result, Scope::LocalInventory)
+            && let (Some(owners), Ok(candidates)) = (&self.ownership, &mut candidates)
+            && !candidates.inflight
+        {
+            let completed: Vec<_> = owners
+                .completed_scheduled_names(self.channel.get())
+                .into_iter()
+                .filter(|name| {
+                    !candidates.names.iter().any(|candidate| {
+                        candidate.name == *name && !matches!(candidate.origin, Origin::Binding(_))
+                    })
+                })
+                .collect();
+            candidates
+                .names
+                .retain(|candidate| !completed.contains(&candidate.name.as_str()));
+            if let Inventory::Sessions(names) = &mut inventory {
+                names.retain(|name| !completed.contains(&name.as_str()));
+            }
+        }
+        let inventory_names = match &inventory {
             Inventory::Sessions(names) => names.as_slice(),
             Inventory::Empty(_) | Inventory::ProbeFailed(_) => &[],
         };
@@ -496,7 +525,7 @@ impl Snapshot {
             decide_unbound(
                 candidates,
                 self.scope(shared),
-                inventory,
+                &inventory,
                 &self.effective_owners(),
             )
         };
@@ -742,6 +771,8 @@ pub(in crate::services::discord::turn_presence::activity) struct Stamp {
 }
 #[path = "canonical_target.rs"]
 mod canonical_target;
+#[path = "completed_scheduled.rs"]
+mod completed_scheduled;
 #[path = "inflight_bound.rs"]
 pub(in crate::services::discord::turn_presence::activity) mod inflight_bound;
 #[path = "legacy_divergence.rs"]
