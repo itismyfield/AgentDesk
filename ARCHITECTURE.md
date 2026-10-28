@@ -2098,6 +2098,9 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── standby_relay/
+│   │   │   ├── scheduled_settle.rs
+│   │   │   └── scheduled_settle_tests.rs
 │   │   ├── startup_reclaim/
 │   │   │   ├── tests/
 │   │   │   │   └── source_guard_tests.rs
@@ -2256,9 +2259,11 @@ src/
 │   │   │   ├── post_stream_exit.rs
 │   │   │   ├── post_stream_exit_host_tests.rs
 │   │   │   ├── pre_emit_guard.rs
+│   │   │   ├── pre_emit_guard_scheduled_tests.rs
 │   │   │   ├── prompt_observe.rs
 │   │   │   ├── provider_output_guard.rs
 │   │   │   ├── provider_session_persistence.rs
+│   │   │   ├── provider_session_persistence_tests.rs
 │   │   │   ├── read_source_switch_tests.rs
 │   │   │   ├── rowless_delivery_authority.rs
 │   │   │   ├── session_bound_ack.rs
@@ -2486,7 +2491,8 @@ src/
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── legacy_summary.rs
 │   │   │   │   ├── legacy_summary_tests.rs
-│   │   │   │   └── prelude_lifecycle.rs
+│   │   │   │   ├── prelude_lifecycle.rs
+│   │   │   │   └── scheduled_completion_tests.rs
 │   │   │   ├── entry_abort_cold_error_tests/
 │   │   │   │   └── provider_failure_tests.rs
 │   │   │   ├── finalize_epilogue/
@@ -2938,6 +2944,8 @@ src/
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs
 │   │   ├── runtime_store_checkpoint_lock_tests.rs
+│   │   ├── scheduled_turn.rs
+│   │   ├── scheduled_turn_tests.rs
 │   │   ├── semantic_boundaries.rs
 │   │   ├── session_banner.rs
 │   │   ├── session_canonical_identity.rs
@@ -3277,7 +3285,9 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   ├── provider_targets.rs
 │   │   ├── push_handoff.rs
-│   │   └── timing.rs
+│   │   ├── timing.rs
+│   │   ├── turn_completion.rs
+│   │   └── turn_completion_tests.rs
 │   ├── session_backend/
 │   │   ├── auth_profiles.rs
 │   │   ├── output.rs

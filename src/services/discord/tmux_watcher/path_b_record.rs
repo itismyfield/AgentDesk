@@ -27,6 +27,12 @@ pub(super) struct PathBTranscript<'a> {
     pub(super) agent_id: Option<&'a str>,
     pub(super) assistant_message: &'a str,
     pub(super) events: &'a [SessionTranscriptEvent],
+    /// An isolated scheduled turn writes no channel transcript.
+    pub(super) channel_effects: crate::services::discord::scheduled_turn::ChannelEffects,
+    /// `(tmux_session_name, current_offset)` of the committed output range.
+    pub(super) completion_range: (&'a str, u64),
+    /// The pre-relay row; the committed range settles its turn before the late row's.
+    pub(super) settle_pin: Option<&'a InflightTurnState>,
 }
 
 impl<'a> PathBRecord<'a> {
@@ -84,6 +90,10 @@ impl<'a> PathBRecord<'a> {
     {
         let state = self.state;
         let dispatch_id = self.dispatch_id(thread_fallback).await;
+        self.settle_scheduled(&target).await;
+        if target.channel_effects.suppressed() {
+            return dispatch_id;
+        }
         let turn_id = format!("discord:{}:{}", target.channel_id.get(), state.user_msg_id);
         let channel_id = target.channel_id.get().to_string();
         let persisted = crate::db::session_transcripts::persist_turn_db(
@@ -111,6 +121,31 @@ impl<'a> PathBRecord<'a> {
             tracing::warn!("  [{ts}] ⚠ watcher: failed to persist session transcript: {e}");
         }
         dispatch_id
+    }
+
+    /// Settle the scheduled delivery of the pinned turn, else this row, only when
+    /// that turn owns this committed range (same session, started before its end).
+    async fn settle_scheduled(&self, target: &PathBTranscript<'_>) {
+        let (tmux_session_name, current_offset) = target.completion_range;
+        let state = target.settle_pin.unwrap_or(self.state);
+        if !state.scheduled.may_settle()
+            || state.user_msg_id == 0
+            || super::turn_identity::pinned_finalize_user_msg_id(
+                Some(state),
+                tmux_session_name,
+                current_offset,
+            ) != state.user_msg_id
+        {
+            return;
+        }
+        let outcome = crate::services::scheduled_messages::turn_completion::classify(
+            target.assistant_message,
+            crate::services::scheduled_messages::turn_completion::terminal_error_event(
+                target.events,
+            ),
+            false,
+        );
+        crate::services::discord::scheduled_turn::settle(target.pool, state, outcome).await;
     }
 }
 

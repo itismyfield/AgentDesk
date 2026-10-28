@@ -873,6 +873,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 bridge_relay_delegated_to_watcher,
                 watcher_delivery_pin: ctx.watcher_delivery_pin.as_ref(),
                 inflight_generation,
+                transcript_terminal_error: ctx.transcript_terminal_error,
             },
             DeliveryEpilogueState {
                 response_sent_offset: &mut response_sent_offset,

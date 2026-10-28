@@ -74,6 +74,19 @@ pub(super) async fn persist_recovered_transcript(
     if assistant_message.is_empty() {
         return false;
     }
+    // The recovered answer settles its scheduled delivery; an isolated
+    // turn's answer never becomes channel transcript context.
+    let outcome = crate::services::discord::scheduled_turn::recovery_delivered_outcome(
+        state,
+        assistant_message,
+    );
+    let settled = crate::services::discord::scheduled_turn::settle(pg_pool, state, outcome).await;
+    if crate::services::discord::scheduled_turn::channel_effects(pg_pool, &[Some(state)])
+        .await
+        .suppressed()
+    {
+        return settled == Some(crate::services::discord::scheduled_turn::Settlement::Evidence);
+    }
 
     let turn_id = recovered_transcript_turn_id(
         state.channel_id,

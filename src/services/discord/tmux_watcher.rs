@@ -1443,6 +1443,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 turn_data_start_offset,
                 last_observed_generation_mtime_ns,
                 runtime_binding_candidate_offset.unwrap_or(current_offset),
+                crate::services::scheduled_messages::turn_completion::classify(
+                    &full_response,
+                    crate::services::scheduled_messages::turn_completion::terminal_error_event(
+                        &tool_state.transcript_events,
+                    ),
+                    false,
+                ),
             );
 
         // #3646 OBSERVATION-ONLY (event 1/3 — terminal_body_commit): emit once the
@@ -1979,6 +1986,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             channel_id.get(),
         );
         let watcher_session_id = state.last_session_id.clone();
+        let channel_effects = crate::services::discord::scheduled_turn::channel_effects(
+            shared.pg_pool.as_ref(),
+            &[inflight_before_relay.as_ref(), inflight_state.as_ref()],
+        )
+        .await;
         if terminal_output_committed {
             persist_watcher_provider_session_id(
                 &shared,
@@ -1986,6 +1998,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &provider_kind,
                 &tmux_session_name,
                 watcher_session_id.as_deref(),
+                channel_effects,
             )
             .await;
         }
@@ -2215,6 +2228,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             agent_id: role_binding.as_ref().map(|binding| binding.role_id.as_str()),
                             assistant_message: &full_response,
                             events: &tool_state.transcript_events,
+                            channel_effects,
+                            completion_range: (&tmux_session_name, current_offset),
+                            settle_pin: inflight_before_relay.as_ref(),
                         },
                         || async {
                             crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(
@@ -2361,6 +2377,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             inflight_state: &inflight_state,
             inflight_before_relay: &inflight_before_relay,
             full_response: &full_response,
+            channel_effects,
             watcher_turn_nonce: &watcher_turn_nonce,
             resolved_did: &resolved_did,
             dispatch_ok,

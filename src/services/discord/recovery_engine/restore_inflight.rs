@@ -62,6 +62,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
     provider: &ProviderKind,
 ) {
     let states = inflight::load_inflight_states(provider);
+    crate::services::discord::scheduled_turn::settle_loaded(shared.pg_pool.as_ref(), &states).await;
     observe_restore_inflight_snapshot(
         provider,
         &states,
@@ -702,12 +703,17 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     continue;
                 }
                 {
+                    let seed = crate::services::discord::scheduled_turn::channel_session_seed(
+                        shared.pg_pool.as_ref(),
+                        &state,
+                    )
+                    .await;
                     let mut data = shared.core.lock().await;
                     let session =
                         data.sessions
                             .entry(channel_id)
                             .or_insert_with(|| DiscordSession {
-                                session_id: state.session_id.clone(),
+                                session_id: seed,
                                 memento_context_loaded: false,
                                 memento_reflected: false,
                                 current_path: None,
@@ -1847,12 +1853,17 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                         continue;
                     }
                 };
+                let seed = crate::services::discord::scheduled_turn::channel_session_seed(
+                    shared.pg_pool.as_ref(),
+                    &state,
+                )
+                .await;
                 let mut data = shared.core.lock().await;
                 let session = data
                     .sessions
                     .entry(channel_id)
                     .or_insert_with(|| DiscordSession {
-                        session_id: state.session_id.clone(),
+                        session_id: seed,
                         memento_context_loaded: false,
                         memento_reflected: false,
                         current_path: None,
@@ -2119,12 +2130,17 @@ pub(in crate::services::discord) async fn restore_inflight_states(
         );
 
         {
+            let seed = crate::services::discord::scheduled_turn::channel_session_seed(
+                shared.pg_pool.as_ref(),
+                &state,
+            )
+            .await;
             let mut data = shared.core.lock().await;
             let session = data
                 .sessions
                 .entry(channel_id)
                 .or_insert_with(|| DiscordSession {
-                    session_id: state.session_id.clone(),
+                    session_id: seed,
                     memento_context_loaded: false,
                     memento_reflected: false,
                     current_path: None,
