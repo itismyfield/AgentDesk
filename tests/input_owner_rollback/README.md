@@ -14,7 +14,7 @@ Entry reachability, admission and content have separate counters. Call each at i
 persisted source generations, namespace, provider, root, host, physical target,
 execution, nonce and the payload-start/bootstrap window. Bootstrap permits create-only effects. Content/argv requires either the explicit Started window or the existing warm arm record (MayHaveSent with no window and a deadline); no additional owner commit is invented. This is a fixture proof
 reader, not a production capability. Registration remains active after scope
-return. Guard lifetime must outlive every spawned writer and observer.
+return. `rebind` changes a known execution descriptor on the same physical target without unregistering it; it refuses a live writer and invalidates old scopes. Guard lifetime must outlive every spawned writer and observer.
 
 The hooks run before raw tmux output, timed output, create, and Herdr socket frame
 write. Generic `TmuxHost` and direct Herdr text/paste/line converge there. Events
@@ -28,7 +28,7 @@ Use `assert_owner_payload` with the actual prepared frame for acceptance: it com
 The command/socket lifetime holds a writer interval; overlap is rejected. Content counts only a successful tmux result or a complete Herdr frame write. A failed command is an attempted trace, not proof of NotSent.
 
 The preserved 4h fixture uses `Preserved4h(stable_origin)` on the same registered
-physical TUI. Only its registered payload is admitted. Its content goes to a
+physical TUI. Only its registered payload on that execution descriptor is admitted; rebind invalidates an old 4h registration as well as old owner scopes. Its content goes to a
 separate counter and cannot satisfy target owner content. The actual 4h handler
 is still pending; this fixture does not claim its integration is complete.
 

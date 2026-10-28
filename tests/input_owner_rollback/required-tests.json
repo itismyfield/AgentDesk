@@ -106,6 +106,17 @@
       "ignored": false
     },
     {
+      "id": "test_support::input_owner::s5_b0_rebind_keeps_physical_guard_and_rejects_the_previous_execution_scope",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
       "id": "test_support::input_owner::scenarios::s5_fixture_5001_source_nonce_expectations_and_crash_cuts_are_complete",
       "platforms": [
         "linux",

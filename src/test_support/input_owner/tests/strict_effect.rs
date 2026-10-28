@@ -102,7 +102,7 @@ struct State {
     target: Target,
     counts: Counts,
     proofs: Vec<(Attempt, bool)>,
-    preserved: HashMap<String, Vec<u8>>,
+    preserved: HashMap<String, (Target, Vec<u8>)>,
     argv: HashMap<String, Vec<u8>>,
     scopes: HashMap<ThreadId, Vec<Scope>>,
     writers: usize,
@@ -149,6 +149,26 @@ impl StrictOwnerEffectGuard {
         }));
         entries.push(state.clone());
         Self(state)
+    }
+
+    pub(crate) fn rebind(&self, target: Target) -> Result<(), &'static str> {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.writers != 0
+            || target.host != state.target.host
+            || target.physical != state.target.physical
+            || [
+                &target.provider,
+                &target.namespace,
+                &target.root,
+                &target.execution,
+            ]
+            .iter()
+            .any(|s| s.is_empty())
+        {
+            return Err("rebind requires the same protected physical target and no live writer");
+        }
+        state.target = target;
+        Ok(())
     }
 
     pub(crate) fn entry_reached(&self) {
@@ -225,11 +245,11 @@ impl StrictOwnerEffectGuard {
 
     pub(crate) fn preserve_4h(&self, origin: &str, payload: &[u8]) {
         assert!(!origin.is_empty() && !payload.is_empty());
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let target = state.target.clone();
+        state
             .preserved
-            .insert(origin.into(), payload.into());
+            .insert(origin.into(), (target, payload.into()));
     }
 
     pub(crate) fn scope(&self, scope: Scope) -> ScopeGuard {
@@ -363,14 +383,19 @@ pub(crate) fn before(host: &str, physical: &str, op: Op, payload: &[u8]) -> Resu
         .and_then(|v| v.last())
         .cloned();
     let authorized = match &scope {
-        Some(Scope::Owner(attempt)) => state
-            .proofs
-            .iter()
-            .any(|(proof, started)| proof == attempt.as_ref() && (*started || op == Op::Create)),
-        Some(Scope::Preserved4h(origin)) => state
-            .preserved
-            .get(origin)
-            .is_some_and(|expected| !op.content() || expected == payload),
+        Some(Scope::Owner(attempt)) => state.proofs.iter().any(|(proof, started)| {
+            attempt.target == state.target
+                && proof == attempt.as_ref()
+                && (*started || op == Op::Create)
+        }),
+        Some(Scope::Preserved4h(origin)) => {
+            state
+                .preserved
+                .get(origin)
+                .is_some_and(|(target, expected)| {
+                    target == &state.target && (!op.content() || expected == payload)
+                })
+        }
         None => false,
     };
     let accepted = !op.guarded() || (authorized && state.writers == 0);
@@ -452,4 +477,55 @@ fn s5_b0_bootstrap_proof_allows_create_but_never_content_before_payload_start() 
         .written();
     assert_eq!(guard.counts().owner_content.get(&attempt), Some(&1));
     assert_eq!(guard.counts().attempted_legacy, 1);
+}
+
+#[test]
+fn s5_b0_rebind_keeps_physical_guard_and_rejects_the_previous_execution_scope() {
+    let (root, a, guard) = tests::fixture("fixture", &uuid::Uuid::new_v4().to_string());
+    guard.preserve_4h("old-origin", b"preserved");
+    let scope_a = guard.scope(Scope::owner(a.clone()));
+    let flight = before("fixture", &a.target.physical, Op::Text, b"owner").unwrap();
+    flight.written();
+    let mut b = a.clone();
+    b.nonce = "attempt-B".into();
+    b.sources = vec![(200, 5), (201, 6)];
+    b.primary = (200, 5);
+    b.target.execution = "execution-B".into();
+    assert!(guard.rebind(b.target.clone()).is_err());
+    drop(flight);
+    guard.rebind(b.target.clone()).unwrap();
+    assert!(before("fixture", &a.target.physical, Op::Text, b"late A").is_err());
+    drop(scope_a);
+    assert!(
+        before(
+            "fixture",
+            &b.target.physical,
+            Op::Text,
+            b"unscoped after restart"
+        )
+        .is_err()
+    );
+    {
+        let _old_4h = guard.scope(Scope::Preserved4h("old-origin".into()));
+        assert!(before("fixture", &b.target.physical, Op::Text, b"preserved").is_err());
+    }
+    guard.entry_reached();
+    guard.admission(&b);
+    let path = root.path().join("proof.json");
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["head_injection"]["identity"] = serde_json::json!({"primary":200,"queued_generation":5,
+        "sources":[{"message_id":200,"queued_generation":5},{"message_id":201,"queued_generation":6}]});
+    value["head_injection"]["attempt"]["nonce"] = b.nonce.clone().into();
+    value["head_injection"]["attempt"]["target"]["execution_nonce"] =
+        b.target.execution.clone().into();
+    std::fs::write(&path, value.to_string()).unwrap();
+    guard.observe_durable(&b, &path).unwrap();
+    let _scope_b = guard.scope(Scope::owner(b.clone()));
+    before("fixture", &b.target.physical, Op::Text, b"owner")
+        .unwrap()
+        .written();
+    let counts = guard.counts();
+    assert_eq!(counts.owner_content.get(&a), Some(&1));
+    assert_eq!(counts.owner_content.get(&b), Some(&1));
+    assert_eq!(counts.attempted_legacy, 3);
 }
