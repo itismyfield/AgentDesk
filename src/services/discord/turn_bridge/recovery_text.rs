@@ -128,8 +128,8 @@ fn take_kv_meta_value_runtime_pg(key: &str) -> Option<String> {
     let key = key.to_string();
     crate::utils::async_bridge::block_on_result(
         async move {
-            let config =
-                crate::config::load().map_err(|error| format!("load runtime config: {error}"))?;
+            let config = crate::config::runtime_config_strict()
+                .map_err(|error| format!("load runtime config: {error}"))?;
             let Some(pool) = crate::db::postgres::connect(&config).await? else {
                 return Ok(None);
             };
@@ -952,3 +952,7 @@ mod retry_pending_tests {
         assert!(!retry_pending_contains(channel));
     }
 }
+
+#[cfg(test)]
+#[path = "recovery_text_snapshot_tests.rs"]
+mod snapshot_tests;

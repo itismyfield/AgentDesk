@@ -15,7 +15,7 @@ fn gateway_instance_tag(instance_id: &str) -> String {
 }
 
 pub(super) fn gateway_lease_application_name(provider: &ProviderKind) -> String {
-    let config = crate::config::load_graceful();
+    let config = crate::config::snapshot().unwrap_or_default();
     let instance_id = config
         .cluster
         .instance_id
@@ -79,7 +79,7 @@ pub(super) async fn reap_orphaned_gateway_lease_with_min_age(
     provider: &ProviderKind,
     min_age_secs: i64,
 ) -> Result<bool, String> {
-    let config = crate::config::load_graceful();
+    let config = crate::config::snapshot().unwrap_or_default();
     let instance_id = config
         .cluster
         .instance_id

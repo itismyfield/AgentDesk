@@ -1,5 +1,9 @@
-//! Whether a transcript body carrying our nonce is exactly the frame that was pasted.
+//! Whether a transcript body is exactly the pasted frame, and which attempt took a mixed body.
 //! Claude Code may record a paste inside one `<pasted_content id="hhhh">` block, read off its transcripts.
+
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 const OPEN: &str = "<pasted_content id=\"";
 const CLOSE: &str = "</pasted_content id=\"";
@@ -29,4 +33,24 @@ fn unwrap_paste(body: &str) -> Option<&str> {
     }
     let inner = rest.strip_prefix("\">\n")?;
     inner.strip_suffix(&format!("\n{CLOSE}{token}\">"))
+}
+
+/// Mixed rows (our frame plus other composer text) an attempt already took, per transcript, so a
+/// later drain of the same text confirms no other attempt. Process memory, oldest dropped first.
+static MIXED: Mutex<VecDeque<(PathBuf, String, String)>> = Mutex::new(VecDeque::new());
+const MIXED_CAP: usize = 256;
+
+/// Whether `nonce` may take `text` in `path` as its mixed receipt; the first taker keeps it.
+pub(super) fn take_mixed(path: &Path, nonce: &str, text: &str) -> bool {
+    use sha2::Digest;
+    let digest = format!("{:x}", sha2::Sha256::digest(text.as_bytes()));
+    let mut taken = MIXED.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some((_, owner, _)) = taken.iter().find(|(p, _, d)| p == path && *d == digest) {
+        return owner == nonce;
+    }
+    if taken.len() >= MIXED_CAP {
+        taken.pop_front();
+    }
+    taken.push_back((path.to_path_buf(), nonce.to_string(), digest));
+    true
 }

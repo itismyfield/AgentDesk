@@ -22,12 +22,14 @@ struct Fixture {
     database: String,
     _paths: [crate::config::TestEnvVarGuard; 2],
     _lifecycle: postgres::PostgresTestLifecycleGuard,
-    _environment: crate::config::test_env_lock::SharedTestEnvLockGuard,
+    _environment: crate::config_live_reload::TestLiveGuard,
 }
 
 impl Fixture {
     async fn new() -> Option<Self> {
-        let environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let environment = crate::config_live_reload::test_live_guard(
+            crate::config::test_env_lock::acquire_shared_test_env_lock(),
+        );
         let root = tempfile::tempdir().unwrap();
         let config_path = root.path().join("agentdesk.yaml");
         let paths = [
@@ -64,6 +66,7 @@ impl Fixture {
         config.cluster.lease_ttl_secs = 600;
         config.cluster.gateway_yield_grace_secs = 5;
         crate::config::save_to_path(&config_path, &config).unwrap();
+        crate::config_live_reload::install(config.clone());
         sqlx::query("INSERT INTO worker_nodes(instance_id,status,last_heartbeat_at) VALUES ('home','online',NOW())")
             .execute(&pool).await.unwrap();
         Some(Self {
@@ -370,6 +373,7 @@ async fn backend_exit_removes_home_waiter_until_live_home_takes_handback_pg() {
     preferred.cluster.instance_id = Some("home".into());
     let config_path = fixture._root.path().join("agentdesk.yaml");
     crate::config::save_to_path(&config_path, &preferred).unwrap();
+    crate::config_live_reload::install(preferred);
     let waiting_shared =
         super::super::make_shared_data_for_tests_with_storage(Some(fixture.pool.clone()));
     let mut breaker = fixture.breaker();
@@ -408,6 +412,7 @@ async fn backend_exit_removes_home_waiter_until_live_home_takes_handback_pg() {
         panic!("preferred home acquires the released lease")
     };
     crate::config::save_to_path(&config_path, &fixture.config).unwrap();
+    crate::config_live_reload::install(fixture.config.clone());
     let mut running = Running::start(home_shared, acquired, None).await;
     assert!(fixture.publish_waiter().await);
     running.manager.shutdown_all().await;
@@ -456,6 +461,7 @@ impl Fixture {
         let mut config = self.config.clone();
         edit(&mut config);
         crate::config::save_to_path(&self._root.path().join("agentdesk.yaml"), &config).unwrap();
+        crate::config_live_reload::install(config);
     }
 
     async fn peer_takes_lease_within(&self, within: Duration) -> postgres::AdvisoryLockLease {
@@ -557,4 +563,68 @@ async fn idle_expired_holder_loses_the_lease_to_a_peer_and_self_fences_pg() {
     peer.unlock().await.unwrap();
     drop(running);
     fixture.close().await;
+}
+
+#[tokio::test]
+async fn gateway_snapshot_first_lease_uses_prepared_boot_config_pg() {
+    const CHILD: &str = "ADK_TEST_GATEWAY_SNAPSHOT_BOOT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let qualified = format!(
+            "{}::gateway_snapshot_first_lease_uses_prepared_boot_config_pg",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &qualified, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("AGENTDESK_ROOT_DIR", root.path())
+            .env_remove("AGENTDESK_CONFIG")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+        return;
+    }
+    let Some(fixture) = Fixture::new().await else {
+        panic!("PostgreSQL fixture required for gateway snapshot boot test");
+    };
+    let mut boot = fixture.config.clone();
+    boot.config_hot_reload = false;
+    boot.cluster.gateway_lease_idle_expiry_secs = 2;
+    let mut disk = boot.clone();
+    disk.cluster.instance_id = Some("disk-only-node".into());
+    disk.cluster.gateway_lease_idle_expiry_secs = 9;
+    crate::config::save_to_path(&fixture._root.path().join("agentdesk.yaml"), &disk).unwrap();
+    let _boot = crate::bootstrap::prepare_dcserver_boot(&boot, &fixture.pool).await;
+    let mut lease = try_acquire_discord_gateway_lease(&fixture.pool, TOKEN, &ProviderKind::Claude)
+        .await
+        .unwrap()
+        .unwrap();
+    let timeout = lease.session_idle_timeout().await.unwrap();
+    let application: String =
+        sqlx::query_scalar("SELECT application_name FROM pg_stat_activity WHERE pid = $1")
+            .bind(fixture.holder().await.unwrap())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    let expected_application = super::gateway_lease_recovery::gateway_lease_application_name_for(
+        "backup",
+        std::process::id(),
+        "claude",
+    );
+    lease.unlock().await.unwrap();
+    fixture.close().await;
+    assert_eq!(
+        timeout, "2s",
+        "the first lease must use prepared boot, not a different disk file"
+    );
+    assert_eq!(
+        application, expected_application,
+        "the lease identity must use the prepared boot instance"
+    );
 }

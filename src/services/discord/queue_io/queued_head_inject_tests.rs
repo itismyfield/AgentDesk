@@ -771,6 +771,62 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
     fixture.assert_holder_kept().await;
 }
 
+/// A queued head stays settled at Enter, yet its transcript receipt still reaches the frame ledger,
+/// so the same author's same body later is injected rather than refused as still unconfirmed.
+#[tokio::test(flavor = "current_thread")]
+async fn s2b_a_received_queued_head_lets_the_same_body_be_injected_again_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = Fixture::new(7_510_101, "all").await;
+    let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+    fixture.kick().await;
+    assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
+    let first = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+    let nonce = fixture.pane.nonce().unwrap();
+    let ledger = crate::config::runtime_root()
+        .unwrap()
+        .join("runtime/injected_frames.json");
+    let received = || {
+        let stored: Value = std::fs::read(&ledger)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        stored["entries"].as_array().is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry["id"] == nonce.as_str()
+                    && entry["events"].as_array().is_some_and(|e| !e.is_empty())
+            })
+        })
+    };
+    let mut seen = received();
+    for _ in 0..100 {
+        if seen {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        seen = received();
+    }
+    assert!(
+        seen,
+        "the queued head's receipt must reach the frame ledger"
+    );
+    let transition = fixture
+        .shared
+        .session_transition_lock(fixture.channel)
+        .lock_owned()
+        .await;
+    queue_io::with_post_enqueue_idle_queue_kick_suppressed(fixture.enqueue("status?")).await;
+    drop(transition);
+    for _ in 0..2 {
+        std::fs::remove_file(fixture.pane.path("pasted")).unwrap();
+        fixture.kick().await;
+    }
+    assert_eq!(fixture.pane.keys().len(), 6, "{:?}", fixture.pane.keys());
+    let again = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+    assert_eq!(again, first);
+    assert!(fixture.queue().await.is_empty());
+    fixture.assert_holder_kept().await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();

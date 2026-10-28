@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) fn fetch_health_snapshot(options: &DoctorOptions) -> HealthSnapshot {
-    let cfg = config::load_graceful();
+    let cfg = config::runtime_config();
     // Startup diagnostics describe this process, even when the user's CLI
     // target is a remote leader. Manual doctor keeps its remote opt-in gate.
     let base = if options.run_context == RunContext::StartupOnce {

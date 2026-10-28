@@ -948,3 +948,58 @@ async fn obligation_window_facade_rejects_unknown_kind_pg() {
     assert_eq!(judgment.delivered_outbox_id(),None); assert!(judgment.malformed());
     drop(connection); pool.close().await; db.drop().await;
 }
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::config::snapshot_reader_tests::{Fixture, isolated};
+
+    fn observe_without_pg(enabled: bool) {
+        isolated(|| {
+            let fixture = Fixture::new();
+            fixture.install(
+                &format!("cluster: {{enabled: {enabled}}}"),
+                &format!("cluster: {{enabled: {}}}", !enabled),
+            );
+            // Each scenario sets its override before starting the child runtime.
+            unsafe {
+                std::env::set_var("ADK_INTAKE_ROUTING_MODE", "observe");
+            }
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                assert!(matches!(
+                    crate::services::cluster::intake_router_hook::effective_intake_routing_config().mode,
+                    IntakeRoutingMode::Observe
+                ));
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                let http = Arc::new(serenity::Http::new("Bot snapshot-intake-fixture"));
+                let deps = deps(&http, &shared);
+                let submission = submission_for_admission(ChannelId::new(7_349_211), 7_349_212);
+                let admission = super::super::admit_text_intake(&deps, &submission).await;
+                if enabled {
+                    match admission {
+                        super::super::IntakeAdmission::Blocked {
+                            reason: crate::services::cluster::intake_router_hook::IntakeBlockedReason::RoutingDependencyFailed { detail },
+                        } => assert_eq!(detail, "Postgres pool unavailable for owner lookup"),
+                        _ => panic!("installed enabled cluster must block without Postgres"),
+                    }
+                } else {
+                    assert!(matches!(admission, super::super::IntakeAdmission::Local(_)));
+                }
+            });
+        });
+    }
+
+    #[test]
+    fn intake_observe_uses_disabled_snapshot_over_enabled_disk() {
+        observe_without_pg(false);
+    }
+
+    #[test]
+    fn intake_observe_uses_enabled_snapshot_over_disabled_disk() {
+        observe_without_pg(true);
+    }
+}

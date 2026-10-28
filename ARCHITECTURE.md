@@ -23,6 +23,7 @@ src/
 ├── cli/
 │   ├── client/
 │   │   ├── runtime_config.rs
+│   │   ├── snapshot_reader_tests.rs
 │   │   └── transport.rs
 │   ├── dcserver/
 │   │   ├── replay_recovery.rs
@@ -55,6 +56,7 @@ src/
 │   │   │   ├── provider_credentials.rs
 │   │   │   ├── repair_response.rs
 │   │   │   ├── report_display.rs
+│   │   │   ├── snapshot_reader_tests.rs
 │   │   │   └── stale_mailbox_repair.rs
 │   │   ├── startup/
 │   │   │   └── herdr_checker_tests.rs
@@ -108,6 +110,7 @@ src/
 │   └── mod.rs
 ├── config/
 │   ├── config_path/
+│   │   ├── selection.rs
 │   │   └── tests.rs
 │   ├── reload_classes/
 │   │   ├── detect.rs
@@ -135,9 +138,12 @@ src/
 │   ├── agent_memory.rs
 │   ├── cluster_role.rs
 │   ├── config_path.rs
+│   ├── daemon_snapshot_pg_tests.rs
 │   ├── disk_write.rs
+│   ├── disk_write_snapshot_tests.rs
 │   ├── late_live_reload_tests.rs
 │   ├── peer_filter.rs
+│   ├── poll_watcher_tests.rs
 │   ├── readers_live_reload_tests.rs
 │   ├── reload_classes.rs
 │   ├── retired_relay_tests.rs
@@ -149,6 +155,7 @@ src/
 │   ├── server_surface.rs
 │   ├── session_hosts.rs
 │   ├── session_hosts_tests.rs
+│   ├── snapshot_reader_tests.rs
 │   ├── test_env.rs
 │   ├── tool_activity_display.rs
 │   └── writer_channels_tests.rs
@@ -343,6 +350,7 @@ src/
 │   ├── dispatch_context.rs
 │   ├── dispatch_create.rs
 │   ├── dispatch_query.rs
+│   ├── dispatch_snapshot_tests.rs
 │   ├── dispatch_status.rs
 │   ├── dispatch_summary.rs
 │   ├── mod.rs
@@ -426,6 +434,7 @@ src/
 │   ├── paths.rs
 │   ├── skill_refresh.rs
 │   ├── skill_sync.rs
+│   ├── snapshot_reader_tests.rs
 │   └── windows_links.rs
 ├── server/
 │   ├── dashboard_auth/
@@ -604,6 +613,7 @@ src/
 │   │   ├── kakao_calendar.rs
 │   │   ├── kanban.rs
 │   │   ├── kanban_repos.rs
+│   │   ├── kanban_snapshot_tests.rs
 │   │   ├── maintenance.rs
 │   │   ├── meetings.rs
 │   │   ├── memory_api.rs
@@ -639,7 +649,8 @@ src/
 │   │   ├── turn_lease.rs
 │   │   ├── voice_audio.rs
 │   │   ├── voice_conductor.rs
-│   │   └── voice_config.rs
+│   │   ├── voice_config.rs
+│   │   └── voice_config_snapshot_tests.rs
 │   ├── task_dispatch_claims/
 │   │   ├── config_read.rs
 │   │   └── config_read_tests.rs
@@ -749,9 +760,11 @@ src/
 │   │   ├── fsm.rs
 │   │   ├── lifecycle_routes.rs
 │   │   ├── order_routes.rs
+│   │   ├── order_snapshot_tests.rs
 │   │   ├── phase_gate.rs
 │   │   ├── phase_gate_catalog.rs
 │   │   ├── phase_gate_violations.rs
+│   │   ├── phase_snapshot_tests.rs
 │   │   ├── planning.rs
 │   │   ├── query.rs
 │   │   ├── route.rs
@@ -821,6 +834,7 @@ src/
 │   │   │   ├── screen_identity_tests.rs
 │   │   │   ├── screen_tests.rs
 │   │   │   ├── stash.rs
+│   │   │   ├── stash_confirm_tests.rs
 │   │   │   ├── stash_owner_tests.rs
 │   │   │   ├── stash_tests.rs
 │   │   │   └── submit.rs
@@ -981,6 +995,7 @@ src/
 │   │   ├── session_matcher.rs
 │   │   ├── session_registry.rs
 │   │   ├── session_routing.rs
+│   │   ├── snapshot_tests.rs
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
 │   ├── codex/
@@ -1126,7 +1141,8 @@ src/
 │   │   │   │   ├── provider_settings/
 │   │   │   │   │   └── revision_tests.rs
 │   │   │   │   ├── allowall_tests.rs
-│   │   │   │   └── provider_settings.rs
+│   │   │   │   ├── provider_settings.rs
+│   │   │   │   └── provider_settings_snapshot_tests.rs
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
 │   │   │   │   │   ├── codex_end_tests/
@@ -1210,6 +1226,7 @@ src/
 │   │   │   ├── model_picker.rs
 │   │   │   ├── model_ui.rs
 │   │   │   ├── node.rs
+│   │   │   ├── node_snapshot_tests.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── restart.rs
 │   │   │   ├── session.rs
@@ -2085,6 +2102,7 @@ src/
 │   │   │   ├── shared_data.rs
 │   │   │   ├── shutdown.rs
 │   │   │   ├── shutdown_sigterm_tests.rs
+│   │   │   ├── snapshot_reader_tests.rs
 │   │   │   ├── spawns.rs
 │   │   │   ├── spawns_tests.rs
 │   │   │   ├── startup_doctor.rs
@@ -2132,6 +2150,7 @@ src/
 │   │   │   └── worktree.rs
 │   │   ├── settings/
 │   │   │   ├── content.rs
+│   │   │   ├── content_snapshot_tests.rs
 │   │   │   ├── memory.rs
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
@@ -2518,6 +2537,7 @@ src/
 │   │   │   ├── completion_guard/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   ├── completion_postgres.rs
+│   │   │   │   ├── completion_postgres_snapshot_tests.rs
 │   │   │   │   ├── replay_hold_tests.rs
 │   │   │   │   └── span_tests.rs
 │   │   │   ├── completion_postlude/
@@ -2699,6 +2719,7 @@ src/
 │   │   │   ├── post_loop_finalize.rs
 │   │   │   ├── recall_feedback.rs
 │   │   │   ├── recovery_text.rs
+│   │   │   ├── recovery_text_snapshot_tests.rs
 │   │   │   ├── replay_policy.rs
 │   │   │   ├── response_delivery.rs
 │   │   │   ├── resume_pin_tests.rs
@@ -2761,6 +2782,7 @@ src/
 │   │   │   │   │   ├── canonical_target.rs
 │   │   │   │   │   ├── clear_owner_race_tests.rs
 │   │   │   │   │   ├── collection_publication_tests.rs
+│   │   │   │   │   ├── completed_scheduled.rs
 │   │   │   │   │   ├── cross_runtime_owner_e2e_tests.rs
 │   │   │   │   │   ├── cross_runtime_owners.rs
 │   │   │   │   │   ├── cross_runtime_owners_tests.rs
@@ -2782,6 +2804,7 @@ src/
 │   │   │   │   │   ├── live_ownership.rs
 │   │   │   │   │   ├── live_publication.rs
 │   │   │   │   │   ├── live_review_tests.rs
+│   │   │   │   │   ├── live_snapshot_tests.rs
 │   │   │   │   │   ├── live_tests.rs
 │   │   │   │   │   ├── midread_owner_tests.rs
 │   │   │   │   │   ├── newlive_ownership_file_tests.rs
@@ -2845,7 +2868,8 @@ src/
 │   │   │   ├── tts_pipeline.rs
 │   │   │   ├── turn_dispatch.rs
 │   │   │   ├── utility.rs
-│   │   │   └── utterance_pipeline.rs
+│   │   │   ├── utterance_pipeline.rs
+│   │   │   └── utterance_snapshot_tests.rs
 │   │   ├── watchers/
 │   │   │   ├── lifecycle/
 │   │   │   │   ├── activity.rs
@@ -2887,6 +2911,7 @@ src/
 │   │   ├── admin_host_guard_verified_reset_tests.rs
 │   │   ├── agent_handoff.rs
 │   │   ├── agentdesk_config.rs
+│   │   ├── agentdesk_config_snapshot_tests.rs
 │   │   ├── agentdesk_memory_tests.rs
 │   │   ├── answer_flush_barrier.rs
 │   │   ├── bot_role.rs
@@ -3079,6 +3104,7 @@ src/
 │   │   │   ├── guard.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── orchestration.rs
+│   │   │   ├── owner_snapshot_tests.rs
 │   │   │   ├── owner_tests.rs
 │   │   │   ├── thread_reuse.rs
 │   │   │   └── transport.rs
@@ -3098,6 +3124,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── remote.rs
 │   │   ├── repo_resolver.rs
+│   │   ├── repo_resolver_snapshot_tests.rs
 │   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
 │   ├── hang_forensics/
@@ -3264,6 +3291,7 @@ src/
 │   │   ├── io.rs
 │   │   ├── mod.rs
 │   │   ├── orchestration.rs
+│   │   ├── orchestration_snapshot_tests.rs
 │   │   ├── paths.rs
 │   │   ├── registry.rs
 │   │   ├── retention.rs
@@ -3863,6 +3891,7 @@ src/
 │   │   │   ├── codex_verified_tests.rs
 │   │   │   └── pane_registration.rs
 │   │   ├── binding_context.rs
+│   │   ├── binding_context_snapshot_tests.rs
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs
 │   │   ├── handoff.rs
@@ -4020,8 +4049,10 @@ src/
 │   ├── kakao_message.rs
 │   ├── kanban.rs
 │   ├── kanban_cards.rs
+│   ├── kanban_cards_snapshot_tests.rs
 │   ├── manual_steer.rs
 │   ├── mcp_config.rs
+│   ├── mcp_config_snapshot_tests.rs
 │   ├── message_outbox.rs
 │   ├── message_outbox_circuit_authority.rs
 │   ├── message_outbox_circuit_authority_tests.rs
