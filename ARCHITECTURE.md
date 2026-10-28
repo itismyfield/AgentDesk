@@ -750,6 +750,12 @@ src/
 │   │   ├── model.rs
 │   │   ├── recovery.rs
 │   │   └── worker.rs
+│   ├── campaign_execution/
+│   │   ├── definition.rs
+│   │   ├── definition_tests.rs
+│   │   ├── mod.rs
+│   │   ├── model.rs
+│   │   └── model_tests.rs
 │   ├── claude/
 │   │   ├── first_input/
 │   │   │   └── tests.rs
@@ -4053,6 +4059,7 @@ src/
 │   ├── api.rs
 │   ├── async_bridge.rs
 │   ├── auth.rs
+│   ├── dag.rs
 │   ├── discord.rs
 │   ├── format.rs
 │   ├── github_links.rs
