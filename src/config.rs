@@ -39,8 +39,39 @@ pub fn snapshot() -> Option<std::sync::Arc<Config>> {
     crate::config_live_reload::current()
 }
 
+/// Boot preparation and standalone CLI keep their existing loader until LIVE is published.
+pub(crate) fn runtime_config() -> Config {
+    snapshot()
+        .map(|config| (*config).clone())
+        .unwrap_or_else(load_graceful)
+}
+
+pub(crate) fn runtime_config_strict() -> Result<Config> {
+    snapshot()
+        .map(|config| Ok((*config).clone()))
+        .unwrap_or_else(load)
+}
+
+pub(crate) fn runtime_config_optional() -> Option<Config> {
+    snapshot()
+        .map(|config| (*config).clone())
+        .or_else(|| config_path::load_runtime_config_file().map(|(config, _)| config))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RuntimeConfigSource {
+    pub(crate) path: PathBuf,
+    pub(crate) meeting_available_agents_explicitly_empty: bool,
+}
+
+#[cfg(test)]
+#[path = "config/snapshot_reader_tests.rs"]
+pub(crate) mod snapshot_reader_tests;
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Config {
+    #[serde(skip)]
+    pub(crate) runtime_source: Option<RuntimeConfigSource>,
     pub server: ServerConfig,
     #[serde(default)]
     pub discord: DiscordConfig,
@@ -2423,6 +2454,24 @@ fn default_memento_mcp_server() -> Option<(String, McpServerConfig)> {
 }
 
 impl Config {
+    fn with_runtime_source(mut self, path: &Path, contents: &str) -> Self {
+        let explicitly_empty = serde_yaml::from_str::<serde_yaml::Value>(contents)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("meeting")?
+                    .get("available_agents")?
+                    .as_sequence()
+                    .map(Vec::is_empty)
+            })
+            .unwrap_or(false);
+        self.runtime_source = Some(RuntimeConfigSource {
+            path: std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+            meeting_available_agents_explicitly_empty: explicitly_empty,
+        });
+        self
+    }
+
     fn apply_runtime_defaults(mut self) -> Self {
         if let Some((name, server)) = default_memento_mcp_server() {
             self.mcp_servers.entry(name).or_insert(server);
@@ -2478,6 +2527,7 @@ fn runtime_root_for_config_path(path: &Path) -> Option<PathBuf> {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            runtime_source: None,
             server: ServerConfig::default(),
             discord: DiscordConfig::default(),
             providers: std::collections::BTreeMap::new(),
@@ -2521,6 +2571,7 @@ pub fn load() -> Result<Config> {
         .with_context(|| format!("Failed to parse config: {path_display}"))?;
     let runtime_root = runtime_root_for_config_path(&path);
     let config = config
+        .with_runtime_source(&path, &contents)
         .apply_runtime_defaults()
         .resolve_runtime_relative_paths(runtime_root.as_deref());
     register_config_secrets(&config);
@@ -2541,6 +2592,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
         .with_context(|| format!("Failed to parse config {}", path.display()))?;
     let runtime_root = runtime_root_for_config_path(path);
     let config = config
+        .with_runtime_source(path, &contents)
         .apply_runtime_defaults()
         .resolve_runtime_relative_paths(runtime_root.as_deref());
     register_config_secrets(&config);
@@ -2798,7 +2850,8 @@ pub fn load_graceful() -> Config {
         Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
             Ok(cfg) => {
                 let runtime_root = runtime_root_for_config_path(&path);
-                cfg.apply_runtime_defaults()
+                cfg.with_runtime_source(&path, &contents)
+                    .apply_runtime_defaults()
                     .resolve_runtime_relative_paths(runtime_root.as_deref())
             }
             Err(e) => crate::config_live_reload::graceful_fallback_config(

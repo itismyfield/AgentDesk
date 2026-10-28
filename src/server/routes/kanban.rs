@@ -1539,7 +1539,7 @@ fn log_kanban_identity_consumption(
     principal: &Option<Extension<RequestPrincipal>>,
     consumed_agent_id: &str,
 ) {
-    let config = crate::config::load_graceful();
+    let config = crate::config::runtime_config();
     log_identity_consumption(
         endpoint,
         request_principal_ref(principal),
@@ -2434,3 +2434,7 @@ mod update_card_validation_tests {
 // ── #1065 param standardization tests ────────────────────────────────
 // UpdateCardBody canonical field is `assignee_agent_id` (snake_case).
 // Legacy `assigned_agent_id` still accepted via serde alias during migration.
+
+#[cfg(test)]
+#[path = "kanban_snapshot_tests.rs"]
+mod snapshot_tests;

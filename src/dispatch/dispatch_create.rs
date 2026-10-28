@@ -571,7 +571,7 @@ fn dispatch_required_capabilities(
     dispatch_type: &str,
 ) -> Option<serde_json::Value> {
     let context = serde_json::from_str::<serde_json::Value>(context_str).ok()?;
-    let config = crate::config::load_graceful();
+    let config = crate::config::runtime_config();
     dispatch_required_capabilities_from_routing(
         &context,
         dispatch_type,
@@ -1465,3 +1465,7 @@ mod capability_routing_tests {
         })));
     }
 }
+
+#[cfg(test)]
+#[path = "dispatch_snapshot_tests.rs"]
+mod snapshot_tests;

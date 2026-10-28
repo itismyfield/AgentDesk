@@ -88,9 +88,15 @@ pub(crate) fn looks_like_explicit_repo_path(raw: &str) -> bool {
 }
 
 fn load_repo_resolution_config() -> Option<(crate::config::Config, PathBuf)> {
-    let (config, path) = crate::config::config_path::load_runtime_config_file()?;
-    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    Some((config, base_dir.to_path_buf()))
+    let config = crate::config::runtime_config_optional()?;
+    let base_dir = config
+        .runtime_source
+        .as_ref()?
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    Some((config, base_dir))
 }
 
 fn configured_repo_dir(repo_id: &str) -> Option<String> {
@@ -249,3 +255,7 @@ mod no_repo_mapping_classification_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "repo_resolver_snapshot_tests.rs"]
+mod snapshot_tests;
