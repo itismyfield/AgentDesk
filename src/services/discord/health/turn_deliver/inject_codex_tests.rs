@@ -91,6 +91,42 @@ fn steerable() -> String {
     started() + &context() + &user()
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn expanded_contract_false_turn_logs_its_reason_without_pane_io() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = 7_504_201;
+    let ended = record(serde_json::json!({"type": "event_msg", "payload": {
+        "type": "task_complete", "turn_id": TURN}}));
+    let pane = CodexPane::new(
+        channel,
+        &(steerable() + &ended),
+        RuntimeHandoffKind::CodexTui,
+    );
+    let sink = super::inject_tests::LogSink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || writer.clone())
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    let guard = tracing::subscriber::set_default(subscriber);
+    assert!(
+        !shared
+            .has_inject_turn(&ProviderKind::Codex, ChannelId::new(channel))
+            .await
+    );
+    drop(guard);
+    assert_eq!(pane.tmux_calls(), 0);
+    let logs = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logs.contains("has_inject_turn") && logs.contains("not_busy"),
+        "{logs}"
+    );
+}
+
 /// A scripted Codex pane over `rollout`, its row/binding and a per-channel mode/program override.
 /// This does not force the Codex capability.
 pub(super) struct CodexPane {
@@ -471,7 +507,13 @@ async fn an_enabled_codex_channel_steers_the_open_turn_quietly_pg() {
     test_hook::enable_codex(drafted);
     let outcome = draft.attempt(&shared).await;
     assert!(
-        matches!(outcome, InjectAttempt::HandedBack { veto: "draft", .. }),
+        matches!(
+            outcome,
+            InjectAttempt::HandedBack {
+                veto: "draft_navigation_unproven",
+                ..
+            }
+        ),
         "{outcome:?}"
     );
     let queued = super::inject_tests::queue_texts(&shared, drafted).await;
@@ -1092,4 +1134,234 @@ async fn codex_missing_receipt_does_not_fail_or_lock_the_next_input_pg() {
             .await
             .is_empty()
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn expanded_contract_counts_every_scan_through_the_real_owner_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool));
+    let channel = 7_504_303;
+    let prefix = steerable();
+    let padding = |body: &str| {
+        record(serde_json::json!({"type":"event_msg","payload":{
+        "type":"item_completed","turn_id":TURN,"item":{"type":"AgentMessage","text":body}}}))
+    };
+    let budget = 64 * 1024 * 1024;
+    let rollout = prefix.clone() + &padding(&"x".repeat(budget - prefix.len() - padding("").len()));
+    assert_eq!(rollout.len(), budget);
+    let pane = CodexPane::new(channel, &rollout, RuntimeHandoffKind::CodexTui);
+    test_hook::enable_codex(channel);
+    let sink = super::inject_tests::LogSink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || writer.clone())
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("isolated metrics process subscriber");
+    let began = std::time::Instant::now();
+    assert!(
+        shared
+            .has_inject_turn(&ProviderKind::Codex, ChannelId::new(channel))
+            .await
+    );
+    assert_eq!(
+        pane.attempt(&shared).await,
+        InjectAttempt::Injected { turn_id: None }
+    );
+    let elapsed = began.elapsed();
+    let logs = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    let scans: Vec<_> = logs
+        .lines()
+        .filter(|line| line.contains("Codex turn scan"))
+        .collect();
+    let number = |line: &str, field: &str| {
+        line.split_whitespace()
+            .find_map(|part| part.strip_prefix(field))
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    assert_eq!(
+        scans.len(),
+        4,
+        "has_inject_turn, resolve and both pane checks: {logs}"
+    );
+    let total_bytes: u64 = scans.iter().map(|line| number(line, "bytes_read=")).sum();
+    assert!(
+        scans
+            .iter()
+            .all(|line| number(line, "bytes_read=") <= budget as u64)
+    );
+    assert_eq!(total_bytes, budget as u64 * scans.len() as u64);
+    let held = logs
+        .lines()
+        .find(|line| line.contains("Codex composer lock held"))
+        .expect("actual lock measurement");
+    eprintln!(
+        "I7504_WHOLE_ATTEMPT scans={} bytes={} elapsed_ms={} lock_held_us={}",
+        scans.len(),
+        total_bytes,
+        elapsed.as_millis(),
+        number(held, "lock_held_micros=")
+    );
+    assert_eq!(pane.keys(), "paste-buffer+send-keys");
+}
+
+/// An admitted origin keeps its episode through Codex injection; route authorization is upstream.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_obligated_input_keeps_reply_episode_and_optional_message_id_pg() {
+    use crate::db::imsg_reply::{AdmissionIdentity, read_obligation, reserve_admission};
+    use crate::services::discord::inflight::{load_inflight_state_read_only, save_inflight_state};
+    use crate::services::imsg_reply::{ReplyObligation, episode};
+    use crate::services::tui_input::human_frame::{self, history};
+    use crate::services::tui_prompt_dedupe::{self as dedupe, PromptObservation};
+    use history::append::{self, Decision};
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let channel = 7_504_304;
+    let pane = CodexPane::new(channel, &steerable(), RuntimeHandoffKind::CodexTui);
+    test_hook::enable_codex(channel);
+    let session = pane.session();
+    let mut holder = load_inflight_state_read_only(&ProviderKind::Codex, channel).unwrap();
+    holder.turn_start_offset = Some(0);
+    save_inflight_state(&holder).unwrap();
+    let expected_episode = episode::busy(
+        &ProviderKind::Codex,
+        channel,
+        &episode::Holder {
+            session: &session,
+            user_msg_id: holder.user_msg_id,
+            started_at: &holder.started_at,
+            start_offset: holder.turn_start_offset,
+            native_turn: Some(TURN),
+        },
+    )
+    .expect("the original holder names one native turn");
+    let origin_id = "p:0/CODEX-7504-OBLIGATED";
+    let channel_id = channel.to_string();
+    assert!(
+        reserve_admission(
+            &pool,
+            &AdmissionIdentity {
+                origin_id,
+                agent_id: "codex-obligated-agent",
+                channel_id: &channel_id,
+                person_id: 200,
+                request_hash: "codex-obligated-request",
+            },
+        )
+        .await
+        .unwrap()
+    );
+    let reply = ReplyObligation::new(pool.clone(), origin_id);
+    let request = HumanInputRequest {
+        channel_id: ChannelId::new(channel),
+        provider: ProviderKind::Codex,
+        text: "obligation payload first line\nobligation payload second line".into(),
+        author_id: 200,
+        source: "imessage".into(),
+        metadata: None,
+        channel_name_hint: None,
+    };
+    let mut rx = dedupe::subscribe_observed_prompts();
+    assert_eq!(
+        inject::attempt(&shared, &request, inject::Origin::Obligated(reply.clone())).await,
+        InjectAttempt::Injected { turn_id: None }
+    );
+    assert_eq!(pane.keys(), "paste-buffer+send-keys");
+
+    let bound = read_obligation(&pool, origin_id).await.unwrap().unwrap();
+    assert_eq!(
+        bound.episode_key.as_deref(),
+        Some(expected_episode.as_str())
+    );
+    assert_eq!(bound.queued_message_id, None);
+    let nonce = bound
+        .inject_nonce
+        .as_deref()
+        .expect("paste bound its nonce");
+    let buffer = fs::read_to_string(pane.path("buffer")).unwrap();
+    let expected = human_frame::plain_inject(
+        "imessage",
+        "200",
+        "imessage:200",
+        nonce,
+        &reply.frame(&request.text),
+    );
+    assert_eq!(buffer, expected);
+    assert_eq!(buffer.matches(reply.contract().as_str()).count(), 1);
+    assert_eq!(buffer.matches(request.text.as_str()).count(), 1);
+    let row = pane.receipt_id();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let observed = dedupe::observe_codex_prompt_in_turn_at(
+            &session,
+            &buffer,
+            Some(&row),
+            Some(TURN),
+            chrono::Utc::now(),
+        );
+        if observed == PromptObservation::InjectedSteer {
+            break;
+        }
+        assert_eq!(observed, PromptObservation::InjectedDeferred);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the real receipt diagnostic must bind the complete multiline frame"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let projection = append::projection("codex", &session, nonce).unwrap();
+    assert_eq!(projection.id, nonce);
+    assert_eq!(projection.message_id, None);
+    assert_eq!(projection.target_turn, TURN);
+    assert!(projection.admitted && projection.bound);
+    assert_eq!(projection.row.as_deref(), Some(row.as_str()));
+    assert_eq!(projection.decision, Some(Decision::Joined));
+    assert_eq!(
+        history::receipt_row(nonce, &pane.path("rollout.jsonl")),
+        Some(row.clone())
+    );
+    let native: Vec<serde_json::Value> = fs::read_to_string(pane.path("rollout.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|record: &serde_json::Value| {
+            record
+                .pointer("/payload/item/id")
+                .and_then(serde_json::Value::as_str)
+                == Some(row.as_str())
+        })
+        .collect();
+    assert_eq!(native.len(), 1);
+    assert_eq!(
+        native[0]["payload"]["item"]["content"][0]["text"].as_str(),
+        Some(buffer.as_str())
+    );
+    assert_eq!(
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|event| event.tmux_session_name == session)
+            .count(),
+        0
+    );
+    let settled = read_obligation(&pool, origin_id).await.unwrap().unwrap();
+    assert_eq!(settled.origin_id, origin_id);
+    assert_eq!(settled.source, "imessage");
+    assert_eq!(settled.person_id, 200);
+    assert_eq!(settled.request_hash, "codex-obligated-request");
+    assert_eq!(settled.episode_key, bound.episode_key);
+    assert_eq!(settled.inject_nonce, bound.inject_nonce);
+    assert_eq!(settled.queued_message_id, None);
+    assert_eq!(settled.resolution, "open");
+    assert_eq!(pane.keys(), "paste-buffer+send-keys");
 }

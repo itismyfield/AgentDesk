@@ -987,8 +987,10 @@ src/
 │   │   └── reconnect_tests.rs
 │   ├── codex_tui/
 │   │   ├── busy_inject/
+│   │   │   ├── expanded_contract_tests.rs
 │   │   │   ├── inject_tests.rs
 │   │   │   ├── rollout.rs
+│   │   │   ├── scan_tests.rs
 │   │   │   └── screen.rs
 │   │   ├── execution_end/
 │   │   │   ├── attempt.rs
@@ -3437,6 +3439,8 @@ src/
 │   │   │   └── pane.rs
 │   │   ├── human_frame/
 │   │   │   ├── history/
+│   │   │   │   ├── append.rs
+│   │   │   │   ├── append_tests.rs
 │   │   │   │   ├── compat.rs
 │   │   │   │   ├── compat_tests.rs
 │   │   │   │   ├── rollback_reader_tests.rs
@@ -3820,6 +3824,7 @@ src/
 │   │   ├── binding_context.rs
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs
+│   │   ├── handed_identity_tests.rs
 │   │   ├── handoff.rs
 │   │   ├── handoff_tests.rs
 │   │   ├── hosted_source.rs

@@ -1,5 +1,5 @@
-//! Pastes one external human input into the composer of a Codex TUI model turn so Enter steers it
-//! into that same native turn. One pre-paste capture precedes one paste and one Enter.
+//! Pastes one external human input into a running Codex composer with one Enter.
+//! Native steer or queue admission succeeds locally; later receipts identify the receiving turn.
 
 #[cfg(all(test, unix))]
 mod inject_tests;
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 pub(crate) use crate::services::claude_tui::busy_inject::Pane;
 use crate::services::claude_tui::busy_inject::{MAX_INPUT_BYTES, at_offsets, frame};
-pub(crate) use rollout::{TurnVerdict, read_turn, submitted};
+pub(crate) use rollout::{TurnVerdict, read_turn, read_turn_detail, submitted};
 
 /// Why nothing reached the pane; the caller may queue the input instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,9 +21,14 @@ pub(crate) enum Veto {
     LockContended,
     PaneUnavailable,
     Modal,
-    Draft,
-    /// Codex already shows its own queue, so an Enter would queue behind it.
-    QueueShown,
+    ComposerUnread,
+    DraftNavigationUnproven,
+    DraftSelectionUnproven,
+    DraftCommandUnproven,
+    DraftPasteTransformUnproven,
+    DraftPlaceholderUnproven,
+    DraftNotFullyVisible,
+    DraftImagePositionUnproven,
     NotSteerable,
     NotBusy,
     TurnUnknown,
@@ -33,6 +38,7 @@ pub(crate) enum Veto {
     LoadFailed,
     /// The injected-input ledger is full for this session.
     LedgerFull,
+    AmbiguousIdenticalPending,
 }
 
 /// A paste was attempted, so the input may sit in the composer or be submitted.
@@ -88,6 +94,10 @@ pub(crate) trait Ledger {
     fn register(&self) -> bool;
     /// Drops the record of a paste that never ran.
     fn withdraw(&self);
+    fn message_id(&self) -> Option<u64> {
+        None
+    }
+    fn admitted(&self) {}
 }
 
 /// Tries the composer lock a bounded number of times, then injects under it.
@@ -127,9 +137,19 @@ pub(crate) fn inject(
         std::thread::sleep,
         || {
             super::input::try_with_composer_mutation_lock(request.session, || {
-                inject_locked(pane, request, &text, ledger, timing)
+                let held = Instant::now();
+                let outcome = inject_locked(pane, request, &text, ledger, timing);
+                tracing::debug!(
+                    lock_held_micros = held.elapsed().as_micros() as u64,
+                    "Codex composer lock held"
+                );
+                outcome
             })
         },
+    );
+    tracing::debug!(
+        elapsed_micros = started.elapsed().as_micros() as u64,
+        "Codex composer mutation elapsed"
     );
     locked.unwrap_or(Outcome::NotSent(Veto::LockContended))
 }
@@ -142,26 +162,18 @@ fn inject_locked(
     timing: &Timing,
 ) -> Outcome {
     let not_sent = Outcome::NotSent;
-    if pane
-        .ok(&["display-message", "-p", "-t", pane.target(), "#{pane_id}"])
-        .is_none()
-    {
+    let Some(pane_id) = pane.ok(&["display-message", "-p", "-t", pane.target(), "#{pane_id}"])
+    else {
         return not_sent(Veto::PaneUnavailable);
-    }
+    };
     let before = pane.capture().unwrap_or_default();
     let shown = screen::read(&before);
     if shown.modal {
         return not_sent(Veto::Modal);
     }
-    if shown.queued {
-        return not_sent(Veto::QueueShown);
-    }
-    match shown.composer {
-        // Images above an empty textarea are a draft an Enter would submit with the input.
-        screen::Composer::Empty if shown.attachments => return not_sent(Veto::Draft),
-        screen::Composer::Empty => {}
-        screen::Composer::Text(_) => return not_sent(Veto::Draft),
-        screen::Composer::Unread => {}
+    tracing::debug!(native_queue = shown.queued, "Codex composer admission");
+    if let Some(veto) = screen::append_veto(&before, &shown) {
+        return not_sent(veto);
     }
     // Register every subsequent native record for the diagnostic observer.
     let Ok(offset) = std::fs::metadata(request.rollout).map(|meta| meta.len()) else {
@@ -197,28 +209,56 @@ fn inject_locked(
         drop_buffer();
         return not_sent(Veto::LedgerFull);
     }
-    if let Err(error) = crate::services::tui_input::human_frame::history::register(
-        ("codex", request.session, request.nonce, request.author),
+    if let Err(error) = crate::services::tui_input::human_frame::history::append::register(
+        (request.session, request.nonce, request.author),
         request.rollout,
         offset,
         text,
+        request.target_turn,
+        ledger.message_id(),
+        false,
     ) {
         tracing::warn!(%error, "busy frame ledger registration failed");
         ledger.withdraw();
         drop_buffer();
-        return not_sent(Veto::LedgerFull);
+        return not_sent(if error == "identical frame still unconfirmed" {
+            Veto::AmbiguousIdenticalPending
+        } else {
+            Veto::LedgerFull
+        });
     }
-    if pane
-        .ok(&["display-message", "-p", "-t", pane.target(), "#{pane_id}"])
-        .is_none()
-    {
+    let current_pane = pane.ok(&["display-message", "-p", "-t", pane.target(), "#{pane_id}"]);
+    let final_veto = if current_pane.as_deref() != Some(pane_id.as_str()) {
+        Some(Veto::PaneUnavailable)
+    } else {
+        match read_turn(request.rollout) {
+            Some(TurnVerdict::KnownModelTurn(turn)) if turn == request.target_turn => None,
+            Some(TurnVerdict::KnownModelTurn(_)) => Some(Veto::TurnChanged),
+            Some(TurnVerdict::NotBusy) => Some(Veto::NotBusy),
+            Some(TurnVerdict::NonSteerable(_)) => Some(Veto::NotSteerable),
+            Some(TurnVerdict::Unknown) => Some(Veto::TurnUnknown),
+            None => Some(Veto::TranscriptUnavailable),
+        }
+    };
+    if let Some(veto) = final_veto {
         drop_buffer();
         ledger.withdraw();
         crate::services::tui_input::human_frame::history::withdraw(request.nonce, request.rollout);
-        return not_sent(Veto::PaneUnavailable);
+        return not_sent(veto);
     }
+    use crate::services::tui_input::human_frame::history::append::{self, Admission};
+    if append::mark(request.nonce, request.rollout, Admission::EffectPossible).is_err() {
+        ledger.withdraw();
+        crate::services::tui_input::human_frame::history::withdraw(request.nonce, request.rollout);
+        drop_buffer();
+        return not_sent(Veto::LedgerFull);
+    }
+    let unconfirmed = |reason| {
+        let _ = append::mark(request.nonce, request.rollout, Admission::Uncertain);
+        Outcome::Unconfirmed(reason)
+    };
     if crate::services::claude_tui::owner_input::before_payload().is_err() {
-        return Outcome::Unconfirmed(Unconfirmed::PasteFailed);
+        return unconfirmed(Unconfirmed::PasteFailed);
     }
     // After a write is attempted, its failure cannot prove that the pane took no input.
     if pane
@@ -234,15 +274,58 @@ fn inject_locked(
         ])
         .is_none()
     {
-        return Outcome::Unconfirmed(Unconfirmed::PasteFailed);
+        return unconfirmed(Unconfirmed::PasteFailed);
     }
     std::thread::sleep(timing.settle);
     if pane
         .ok(&["send-keys", "-t", pane.target(), "Enter"])
         .is_none()
     {
-        return Outcome::Unconfirmed(Unconfirmed::EnterFailed);
+        return unconfirmed(Unconfirmed::EnterFailed);
+    }
+    if append::mark(request.nonce, request.rollout, Admission::Admitted).is_ok() {
+        ledger.admitted();
+    } else {
+        tracing::warn!(
+            nonce = request.nonce,
+            "Codex admission retained without durable confirmation"
+        );
     }
     rollout::observe(request, offset, text, timing);
     Outcome::Injected
+}
+
+/// Native completion is receipt evidence; later response aliases cannot mint ownership.
+pub(crate) fn observe_native_record(
+    path: &Path,
+    start: u64,
+    json: &serde_json::Value,
+) -> Option<crate::services::tui_input::human_frame::history::append::Receipt> {
+    let receipt = crate::services::tui_input::human_frame::history::append::bind_record_at(
+        path, start, json,
+    )?;
+    observe_receipt(&receipt);
+    Some(receipt)
+}
+
+pub(crate) fn observe_native_file(
+    file: &std::fs::File,
+    start: u64,
+    json: &serde_json::Value,
+) -> Option<crate::services::tui_input::human_frame::history::append::Receipt> {
+    let receipt = crate::services::tui_input::human_frame::history::append::bind_open_record(
+        file, start, json,
+    )?;
+    observe_receipt(&receipt);
+    Some(receipt)
+}
+
+fn observe_receipt(receipt: &crate::services::tui_input::human_frame::history::append::Receipt) {
+    crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
+        &receipt.session,
+        &receipt.prompt,
+        Some(&receipt.row),
+        receipt.native_turn.as_deref(),
+        chrono::Utc::now(),
+    );
 }

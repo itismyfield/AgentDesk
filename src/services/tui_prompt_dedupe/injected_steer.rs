@@ -37,7 +37,7 @@ pub(super) enum Claim {
     /// Joined an owned turn now; `first` is false for a later sighting of a settled input.
     Joined { first: bool },
     /// Opened an unowned turn now: the ordinary direct-input path runs once.
-    Handed,
+    Handed { verified_row: bool },
     /// Already handed: a later sighting is a duplicate.
     HandedBefore,
 }
@@ -96,7 +96,7 @@ pub(crate) fn register_injected_steer(
     true
 }
 
-/// Forgets an unsettled input whose paste never ran.
+/// Drops only an unsettled memory projection; durable admission and receipts stay unchanged.
 pub(crate) fn withdraw_injected_steer(provider: &str, tmux_session_name: &str, nonce: &str) {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     let key = PromptKey::new(provider, tmux_session_name);
@@ -118,6 +118,20 @@ pub(super) fn claim_injected_steer(
     native_turn: Option<&str>,
     entry_id: Option<&str>,
 ) -> Option<Claim> {
+    use crate::services::tui_input::human_frame::history::{
+        ObservedAttempt, append, observed_attempt,
+    };
+    let observed = observed_attempt(provider, tmux_session_name, prompts, entry_id);
+    let durable = match &observed {
+        ObservedAttempt::Known(id) => append::projection(provider, tmux_session_name, id),
+        _ => None,
+    };
+    let verified_row = durable
+        .as_ref()
+        .is_some_and(|entry| entry.bound && entry.row.as_deref() == entry_id && entry_id.is_some());
+    if provider == "claude" && !matches!(&observed, ObservedAttempt::None) {
+        return Some(Claim::Joined { first: false });
+    }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     let key = PromptKey::new(provider, tmux_session_name);
@@ -125,10 +139,27 @@ pub(super) fn claim_injected_steer(
         .native_turn_by_tmux
         .get(&key)
         .map(|slot| slot.value.turn.clone());
-    use crate::services::tui_input::human_frame::history::{ObservedAttempt, observed_attempt};
-    let observed = observed_attempt(provider, tmux_session_name, prompts, entry_id);
-    if provider == "claude" && !matches!(&observed, ObservedAttempt::None) {
-        return Some(Claim::Joined { first: false });
+    if let Some(saved) = durable.as_ref().filter(|_| verified_row) {
+        if saved.decision == Some(append::Decision::Joined) {
+            return Some(Claim::Joined { first: false });
+        }
+        let ledger = state.injected_steer_by_tmux.entry(key.clone()).or_default();
+        if !ledger.iter().any(|entry| entry.value.nonce == saved.id) {
+            // A row already admitted is restored, never reserved against the pending limit again.
+            if native_turn.is_none() || saved.decision == Some(append::Decision::HandedPending) {
+                return Some(Claim::Deferred);
+            }
+            ledger.push_back(TimedValue {
+                value: InjectedSteer {
+                    nonce: saved.id.clone(),
+                    target_turn: saved.target_turn.clone(),
+                    message_id: saved.message_id,
+                    settled: None,
+                    retained: true,
+                },
+                recorded_at: Instant::now(),
+            });
+        }
     }
     let Some(ledger) = state.injected_steer_by_tmux.get_mut(&key) else {
         return (!matches!(observed, ObservedAttempt::None)).then_some(Claim::Deferred);
@@ -147,29 +178,52 @@ pub(super) fn claim_injected_steer(
         ObservedAttempt::Pending => return Some(Claim::Deferred),
         ObservedAttempt::None => ledger.iter_mut().find(|entry| carries(entry)),
     }?;
-    let claim = match (entry.value.settled, native_turn) {
-        (Some(Settled::Joined), _) => return Some(Claim::Joined { first: false }),
-        (Some(Settled::Handed), _) => return Some(Claim::HandedBefore),
-        (None, None) => return Some(Claim::Deferred),
-        (None, Some(turn)) if turn == entry.value.target_turn || owned.as_deref() == Some(turn) => {
-            entry.value.settled = Some(Settled::Joined);
-            Claim::Joined { first: true }
+    match entry.value.settled {
+        Some(Settled::Joined) => return Some(Claim::Joined { first: false }),
+        Some(Settled::Handed) => return Some(Claim::HandedBefore),
+        None => {}
+    }
+    if durable
+        .as_ref()
+        .is_some_and(|saved| saved.decision == Some(append::Decision::HandedPending))
+    {
+        return Some(Claim::Deferred);
+    }
+    let Some(turn) = native_turn else {
+        return Some(Claim::Deferred);
+    };
+    let joined = turn == entry.value.target_turn || owned.as_deref() == Some(turn);
+    if verified_row {
+        let decision = if joined {
+            append::Decision::Joined
+        } else {
+            append::Decision::HandedPending
+        };
+        // Registry updates never call STATE; this single lock order keeps owner and row decisions together.
+        if !append::settle(&entry.value.nonce, tmux_session_name, entry_id?, decision) {
+            return Some(Claim::Deferred);
         }
-        (None, Some(_)) => {
-            entry.value.settled = Some(Settled::Handed);
-            Claim::Handed
-        }
+    }
+    entry.value.settled = Some(if joined {
+        Settled::Joined
+    } else {
+        Settled::Handed
+    });
+    entry.value.retained = false;
+    let claim = if joined {
+        Claim::Joined { first: true }
+    } else {
+        Claim::Handed { verified_row }
     };
     tracing::info!(
         tmux_session_name,
         nonce = %entry.value.nonce,
         target_turn = %entry.value.target_turn,
-        observed_turn = native_turn.unwrap_or(""),
+        observed_turn = turn,
         message_id = entry.value.message_id.unwrap_or(0),
         claim = ?claim,
         "injected input observed"
     );
-    // The oldest settled entries go first once the session keeps too many.
     let settled = ledger.iter().filter(|entry| entry.value.settled.is_some());
     let mut excess = settled.count().saturating_sub(MAX_SETTLED);
     ledger.retain(|entry| {
@@ -236,3 +290,7 @@ mod retained_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "handed_identity_tests.rs"]
+mod handed_identity_tests;

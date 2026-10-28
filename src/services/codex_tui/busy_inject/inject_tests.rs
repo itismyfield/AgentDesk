@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use super::*;
 
+#[path = "expanded_contract_tests.rs"]
+mod expanded_contract_tests;
+
 /// The model turn the captured `model_turn.jsonl` keeps open until its line 19.
 const T: &str = "01a11d88-ef31-7860-9d48-88926c4b1809";
 /// The request whose frame `busy_frame_v1.ansi`, the captured `busy_frame.ansi` with the v1 header
@@ -103,7 +106,7 @@ fn captured_turns_read_as_enter_met_them() {
     let compact = "01a11dcc-3da7-7a23-9f47-5067834fa221";
     assert_eq!(
         verdict(&records("compact_turn.jsonl", 6)),
-        non_steerable(compact)
+        steerable(compact)
     );
     // The review's inner turn names the outer one as its root; the outer end closes both.
     let inner = "01a11dcd-2d80-7d51-9f27-c599b4df17e6";
@@ -181,23 +184,15 @@ fn a_model_turn_with_in_progress_compaction_still_injects() {
 }
 
 #[test]
-fn compaction_without_a_user_message_never_injects() {
+fn compaction_without_a_user_message_accepts_native_queue_admission() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     let rollout =
         started(T, T) + &context(T, "danger-full-access") + &item(T, "ContextCompaction", "");
-    assert_eq!(verdict(&rollout), TurnVerdict::Unknown);
+    assert_eq!(verdict(&rollout), steerable(T));
     let fake = Fake::new();
     fs::write(&fake.rollout, rollout).unwrap();
-    let ledger = FakeLedger::default();
-    assert_eq!(fake.run(&ledger), Outcome::NotSent(Veto::TurnUnknown));
-    assert_eq!(
-        (
-            fake.calls("paste-buffer"),
-            fake.enters(),
-            ledger.registered.get()
-        ),
-        (0, 0, 0)
-    );
+    assert_eq!(fake.run(&FakeLedger::default()), Outcome::Injected);
+    assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
 }
 
 /// What the reader cannot prove reads as Unknown: an unparsed or unnamed record after the start,
@@ -216,7 +211,7 @@ fn unreadable_tails_read_as_unknown() {
     assert_eq!(verdict(&(model("t1") + "{\"type\":")), steerable("t1"));
     let padding = item("t1", "AgentMessage", &"x".repeat(1024));
     let long = model("t1") + &padding.repeat((4 * 1024 * 1024) / padding.len() + 2);
-    assert_eq!(verdict(&long), TurnVerdict::Unknown);
+    assert_eq!(verdict(&long), steerable("t1"));
 }
 
 /// The confirm scan finds the nonce only in a complete user record after the offset, and names
@@ -299,12 +294,14 @@ next() { n=$(cat "$d/$1.n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/$1.
 echo "$*" >> "$d/log"
 [ -f "$d/fail.$2" ] && exit 1
 case "$2" in
-display-message) [ -f "$d/gone" ] && exit 1; next attach ;;
+display-message) [ -f "$d/gone" ] && exit 1; if [ -f "$d/loaded" ] && [ -f "$d/replace_pane" ]; then echo pane-other; else echo pane-7504; fi ;;
 capture-pane)
   [ -f "$d/pasted" ] && [ -f "$d/fail_post_capture" ] && exit 1
   next cap ;;
 load-buffer)
   for last do :; done; cp "$last" "$d/buffer"
+  touch "$d/loaded"
+  [ -f "$d/on_load" ] && cat "$d/on_load" >> '@T@'
   [ -f "$d/gone_after_load" ] && touch "$d/gone" ;;
 paste-buffer)
   [ -f "$d/gone" ] && exit 1
@@ -511,9 +508,7 @@ fn missing_receipt_succeeds_and_enter_is_never_repeated() {
 fn draft_queue_and_hidden_composer_are_refused_before_the_paste() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     let cases = [
-        ("busy_draft.ansi", Veto::Draft),
-        ("busy_queued.ansi", Veto::QueueShown),
-        ("compact_queued.txt", Veto::QueueShown),
+        ("busy_draft.ansi", Veto::DraftNavigationUnproven),
         ("overlay.ansi", Veto::Modal),
         ("review_picker.ansi", Veto::Modal),
     ];
@@ -645,7 +640,10 @@ fn an_image_draft_is_refused_only_before_the_paste() {
     let fake = Fake::new();
     fake.answers("cap", &[&with_image(&fixture("busy_empty.ansi"))]);
     let ledger = FakeLedger::default();
-    assert_eq!(fake.run(&ledger), Outcome::NotSent(Veto::Draft));
+    assert_eq!(
+        fake.run(&ledger),
+        Outcome::NotSent(Veto::DraftImagePositionUnproven)
+    );
     let writes = fake.calls("load-buffer") + fake.calls("paste-buffer") + fake.enters();
     assert_eq!((writes, ledger.registered.get()), (0, 0));
     let fake = Fake::new();
@@ -836,9 +834,9 @@ fn common_glyphs_submit_without_a_width_allowlist() {
     assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
 }
 
-/// Layout prediction and a clipped footer cannot hold back an otherwise valid paste.
+/// A clipped composer falls back; readable empty composers still submit without predicting wraps.
 #[test]
-fn a_plan_narrow_and_clipped_screens_reach_enter() {
+fn a_plan_unread_composers_fall_back_and_known_empty_composers_submit() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     for (size, before) in [
         ("0,,12,10", fixture("busy_empty.ansi")),
@@ -849,19 +847,20 @@ fn a_plan_narrow_and_clipped_screens_reach_enter() {
         fake.answers("attach", &[size]);
         fake.answers("cap", &[&before, "unread post-paste screen"]);
         let outcome = fake.run(&FakeLedger::default());
-        assert_eq!(
-            (fake.calls("paste-buffer"), fake.enters()),
-            (1, 1),
-            "{size}: {outcome:?}"
-        );
-        assert!(matches!(outcome, Outcome::Injected));
+        if before == "\n› \n\n  GPT-6-Luna xh" {
+            assert_eq!(outcome, Outcome::NotSent(Veto::ComposerUnread));
+            assert_eq!((fake.calls("paste-buffer"), fake.enters()), (0, 0));
+        } else {
+            assert_eq!(outcome, Outcome::Injected);
+            assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
+        }
         assert_eq!(fake.calls("capture-pane"), 1);
     }
 }
 
-/// Failed post-paste reads do not block Enter or keep the next input locked.
+/// An unread next snapshot falls back and releases the lock for a later readable composer.
 #[test]
-fn a_plan_post_paste_read_failure_does_not_block_next_input() {
+fn a_plan_unread_next_snapshot_falls_back_and_recovers_without_retyping() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     fake.flag("fail_post_capture");
@@ -870,13 +869,16 @@ fn a_plan_post_paste_read_failure_does_not_block_next_input() {
     assert_eq!(fake.enters(), 1, "{first:?}");
     assert!(matches!(first, Outcome::Injected));
     let next = fake.run_with_nonce(&ledger, "next human message", "c0ffee02");
+    assert_eq!(next, Outcome::NotSent(Veto::ComposerUnread));
+    assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
+    fs::remove_file(fake.dir.path().join("fail_post_capture")).unwrap();
+    fake.caps(&["busy_empty.ansi", "busy_empty.ansi", "busy_empty.ansi"]);
     assert_eq!(
-        (fake.calls("paste-buffer"), fake.enters()),
-        (2, 2),
-        "{next:?}"
+        fake.run_with_nonce(&ledger, "new message after recovery", "c0ffee03"),
+        Outcome::Injected
     );
-    assert!(matches!(next, Outcome::Injected));
-    assert_eq!(fake.calls("capture-pane"), 2);
+    assert_eq!((fake.calls("paste-buffer"), fake.enters()), (2, 2));
+    assert_eq!(fake.calls("capture-pane"), 3);
 }
 
 /// Every menu fixture is refused before buffer loading or input registration.
