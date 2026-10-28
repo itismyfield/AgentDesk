@@ -191,6 +191,7 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   └── read.rs
 │   ├── campaigns/
+│   │   ├── issue_sync.rs
 │   │   └── tests.rs
 │   ├── dispatched_sessions/
 │   │   ├── hosted_execution/
@@ -395,6 +396,8 @@ src/
 │   └── transition_executor_pg.rs
 ├── github/
 │   ├── sync/
+│   │   ├── campaign_nodes.rs
+│   │   ├── campaign_nodes_tests.rs
 │   │   ├── card_state.rs
 │   │   └── warning_tests.rs
 │   ├── triage/
@@ -974,7 +977,8 @@ src/
 │   │   │   ├── first_input/
 │   │   │   │   └── tests.rs
 │   │   │   ├── launch_policy/
-│   │   │   │   └── fresh_tests.rs
+│   │   │   │   ├── fresh_tests.rs
+│   │   │   │   └── symlink_home_tests.rs
 │   │   │   ├── first_input.rs
 │   │   │   └── launch_policy.rs
 │   │   ├── absence_launch.rs

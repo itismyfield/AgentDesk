@@ -1722,6 +1722,14 @@ async fn github_sync_loop(pg_pool: Arc<PgPool>, interval_minutes: u64) {
                 .await
             {
                 Ok(result) => {
+                    if result.campaign_nodes.failed() {
+                        tracing::warn!(
+                            "[github-sync] {}: campaign node sync failed: {:?}",
+                            repo.id,
+                            result.campaign_nodes
+                        );
+                        had_errors = true;
+                    }
                     if result.closed_count > 0
                         || result.inconsistency_count > 0
                         || result.stale_card_issue_check_count > 0
