@@ -309,6 +309,7 @@ fn user_text(record: &serde_json::Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
     use std::io::Write;
 
     #[test]
@@ -414,6 +415,8 @@ mod tests {
         tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
     }
 
+    // Exact receipt confirmation requires Unix device/inode identity.
+    #[cfg(unix)]
     #[test]
     fn a2_receipt_requires_one_new_exact_user_on_the_same_binding_and_file() {
         let _root = crate::config::TestRuntimeRootGuard::new();

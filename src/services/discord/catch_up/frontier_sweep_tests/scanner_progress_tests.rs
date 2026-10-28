@@ -157,7 +157,10 @@ async fn i7441_scanner_identity_validation_monotonic_merge_and_prune() {
         thread.join().unwrap();
     }
     assert_eq!(progress::read(&fx.provider, channel), Some(low + 11));
-    std::fs::File::open(&path)
+    // Windows timestamp updates require a writable file handle.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
         .unwrap()
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(601))
         .unwrap();
@@ -190,7 +193,10 @@ async fn i7441_scanner_progress_survives_restart_and_newer_intake_checkpoint() {
         saved_after(fx.root.path(), &fx.provider, channel),
         old.get()
     );
-    std::fs::File::open(checkpoint_path(fx.root.path(), &fx.provider, channel))
+    // Windows timestamp updates require a writable file handle.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(checkpoint_path(fx.root.path(), &fx.provider, channel))
         .unwrap()
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(601))
         .unwrap();

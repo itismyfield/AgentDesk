@@ -1,6 +1,7 @@
 use super::*;
 
 fn fixture(instance_id: Option<&str>, execution_node: &str) -> crate::config::Config {
+    let socket = std::env::temp_dir().join("fixture").join("herdr.sock");
     serde_json::from_value(serde_json::json!({
         "server": {}, "cluster": {"instance_id": instance_id},
         "agents": [{"id": "fixture", "name": "fixture", "channels": {
@@ -8,7 +9,7 @@ fn fixture(instance_id: Option<&str>, execution_node: &str) -> crate::config::Co
         }}],
         "session_hosts": {"herdr": {
             "endpoints": {"one": {"mode": "user_default", "execution_node": execution_node,
-                "socket_path": "/fixture/herdr.sock", "herdr_session": "agentdesk"}},
+                "socket_path": socket, "herdr_session": "agentdesk"}},
             "channels": {"41": "one"}
         }}
     }))
