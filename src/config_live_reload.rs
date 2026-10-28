@@ -40,7 +40,7 @@ mod daemon_snapshot_pg_tests;
 mod poll_watcher_tests;
 
 /// Process-global live config snapshot. `None` until [`install`] runs at boot.
-static LIVE: OnceLock<RwLock<Arc<Config>>> = OnceLock::new();
+static LIVE: OnceLock<RwLock<Option<Arc<Config>>>> = OnceLock::new();
 
 /// Every successfully installed snapshot, including a same-value reload.
 /// Consumers that must redo external validation subscribe here instead of
@@ -74,7 +74,7 @@ pub fn install(config: Config) {
 /// The current live config snapshot, or `None` if [`install`] has not run yet
 /// (callers should fall back to their boot-captured config in that case).
 pub fn current() -> Option<Arc<Config>> {
-    LIVE.get().map(|lock| {
+    LIVE.get().and_then(|lock| {
         lock.read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -101,10 +101,10 @@ pub(crate) fn subscribe() -> tokio::sync::watch::Receiver<Option<Arc<Config>>> {
 }
 
 fn store(config: Arc<Config>) {
-    let lock = LIVE.get_or_init(|| RwLock::new(config.clone()));
+    let lock = LIVE.get_or_init(|| RwLock::new(Some(config.clone())));
     *lock
         .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = config.clone();
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(config.clone());
     LIVE_UPDATES
         .get_or_init(|| tokio::sync::watch::channel(None).0)
         .send_replace(Some(config));
@@ -305,14 +305,20 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
 
 #[cfg(test)]
 pub(crate) struct TestLiveGuard {
-    previous: Config,
+    previous: Option<Arc<Config>>,
     _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
 }
 
 #[cfg(test)]
 impl Drop for TestLiveGuard {
     fn drop(&mut self) {
-        install(self.previous.clone());
+        let lock = LIVE.get_or_init(|| RwLock::new(None));
+        *lock
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.previous.clone();
+        LIVE_UPDATES
+            .get_or_init(|| tokio::sync::watch::channel(None).0)
+            .send_replace(self.previous.clone());
     }
 }
 
@@ -320,9 +326,7 @@ impl Drop for TestLiveGuard {
 pub(crate) fn test_live_guard(
     lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
 ) -> TestLiveGuard {
-    let previous = current()
-        .map(|config| (*config).clone())
-        .unwrap_or_default();
+    let previous = current();
     TestLiveGuard {
         previous,
         _lock: lock,
@@ -341,6 +345,66 @@ mod tests {
     /// they do not race each other under the parallel test runner.
     fn global_test_guard() -> TestLiveGuard {
         test_live_guard(crate::config::test_env_lock::acquire_shared_test_env_lock())
+    }
+
+    fn isolated_live_guard(body: impl FnOnce()) {
+        const CHILD: &str = "ADK_TEST_LIVE_GUARD_RESTORATION_CHILD";
+        let thread = std::thread::current();
+        let name = thread.name().expect("named libtest worker");
+        if std::env::var(CHILD).ok().as_deref() == Some(name) {
+            assert!(current().is_none(), "child starts without a snapshot");
+            body();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(CHILD, name)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{name}: {stdout}\n{stderr}");
+        assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
+    }
+
+    #[test]
+    fn live_guard_restores_an_absent_snapshot_and_watch() {
+        isolated_live_guard(|| {
+            let updates = subscribe();
+            assert!(updates.borrow().is_none());
+            {
+                let _guard = global_test_guard();
+                install(Config::default());
+                let installed = current().unwrap();
+                assert!(Arc::ptr_eq(updates.borrow().as_ref().unwrap(), &installed));
+            }
+            assert!(current().is_none());
+            assert!(updates.borrow().is_none());
+        });
+    }
+
+    #[test]
+    fn live_guard_restores_the_same_snapshot_arc_and_watch() {
+        isolated_live_guard(|| {
+            install(Config::default());
+            let previous = current().unwrap();
+            let updates = subscribe();
+            assert!(Arc::ptr_eq(updates.borrow().as_ref().unwrap(), &previous));
+            {
+                let _guard = global_test_guard();
+                install(Config::default());
+                let replacement = current().unwrap();
+                assert!(!Arc::ptr_eq(&replacement, &previous));
+                assert!(Arc::ptr_eq(
+                    updates.borrow().as_ref().unwrap(),
+                    &replacement
+                ));
+            }
+            assert!(Arc::ptr_eq(&current().unwrap(), &previous));
+            assert!(Arc::ptr_eq(updates.borrow().as_ref().unwrap(), &previous));
+        });
     }
 
     fn write(path: &Path, body: &str) {

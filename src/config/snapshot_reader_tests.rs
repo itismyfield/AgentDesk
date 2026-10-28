@@ -28,6 +28,7 @@ pub(crate) fn isolated(body: impl FnOnce()) {
 }
 
 pub(crate) struct Fixture {
+    _root_env: crate::config::TestEnvVarGuard,
     root: tempfile::TempDir,
     pub(crate) path: PathBuf,
 }
@@ -35,15 +36,19 @@ pub(crate) struct Fixture {
 impl Fixture {
     pub(crate) fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
+        let root_env = crate::config::set_agentdesk_root_for_test(root.path());
         let path = root.path().join("config/agentdesk.yaml");
         std::env::set_current_dir(root.path()).unwrap();
         // Each fixture runs in a fresh single-test child, before its runtime starts.
         unsafe {
-            std::env::set_var("AGENTDESK_ROOT_DIR", root.path());
             std::env::set_var("AGENTDESK_CONFIG", &path);
             std::env::remove_var("DATABASE_URL");
         }
-        Self { root, path }
+        Self {
+            _root_env: root_env,
+            root,
+            path,
+        }
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -115,6 +120,10 @@ pub(crate) fn capture_identity<T>(body: impl FnOnce() -> T) -> (T, Vec<bool>) {
 fn snapshot_facades_keep_published_value_and_preserve_boot_fallback() {
     isolated(|| {
         let fixture = Fixture::new();
+        assert!(matches!(
+            crate::config::shared_test_env_lock().try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
         fixture.write("server: {port: 41}\nmeeting: {channel_name: fixture, available_agents: []}");
         for config in [
             runtime_config(),
