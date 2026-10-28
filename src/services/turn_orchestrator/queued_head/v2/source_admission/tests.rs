@@ -424,6 +424,8 @@ async fn admission_status_reads_without_admitting() {
             .await
             .unwrap()
     };
+    // With the fault gone a recovery would now publish; a lookup still must not run one.
+    drop(watch);
     let before = state().await;
     for _ in 0..2 {
         assert_eq!(
@@ -441,7 +443,6 @@ async fn admission_status_reads_without_admitting() {
         "a lookup neither recovers nor commits"
     );
     assert!(before.2);
-    drop(watch);
 }
 
 #[test]
