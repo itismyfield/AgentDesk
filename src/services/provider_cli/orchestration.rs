@@ -189,7 +189,7 @@ fn configured_provider_agent_ids(provider: &str) -> Vec<String> {
 }
 
 pub fn configured_provider_agents(provider: &str) -> Vec<super::AgentInfo> {
-    let Some((config, _)) = crate::config::config_path::load_runtime_config_file() else {
+    let Some(config) = crate::config::runtime_config_optional() else {
         return Vec::new();
     };
 
@@ -217,3 +217,7 @@ fn agent_supports_provider(agent: &crate::config::AgentDef, provider: &str) -> b
         provider_key.eq_ignore_ascii_case(provider) && channel.target().is_some()
     })
 }
+
+#[cfg(test)]
+#[path = "orchestration_snapshot_tests.rs"]
+mod snapshot_tests;

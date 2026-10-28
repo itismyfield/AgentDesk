@@ -61,7 +61,11 @@ async fn a_queued_message_holds_the_checkpoint_until_a_turn_dispatches_it() {
     harness.seed_channel_history(&history);
 
     let _active = harness
-        .spawn_turn_held_at_placeholder(base | 500, "holds the mailbox", Duration::from_secs(2))
+        .spawn_turn_held_at_placeholder(
+            base | 500,
+            "holds the mailbox",
+            super::PLACEHOLDER_HOLD_LIMIT,
+        )
         .await;
     harness
         .deliver_user_message(queued, QUEUED_TEXT)

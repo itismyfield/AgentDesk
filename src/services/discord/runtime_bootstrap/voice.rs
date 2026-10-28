@@ -38,6 +38,11 @@ pub(super) fn voice_auto_join_provider_map(
     map
 }
 
+pub(super) fn configured_voice_auto_join_provider_map()
+-> std::collections::HashMap<String, (String, Option<String>)> {
+    voice_auto_join_provider_map(&crate::config::runtime_config())
+}
+
 /// #2274: rehydrate the process-local voice-background handoff store from the
 /// durable PG side table. Best-effort — a PG error is logged and the
 /// terminal-delivery path falls back to a per-call `load_handoff_durable`
@@ -165,8 +170,7 @@ pub(super) async fn run_bot_spawn_voice_auto_join(
         // #2054 v7: agent voice binding은 channel_id → provider+agent
         // 매핑을 build 해서 같은 provider의 다른 에이전트 봇까지
         // 같은 voice 채널에 진입하는 중복 STT/TTS를 차단한다.
-        let cfg = crate::config::load_graceful();
-        let channel_provider_map = voice_auto_join_provider_map(&cfg);
+        let channel_provider_map = configured_voice_auto_join_provider_map();
         tokio::spawn(async move {
             commands::auto_join_voice_channels(
                 ctx_for_voice,

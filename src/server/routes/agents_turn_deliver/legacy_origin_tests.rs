@@ -521,8 +521,13 @@ async fn restart_child() {
     let registry = Arc::new(HealthRegistry::new());
     register_inject_runtime(&registry, &[channel], Some(pool.clone())).await;
     let pane = InjectPane::new(channel, "external");
-    let script = std::fs::read_to_string(std::env::var("ADK_LEGACY_CHILD_SHIM").unwrap()).unwrap();
-    pane.set("tmux", &script);
+    let shim = std::env::var("ADK_LEGACY_CHILD_SHIM").unwrap();
+    pane.set("tmux", &std::fs::read_to_string(&shim).unwrap());
+    // The parent's shim records into the parent's transcript, so the child reads that one.
+    let transcript = pane.path(InjectPane::TRANSCRIPT);
+    std::fs::remove_file(&transcript).unwrap();
+    let parent = std::path::Path::new(&shim).with_file_name(InjectPane::TRANSCRIPT);
+    std::os::unix::fs::symlink(parent, &transcript).unwrap();
     let app = router(Some(pool.clone()), Some(registry));
     let origin = std::env::var("ADK_LEGACY_CHILD_ORIGIN").unwrap();
     let calls = Arc::new(AtomicUsize::new(0));

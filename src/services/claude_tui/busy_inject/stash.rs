@@ -1,4 +1,5 @@
-//! Optional C-s, bracketed paste, a fixed settle, and one Enter. No pane is read after a key.
+//! Optional C-s, bracketed paste, a fixed settle, and one Enter. No pane is read after a key;
+//! `enter` lets the receipt check finish an unreceived paste with the same pinned key.
 //! An owner is asked twice: ready before any key, and the payload start just before content.
 use std::io::Write;
 
@@ -95,6 +96,12 @@ pub(in crate::services::claude_tui) fn submit(
         let _ = pane.ok(&["delete-buffer", "-b", &buffer]);
     }
     outcome
+}
+
+/// One Enter, pinned like the submit's own keys; whether the server applied it.
+pub(in crate::services::claude_tui) fn enter(pane: &Pane) -> bool {
+    let enter = |target: &str| ["send-keys", "-t", target, "Enter"].map(String::from);
+    matches!(key(pane, enter), Key::Applied)
 }
 
 fn load_failed() -> Outcome {
