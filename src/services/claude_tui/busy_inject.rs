@@ -1,5 +1,6 @@
 //! Pastes one external human input into a hosted Claude TUI composer; nothing here enqueues.
-//! One pre-paste capture chooses an optional stash; a short settle precedes one Enter.
+//! One pre-paste capture chooses an optional stash; a short settle precedes one Enter, and
+//! `confirm` settles the result from the transcript.
 
 #[cfg(unix)]
 mod epoch;
@@ -69,23 +70,46 @@ pub(crate) enum WriteFailure {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// The paste and one Enter were sent; Claude's transcript is diagnostic only.
+    /// The paste and Enter were sent; only `confirm` reads whether Claude received them.
     Injected,
     NotSent(Veto),
     Failed(WriteFailure),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Report {
     pub outcome: Outcome,
+    /// What `confirm` checks once the paste and Enter were sent.
+    sent: Option<Sent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Sent {
+    offset: u64,
+    text: String,
+    /// C-s parked a person's draft that Claude hands back on submit.
+    parked: bool,
 }
 
 impl Report {
     fn not_sent(veto: Veto) -> Self {
         Self {
             outcome: Outcome::NotSent(veto),
+            sent: None,
         }
     }
+}
+
+/// How the transcript answered a sent paste.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Receipt {
+    Observed,
+    /// The frame was submitted together with other composer text.
+    Contaminated,
+    /// Nothing within both windows; `resent` tells whether the one finishing Enter went.
+    Missing {
+        resent: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -430,31 +454,15 @@ fn inject_locked(
         tracing::warn!(%error, "busy frame ledger registration failed");
         return Report::not_sent(Veto::LoadFailed);
     }
+    let outcome = stash::submit(pane, request.nonce, text, timing, park);
     let report = Report {
-        outcome: stash::submit(pane, request.nonce, text, timing, park),
-    };
-    if report.outcome == Outcome::Injected {
-        let request = (
-            request.transcript.to_path_buf(),
+        outcome,
+        sent: (outcome == Outcome::Injected).then(|| Sent {
             offset,
-            request.nonce.to_string(),
-            text.to_string(),
-        );
-        let window = timing.confirm_window;
-        let poll = timing.confirm_poll;
-        // Receipt collection never delays the next input or changes its result.
-        let _ = std::thread::Builder::new()
-            .name("claude-receipt".into())
-            .spawn(move || {
-                let (path, offset, nonce, text) = request;
-                let result = await_receipt(
-                    (&path, offset, &nonce, &text),
-                    Instant::now() + window,
-                    poll,
-                );
-                tracing::debug!(%nonce, ?result, "Claude injection receipt diagnostic");
-            });
-    }
+            text: text.to_string(),
+            parked: park,
+        }),
+    };
     if matches!(report.outcome, Outcome::NotSent(_)) {
         crate::services::tui_input::human_frame::history::withdraw(
             request.nonce,
@@ -462,6 +470,93 @@ fn inject_locked(
         );
     }
     report
+}
+
+/// The transcript's answer to a sent paste: one window, at most one finishing Enter under the
+/// composer lock, one more window. The waits hold no lock; `None` when nothing was sent.
+pub(crate) fn confirm(
+    pane: &Pane,
+    request: &Request<'_>,
+    report: &Report,
+    timing: &Timing,
+) -> Option<Receipt> {
+    let sent = report.sent.as_ref()?;
+    let receipt = (
+        request.transcript,
+        sent.offset,
+        request.nonce,
+        sent.text.as_str(),
+    );
+    let wait = || match await_receipt(
+        receipt,
+        Instant::now() + timing.confirm_window,
+        timing.confirm_poll,
+    ) {
+        Ok(()) => Some(Receipt::Observed),
+        Err(ReceiptError::ContaminatedSubmit) => Some(Receipt::Contaminated),
+        Err(ReceiptError::NotObserved) => None,
+    };
+    if let Some(receipt) = wait() {
+        return Some(receipt);
+    }
+    let started = Instant::now();
+    let resent = at_offsets(
+        timing.lock_retries,
+        || started.elapsed(),
+        std::thread::sleep,
+        || {
+            super::composer_lock::try_with_composer_mutation_lock(request.session, || {
+                finish_submit(pane, request, sent)
+            })
+        },
+    )
+    .unwrap_or(false);
+    if let Some(receipt) = wait() {
+        return Some(receipt);
+    }
+    tracing::warn!(
+        nonce = %request.nonce,
+        tmux_session = %request.session,
+        window_ms = timing.confirm_window.as_millis() as u64,
+        resent,
+        "Claude injection not received in the transcript"
+    );
+    Some(Receipt::Missing { resent })
+}
+
+/// An Enter on our own paste still shown is the same submission finished, not a resend: no
+/// content is pasted again. A parked draft is never risked, since a late first Enter restores it.
+fn finish_submit(pane: &Pane, request: &Request<'_>, sent: &Sent) -> bool {
+    if sent.parked {
+        return false;
+    }
+    let Some(capture) = pane.capture() else {
+        return false;
+    };
+    // Read after the capture, so a receipt that landed meanwhile keeps the Enter off.
+    let received = transcript_submission(
+        request.transcript,
+        sent.offset,
+        request.nonce,
+        Some(&sent.text),
+    );
+    let own = crate::services::tui_input::actor::gate::own_draft(
+        crate::services::tui_o::shadow::ShadowProvider::Claude,
+        &capture,
+        &sent.text,
+        true,
+    );
+    if received.is_some() || !own {
+        return false;
+    }
+    let applied = stash::enter(pane);
+    tracing::info!(
+        nonce = %request.nonce,
+        tmux_session = %request.session,
+        applied,
+        "Claude injection unreceived; Enter sent once more on its own paste"
+    );
+    applied
 }
 
 /// Polls the transcript after `offset` until `deadline` for the submission carrying `nonce`:

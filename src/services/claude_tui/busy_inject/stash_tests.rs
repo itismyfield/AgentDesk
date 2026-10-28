@@ -64,6 +64,7 @@ const FAST: Timing = Timing {
 
 /// A scripted Claude TUI behind `tmux`: composer, stash, the single-slot C-s, a submit handing the
 /// stash back, attach generation, a person, a barrier, and a faint idle placeholder only `-e` keeps.
+/// `drop.Enter` counts Enters the TUI ignores; `mute` loses the record, `late` lands it at a capture.
 pub(crate) const FAKE_TUI: &str = r#"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
@@ -87,9 +88,10 @@ cs() {
 }
 enter() {
   [ -s "$d/composer" ] || return 0
+  rec='@T@'; [ ! -f "$d/late" ] || rec="$d/late.rec"; [ ! -f "$d/mute" ] || rec=/dev/null
   # The acceptance record carries what the composer held at Enter.
   awk 'BEGIN { printf "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\"" }
-    { gsub(/"/, "\""); printf "%s%s", (NR > 1 ? "\\n" : ""), $0 } END { print "\"}" }' "$d/composer" >> '@T@'
+    { gsub(/"/, "\""); gsub(/\t/, "\\t"); printf "%s%s", (NR > 1 ? "\\n" : ""), $0 } END { print "\"}" }' "$d/composer" >> "$rec"
   : > "$d/composer"
   rm -f "$d/chip"
   [ -f "$d/stash" ] || return 0
@@ -106,7 +108,9 @@ paste() {
 apply() {
   [ "$1" != Enter ] || [ ! -f "$d/human.before-Enter" ] || . "$d/human.before-Enter"
   echo "$1" >> "$d/applied"
-  case "$1" in C-s) cs ;; Enter) enter ;; paste) paste ;; esac
+  drop=$(cat "$d/drop.$1" 2>/dev/null || echo 0)
+  if [ "$drop" -gt 0 ]; then echo $((drop - 1)) > "$d/drop.$1"
+  else case "$1" in C-s) cs ;; Enter) enter ;; paste) paste ;; esac; fi
   cursor
   [ "$1" != paste ] || [ ! -f "$d/human.after-paste" ] || . "$d/human.after-paste"
   [ "$1" != C-s ] || [ ! -f "$d/human.after-C-s" ] || . "$d/human.after-C-s"
@@ -134,6 +138,7 @@ case "$2" in
 display-message) for last do :; done; case "$last" in '#{pane_dead}') printf ' 0 \n' ;; *) echo "$(cat "$d/attached"),$(cat "$d/last"),$(cat "$d/width"),$(cat "$d/height")" ;; esac ;;
 capture-pane)
   n=$(($(cat "$d/cap.n" 2>/dev/null || echo 0) + 1)); echo $n > "$d/cap.n"
+  [ ! -f "$d/late.rec" ] || { cat "$d/late.rec" >> '@T@'; rm "$d/late.rec"; }
   [ -f "$d/fail.cap.$n" ] && exit 1
   # With a barrier, the first capture after Enter waits for go, 3s at most.
   if [ -f "$d/barrier" ] && grep -qx Enter "$d/applied" 2>/dev/null; then
@@ -405,6 +410,9 @@ fn menus_and_permission_cards_precede_stash_and_paste() {
         assert_eq!(tui.drafts(), ("draft".into(), None));
     }
 }
+
+#[path = "stash_confirm_tests.rs"]
+mod confirm_tests;
 
 mod environment_tests {
     use super::*;

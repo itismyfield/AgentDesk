@@ -20,7 +20,7 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::HumanInputRequest;
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::claude_tui::busy_inject::{self, Outcome};
+use crate::services::claude_tui::busy_inject::{self, Outcome, Receipt};
 use crate::services::codex_tui::busy_inject as codex_inject;
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnState, TurnSource};
@@ -614,7 +614,7 @@ impl Owner {
             let (input, session, turn_id) = (input.clone(), session.clone(), turn_id.clone());
             move || match native_turn {
                 _ if !bound => InjectAttempt::NotSent(imsg_reply::UNBOUND),
-                None => run(
+                None => run_received(
                     (&pane, herdr.as_ref()),
                     &session,
                     &transcript,
@@ -732,12 +732,34 @@ struct Input {
     nonce: String,
 }
 
+/// The queued-head effect: its transaction is terminal once Enter is sent.
 fn run(
-    (pane, herdr): (&busy_inject::Pane, Option<&HerdrTarget>),
+    pane: (&busy_inject::Pane, Option<&HerdrTarget>),
     session: &str,
     transcript: &std::path::Path,
     turn_id: Option<String>,
     input: &Input,
+) -> InjectAttempt {
+    run_with(pane, (session, transcript), turn_id, input, false)
+}
+
+/// The live owner's effect: a paste the transcript never received stays Unconfirmed.
+fn run_received(
+    pane: (&busy_inject::Pane, Option<&HerdrTarget>),
+    session: &str,
+    transcript: &std::path::Path,
+    turn_id: Option<String>,
+    input: &Input,
+) -> InjectAttempt {
+    run_with(pane, (session, transcript), turn_id, input, true)
+}
+
+fn run_with(
+    (pane, herdr): (&busy_inject::Pane, Option<&HerdrTarget>),
+    (session, transcript): (&str, &std::path::Path),
+    turn_id: Option<String>,
+    input: &Input,
+    received: bool,
 ) -> InjectAttempt {
     #[cfg(test)]
     test_hook::crash(input.channel);
@@ -760,14 +782,18 @@ fn run(
         } else {
             busy_inject::inject_report
         };
-        report(pane, &request, Some(input.channel), &busy_inject::TIMING).outcome
+        let report = report(pane, &request, Some(input.channel), &busy_inject::TIMING);
+        let confirm = || busy_inject::confirm(pane, &request, &report, &busy_inject::TIMING);
+        (report.outcome, received.then(confirm).flatten())
     };
     // A panic may come after the paste, so it is reported like any later failure.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
     let alert = |detail| unconfirmed(input, session, turn_id.clone(), detail);
     let result = match outcome {
-        Ok(Outcome::NotSent(veto)) => InjectAttempt::NotSent(veto_name(veto)),
-        Ok(Outcome::Injected) => {
+        Ok((Outcome::NotSent(veto), _)) => InjectAttempt::NotSent(veto_name(veto)),
+        // Neither window held a receipt, even after any finishing Enter; nothing is resent.
+        Ok((Outcome::Injected, Some(Receipt::Missing { .. }))) => alert("not_observed"),
+        Ok((Outcome::Injected, _)) => {
             tracing::info!(
                 channel_id = input.channel,
                 tmux_session = %session,
@@ -778,7 +804,7 @@ fn run(
                 turn_id: turn_id.clone(),
             }
         }
-        Ok(Outcome::Failed(detail)) => alert(match detail {
+        Ok((Outcome::Failed(detail), _)) => alert(match detail {
             busy_inject::WriteFailure::Stash => "stash_failed",
             busy_inject::WriteFailure::Paste => "paste_failed",
             busy_inject::WriteFailure::Enter => "enter_failed",

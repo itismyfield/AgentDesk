@@ -607,6 +607,84 @@ async fn mixed_human_input_is_submitted_without_an_alert_or_later_hold_pg() {
     assert_eq!(notices, 0);
 }
 
+/// A TUI that ignores the first Enter of a folded paste takes it on one more Enter; one that
+/// ignores both leaves the Discord message Unconfirmed with an alert, never Observed or resent.
+#[tokio::test(flavor = "current_thread")]
+async fn an_ignored_enter_is_finished_once_and_an_unreceived_paste_stays_unconfirmed_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let (once, always) = (7_510_001, 7_510_002);
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &[once, always], Some(pool)).await;
+    let provider = ProviderKind::Claude;
+    let disposition = crate::services::discord::inject_disposition::terminal;
+    let claim_source = crate::services::discord::inject_disposition::claim_source;
+    let mut observed = Vec::new();
+    for (ch, ignored) in [(once, "1"), (always, "2")] {
+        let mut pane = InjectPane::new(ch, "external");
+        pane.stash("", false);
+        pane.set("fold", "");
+        pane.set("drop.Enter", ignored);
+        let message = MessageId::new(ch + 100);
+        let guard = claim_source(&provider, message, std::time::Instant::now()).unwrap();
+        let request = HumanInputRequest {
+            channel_id: ChannelId::new(ch),
+            provider: provider.clone(),
+            text: "첫 줄\n둘째 줄\n셋째 줄".into(),
+            author_id: 200,
+            source: "discord".into(),
+            metadata: None,
+            channel_name_hint: None,
+        };
+        let mut entry = queued(message.get());
+        entry.author_id = UserId::new(200);
+        entry.text = request.text.clone();
+        let origin = inject::Origin::Discord {
+            message,
+            handback: Box::new((entry, format!("discord:{ch}:{message}"))),
+            guard,
+            name: "Ann".into(),
+        };
+        let result = inject::attempt(&shared, &request, origin).await;
+        let received = pane.records() == [pane.read("buffer").unwrap()];
+        observed.push((
+            result,
+            pane.applied().join("+"),
+            received,
+            disposition(Some(&provider), message, std::time::Instant::now()),
+            pane.alarm_count("busy_inject_unconfirmed"),
+            queue_texts(&shared, ch).await.len(),
+        ));
+    }
+    use crate::services::discord::inject_disposition::InjectionOutcome;
+    let unconfirmed = inject::InjectAttempt::Unconfirmed {
+        turn_id: None,
+        detail: "not_observed",
+    };
+    assert_eq!(
+        observed,
+        [
+            (
+                inject::InjectAttempt::Injected { turn_id: None },
+                "paste+Enter+Enter".to_string(),
+                true,
+                Some(InjectionOutcome::Observed),
+                0,
+                0,
+            ),
+            (
+                unconfirmed,
+                "paste+Enter+Enter".to_string(),
+                false,
+                Some(InjectionOutcome::Unconfirmed),
+                1,
+                0,
+            ),
+        ]
+    );
+}
+
 #[test]
 fn the_switch_opens_only_on_external_or_all() {
     assert_eq!(inject::INJECT_ENV, "ADK_BUSY_INJECT");

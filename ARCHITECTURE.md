@@ -794,6 +794,7 @@ src/
 │   │   │   ├── screen_identity_tests.rs
 │   │   │   ├── screen_tests.rs
 │   │   │   ├── stash.rs
+│   │   │   ├── stash_confirm_tests.rs
 │   │   │   ├── stash_owner_tests.rs
 │   │   │   ├── stash_tests.rs
 │   │   │   └── submit.rs
