@@ -1,0 +1,54 @@
+[
+  {
+    "author_id": 7,
+    "author_is_bot": true,
+    "message_id": 100,
+    "queued_generation": 5,
+    "source_message_ids": [
+      100,
+      101
+    ],
+    "source_message_queued_generations": [
+      {
+        "message_id": 100,
+        "queued_generation": 5
+      },
+      {
+        "message_id": 101,
+        "queued_generation": 6
+      }
+    ],
+    "source_text_segments": [
+      {
+        "message_id": 100,
+        "text": "voice 원문"
+      },
+      {
+        "message_id": 101,
+        "text": "merged 원문"
+      }
+    ],
+    "text": "voice 원문\nmerged 원문",
+    "reply_context": "reply 원문",
+    "has_reply_boundary": true,
+    "merge_consecutive": false,
+    "pending_uploads": [
+      "fixture://asset-a.txt",
+      "fixture://asset-b.txt"
+    ],
+    "channel_id": 7272591,
+    "channel_name": null,
+    "override_channel_id": 91,
+    "voice_announcement": {
+      "transcript": "voice 원문",
+      "user_id": "7",
+      "utterance_id": "utterance-1",
+      "language": "ko",
+      "verbose_progress": false,
+      "started_at": null,
+      "completed_at": null,
+      "samples_written": 128,
+      "control_channel_id": 91
+    }
+  }
+]

@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "status": "UNMEASURED",
+  "forward": {
+    "sha": null,
+    "tree": null,
+    "binary": null,
+    "sha256": null
+  },
+  "rollback_r5": {
+    "base_4f_sha": null,
+    "patchset": null,
+    "sha": null,
+    "tree": null,
+    "binary": null,
+    "sha256": null,
+    "mode": "writable",
+    "unknown_fields_preserved": null,
+    "pending_same_ticket": null
+  },
+  "build": {
+    "target": null,
+    "profile": null,
+    "dependency_fingerprint": null
+  },
+  "evidence": {
+    "process_boots": null,
+    "r5_admissions": null,
+    "r5_queue_writes": null,
+    "r5_content": null,
+    "forward_recovery": null,
+    "raw_log": null,
+    "transport_trace": null
+  },
+  "forbidden_rollback_actions": [
+    "snapshot-delete",
+    "array-downgrade",
+    "terminal-reset",
+    "new-ticket-readmission"
+  ],
+  "acceptance_contract": {
+    "normal_ready_inputs": 1,
+    "expected_r5_content": 1,
+    "r5_admissions_min": 1,
+    "r5_queue_writes_min": 1
+  }
+}

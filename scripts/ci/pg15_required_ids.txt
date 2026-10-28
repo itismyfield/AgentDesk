@@ -18,3 +18,4 @@ services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_cens
 services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg
 services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
 services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
+services::turn_orchestrator::queued_head::compat_tests::s5_fixtures::s5_fixture_throwaway_pg_records_source_nonce_expectations_pg

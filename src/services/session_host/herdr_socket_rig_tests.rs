@@ -2,6 +2,9 @@
 //! one request a connection carries, registered on a thread with E7 off and a scripted process OS.
 #![cfg(unix)]
 
+#[path = "herdr_socket_rig_tests/s5_effect_tests.rs"]
+mod s5_effect_tests;
+
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;

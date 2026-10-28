@@ -2,6 +2,9 @@ use super::*;
 use crate::config::TestRuntimeRootGuard;
 use serde_json::{Value, json};
 
+#[path = "compat_tests/s5_fixture_tests.rs"]
+mod s5_fixtures;
+
 fn context() -> QueuePersistenceContext {
     QueuePersistenceContext::new(&ProviderKind::Claude, "v2-compat", None)
 }

@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "terminal_clock": {
+    "settled_at_ms": 1000,
+    "ttl_ms": 86400000,
+    "cases": [
+      {"now_ms": 86400999, "fenced": true},
+      {"now_ms": 86401000, "fenced": false},
+      {"now_ms": 86401001, "fenced": false},
+      {"now_ms": 999, "fenced": true}
+    ]
+  },
+  "inputs": {
+    "count": 5001,
+    "first_source": 8000000000000001000,
+    "queued_generation": 5,
+    "execution_nonce": "execution-A",
+    "attempt_nonce_prefix": "s5-attempt-",
+    "body": "same literal _ 한글",
+    "expected_admissions_per_source": 1,
+    "expected_content_per_source": 1,
+    "expected_old_echo_new_inputs": 0
+  },
+  "crash_cuts": [
+    {"cut": "admitted", "same_ticket": true, "possibly_sent": false, "max_recovery_content": 1},
+    {"cut": "reserved", "same_ticket": true, "possibly_sent": false, "max_recovery_content": 1},
+    {"cut": "bootstrap", "same_ticket": true, "possibly_sent": true, "max_recovery_content": 0},
+    {"cut": "payload-start", "same_ticket": true, "possibly_sent": true, "max_recovery_content": 0},
+    {"cut": "transport-effect", "same_ticket": true, "possibly_sent": true, "max_recovery_content": 0},
+    {"cut": "local-settle", "same_ticket": true, "possibly_sent": true, "max_recovery_content": 0},
+    {"cut": "secondary-projection", "same_ticket": true, "possibly_sent": true, "max_recovery_content": 0}
+  ],
+  "publish_faults": ["write", "file-sync", "parent-sync"],
+  "readback_cases": ["old", "candidate", "third", "read-failure"],
+  "receipt_lifetime": ["pending", "later-commit", "settled", "advance-after-24h", "same-body-two-tickets"],
+  "publish_paths": ["queue", "history", "outbox", "migration"]
+}

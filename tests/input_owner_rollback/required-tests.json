@@ -1,0 +1,238 @@
+{
+  "platform_meaning": "source compilation universe; Linux execution required, macOS/Windows native execution separate",
+  "generated_by": "python3 tests/input_owner_rollback/generate_required.py",
+  "source": "scripts/ci/rust_test_sources.py platform_tests; ci-pr.yml archive and PG15 jobs",
+  "tests": [
+    {
+      "id": "services::session_host::herdr_socket_rig_tests::s5_effect_tests::s5_b0_real_herdr_socket_text_paste_line_and_enter_are_observed",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "services::turn_orchestrator::queued_head::compat_tests::s5_fixtures::s5_fixture_durable_crash_cuts_record_real_fault_and_same_ticket",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "services::turn_orchestrator::queued_head::compat_tests::s5_fixtures::s5_fixture_legacy_identity_voice_assets_and_metadata_stay_distinct",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "services::turn_orchestrator::queued_head::compat_tests::s5_fixtures::s5_fixture_publish_barrier_stops_before_durable_admission_returns",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "services::turn_orchestrator::queued_head::compat_tests::s5_fixtures::s5_fixture_real_writer_proof_transport_and_publish_paths",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "services::turn_orchestrator::queued_head::compat_tests::s5_fixtures::s5_fixture_terminal_cutoff_plus_minus_one_and_clock_reversal",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "services::turn_orchestrator::queued_head::compat_tests::s5_fixtures::s5_fixture_throwaway_pg_records_source_nonce_expectations_pg",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "pg15-required",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "services::turn_orchestrator::queued_head::compat_tests::s5_fixtures::s5_fixture_writer_goldens_verify_separately_from_generation",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::s5_b0_bootstrap_proof_allows_create_but_never_content_before_payload_start",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::s5_b0_durable_proof_rejects_missing_and_foreign_fields_without_effects",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::scenarios::s5_fixture_5001_source_nonce_expectations_and_crash_cuts_are_complete",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::scenarios::s5_fixture_writable_r5_cannot_pass_with_absent_or_zero_effects",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::tests::s5_b0_admitted_command_without_transport_write_cannot_pass",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::tests::s5_b0_auxiliary_underscore_cannot_substitute_for_the_actual_payload",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::tests::s5_b0_cross_thread_barrier_and_distinct_targets_keep_writer_intervals",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::tests::s5_b0_real_cold_argv_create_is_content_once_and_has_no_paste",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::tests::s5_b0_real_same_tui_4h_and_owner_effects_have_separate_positive_counts",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::tests::s5_b0_real_tmux_leaves_reject_before_transport_and_trace_owner_commands",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::tests::s5_b0_rejects_missing_foreign_and_unscoped_even_after_owner_returns",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::tests::s5_b0_same_tui_preserved_4h_never_counts_as_owner_success",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::tests::s5_b0_tmux_argv_and_key_only_classification",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::transport::s5_b0_transport_classifies_text_with_enter_as_one_payload_and_control_as_zero",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml Rust src/** or tests/**; Linux archive all(); PG15 exact IDs for _pg",
+      "ignored": false
+    }
+  ]
+}

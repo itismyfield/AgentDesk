@@ -104,6 +104,9 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
 
     /// Writes one request on `stream` and reads one reply; the stream is not reused.
     fn exchange(&self, stream: UnixStream, call: &HerdrCall) -> HerdrOutcome {
+        #[cfg(test)]
+        let _effect = crate::test_support::input_owner::herdr(&self.socket_path, call)
+            .map_err(HerdrTransportError::NotSent)?;
         let frame = self
             .framing
             .encode(call)
@@ -122,6 +125,8 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
                 HerdrTransportError::AfterWrite(detail)
             });
         }
+        #[cfg(test)]
+        _effect.written();
         let reply = self
             .framing
             .read_frame(&mut BufReader::new(&stream), self.config.max_frame_bytes)

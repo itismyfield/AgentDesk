@@ -37,7 +37,19 @@ fn tmux_command() -> std::io::Result<Command> {
 fn tmux_output<S: AsRef<std::ffi::OsStr>>(
     args: impl IntoIterator<Item = S>,
 ) -> std::io::Result<Output> {
-    tmux_command()?.args(args).output()
+    let mut command = tmux_command()?;
+    command.args(args);
+    #[cfg(test)]
+    let _effect =
+        crate::test_support::input_owner::tmux(&command).map_err(std::io::Error::other)?;
+    let output = command.output();
+    #[cfg(test)]
+    if let Ok(output) = &output
+        && output.status.success()
+    {
+        _effect.written();
+    }
+    output
 }
 
 #[cfg(unix)]
@@ -67,12 +79,21 @@ fn wait_for_tmux_output(
     timeout: Duration,
     label: &str,
 ) -> Result<Output, String> {
+    #[cfg(test)]
+    let _effect = crate::test_support::input_owner::tmux(&command)?;
     configure_child_process_group(&mut command);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = command
         .spawn()
         .map_err(|e| format!("{label} spawn failed: {e}"))?;
-    wait_with_output_timeout(child, timeout, label)
+    let output = wait_with_output_timeout(child, timeout, label);
+    #[cfg(test)]
+    if let Ok(output) = &output
+        && output.status.success()
+    {
+        _effect.written();
+    }
+    output
 }
 
 mod availability;
@@ -160,10 +181,14 @@ pub fn create_session(
     }
     cmd.arg(shell_command);
     cmd.env_remove("CLAUDECODE");
+    #[cfg(test)]
+    let _effect = crate::test_support::input_owner::tmux(&cmd)?;
     let output = cmd
         .output()
         .map_err(|e| format!("Failed to create tmux session: {e}"))?;
     if output.status.success() {
+        #[cfg(test)]
+        _effect.written();
         install_dead_marker_hooks(session_name);
     }
     Ok(output)
@@ -466,6 +491,8 @@ pub fn send_literal(session_name: &str, text: &str) -> Result<Output, String> {
 
 /// Load literal text into a named tmux buffer via stdin.
 pub fn load_buffer(buffer_name: &str, text: &str) -> Result<Output, String> {
+    #[cfg(test)]
+    crate::test_support::input_owner::load_buffer(buffer_name, text);
     let mut child = tmux_command()
         .map_err(|e| format!("tmux load-buffer failed: {e}"))?
         .args(["load-buffer", "-b", buffer_name, "-"])
@@ -577,7 +604,12 @@ pub fn pane_current_path(session_name: &str) -> Option<String> {
 /// `scroll_back` is the number of lines to capture (negative = from bottom).
 pub fn capture_pane(session_name: &str, scroll_back: i32) -> Option<String> {
     capture_pane_command(session_name, scroll_back, false)
-        .and_then(|mut command| command.output())
+        .and_then(|mut command| {
+            #[cfg(test)]
+            let _effect =
+                crate::test_support::input_owner::tmux(&command).map_err(std::io::Error::other)?;
+            command.output()
+        })
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
@@ -627,7 +659,12 @@ fn capture_pane_command(
 /// `scroll_back` is the number of lines to capture (negative = from bottom).
 pub fn capture_pane_with_escapes(session_name: &str, scroll_back: i32) -> Option<String> {
     capture_pane_command(session_name, scroll_back, true)
-        .and_then(|mut command| command.output())
+        .and_then(|mut command| {
+            #[cfg(test)]
+            let _effect =
+                crate::test_support::input_owner::tmux(&command).map_err(std::io::Error::other)?;
+            command.output()
+        })
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())

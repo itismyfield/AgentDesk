@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "items": [],
+  "head_injection": null,
+  "terminal_identities": [
+    {
+      "primary": 100,
+      "queued_generation": 5,
+      "sources": [
+        {
+          "message_id": 100,
+          "queued_generation": 5
+        },
+        {
+          "message_id": 101,
+          "queued_generation": 6
+        }
+      ]
+    }
+  ]
+}

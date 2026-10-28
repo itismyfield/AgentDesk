@@ -1,0 +1,31 @@
+{
+  "provider": "codex",
+  "namespace": "s5-fixture",
+  "channel": 7272591,
+  "author": 7,
+  "author_is_bot": true,
+  "role_override": 91,
+  "primary": 100,
+  "sources": [
+    {
+      "message_id": 100,
+      "queued_generation": 5
+    },
+    {
+      "message_id": 101,
+      "queued_generation": 6
+    }
+  ],
+  "nonce": "s5-attempt-A",
+  "execution_nonce": "execution-A",
+  "legacy_nonce": "legacy-nonce",
+  "voice_utterance": "utterance-1",
+  "assets": [
+    "fixture://asset-a.txt",
+    "fixture://asset-b.txt"
+  ],
+  "asset_sha256": {
+    "asset-a.txt": "d8de5c8a78d6b6743dcdc69c4fc3a4c026286a30f678049f41b69815e7e08d7a",
+    "asset-b.txt": "cb8399899cd9e47bfd76d61064b26393b88494a44785ffd022d4ee5460911851"
+  }
+}

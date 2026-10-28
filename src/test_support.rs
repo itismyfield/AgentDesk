@@ -1,6 +1,8 @@
 //! Test-only serialized runtimes and Rust source scanning for `include_str!` guards.
 //! The lexer handles comments and literals without resolving names or evaluating `cfg`.
 
+#[path = "test_support/input_owner/tests/strict_effect.rs"]
+pub(crate) mod input_owner;
 pub(crate) mod serial_runtime;
 
 use std::fmt;

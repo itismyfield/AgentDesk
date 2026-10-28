@@ -1,0 +1,259 @@
+{
+  "base": "d4976406ba9f1a54f5772f0aaf3e0588f248ea91",
+  "scope": "5t preparation; final 4f census is mandatory",
+  "sources": [
+    {
+      "path": "src/services/platform/tmux.rs",
+      "line": 37,
+      "symbol": "fn tmux_output",
+      "role": "raw tmux literal/paste/keys",
+      "integration": "5t test hook"
+    },
+    {
+      "path": "src/services/platform/tmux.rs",
+      "line": 77,
+      "symbol": "fn wait_for_tmux_output",
+      "role": "timed raw tmux",
+      "integration": "5t test hook"
+    },
+    {
+      "path": "src/services/platform/tmux.rs",
+      "line": 172,
+      "symbol": "pub fn create_session",
+      "role": "cold create and argv",
+      "integration": "5t test hook"
+    },
+    {
+      "path": "src/services/session_host/tmux_host.rs",
+      "line": 111,
+      "symbol": "fn send_text",
+      "role": "generic SessionHost text converges at tmux",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/session_host/herdr/transport.rs",
+      "line": 106,
+      "symbol": "fn exchange",
+      "role": "direct and generic Herdr text/paste/line before wire",
+      "integration": "5t test hook"
+    },
+    {
+      "path": "src/services/tui_input/writer_lease.rs",
+      "line": 62,
+      "symbol": "pub(crate) fn admits",
+      "role": "legacy allowed after owner releases: B0 persists separately",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/turn_orchestrator/queued_head/snapshot.rs",
+      "line": 14,
+      "symbol": "pub(crate) fn snapshot_json",
+      "role": "actual raw/V1 writer",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/turn_orchestrator/pending_queue_persistence.rs",
+      "line": 528,
+      "symbol": "pub(crate) fn save_channel_pending_dispatch_marker",
+      "role": "actual legacy marker writer",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/turn_orchestrator/queued_head/v2.rs",
+      "line": 87,
+      "symbol": "pub(crate) fn reserve",
+      "role": "existing test-only V2 writer",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/discord/runtime_store/durable_publish.rs",
+      "line": 359,
+      "symbol": "pub(crate) mod flush_probe",
+      "role": "path-specific faults, publish events, Gate barriers",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/discord/router/intake_gate/gate.rs",
+      "line": 37,
+      "symbol": "fn",
+      "role": "Gateway source classification",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/discord/catch_up/phase1_sweep.rs",
+      "line": 6,
+      "symbol": "fn",
+      "role": "sweep phase 1",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/discord/catch_up/phase2_sweep.rs",
+      "line": 4,
+      "symbol": "fn",
+      "role": "sweep phase 2",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/discord/runtime_bootstrap/queued_recovery.rs",
+      "line": 11,
+      "symbol": "fn",
+      "role": "queue/inflight/marker boot",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/discord/router/message_handler/intake_turn/worker_entry.rs",
+      "line": 49,
+      "symbol": "fn",
+      "role": "claimed worker and exact retry",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/discord/turn_bridge/finalize_epilogue.rs",
+      "line": 16,
+      "symbol": "fn",
+      "role": "completion wake",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/discord/queue_dispatch/kickoff.rs",
+      "line": 22,
+      "symbol": "fn",
+      "role": "fallback census after 4f",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/server/routes/agents_turn_target.rs",
+      "line": 15,
+      "symbol": "fn",
+      "role": "HTTP start origin and mode",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/routines/agent_executor/launch.rs",
+      "line": 5,
+      "symbol": "fn",
+      "role": "routine Accepted consumer",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/scheduled_messages.rs",
+      "line": 56,
+      "symbol": "fn",
+      "role": "scheduled Accepted consumer",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/server/routes/agents_turn_deliver.rs",
+      "line": 54,
+      "symbol": "fn",
+      "role": "preserved 4h Legacy HTTP deliver",
+      "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/imsg_reply/mod.rs",
+      "line": 36,
+      "symbol": "fn",
+      "role": "preserved 4h obligated delivery",
+      "integration": "existing foundation or re-audit after 4f"
+    }
+  ],
+  "coordinate_revision": "lane working tree, fixed at review head; base identifies fixture writer lineage",
+  "origins": [
+    {
+      "origin": "Discord guild/DM/thread human",
+      "identity": "provider/channel/namespace + message IDs/generations",
+      "effect_contract": "owner admission/content per source",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "allowed bot/voice announcement",
+      "identity": "actual bot author + utterance/claim provenance",
+      "effect_contract": "same owner; no human impersonation",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "catch-up phase1/phase2/live",
+      "identity": "original Discord source and same ticket",
+      "effect_contract": "one content across redelivery; L05 catch_up_race census in 5c",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "boot queue/inflight/legacy marker",
+      "identity": "persisted raw author/role/provider/token/channel",
+      "effect_contract": "adopt same custody; possibly-sent does not resend",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "PG claimed worker",
+      "identity": "durable row/authority/lineage",
+      "effect_contract": "done only after durable custody",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "exact retry",
+      "identity": "original source plus existing retry permit",
+      "effect_contract": "existing ReplayStart/capacity authority retained",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "completion/backstop/source tick",
+      "identity": "existing backlog ticket",
+      "effect_contract": "wake only; no new admission/original",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "HTTP /turn/start",
+      "identity": "trusted origin/agent/placement/consent",
+      "effect_contract": "local TUI owner; Accepted separate from Started/completed",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "routine/scheduled",
+      "identity": "run_id/attempt_kind/turn_id",
+      "effect_contract": "durable Accepted; exact AI completion separately",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "direct headless/health/voice starter",
+      "identity": "trusted actual execution mode",
+      "effect_contract": "local TUI owner; function/source name is not a Process exception",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "Legacy HTTP /turn/deliver and obligated iMessage",
+      "identity": "stable origin/obligation",
+      "effect_contract": "preserved 4h; separate content counter on same TUI",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "actual Process/non-TUI provider",
+      "identity": "existing execution owner",
+      "effect_contract": "preserve shared effects; do not classify from provider name",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "actual recovery/restart seed",
+      "identity": "existing recovery lease/ReplayStart authority",
+      "effect_contract": "preserve existing contract; client source string grants no exception",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "native human pane",
+      "identity": "native observer evidence",
+      "effect_contract": "mirror only; injected echo is not a new human input",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "operational notice/outbox",
+      "identity": "persistent non-turn provenance",
+      "effect_contract": "input admission zero; actual allowed-bot control positive",
+      "connection": "after 4f; fixture expectations only"
+    },
+    {
+      "origin": "remote placement",
+      "identity": "existing node/placement authority",
+      "effect_contract": "existing remote behavior; local fallback zero",
+      "connection": "after 4f; fixture expectations only"
+    }
+  ]
+}
