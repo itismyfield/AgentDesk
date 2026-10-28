@@ -85,8 +85,7 @@ health_failure="$(awk '
 ' "$DEPLOY_SH")"
 [ -n "$health_failure" ] && bash -n <<<"$health_failure" || exit 1
 run_failed_readiness() (
-    ROLLBACK_ARMED=1
-    DEPLOY_OK=0
+    export ROLLBACK_ARMED=1 DEPLOY_OK=0
     trap '_cleanup_on_exit "$?"' EXIT
     eval "$health_failure"
 )
