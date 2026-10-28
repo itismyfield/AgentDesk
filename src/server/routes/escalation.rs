@@ -481,7 +481,7 @@ async fn send_channel_message(
         base_url,
         token,
         &format!("/channels/{channel_id}/messages"),
-        &json!({ "content": content }),
+        &crate::services::discord::http::relay_message_payload(content),
     )
     .await?;
     if response.status().is_success() {
@@ -618,6 +618,54 @@ mod manual_decision_gate_tests {
         path::Path as FsPath,
         sync::{Arc, Mutex},
     };
+
+    #[tokio::test]
+    async fn p2_allowed_mentions_escalation_owner_dm_wire() {
+        type Captured = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+        async fn capture(
+            State(captured): State<Captured>,
+            Path(channel_id): Path<String>,
+            Json(body): Json<serde_json::Value>,
+        ) -> StatusCode {
+            captured
+                .lock()
+                .expect("captured messages")
+                .push((channel_id, body));
+            StatusCode::OK
+        }
+
+        let captured = Captured::default();
+        let app = Router::new()
+            .route("/channels/{channel_id}/messages", post(capture))
+            .with_state(Arc::clone(&captured));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind owner DM proxy");
+        let base = format!("http://{}", listener.local_addr().expect("proxy address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve owner DM proxy");
+        });
+        let content = "  <@42> <@&99> @everyone @here\n에스컬레이션 본문  ";
+        send_channel_message(
+            &reqwest::Client::new(),
+            &base,
+            "test-token",
+            "7777001",
+            content,
+        )
+        .await
+        .expect("send owner DM message");
+        server.abort();
+
+        let captured = captured.lock().expect("captured messages");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, "7777001");
+        assert_eq!(captured[0].1["content"], content);
+        assert_eq!(captured[0].1["allowed_mentions"]["parse"], json!(["users"]));
+    }
 
     struct EnvVarGuard {
         key: &'static str,

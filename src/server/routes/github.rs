@@ -931,6 +931,8 @@ pub async fn sync_repo(
             "stale_card_issue_checks": sync_result.stale_card_issue_check_count,
             "stale_card_issue_batches": sync_result.stale_card_issue_batch_count,
             "stale_card_issue_errors": sync_result.stale_card_issue_error_count,
+            "campaign_nodes": sync_result.campaign_nodes,
+            "campaign_nodes_failed": sync_result.campaign_nodes.failed(),
         })),
     ))
 }

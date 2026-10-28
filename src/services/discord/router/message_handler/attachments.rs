@@ -193,17 +193,24 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
     // Always use the runtime uploads directory (works without session)
     let Some(save_dir) = channel_upload_dir(channel_id) else {
         rate_limit_wait(shared, channel_id).await;
-        let _ = channel_id
-            .say(http, "Cannot resolve upload directory.")
-            .await;
+        let _ = crate::services::discord::http::dispatch_channel_message(
+            http,
+            channel_id,
+            serenity::CreateMessage::new().content("Cannot resolve upload directory."),
+        )
+        .await;
         return Err("cannot resolve upload directory".into());
     };
 
     if let Err(e) = fs::create_dir_all(&save_dir) {
         rate_limit_wait(shared, channel_id).await;
-        let _ = channel_id
-            .say(http, format!("Failed to prepare upload directory: {}", e))
-            .await;
+        let _ = crate::services::discord::http::dispatch_channel_message(
+            http,
+            channel_id,
+            serenity::CreateMessage::new()
+                .content(format!("Failed to prepare upload directory: {}", e)),
+        )
+        .await;
         return Err(e.into());
     }
 
@@ -221,16 +228,24 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
             Ok(saved) => saved,
             Err(e) => {
                 rate_limit_wait(shared, channel_id).await;
-                let _ = channel_id
-                    .say(http, format!("Failed to save file: {}", e))
-                    .await;
+                let _ = crate::services::discord::http::dispatch_channel_message(
+                    http,
+                    channel_id,
+                    serenity::CreateMessage::new().content(format!("Failed to save file: {}", e)),
+                )
+                .await;
                 return Err(e.into());
             }
         };
 
         let msg_text = format!("Saved: {}\n({} bytes)", dest.display(), file_size);
         rate_limit_wait(shared, channel_id).await;
-        let _ = channel_id.say(http, &msg_text).await;
+        let _ = crate::services::discord::http::dispatch_channel_message(
+            http,
+            channel_id,
+            serenity::CreateMessage::new().content(&msg_text),
+        )
+        .await;
         debug_assert!(upload_record.starts_with(&format!("[File uploaded] {file_name} → ")));
         upload_records.push(upload_record.into());
     }
@@ -240,6 +255,116 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
 
 #[cfg(test)]
 mod attachment_tests {
+
+    #[cfg(unix)]
+    async fn attachment_status_on_wire(scenario: u64) -> serde_json::Value {
+        use crate::services::discord::admin_host_guard::tests::Recorder;
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let api = Recorder::start().await;
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let channel = poise::serenity_prelude::ChannelId::new(74_190_100 + scenario);
+        let directory = crate::services::discord::settings::channel_upload_dir(channel).unwrap();
+        if scenario == 1 {
+            std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
+            std::fs::write(&directory, b"blocks directory creation").unwrap();
+        }
+        let filename = if scenario == 2 {
+            "@everyone".repeat(40)
+        } else {
+            "@everyone @here <@&5678> <@1234>.txt".into()
+        };
+        let url = format!("https://cdn.discordapp.com/attachments/7419/{scenario}/fixture.txt");
+        super::TEST_DOWNLOADS.with(|served| {
+            served
+                .borrow_mut()
+                .insert(url.clone(), b"exact upload bytes".to_vec())
+        });
+        let attachments = [AttachmentDescriptor {
+            filename: filename.clone(),
+            url: url.clone(),
+        }];
+        let permit = super::LocalAttachmentPreparationPermit::after_local_admission();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            super::prepare_admitted_local_attachment(
+                &api.http,
+                channel,
+                &attachments,
+                &shared,
+                &permit,
+            ),
+        )
+        .await;
+        super::TEST_DOWNLOADS.with(|served| served.borrow_mut().remove(&url));
+        let outcome = outcome.expect("attachment status POST finishes");
+        if scenario == 0 {
+            assert_eq!(outcome.expect("attachment saved").len(), 1);
+            let files: Vec<_> = std::fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            assert_eq!(files.len(), 1);
+            assert_eq!(std::fs::read(&files[0]).unwrap(), b"exact upload bytes");
+        } else {
+            assert!(
+                outcome.is_err(),
+                "fixture must reach the save failure status"
+            );
+        }
+        let calls = api.take();
+        assert_eq!(calls.len(), 1, "one attachment result POST: {calls:?}");
+        let prefix = format!("POST /api/v10/channels/{}/messages ", channel.get());
+        let body: serde_json::Value = serde_json::from_str(
+            calls[0]
+                .strip_prefix(&prefix)
+                .expect("actual attachment status POST"),
+        )
+        .unwrap();
+        let text = body["content"].as_str().unwrap();
+        match scenario {
+            0 => {
+                assert!(text.starts_with("Saved: "));
+                assert!(
+                    text.contains(&filename),
+                    "filename remains in the status body"
+                );
+            }
+            1 => assert!(text.starts_with("Failed to prepare upload directory: ")),
+            2 => assert!(text.starts_with("Failed to save file: ")),
+            _ => unreachable!(),
+        }
+        body
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn attachment_saved_status_p2_allowed_mentions_keep_filename() {
+        let body = attachment_status_on_wire(0).await;
+        assert_eq!(
+            body["allowed_mentions"]["parse"],
+            serde_json::json!(["users"])
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn attachment_directory_error_p2_allowed_mentions_are_users_only() {
+        let body = attachment_status_on_wire(1).await;
+        assert_eq!(
+            body["allowed_mentions"]["parse"],
+            serde_json::json!(["users"])
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn attachment_save_error_p2_allowed_mentions_are_users_only() {
+        let body = attachment_status_on_wire(2).await;
+        assert_eq!(
+            body["allowed_mentions"]["parse"],
+            serde_json::json!(["users"])
+        );
+    }
     use super::{AttachmentDescriptor, is_allowed_discord_attachment_url, persist_attachment};
 
     #[test]

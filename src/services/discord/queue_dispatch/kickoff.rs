@@ -118,9 +118,8 @@ async fn kickoff_queue_channel_inner(
 ) -> IdleQueueKickoffChannelOutcome {
     let shared = deps.shared;
     let settings_snapshot = shared.settings.read().await.clone();
-    if let Err(reason) = session_runtime::validate_rest_channel_routing(
+    let thread_parent = match session_runtime::validate_rest_channel_routing_with_parent(
         deps.http,
-        deps.cache,
         provider,
         &settings_snapshot,
         channel_id,
@@ -128,14 +127,17 @@ async fn kickoff_queue_channel_inner(
     )
     .await
     {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] ⚠ KICKOFF-GUARD: preserving queued item(s) for channel {} (reason={})",
-            channel_id,
-            reason
-        );
-        return IdleQueueKickoffChannelOutcome::default();
-    }
+        Ok(parent) => parent,
+        Err(reason) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ⚠ KICKOFF-GUARD: preserving queued item(s) for channel {} (reason={})",
+                channel_id,
+                reason
+            );
+            return IdleQueueKickoffChannelOutcome::default();
+        }
+    };
 
     let queued_gate =
         Some(router::queued_head_inject_covers as fn(ChannelId, Option<ChannelId>) -> bool);
@@ -143,9 +145,15 @@ async fn kickoff_queue_channel_inner(
         KickoffLane::Idle => "idle_kickoff",
         KickoffLane::QueuedOnly(reason) => reason,
     };
-    let held =
-        queue_io::queued_head_inject::try_busy(deps, provider, channel_id, queued_gate, trigger)
-            .await;
+    let held = queue_io::queued_head_inject::try_busy(
+        deps,
+        provider,
+        channel_id,
+        Some(thread_parent),
+        queued_gate,
+        trigger,
+    )
+    .await;
     // The queued-only lane ends here whatever the paste answered: it never owns an idle start.
     if held || lane != KickoffLane::Idle {
         return IdleQueueKickoffChannelOutcome::default();

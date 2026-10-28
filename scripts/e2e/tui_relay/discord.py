@@ -457,9 +457,8 @@ class DiscordClient:
                 mid = str(message.get("id") or "")
                 if mid:
                     observed.append(message)
-                if predicate(message):
+                if found is None and predicate(message):
                     found = message
-                    break
             if found is None:
                 time.sleep(poll_interval_s)
         if debug_enabled and found is None:

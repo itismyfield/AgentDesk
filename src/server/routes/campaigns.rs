@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::AppState;
+use crate::db::campaigns::issue_sync::drift_entries;
 use crate::db::campaigns::{self, Campaign, CampaignError, CampaignInput, CampaignStatus};
 use crate::error::{AppError, AppResult, ErrorCode};
 
@@ -89,8 +90,15 @@ pub async fn list(
     let live = campaigns::live_status(pool, &campaigns)
         .await
         .map_err(error)?;
+    let issue_drift: serde_json::Map<String, Value> = campaigns
+        .iter()
+        .filter_map(|campaign| {
+            let entries = drift_entries(campaign);
+            (!entries.is_empty()).then(|| (campaign.id.clone(), json!(entries)))
+        })
+        .collect();
     Ok(Json(
-        json!({ "campaigns": campaigns, "live": live, "limit": limit, "offset": offset }),
+        json!({ "campaigns": campaigns, "live": live, "issue_drift": issue_drift, "limit": limit, "offset": offset }),
     ))
 }
 
@@ -101,7 +109,10 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> AppRe
         .await
         .map_err(error)?;
     let live = live.remove(&campaign.id).unwrap_or_default();
-    Ok(Json(json!({ "campaign": campaign, "live": live })))
+    let issue_drift = drift_entries(&campaign);
+    Ok(Json(
+        json!({ "campaign": campaign, "live": live, "issue_drift": issue_drift }),
+    ))
 }
 
 pub async fn history(
@@ -316,6 +327,70 @@ mod tests {
                 .0,
             StatusCode::NOT_FOUND
         );
+        drop(app);
+        pool.close().await;
+        fixture.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_campaign_api_reports_completed_nodes_with_open_issues_pg() {
+        let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = fixture.connect_and_migrate().await;
+        let app = app(pool.clone());
+        let issue = |number: i64| format!("https://github.com/owner/repo/issues/{number}");
+        let node = |id: &str, status: &str, number: i64| {
+            json!({"id": id, "title": id, "status": status, "stage": "merged", "round": 1,
+                   "issue_url": issue(number)})
+        };
+        let body = json!({"id": "drift", "title": "Drift", "status": "active", "round": 1,
+                          "nodes": [node("bundled", "completed", 61), node("open-work", "running", 62)]});
+        assert_eq!(
+            request(&app, Method::POST, "/campaigns", Some(body), true)
+                .await
+                .0,
+            StatusCode::CREATED
+        );
+        // A bundle PR that only mentioned (#61) left the issue open; reading it needs no GitHub call.
+        let open = |number: i64| crate::github::sync::GhIssue {
+            number,
+            state: "OPEN".into(),
+            title: format!("issue {number}"),
+            labels: Vec::new(),
+            body: None,
+            url: Some(issue(number)),
+            closed_at: None,
+            closed_by_pull_requests_references: Vec::new(),
+        };
+        crate::github::sync::sync_github_issues_for_repo_pg(
+            &pool,
+            "Owner/Repo",
+            &[open(61), open(62)],
+        )
+        .await
+        .expect("github sync");
+
+        let (status, single) = request(&app, Method::GET, "/campaigns/drift", None, true).await;
+        assert_eq!(status, StatusCode::OK);
+        let drift = single["issue_drift"].as_array().expect("drift list");
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert_eq!(drift[0]["node_id"], "bundled");
+        assert_eq!(drift[0]["reason"], "open_issue");
+        assert_eq!(drift[0]["issue_url"], issue(61));
+        let (_, listed) = request(&app, Method::GET, "/campaigns", None, true).await;
+        assert_eq!(listed["issue_drift"]["drift"][0]["node_id"], "bundled");
+
+        // Relinking the node to another issue drops the report about the old one.
+        let mut relinked = single["campaign"].clone();
+        relinked["expected_revision"] = single["campaign"]["revision"].clone();
+        relinked["nodes"][0]["issue_url"] = json!(issue(63));
+        assert_eq!(
+            request(&app, Method::PUT, "/campaigns/drift", Some(relinked), true)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let (_, after) = request(&app, Method::GET, "/campaigns/drift", None, true).await;
+        assert_eq!(after["issue_drift"], json!([]));
         drop(app);
         pool.close().await;
         fixture.drop().await;

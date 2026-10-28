@@ -186,6 +186,7 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   └── read.rs
 │   ├── campaigns/
+│   │   ├── issue_sync.rs
 │   │   └── tests.rs
 │   ├── dispatched_sessions/
 │   │   ├── hosted_execution/
@@ -389,6 +390,8 @@ src/
 │   └── transition_executor_pg.rs
 ├── github/
 │   ├── sync/
+│   │   ├── campaign_nodes.rs
+│   │   ├── campaign_nodes_tests.rs
 │   │   ├── card_state.rs
 │   │   └── warning_tests.rs
 │   ├── triage/
@@ -963,7 +966,8 @@ src/
 │   │   │   ├── first_input/
 │   │   │   │   └── tests.rs
 │   │   │   ├── launch_policy/
-│   │   │   │   └── fresh_tests.rs
+│   │   │   │   ├── fresh_tests.rs
+│   │   │   │   └── symlink_home_tests.rs
 │   │   │   ├── first_input.rs
 │   │   │   └── launch_policy.rs
 │   │   ├── absence_launch.rs
@@ -3610,6 +3614,7 @@ src/
 │   │   │   ├── always_on_repost_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── bo_post_tests.rs
+│   │   │   ├── boot.rs
 │   │   │   ├── boundary_pending_health_tests.rs
 │   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_end_empty_session_tests.rs
@@ -3677,7 +3682,10 @@ src/
 │   │   │   ├── recovery_tests.rs
 │   │   │   ├── renumber_tests.rs
 │   │   │   ├── renumbered.rs
+│   │   │   ├── replay.rs
+│   │   │   ├── replay_metadata_tests.rs
 │   │   │   ├── repost_turn_tests.rs
+│   │   │   ├── restart_replay_host_tests.rs
 │   │   │   ├── resume.rs
 │   │   │   ├── resume_tests.rs
 │   │   │   ├── retire_tests.rs
