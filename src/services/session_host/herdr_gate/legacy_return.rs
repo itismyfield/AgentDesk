@@ -16,6 +16,7 @@ pub(crate) enum ReturnEndRefusal {
 pub(crate) struct RetiredEnd(HostedExecution);
 
 /// A retired execution's endpoint reads and nonce exclusion; it exposes no pane mutation.
+#[cfg(unix)]
 pub(crate) struct RetiredProbe {
     endpoint: HerdrEndpoint,
     transport: Arc<dyn HerdrTransport>,
@@ -23,6 +24,7 @@ pub(crate) struct RetiredProbe {
     os: Arc<dyn ProcessOs>,
 }
 
+#[cfg(unix)]
 impl RetiredProbe {
     pub(crate) fn new(
         endpoint: HerdrEndpoint,

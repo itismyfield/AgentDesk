@@ -392,6 +392,7 @@ impl HerdrRegistry {
         view
     }
 
+    #[cfg(unix)]
     pub(crate) fn retired_probe(
         &self,
         stored: &HostedExecution,
