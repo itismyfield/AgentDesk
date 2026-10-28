@@ -1712,7 +1712,8 @@ src/
 │   │   │   │   ├── ready_without_output_tests.rs
 │   │   │   │   ├── replay_decision.rs
 │   │   │   │   ├── replay_hold.rs
-│   │   │   │   └── replay_hold_tests.rs
+│   │   │   │   ├── replay_hold_tests.rs
+│   │   │   │   └── scheduled_body_restore_tests.rs
 │   │   │   ├── terminal_text_idempotency/
 │   │   │   │   └── anchor_identity.rs
 │   │   │   ├── analytics_transcript.rs
@@ -2270,6 +2271,7 @@ src/
 │   │   │   ├── provider_session_persistence_tests.rs
 │   │   │   ├── read_source_switch_tests.rs
 │   │   │   ├── rowless_delivery_authority.rs
+│   │   │   ├── scheduled_watcher_harness_tests.rs
 │   │   │   ├── session_bound_ack.rs
 │   │   │   ├── session_bound_ack_tests.rs
 │   │   │   ├── single_message_footer.rs
