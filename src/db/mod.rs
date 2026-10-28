@@ -36,6 +36,8 @@ pub(crate) mod provider_session_prompts;
 pub mod relay_dead_letter;
 pub(crate) mod replay_disposition;
 pub mod scheduled_messages;
+#[cfg(test)]
+pub mod server_campaigns;
 pub(crate) mod session_agent_resolution;
 pub(crate) mod session_evidence;
 pub mod session_observability;
