@@ -4,6 +4,36 @@
   "source": "scripts/ci/rust_test_sources.py platform_tests; ci-pr.yml rust_build/rust_tests",
   "tests": [
     {
+      "id": "services::claude_tui::busy_inject::stash::owner_tests::s5_effect_tests::s5_b0_alias_owner_writes_count_and_unrelated_panes_remain_independent",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "services::claude_tui::busy_inject::stash::owner_tests::s5_effect_tests::s5_b0_pane_alias_send_keys_cannot_hide_a_late_write",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "services::claude_tui::busy_inject::stash::owner_tests::s5_effect_tests::s5_b0_pinned_alias_if_shell_cannot_hide_a_late_write",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
       "id": "services::claude_tui::busy_inject::stash::owner_tests::s5_effect_tests::s5_b0_pinned_stash_applied_counts_the_actual_payload_once",
       "platforms": [
         "linux",
@@ -15,6 +45,36 @@
     },
     {
       "id": "services::claude_tui::busy_inject::stash::owner_tests::s5_effect_tests::s5_b0_pinned_stash_held_does_not_count_a_successful_shell_exit",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "services::claude_tui::busy_inject::stash::owner_tests::s5_effect_tests::s5_b0_raw_alias_preserves_explicit_server_options",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "services::claude_tui::busy_inject::stash::owner_tests::s5_effect_tests::s5_b0_unresolved_alias_invalidates_owner_success",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "services::claude_tui::busy_inject::stash::owner_tests::s5_effect_tests::s5_b0_window_alias_paste_cannot_hide_a_late_write",
       "platforms": [
         "linux",
         "macos"

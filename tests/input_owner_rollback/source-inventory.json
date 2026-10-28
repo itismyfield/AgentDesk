@@ -204,6 +204,20 @@
       "symbol": "pub fn load_buffer(",
       "role": "buffer request trace is separate from successful complete-input/child-exit cache",
       "integration": "5t cfg(test) hook"
+    },
+    {
+      "path": "src/test_support/input_owner/tests/transport_tests.rs",
+      "line": 164,
+      "symbol": "fn normalize_target(",
+      "role": "cfg(test) physical socket/pane identity normalization for every metadata-free guarded tmux target; unresolved writes fail closed",
+      "integration": "5t test observer only; read-only resolution uses the existing bounded lifecycle"
+    },
+    {
+      "path": "src/test_support/input_owner/tests/transport_tests.rs",
+      "line": 120,
+      "symbol": "fn pane_identity(",
+      "role": "test-only read-only display-message query through the existing bounded runner; never a content producer",
+      "integration": "5t cfg(test) observer only"
     }
   ],
   "coordinate_revision": "lane working tree, fixed at review head; base identifies fixture writer lineage",

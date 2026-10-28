@@ -48,6 +48,16 @@ physical TUI. Only its registered payload on that execution descriptor is admitt
 separate counter and cannot satisfy target owner content. The actual 4h handler
 is still pending; this fixture does not claim its integration is complete.
 
+Metadata-free guarded tmux commands resolve target aliases through read-only
+`display-message` calls using the command's executable, global socket options,
+explicit environment and working directory. Socket path plus pane ID identifies
+the physical pane, so session, window and pane spellings share the same B0 scope
+and counters. Resolution uses the existing bounded runner and does not retain a
+stale alias cache. Unresolvable writes are refused; registrations visible through
+the selected transport record the failed attempt. Other resolved panes remain
+independent. The real isolated tmux regressions cover opaque `if-shell`, direct
+`send-keys`, `paste-buffer`, valid owner aliases and an unrelated pane.
+
 ## Fixtures
 
 Queue array/V1 use `snapshot_json`; V2 uses the current `Owner` writer, including
