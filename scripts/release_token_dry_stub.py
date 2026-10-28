@@ -78,6 +78,8 @@ elif NAME == "python3":
 elif NAME == "bash":
     if ARGS[:2] == ["-c", '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"']:
         os.execv("/bin/bash", ["/bin/bash", *ARGS])
+    elif ARGS == [str(ROOT / "repo/scripts/resolve-config-path.sh"), str(ROOT / "release")]:
+        print(ROOT / "release/config/agentdesk.yaml")
     elif ARGS and Path(ARGS[0]).name in ("verify-dashboard.sh", "check-dashboard-toolchain.sh"):
         pass
     else:

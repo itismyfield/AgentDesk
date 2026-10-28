@@ -104,9 +104,9 @@ pub enum LedgerEntry {
 }
 
 #[derive(Serialize, Deserialize)]
-struct LedgerLine {
-    at: DateTime<Utc>,
-    entry: LedgerEntry,
+pub(super) struct LedgerLine {
+    pub(super) at: DateTime<Utc>,
+    pub(super) entry: LedgerEntry,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

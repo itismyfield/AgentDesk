@@ -967,9 +967,7 @@ pub fn handle_dcserver(token: Option<String>) {
                 }
             }
         } else {
-            let fallback_path = settings_path
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("config").join("agentdesk.yaml"));
+            let fallback_path = config::resolved_config_path();
             crate::services::discord_config_audit::LoadedRuntimeConfig {
                 config: config::load_graceful(),
                 existed: fallback_path.is_file(),
@@ -1180,7 +1178,8 @@ pub fn handle_dcserver(token: Option<String>) {
                 }
             }
         };
-        crate::bootstrap::prepare_dcserver_boot(&ad_config, &discord_pg_pool).await;
+        let _config_hot_reload_guard =
+            crate::bootstrap::prepare_dcserver_boot(&ad_config, &discord_pg_pool).await;
         crate::services::termination_audit::init_audit_db(Some(discord_pg_pool.clone()));
 
         // Start axum HTTP server (background task) — now serves all API

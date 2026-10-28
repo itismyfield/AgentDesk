@@ -5,10 +5,12 @@
 # shape of the health body keeps the full-node checks (fail-closed).
 
 set -euo pipefail
+unset AGENTDESK_CONFIG
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEPLOY_SH="${DEPLOY_SH_OVERRIDE:-$REPO_ROOT/scripts/deploy-release.sh}"
+SCRIPT_DIR="$REPO_ROOT/scripts"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-smoke-runner-profile.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -28,7 +30,7 @@ extract_array() {
 }
 
 # Load the production smoke functions and endpoint lists without deploying.
-for fn in _post_deploy_smoke_note _post_deploy_smoke_fail \
+for fn in _release_config_path _post_deploy_smoke_note _post_deploy_smoke_fail \
     _post_deploy_smoke_optional_accounts_absent _post_deploy_smoke_resolve_health_module \
     _post_deploy_smoke_profile_unmounted _post_deploy_smoke_probe_apis \
     _post_deploy_smoke_resolve_cluster_standby _post_deploy_smoke_check_relay_round_trip; do

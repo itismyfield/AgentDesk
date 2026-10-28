@@ -22,7 +22,9 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_pg(
     pool: &PgPool,
     claim_owner: &str,
 ) -> Vec<DispatchOutboxRow> {
-    let cluster_config = crate::config::load_graceful().cluster;
+    let cluster_config = crate::config::snapshot()
+        .map(|config| config.cluster.clone())
+        .unwrap_or_default();
     claim_pending_dispatch_outbox_batch_with_cluster_config_pg(pool, claim_owner, &cluster_config)
         .await
 }
@@ -1014,6 +1016,50 @@ mod tests {
                 },
             );
             config
+        }
+
+        #[tokio::test]
+        async fn outbox_claim_uses_installed_snapshot_instead_of_disk() {
+            let _live = crate::config_live_reload::test_live_guard(
+                crate::config::test_env_lock::acquire_shared_test_env_lock(),
+            );
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("agentdesk.yaml");
+            let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_CONFIG",
+                &path,
+            );
+            let mut config = crate::config::Config::default();
+            config.data.dir = root.path().join("data");
+            crate::config::save_to_path(&path, &config).unwrap();
+            config.cluster = cluster_config_capping_node_at("snapshot-owner", 0);
+            crate::config_live_reload::install(config.clone());
+            let pg_db = TestPostgresDb::create()
+                .await
+                .expect("test PostgreSQL required");
+            let pool = pg_db.connect_and_migrate().await;
+            seed_worker_node(&pool, "snapshot-owner", json!([]), 0).await;
+            seed_pending_outbox_row(&pool, "snapshot-dispatch", json!({})).await;
+            let claimed = claim_pending_dispatch_outbox_batch_pg(&pool, "snapshot-owner").await;
+            assert!(
+                claimed.is_empty(),
+                "the installed zero capacity must prevent the disk config from claiming"
+            );
+            let reason: Option<String> = sqlx::query_scalar(
+                "SELECT wait_reason FROM dispatch_outbox WHERE dispatch_id = 'snapshot-dispatch'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(reason.unwrap().contains("at capacity"));
+            config.cluster.nodes.clear();
+            crate::config_live_reload::install(config);
+            seed_pending_outbox_row(&pool, "snapshot-after-reload", json!({})).await;
+            let claimed = claim_pending_dispatch_outbox_batch_pg(&pool, "snapshot-owner").await;
+            assert_eq!(claimed.len(), 1);
+            assert_eq!(claimed[0].1, "snapshot-after-reload");
+            pool.close().await;
+            pg_db.drop().await;
         }
 
         /// #5407 regression: an owner that is registered but has stopped

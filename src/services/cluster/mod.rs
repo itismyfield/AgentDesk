@@ -42,3 +42,6 @@ pub mod session_registry;
 pub(crate) mod session_routing;
 pub mod stream_relay;
 pub mod watcher_supervisor;
+
+#[cfg(test)]
+mod snapshot_tests;

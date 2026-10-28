@@ -151,8 +151,8 @@ async fn build_channel_directory_from_pg_for_live_sessions(
     live_session_names: &HashSet<String>,
     local_instance_id: Option<&str>,
 ) -> Result<ChannelDirectory, sqlx::Error> {
-    // load_graceful() does sync filesystem IO + yaml parse — push to a blocking
-    // thread so we don't stall the tokio runtime on every discovery tick.
+    // Build the snapshot's name map off the runtime worker; a panicking build
+    // keeps the existing empty-map fallback.
     let name_map = tokio::task::spawn_blocking(build_yaml_channel_name_map)
         .await
         .unwrap_or_default();
@@ -189,12 +189,13 @@ const SESSION_TMUX_SEGMENTS_QUERY: &str = "SELECT provider, channel_id, session_
                   created_at DESC NULLS LAST,
                   id DESC";
 
-/// Build the channel-name map from the live yaml config. Returns an empty map
-/// on any failure so discovery degrades gracefully (legacy snowflake-keyed
-/// matching).
+/// Build the channel-name map from the installed snapshot, or leave it empty
+/// before installation so discovery keeps legacy snowflake-keyed matching.
 pub fn build_yaml_channel_name_map() -> ChannelNameMap {
     let mut map: ChannelNameMap = ChannelNameMap::new();
-    let config = crate::config::load_graceful();
+    let Some(config) = crate::config::snapshot() else {
+        return map;
+    };
     for agent in &config.agents {
         for (provider_str, channel) in agent.channels.iter() {
             let Some(provider) = ProviderKind::from_str(provider_str) else {

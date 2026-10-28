@@ -143,6 +143,14 @@ pub(super) fn committed_nonce() -> Option<String> {
     with_commit_latch(|latch| latch.get().cloned())
 }
 
+fn bot_boot_settings() -> crate::config::Config {
+    crate::config::runtime_config()
+}
+
+#[cfg(test)]
+#[path = "runtime_bootstrap/snapshot_reader_tests.rs"]
+mod snapshot_reader_tests;
+
 /// Entry point: start the Discord bot
 pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext) {
     if crate::services::codex::codex_source_mode_snapshot()
@@ -213,7 +221,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         skill_count
     );
 
-    let boot_config = crate::config::load_graceful();
+    let boot_config = bot_boot_settings();
     let modules = boot_config.cluster.runtime_profile.modules();
     let voice_config = boot_config.voice;
     let voice_barge_in = Arc::new(if modules.voice {
