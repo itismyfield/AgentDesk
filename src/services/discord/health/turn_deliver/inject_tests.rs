@@ -741,9 +741,8 @@ fn expected_ignored_enters(
     ]
 }
 
-/// An earlier input A drains while B's first Enter is ignored: A's frame extending B's, the same
-/// frame behind a person's draft, or B's own body repeated. No earlier row is B's receipt, so B
-/// takes its finishing Enter, or stays Unconfirmed without one.
+/// No earlier input's row (a frame extending B's, alone or behind a draft, or B's own body) is B's
+/// receipt: B takes its finishing Enter, or stays Unconfirmed without one.
 #[tokio::test(flavor = "current_thread")]
 async fn an_earlier_drain_containing_the_frame_is_not_its_receipt_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
