@@ -25,6 +25,7 @@ use super::{
 use crate::services::provider::ProviderKind;
 use formatting::ReplaceLongMessageOutcome;
 
+mod body_create;
 mod outbound_messages;
 #[cfg(test)]
 use self::outbound_messages::await_answer_flush_if_queued_notice;
@@ -53,6 +54,45 @@ fn watcher_classified_error_string(error: &(dyn std::error::Error + 'static)) ->
 
 #[allow(dead_code)]
 pub(super) trait TurnGateway: Send + Sync {
+    fn body_create_http(&self, shared: &SharedData) -> Result<Arc<serenity::Http>, String> {
+        shared
+            .serenity_http_or_token_fallback()
+            .ok_or_else(|| "body create HTTP context unavailable".into())
+    }
+    fn create_body_message<'a>(
+        &'a self,
+        shared: &'a Arc<SharedData>,
+        channel: ChannelId,
+        text: &'a str,
+        nonce: &'a str,
+        reference: Option<(u64, u64)>,
+    ) -> GatewayFuture<'a, Result<MessageId, String>> {
+        Box::pin(async move {
+            body_create::post(
+                &self.body_create_http(shared)?,
+                shared,
+                channel,
+                text,
+                nonce,
+                reference,
+            )
+            .await
+        })
+    }
+    fn verify_body_message<'a>(
+        &'a self,
+        shared: &'a SharedData,
+        channel: ChannelId,
+        id: MessageId,
+        text: &'a str,
+        reference: Option<(u64, u64)>,
+    ) -> GatewayFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let http = self.body_create_http(shared)?;
+            body_create::verify(http.as_ref(), channel, id, text, reference).await
+        })
+    }
+
     fn send_message<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -556,6 +596,10 @@ fn next_headless_message_id() -> MessageId {
 }
 
 impl TurnGateway for DiscordGateway {
+    fn body_create_http(&self, _: &SharedData) -> Result<Arc<serenity::Http>, String> {
+        Ok(self.http.clone())
+    }
+
     fn send_notice_once<'a>(
         &'a self,
         channel_id: ChannelId,

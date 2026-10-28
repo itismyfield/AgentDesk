@@ -9,6 +9,8 @@ pub(crate) mod busy_followup_retry_store;
 #[cfg(unix)]
 pub(crate) mod herdr_terminate;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
+#[cfg(unix)]
+mod body_create;
 mod catch_up;
 pub(crate) mod codex_absence;
 mod commands;

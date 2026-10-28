@@ -37,10 +37,11 @@ pub(crate) mod terminal_prepare_test {
 }
 
 #[cfg(unix)]
-pub(in super::super) struct PinnedTerminalTransport<'a> {
+pub(in super::super) struct PinnedTerminalTransport<'a, Anchor = MessageId> {
     pub(in super::super) source: (&'a SharedData, &'a dyn TurnGateway, &'a ProviderKind),
+    pub(in super::super) creation: Option<(&'a Arc<SharedData>, &'a InflightTurnState)>,
     pub(in super::super) admitted: Option<&'a CodexRange>,
-    pub(in super::super) target: (ChannelId, ChannelId, MessageId),
+    pub(in super::super) target: (ChannelId, ChannelId, Anchor),
     pub(in super::super) payload: (Option<&'a str>, &'a str, (u64, u64)),
     pub(in super::super) trace: (Option<&'a str>, Option<&'a str>, Option<&'a str>),
     /// The pending O adoption this body ends, claimed only as its transport starts.
@@ -48,25 +49,82 @@ pub(in super::super) struct PinnedTerminalTransport<'a> {
 }
 
 #[cfg(unix)]
-impl PinnedTerminalTransport<'_> {
-    pub(in super::super) async fn deliver(
+pub(in super::super) struct PinnedSend {
+    pub(in super::super) committed: bool,
+    pub(in super::super) fallback: bool,
+    pub(in super::super) anchor: Option<MessageId>,
+    pub(in super::super) pending: Option<crate::services::discord::body_create::PendingBind>,
+}
+#[cfg(unix)]
+impl<Anchor> PinnedTerminalTransport<'_, Anchor> {
+    async fn deliver_to(
         &self,
         pinned: terminal_delivery::PinnedBridgeDeliveryLease,
         long: bool,
-    ) -> (bool, bool, Option<MessageId>) {
+        msg: Option<MessageId>,
+    ) -> Result<PinnedSend, String> {
         use crate::services::discord::formatting::ReplaceLongMessageOutcome as Replace;
         use crate::services::tui_o::cutover::{BodySend, claim_then_send};
         use LeaseOutcome::{NotDelivered, Unknown};
         use terminal_delivery::PinnedBridgeCommit::*;
         let (shared, gateway, provider) = self.source;
-        let (_, channel, msg) = self.target;
+        let channel = self.target.1;
         let (tmux, body, _) = self.payload;
         if let Some(admitted) = self.admitted
             && !admitted.parked_current(shared).await
         {
             pinned.release_without_receipt(NotDelivered);
-            return (false, false, None);
+            return Err("pinned actor/source is no longer current".into());
         }
+        if let Some((create_shared, row)) = self.creation
+            && (msg.is_none() || crate::services::discord::body_create::has_attempt(shared, row))
+        {
+            use crate::services::discord::body_create::{CreateOutcome, create_terminal};
+            let send = || create_terminal(create_shared, gateway, row, body);
+            let pending = match claim_then_send(self.claim, send).await {
+                Ok(BodySend::Sent(CreateOutcome::Ready(pending))) => pending,
+                result => {
+                    pinned.release_without_receipt(Unknown);
+                    return Err(match result {
+                        Ok(BodySend::Sent(CreateOutcome::Held(reason))) => reason,
+                        _ => "body create ownership held".into(),
+                    });
+                }
+            };
+            #[cfg(test)]
+            if let Some(hook) = terminal_prepare_test::for_channel(channel)
+                && let Some(mutate) = hook.after_send.lock().unwrap().take()
+            {
+                mutate();
+            }
+            let admitted = self.admitted.cloned();
+            let pending = pending.after_bind(move |shared, anchor| {
+                let result = match pinned.commit_created_after_send(shared, anchor.get()) {
+                    Pending(lease) => lease.commit_created_after_send(shared, anchor.get()),
+                    result => result,
+                };
+                match result {
+                    Current | Historical => {
+                        if let Some(admitted) = admitted {
+                            admitted.complete_parked_delivery();
+                        }
+                        true
+                    }
+                    Pending(lease) => {
+                        lease.release_without_receipt(Unknown);
+                        false
+                    }
+                    Rejected => false,
+                }
+            });
+            return Ok(PinnedSend {
+                committed: false,
+                fallback: false,
+                anchor: Some(pending.anchor),
+                pending: Some(pending),
+            });
+        }
+        let msg = msg.ok_or("response anchor missing")?;
         let (message_id, failed, fallback) = if long {
             let send = || {
                 send_ordered_long_terminal_response(
@@ -127,30 +185,59 @@ impl PinnedTerminalTransport<'_> {
             admitted.complete_parked_delivery();
         }
         let receipt = committed.then_some(message_id).flatten();
-        (committed, fallback, receipt)
+        Ok(PinnedSend {
+            committed,
+            fallback,
+            anchor: receipt,
+            pending: None,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl PinnedTerminalTransport<'_, MessageId> {
+    pub(in super::super) async fn deliver(
+        &self,
+        pinned: terminal_delivery::PinnedBridgeDeliveryLease,
+        long: bool,
+    ) -> (bool, bool, Option<MessageId>) {
+        let message = crate::services::discord::inflight::opt_message_id(
+            crate::services::discord::turn_bridge::current_message_anchor::durable_current_msg_id_from_detached(self.target.2));
+        match self.deliver_to(pinned, long, message).await {
+            Ok(sent) => (sent.committed, sent.fallback, sent.anchor),
+            Err(_) => (false, false, None),
+        }
+    }
+}
+#[cfg(unix)]
+impl PinnedTerminalTransport<'_, Option<MessageId>> {
+    pub(in super::super) async fn deliver(
+        &self,
+        pinned: terminal_delivery::PinnedBridgeDeliveryLease,
+        long: bool,
+    ) -> Result<PinnedSend, String> {
+        self.deliver_to(pinned, long, self.target.2).await
     }
 }
 
 #[cfg(unix)]
 pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
-    shared: &SharedData,
+    shared: &Arc<SharedData>,
     gateway: &dyn TurnGateway,
     row: &InflightTurnState,
     text: &str,
     claim: Option<crate::services::tui_o::cutover::BodyClaim<'_>>,
-) -> bool {
+) -> Result<Option<crate::services::discord::body_create::PendingBind>, String> {
     use crate::services::discord::{inflight, outbound::delivery_record as dr};
     let Some(admitted) = inflight::CodexRange::from_retained_tui_terminal(row) else {
-        return false;
+        return Err("retained pinned source or lease unavailable".into());
     };
     let Some(provider) = row.provider_kind() else {
-        return false;
+        return Err("retained pinned source or lease unavailable".into());
     };
     let owner = ChannelId::new(admitted.source.offset_authority_channel_id);
     let channel = ChannelId::new(admitted.source.delivery_channel_id);
-    let Some(message) = inflight::opt_message_id(row.current_msg_id) else {
-        return false;
-    };
+    let message = inflight::opt_message_id(row.current_msg_id);
     let acquired = terminal_delivery::bridge_delivery_lease_for_inflight(
         shared,
         owner,
@@ -161,13 +248,14 @@ pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
     let PreparedBridgeLease::Pinned(pinned) =
         prepare_bridge_lease(acquired, Some(&admitted), row, shared, &provider, channel)
     else {
-        return false;
+        return Err("retained pinned source or lease unavailable".into());
     };
     // The source proof covers the full admitted body; recovery has already
     // formatted only the suffix not represented by frozen Discord prefixes.
     let long = terminal_delivery::terminal_delivery_should_send_new_chunks(true, text);
-    let (committed, _, receipt) = PinnedTerminalTransport {
+    let sent = PinnedTerminalTransport {
         source: (shared, gateway, &provider),
+        creation: Some((shared, row)),
         admitted: Some(&admitted),
         target: (owner, channel, message),
         payload: (
@@ -179,16 +267,24 @@ pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
         claim,
     }
     .deliver(pinned, long)
-    .await;
-    committed
-        && receipt.is_some_and(|anchor| {
+    .await?;
+    if let Some(pending) = sent.pending {
+        return Ok(Some(pending));
+    }
+    let confirmed = sent.committed
+        && sent.anchor.is_some_and(|anchor| {
             dr::confirmed_delivery_receipt_exists(
                 &provider,
                 channel,
                 anchor.get(),
                 &admitted.source,
             )
-        })
+        });
+    if confirmed {
+        Ok(None)
+    } else {
+        Err("pinned receipt remains unconfirmed".into())
+    }
 }
 
 #[cfg(unix)]
@@ -307,6 +403,7 @@ macro_rules! dispatch_pinned_terminal {
                 $crate::services::discord::turn_bridge::stream_loop::types::PreparedBridgeLease::Pinned(pinned) => {
                     let transport = PinnedTerminalTransport {
                         source: ($shared.as_ref(), $gateway.as_ref(), &$provider),
+                        creation: None,
                         admitted: $admitted,
                         target: ($owner, $channel, $message),
                         payload: (

@@ -2,6 +2,11 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(all(test, unix))]
+pub(crate) fn without_directory_birth_times_for_test(scope: &Path) -> impl Drop + use<> {
+    durable_ancestors::no_birth_time::Guard::new(scope)
+}
+
 mod durable_ancestors;
 pub(crate) mod durable_publish;
 pub(crate) use durable_publish::{

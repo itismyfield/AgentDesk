@@ -473,8 +473,9 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/discord/turn_bridge/response_delivery.rs": ("stream_body_ownership_peek:peek",),
     "src/services/discord/turn_bridge/stream_loop/types.rs": (
-        "deliver:claim",
-        "deliver:claim",
+        "deliver_to:claim",
+        "deliver_to:claim",
+        "deliver_to:claim",
     ),
     "src/services/discord/turn_bridge/stream_tick.rs": (
         "run_bridge_stream_tick:peek",

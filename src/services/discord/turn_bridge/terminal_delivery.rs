@@ -475,6 +475,7 @@ pub(super) struct PinnedBridgeDeliveryLease {
     provider: ProviderKind,
     reset_incarnation: u64,
     committed_current: Option<bool>,
+    receipt_before_advance: bool,
     message_id: Option<u64>,
 }
 #[cfg(unix)]
@@ -755,6 +756,7 @@ impl BridgeDeliveryLease {
             provider: provider.clone(),
             reset_incarnation,
             committed_current: None,
+            receipt_before_advance: false,
             message_id: None,
         })
     }
@@ -772,6 +774,14 @@ impl PinnedBridgeDeliveryLease {
         let _ = self.lease.release_lease();
     }
 
+    pub(super) fn commit_created_after_send(
+        mut self,
+        shared: &SharedData,
+        message_id: u64,
+    ) -> PinnedBridgeCommit {
+        self.receipt_before_advance = true;
+        self.commit_after_send(shared, message_id)
+    }
     pub(super) fn commit_after_send(
         self,
         shared: &SharedData,
@@ -827,6 +837,7 @@ impl PinnedBridgeDeliveryLease {
                     self.lease.release_on_drop = false;
                     self.committed_current = Some(source_is_live);
                     if source_is_live
+                        && !self.receipt_before_advance
                         && !guard.as_ref().is_some_and(|mutation| {
                             mutation.advance(
                                 crate::services::discord::tmux::WatcherDeliveryTarget {
@@ -846,6 +857,22 @@ impl PinnedBridgeDeliveryLease {
                 if self.committed_current == Some(true) && source_is_live {
                     match dr::record_current_pinned_delivery(&exact, message_id) {
                         Ok(()) => {
+                            if self.receipt_before_advance
+                                && !guard.as_ref().is_some_and(|mutation| {
+                                    mutation.advance(
+                                        crate::services::discord::tmux::WatcherDeliveryTarget {
+                                            shared,
+                                            provider: &self.provider,
+                                            channel_id: owner,
+                                            tmux_session_name: &exact.tmux_session_name,
+                                        },
+                                        exact.range.1,
+                                        "turn_bridge::created_pinned_exact_source",
+                                    )
+                                })
+                            {
+                                return None;
+                            }
                             observe(true);
                             Some(PinnedBridgeCommit::Current)
                         }

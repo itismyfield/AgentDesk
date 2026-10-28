@@ -1054,6 +1054,8 @@ src/
 │   ├── discord/
 │   │   ├── abandon_request_store/
 │   │   │   └── probe_contract_tests.rs
+│   │   ├── body_create/
+│   │   │   └── store.rs
 │   │   ├── busy_followup_retry_store/
 │   │   │   ├── hold_release_tests.rs
 │   │   │   ├── policy.rs
@@ -1223,6 +1225,7 @@ src/
 │   │   │   ├── streaming_status.rs
 │   │   │   └── tool_markdown.rs
 │   │   ├── gateway/
+│   │   │   ├── body_create.rs
 │   │   │   ├── headless.rs
 │   │   │   ├── headless_exact.rs
 │   │   │   ├── intake_placeholder_retirement_tests.rs
@@ -1671,6 +1674,8 @@ src/
 │   │   ├── queued_dequeue_dispatch_guard_wiring_tests/
 │   │   │   └── source_guard_tests.rs
 │   │   ├── recovery_engine/
+│   │   │   ├── completion_delivery/
+│   │   │   │   └── body_create_tests.rs
 │   │   │   ├── herdr_row_end/
 │   │   │   │   ├── diagnostics.rs
 │   │   │   │   ├── diagnostics_tests.rs
@@ -2860,6 +2865,7 @@ src/
 │   │   ├── agentdesk_config.rs
 │   │   ├── agentdesk_memory_tests.rs
 │   │   ├── answer_flush_barrier.rs
+│   │   ├── body_create.rs
 │   │   ├── bot_role.rs
 │   │   ├── busy_followup_retry_store.rs
 │   │   ├── catch_up.rs

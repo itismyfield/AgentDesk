@@ -1101,6 +1101,8 @@ async fn partial_eof_actual_fallback_uses_own_anchor_snapshot_and_refuses_foreig
                     }
                     transport_returned.set(true);
                     CapturedRecoveryDelivery {
+                        #[cfg(unix)]
+                        body_bind: None,
                         outcome,
                         pending_anchor,
                     }
@@ -1451,6 +1453,8 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
                             )
                             .await;
                             CapturedRecoveryDelivery {
+                                #[cfg(unix)]
+                                body_bind: None,
                                 outcome,
                                 pending_anchor: context.and_then(
                                     RecoveryDeliveryContext::pending_anchor_after_delivery,

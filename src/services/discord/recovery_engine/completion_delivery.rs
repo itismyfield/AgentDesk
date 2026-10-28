@@ -9,6 +9,10 @@
 use super::*;
 use crate::services::tui_o::cutover::{BodyClaim, BodySend, IdentityError, claim_then_send};
 
+#[cfg(all(test, unix))]
+#[path = "completion_delivery/body_create_tests.rs"]
+mod body_create_tests;
+
 pub(super) fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bool {
     relay_ok
 }
@@ -16,6 +20,8 @@ pub(super) fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bo
 pub(super) struct CapturedRecoveryDelivery {
     pub(super) outcome: RecoveryRelayOutcome,
     pub(super) pending_anchor: Option<terminal_text_idempotency::PendingRecoveryAnchor>,
+    #[cfg(unix)]
+    pub(super) body_bind: Option<crate::services::discord::body_create::PendingBind>,
 }
 
 /// Only this captured recovery outcome can cross into the mailbox commit command.
@@ -42,6 +48,13 @@ impl CapturedReadyDeliveryCommit {
                 pending.bind_after_actor_check(&self.shared, &mut self.state),
                 inflight::GuardedSaveOutcome::Saved
             )
+        {
+            return None;
+        }
+        #[cfg(unix)]
+        if let Some(pending) = self.delivery.body_bind.take()
+            && pending.bind_after_actor_check(&self.shared, &mut self.state)
+                != inflight::GuardedSaveOutcome::Saved
         {
             return None;
         }
@@ -76,6 +89,8 @@ impl From<RecoveryRelayOutcome> for CapturedRecoveryDelivery {
         Self {
             outcome,
             pending_anchor: None,
+            #[cfg(unix)]
+            body_bind: None,
         }
     }
 }
@@ -141,12 +156,20 @@ pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
         let _ = (gateway, claim);
         false
     };
-    if committed {
-        RecoveryRelayOutcome::Delivered
-    } else {
-        RecoveryRelayOutcome::TransientFailure
+    #[cfg(unix)]
+    return match committed {
+        Ok(body_bind) => CapturedRecoveryDelivery {
+            outcome: RecoveryRelayOutcome::Delivered,
+            pending_anchor: None,
+            body_bind,
+        },
+        Err(_) => RecoveryRelayOutcome::TransientFailure.into(),
+    };
+    #[cfg(not(unix))]
+    {
+        let _ = committed;
+        RecoveryRelayOutcome::TransientFailure.into()
     }
-    .into()
 }
 
 pub(super) async fn relay_recovery_terminal_notice(
@@ -212,6 +235,8 @@ async fn relay_recovery_terminal_notice_with_capture(
     };
     Ok(BodySend::Sent(CapturedRecoveryDelivery {
         outcome,
+        #[cfg(unix)]
+        body_bind: None,
         pending_anchor: recovery_context
             .as_ref()
             .and_then(RecoveryDeliveryContext::pending_anchor_after_delivery),

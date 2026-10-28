@@ -1263,7 +1263,7 @@ mod tests {
         #[cfg(unix)]
         #[rustfmt::skip]
         fn pinned_transport<'a>(shared: &'a SharedData, gateway: &'a dyn TurnGateway, provider: &'a ProviderKind, owner: ChannelId) -> PinnedTerminalTransport<'a> {
-            PinnedTerminalTransport { source: (shared, gateway, provider), admitted: None, target: (owner, ch(), MessageId::new(MSG)), payload: (Some("AgentDesk-codex-5264-barrier"), "answer", (0, 64)), trace: (None, None, None), claim: None }
+            PinnedTerminalTransport { source: (shared, gateway, provider), creation: None, admitted: None, target: (owner, ch(), MessageId::new(MSG)), payload: (Some("AgentDesk-codex-5264-barrier"), "answer", (0, 64)), trace: (None, None, None), claim: None }
         }
         #[cfg(unix)]
         #[rustfmt::skip]
