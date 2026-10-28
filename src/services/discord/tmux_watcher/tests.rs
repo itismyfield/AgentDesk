@@ -177,6 +177,7 @@ fn watcher_terminal_delivery_commit_mirrors_bridge_inflight_fields() {
         64,
         Some(7),
         128,
+        None,
     ));
 
     let persisted =
@@ -235,6 +236,7 @@ fn watcher_terminal_delivery_commit_marks_loop_turn_with_zero_user_msg_id() {
             64,
             Some(7),
             128,
+            None,
         ),
         "a fully-anchored loop turn (user_msg_id == 0) must commit"
     );
@@ -264,6 +266,7 @@ fn watcher_terminal_delivery_commit_marks_loop_turn_with_zero_user_msg_id() {
             64,
             Some(7),
             128,
+            None,
         ),
         "a loop turn without a known turn_start_offset must NOT commit"
     );
@@ -558,6 +561,7 @@ async fn terminal_delivery_timeout_cleanup_releases_mailbox_and_preserves_follow
         64,
         Some(7),
         128,
+        None,
     ));
 
     let side_effects = watcher_terminal_commit_side_effects_for_test(

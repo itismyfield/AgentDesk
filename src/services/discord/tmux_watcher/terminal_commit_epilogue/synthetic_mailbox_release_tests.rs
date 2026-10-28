@@ -70,6 +70,7 @@ async fn commit(
     inflight_state: &Option<InflightTurnState>,
     data_start_offset: u64,
     current_offset: u64,
+    channel_effects: crate::services::discord::scheduled_turn::ChannelEffects,
 ) {
     let tmux = WATCHER_SESSION.to_string();
     let output = output.to_string();
@@ -108,6 +109,7 @@ async fn commit(
             inflight_state,
             inflight_before_relay,
             full_response: &"synthetic terminal body".to_string(),
+            channel_effects,
             // The watcher attached before the synthetic row existed: no nonce.
             watcher_turn_nonce: &None,
             resolved_did: &None,
@@ -212,6 +214,7 @@ fn run(late_row: LateRow, snapshot_has_row: bool) -> (bool, Option<serenity::Mes
                 &late,
                 data_start_offset,
                 current_offset,
+                crate::services::discord::scheduled_turn::ChannelEffects::Allowed,
             )
             .await;
 
@@ -298,4 +301,87 @@ fn refused_guarded_clear_releases_nothing() {
         Some(serenity::MessageId::new(1_552_447_036_652_134_502)),
         "release is tied to this pass's own clear, never to a row it did not clear"
     );
+}
+
+/// An isolated scheduled turn's terminal commit adds nothing to the channel's
+/// in-memory history; an ordinary turn still pushes its pair.
+#[test]
+fn an_isolated_scheduled_commit_adds_nothing_to_the_channel_history() {
+    use crate::services::discord::scheduled_turn::ChannelEffects;
+    for (effects, pushed) in [
+        (ChannelEffects::Allowed, 2),
+        (ChannelEffects::Suppressed, 0),
+    ] {
+        let _env = crate::services::observability::lock_env_then_runtime();
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let history = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                let channel = serenity::ChannelId::new(570_400_101);
+                let output = temp.path().join("transcript.jsonl");
+                std::fs::write(&output, "{}\n".repeat(8)).unwrap();
+                let generation =
+                    crate::services::tmux_common::session_temp_path(WATCHER_SESSION, "generation");
+                std::fs::write(generation, b"1").unwrap();
+                shared.core.lock().await.sessions.insert(
+                    channel,
+                    crate::services::discord::DiscordSession {
+                        session_id: Some("live-sid".to_string()),
+                        memento_context_loaded: false,
+                        memento_reflected: false,
+                        current_path: None,
+                        history: Vec::new(),
+                        pending_uploads: Vec::new(),
+                        cleared: false,
+                        remote_profile_name: None,
+                        channel_id: Some(channel.get()),
+                        channel_name: None,
+                        category_name: None,
+                        last_active: tokio::time::Instant::now(),
+                        worktree: None,
+                        born_generation: 0,
+                    },
+                );
+                let mut row = InflightTurnState::new(
+                    ProviderKind::Claude,
+                    channel.get(),
+                    None,
+                    7,
+                    1_552_447_036_652_134_777,
+                    1_552_447_036_652_134_778,
+                    "scheduled prompt".to_string(),
+                    None,
+                    Some(WATCHER_SESSION.to_string()),
+                    Some(output.display().to_string()),
+                    None,
+                    0,
+                );
+                row.turn_start_offset = Some(0);
+                crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+                let row = Some(row);
+                commit(
+                    &shared,
+                    channel,
+                    output.to_str().unwrap(),
+                    &row,
+                    &row,
+                    1,
+                    16,
+                    effects,
+                )
+                .await;
+                shared.core.lock().await.sessions[&channel].history.len()
+            });
+        assert_eq!(history, pushed, "{effects:?}");
+    }
 }

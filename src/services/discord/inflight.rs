@@ -1621,6 +1621,7 @@ mod stall_recovery_tests {
                 last_offset: 250,
                 last_watcher_relayed_offset: Some(64),
                 last_watcher_relayed_generation_mtime_ns: Some(7),
+                scheduled_outcome: None,
             },
         );
         assert_eq!(outcome, WatcherTerminalCommitOutcome::Committed);
@@ -1676,6 +1677,7 @@ mod stall_recovery_tests {
                 last_offset: 256,
                 last_watcher_relayed_offset: Some(64),
                 last_watcher_relayed_generation_mtime_ns: Some(9),
+                scheduled_outcome: None,
             },
         );
 
@@ -1707,6 +1709,7 @@ mod stall_recovery_tests {
                 last_offset: 256,
                 last_watcher_relayed_offset: Some(64),
                 last_watcher_relayed_generation_mtime_ns: Some(9),
+                scheduled_outcome: None,
             },
         );
         assert_eq!(outcome, WatcherTerminalCommitOutcome::Committed);

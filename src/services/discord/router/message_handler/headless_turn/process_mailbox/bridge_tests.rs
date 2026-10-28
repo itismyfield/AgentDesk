@@ -278,3 +278,117 @@ async fn idle_actor_with_a_live_foreign_watcher_retains_the_exact_handle_and_mar
     })
     .await;
 }
+
+/// A scheduled turn's actual bridge completion records its outcome on the delivery
+/// row before the row is dropped, and the scheduler's next production poll sends it.
+#[tokio::test]
+async fn a_scheduled_bridge_completion_settles_on_the_next_poll_pg() {
+    use crate::services::discord::scheduled_turn::ScheduledTurnMark;
+    use crate::services::scheduled_messages::turn_completion::tests::{
+        delivery_state, launch_agent_delivery, poll_once,
+    };
+    const USER_MESSAGE: u64 = 9_100_000_000_000_007_420;
+    const PLACEHOLDER: u64 = 9_100_000_000_000_007_421;
+    const TURN: &str = "discord:i7420-bridge:1";
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    with_isolated_runtime_root(|| async {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        launch_agent_delivery(&pool, "i7420-bridge", TURN, true, "fail").await;
+        let (fixture, lease) =
+            Fixture::with_storage(ProviderKind::Codex, USER_MESSAGE, Some(pool.clone())).await;
+        let mut row = inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            fixture.channel.get(),
+            None,
+            7,
+            USER_MESSAGE,
+            PLACEHOLDER,
+            "scheduled prompt".into(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        row.turn_nonce = fixture.token.turn_nonce().map(str::to_owned);
+        row.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
+        row.scheduled = ScheduledTurnMark::Scheduled {
+            turn_id: TURN.into(),
+            isolated: true,
+            outcome: None,
+        };
+        inflight::save_inflight_state(&row).unwrap();
+        crate::services::discord::increment_global_active(&fixture.shared, "test_i7420_bridge");
+        let completion = lease.watch(tokio::spawn(async {}));
+        let shown = Arc::new(RecordingDirectGateway::default());
+        let context = TurnBridgeContext {
+            provider: ProviderKind::Codex,
+            gateway: shown.clone(),
+            channel_id: fixture.channel,
+            user_msg_id: Some(MessageId::new(USER_MESSAGE)),
+            user_text_owned: "scheduled prompt".into(),
+            request_owner_name: "scheduled fixture".into(),
+            role_binding: None,
+            adk_session_key: None,
+            adk_session_name: None,
+            adk_session_info: None,
+            adk_cwd: None,
+            dispatch_id: None,
+            dispatch_kind: None,
+            memory_recall_usage: TokenUsage::default(),
+            context_window_tokens: 0,
+            context_compact_percent: 0,
+            current_msg_id: Some(MessageId::new(PLACEHOLDER)),
+            response_sent_offset: 0,
+            full_response: String::new(),
+            tmux_last_offset: None,
+            new_session_id: None,
+            defer_watcher_resume: false,
+            reuse_status_panel_message: false,
+            completion_tx: Some(completion),
+            is_external_input_tui_direct: false,
+            inflight_state: row,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        spawn_turn_bridge(fixture.shared.clone(), fixture.token.clone(), rx, context);
+        tx.send(StreamMessage::Done {
+            result: "scheduled bridge answer".into(),
+            session_id: None,
+        })
+        .unwrap();
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while fixture.shared.mailbox_peek(fixture.channel).is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the real bridge completion retires the turn");
+        assert!(matches!(
+            inflight::load_inflight_state_read_only_result(
+                &fixture.shared.provider,
+                fixture.channel.get()
+            ),
+            Ok(None)
+        ));
+        assert!(
+            shown
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, content)| content.contains("scheduled bridge answer"))
+        );
+        assert_eq!(
+            delivery_state(&pool, TURN).await,
+            ("running".to_string(), Some("delivered".to_string()))
+        );
+        assert!(poll_once(&pool).await, "the production poll settles it");
+        assert_eq!(delivery_state(&pool, TURN).await.0, "sent");
+        drop(fixture);
+        pool.close().await;
+        db.drop().await;
+    })
+    .await;
+}
