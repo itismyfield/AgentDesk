@@ -21,6 +21,10 @@ impl<B: BindingEvents> Sources<B> {
         owed: &mut impl Owe,
         wall_now: SystemTime,
     ) -> Result<(), WriterAlarm> {
+        let started = std::time::Instant::now();
+        let mut records = 0;
+        #[cfg(test)]
+        let raw_skip = super::super::replay::mutant("raw_skip");
         if self.reader_config.is_some() {
             self.observe_clock(wall_now)?;
             writer
@@ -85,6 +89,11 @@ impl<B: BindingEvents> Sources<B> {
                     .store()
                     .for_each_frame(&cursor.source, |frame, identity_version| {
                         if let SpoolFrame::Record(record) = frame {
+                            records += 1;
+                            #[cfg(test)]
+                            if raw_skip {
+                                return;
+                            }
                             captured_any = true;
                             self.owe(deriver, owed, &cursor.source, &record, identity_version);
                         }
@@ -198,6 +207,13 @@ impl<B: BindingEvents> Sources<B> {
         self.settle_cleared(writer)?;
         self.wake_resumed_proofs(writer)?;
         self.reconcile_boundary_pending(writer);
+        self.replayed = owed.finish_replay(writer.store().ledger());
+        writer.boot.replay(
+            "resume_replay",
+            records,
+            self.replayed,
+            started.elapsed().as_millis() as u64,
+        );
         Ok(())
     }
 

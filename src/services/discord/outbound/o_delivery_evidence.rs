@@ -195,7 +195,7 @@ pub(in crate::services::discord) async fn tail(
     let plan = tokio::time::timeout_at(
         deadline,
         tokio::task::spawn_blocking(move || {
-            manifest::build(
+            manifest::build_terminal(
                 &build_root,
                 manifest::Query {
                     provider: &provider,
@@ -212,7 +212,7 @@ pub(in crate::services::discord) async fn tail(
     .ok()?
     .ok()
     .flatten()?;
-    if plan.body != frame.body {
+    if plan.range != frame.range || plan.body != frame.body {
         return None;
     }
     let bot = tokio::time::timeout_at(deadline, http.get_current_user())
