@@ -163,14 +163,8 @@ fn section_replay_claude_footer_keeps_plan_tasks_subagents_in_every_admission() 
             for body in bodies() {
                 let [panel, footer] = replay(ProviderKind::Claude, &records, mode, &body);
                 let case = format!("{mode:?} pressure={pressure} body={}", body.len());
-                // The standalone class panel keeps its whole-section overflow drop; footers are fitted.
-                let standalone_drop = mode == ToolActivityDisplay::Class && pressure == "ascii";
-                let texts = if standalone_drop {
-                    vec![&footer]
-                } else {
-                    vec![&panel, &footer]
-                };
-                for text in texts {
+                assert!(panel.encode_utf16().count() <= 2000, "{case}");
+                for text in [&panel, &footer] {
                     assert_eq!(
                         titles(text),
                         ["Plan", "Tasks", "Subagents"],
@@ -212,4 +206,210 @@ fn section_replay_codex_footer_keeps_plan_and_hides_subagents_in_every_admission
             }
         }
     }
+}
+
+#[test]
+fn section_replay_codex_spawn_rows_settle_from_wait_and_close_results() {
+    let item = |payload: Value| json!({"timestamp":"2026-10-27T07:00:00.000Z","type":"response_item","payload":payload});
+    let call = |name: &str, id: &str, arguments: Value| {
+        item(
+            json!({"type":"function_call","name":name,"namespace":"collaboration","call_id":id,"arguments":arguments.to_string()}),
+        )
+    };
+    let output = |id: &str, output: Value| {
+        item(json!({"type":"function_call_output","call_id":id,"output":output.to_string()}))
+    };
+    let mut records = vec![
+        json!({"timestamp":"2026-10-27T07:00:00.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-fixture"}}),
+    ];
+    for agent in ["done", "failed", "closed", "running"] {
+        let id = format!("call_spawn_{agent}");
+        records.push(call("spawn_agent", &id, json!({"message":"더미 지시"})));
+        records.push(output(
+            &id,
+            json!({"agent_id":format!("agent-{agent}"),"nickname":null}),
+        ));
+    }
+    records.push(call(
+        "wait_agent",
+        "call_wait",
+        json!({"targets":["agent-done","agent-failed","agent-running"]}),
+    ));
+    records.push(output(
+        "call_wait",
+        json!({"status":{"agent-done":{"completed":"PRIVATE_DONE"},"agent-failed":{"errored":"PRIVATE_ERROR"},"agent-running":"running"},"timed_out":false}),
+    ));
+    records.push(call(
+        "close_agent",
+        "call_close",
+        json!({"target":"agent-closed"}),
+    ));
+    records.push(output("call_close", json!({"previous_status":"running"})));
+    let [panel, _] = replay(
+        ProviderKind::Codex,
+        &records,
+        ToolActivityDisplay::Summary,
+        "",
+    );
+    let count = |row: &str| panel.matches(row).count();
+    assert_eq!(
+        [count("✓ Task"), count("✗ Task"), count("↗ Task")],
+        [2, 1, 1],
+        "{panel}"
+    );
+    assert!(
+        panel.contains("실패 1") && !panel.contains("PRIVATE_"),
+        "{panel}"
+    );
+}
+
+#[test]
+fn section_replay_codex_script_failure_marks_the_exec_row_failed() {
+    let mut records = codex_records(1);
+    records.push(
+        json!({"timestamp":"2026-10-27T07:00:01.000Z","type":"response_item","payload":
+        {"type":"custom_tool_call_output","call_id":"call_exec0","output":[
+            {"type":"input_text","text":"Script failed\nWall time 0.1 seconds\nOutput:"},
+            {"type":"input_text","text":"Error: 더미 실패"}]}}),
+    );
+    let [panel, _] = replay(
+        ProviderKind::Codex,
+        &records,
+        ToolActivityDisplay::Summary,
+        "",
+    );
+    assert!(panel.contains("실패 1") && panel.contains("✗ "), "{panel}");
+}
+
+// Replays one Claude tool call and returns the summary-mode card with mention breakers removed.
+fn summary_card(name: &str, input: Value) -> String {
+    let records = claude_tool("toolu_account", name, input);
+    let [panel, _] = replay(
+        ProviderKind::Claude,
+        &records,
+        ToolActivityDisplay::Summary,
+        "",
+    );
+    panel.replace('\u{200b}', "")
+}
+
+#[test]
+fn section_replay_cards_hide_account_operands_and_keep_package_versions() {
+    for (name, input, shown) in [
+        ("Bash", json!({"command":"su - LaneAlice"}), r"su - \*\*\*"),
+        (
+            "Bash",
+            json!({"command":"chown LaneAlice:staff build.log"}),
+            r"chown \*\*\* build.log",
+        ),
+        (
+            "Bash",
+            json!({"command":"sudo chown LaneAlice build.log"}),
+            r"sudo chown \*\*\* build.log",
+        ),
+        (
+            "Bash",
+            json!({"command":"ssh LaneAlice@v2 uptime"}),
+            r"ssh \*\*\*@v2 uptime",
+        ),
+        (
+            "Bash",
+            json!({"command":"ssh LaneAlice@canary uptime"}),
+            r"ssh \*\*\*@canary uptime",
+        ),
+        (
+            "Grep",
+            json!({"pattern":"sudo -u LaneAlice make"}),
+            r#""sudo -u \*\*\* make""#,
+        ),
+    ] {
+        let card = summary_card(name, input.clone());
+        assert!(
+            card.contains(shown) && !card.contains("LaneAlice"),
+            "{input}\n{card}"
+        );
+    }
+    for (name, input, shown) in [
+        (
+            "Bash",
+            json!({"command":"npm i react@18"}),
+            "npm i react@18",
+        ),
+        (
+            "Bash",
+            json!({"command":"npx next@canary build"}),
+            "npx next@canary build",
+        ),
+        (
+            "Bash",
+            json!({"command":"pnpm add react@experimental"}),
+            "pnpm add react@experimental",
+        ),
+        (
+            "Bash",
+            json!({"command":"npm i node-lib@18.x"}),
+            "npm i node-lib@18.x",
+        ),
+        (
+            "Bash",
+            json!({"command":"npm i some-lib@main"}),
+            "npm i some-lib@main",
+        ),
+        (
+            "Grep",
+            json!({"pattern":"ssh -L 8080:localhost:80 build-host"}),
+            r#""ssh -L 8080:localhost:80 build-host""#,
+        ),
+        (
+            "Grep",
+            json!({"pattern":"inspect chown handling"}),
+            r#""inspect chown handling""#,
+        ),
+    ] {
+        let card = summary_card(name, input.clone());
+        assert!(card.contains(shown), "{input}\n{card}");
+    }
+}
+
+#[test]
+fn section_replay_cards_reset_account_context_per_command_and_line() {
+    for (name, input, shown) in [
+        (
+            "Grep",
+            json!({"pattern":"ssh -oUser=LaneAlice build-host"}),
+            r#""ssh -oUser=\*\*\* build-host""#,
+        ),
+        (
+            "Bash",
+            json!({"command":"npm test && echo LaneAlice@canary"}),
+            r"npm test && echo \*\*\*@canary",
+        ),
+        (
+            "Bash",
+            json!({"command":"npm test; echo LaneAlice@main"}),
+            r"npm test; echo \*\*\*@main",
+        ),
+    ] {
+        let card = summary_card(name, input.clone());
+        assert!(
+            card.contains(shown) && !card.contains("LaneAlice"),
+            "{input}\n{card}"
+        );
+    }
+    let todos = json!({"todos":[
+        {"content":"chown LaneAlice:staff build.log","status":"pending","activeForm":"더미"},
+        {"content":"su - LaneAlice","status":"pending","activeForm":"더미"},
+        {"content":"fix su handling","status":"pending","activeForm":"더미"},
+        {"content":"npm i react@18","status":"pending","activeForm":"더미"},
+    ]});
+    let card = summary_card("TodoWrite", todos);
+    for shown in [
+        "- [ ] chown *** build.log",
+        "- [ ] su - ***",
+        "- [ ] fix su handling",
+        "- [ ] npm i react@18",
+    ] {
+        assert!(card.contains(shown), "{shown}\n{card}");
+    }
+    assert!(!card.contains("LaneAlice"), "{card}");
 }

@@ -258,3 +258,51 @@ fn accuracy_panel_keeps_safe_headings_when_content_must_be_hidden() {
         "{out}"
     );
 }
+
+#[test]
+fn accuracy_numeric_record_times_are_seconds_and_settle_elapsed_from_record_times() {
+    let _clock = super::super::test_clock::Guard::new();
+    let tool = |stamp: Value| json!({"type":"assistant","timestamp":stamp,"message":{"content":[{"type":"tool_use","id":"bash","name":"Bash","input":{"command":"cargo check"}}]}});
+    let result = |stamp: Value| json!({"type":"user","timestamp":stamp,"message":{"content":[{"type":"tool_result","tool_use_id":"bash","content":"ok"}]}});
+    let replay = |records: &[Value]| {
+        let mut ring = ToolActivityRing::default();
+        for record in records {
+            for event in status_events_from_json(record) {
+                ring.apply(&event, None);
+            }
+        }
+        ring
+    };
+    let ms = replay(&[tool(json!(1_792_317_600_000_i64))]);
+    assert!(
+        ms.render(6).contains("<t:1792317600:R>"),
+        "{}",
+        ms.render(6)
+    );
+    assert_eq!(
+        replay(&[tool(json!(1_600_000_000))]).rows[0].started_unix,
+        1_600_000_000
+    );
+    for implausible in [
+        json!(1_599_999_999),
+        json!(1_599_999_999_999_i64),
+        json!(1_000_000),
+    ] {
+        let before = observed_unix();
+        let ring = replay(&[tool(implausible.clone())]);
+        assert!(ring.rows[0].started_unix >= before, "{implausible}");
+    }
+    for (start, end) in [
+        (json!("2026-10-18T10:00:00Z"), json!("2026-10-18T10:00:42Z")),
+        (json!(1_792_317_600_000_i64), json!(1_792_317_642_000_i64)),
+    ] {
+        let out = replay(&[tool(start), result(end)]).render(6);
+        assert!(out.contains("✓ Bash") && out.contains("42초"), "{out}");
+    }
+    let one_sided = replay(&[tool(Value::Null), result(json!("2026-10-18T10:00:42Z"))]);
+    assert!(
+        one_sided.render(6).contains("0초"),
+        "{}",
+        one_sided.render(6)
+    );
+}

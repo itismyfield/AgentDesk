@@ -84,6 +84,9 @@ pub struct StartAgentTurnBody {
     /// agent's primary bot DM with that user instead of a guild channel.
     #[serde(default)]
     pub dm_user_id: Option<String>,
+    /// Accepted-input id the execution's receipt names; any source may send one.
+    #[serde(default)]
+    pub origin_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -729,6 +732,10 @@ pub async fn start_agent_turn(
             Json(json!({"ok": false, "error": "prompt is required"})),
         );
     }
+    let metadata = match super::agents_turn_target::start_metadata(body.metadata, body.origin_id) {
+        Ok(metadata) => metadata,
+        Err(response) => return response,
+    };
 
     let provider_override = body
         .provider
@@ -780,8 +787,7 @@ pub async fn start_agent_turn(
     // would otherwise honor with precedence), so reject a mismatch. The
     // in-process routine executor does not go through this HTTP handler and
     // sets its own server-trusted metadata.
-    if let Some(metadata_agent_id) = body
-        .metadata
+    if let Some(metadata_agent_id) = metadata
         .as_ref()
         .and_then(|value| value.get("agent_id"))
         .and_then(|value| value.as_str())
@@ -841,7 +847,7 @@ pub async fn start_agent_turn(
     };
 
     let start_result = if let Some(dm_user_id_num) = dm_user_id_num {
-        let metadata = metadata_with_parent_channel_id(body.metadata, channel_id_num);
+        let metadata = metadata_with_parent_channel_id(metadata, channel_id_num);
         crate::services::discord::health::start_headless_agent_turn_in_dm(
             registry,
             poise::serenity_prelude::ChannelId::new(channel_id_num),
@@ -863,7 +869,7 @@ pub async fn start_agent_turn(
             },
             prompt.to_string(),
             body.source,
-            body.metadata,
+            metadata,
         )
         .await
     };

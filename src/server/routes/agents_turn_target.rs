@@ -135,6 +135,16 @@ fn resolve_bound_target(
     })
 }
 
+/// The start metadata with the body's `origin_id` in place, or the 400 that refuses it.
+pub(super) fn start_metadata(
+    metadata: Option<serde_json::Value>,
+    origin_id: Option<String>,
+) -> Result<Option<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    use crate::services::agents::input_result::start_metadata_with_origin;
+    start_metadata_with_origin(metadata, origin_id.as_deref())
+        .map_err(|error| target_error(StatusCode::BAD_REQUEST, error))
+}
+
 /// 409 when a turn that never claimed the mailbox (TUI-direct, adopted or monitor) still
 /// holds the channel, or a turn-mode transcript reads busy or unknown: a start there would
 /// report `started` and then lose the prompt.

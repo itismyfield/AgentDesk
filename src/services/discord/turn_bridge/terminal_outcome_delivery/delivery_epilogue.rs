@@ -88,6 +88,16 @@ pub(super) async fn handle_delivery_epilogue(
             inflight_state.response_sent_offset = response_sent_offset;
             inflight_state.terminal_delivery_committed = true;
             inflight_state.full_response = full_response.clone();
+            // The scheduled outcome is mirrored with the commit so a crash before the
+            // postlude record still settles this exact turn.
+            let scheduled_outcome = crate::services::scheduled_messages::turn_completion::classify(
+                &full_response,
+                ctx.transcript_terminal_error,
+                ctx.provider_failure,
+            );
+            inflight_state
+                .scheduled
+                .set_outcome(scheduled_outcome.filter(|_| !cancelled));
             let mirror_outcome =
                 crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
                     &mut *inflight_state,

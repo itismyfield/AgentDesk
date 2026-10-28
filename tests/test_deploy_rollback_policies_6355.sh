@@ -74,6 +74,7 @@ _launchd_domain() { echo gui/501; }
 _deploy_e2e_smoke_channel_ids() { echo ""; }
 _rollback_would_brick_on_migration() { [ "${FIXTURE_MIGRATION_AHEAD:-0}" = 1 ]; }
 _rollback_would_revert_o_writer() { return 1; }
+_rollback_would_revert_o_spool() { return 1; }
 _rollback_would_revert_o_ledger() { return 1; }
 _cleanup_owned_pg_tunnel_preflight() { :; }
 _rollback_pg_tunnel_migration() { :; }
