@@ -1,12 +1,15 @@
 use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::services::provider::{CancelToken, ProviderKind};
+#[cfg(unix)]
 use crate::services::turn_orchestrator::checked_purge::ExpectedQueue;
 use crate::services::turn_orchestrator::pending_queue_persistence::{
     pending_queue_item_to_intervention, save_channel_pending_dispatch_marker,
 };
+#[cfg(unix)]
+use crate::services::turn_orchestrator::queued_head::compat;
 use crate::services::turn_orchestrator::queued_head::{
-    PersistedHeadInjection, canonical_item, compat, mend::HeadAttempt, snapshot_json,
+    PersistedHeadInjection, canonical_item, mend::HeadAttempt, snapshot_json,
 };
 use crate::services::turn_orchestrator::{
     ActiveTurnKind, ChannelMailboxHandle, Intervention, TurnAdmissionOrder,

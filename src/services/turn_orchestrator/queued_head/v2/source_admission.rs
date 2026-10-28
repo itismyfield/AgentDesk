@@ -83,11 +83,7 @@ impl Ticket {
 fn canonical(original: &PendingQueueItem) -> serde_json::Value {
     let mut value = serde_json::to_value(original).expect("queue item serializes");
     if let Some(map) = value.as_object_mut() {
-        for field in [
-            "created_at_wall_time_ms",
-            "channel_name",
-            "override_channel_id",
-        ] {
+        for field in ["created_at_wall_time_ms", "channel_name"] {
             map.remove(field);
         }
         if let Some(serde_json::Value::Array(sources)) =
@@ -284,7 +280,7 @@ impl Custody {
         let Some(mut next) = next else {
             return Err(AdmitError::SourceAlreadyKnown);
         };
-        next.bind_admitted(&receipt, outcome);
+        next.bind_admitted(&receipt, outcome, &digest(&canonical(&self.original)));
         match owner.admit_commit(next, Some(receipt.clone())) {
             Ok(()) => {
                 self.state = State::Done;
@@ -390,12 +386,16 @@ impl SnapshotV2 {
         self.items.get(index).map(|item| digest(&canonical(item)))
     }
 
-    fn bind_admitted(&mut self, receipt: &str, outcome: Admitted) {
+    /// Binds the admitted input only when it is the whole original: a partitioned admission queues
+    /// a part, so no attempt of that part ever stands for the original.
+    fn bind_admitted(&mut self, receipt: &str, outcome: Admitted, whole: &str) {
         let at = match outcome {
             Admitted::Queued => {
-                self.prune_binds();
                 let index = self.items.len() - 1;
                 let item = self.queued_digest(index).expect("admitted item is queued");
+                if item != whole {
+                    return;
+                }
                 BindAt::Queued { index, item }
             }
             Admitted::RetainedOpaque => BindAt::Opaque,
@@ -620,6 +620,7 @@ impl Owner {
         if next.items.len() >= 30 {
             return Err(AdmitError::Full);
         }
+        next.prune_binds();
         next.items.push(fresh);
         Ok((Some(next), Admitted::Queued))
     }
@@ -789,7 +790,7 @@ impl Owner {
         let Some(mut next) = next else {
             return Err(AdmitError::SourceAlreadyKnown);
         };
-        next.bind_admitted(&receipt, outcome);
+        next.bind_admitted(&receipt, outcome, &digest(&canonical(original)));
         let bind = next
             .admission_binds
             .iter_mut()
