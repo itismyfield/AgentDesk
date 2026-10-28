@@ -600,8 +600,8 @@ pub(super) fn render_status_panel(
     render_status_panel_for(snapshot, provider, time_line, turn_trigger_line, false)
 }
 
-/// A class render over the 2000-unit panel limit (or, for `footer`, the footer body budget) is
-/// fitted section-wise, because the cuts would otherwise drop trailing Tasks/Subagents sections whole.
+/// A class render with titled sections over the 2000-unit limit (or, for `footer`, the footer body
+/// budget) is fitted section-wise, because the cuts would otherwise drop trailing sections whole.
 pub(super) fn render_status_panel_for(
     snapshot: StatusPanelState,
     provider: &ProviderKind,
@@ -708,8 +708,17 @@ pub(super) fn render_status_panel_for(
         let over_footer_budget = footer
             && body.len()
                 > super::super::single_message_panel::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES;
+        // Without a titled section there is no title to keep, so the plain trailing cut stays.
+        let titled = sections[1..].iter().any(|section| {
+            matches!(
+                section.lines().next(),
+                Some("Plan" | "Tasks" | "Subagents" | "Workflow")
+            )
+        });
         if over_footer_budget
-            || super::super::formatting::discord_message_units(&lossless) > STATUS_PANEL_MAX_CHARS
+            || (footer || titled)
+                && super::super::formatting::discord_message_units(&lossless)
+                    > STATUS_PANEL_MAX_CHARS
         {
             super::tool_activity::fit_sections(sections)
         } else {
