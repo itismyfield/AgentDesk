@@ -511,7 +511,7 @@ fn a_v2_checked_purge_discards_untried_items_only_while_the_capture_still_holds(
 }
 
 /// A V1 capture refused under an owner picks no namespace and adopts no V1 record: once the owner
-/// is gone, a third namespace still captures and the next writer reads the foreign head first.
+/// is gone, a third namespace still captures and the next writer reads the foreign record first.
 #[cfg(unix)]
 #[test]
 fn a_v1_capture_refused_under_a_v2_owner_leaves_no_v1_namespace_or_record() {
@@ -539,14 +539,15 @@ fn a_v1_capture_refused_under_a_v2_owner_leaves_no_v1_namespace_or_record() {
                 pending_queue_file_path(&b.provider, &b.token_hash, ChannelId::new(channel));
             let b_file = b_file.unwrap();
             std::fs::create_dir_all(b_file.parent().unwrap()).unwrap();
-            std::fs::write(&b_file, envelope(vec![item(200), item(300)], true)).unwrap();
+            std::fs::write(&b_file, envelope(vec![item(200), item(300)], false)).unwrap();
             let enqueued = handle.enqueue(intervention(400), b).await;
-            assert!(enqueued.enqueued && enqueued.persistence_error.is_none());
-            assert!(
-                std::fs::read_to_string(&b_file)
-                    .unwrap()
-                    .contains("legacy-nonce"),
-                "the foreign head record was read before the write and kept"
+            assert!(enqueued.enqueued, "{:?}", enqueued.persistence_error);
+            let written: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&b_file).unwrap()).unwrap();
+            assert_eq!(
+                written["terminal_identities"].as_array().map(Vec::len),
+                Some(1),
+                "the foreign record was read before the write and kept"
             );
         }
     });
