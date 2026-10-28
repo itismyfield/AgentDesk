@@ -12,6 +12,7 @@ use crate::services::turn_orchestrator::{
     ActiveTurnKind, ChannelMailboxHandle, Intervention, TurnAdmissionOrder,
     registry_purge::MailboxPurgeOutcome,
 };
+use poise::serenity_prelude::MessageId;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -506,6 +507,48 @@ fn a_v2_checked_purge_discards_untried_items_only_while_the_capture_still_holds(
             compat::inspect(&bytes),
             Ok(compat::SnapshotRead::ReadOnlyV2(_))
         ));
+    });
+}
+
+/// A V1 capture refused under an owner picks no namespace and adopts no V1 record: once the owner
+/// is gone, a third namespace still captures and the next writer reads the foreign head first.
+#[cfg(unix)]
+#[test]
+fn a_v1_capture_refused_under_a_v2_owner_leaves_no_v1_namespace_or_record() {
+    let _root = TestRuntimeRootGuard::new();
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        let third = QueuePersistenceContext::new(&ProviderKind::Claude, "v2-projection-c", None);
+        for channel in [7_272_661, 7_272_662] {
+            let (handle, _) = owned(&registry, channel, &[100], false).await;
+            let refused = handle.try_capture_own_queue(other_ctx()).await.unwrap();
+            assert!(refused.is_err(), "the owner's actor refuses a V1 capture");
+            let released = handle.v2_request(|slot| Ok(slot.take().is_some())).await;
+            assert_eq!(released, Ok(true));
+            if channel == 7_272_661 {
+                let captured = handle.try_capture_own_queue(third.clone()).await.unwrap();
+                assert!(
+                    captured.is_ok(),
+                    "no namespace was picked: {:?}",
+                    captured.err()
+                );
+                continue;
+            }
+            let b = other_ctx();
+            let b_file =
+                pending_queue_file_path(&b.provider, &b.token_hash, ChannelId::new(channel));
+            let b_file = b_file.unwrap();
+            std::fs::create_dir_all(b_file.parent().unwrap()).unwrap();
+            std::fs::write(&b_file, envelope(vec![item(200), item(300)], true)).unwrap();
+            let enqueued = handle.enqueue(intervention(400), b).await;
+            assert!(enqueued.enqueued && enqueued.persistence_error.is_none());
+            assert!(
+                std::fs::read_to_string(&b_file)
+                    .unwrap()
+                    .contains("legacy-nonce"),
+                "the foreign head record was read before the write and kept"
+            );
+        }
     });
 }
 
