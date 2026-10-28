@@ -1,6 +1,8 @@
-//! Reconcile a launch selector only through verified transitions of the same execution.
+//! Reconcile launch evidence with the writer's settled source and verified transition links.
 use super::*;
-use crate::services::tui_prompt_dedupe::binding_events::{BindingCause, StrictBindingRecord};
+use crate::services::tui_prompt_dedupe::binding_events::{
+    StrictBindingRecord, pending_matches, strict_claude_history,
+};
 
 pub(super) fn reconcile(
     context: &BindingContext,
@@ -13,98 +15,120 @@ pub(super) fn reconcile(
             event.provider == "claude"
                 && event.tmux_session == context.tmux_session
                 && event.channel_id == context.channel_id.unwrap_or_default()
-                && !matches!(event.new, BindingTarget::Rejected { .. })
         })
         .collect();
-    let Some(expected) = context.expected_native_session_id.as_deref() else {
-        return Ok(None);
-    };
-    let target = |event: &BindingEvent| match &event.new {
-        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
-            Some(source.clone())
-        }
-        _ => None,
-    };
-    let Some(latest) = relevant.last().and_then(|record| target(&record.event)) else {
-        return Ok(None);
-    };
-    if latest.session_id == expected {
-        return Ok(None);
-    }
     let refuse = || {
         HoldReason::Conflict(
             "launch selector has no verified same-execution transition chain".into(),
         )
     };
-    let first = relevant
-        .iter()
-        .position(|record| {
-            record.event.execution_nonce.as_deref() == Some(context.execution_nonce.as_str())
-        })
-        .ok_or_else(refuse)?;
-    if relevant[first..].iter().any(|record| {
+    let Some(first) = relevant.iter().position(|record| {
+        record.event.execution_nonce.as_deref() == Some(context.execution_nonce.as_str())
+    }) else {
+        return Ok(None);
+    };
+    let span = &relevant[first..];
+    if span.iter().any(|record| {
         record.event.execution_nonce.as_deref() != Some(context.execution_nonce.as_str())
     }) {
         return Err(refuse());
     }
-    if target(&relevant[first].event).is_none_or(|source| source.session_id != expected) {
+    let folded = strict_claude_history(
+        span.iter().copied(),
+        &context.tmux_session,
+        &context.execution_nonce,
+    );
+    if !folded.complete || folded.awaiting.is_some() {
         return Err(refuse());
     }
-    let mut current = target(&relevant[first].event).ok_or_else(refuse)?;
-    let mut pending: Option<&BindingEvent> = None;
-    for record in &relevant[first + 1..] {
-        let event = &record.event;
-        if event.execution_nonce.as_deref() != Some(context.execution_nonce.as_str()) {
+    let source_of = |event: &BindingEvent| match &event.new {
+        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
+            Some(source.clone())
+        }
+        _ => None,
+    };
+    let Some(latest) = span
+        .iter()
+        .rev()
+        .find(|record| !matches!(record.event.new, BindingTarget::Rejected { .. }))
+        .and_then(|record| source_of(&record.event))
+    else {
+        return Ok(None);
+    };
+    if folded
+        .current
+        .as_ref()
+        .is_none_or(|visit| visit.session != latest.session_id)
+    {
+        return Err(refuse());
+    }
+    let Some(expected) = context.expected_native_session_id.as_deref() else {
+        return Ok(None);
+    };
+    let sources: Vec<_> = span
+        .iter()
+        .filter_map(|record| source_of(&record.event))
+        .collect();
+    if latest.session_id == expected && sources.iter().all(|source| source == &latest) {
+        return Ok(None);
+    }
+    let anchor = span
+        .iter()
+        .position(|record| source_of(&record.event).is_some())
+        .ok_or_else(refuse)?;
+    let mut current = source_of(&span[anchor].event).ok_or_else(refuse)?;
+    if current.session_id != expected {
+        return Err(refuse());
+    }
+    let resolved_pair = |event: &BindingEvent, source: &SourceId| -> Result<(), HoldReason> {
+        let BindingTarget::Resolved { pending_seq, .. } = &event.new else {
+            return Ok(());
+        };
+        let prior = span
+            .iter()
+            .find(|record| record.event.seq == *pending_seq)
+            .map(|record| &record.event)
+            .ok_or_else(refuse)?;
+        if !matches!(prior.new, BindingTarget::Pending { .. })
+            || prior.seq >= event.seq
+            || prior.cause != event.cause
+            || !pending_matches(
+                prior,
+                Some(&source.session_id),
+                source.path.to_str().ok_or_else(refuse)?,
+            )
+        {
             return Err(refuse());
         }
+        Ok(())
+    };
+    resolved_pair(&span[anchor].event, &current)?;
+    if matches!(span[anchor].event.new, BindingTarget::Resolved { .. }) && !span[anchor].verified {
+        return Err(refuse());
+    }
+    for record in &span[anchor + 1..] {
+        let event = &record.event;
         match &event.new {
             BindingTarget::Pending { .. } => {
                 if event.old.as_ref() != Some(&current) {
                     return Err(refuse());
                 }
-                pending = Some(event);
             }
             BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
-                if source == &current {
-                    continue;
-                }
-                let transition = matches!(
-                    event.cause,
-                    BindingCause::Clear | BindingCause::Compact | BindingCause::Continuation
-                ) && matches!(
-                    event.evidence.hook_event.as_deref(),
-                    Some("session_start" | "user_prompt_submit")
-                ) || event.cause == BindingCause::Unknown
-                    && event.evidence.hook_event.as_deref() == Some("user_prompt_submit");
-                if !record.verified || !transition || event.old.as_ref() != Some(&current) {
-                    return Err(refuse());
-                }
-                if let BindingTarget::Resolved { pending_seq, .. } = event.new {
-                    let prior = pending.ok_or_else(refuse)?;
-                    let BindingTarget::Pending {
-                        payload_session_id,
-                        payload_transcript_path,
-                    } = &prior.new
-                    else {
-                        return Err(refuse());
-                    };
-                    if prior.seq != pending_seq
-                        || prior.seq >= event.seq
-                        || prior.cause != event.cause
-                        || prior.old.as_ref() != Some(&current)
-                        || payload_session_id != &source.session_id
-                        || payload_transcript_path.as_deref() != source.path.to_str()
-                    {
+                resolved_pair(event, source)?;
+                if source != &current {
+                    if !record.verified || event.old.as_ref() != Some(&current) {
                         return Err(refuse());
                     }
+                    current = source.clone();
                 }
-                current = source.clone();
-                pending = None;
             }
-            BindingTarget::Rejected { .. } => unreachable!(),
+            BindingTarget::Rejected { .. } => {}
         }
     }
-    if current != latest || pending.is_some() {
+    if current != latest
+        || folded.current.as_ref().and_then(|visit| visit.pin.as_ref()) != Some(&current)
+    {
         return Err(refuse());
     }
     Ok(Some(current))

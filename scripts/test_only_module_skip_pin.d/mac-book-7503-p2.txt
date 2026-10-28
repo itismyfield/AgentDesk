@@ -1,0 +1,1 @@
+resolver | src/services/claude/herdr_resume_plan/legacy_handoff.rs

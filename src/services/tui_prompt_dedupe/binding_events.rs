@@ -26,6 +26,8 @@ pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
 mod claude_fold;
 use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
+#[cfg(unix)]
+pub(crate) use claude_fold::strict_claude_history;
 pub(crate) mod codex;
 mod log_record;
 use log_record::{Logged, LoggedRef};
@@ -315,6 +317,7 @@ pub(crate) fn records_strict(channel_id: u64) -> io::Result<Result<Vec<BindingEv
 pub(crate) struct StrictBindingRecord {
     pub event: BindingEvent,
     pub verified: bool,
+    pub published_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(unix)]
@@ -328,6 +331,7 @@ pub(crate) fn records_strict_verified(
                 .map(|record| StrictBindingRecord {
                     event: record.event,
                     verified: record.verified,
+                    published_at: record.published_at,
                 })
                 .collect()
         })
@@ -630,7 +634,7 @@ fn same_source(
         && file.is_none_or(|file| file == (current.dev, current.ino))
 }
 
-fn pending_matches(pending: &BindingEvent, session: Option<&str>, path: &str) -> bool {
+pub(crate) fn pending_matches(pending: &BindingEvent, session: Option<&str>, path: &str) -> bool {
     let BindingTarget::Pending {
         payload_session_id,
         payload_transcript_path,

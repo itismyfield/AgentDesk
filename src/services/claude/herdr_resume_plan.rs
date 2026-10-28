@@ -382,6 +382,7 @@ fn evaluate(
             events
                 .into_iter()
                 .map(|event| StrictBindingRecord {
+                    published_at: Some(event.evidence.received_at),
                     event,
                     verified: false,
                 })

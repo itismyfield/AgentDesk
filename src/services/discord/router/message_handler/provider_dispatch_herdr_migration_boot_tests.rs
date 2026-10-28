@@ -712,6 +712,33 @@ fn actual_dispatch_shadow_latency_and_history_lock_samples_pg() {
     let bound = fx.bound();
     let pending = pending_on(&fx.owner, NONCE, bound.location.clone(), None);
     dedupe::register_tmux_runtime_binding(fx.logical(), claude(&path, &sid));
+    let _legacy_context = dedupe::binding_context::PreparedIncarnation::create(
+        dedupe::binding_context::BindingContext {
+            schema: 1,
+            provider: "claude".into(),
+            created_at: chrono::Utc::now(),
+            execution_nonce: NONCE.into(),
+            tmux_session: fx.logical().into(),
+            channel_id: Some(CHANNEL),
+            owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
+            host: Some(NODE.into()),
+            expected_native_session_id: Some(sid.clone()),
+            launch_mode: "fresh".into(),
+            provider_root: Some(
+                crate::services::claude_tui::transcript_tail::default_claude_home()
+                    .unwrap()
+                    .join("projects"),
+            ),
+            first_prompt_digest: None,
+            source_policy: None,
+        },
+    )
+    .unwrap();
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(fx.logical(), "spawn_nonce"),
+        NONCE,
+    )
+    .unwrap();
     let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
         "http://127.0.0.1:1".into(),
     );
@@ -758,6 +785,7 @@ fn actual_dispatch_shadow_latency_and_history_lock_samples_pg() {
                         plans[0]["decision"], "resume",
                         "measurement must use a valid old source"
                     );
+                    assert_eq!(plans[0]["readset"]["old_context"]["execution_nonce"], NONCE);
                     assert_eq!(plans[0]["source"]["session_id"], sid);
                     assert_eq!(plans[0]["source"]["path"], path.display().to_string());
                     assert_eq!(history.len(), 1, "actual strict reader must acquire LOGS");
@@ -784,7 +812,7 @@ fn actual_dispatch_shadow_latency_and_history_lock_samples_pg() {
             waits.sort_unstable();
             eprintln!(
                 "P2_COST {}",
-                json!({"kind":kind,"records":count,"samples":elapsed.len(),"observer_median_us":elapsed[elapsed.len()/2],"observer_max_us":elapsed.last(),"lock_hold_median_us":holds[holds.len()/2],"lock_hold_max_us":holds.last(),"lock_wait_max_us":waits.last()})
+                json!({"context":"present","kind":kind,"records":count,"samples":elapsed.len(),"observer_median_us":elapsed[elapsed.len()/2],"observer_max_us":elapsed.last(),"lock_hold_median_us":holds[holds.len()/2],"lock_hold_max_us":holds.last(),"lock_wait_max_us":waits.last()})
             );
         }
     }

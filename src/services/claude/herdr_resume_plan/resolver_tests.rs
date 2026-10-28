@@ -800,6 +800,7 @@ fn completed_clear_and_continuation_reconcile_the_immutable_launch_selector() {
             Ok(history
                 .into_iter()
                 .map(|event| StrictBindingRecord {
+                    published_at: Some(event.evidence.received_at),
                     event,
                     verified: true,
                 })
@@ -883,6 +884,13 @@ fn source_transitions_require_verified_links_pending_proof_and_one_nonce() {
                     } = &mut history[1].new
                     {
                         *payload_session_id = uuid::Uuid::new_v4().to_string();
+                        if let BindingTarget::Pending {
+                            payload_transcript_path,
+                            ..
+                        } = &mut history[1].new
+                        {
+                            *payload_transcript_path = None;
+                        }
                     }
                 }
                 "pending_path" => {
@@ -892,6 +900,12 @@ fn source_transitions_require_verified_links_pending_proof_and_one_nonce() {
                     } = &mut history[1].new
                     {
                         *payload_transcript_path = Some("/wrong/source.jsonl".into());
+                        if let BindingTarget::Pending {
+                            payload_session_id, ..
+                        } = &mut history[1].new
+                        {
+                            payload_session_id.clear();
+                        }
                     }
                 }
                 "pending_seq" => {
@@ -903,7 +917,11 @@ fn source_transitions_require_verified_links_pending_proof_and_one_nonce() {
             }
             let history = history
                 .into_iter()
-                .map(|event| StrictBindingRecord { event, verified })
+                .map(|event| StrictBindingRecord {
+                    published_at: Some(event.evidence.received_at),
+                    event,
+                    verified,
+                })
                 .collect();
             let plan = evaluate_verified(
                 fx.request(),
@@ -1054,4 +1072,330 @@ fn event_only_strict_read_keeps_legacy_metadata_compatibility() {
             .unwrap()
             .is_err()
     );
+}
+
+#[test]
+fn verified_native_resume_fork_and_stop_transitions_reconcile_the_launch() {
+    use crate::services::tui_prompt_dedupe::binding_events::BindingCause;
+    for kind in ["resume", "fork", "stop", "clear_stop", "fork_stop"] {
+        let pending = kind.ends_with("_stop");
+        let (fx, own, mut history) = transition_fixture(pending);
+        let cause = match kind {
+            "resume" => BindingCause::Resume,
+            "fork" | "fork_stop" => BindingCause::Fork,
+            "clear_stop" => BindingCause::Clear,
+            _ => BindingCause::Unknown,
+        };
+        for event in history.iter_mut().skip(1) {
+            event.cause = cause;
+        }
+        let event = history.last_mut().unwrap();
+        event.evidence.hook_event = Some(
+            if kind == "stop" || pending {
+                "stop"
+            } else {
+                "session_start"
+            }
+            .into(),
+        );
+        let records = history
+            .into_iter()
+            .map(|event| StrictBindingRecord {
+                published_at: Some(event.evidence.received_at),
+                event,
+                verified: true,
+            })
+            .collect();
+        let plan = evaluate_verified(
+            fx.request(),
+            Ok(Some(fx.database())),
+            RuntimeObservation::Missing,
+            Ok(Some(own)),
+            Ok(records),
+        );
+        assert!(
+            matches!(plan, Plan::Resume(..)),
+            "native {kind}: {:?}",
+            plan.diagnostic()
+        );
+    }
+}
+
+#[test]
+fn returning_to_the_initial_selector_does_not_hide_nonce_aba() {
+    let (fx, own, mut history) = transition_fixture(false);
+    let BindingTarget::Source(original) = history[0].new.clone() else {
+        unreachable!()
+    };
+    let BindingTarget::Source(other) = history[1].new.clone() else {
+        unreachable!()
+    };
+    let mut back = history[0].clone();
+    back.seq = 3;
+    back.old = Some(other);
+    history.push(back);
+    let selected = original.session_id;
+    for collision in [true, false] {
+        let mut db = fx.database();
+        db.claude_session_id = Some(selected.clone());
+        db.raw_provider_session_id = Some(selected.clone());
+        history[1].execution_nonce = Some(if collision {
+            "b".repeat(32)
+        } else {
+            own.execution_nonce.clone()
+        });
+        let records = history
+            .clone()
+            .into_iter()
+            .map(|event| StrictBindingRecord {
+                published_at: Some(event.evidence.received_at),
+                event,
+                verified: true,
+            })
+            .collect();
+        let plan = evaluate_verified(
+            fx.request(),
+            Ok(Some(db)),
+            RuntimeObservation::Missing,
+            Ok(Some(own.clone())),
+            Ok(records),
+        );
+        if collision {
+            assert!(
+                matches!(plan, Plan::Hold(..)),
+                "nonce ABA: {:?}",
+                plan.diagnostic()
+            );
+        } else {
+            assert!(
+                matches!(plan, Plan::Resume(..)),
+                "same execution round trip: {:?}",
+                plan.diagnostic()
+            );
+        }
+    }
+}
+
+#[test]
+fn an_initial_pending_resolution_can_anchor_the_launch_selector() {
+    let (fx, own, history) = transition_fixture(false);
+    let BindingTarget::Source(original) = history[0].new.clone() else {
+        unreachable!()
+    };
+    let mut pending = history[0].clone();
+    pending.new = BindingTarget::Pending {
+        payload_session_id: original.session_id.clone(),
+        payload_transcript_path: Some(original.path.display().to_string()),
+    };
+    let mut resolved = history[0].clone();
+    resolved.seq = 2;
+    resolved.new = BindingTarget::Resolved {
+        pending_seq: 1,
+        source: original,
+    };
+    resolved.evidence.hook_event = Some("stop".into());
+    let mut switched = history[1].clone();
+    switched.seq = 3;
+    let records = vec![pending, resolved, switched]
+        .into_iter()
+        .map(|event| StrictBindingRecord {
+            published_at: Some(event.evidence.received_at),
+            event,
+            verified: true,
+        })
+        .collect();
+    let plan = evaluate_verified(
+        fx.request(),
+        Ok(Some(fx.database())),
+        RuntimeObservation::Missing,
+        Ok(Some(own)),
+        Ok(records),
+    );
+    assert!(
+        matches!(plan, Plan::Resume(..)),
+        "initial pending: {:?}",
+        plan.diagnostic()
+    );
+}
+
+#[test]
+fn pending_resolution_uses_the_existing_id_or_path_matching_policy() {
+    for path_changed in [true, false] {
+        let (fx, own, mut history) = transition_fixture(true);
+        if let BindingTarget::Pending {
+            payload_session_id,
+            payload_transcript_path,
+        } = &mut history[1].new
+        {
+            if path_changed {
+                *payload_transcript_path = Some(format!("/previous-project/{}.jsonl", fx.sid));
+            } else {
+                *payload_session_id = String::new();
+            }
+        }
+        let records = history
+            .into_iter()
+            .map(|event| StrictBindingRecord {
+                published_at: Some(event.evidence.received_at),
+                event,
+                verified: true,
+            })
+            .collect();
+        let plan = evaluate_verified(
+            fx.request(),
+            Ok(Some(fx.database())),
+            RuntimeObservation::Missing,
+            Ok(Some(own)),
+            Ok(records),
+        );
+        assert!(
+            matches!(plan, Plan::Resume(..)),
+            "producer matching path_changed={path_changed}: {:?}",
+            plan.diagnostic()
+        );
+    }
+}
+
+#[test]
+fn rejected_records_cannot_hide_execution_nonce_reentry() {
+    let (fx, own, history) = transition_fixture(false);
+    let BindingTarget::Source(original) = history[0].new.clone() else {
+        unreachable!()
+    };
+    let mut audit = history[0].clone();
+    audit.seq = 2;
+    audit.execution_nonce = Some("b".repeat(32));
+    audit.new = BindingTarget::Rejected {
+        payload_session_id: fx.sid.clone(),
+        payload_transcript_path: None,
+        reason: "different execution".into(),
+    };
+    let mut back = history[0].clone();
+    back.seq = 3;
+    let records = vec![history[0].clone(), audit, back]
+        .into_iter()
+        .map(|event| StrictBindingRecord {
+            published_at: Some(event.evidence.received_at),
+            event,
+            verified: true,
+        })
+        .collect();
+    let mut db = fx.database();
+    db.claude_session_id = Some(original.session_id.clone());
+    db.raw_provider_session_id = Some(original.session_id);
+    let plan = evaluate_verified(
+        fx.request(),
+        Ok(Some(db)),
+        RuntimeObservation::Missing,
+        Ok(Some(own)),
+        Ok(records),
+    );
+    assert!(
+        matches!(plan, Plan::Hold(..)),
+        "rejected nonce ABA: {:?}",
+        plan.diagnostic()
+    );
+}
+
+#[test]
+fn an_unverified_intermediate_source_cannot_be_hidden_by_a_later_pin() {
+    let (fx, own, mut history) = transition_fixture(false);
+    let BindingTarget::Source(second) = history[1].new.clone() else {
+        unreachable!()
+    };
+    let third = source(&fx, &uuid::Uuid::new_v4().to_string());
+    let mut last = event(&fx, third.clone(), &own.execution_nonce);
+    last.seq = 3;
+    last.old = Some(second);
+    last.evidence.hook_event = Some("stop".into());
+    history.push(last);
+    let records = history
+        .into_iter()
+        .enumerate()
+        .map(|(i, event)| StrictBindingRecord {
+            published_at: Some(event.evidence.received_at),
+            event,
+            verified: i != 1,
+        })
+        .collect();
+    let mut db = fx.database();
+    db.claude_session_id = Some(third.session_id.clone());
+    db.raw_provider_session_id = Some(third.session_id);
+    let plan = evaluate_verified(
+        fx.request(),
+        Ok(Some(db)),
+        RuntimeObservation::Missing,
+        Ok(Some(own)),
+        Ok(records),
+    );
+    assert!(
+        matches!(plan, Plan::Hold(..)),
+        "unverified intermediate: {:?}",
+        plan.diagnostic()
+    );
+}
+
+#[test]
+fn strict_snapshot_preserves_pending_and_reclaim_publication_authority() {
+    for reclaims in [false, true] {
+        let (fx, own, history) = transition_fixture(false);
+        let BindingTarget::Source(original) = history[0].new.clone() else {
+            unreachable!()
+        };
+        let at = chrono::Utc::now();
+        let start = history[0].clone();
+        let mut pending = history[1].clone();
+        pending.seq = 2;
+        pending.new = BindingTarget::Pending {
+            payload_session_id: fx.sid.clone(),
+            payload_transcript_path: Some(fx.path(&fx.cwd, &fx.sid).display().to_string()),
+        };
+        pending.evidence.received_at = at + chrono::Duration::seconds(2);
+        let mut pin = start.clone();
+        pin.seq = 3;
+        pin.old = Some(original.clone());
+        pin.evidence.hook_event = Some("user_prompt_submit".into());
+        pin.evidence.received_at = at + chrono::Duration::seconds(4);
+        let pin_at = at + chrono::Duration::seconds(if reclaims { 3 } else { 1 });
+        let records = vec![
+            StrictBindingRecord {
+                event: start,
+                verified: reclaims,
+                published_at: Some(at),
+            },
+            StrictBindingRecord {
+                event: pending,
+                verified: false,
+                published_at: Some(at + chrono::Duration::seconds(2)),
+            },
+            StrictBindingRecord {
+                event: pin,
+                verified: true,
+                published_at: Some(pin_at),
+            },
+        ];
+        let mut db = fx.database();
+        db.claude_session_id = Some(original.session_id.clone());
+        db.raw_provider_session_id = Some(original.session_id);
+        let plan = evaluate_verified(
+            fx.request(),
+            Ok(Some(db)),
+            RuntimeObservation::Missing,
+            Ok(Some(own)),
+            Ok(records),
+        );
+        if reclaims {
+            assert!(
+                matches!(plan, Plan::Resume(..)),
+                "published current reclaim: {:?}",
+                plan.diagnostic()
+            );
+        } else {
+            assert!(
+                matches!(plan, Plan::Hold(..)),
+                "older first pin cannot consume Pending: {:?}",
+                plan.diagnostic()
+            );
+        }
+    }
 }

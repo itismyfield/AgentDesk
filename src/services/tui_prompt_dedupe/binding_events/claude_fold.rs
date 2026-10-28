@@ -146,6 +146,24 @@ pub(crate) fn binding_events_judged_since(
         .collect())
 }
 
+/// Replay a strict snapshot without loading, syncing, or publishing the cached writer.
+#[cfg(unix)]
+pub(crate) fn strict_claude_history<'a>(
+    records: impl IntoIterator<Item = &'a super::StrictBindingRecord>,
+    tmux_session: &str,
+    nonce: &str,
+) -> SourceHistory {
+    let mut replay = Writer::default();
+    for record in records {
+        replay.apply(&record.event, record.verified, record.published_at);
+    }
+    replay
+        .panes
+        .get(tmux_session)
+        .map(|pane| pane.claude.history(Some(nonce), replay.tainted))
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct ClaudeFold {
     nonce: Option<String>,
