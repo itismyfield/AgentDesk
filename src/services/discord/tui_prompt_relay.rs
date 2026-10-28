@@ -339,7 +339,13 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             );
             return;
         };
-        match channel_id.say(&*notify_http, note).await {
+        match super::http::dispatch_channel_message(
+            &notify_http,
+            channel_id,
+            serenity::CreateMessage::new().content(note),
+        )
+        .await
+        {
             Ok(message) => {
                 crate::services::tui_prompt_dedupe::record_local_only_entry_id_after_note_delivery(
                     &prompt,
@@ -525,7 +531,13 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             synthetic_start_wiring::record_prompt_id_after_post(&prompt, None);
             message_id
         } else {
-            match channel_id.say(&*notify_http, content).await {
+            match super::http::dispatch_channel_message(
+                &notify_http,
+                channel_id,
+                serenity::CreateMessage::new().content(content),
+            )
+            .await
+            {
                 Ok(message) => {
                     synthetic_start_wiring::record_prompt_id_after_post(&prompt, None);
                     message.id
