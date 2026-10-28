@@ -1,5 +1,6 @@
 //! Exact-incarnation handoff orchestration; callers supply evidence before every effect.
 
+use crate::services::discord::runtime_store;
 use crate::services::tui_input::actor::gate::{PaneVerdict, judge_pane};
 use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_prompt_dedupe::binding_events::SourceId;
@@ -190,9 +191,7 @@ impl Drop for Lock {
 fn safe_dir(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     match fs::DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => {
-            File::open(path.parent().ok_or_else(|| io::Error::other("no parent"))?)?.sync_all()?
-        }
+        Ok(()) => runtime_store::fsync_parent_dir(path)?,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e),
     }
@@ -300,16 +299,15 @@ impl Store {
         self.strike(Step::FileSync)?;
         file.sync_all()?;
         self.strike(Step::Rename)?;
-        fs::rename(tmp, path)?;
+        fs::rename(tmp, &path)?;
         self.strike(Step::ParentSync)?;
-        File::open(&self.dir)?.sync_all()?;
-        File::open(
+        runtime_store::fsync_parent_dir(&path)?;
+        runtime_store::fsync_parent_dir(&self.dir)?;
+        runtime_store::fsync_parent_dir(
             self.dir
                 .parent()
                 .ok_or_else(|| io::Error::other("no receipt parent"))?,
-        )?
-        .sync_all()?;
-        File::open(&self.root)?.sync_all()
+        )
     }
 
     /// Invalidation and the short selector/revision commit share one gate, including absent receipts.
