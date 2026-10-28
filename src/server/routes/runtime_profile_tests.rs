@@ -65,6 +65,12 @@ async fn worker_profile_routes_preserve_execution_auth_and_remove_admin_methods(
         }
         // A valid administrator credential cannot mount disabled worker routes.
         for (method, path) in [
+            ("GET", "/server-campaigns"),
+            ("POST", "/server-campaigns"),
+            ("GET", "/server-campaigns/example"),
+            ("PUT", "/server-campaigns/example/definition"),
+            ("POST", "/server-campaigns/example/commands"),
+            ("GET", "/server-campaigns/example/events"),
             ("PUT", "/settings"),
             ("PATCH", "/settings/config"),
             ("POST", "/agents"),
