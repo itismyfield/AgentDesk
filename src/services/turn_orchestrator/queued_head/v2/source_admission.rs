@@ -7,6 +7,15 @@ pub(crate) enum AdmitError {
     NotCommitted(String),
     Full,
     Pending,
+    /// The ticket already names another original; nothing is admitted under it.
+    Conflict(String),
+}
+
+impl AdmitError {
+    /// An uncertain publish: neither accepted nor refused, so the caller keeps the same ticket.
+    pub(crate) fn is_pending(&self) -> bool {
+        *self == Self::Pending
+    }
 }
 
 impl From<AdmitError> for String {
@@ -31,6 +40,62 @@ enum State {
 pub(crate) struct Custody {
     original: PendingQueueItem,
     state: State,
+    ticket: Option<Ticket>,
+}
+
+/// A caller's stable admission name, fixed before it records its own intent; its receipt also
+/// carries a digest of the original, so one ticket never names two originals.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Ticket(String);
+
+impl Ticket {
+    pub(crate) fn new(raw: &str) -> Result<Self, String> {
+        let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        if raw.is_empty() || raw.len() > 64 || !raw.chars().all(plain) {
+            return Err(format!("invalid admission ticket {raw:?}"));
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    /// The ticket a queue input derives from its sources, so its retries name one admission.
+    pub(super) fn of_sources(original: &PendingQueueItem) -> Self {
+        Self(format!("src-{}", digest(&sources::identity(original))))
+    }
+
+    fn prefix(&self) -> String {
+        format!("tk:{}:", self.0)
+    }
+
+    fn receipt(&self, original: &PendingQueueItem) -> String {
+        let named = (sources::identity(original), original.text.as_str());
+        format!("{}{}", self.prefix(), digest(&named))
+    }
+}
+
+fn digest(value: &impl serde::Serialize) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(value).expect("queue identity serializes");
+    let hash = Sha256::digest(bytes);
+    hash[..16].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// What the owner holds for a ticket, read without recovery or commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TicketStatus {
+    Committed,
+    /// Only an unconfirmed publish names it.
+    Pending,
+    Absent,
+}
+
+impl TicketStatus {
+    pub(crate) fn committed(self) -> bool {
+        self == Self::Committed
+    }
+
+    pub(crate) fn pending(self) -> bool {
+        self == Self::Pending
+    }
 }
 
 impl Custody {
@@ -38,10 +103,28 @@ impl Custody {
         Self {
             original: original.clone(),
             state: State::New,
+            ticket: None,
         }
     }
 
+    /// Custody whose receipt is the caller's ticket: a retry, or a restart that re-adopted the
+    /// owner, finds the receipt before any second admission.
+    pub(crate) fn with_ticket(original: &PendingQueueItem, ticket: Ticket) -> Self {
+        Self {
+            ticket: Some(ticket),
+            ..Self::new(original)
+        }
+    }
+
+    /// Re-entry for a ticket last reported Pending; the same lookup runs before any admission.
+    pub(crate) fn resume(original: &PendingQueueItem, ticket: Ticket) -> Self {
+        Self::with_ticket(original, ticket)
+    }
+
     pub(crate) fn advance(&mut self, owner: &mut Owner) -> Result<Admitted, AdmitError> {
+        if let Some(ticket) = self.ticket.clone() {
+            return self.advance_ticket(&ticket, owner);
+        }
         match &self.state {
             State::Done => return Ok(Admitted::Duplicate),
             State::Pending(receipt, outcome) => {
@@ -86,6 +169,93 @@ impl Custody {
             }
             Err(error) => Err(error),
         }
+    }
+}
+
+impl Custody {
+    fn advance_ticket(
+        &mut self,
+        ticket: &Ticket,
+        owner: &mut Owner,
+    ) -> Result<Admitted, AdmitError> {
+        let receipt = ticket.receipt(&self.original);
+        if owner.pending.is_some() && owner.recover().is_err() && owner.pending.is_some() {
+            return Err(AdmitError::Pending);
+        }
+        let prefix = ticket.prefix();
+        let named = (owner.snapshot.admission_receipts.iter())
+            .find(|r| r.starts_with(&prefix))
+            .cloned();
+        match named {
+            Some(found) if found == receipt => {
+                self.state = State::Done;
+                Ok(owner.acknowledge(&receipt).unwrap_or(Admitted::Duplicate))
+            }
+            Some(_) => Err(AdmitError::Conflict(
+                "the ticket already names another original".into(),
+            )),
+            None => {
+                owner.unacknowledged.retain(|(r, _)| *r != receipt);
+                let (next, outcome) = owner.fresh_candidate(&self.original)?;
+                let Some(next) = next else {
+                    // Its sources were admitted earlier under another receipt.
+                    self.state = State::Done;
+                    return Ok(outcome);
+                };
+                match owner.admit_commit(next, Some(receipt.clone())) {
+                    Ok(()) => {
+                        self.state = State::Done;
+                        Ok(outcome)
+                    }
+                    Err(AdmitError::Pending) => {
+                        owner.unacknowledged.push((receipt, outcome));
+                        Err(AdmitError::Pending)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+}
+
+impl Owner {
+    /// The outcome of an admission this owner committed while its caller saw Pending; acknowledged
+    /// once, after which the same ticket is a duplicate.
+    fn acknowledge(&mut self, receipt: &str) -> Option<Admitted> {
+        let at = self.unacknowledged.iter().position(|(r, _)| r == receipt)?;
+        Some(self.unacknowledged.remove(at).1)
+    }
+
+    /// Where `ticket` stands, read from the committed snapshot and the unconfirmed candidate only.
+    pub(crate) fn admission_status(&self, ticket: &Ticket) -> TicketStatus {
+        let prefix = ticket.prefix();
+        let names = |receipts: &[String]| receipts.iter().any(|r| r.starts_with(&prefix));
+        if names(&self.snapshot.admission_receipts) {
+            TicketStatus::Committed
+        } else if (self.pending.as_ref()).is_some_and(|(_, next)| names(&next.admission_receipts)) {
+            TicketStatus::Pending
+        } else {
+            TicketStatus::Absent
+        }
+    }
+
+    /// The attempt nonce and bound source of the committed `original`, while it is the head or a
+    /// retained input; an input the admission partitioned keeps another identity.
+    pub(crate) fn exact_turn(
+        &self,
+        ticket: &Ticket,
+        original: &PendingQueueItem,
+    ) -> Option<(String, Option<serde_json::Value>)> {
+        let receipt = ticket.receipt(original);
+        if !self.snapshot.admission_receipts.contains(&receipt) {
+            return None;
+        }
+        let identity = sources::identity(original);
+        let retained = self.snapshot.retained_inputs.iter().map(|r| &r.input);
+        let input = (self.snapshot.head_injection.iter().chain(retained))
+            .find(|input| input.identity == identity)?;
+        let nonce = input.attempt.as_ref()?.nonce.clone();
+        Some((nonce, input.resolved_source.clone()))
     }
 }
 
@@ -232,6 +402,80 @@ impl super::super::super::ChannelMailboxHandle {
         })
         .await
         .map_err(|_| AdmitError::Pending)?
+    }
+
+    /// Admits `original` under the caller's ticket; repeat it with the same ticket after Pending
+    /// or a restart. An invalid ticket refuses before the owner is asked.
+    pub(crate) async fn v2_admit_ticket(
+        &self,
+        original: PendingQueueItem,
+        ticket: String,
+    ) -> Result<Admitted, AdmitError> {
+        let ticket = Ticket::new(&ticket).map_err(AdmitError::NotCommitted)?;
+        self.v2_admit(Arc::new(Mutex::new(Custody::resume(&original, ticket))))
+            .await
+    }
+
+    /// Reads the ticket's standing; it never recovers, commits or admits.
+    pub(crate) async fn v2_admission_status(&self, ticket: String) -> Result<TicketStatus, String> {
+        let ticket = Ticket::new(&ticket)?;
+        self.v2_request(move |slot| {
+            let owner = slot.as_ref().ok_or("V2 not adopted")?;
+            Ok(owner.admission_status(&ticket))
+        })
+        .await
+    }
+
+    /// Test fixture: reserves and arms the queue head under `nonce`, as a pump does before its
+    /// effect.
+    #[cfg(test)]
+    pub(crate) async fn v2_arm_head_for_tests(&self, nonce: &str) -> Result<(), String> {
+        use super::super::v2_types::{
+            AttemptIdentity, AttemptSource, PreparedPayload, TargetIdentity,
+        };
+        let nonce = nonce.to_string();
+        self.v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("V2 not adopted")?;
+            let attempt = AttemptIdentity {
+                nonce,
+                provider: "claude".into(),
+                target: TargetIdentity {
+                    host: "tmux".into(),
+                    owner: "owner-pane".into(),
+                    root: "/test".into(),
+                    execution_nonce: "execution".into(),
+                },
+                source: AttemptSource::Existing {
+                    session_id: "native".into(),
+                    transcript: "/test/transcript".into(),
+                    file: [1, 2],
+                    offset: 0,
+                },
+            };
+            let payload = PreparedPayload {
+                frame: "frame".into(),
+                digest: "digest".into(),
+                attribution: serde_json::json!({}),
+            };
+            let key = owner.reserve(attempt, payload)?;
+            drop(owner.arm(&key, 0)?);
+            Ok(())
+        })
+        .await
+    }
+
+    /// The attempt and bound source the owner holds for the ticket's committed original.
+    pub(crate) async fn v2_exact_turn(
+        &self,
+        original: PendingQueueItem,
+        ticket: String,
+    ) -> Result<Option<(String, Option<serde_json::Value>)>, String> {
+        let ticket = Ticket::new(&ticket)?;
+        self.v2_request(move |slot| {
+            let owner = slot.as_ref().ok_or("V2 not adopted")?;
+            Ok(owner.exact_turn(&ticket, &original))
+        })
+        .await
     }
 }
 
