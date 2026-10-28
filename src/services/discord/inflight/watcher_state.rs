@@ -227,6 +227,9 @@ pub(in crate::services::discord) struct WatcherTerminalCommitPatch {
     pub last_offset: u64,
     pub last_watcher_relayed_offset: Option<u64>,
     pub last_watcher_relayed_generation_mtime_ns: Option<i64>,
+    /// The outcome a scheduled row settles with, stored with the commit.
+    pub scheduled_outcome:
+        Option<crate::services::scheduled_messages::turn_completion::ScheduledTurnOutcome>,
 }
 
 /// #3558: outcome of [`commit_watcher_terminal_delivery_locked_in_root`].
@@ -313,6 +316,9 @@ pub(super) fn commit_watcher_terminal_delivery_locked_in_root(
     state.last_offset = patch.last_offset.max(state.last_offset);
     state.last_watcher_relayed_offset = patch.last_watcher_relayed_offset;
     state.last_watcher_relayed_generation_mtime_ns = patch.last_watcher_relayed_generation_mtime_ns;
+    if patch.scheduled_outcome.is_some() {
+        state.scheduled.set_outcome(patch.scheduled_outcome);
+    }
 
     match persist_under_lock(
         root,

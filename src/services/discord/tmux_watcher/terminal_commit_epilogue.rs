@@ -35,6 +35,8 @@ pub(super) struct TerminalCommitEpilogueLocals<'a> {
     pub(super) inflight_state: &'a Option<InflightTurnState>,
     pub(super) inflight_before_relay: &'a Option<InflightTurnState>,
     pub(super) full_response: &'a String,
+    /// An isolated scheduled turn adds nothing to the channel history.
+    pub(super) channel_effects: crate::services::discord::scheduled_turn::ChannelEffects,
     pub(super) watcher_turn_nonce: &'a Option<String>,
     pub(super) resolved_did: &'a Option<String>,
     pub(super) dispatch_ok: bool,
@@ -149,6 +151,7 @@ pub(super) async fn run_terminal_commit_epilogue(
         inflight_state,
         inflight_before_relay,
         full_response,
+        channel_effects,
         watcher_turn_nonce,
         resolved_did,
         dispatch_ok,
@@ -199,6 +202,7 @@ pub(super) async fn run_terminal_commit_epilogue(
         // `rebind_origin == false`, populated `user_text`) cannot cross-pair
         // its `user_text` with the OLDER `full_response` in the TUI history.
         if has_assistant_response
+            && !channel_effects.suppressed()
             && !completion_is_stale_for_newer_turn
             && !anchor_cleanup_is_stale_for_newer_turn
             && let Some(state) = inflight_state.as_ref().filter(|state| !state.rebind_origin)

@@ -163,3 +163,49 @@ fn accuracy_code_mode_labels_escape_markdown_and_keep_the_first_label() {
     let read = safe_tool_summary("exec", "tools.read_file({path:'src/lib.rs'})", None).unwrap();
     assert!(read.starts_with("Read · src/lib.rs"), "{read}");
 }
+
+#[test]
+fn accuracy_account_operands_and_versioned_hosts_are_anonymous_while_versions_stay() {
+    let shown = |raw: &str| {
+        let bash = safe_tool_summary("Bash", &json!({"command":raw}).to_string(), None);
+        let plain = text(raw, 120).map(|out| out.replace('\u{200b}', ""));
+        (bash.unwrap_or_default(), plain)
+    };
+    for raw in [
+        "sudo -u LaneAlice cargo check",
+        "sudo -E -u LaneAlice make",
+        "sudo --user=LaneAlice make",
+        "ssh -l LaneAlice build-host uptime",
+        "ssh -p 22 -l LaneAlice build-host uptime",
+        "su - LaneAlice",
+        "chown LaneAlice:staff build.log",
+        "chown -R LaneAlice target",
+        "sudo chown LaneAlice build.log",
+        "ssh LaneAlice@v2 uptime",
+        "ssh LaneAlice@canary uptime",
+        "rsync -a target LaneAlice@main:/srv",
+        "echo LaneAlice@canary",
+    ] {
+        let (bash, plain) = shown(raw);
+        let plain = plain.expect(raw);
+        assert!(
+            plain.contains("\\*\\*\\*")
+                && !plain.contains("LaneAlice")
+                && !bash.contains("LaneAlice"),
+            "{raw}: {plain} / {bash}"
+        );
+    }
+    for raw in [
+        "npm i node-lib@18.x",
+        "pnpm add react@experimental",
+        "npx next@canary build",
+        "npm i some-lib@main",
+        "uvx ruff@v0.6 check",
+        "npm i react@18",
+        "ssh -L 8080:localhost:80 build-host",
+        "ssh build-host ls -la",
+        "echo chown handling",
+    ] {
+        assert_eq!(shown(raw).1.as_deref(), Some(raw), "{raw}");
+    }
+}
