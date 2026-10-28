@@ -1202,3 +1202,6 @@ fn a_scheduled_snapshot_headless_start_marks_its_row_isolated_pg() {
         host.close().await;
     });
 }
+
+#[path = "replay_start_origin_tests.rs"]
+mod origin_tests;
