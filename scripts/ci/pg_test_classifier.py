@@ -234,7 +234,7 @@ _CALL = re.compile(
 _UFCS_CALL = re.compile(
     r"<\s*(?P<type>[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)"
     r"\s+as\s+[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*\s*>"
-    r"\s*::\s*[A-Za-z_][A-Za-z0-9_]*\s*\("
+    r"\s*::\s*(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\("
 )
 
 
@@ -354,6 +354,55 @@ def _impl_method_bodies(body: str, counter: list[int] | None = None) -> list[str
         end = _matching_brace(body, opening, counter) + 1
         methods.append(_mask_nested_items(body[opening:end], counter))
     return methods
+
+
+def _argument_spans(clean: str, opening: int) -> list[tuple[int, int]]:
+    """Split delimited arguments without splitting nested expressions."""
+    closers = {"(": ")", "[": "]", "{": "}"}
+    stack, spans, start = [closers[clean[opening]]], [], opening + 1
+    for offset in range(start, len(clean)):
+        char = clean[offset]
+        if char in closers:
+            stack.append(closers[char])
+        elif char == stack[-1]:
+            stack.pop()
+            if not stack:
+                return [*spans, (start, offset)]
+        elif char == "," and len(stack) == 1:
+            spans.append((start, offset))
+            start = offset + 1
+    return []
+
+
+def _parameters(clean: str, start: int, body: int) -> tuple[str | None, ...]:
+    depth = 0
+    for offset in range(start, body):
+        char = clean[offset]
+        if char == "<":
+            depth += 1
+        elif char == ">" and depth:
+            depth -= 1
+        elif char == "(" and not depth:
+            params = []
+            for left, right in _argument_spans(clean, offset):
+                if clean[left:right].strip():
+                    name = re.match(r"\s*(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:", clean[left:right])
+                    params.append(name[1] if name else None)
+            return tuple(params)
+    return ()
+
+
+def _exact_targets(clean: str, raw: str) -> list[tuple[str, int]]:
+    targets = []
+    for call in re.finditer(r"\.\s*args\s*\(\s*\[", clean):
+        args = _argument_spans(clean, call.end() - 1)
+        for index, (left, right) in enumerate(args):
+            if raw[left:right].strip() != '"--exact"':
+                continue
+            candidates = [i for i in (index + 1, index - 1) if 0 <= i < len(args)]
+            target = next((args[i] for i in candidates if not raw[slice(*args[i])].strip().startswith('"--')), None)
+            targets.append((raw[slice(*target)], left) if target else ("", left))
+    return targets
 
 
 def _transitive_closure(
@@ -476,8 +525,11 @@ def discover_pg_inventory(
     (``current_exe`` with ``--exact``) needs PG when a test named by a string
     literal it reaches does; naming no resolvable test is an unanalysable finding.
 
-    Out of scope are block-local call graphs, method-level dispatch within an
-    impl (an impl is conservatively treated as one type-level item), and UFCS
+    Self-exec evidence follows named associated and Self:: calls with call-local
+    string arguments; unrelated impl methods lend no raw literals.
+
+    Out of scope are block-local call graphs, value-receiver dispatch and PG method
+    dispatch (PG reach treats an impl as one type-level item), plus UFCS
     receivers containing generic, tuple, reference, or ``dyn`` type syntax. A
     real Rust parser would be required to cover those forms without broad false
     positives. Only files the lib root reaches (mod, ``#[path]``, ``include!``)
@@ -495,6 +547,8 @@ def discover_pg_inventory(
     impl_methods: dict[tuple[tuple[str, ...], str, str], list[str]] = {}
     # Unstripped item text and file, read only for the test IDs a self-exec names.
     item_raw: dict[tuple[tuple[str, ...], str, str], list[tuple[str, str]]] = {}
+    raw_bodies: dict[tuple[tuple[str, ...], str, str], list[str]] = {}
+    raw_parameters: dict[tuple[tuple[str, ...], str, str], list[tuple[str | None, ...]]] = {}
     seeded: set[tuple[tuple[str, ...], str, str]] = set()
     records: list[tuple[str, str, tuple[str, ...], str, str, int]] = []
     use_aliases: dict[tuple[str, ...], dict[str, tuple[str, ...]]] = {}
@@ -594,6 +648,8 @@ def discover_pg_inventory(
             body = _edge_boundary(clean, opening, brace_counter)
             item_bodies[key] = body
             item_raw[key] = [(source[opening:opening + len(body)], rel)]
+            raw_bodies[key] = [_mask_nested_items(body, brace_counter)]
+            raw_parameters[key] = [_parameters(clean, match.end(), opening)]
             if seed_match(body):
                 seeded.add(key)
 
@@ -623,7 +679,16 @@ def discover_pg_inventory(
             methods = _impl_method_bodies(body, brace_counter)
             impl_methods.setdefault(key, []).extend(methods)
             item_bodies[key] = "\n".join(impl_methods[key])
-            item_raw.setdefault(key, []).append((source[opening:opening + len(body)], rel))
+            for method_start, method_end, method, method_opening in fn_ranges:
+                if not opening < method_start < opening + len(body):
+                    continue
+                if nested(method_start, ((a, b) for a, b in all_fn_ranges if a != method_start)):
+                    continue
+                method_key = (module, match.group(1), "method:" + method.group("name"))
+                method_body = clean[method_opening:method_end + 1]
+                item_raw.setdefault(method_key, []).append((source[method_opening:method_end + 1], rel))
+                raw_bodies.setdefault(method_key, []).append(_mask_nested_items(method_body, brace_counter))
+                raw_parameters.setdefault(method_key, []).append(_parameters(clean, method.end(), method_opening))
             if any(seed_match(method) for method in methods):
                 seeded.add(key)
 
@@ -638,6 +703,8 @@ def discover_pg_inventory(
             key = (logical_at(*_scope_at(match.start(), ranges)), match.group("name"), "const")
             item_bodies[key] = clean[match.start():end + 1]
             item_raw[key] = [(source[match.start():end + 1], rel)]
+            raw_bodies[key] = [item_bodies[key]]
+            raw_parameters[key] = [()]
 
         for match in _ATTR_FN.finditer(clean):
             if not _TEST_ATTR.search(match.group("attrs")):
@@ -716,7 +783,7 @@ def discover_pg_inventory(
         return targets
 
     def resolve_call(
-        module: tuple[str, ...], raw: str, local_aliases=None, local_wildcards=()
+        module: tuple[str, ...], raw: str, local_aliases=None, local_wildcards=(), methods=False
     ) -> set[tuple[tuple[str, ...], str, str]]:
         """Resolve a free call or one whole associated-call receiver path.
 
@@ -726,39 +793,45 @@ def discover_pg_inventory(
         reinterpreted in the caller's module.
         """
         targets = set(resolve(module, raw, local_aliases, local_wildcards))
-        receiver, separator, _method = raw.rpartition("::")
+        receiver, separator, method = raw.rpartition("::")
         if separator and not targets:
-            targets.update(resolve(module, receiver, local_aliases, local_wildcards))
+            owners = resolve(module, receiver, local_aliases, local_wildcards)
+            if methods:
+                targets.update((owner[0], owner[1], "method:" + method) for owner in owners
+                               if (owner[0], owner[1], "method:" + method) in item_raw)
+            else:
+                targets.update(owners)
         return targets
 
     def body_references(
-        module: tuple[str, ...], body: str
+        module: tuple[str, ...], body: str, *, methods=False, self_type=None, call_sites=None, context=None
     ) -> set[tuple[tuple[str, ...], str, str]]:
         """Resolve body-local imports without leaking aliases into sibling tests."""
-        local_aliases = {}
+        local_aliases = {"Self": (*module, self_type)} if self_type else {}
         local_wildcards = []
         visible = list(body)
-        for use in _USE.finditer(body):
+        for use in _USE.finditer(body if context is None else context):
             for binding, target in import_bindings(module, use.group("path")):
                 if binding == "*":
                     local_wildcards.append(target[:-1])
                 else:
                     local_aliases[binding] = target
-            visible[use.start():use.end()] = " " * (use.end() - use.start())
+            if context is None:
+                visible[use.start():use.end()] = " " * (use.end() - use.start())
         body = "".join(visible)
         calls = list(_CALL.finditer(body))
         ufcs_calls = list(_UFCS_CALL.finditer(body))
         occupied = [match.span() for match in (*calls, *ufcs_calls)]
-        targets = {
-            target
-            for call in calls
-            for target in resolve_call(module, call.group("path"), local_aliases, local_wildcards)
-        }
-        targets.update(
-            target
-            for call in ufcs_calls
-            for target in resolve(module, call.group("type"), local_aliases, local_wildcards)
-        )
+        targets = set()
+        for call in (*calls, *ufcs_calls):
+            if call.re is _UFCS_CALL and not methods:
+                found = resolve(module, call.group("type"), local_aliases, local_wildcards)
+            else:
+                path = call.group("path") if call.re is _CALL else call.group("type") + "::" + call.group("method")
+                found = resolve_call(module, path, local_aliases, local_wildcards, methods)
+            targets.update(found)
+            if call_sites is not None:
+                call_sites.extend((target, call.end() - 1) for target in found if target in item_raw)
         targets.update(
             target
             for mention in _BARE_REFERENCE.finditer(body)
@@ -774,14 +847,23 @@ def discover_pg_inventory(
         bodies = impl_methods[key] if key[2] == "impl" else [_mask_nested_items(body, brace_counter)]
         edges[key] = {target for caller_body in bodies for target in body_references(key[0], caller_body)}
 
-    def reached_items(referenced) -> set[tuple[tuple[str, ...], str, str]]:
+    raw_edges, raw_calls = {}, {}
+    for key, bodies in raw_bodies.items():
+        raw_edges[key] = set()
+        for index, body in enumerate(bodies):
+            sites = []
+            raw_edges[key].update(body_references(key[0], body, methods=True,
+                self_type=key[1] if key[2].startswith("method:") else None, call_sites=sites))
+            raw_calls[key, index] = sites
+
+    def reached_items(referenced, graph=edges) -> set[tuple[tuple[str, ...], str, str]]:
         seen, frontier = set(), set(referenced)
         for _depth in range(PG_REACH_MAX_DEPTH):
             frontier -= seen
             if not frontier:
                 break
             seen |= frontier
-            frontier = {target for caller in frontier for target in edges.get(caller, set())}
+            frontier = {target for caller in frontier for target in graph.get(caller, set())}
         return seen
 
     files_of: dict[str, set[str]] = {}
@@ -801,6 +883,106 @@ def discover_pg_inventory(
         hits = {test_id for test_id in by_last.get(parts[-1], ()) if test_id == tail or test_id.endswith("::" + tail)}
         return hits if len(parts) > 1 else {test_id for test_id in hits if files_of.get(test_id, set()) & files}
 
+    method_exec = {key for key, bodies in raw_bodies.items() if key[2].startswith("method:")
+                     and any(_SELF_EXEC.search(body) and '"--exact"' in item_raw[key][i][0]
+                             for i, body in enumerate(bodies))}
+    method_needed = set(method_exec)
+    value_calls = {key: re.compile(rf"\.\s*{re.escape(key[2].removeprefix('method:'))}\s*\(") for key in method_exec}
+    reverse = {}
+    for caller, targets in raw_edges.items():
+        for target in targets:
+            reverse.setdefault(target, set()).add(caller)
+    pending = list(method_needed)
+    while pending:
+        for caller in reverse.get(pending.pop(), set()) - method_needed:
+            method_needed.add(caller)
+            pending.append(caller)
+
+    def literal_tests(text: str, files: set[str]) -> set[str]:
+        return {test for literal in _STRING_LITERAL.findall(text)
+                for token in _ID_PATH.findall(literal) for test in named_tests(token, files)}
+
+    def unresolved_method_target(module, body, raw, root_sites, root_refs, reached, files, test_name) -> bool:
+        """Prove each reached method's exact argument in its own call context."""
+        owners = {(key[0], key[1]) for key in root_refs | reached}
+        bodies = [body, *(text for key in reached for text in raw_bodies.get(key, ()))]
+        # Value-receiver dispatch is not modelled; possible self-exec must remain unresolved.
+        if any(owner[:2] in owners and any(pattern.search(text) for text in bodies)
+               for owner, pattern in value_calls.items()):
+            return True
+        if not root_refs & method_needed:
+            return False
+
+        def node(key, index):
+            return (key[0], raw_bodies[key][index], item_raw[key][index][0]) if key else (module, body, raw)
+
+        def argument_tests(expression, key, index, values, position, seen=frozenset()):
+            identity = (key, index, expression, position)
+            if identity in seen or len(seen) >= PG_REACH_MAX_DEPTH:
+                return set()
+            seen = seen | {identity}
+            scope, clean, source = node(key, index)
+            locals_ = {}
+            for binding in re.finditer(r"\b(?:let|const|static)\s+(?:mut\s+)?(\w+)\b[^;={}]*=", clean[:position]):
+                end = clean.find(";", binding.end(), position)
+                if end >= 0:
+                    locals_[binding[1]] = (source[binding.end():end], binding.start())
+
+            def value(name):
+                if name in locals_:
+                    text, before = locals_[name]
+                    return argument_tests(text, key, index, values, before, seen)
+                return values.get(name, set())
+
+            simple = re.fullmatch(r"\s*&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*", expression)
+            if simple and (simple[1] in locals_ or simple[1] in values):
+                return value(simple[1])
+            hits = literal_tests(expression, files)
+            for mention in _BARE_REFERENCE.finditer(strip_rust(expression)):
+                if mention["name"] in locals_ or mention["name"] in values:
+                    hits.update(value(mention["name"]))
+            refs = body_references(scope, strip_rust(expression), methods=True, context=clean,
+                self_type=key[1] if key and key[2].startswith("method:") else None)
+            texts = [expression, *(text for target in reached_items(refs, raw_edges)
+                                   for text, _ in item_raw.get(target, ()))]
+            for text in texts:
+                hits.update(literal_tests(text, files))
+                if _OWN_THREAD.search(strip_rust(text)):
+                    hits.add(test_name)
+            return hits
+
+        pending, seen = [(None, 0, {}, 0)], set()
+        while pending:
+            key, index, values, depth = pending.pop()
+            identity = (key, index, tuple(sorted((p, tuple(sorted(v))) for p, v in values.items())))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            scope, clean, source = node(key, index)
+            if key and key[2].startswith("method:") and _SELF_EXEC.search(clean) and '"--exact"' in source:
+                exact = _exact_targets(clean, source)
+                if not exact or any(not argument_tests(expr, key, index, values, pos) for expr, pos in exact):
+                    return True
+            sites = raw_calls[key, index] if key else root_sites
+            refs = raw_edges.get(key, set()) if key else root_refs
+            if depth >= PG_REACH_MAX_DEPTH and refs & method_needed:
+                return True
+            called = set()
+            for target, opening in sites:
+                called.add(target)
+                if target not in method_needed:
+                    continue
+                args = [argument_tests(source[left:right], key, index, values, opening)
+                        for left, right in _argument_spans(clean, opening)]
+                for child, params in enumerate(raw_parameters[target]):
+                    bound = {param: args[i] if i < len(args) else set()
+                             for i, param in enumerate(params) if param is not None}
+                    pending.append((target, child, bound, depth + 1))
+            for target in (refs - called) & method_needed:
+                for child in range(len(item_raw.get(target, ()))):
+                    pending.append((target, child, {}, depth + 1))
+        return False
+
     tests: dict[str, str] = {}
     children: dict[str, set[str]] = {}
     for name, path, module, body, raw, line in records:
@@ -808,23 +990,26 @@ def discover_pg_inventory(
         direct = any(pattern.search(visible_body) for pattern in SEED_PATTERNS)
         referenced = body_references(module, visible_body)
         indirect = _transitive_closure(referenced, seeded, edges)
-        reach = [text for key in reached_items(referenced) for text in item_raw.get(key, ())]
+        sites = []
+        raw_refs = body_references(module, visible_body, methods=True, call_sites=sites)
+        reached = reached_items(raw_refs, raw_edges)
+        reach = [text for key in reached for text in item_raw.get(key, ())]
         texts = [(raw, path), *reach]
-        if _SELF_EXEC.search(visible_body) or any(_SELF_EXEC.search(strip_rust(text)) for text, _ in reach):
-            if any('"--exact"' in text for text, _ in texts):
-                files = {file for _, file in texts}
-                named = {test_id for text, _ in texts for literal in _STRING_LITERAL.findall(text)
-                         for token in _ID_PATH.findall(literal) for test_id in named_tests(token, files)}
+        files = {file for _, file in texts}
+        unresolved = unresolved_method_target(module, visible_body, raw, sites, raw_refs, reached, files, name)
+        if unresolved or _SELF_EXEC.search(visible_body) or any(_SELF_EXEC.search(strip_rust(text)) for text, _ in reach):
+            if unresolved or any('"--exact"' in text for text, _ in texts):
+                named = {test_id for text, _ in texts for test_id in literal_tests(text, files)}
                 if any(_OWN_THREAD.search(strip_rust(text)) for text, _ in texts):
                     named.add(name)
                 if named:
                     children[name] = named - {name}
                     if findings is not None:
                         findings.append(Finding("self-exec", f"{path}:{line}", " ".join([name, *sorted(children[name])])))
-                elif findings is not None:
+                if findings is not None and (not named or unresolved):
                     findings.append(Finding(
                         "unresolved-self-exec", f"{path}:{line}",
-                        f"{name} re-runs the test binary with --exact but names no test ID the classifier can resolve"))
+                        f"{name} re-runs the test binary with --exact but a child target cannot be resolved"))
         if direct or indirect:
             tests[name] = path
         elif indirect is None and findings is not None:

@@ -1432,6 +1432,68 @@ mod tests {
         self.assertEqual(len(problems), 1)
         self.assertIn("unresolved-self-exec: src/u.rs:4: u::tests::opaque", problems[0])
 
+    def impl_self_exec_cases(self):
+        run = ('fn run(test: &str) { std::process::Command::new(std::env::current_exe().unwrap())'
+               '.args(["--exact", test]).output().unwrap(); }')
+        label = 'fn label() -> &\'static str { "pure_child" }'
+        calls = {
+            "opaque": ("Runner::run(&pick());", False, 1),
+            "known_pg": ('Runner::run("fixtures::pg_child");', True, 0),
+            "known_and_opaque": ('Runner::run("fixtures::pure_child"); Runner::run(&pick());', False, 1),
+            "value_receiver": ("let runner = Runner; runner.run(&pick());", False, 1),
+        }
+        for variant in ("absent", "before", "after", "same", "forwarded", "ufcs"):
+            methods = f"impl Runner {{ {run} }}"
+            if variant == "before":
+                methods = f"impl Runner {{ {label} }}\n" + methods
+            elif variant == "after":
+                methods += f"\nimpl Runner {{ {label} }}"
+            elif variant == "same":
+                methods = f"impl Runner {{ {label} {run} }}"
+            elif variant == "forwarded":
+                methods = (f"impl Runner {{ {label} fn run(test: &str) {{ Self::dispatch(test); }} }}\n"
+                           f"impl Runner {{ {run.replace('fn run(', 'fn dispatch(')} }}")
+            elif variant == "ufcs":
+                methods = f"trait Invoke {{ fn run(test: &str); }}\nimpl Invoke for Runner {{ {run} }}\nimpl Runner {{ {label} }}"
+            cases = dict(calls)
+            if variant != "absent":
+                cases.update({"unrelated_label_call": ("Runner::label(); Runner::run(&pick());", False, 1),
+                              "connected_label": ("Runner::run(Runner::label());", False, 0)})
+            for case, (call, parent_pg, problems) in cases.items():
+                if variant in ("forwarded", "ufcs") and case == "value_receiver":
+                    continue
+                if variant == "ufcs":
+                    call = call.replace("Runner::run", "<Runner as Invoke>::run")
+                fixture_methods = methods.replace("fn run(test:", "fn run(&self, test:") if case == "value_receiver" else methods
+                self.tree({"src/lib.rs": "#[cfg(test)]\nmod fixtures;\n",
+                           "src/fixtures.rs": "struct Runner;\n" + fixture_methods + "\n"
+                           'fn pick() -> String { ["fixtures::pg_", "child"].concat() }\n'
+                           "#[test]\nfn opaque() { " + call + " }\n"
+                           "#[test]\nfn pg_child() { TestPostgresDb::new(); }\n"
+                           "#[test]\nfn pure_child() {}\n"})
+                yield f"{variant}/{case}", parent_pg, problems
+
+    def test_impl_self_exec_requires_connected_child_evidence(self):
+        for case, parent_pg, problem_count in self.impl_self_exec_cases():
+            with self.subTest(case=case):
+                pg, problems = pgc.classify(self.root, exempt={})
+                self.assertEqual("fixtures::opaque" in pg, parent_pg)
+                self.assertEqual(len(problems), problem_count)
+                if problem_count:
+                    self.assertIn("unresolved-self-exec:", problems[0])
+
+    def test_impl_self_exec_cli_rejects_unresolved_child_with_a_list(self):
+        listed = {"rust-suites": {"x": {"binary-id": "x", "kind": "lib", "testcases": {
+            name: {"ignored": False} for name in ("fixtures::opaque", "fixtures::pg_child", "fixtures::pure_child")}}}}
+        (self.root / "list.json").write_text(json.dumps(listed))
+        for case, parent_pg, problem_count in self.impl_self_exec_cases():
+            with self.subTest(case=case):
+                rc, err = self.cli("classify", "--list", self.root / "list.json", "--json-out", self.root / "out.json")
+                self.assertEqual(rc, 1 if problem_count else 0, err)
+                result = json.loads((self.root / "out.json").read_text())
+                self.assertEqual("fixtures::opaque" in result["pg"], parent_pg)
+                self.assertEqual(len(result["problems"]), problem_count)
+
     def test_local_self_exec_ids_use_the_same_paths_on_every_host(self):
         self.tree({"src/lib.rs": "#[cfg(test)]\nmod local;\n#[cfg(test)]\nmod foreign;\n",
                    "src/local.rs": """fn run(test: &str) {
