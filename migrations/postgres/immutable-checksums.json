@@ -805,6 +805,11 @@
       "path": "migrations/postgres/0160_execution_cleanup.sql",
       "sha256": "ec3b055ec391d18d53faa2ca38f58a1d0bbf1f8c7f13509da0aa99c98c0d04ab",
       "version": 160
+    },
+    {
+      "path": "migrations/postgres/0161_input_fallback_plan.sql",
+      "sha256": "aac08a86cdd771855dcba6396262a32d54caa69b8813d6bf73367cca8d9cab98",
+      "version": 161
     }
   ],
   "version": 1

@@ -10,10 +10,16 @@ use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use sqlx::{PgPool, Postgres, Transaction};
 use std::future::Future;
 
+pub(crate) mod adoption;
 pub(crate) mod cleanup;
 pub(crate) mod custody;
+pub(crate) mod event;
+#[path = "../input_fallback.rs"]
+pub(crate) mod fallback;
 pub(crate) mod input_start;
 pub(crate) mod output;
+pub(crate) mod plan;
+pub(crate) mod snapshot;
 
 /// Canonical identity uses Rust trim/lowercase; queries and advisory keys use these same bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]

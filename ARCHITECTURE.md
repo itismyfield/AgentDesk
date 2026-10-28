@@ -917,14 +917,24 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
 │   │   │   ├── owner_record/
+│   │   │   │   ├── adoption/
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── cleanup/
 │   │   │   │   │   └── tests/
 │   │   │   │   │       └── mod.rs
+│   │   │   │   ├── event/
+│   │   │   │   │   └── tests.rs
+│   │   │   │   ├── snapshot/
+│   │   │   │   │   └── tests.rs
+│   │   │   │   ├── adoption.rs
 │   │   │   │   ├── cleanup.rs
 │   │   │   │   ├── custody.rs
+│   │   │   │   ├── event.rs
 │   │   │   │   ├── input_start.rs
 │   │   │   │   ├── output.rs
-│   │   │   │   └── output_tests.rs
+│   │   │   │   ├── output_tests.rs
+│   │   │   │   ├── plan.rs
+│   │   │   │   └── snapshot.rs
 │   │   │   ├── agent_execution_node_tests.rs
 │   │   │   ├── attachment_tests.rs
 │   │   │   ├── capacity_tests.rs

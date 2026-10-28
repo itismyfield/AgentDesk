@@ -1,5 +1,6 @@
 //! Input-time routing preparation; production intake does not mount this module yet.
 
+#[path = "input_fallback/notice.rs"]
 pub(crate) mod notice;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,4 +75,5 @@ pub(crate) fn choose_target<'a>(snapshot: &Snapshot<'a>) -> Target<'a> {
 }
 
 #[cfg(test)]
+#[path = "input_fallback/tests.rs"]
 mod tests;
