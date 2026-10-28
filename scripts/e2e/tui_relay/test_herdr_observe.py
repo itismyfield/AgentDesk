@@ -459,6 +459,93 @@ def bot(message_id, content, **extra):
     return {"id": str(message_id), "content": content, "author": {"id": "7", "bot": True}, **extra}
 
 
+class HerdrProviderHold(unittest.TestCase):
+    PROVIDERS = {"claude": "1474932782395293736", "codex": "1479425196824989758"}
+    OK, LATE = "[E2E:E18:OK]", "[E2E:E18:LATE]"
+
+    def setUp(self):
+        self.args = arguments()
+        self.args.allow_destructive = True
+        self.enterContext(patch.dict("os.environ", {"AGENTDESK_E2E_ALLOW_DESTRUCTIVE": "1"}))
+        self.enterContext(patch("urllib.request.urlopen", side_effect=AssertionError("offline only")))
+        self.enterContext(patch.object(driver, "_read_api_json", return_value=(200, health())))
+        self.enterContext(patch.object(herdr.subprocess, "run", side_effect=lambda *a, **kw: Namespace(
+            stdout=json.dumps(status([{**row(), "provider": driver.cell_provider(self.args.cell)}])))))
+        self.enterContext(patch.object(driver, "post_send_sleep"))
+        self.enterContext(patch.object(herdr.time, "sleep"))
+        self.enterContext(patch.object(driver.assertions, "OUR_BOT_ID", "1479017284805722200"))
+        self.enterContext(patch.dict(driver.assertions.PROVIDER_BOT_IDS, self.PROVIDERS))
+        self.cancel = self.enterContext(patch.object(driver, "cancel_turn"))
+        self.client = Mock()
+        self.client.send_control.return_value = {"id": "100"}
+        self.client.send.return_value = {"id": "101"}
+
+    def capture(self, provider):
+        fixture = Path(__file__).with_name("tests") / "fixtures/e18_claude_herdr_20261021_hold.json"
+        rows = json.loads(fixture.read_text())
+        for message in rows:
+            author = message.pop("author_id")
+            if author == self.PROVIDERS["claude"]:
+                author = self.PROVIDERS[provider]
+            message["author"] = {"id": author, "bot": message.pop("author_bot")}
+        return rows
+
+    def run_hold(self, provider, rows):
+        self.args.cell = provider + "-herdr"
+        self.cancel.reset_mock()
+        self.client.fetch_messages.return_value = rows
+        self.client.wait_for_message.side_effect = lambda _channel, *, predicate, **kw: (
+            next((message for message in rows if predicate(message)), None), rows)
+        scenario = dict(id="E-18", agent_mode="real_live", coverage_class="live", assertions=[], steps=[
+            {"send_provider_hold_prompt": {"ok_marker": self.OK, "late_marker": self.LATE, "hold_seconds": 60}},
+            {"wait_for_provider_hold_state": {"ok_marker": self.OK, "late_marker": self.LATE}},
+            {"cancel_turn": {"force": False}}])
+        with redirect_stdout(io.StringIO()):
+            return driver.run_scenario(scenario, args=self.args, client=self.client, run_id="test")
+
+    def assert_reaches_cancel(self, result):
+        self.assertEqual(result["status"], "unexpected_pass", result)
+        self.cancel.assert_called_once_with(base_url=self.args.base_url, channel_id=self.args.channel_id, force=False)
+
+    def test_captured_prompt_late_marker_does_not_end_provider_hold(self):
+        for provider in self.PROVIDERS:
+            with self.subTest(provider=provider):
+                self.assert_reaches_cancel(self.run_hold(provider, self.capture(provider)))
+
+    def test_other_bots_late_marker_does_not_end_provider_hold(self):
+        for provider in self.PROVIDERS:
+            for author in ("notify", "announce", self.PROVIDERS["codex" if provider == "claude" else "claude"]):
+                with self.subTest(provider=provider, author=author):
+                    rows = self.capture(provider) + [bot(1562545294149943328, self.LATE,
+                                                        author={"id": author, "bot": True})]
+                    self.assert_reaches_cancel(self.run_hold(provider, rows))
+
+    def test_provider_late_marker_refuses_cancel(self):
+        for provider in self.PROVIDERS:
+            for separate in (False, True):
+                with self.subTest(provider=provider, separate=separate):
+                    rows = self.capture(provider)
+                    if separate:
+                        rows.append(bot(1562545294149943328, self.LATE,
+                                        author={"id": self.PROVIDERS[provider], "bot": True}))
+                    else:
+                        rows[-1]["content"] += "\n" + self.LATE
+                    result = self.run_hold(provider, rows)
+                    self.assertEqual(result["status"], "fail", result)
+                    self.assertIn("Herdr hold already ended before operation", result["reason"])
+                    self.cancel.assert_not_called()
+
+    def test_hold_ok_marker_requires_the_cell_provider(self):
+        for provider in self.PROVIDERS:
+            with self.subTest(provider=provider):
+                rows = self.capture(provider)
+                rows[-1]["author"]["id"] = self.PROVIDERS["codex" if provider == "claude" else "claude"]
+                result = self.run_hold(provider, rows)
+                self.assertEqual(result["status"], "fail", result)
+                self.assertIn("Herdr Discord marker timeout: " + self.OK, result["reason"])
+                self.cancel.assert_not_called()
+
+
 class HerdrTextClear(unittest.TestCase):
     """E-50's text !clear: a server refusal fails at once; silence keeps the acknowledgement timeout."""
 

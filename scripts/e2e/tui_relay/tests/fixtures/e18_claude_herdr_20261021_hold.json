@@ -1,0 +1,35 @@
+[
+  {
+    "id": "1562545200126238952",
+    "type": 0,
+    "timestamp": "2026-10-21T19:16:46.396000+00:00",
+    "edited_timestamp": null,
+    "author_id": "1479017284805722200",
+    "author_bot": true,
+    "is_our_send": true,
+    "is_relay_response": false,
+    "content": "E2E E-18 stop-mid-turn cancellation fixture.\n\nFollow these steps exactly:\n1. First, emit assistant text containing exactly one line: [E2E:E18:OK]\n2. Immediately after that line, use your normal shell/terminal command tool to run:\n   python3 -c \"import time; time.sleep(60)\"\n3. Do not write, echo, quote, or mention [E2E:E18:LATE] before the command returns.\n4. Only if the turn is still running after the command returns, send exactly: [E2E:E18:LATE]\n\nThe harness will cancel this turn while the command is sleeping. If cancellation arrives, stop without sending the late marker."
+  },
+  {
+    "id": "1562545223630856193",
+    "type": 0,
+    "timestamp": "2026-10-21T19:16:52+00:00",
+    "edited_timestamp": null,
+    "author_id": "1474932782395293736",
+    "author_bot": true,
+    "is_our_send": false,
+    "is_relay_response": true,
+    "content": "⠋ 계속 처리 중"
+  },
+  {
+    "id": "1562545294149943327",
+    "type": 0,
+    "timestamp": "2026-10-21T19:17:08.813000+00:00",
+    "edited_timestamp": null,
+    "author_id": "1474932782395293736",
+    "author_bot": true,
+    "is_our_send": false,
+    "is_relay_response": true,
+    "content": "[E2E:E18:OK]"
+  }
+]
