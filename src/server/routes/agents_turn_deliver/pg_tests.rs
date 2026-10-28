@@ -216,7 +216,9 @@ async fn the_route_stashes_an_attached_persons_draft_only_on_the_allowlisted_cha
     assert!(!records[0].contains(draft));
     assert!(queue_texts(&shared, agents[0].1).await.is_empty());
 
-    let (status, body) = deliver(&app, agents[1].0, &input).await;
+    let mut outside_input: Value = serde_json::from_str(&input).unwrap();
+    outside_input["origin_id"] = json!("attached-stash-http-outside");
+    let (status, body) = deliver(&app, agents[1].0, &outside_input.to_string()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["delivery"], "injected", "{body}");
     assert!(queue_texts(&shared, agents[1].1).await.is_empty());
@@ -1442,7 +1444,7 @@ mod s1a {
                 contract: None,
             };
             assert_eq!(inject_hook::starts_seen(f.channel), [seen, unmarked]);
-            assert_eq!(f.counts().await, (1, 0));
+            assert_eq!(f.counts().await, (2, 0));
             f.close().await;
         }
 
@@ -1504,7 +1506,9 @@ mod s1a {
             let mut off = InjectPane::new(f.channel, "external");
             off.stash(draft, true);
             let guid = "p:0/STASH";
-            let answer = f.call(false, input(Some(guid), "status?", 200)).await;
+            let answer = f
+                .call(false, input(Some("p:0/STASH-OFF"), "status?", 200))
+                .await;
             assert_eq!(answer.1["delivery"], "injected", "{}", answer.1);
             assert!(off.nonce().is_some());
             let legacy = "[User: imessage:200 (ID: 200)] status?".to_string();
@@ -1512,7 +1516,7 @@ mod s1a {
             assert_eq!(off.records(), [legacy]);
             assert_eq!(off.applied(), ["C-s", "paste", "Enter"]);
             assert_eq!(off.read("composer").as_deref(), Some(draft));
-            assert_eq!(f.counts().await, (0, 0));
+            assert_eq!(f.counts().await, (1, 0));
             // The A-plan reads the pane once before its paste, so a tab needs no render
             // prediction: the ON path stashes and sends it like any text.
             let on_channel = f.channel + 100;

@@ -1,4 +1,4 @@
-//! Dormant iMessage reply storage; production senders are not connected to this module.
+//! Origin admission storage; only iMessage origins may claim reply actions.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -139,14 +139,24 @@ pub(crate) async fn reserve_admission(
     pool: &PgPool,
     identity: &AdmissionIdentity<'_>,
 ) -> Result<bool, sqlx::Error> {
+    reserve_admission_for_source(pool, identity, "imessage").await
+}
+
+/// Storage source determines reply authority from the same commit as origin reservation.
+pub(crate) async fn reserve_admission_for_source(
+    pool: &PgPool,
+    identity: &AdmissionIdentity<'_>,
+    source: &str,
+) -> Result<bool, sqlx::Error> {
     let inserted: Option<String> = sqlx::query_scalar(
         "INSERT INTO imsg_reply_obligations (
              origin_id, source, agent_id, channel_id,
              person_id, request_hash, opened_at, expires_at
-         ) VALUES ($1, 'imessage', $2, $3, $4, $5, NOW(), NOW() + INTERVAL '24 hours')
+         ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW() + INTERVAL '24 hours')
          ON CONFLICT (origin_id) DO NOTHING RETURNING origin_id",
     )
     .bind(identity.origin_id)
+    .bind(source)
     .bind(identity.agent_id)
     .bind(identity.channel_id)
     .bind(identity.person_id)
@@ -290,7 +300,7 @@ pub async fn bind_consumed(
 const CLAIM_SQL: &str = r#"
 WITH slot AS (
     UPDATE imsg_reply_obligations AS o SET active_send_action = $2
-    WHERE o.origin_id = $1 AND o.resolution = 'open'
+    WHERE o.origin_id = $1 AND o.source = 'imessage' AND o.resolution = 'open'
       AND o.active_send_action IS NULL
       AND (
         ($3 = 'final' AND o.admission IN ('admitting', 'admitted'))
@@ -318,7 +328,7 @@ ON CONFLICT DO NOTHING RETURNING id
 const MIRROR_CLAIM_SQL: &str = r#"
 INSERT INTO imsg_reply_actions (id, origin_id, purpose, action_key, reply_episode_key)
 SELECT $2, origin_id, $3, $4, $5 FROM imsg_reply_obligations
-WHERE origin_id = $1 AND admission = 'admitted'
+WHERE origin_id = $1 AND source = 'imessage' AND admission = 'admitted'
 ON CONFLICT DO NOTHING RETURNING id
 "#;
 
@@ -434,3 +444,201 @@ pub async fn ack_action(pool: &PgPool, ack: &ActionAck<'_>) -> Result<bool, sqlx
 #[cfg(test)]
 #[path = "imsg_reply_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod external_admission_tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use serde_json::json;
+
+    const SOURCE_MIGRATION: &str =
+        include_str!("../../migrations/postgres/0156_imsg_external_admission.sql");
+
+    async fn old_schema() -> (TestPostgresDb, PgPool) {
+        let db = TestPostgresDb::create().await;
+        let pool = crate::db::postgres::connect_test_pool_with_max_connections(
+            &db.database_url,
+            "origin source migration",
+            2,
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/postgres/0139_imsg_reply_obligations.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        (db, pool)
+    }
+
+    async fn reserve(pool: &PgPool, origin: &str, source: &str) -> Result<bool, sqlx::Error> {
+        let identity = AdmissionIdentity {
+            origin_id: origin,
+            agent_id: "source-agent",
+            channel_id: "7",
+            person_id: 200,
+            request_hash: "v2:source-test",
+        };
+        if source == "imessage" {
+            reserve_admission(pool, &identity).await
+        } else {
+            reserve_admission_for_source(pool, &identity, source).await
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s4h_source_migration_preserves_old_rows_pg() {
+        let (db, pool) = old_schema().await;
+        assert!(reserve(&pool, "old-origin", "imessage").await.unwrap());
+        sqlx::query(
+            "UPDATE imsg_reply_obligations SET admission='admitted',
+                 admission_kind='unconfirmed', delivery_confirmed=FALSE,
+                 admission_result=$1, episode_key='old-episode', inject_nonce='old-nonce'
+             WHERE origin_id='old-origin'",
+        )
+        .bind(json!({"status": 200, "body": {"delivery": "unconfirmed"}}))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let snapshot = || {
+            sqlx::query_scalar::<_, Value>(
+                "SELECT to_jsonb(o) FROM imsg_reply_obligations o WHERE origin_id='old-origin'",
+            )
+            .fetch_one(&pool)
+        };
+        let before = snapshot().await.unwrap();
+        sqlx::raw_sql(SOURCE_MIGRATION)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(snapshot().await.unwrap(), before);
+        let restored = read_obligation(&pool, "old-origin").await.unwrap().unwrap();
+        assert_eq!(restored.source, "imessage");
+        assert_eq!(restored.admission_kind.as_deref(), Some("unconfirmed"));
+        let default_source: String = sqlx::query_scalar(
+            "INSERT INTO imsg_reply_obligations
+                 (origin_id,agent_id,channel_id,person_id,request_hash,opened_at,expires_at)
+             VALUES ('default-origin','agent','7',200,'hash',NOW(),NOW()+INTERVAL '24 hours')
+             RETURNING source",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(default_source, "imessage");
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s4h_source_migration_accepts_only_imessage_and_external_pg() {
+        let (db, pool) = old_schema().await;
+        let old_refusal = reserve(&pool, "before-external", "external")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            old_refusal.as_database_error().unwrap().code().as_deref(),
+            Some("23514")
+        );
+        sqlx::raw_sql(SOURCE_MIGRATION)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for source in ["imessage", "external"] {
+            assert!(reserve(&pool, source, source).await.unwrap());
+            assert_eq!(
+                read_obligation(&pool, source)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .source,
+                source
+            );
+        }
+        let error = reserve(&pool, "unsupported", "discord").await.unwrap_err();
+        let error = error.as_database_error().unwrap();
+        assert_eq!(error.code().as_deref(), Some("23514"));
+        assert_eq!(
+            error.constraint(),
+            Some("imsg_reply_obligations_source_check")
+        );
+        assert!(
+            read_obligation(&pool, "unsupported")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn s4h_external_origins_cannot_claim_any_reply_action_pg() {
+        let (db, pool) = old_schema().await;
+        sqlx::raw_sql(SOURCE_MIGRATION)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let cases = [
+            (Purpose::Final, "admitting", "open"),
+            (Purpose::Final, "admitted", "open"),
+            (Purpose::Progress, "admitted", "open"),
+            (Purpose::Fallback, "admitted", "open"),
+            (Purpose::Expiry, "admitted", "open"),
+            (Purpose::Mirror, "admitted", "open"),
+            (Purpose::Mirror, "admitted", "closed"),
+        ];
+        for source in ["external", "imessage"] {
+            for (index, (purpose, admission, resolution)) in cases.into_iter().enumerate() {
+                let origin = format!("{source}-{index}");
+                assert!(reserve(&pool, &origin, source).await.unwrap());
+                if admission != "admitting" {
+                    sqlx::query(
+                        "UPDATE imsg_reply_obligations SET admission=$2, resolution=$3,
+                             admission_kind='started', episode_key='episode', terminal_seen_at=NOW(),
+                             opened_at=NOW()-INTERVAL '25 hours', expires_at=NOW()-INTERVAL '1 hour'
+                         WHERE origin_id=$1",
+                    )
+                    .bind(&origin)
+                    .bind(admission)
+                    .bind(resolution)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                }
+                let claimed = claim_action(
+                    &pool,
+                    &ClaimAction {
+                        id: Uuid::new_v4(),
+                        origin_id: &origin,
+                        purpose,
+                        action_key: "source-authority",
+                        reply_episode_key: Some("episode"),
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    claimed.is_some(),
+                    source == "imessage",
+                    "{source} {purpose:?} {admission} {resolution}"
+                );
+                if source == "external" {
+                    let row = read_obligation(&pool, &origin).await.unwrap().unwrap();
+                    assert!(row.active_send_action.is_none());
+                }
+            }
+        }
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*) FILTER (WHERE o.source='external'),
+                    COUNT(*) FILTER (WHERE o.source='imessage')
+             FROM imsg_reply_actions a JOIN imsg_reply_obligations o USING(origin_id)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(counts, (0, 7));
+        pool.close().await;
+        db.drop().await;
+    }
+}

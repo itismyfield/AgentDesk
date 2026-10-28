@@ -445,6 +445,8 @@ src/
 │   │   ├── agents_crud/
 │   │   │   └── agent_read.rs
 │   │   ├── agents_turn_deliver/
+│   │   │   ├── legacy_origin.rs
+│   │   │   ├── legacy_origin_tests.rs
 │   │   │   └── pg_tests.rs
 │   │   ├── auth/
 │   │   │   ├── tailnet_peer.rs
@@ -3075,6 +3077,7 @@ src/
 │   ├── herdr_launch_tests/
 │   │   └── retired_hold_tests.rs
 │   ├── imsg_reply/
+│   │   ├── admission.rs
 │   │   ├── contract.rs
 │   │   ├── episode.rs
 │   │   └── mod.rs
