@@ -44,11 +44,16 @@ echo 15.5
 STUB
 cat >"$WORK/tools/codesign" <<'STUB'
 #!/usr/bin/env bash
-if [ "${1:-}" = --verify ]; then
-    [ "${FAKE_SIGNATURE:-ok}" != bad ]
-else
-    printf '%s\n' 'Identifier=com.itismyfield.agentdesk' 'Authority=Developer ID Application: fixture' 'CDHash=0123456789abcdef'
-fi
+case "${1:-}" in
+    --verify) [ "${FAKE_SIGNATURE:-ok}" != bad ] ;;
+    -dvv|-dvvv*)
+        printf '%s\n' 'Identifier=com.itismyfield.agentdesk' 'Authority=Developer ID Application: fixture' >&2
+        case "$1" in
+            -dvvv*) printf '%s\n' 'CandidateCDHash sha256=0123456789abcdef' 'CDHash=0123456789abcdef' 'CMSDigest=fixture' >&2 ;;
+        esac
+        ;;
+    *) exit 2 ;;
+esac
 STUB
 cat >"$WORK/tools/cargo" <<'STUB'
 #!/usr/bin/env bash
@@ -240,7 +245,7 @@ run_case() (
     unset PEER_RUNTIME_MACOS PEER_RUNTIME_HEAD
     unset AGENTDESK_DEPLOY_BINARY AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR
     case "$scenario" in
-        success|stages|concurrency|detach|leader-staged|leader-live|unavailable) ;;
+        success|codesign-verbosity|stages|concurrency|detach|leader-staged|leader-live|unavailable) ;;
         launch-fail) export LAUNCH_FAIL=1 ;;
         peer-platform) export PEER_RUNTIME_MACOS=14.0 ;;
         head-target) export PEER_RUNTIME_HEAD=old-head ;;
@@ -259,6 +264,15 @@ run_case() (
     DEPLOY_PEER_BINARY_SOURCE="$ADK_REL/bin/signed"
     DEPLOY_BUILT_SOURCE_SHA="$EXPECTED_SHA" DEPLOY_TARGET_SHA="$EXPECTED_SHA"
     DEPLOY_BUILD_PROFILE=release DEPLOY_SSH_CONNECT_TIMEOUT=1
+    if [ "$scenario" = codesign-verbosity ]; then
+        local details verbosity
+        details="$(codesign -dvv "$DEPLOY_PEER_BINARY_SOURCE" 2>&1)"
+        ! printf '%s\n' "$details" | grep -q '^CDHash=' || fail "codesign -dvv unexpectedly emitted CDHash"
+        for verbosity in -dvvv -dvvvv; do
+            details="$(codesign "$verbosity" "$DEPLOY_PEER_BINARY_SOURCE" 2>&1)"
+            printf '%s\n' "$details" | grep -q '^CDHash=.' || fail "codesign $verbosity omitted CDHash"
+        done
+    fi
     if declare -F _peer_binary_platform >/dev/null; then
         DEPLOY_BINARY_PLATFORM="$(_peer_binary_platform)"
     fi
@@ -331,7 +345,7 @@ PROBE
     grep -qx activate "$TRACE" || fail "$scenario did not activate"
     grep -qx peer-smoke "$TRACE" || fail "$scenario skipped peer smoke"
     grep -qx peer-health "$TRACE" || fail "$scenario skipped peer health"
-    if [ "$scenario" = success ] || [ "$scenario" = stages ] || [[ "$scenario" == leader-* ]]; then
+    if [ "$scenario" = success ] || [ "$scenario" = codesign-verbosity ] || [ "$scenario" = stages ] || [[ "$scenario" == leader-* ]]; then
         grep -qx transfer "$TRACE" || fail "$scenario did not transfer"
         ! grep -qx build "$TRACE" || fail "$scenario rebuilt on peer"
         cmp -s "$WORK/good-binary" "$PEER_ROOT/bin/agentdesk" || fail "$scenario activated different bytes"
@@ -383,7 +397,7 @@ if [ "$#" -gt 0 ]; then
     run_case "$1"
 else
     count=0
-    for scenario in success hash arch transfer stages size signature execute runtime toolchain os format source profile signature-meta optimized-hash concurrency detach leader-staged leader-live unavailable launch-fail peer-platform head-target; do
+    for scenario in success codesign-verbosity hash arch transfer stages size signature execute runtime toolchain os format source profile signature-meta optimized-hash concurrency detach leader-staged leader-live unavailable launch-fail peer-platform head-target; do
         run_case "$scenario"
         count=$((count + 1))
     done

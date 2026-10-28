@@ -62,6 +62,7 @@ const campaign: Campaign = {
       blocker: null,
       summary: null,
       benefit: null,
+      post_merge_hold: null,
       updated_at: "2026-09-20T00:00:00Z",
       details: "",
       acceptance: [],
@@ -203,6 +204,17 @@ it("browses 120 tasks through group collapse, issue search and combined filters 
   await changeSelect(selectFor("Status filter"), "all");
   await act(async () => container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
   expect(container.querySelectorAll(".campaign-task-row")).toHaveLength(100);
+});
+
+it("marks only post-merge held tasks with a hold badge in the task list", async () => {
+  const large = makeLargeCampaign();
+  large.nodes[0] = { ...large.nodes[0], post_merge_hold: "release deploy, then 24h relay observation" };
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [large], live: {}, read: 1 });
+  await render();
+  await act(async () => button("Expand all").click());
+  const held = (id: string) => container.querySelector(`.campaign-task-row[data-node-id="${id}"]`)?.textContent ?? "";
+  expect(held(large.nodes[0].id)).toContain("On hold: post-merge work");
+  expect(held(large.nodes[1].id)).not.toContain("On hold");
 });
 
 it("preserves selection, filters, collapse and a group edit draft across polls, task changes and campaign switches", async () => {
