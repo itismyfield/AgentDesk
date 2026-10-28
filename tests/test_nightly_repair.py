@@ -16,7 +16,8 @@ DEBUG_KEYS = ("CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG")
 PG_STEP = "cargo test (e2e smoke against PostgreSQL)"
 PG_CARGO = "cargo test --test e2e -- --test-threads=1"
 NON_PG_CARGO = "cargo test --bins --examples --benches --test '*' -- --skip _pg --skip pg_ --skip postgres"
-NATIVE_LIB_STEP = "Compare and run non-PG lib tests"
+NATIVE_LIB_STEPS = (("Build and plan non-PG lib tests", "prepare"),
+                    ("Run and audit non-PG lib tests", "run"))
 
 
 def load_module(name: str, path: Path):
@@ -78,10 +79,11 @@ def nightly_contract_problems(text: str) -> list[str]:
         run = (step_of(jobs, name, "cargo test (non-PG, non-lib targets)") or {}).get("run", "")
         need(run.strip() == NON_PG_CARGO,
              f"{name} changed its canonical non-PG non-lib sweep")
-        lib = step_of(jobs, name, NATIVE_LIB_STEP) or {}
-        need(lib.get("run", "").strip() == f"bash scripts/ci/nextest-native.sh {platform} {platform}-lib pg-classifier",
-             f"{name} stopped running its lib tests through the audited native nextest path")
-        need("if" not in lib and not lib.get("continue-on-error"), f"{name} made its native lib run conditional")
+        for step_name, phase in NATIVE_LIB_STEPS:
+            lib = step_of(jobs, name, step_name) or {}
+            need(lib.get("run", "").strip() == f"bash scripts/ci/nextest-native.sh {platform} {platform}-lib pg-classifier {phase}",
+                 f"{name} stopped running its lib {phase} through the audited native nextest path")
+            need("if" not in lib and not lib.get("continue-on-error"), f"{name} made its native lib {phase} conditional")
 
     pg = step_of(jobs, "postgres_full", PG_STEP) or {}
     lines = [line.strip() for line in pg.get("run", "").splitlines()]
@@ -125,13 +127,13 @@ STRUCTURAL_MUTANTS = (
      lambda t: t.replace("  postgres_full:\n    name: PostgreSQL full tests\n    runs-on: ubuntu-latest\n    timeout-minutes: 90",
                          "  postgres_full:\n    name: PostgreSQL full tests\n    runs-on: ubuntu-latest\n    timeout-minutes: 30", 1)),
     ("replaces the native audited run",
-     lambda t: t.replace("bash scripts/ci/nextest-native.sh windows windows-lib pg-classifier",
+     lambda t: t.replace("bash scripts/ci/nextest-native.sh windows windows-lib pg-classifier run",
                          "cargo nextest run --lib", 1)),
     ("narrows the native run to a filter",
-     lambda t: t.replace("macos macos-lib pg-classifier", "macos macos-lib relay_recovery", 1)),
+     lambda t: t.replace("macos macos-lib pg-classifier run", "macos macos-lib relay_recovery run", 1)),
     ("skips the native run",
-     lambda t: t.replace("        run: bash scripts/ci/nextest-native.sh macos",
-                         "        if: false\n        run: bash scripts/ci/nextest-native.sh macos", 1)),
+     lambda t: t.replace("        run: bash scripts/ci/nextest-native.sh macos macos-lib pg-classifier run",
+                         "        if: false\n        run: bash scripts/ci/nextest-native.sh macos macos-lib pg-classifier run", 1)),
 )
 
 WRAPPER_MUTANTS = (

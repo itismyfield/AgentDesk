@@ -8,13 +8,13 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/campaigns",
             "campaigns",
-            "List durable campaign DAG checkpoints from canonical PostgreSQL, newest updated first. `live` maps campaign id -> node id -> what the kanban card behind the node's GitHub issue_url is doing now (card_id, card_status, newest dispatch_type/dispatch_status, session_status/session_seen_at of the session holding that dispatch, running, newest auto-queue queue_status); `running` is true only while that session is mid-turn with a fresh heartbeat. It is read per request and never stored in the ledger.",
+            "List durable campaign DAG checkpoints from canonical PostgreSQL, newest updated first. `live` maps campaign id -> node id -> what the kanban card behind the node's GitHub issue_url is doing now (card_id, card_status, newest dispatch_type/dispatch_status, session_status/session_seen_at of the session holding that dispatch, running, newest auto-queue queue_status); `running` is true only while that session is mid-turn with a fresh heartbeat. It is read per request and never stored in the ledger. `issue_drift` maps campaign id -> completed nodes whose linked issue github-sync saw open (reason open_issue or changed_after_auto_close); it is reported, never acted on.",
         )
         .with_params([
             ("limit", query_param("integer", false, "Page size 1..500; default 100.")),
             ("offset", query_param("integer", false, "Zero-based offset; default 0.")),
         ])
-        .with_example(json!({}), json!({"campaigns": [], "live": {}, "limit": 100, "offset": 0}))
+        .with_example(json!({}), json!({"campaigns": [], "live": {}, "issue_drift": {}, "limit": 100, "offset": 0}))
         .with_curl("curl -H \"Authorization: Bearer $ADK_AUTH_TOKEN\" \"$ADK_URL/api/campaigns\""),
         ep(
             "POST",
@@ -28,7 +28,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("description", body_param("string", false, "Durable objective and context.")),
             ("status", body_param("string", true, "planned|active|paused|completed|cancelled")),
             ("round", body_param("integer", true, "Positive campaign round.")),
-            ("nodes", body_param("array", false, "Full DAG: id/title/status/stage/group/round, dependencies, assignee/session_id/provider, issue_url/pr_url/head_sha, details/acceptance/findings/evidence/evidence_records/next_action/blocker, optional summary/benefit. Optional group is trimmed; blank/omitted/null stays unclassified, independent of stage/status. See docs/campaign-ledger.md.")),
+            ("nodes", body_param("array", false, "Full DAG: id/title/status/stage/group/round, dependencies, assignee/session_id/provider, issue_url/pr_url/head_sha, details/acceptance/findings/evidence/evidence_records/next_action/blocker, optional summary/benefit/post_merge_hold (work left after merge; while set a closed issue does not complete the node). Optional group is trimmed; blank/omitted/null stays unclassified, independent of stage/status. See docs/campaign-ledger.md.")),
             ("auto_queue", body_param("boolean", false, "Hand ready nodes to auto-queue automatically while the campaign is active; default false. The response then carries `handoff`.")),
         ])
         .with_example(
@@ -41,10 +41,10 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/campaigns/{id}",
             "campaigns",
-            "Read the canonical checkpoint before resuming after clear, compaction, quota interruption, or provider/session replacement. Recorded running state is not proof of a live process; check `live` (node id -> card, dispatch, session and queue status of the node's issue card), where `running` means a session is mid-turn on it now.",
+            "Read the canonical checkpoint before resuming after clear, compaction, quota interruption, or provider/session replacement. Recorded running state is not proof of a live process; check `live` (node id -> card, dispatch, session and queue status of the node's issue card), where `running` means a session is mid-turn on it now. `issue_drift` lists completed nodes whose linked issue is open.",
         )
         .with_params([("id", path_param("Campaign ID."))])
-        .with_example(json!({"path": {"id": "release-a"}}), json!({"campaign": {"id": "release-a", "title": "Release A", "description": "", "status": "planned", "round": 1, "revision": 1, "nodes": [], "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:00:00Z"}, "live": {}}))
+        .with_example(json!({"path": {"id": "release-a"}}), json!({"campaign": {"id": "release-a", "title": "Release A", "description": "", "status": "planned", "round": 1, "revision": 1, "nodes": [], "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:00:00Z"}, "live": {}, "issue_drift": []}))
         .with_curl("curl -H \"Authorization: Bearer $ADK_AUTH_TOKEN\" \"$ADK_URL/api/campaigns/release-a\""),
         ep(
             "PUT",

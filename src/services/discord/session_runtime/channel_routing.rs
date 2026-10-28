@@ -122,34 +122,54 @@ pub(in crate::services::discord) async fn validate_live_channel_routing_with_dm_
 /// the same thread inheritance, DM and bot allowlist checks on REST workers.
 pub(in crate::services::discord) async fn validate_rest_channel_routing(
     http: &Arc<serenity::Http>,
-    cache: Option<&Arc<serenity::cache::Cache>>,
+    _cache: Option<&Arc<serenity::cache::Cache>>,
     provider: &ProviderKind,
     settings: &DiscordBotSettings,
     channel_id: ChannelId,
     is_dm_hint: Option<bool>,
 ) -> Result<(), settings::BotChannelRoutingGuardFailure> {
-    let is_dm = match is_dm_hint {
-        Some(is_dm) => is_dm,
-        None => matches!(
-            channel_id.to_channel(http).await,
-            Ok(serenity::model::channel::Channel::Private(_))
+    validate_rest_channel_routing_with_parent(http, provider, settings, channel_id, is_dm_hint)
+        .await
+        .map(|_| ())
+}
+
+pub(in crate::services::discord) async fn validate_rest_channel_routing_with_parent(
+    http: &Arc<serenity::Http>,
+    provider: &ProviderKind,
+    settings: &DiscordBotSettings,
+    channel_id: ChannelId,
+    is_dm_hint: Option<bool>,
+) -> Result<Option<ChannelId>, settings::BotChannelRoutingGuardFailure> {
+    let channel = channel_id.to_channel(http).await.ok();
+    let is_dm = resolve_is_dm_channel(
+        is_dm_hint,
+        matches!(channel, Some(serenity::model::channel::Channel::Private(_))),
+    );
+    let (channel_name, parent) = match channel {
+        Some(serenity::model::channel::Channel::Guild(gc)) => (
+            Some(gc.name),
+            gc.parent_id.filter(|_| is_actual_thread_kind(gc.kind)),
         ),
+        _ => (None, None),
     };
-    let (channel_name, _) = resolve_channel_category(http, cache, channel_id).await;
-    let (allowlist_channel_id, provider_channel_name) =
-        if let Some((parent_id, parent_name)) = resolve_thread_parent(http, channel_id).await {
-            (parent_id, parent_name.or(channel_name.clone()))
-        } else {
-            (channel_id, channel_name.clone())
-        };
+    // Cached category names never affected routing; keep the policy's parent name live.
+    let parent_name = if let Some(parent_id) = parent {
+        match parent_id.to_channel(http).await {
+            Ok(serenity::model::channel::Channel::Guild(gc)) => Some(gc.name),
+            _ => None,
+        }
+    } else {
+        None
+    };
     validate_bot_channel_routing_with_provider_channel(
         settings,
         provider,
-        allowlist_channel_id,
+        parent.unwrap_or(channel_id),
         channel_name.as_deref(),
-        provider_channel_name.as_deref(),
+        parent_name.as_deref().or(channel_name.as_deref()),
         is_dm,
-    )
+    )?;
+    Ok(parent)
 }
 
 pub(in crate::services::discord) async fn validate_live_channel_routing(
