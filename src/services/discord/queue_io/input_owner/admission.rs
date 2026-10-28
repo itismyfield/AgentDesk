@@ -119,5 +119,21 @@ pub(crate) async fn exact_turn(
     })
 }
 
+pub(crate) async fn admit_with_context(
+    handle: &ChannelMailboxHandle,
+    original: &PendingQueueItem,
+    ticket: AdmissionTicket,
+    context: serde_json::Value,
+) -> Admission {
+    match handle
+        .v2_admit_ticket_with_context(original.clone(), ticket.0.clone(), context)
+        .await
+    {
+        Ok(_) => Admission::Accepted(ticket),
+        Err(error) if error.is_pending() => Admission::Pending(ticket),
+        Err(error) => Admission::Rejected(error.into()),
+    }
+}
+
 #[path = "admission_tests.rs"]
 mod tests;

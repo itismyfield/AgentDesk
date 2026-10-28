@@ -2,3 +2,4 @@
 //! wired. Each later slice adds its own `mod` line here and nothing else.
 pub(crate) mod admission;
 pub(crate) mod origin;
+pub(crate) mod routine;

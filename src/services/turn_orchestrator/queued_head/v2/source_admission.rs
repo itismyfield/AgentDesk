@@ -738,9 +738,6 @@ impl super::super::super::ChannelMailboxHandle {
     }
 }
 
-#[cfg(test)]
-mod tests;
-
 impl Owner {
     fn context_in<'a>(
         snapshot: &'a SnapshotV2,
@@ -851,3 +848,6 @@ impl super::super::super::ChannelMailboxHandle {
 
 #[cfg(test)]
 mod context_tests;
+
+#[cfg(test)]
+mod tests;
