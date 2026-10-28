@@ -128,12 +128,31 @@ impl Fixture {
         uncertain: u8,
         ending: Option<serde_json::Value>,
     ) -> Self {
+        Self::new_scoped(channel, provider, bodies, uncertain, ending, None).await
+    }
+
+    pub async fn injected_with_prefix(channel: u64, bodies: &[&str], prefix: usize) -> Self {
+        Self::new_scoped(channel, ProviderKind::Claude, bodies, 0, None, Some(prefix)).await
+    }
+
+    async fn new_scoped(
+        channel: u64,
+        provider: ProviderKind,
+        bodies: &[&str],
+        uncertain: u8,
+        ending: Option<serde_json::Value>,
+        prefix: Option<usize>,
+    ) -> Self {
         let root = crate::config::runtime_root().unwrap();
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join(format!("native-{channel}.jsonl"));
         let mut values = Vec::new();
         match provider {
-            ProviderKind::Claude => values.push(json!({"type":"user","uuid":"input","sessionId":"native-session","message":{"content":"input"}})),
+            ProviderKind::Claude => values.push(if prefix.is_some() {
+                json!({"type":"user","uuid":"input","sessionId":"native-session","isMeta":true,"message":{"content":"<task-notification>background task completed</task-notification>"}})
+            } else {
+                json!({"type":"user","uuid":"input","sessionId":"native-session","message":{"content":"input"}})
+            }),
             ProviderKind::Codex => { values.push(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}));
                 values.push(json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"input"}]}})); },
             _ => panic!("native fixture provider"),
@@ -157,7 +176,13 @@ impl Fixture {
             ProviderKind::Claude => json!({"type":"system","subtype":"stop_hook_summary"}),
             _ => json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}),
         }));
-        let raw = values.iter().map(|v| format!("{v}\n")).collect::<String>();
+        let mut raw = vec![b' '; prefix.unwrap_or(0)];
+        if let Some(last) = raw.last_mut() {
+            *last = b'\n';
+        }
+        let delivery_start = raw.len() as u64;
+        let initial_hash = manifest::hash(&raw);
+        raw.extend(values.iter().flat_map(|v| format!("{v}\n").into_bytes()));
         std::fs::write(&path, &raw).unwrap();
         let source = source_id_for("native-session", &path).unwrap();
         let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root)
@@ -168,8 +193,8 @@ impl Fixture {
                 channel,
                 sources: vec![InitSource {
                     source_id: source.clone(),
-                    delivery_start: 0,
-                    prefix_hash: manifest::hash(b""),
+                    delivery_start,
+                    prefix_hash: initial_hash.clone(),
                 }],
                 initial_anchor: snowflake(500),
                 build_digest: "fixture".into(),
@@ -182,8 +207,8 @@ impl Fixture {
                     channel,
                     sources: vec![InitSource {
                         source_id: source.clone(),
-                        delivery_start: 0,
-                        prefix_hash: manifest::hash(b""),
+                        delivery_start,
+                        prefix_hash: initial_hash.clone(),
                     }],
                     initial_anchor: snowflake(500),
                     build_digest: "fixture".into(),
@@ -193,7 +218,7 @@ impl Fixture {
             .unwrap();
         let era = store.read_era().unwrap().unwrap();
         let mut channel_store = store.open_channel(&era, channel).unwrap().unwrap();
-        let mut capture = SourceCapture::open(source.clone(), 0).unwrap();
+        let mut capture = SourceCapture::open(source.clone(), delivery_start).unwrap();
         let CaptureOutcome::Batch(batch) = capture.poll(1024 * 1024) else {
             panic!("capture")
         };
@@ -242,7 +267,7 @@ impl Fixture {
             0,
         );
         row.runtime_kind = Some(kind);
-        row.turn_start_offset = Some(0);
+        row.turn_start_offset = Some(delivery_start);
         row.last_offset = raw.len() as u64;
         row.full_response = body.clone();
         row.turn_nonce = Some(format!("nonce-{channel}"));
@@ -455,6 +480,20 @@ async fn i7441b_source_prefix_and_deadline_budgets_fail_closed_pg() {
         Instant::now(),
     );
     assert!(expired.is_none());
+    assert!(
+        manifest::build_terminal(
+            &f.root,
+            manifest::Query {
+                provider: &ProviderKind::Claude,
+                channel: f.row.channel_id,
+                path: &f.source.path,
+                file: (f.source.dev, f.source.ino),
+                range: (0, f.row.last_offset),
+            },
+            Instant::now(),
+        )
+        .is_none()
+    );
     let raw = std::fs::read(&f.source.path).unwrap();
     let prefix = format!(
         "{}\n",
@@ -507,7 +546,7 @@ async fn i7441b_source_prefix_and_deadline_budgets_fail_closed_pg() {
         f.row.channel_id,
         RuntimeHandoffKind::ClaudeTui,
     )]);
-    crate::services::discord::tmux::tmux_watcher::o_evidence_tests::assert_uncovered_fixture_recorded(&f,&pool).await;
+    crate::services::discord::tmux::tmux_watcher::o_evidence_tests::assert_receipted_fixture_suppressed(&f,&pool).await;
     super::super::completed_turn_ledger::o_pending::capture(&ProviderKind::Claude, &f.row).await;
     let pending = f
         .root

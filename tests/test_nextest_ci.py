@@ -153,6 +153,27 @@ class Plan(Fixture):
         forward = nci.lpt({t: 1.0 for t in ids}, 3)
         self.assertEqual(nci.lpt({t: 1.0 for t in reversed(ids)}, 3), forward)
 
+    def test_plan_configs_verify_with_windows_text_newlines(self):
+        write_text = Path.write_text
+
+        def windows_write_text(path, text, encoding=None, errors=None, newline=None):
+            if newline is None:
+                text = text.replace("\n", "\r\n")
+                newline = ""
+            return write_text(path, text, encoding=encoding, errors=errors, newline=newline)
+
+        with mock.patch.object(Path, "write_text", windows_write_text):
+            plan = self.plan_ok(self.NAMES, workers=2)
+            self.assertIn(b"\r\n", (self.dir / "plan/plan.json").read_bytes())
+            for worker in plan["workers"]:
+                index = worker["index"]
+                with self.subTest(worker=index):
+                    rc, err = self.run_cli(
+                        "verify-archive", "--plan", self.dir / "plan/plan.json", "--worker", index,
+                        "--archive", self.archive, "--config", self.dir / f"plan/worker-{index}.toml",
+                        "--sha", SHA, "--run-id", "7", "--record", self.dir / f"results/worker-{index}")
+                    self.assertEqual(rc, 0, err)
+
     def test_slow_tests_are_spread_by_duration_not_count(self):
         times = {"m::slow": 100, "m::a": 30, "m::b": 30, "m::c": 30, "m::d": 1, "m::e": 1}
         plan = self.plan_ok(list(times), workers=2,

@@ -90,6 +90,29 @@ pub(super) struct SubmittedPrompt {
 pub(super) static INPUT_PROMPT_PROBE: std::sync::Mutex<
     Option<(u64, tokio::sync::oneshot::Sender<SubmittedPrompt>)>,
 > = std::sync::Mutex::new(None);
+/// Provider dispatches a test counts on one channel; a counted dispatch with no effect probe left
+/// is refused, so a duplicate start never reaches the real provider.
+#[cfg(test)]
+pub(in crate::services::discord) static COUNTED_DISPATCHES: std::sync::Mutex<Option<(u64, usize)>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
+fn count_dispatch(channel: u64) -> Result<(), String> {
+    let mut counted = COUNTED_DISPATCHES.lock().unwrap();
+    let Some((_, count)) = counted.as_mut().filter(|(counted, _)| *counted == channel) else {
+        return Ok(());
+    };
+    *count += 1;
+    let probed = INPUT_EFFECT_PROBE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|probe| probe.channel == channel);
+    if probed {
+        Ok(())
+    } else {
+        Err("counted test dispatch has no provider probe".into())
+    }
+}
 #[cfg(test)]
 fn input_effect_probe(
     turn: &StreamingTurn<'_>,
@@ -250,6 +273,8 @@ pub(super) fn execute(
             });
         }
     }
+    #[cfg(test)]
+    count_dispatch(turn.channel_id)?;
     #[cfg(test)]
     {
         let mut probe = INPUT_PROMPT_PROBE.lock().unwrap();

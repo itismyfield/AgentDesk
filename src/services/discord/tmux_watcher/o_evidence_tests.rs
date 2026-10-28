@@ -245,6 +245,25 @@ async fn i7441b_actual_o_terminal_denials_and_true_orphans_pg() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn i7441b_claude_soft_frameaccepted_ack_and_o_lookup_share_deadline_pg() {
+    soft_ack_cases(&[0, 1, 2], false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c_injected_soft_stop_posted_after_85mb_suppresses_pg() {
+    soft_ack_cases(&[0], true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c_missing_mismatched_foreign_or_unreadable_evidence_records_pg() {
+    soft_ack_cases(&[1, 2, 4, 5, 6], true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c_partial_range_past_terminal_seal_records_pg() {
+    soft_ack_cases(&[3], true).await;
+}
+
+async fn soft_ack_cases(cases: &[u64], injected: bool) {
     use crate::services::cluster::{
         relay_producer_registry::RelayProducerRegistry,
         session_matcher::MatchedChannel,
@@ -262,8 +281,18 @@ async fn i7441b_claude_soft_frameaccepted_ack_and_o_lookup_share_deadline_pg() {
     )
     .await;
     let pool = db.connect_and_migrate().await;
-    for proof in 0..3 {
-        let mut f = Fixture::new(744160 + proof, ProviderKind::Claude, &["soft answer"]).await;
+    for &proof in cases {
+        let mut f = if injected {
+            assert!(load_inflight_state(&ProviderKind::Claude, 744260 + proof).is_none());
+            Fixture::injected_with_prefix(
+                744260 + proof,
+                &["background task finished. ", "monitor followup"],
+                85_419_517,
+            )
+            .await
+        } else {
+            Fixture::new(744160 + proof, ProviderKind::Claude, &["soft answer"]).await
+        };
         let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
             f.row.channel_id,
             crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
@@ -276,16 +305,19 @@ async fn i7441b_claude_soft_frameaccepted_ack_and_o_lookup_share_deadline_pg() {
             Some(format!("AgentDesk-claude-i7441b-soft-{}", f.row.channel_id));
         let session = f.row.tmux_session_name.clone().unwrap();
         let _live = InjectedLivenessGuard::set(HostSessionRef::tmux(&session), HostLiveness::Live);
-        save_inflight_state(&f.row).unwrap();
-        assert_eq!(
-            crate::services::discord::inflight::clear_inflight_state_for_captured_episode(
-                &ProviderKind::Claude,
-                f.row.channel_id,
-                &InflightTurnIdentity::from_state(&f.row),
-                f.row.turn_nonce.as_deref()
-            ),
-            crate::services::discord::inflight::GuardedClearOutcome::Cleared
-        );
+        if !injected {
+            save_inflight_state(&f.row).unwrap();
+            assert_eq!(
+                crate::services::discord::inflight::clear_inflight_state_for_captured_episode(
+                    &ProviderKind::Claude,
+                    f.row.channel_id,
+                    &InflightTurnIdentity::from_state(&f.row),
+                    f.row.turn_nonce.as_deref()
+                ),
+                crate::services::discord::inflight::GuardedClearOutcome::Cleared
+            );
+        }
+        assert!(load_inflight_state(&ProviderKind::Claude, f.row.channel_id).is_none());
         let health = Arc::new(crate::services::discord::health::HealthRegistry::new());
         health.register("claude".into(), shared.clone()).await;
         let sink = SessionBoundDiscordRelaySink::new(health);
@@ -304,7 +336,8 @@ async fn i7441b_claude_soft_frameaccepted_ack_and_o_lookup_share_deadline_pg() {
         registry.register(session.clone(), handle.producer());
         let file = std::fs::File::open(&f.source.path).unwrap();
         let raw = std::fs::read(&f.source.path).unwrap();
-        let start = raw.iter().position(|b| *b == b'\n').unwrap() + 1;
+        let base = f.row.turn_start_offset.unwrap_or(0) as usize;
+        let mut start = base + raw[base..].iter().position(|b| *b == b'\n').unwrap() + 1;
         let data = raw[start..].to_vec();
         let source_authority = WatcherSourceAuthority {
             source_file: SourceFileIdentity::from_open_file(&file),
@@ -418,10 +451,55 @@ async fn i7441b_claude_soft_frameaccepted_ack_and_o_lookup_share_deadline_pg() {
             "FrameAccepted is not a terminal ACK"
         );
         assert!(load_inflight_state(&ProviderKind::Claude, f.row.channel_id).is_none());
+        let ack_probe = target.clone();
         if proof == 1 {
-            f.port.messages.lock().unwrap().clear();
+            if injected {
+                std::fs::write(
+                    f.root
+                        .join("o_store")
+                        .join(f.row.channel_id.to_string())
+                        .join("ledger.jsonl"),
+                    b"",
+                )
+                .unwrap();
+            } else {
+                f.port.messages.lock().unwrap().clear();
+            }
         } else if proof == 2 {
             f.port.messages.lock().unwrap()[0].content = "mismatch".into();
+        } else if proof == 3 {
+            use std::io::Write;
+            let extra = b"{\"type\":\"system\",\"subtype\":\"metadata\"}\n";
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&f.source.path)
+                .unwrap()
+                .write_all(extra)
+                .unwrap();
+            f.row.last_offset += extra.len() as u64;
+        } else if proof == 4 {
+            let other = f.source.path.with_extension("replacement");
+            let replacement = String::from_utf8(raw.clone())
+                .unwrap()
+                .replace("native-session", "different-session");
+            start = base
+                + replacement.as_bytes()[base..]
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .unwrap()
+                + 1;
+            f.row.last_offset = replacement.len() as u64;
+            std::fs::write(&other, replacement).unwrap();
+            std::fs::rename(other, &f.source.path).unwrap();
+            f.source = crate::services::tui_o::shadow::binding_reader::source_id_for(
+                "different-session",
+                &f.source.path,
+            )
+            .unwrap();
+        } else if proof == 5 {
+            std::fs::remove_file(&f.source.path).unwrap();
+        } else if proof == 6 {
+            f.port.messages.lock().unwrap().pop();
         }
         let frontier = shared
             .tmux_relay_coord(channel)
@@ -443,9 +521,10 @@ async fn i7441b_claude_soft_frameaccepted_ack_and_o_lookup_share_deadline_pg() {
             began.elapsed() < std::time::Duration::from_secs(10),
             "the complete terminal decision stays within 10s"
         );
-        assert!(
-            f.get_calls.load(Ordering::SeqCst) > 0,
-            "O lookup must execute before ACK timeout"
+        assert_eq!(
+            wait_for_session_bound_relay_delivery_ack(Some(&ack_probe), std::time::Duration::ZERO)
+                .await,
+            SessionBoundRelayAckOutcome::TimedOut
         );
         assert_eq!(
             shared
@@ -454,22 +533,26 @@ async fn i7441b_claude_soft_frameaccepted_ack_and_o_lookup_share_deadline_pg() {
                 .load(Ordering::Acquire),
             frontier
         );
-        let rows: Vec<String> = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let rows =
-                    sqlx::query_scalar("SELECT content FROM relay_dead_letter WHERE channel_id=$1")
-                        .bind(channel.to_string())
-                        .fetch_all(&pool)
-                        .await
-                        .unwrap();
-                if proof == 0 || !rows.is_empty() {
-                    break rows;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("DLQ must contain the preserved orphan tail");
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT content FROM relay_dead_letter WHERE channel_id=$1")
+                .bind(channel.to_string())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let reasons: Vec<String> =
+            sqlx::query_scalar("SELECT reason FROM relay_dead_letter WHERE channel_id=$1")
+                .bind(channel.to_string())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        for reason in &reasons {
+            assert!(reason.contains("denial=no_inflight_row"));
+            assert!(reason.contains("frame_ack_outcome=TimedOut"));
+        }
+        eprintln!(
+            "soft-stop injected={injected} proof={proof} rows={} reasons={reasons:?}",
+            rows.len()
+        );
         assert_eq!(
             rows,
             if proof == 0 {
@@ -478,6 +561,12 @@ async fn i7441b_claude_soft_frameaccepted_ack_and_o_lookup_share_deadline_pg() {
                 vec![f.body.clone()]
             }
         );
+        if !injected || proof == 0 {
+            assert!(
+                f.get_calls.load(Ordering::SeqCst) > 0,
+                "O lookup must execute before ACK timeout"
+            );
+        }
         handle.shutdown().await;
     }
     pool.close().await;
@@ -519,7 +608,17 @@ pub(in crate::services::discord) async fn assert_receipted_fixture_suppressed(
             Some(b)
         };
         let reads = f.get_calls.load(Ordering::SeqCst);
-        plan(f, &shared, &http, before, None, &mut None, false, 0).await;
+        plan(
+            f,
+            &shared,
+            &http,
+            before,
+            None,
+            &mut None,
+            false,
+            f.row.turn_start_offset.unwrap_or(0),
+        )
+        .await;
         assert!(f.get_calls.load(Ordering::SeqCst) > reads);
     }
 

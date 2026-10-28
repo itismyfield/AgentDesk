@@ -321,7 +321,7 @@ mod tests {
     const INTAKE_TURN: &str = include_str!("intake_turn.rs");
     const CREATE: &str =
         "let row = save_intake_inflight(codex_seed.as_ref(), &mut inflight_state);";
-    const ADMIT: &str = "if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {\n        return Ok(IntakeExecution::deferred(channel_id));\n    }";
+    const ADMIT: &str = "let admitted = super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await;\n        if !matches!(admitted, Ok(true)) {";
 
     fn compact(text: &str) -> String {
         text.split_whitespace().collect()
@@ -372,7 +372,7 @@ mod tests {
         use crate::services::discord::router::source_guard_support::forge;
         use crate::test_support::CommentForgery;
         let bridge = ["spawn_turn_", "bridge("].concat();
-        let admit = "if !super::foreign_row::admit(";
+        let admit = "let admitted = super::foreign_row::admit(";
         let teardown = "turn_teardown_clearance::for_turn(";
         let spawn = "tokio::task::spawn_blocking(move || {";
         for needle in [CREATE, admit, teardown, spawn, &bridge] {
