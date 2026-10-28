@@ -101,7 +101,7 @@ async fn reconcile_one(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::Fixture;
