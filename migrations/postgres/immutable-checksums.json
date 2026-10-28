@@ -782,6 +782,11 @@
       "version": 155
     },
     {
+      "path": "migrations/postgres/0156_turn_execution_receipt.sql",
+      "sha256": "ee61a92c65ca656ba7a9faa5a84b7037dc047761b1cdb3fa332a140f75a0a0ed",
+      "version": 156
+    },
+    {
       "path": "migrations/postgres/0157_channel_home_preferences.sql",
       "sha256": "a0523901b63e955bf3d7e9170180ffbc7d9b6763b26bb53015608f4932b84006",
       "version": 157

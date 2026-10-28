@@ -64,6 +64,7 @@ event() { printf '%s at=%s\n' "$*" "$(cat "$TMP_ROOT/tick")" >>"$TMP_ROOT/events
 _launchd_domain() { echo gui/501; }
 _rollback_would_brick_on_migration() { return 1; }
 _rollback_would_revert_o_writer() { return 1; }
+_rollback_would_revert_o_spool() { return 1; }
 chflags() { return 0; }
 xattr() { return 0; }
 tmux() { event "tmux $*"; return 0; }
