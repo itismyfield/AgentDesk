@@ -35,6 +35,14 @@ pub(super) fn revision(value: u64) -> AppResult<()> {
     }
 }
 
+pub(super) fn key(value: &str) -> AppResult<()> {
+    if value.trim().is_empty() {
+        Err(AppError::bad_request("idempotency_key must be nonempty"))
+    } else {
+        Ok(())
+    }
+}
+
 pub(super) fn body<T>(input: Result<Json<T>, JsonRejection>) -> AppResult<T> {
     input.map(|Json(body)| body).map_err(|error| {
         let status = match error.status() {

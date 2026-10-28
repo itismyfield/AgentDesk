@@ -951,6 +951,7 @@ async fn public_execution_is_unavailable_without_legacy_queue_or_card_effects_pg
         "SELECT COUNT(*) FROM task_dispatches",
         "SELECT COUNT(*) FROM dispatch_outbox",
         "SELECT COUNT(*) FROM kanban_cards",
+        "SELECT COUNT(*) FROM worker_nodes",
     ] {
         let count: i64 = sqlx::query_scalar(sql).fetch_one(&h.pool).await.unwrap();
         assert_eq!(count, 0);

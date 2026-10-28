@@ -7,7 +7,7 @@ use crate::services::campaign_execution::{
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Create {
+pub(in crate::server::routes) struct Create {
     pub id: String,
     pub idempotency_key: String,
     pub definition: DefinitionInput,
@@ -15,7 +15,7 @@ pub(super) struct Create {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Edit {
+pub(in crate::server::routes) struct Edit {
     pub idempotency_key: String,
     pub expected_definition_revision: u64,
     pub definition: DefinitionInput,
@@ -24,14 +24,14 @@ pub(super) struct Edit {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct CommandRequest {
+pub(in crate::server::routes) struct CommandRequest {
     pub idempotency_key: String,
     pub command: PublicCommand,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum PublicCommand {
+pub(in crate::server::routes) enum PublicCommand {
     Start {
         expected_definition_revision: u64,
     },
@@ -112,11 +112,11 @@ fn page_size() -> i64 {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct DetailQuery {}
+pub(in crate::server::routes) struct DetailQuery {}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ListQuery {
+pub(in crate::server::routes) struct ListQuery {
     #[serde(default = "page_size")]
     pub limit: i64,
     #[serde(default)]
@@ -125,7 +125,7 @@ pub(super) struct ListQuery {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct EventsQuery {
+pub(in crate::server::routes) struct EventsQuery {
     #[serde(default = "page_size")]
     pub limit: i64,
     #[serde(default)]

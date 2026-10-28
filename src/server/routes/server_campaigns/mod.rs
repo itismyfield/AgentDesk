@@ -1,17 +1,16 @@
 use axum::{
-    Json, Router,
+    Json,
     extract::{
-        DefaultBodyLimit, Path, Query, State,
+        Path, Query, State,
         rejection::{JsonRejection, QueryRejection},
     },
     http::StatusCode,
     response::Response,
-    routing::get,
 };
 use chrono::Utc;
 use serde_json::{Value, json};
 
-use super::{ApiRouter, AppState};
+use super::AppState;
 use crate::{
     db::server_campaigns as store,
     error::{AppError, AppResult, ErrorCode},
@@ -28,22 +27,6 @@ use protocol::{body, id, store_error};
 
 pub(super) const BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 
-pub(super) fn router() -> ApiRouter {
-    Router::new()
-        .route("/server-campaigns", get(list).post(create))
-        .route("/server-campaigns/{id}", get(detail))
-        .route(
-            "/server-campaigns/{id}/definition",
-            axum::routing::put(edit),
-        )
-        .route(
-            "/server-campaigns/{id}/commands",
-            axum::routing::post(command),
-        )
-        .route("/server-campaigns/{id}/events", get(events))
-        .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
-}
-
 fn pool(state: &AppState) -> AppResult<&sqlx::PgPool> {
     state.pg_pool_ref().ok_or_else(|| {
         AppError::new(
@@ -58,7 +41,7 @@ fn document(state: &CampaignState, as_of: chrono::DateTime<Utc>) -> Value {
     json!({"definition": state.definition.input(), "view": view::view(state, as_of)})
 }
 
-async fn list(
+pub(super) async fn list(
     State(state): State<AppState>,
     query: Result<Query<ListQuery>, QueryRejection>,
 ) -> AppResult<Json<Value>> {
@@ -77,7 +60,7 @@ async fn list(
     ))
 }
 
-async fn detail(
+pub(super) async fn detail(
     State(state): State<AppState>,
     Path(campaign_id): Path<String>,
     query: Result<Query<DetailQuery>, QueryRejection>,
@@ -91,11 +74,12 @@ async fn detail(
     Ok(Json(json!({"campaign": document(&campaign, Utc::now())})))
 }
 
-async fn create(
+pub(super) async fn create(
     State(state): State<AppState>,
     input: Result<Json<Create>, JsonRejection>,
 ) -> AppResult<Response> {
     let input = body(input)?;
+    protocol::key(&input.idempotency_key)?;
     id(&input.id)?;
     protocol::saved(
         store::create(
@@ -111,13 +95,14 @@ async fn create(
     )
 }
 
-async fn edit(
+pub(super) async fn edit(
     State(state): State<AppState>,
     Path(campaign_id): Path<String>,
     input: Result<Json<Edit>, JsonRejection>,
 ) -> AppResult<Response> {
     id(&campaign_id)?;
     let input = body(input)?;
+    protocol::key(&input.idempotency_key)?;
     protocol::revision(input.expected_definition_revision)?;
     let envelope = CommandEnvelope {
         idempotency_key: input.idempotency_key,
@@ -135,13 +120,14 @@ async fn edit(
     )
 }
 
-async fn command(
+pub(super) async fn command(
     State(state): State<AppState>,
     Path(campaign_id): Path<String>,
     input: Result<Json<CommandRequest>, JsonRejection>,
 ) -> AppResult<Response> {
     id(&campaign_id)?;
     let input = body(input)?;
+    protocol::key(&input.idempotency_key)?;
     let envelope = CommandEnvelope {
         idempotency_key: input.idempotency_key,
         observed_at: Utc::now(),
@@ -154,7 +140,7 @@ async fn command(
     )
 }
 
-async fn events(
+pub(super) async fn events(
     State(state): State<AppState>,
     Path(campaign_id): Path<String>,
     query: Result<Query<EventsQuery>, QueryRejection>,

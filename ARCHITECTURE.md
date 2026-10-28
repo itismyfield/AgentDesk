@@ -479,6 +479,7 @@ src/
 │   │   │   │       ├── part_10.rs
 │   │   │   │       ├── part_11.rs
 │   │   │   │       ├── public_surfaces.rs
+│   │   │   │       ├── server_campaigns.rs
 │   │   │   │       └── session_evidence.rs
 │   │   │   ├── group_response.rs
 │   │   │   ├── guides.rs
@@ -549,6 +550,11 @@ src/
 │   │   │   ├── postgres_tests.rs
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
+│   │   ├── server_campaigns/
+│   │   │   ├── dto.rs
+│   │   │   ├── http_tests.rs
+│   │   │   ├── mod.rs
+│   │   │   └── protocol.rs
 │   │   ├── tests/
 │   │   │   ├── preflight_harness/
 │   │   │   │   ├── types.rs
