@@ -144,6 +144,7 @@ pub(super) async fn stop_judged_channel_runtime(
         judged_termination = termination_recorded;
         if wait_for_turn_end(&shared, channel_id, runtime_stop_wait_timeout()).await {
             let snapshot = shared.mailbox(channel_id).snapshot().await;
+            discord::receipt_settle::stopped(&shared, &provider, channel_id, cleanup_policy).await;
             let idle_inflight_cleared = if skipped_idle_provider_interrupt {
                 discord::clear_inflight_state(&provider, channel_id.get())
             } else {
@@ -226,6 +227,7 @@ pub(super) async fn stop_judged_channel_runtime(
         .intervention_queue
         .len();
     discord::mailbox_clear_recovery_marker(&shared, channel_id).await;
+    discord::receipt_settle::stopped(&shared, &provider, channel_id, cleanup_policy).await;
     let idle_inflight_cleared = if skipped_idle_provider_interrupt {
         discord::clear_inflight_state(&provider, channel_id.get())
     } else {

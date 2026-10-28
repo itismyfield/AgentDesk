@@ -1535,6 +1535,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             watcher_tui_gate_outcome,
             terminal_delivery_committed,
         );
+        // The receipt commits before the pre-panel release or the epilogue can drop the row.
+        let receipt_kept = path_b_record::record_receipt(
+            shared.pg_pool.as_ref(),
+            inflight_before_relay
+                .as_ref()
+                .filter(|_| terminal_output_committed && !lifecycle_stage_paused),
+            (&tmux_session_name, current_offset),
+            crate::services::discord::receipt_settle::watcher_outcome(
+                summary_was_cancelled,
+                has_assistant_response,
+            ),
+        )
+        .await;
         // #4106: whether the pre-panel early release below actually released THIS
         // turn's mailbox slot. When it did, the late
         // `finish_restored_watcher_active_turn` for the same pinned id is a
@@ -2383,6 +2396,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             lifecycle_stage_paused,
             relay_suppressed,
             has_assistant_response,
+            receipt_kept,
             completion_is_stale_for_newer_turn,
             anchor_cleanup_is_stale_for_newer_turn,
             inflight_state: &inflight_state,

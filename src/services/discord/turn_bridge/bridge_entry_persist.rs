@@ -508,14 +508,24 @@ fn capture_entry_abort_notice(
 }
 
 /// Unwinds the refused turn exactly as before, then starts its notice; nothing awaits the send.
+/// When the unwind released this turn's own claim, a row still solely its own ends as failed; a
+/// row another turn, marker or watcher owns is handed over and that owner records the end.
 pub(super) async fn unwind_and_notify(
     shared: &std::sync::Arc<SharedData>,
     channel_id: ChannelId,
     cancel: &std::sync::Arc<crate::services::provider::CancelToken>,
     notice: Option<EntryAbortNotice>,
 ) {
-    crate::services::discord::mailbox_finish::unwind_unstarted_turn(shared, channel_id, cancel)
+    if crate::services::discord::mailbox_finish::unwind_unstarted_turn(shared, channel_id, cancel)
+        .await
+    {
+        crate::services::discord::receipt_settle::entry_aborted(
+            shared,
+            channel_id,
+            cancel.turn_nonce(),
+        )
         .await;
+    }
     spawn_entry_abort_notice(notice);
 }
 

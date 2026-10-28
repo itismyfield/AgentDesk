@@ -97,6 +97,13 @@ fn synthetic_finalizer_turn_id(
         + SYNTHETIC_FINALIZER_TURN_ID_FLOOR
 }
 
+/// The terminal outcome and instant an execution confirmed before its receipt commit failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(in crate::services::discord) struct TerminalReceiptStamp {
+    pub outcome: crate::db::turns::TerminalOutcome,
+    pub confirmed_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(in crate::services::discord) struct InflightTurnState {
     pub version: u32,
@@ -130,6 +137,10 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Omitted while empty, so a row without one keeps its earlier bytes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_origin_ids: Vec<String>,
+    /// A terminal this execution confirmed but could not commit; the row stays until boot or
+    /// the next admission on its channel records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_receipt: Option<TerminalReceiptStamp>,
     /// Primary key of the `intake_outbox` row that produced this turn. Worker
     /// turns carry `Some`; leader-local and legacy turns carry `None`. Production
     /// construction sets it through `adopt_intake_outbox`; serde deserialization
@@ -1050,6 +1061,7 @@ impl InflightTurnState {
             user_msg_id,
             source_message_ids: Vec::new(),
             input_origin_ids: Vec::new(),
+            terminal_receipt: None,
             intake_outbox_id: None,
             managed_submission: None,
             managed_submission_capability: None,

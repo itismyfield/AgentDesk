@@ -21,7 +21,8 @@ pub(super) fn terminal_receipt_outcome(label: &str) -> Option<TerminalOutcome> {
 }
 
 /// Awaits the execution's receipt, retrying briefly. Only a turn with its own Discord message has
-/// a managed execution id, so a message-less (TUI-direct) turn writes none here.
+/// a managed execution id, so a message-less (TUI-direct) turn writes none here. False when the
+/// commit failed and the row stays marked for boot or the next admission to record.
 pub(super) async fn record_terminal_receipt(
     pg_pool: Option<&sqlx::PgPool>,
     (provider, channel_id, user_msg_id): (&ProviderKind, ChannelId, Option<MessageId>),
@@ -29,9 +30,9 @@ pub(super) async fn record_terminal_receipt(
     session_key: Option<&str>,
     inflight_state: &InflightTurnState,
     outcome: TerminalOutcome,
-) {
+) -> bool {
     let (Some(pool), Some(user_msg_id)) = (pg_pool, user_msg_id) else {
-        return;
+        return true;
     };
     let turn_id = discord_turn_id(provider, channel_id, Some(user_msg_id), session_key, None);
     let channel = inflight_state
@@ -51,13 +52,18 @@ pub(super) async fn record_terminal_receipt(
     };
     for attempt in 1..=RECEIPT_ATTEMPTS {
         match record_turn_receipt(pool, &receipt).await {
-            Ok(()) => return,
+            Ok(()) => return true,
             Err(error) if attempt == RECEIPT_ATTEMPTS => {
-                tracing::warn!(%error, turn_id, "turn receipt not committed; inflight cleared as before");
+                tracing::warn!(%error, turn_id, "turn receipt not committed");
             }
             Err(_) => tokio::time::sleep(RECEIPT_RETRY_DELAY * attempt).await,
         }
     }
+    let stamp = crate::services::discord::inflight::TerminalReceiptStamp {
+        outcome,
+        confirmed_at: receipt.confirmed_at,
+    };
+    !crate::services::discord::receipt_settle::keep_marked(inflight_state, stamp)
 }
 
 pub(super) fn pending_delivery_outcome(

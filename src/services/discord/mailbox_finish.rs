@@ -191,14 +191,15 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
 
 /// Releases only the admitted token when setup ends before bridge guards exist.
 /// No durable-row cleanup or terminal completion is authorized by this unwind.
+/// True when this unwind released the admitted token itself.
 pub(in crate::services::discord) async fn unwind_unstarted_turn(
     shared: &std::sync::Arc<SharedData>,
     channel_id: ChannelId,
     cancel: &std::sync::Arc<crate::services::provider::CancelToken>,
-) {
+) -> bool {
     let snapshot = super::mailbox_snapshot(shared, channel_id).await;
     let Some(message_id) = snapshot.active_user_message_id else {
-        return;
+        return false;
     };
     let finish =
         mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
@@ -212,7 +213,7 @@ pub(in crate::services::discord) async fn unwind_unstarted_turn(
         )
         .await;
     let Some(removed) = finish.removed_token else {
-        return;
+        return false;
     };
     removed.mark_completion_cleanup();
     removed
@@ -227,6 +228,7 @@ pub(in crate::services::discord) async fn unwind_unstarted_turn(
             "pre_bridge_unwind",
         );
     }
+    true
 }
 
 async fn mailbox_finish_turn_if_matches_episode_started_before_inner(

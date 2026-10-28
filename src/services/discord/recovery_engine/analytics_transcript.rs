@@ -74,6 +74,9 @@ pub(super) async fn settle_recovered_answer(
     if relayed_answer.is_empty() {
         return None;
     }
+    // The recovered answer ends the execution; its receipt commits before the row can drop.
+    let completed = crate::db::turns::TerminalOutcome::Completed;
+    super::receipt_settle::record(pg_pool, state, completed, chrono::Utc::now()).await;
     let outcome =
         crate::services::discord::scheduled_turn::recovery_delivered_outcome(state, relayed_answer);
     crate::services::discord::scheduled_turn::settle(pg_pool, state, outcome).await

@@ -149,6 +149,26 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         // `start_claude` respawn of a fresh same-named session does not
         // get its inflight wiped.
         {
+            // The dead pane ended the turn this watcher pinned as failed; that receipt commits
+            // before the row goes, and a failed commit keeps the row marked instead.
+            let pane_dead = {
+                let (sess, provider, host) =
+                    (tmux_session_name.clone(), provider.clone(), host.clone());
+                tokio::task::spawn_blocking(move || {
+                    host_gate::tmux_pane_dead(&provider, channel_id, &sess, &host)
+                })
+                .await
+                .unwrap_or(false)
+            };
+            let receipt_kept = pane_dead
+                && !crate::services::discord::receipt_settle::pane_dead(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    &tmux_session_name,
+                    watcher_turn_identity.as_ref(),
+                )
+                .await;
             let sess_for_inflight = tmux_session_name.clone();
             let provider_for_inflight = provider.clone();
             let channel_id_inflight = channel_id;
@@ -157,12 +177,14 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
             let cleanup = cleanup.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 let _cleanup = cleanup;
-                if !host_gate::tmux_pane_dead(
-                    &provider_for_inflight,
-                    channel_id_inflight,
-                    &sess_for_inflight,
-                    &host,
-                ) {
+                if receipt_kept
+                    || !host_gate::tmux_pane_dead(
+                        &provider_for_inflight,
+                        channel_id_inflight,
+                        &sess_for_inflight,
+                        &host,
+                    )
+                {
                     // Pane resurrected (e.g. start_claude respawn race) or not
                     // confirmed dead — do not touch its inflight.
                     return;
