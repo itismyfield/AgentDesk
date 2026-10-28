@@ -425,7 +425,7 @@ fn finish_stage_accepts_late_pre_fence_initiation_without_reopening_new_actions(
         Command::ConfirmStopped,
         RejectionCode::InvalidState,
     );
-    // F3 owns evidence acceptance; this fixture stores a result only after the binding gate.
+    // This fixture stores a bound result; evidence acceptance remains a separate gate.
     validate_result_binding(&reconciled, &binding(&reconciled)).unwrap();
     reconciled
         .run
