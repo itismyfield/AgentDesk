@@ -664,6 +664,7 @@ fn herdr_incarnation(
         },
         first_prompt_digest: None,
         source_policy: None,
+        claude_resume: None,
     };
     PreparedIncarnation::create(context).map_err(|error| format!("create binding context: {error}"))
 }

@@ -784,4 +784,4 @@ fn missing_activity() -> SelectorFileActivity {
 mod tests;
 
 #[cfg(test)]
-mod legacy_handoff;
+pub(crate) mod legacy_handoff;

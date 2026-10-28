@@ -990,6 +990,7 @@ async fn held_actor_preserves_cursor_and_owed_output(allowed_new_source: bool) {
                 provider_root: Some(_context_root.path().canonicalize().unwrap()),
                 first_prompt_digest: None,
                 source_policy: Some("verified".into()),
+                claude_resume: None,
             };
             PreparedIncarnation::create(context.clone()).unwrap();
             let marker = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");

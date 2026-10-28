@@ -226,6 +226,7 @@ mod tests {
             provider_root: Some(root.join("codex")),
             first_prompt_digest: None,
             source_policy: Some("shadow".into()),
+            claude_resume: None,
         };
         let fresh_logs = capture_logs(|| observation.as_mut().unwrap().prepare(&fresh));
         let warnings = fresh_logs

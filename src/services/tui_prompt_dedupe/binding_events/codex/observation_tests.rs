@@ -129,6 +129,7 @@ fn whole_channel_observation_validates_typed_ownership_envelopes_alongside_legac
         provider_root: Some(h.root.path().join("sessions")),
         first_prompt_digest: None,
         source_policy: Some("verified".into()),
+        claude_resume: None,
     };
     let claim = Claim {
         session_id: ID.into(),

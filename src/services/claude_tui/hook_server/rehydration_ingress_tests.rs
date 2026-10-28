@@ -91,6 +91,7 @@ fn outer_failure(alias: bool, header: bool) {
         provider_root: Some(home.clone()),
         first_prompt_digest: None,
         source_policy: None,
+        claude_resume: None,
     };
     let prepared = PreparedIncarnation::create(context).unwrap();
     use crate::services::tmux_common as tc;
@@ -319,6 +320,7 @@ impl RegistrationRace {
             provider_root: Some(home.clone()),
             first_prompt_digest: None,
             source_policy: None,
+            claude_resume: None,
         };
         let prepared = PreparedIncarnation::create(context.clone()).unwrap();
         use crate::services::tmux_common as tc;
@@ -1025,6 +1027,7 @@ fn a_rehydrated_replacement_execution_uses_its_matching_launch_context_once() {
                 provider_root: Some(home.clone()),
                 first_prompt_digest: None,
                 source_policy: None,
+                claude_resume: None,
             })
             .unwrap();
             let marker = tc::session_temp_path(&tmux, "spawn_nonce");

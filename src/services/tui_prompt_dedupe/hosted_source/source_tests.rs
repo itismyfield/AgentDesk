@@ -93,6 +93,7 @@ impl Fixture {
             provider_root: Some(self.root.path().into()),
             first_prompt_digest: None,
             source_policy: None,
+            claude_resume: None,
         };
         binding_context::PreparedIncarnation::create(context.clone()).unwrap();
         context

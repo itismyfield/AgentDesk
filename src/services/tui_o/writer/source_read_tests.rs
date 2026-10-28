@@ -80,6 +80,7 @@ impl Fixture {
             provider_root: Some(sessions.canonicalize().unwrap()),
             first_prompt_digest: Some(format!("sha256:{:x}", Sha256::digest(PROMPT.as_bytes()))),
             source_policy: Some(if verified { "verified" } else { "legacy" }.into()),
+            claude_resume: None,
         };
         PreparedIncarnation::create(context.clone()).unwrap();
         let marker = tc::session_temp_path(&context.tmux_session, "spawn_nonce");

@@ -40,6 +40,7 @@ fn prepare_execution(
         provider_root: Some(provider_root.to_owned()),
         first_prompt_digest: None,
         source_policy: Some(policy.into()),
+        claude_resume: None,
     };
     PreparedIncarnation::create(context.clone()).unwrap();
     let marker = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");

@@ -825,6 +825,8 @@ src/
 │   │   │   └── transport_retry.rs
 │   │   ├── hook_server/
 │   │   │   ├── adoption_retry.rs
+│   │   │   ├── claude_resume_start.rs
+│   │   │   ├── claude_resume_start_tests.rs
 │   │   │   ├── codex_ingress_tests.rs
 │   │   │   ├── hook_event.rs
 │   │   │   ├── native_clear_fence_tests.rs
@@ -1972,6 +1974,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_migration_boot_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_resume_start_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_idle_stash_tests.rs
@@ -2362,6 +2365,8 @@ src/
 │   │   │   ├── turn_retirement_tests.rs
 │   │   │   └── watcher_cancel.rs
 │   │   ├── tui_prompt_relay/
+│   │   │   ├── herdr_source/
+│   │   │   │   └── claude_resume_start.rs
 │   │   │   ├── rehydration/
 │   │   │   │   ├── child_binding_tests.rs
 │   │   │   │   ├── codex_marker.rs
@@ -2372,7 +2377,8 @@ src/
 │   │   │   │   │   └── autoheal.rs
 │   │   │   │   ├── prompt_identity_e2e_tests/
 │   │   │   │   │   ├── herdr_direct_actual_client_tests.rs
-│   │   │   │   │   └── herdr_direct_roundtrip_tests.rs
+│   │   │   │   │   ├── herdr_direct_roundtrip_tests.rs
+│   │   │   │   │   └── late_hook_tests.rs
 │   │   │   │   ├── agent_text_command_e2e_tests.rs
 │   │   │   │   ├── busy_inject_e2e_tests.rs
 │   │   │   │   ├── busy_inject_thread_e2e_tests.rs
@@ -3803,11 +3809,13 @@ src/
 │   │   │   │   └── terminal.rs
 │   │   │   ├── admission_tests.rs
 │   │   │   ├── claude_fold.rs
+│   │   │   ├── claude_resume_start.rs
 │   │   │   ├── codex.rs
 │   │   │   ├── codex_claim_tests.rs
 │   │   │   ├── lane_tests.rs
 │   │   │   └── log_record.rs
 │   │   ├── hosted_source/
+│   │   │   ├── late_hook_tests.rs
 │   │   │   ├── observation.rs
 │   │   │   └── source_tests.rs
 │   │   ├── runtime_binding/

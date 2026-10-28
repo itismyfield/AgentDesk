@@ -16,6 +16,7 @@ fn context(nonce: char) -> PreparedIncarnation {
         provider_root: Some(PathBuf::from("/test/sessions")),
         first_prompt_digest: None,
         source_policy: Some("shadow".into()),
+        claude_resume: None,
     })
     .unwrap()
 }

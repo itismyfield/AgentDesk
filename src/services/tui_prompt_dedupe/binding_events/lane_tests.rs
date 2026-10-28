@@ -576,6 +576,7 @@ fn launch_cause_comes_from_the_execution_context_only_once() {
             provider_root: None,
             first_prompt_digest: None,
             source_policy: None,
+            claude_resume: None,
         };
         PreparedIncarnation::create(context).unwrap();
         fs::write(tc::session_temp_path(tmux, "spawn_nonce"), &nonce).unwrap();

@@ -111,7 +111,15 @@ async fn hook_prompt_without_watcher(herdr: bool) {
         owner: false,
         ..READY
     };
-    let (harness, relayed) = start(tmux, &[session], hooks.subscribe(), setup).await;
+    let probe = Arc::new(super::super::HookObserverProbe::default());
+    let (harness, relayed) = start_with_probe(
+        tmux,
+        &[session],
+        hooks.subscribe(),
+        setup,
+        Some(probe.clone()),
+    )
+    .await;
     dedupe::register_tmux_channel(tmux, super::CHANNEL_ID);
     assert_eq!(
         harness
@@ -130,8 +138,25 @@ async fn hook_prompt_without_watcher(herdr: bool) {
     );
 
     post_hook(&hooks, session, PROMPT).await;
-    wait_for_relays(&relayed, 1).await;
     if herdr {
+        assert!(
+            wait_until(WAIT, || {
+                let reached = probe.processed.load(Ordering::SeqCst) == 1;
+                Box::pin(async move { reached })
+            })
+            .await,
+            "the actual Herdr hook observation was processed"
+        );
+        assert_eq!(probe.observation_calls.load(Ordering::SeqCst), 1);
+        assert!(!dedupe::external_input_relay_lease_present(
+            PROVIDER_KEY,
+            tmux,
+            super::CHANNEL_ID
+        ));
+        assert!(!dedupe::is_ssh_direct_observation_pending(
+            PROVIDER_KEY,
+            tmux
+        ));
         assert!(harness.shared.pg_pool.is_none());
         assert!(
             !crate::services::tui_prompt_dedupe::hosted_source::current_execution_for_adoption(
@@ -143,13 +168,15 @@ async fn hook_prompt_without_watcher(herdr: bool) {
             .await,
             "missing_live_authority_is_unverified_contract"
         );
+    } else {
+        wait_for_relays(&relayed, 1).await;
     }
     let counts = settled_counts(&harness).await;
     let log = String::from_utf8(REGISTRY_MISS_LOG.lock().unwrap().clone()).unwrap();
     eprintln!("registry_miss herdr={herdr} posts/announcements/placeholders={counts:?}\n{log}");
     assert_eq!(counts, (0, 0, 0), "unverified_hook_posts_nothing_contract");
     assert!(harness.messages().is_empty());
-    assert_eq!(relayed.load(Ordering::SeqCst), 1);
+    assert_eq!(relayed.load(Ordering::SeqCst), usize::from(!herdr));
     assert_eq!(
         harness
             .shared
@@ -1002,6 +1029,7 @@ async fn bound_live_hook_without_watcher(
         provider_root: None,
         first_prompt_digest: None,
         source_policy: None,
+        claude_resume: None,
     })
     .unwrap();
     rig.run_provider(&incarnation.path, false);
@@ -1067,6 +1095,13 @@ async fn bound_live_hook_without_watcher(
         "herdr",
     )
     .unwrap();
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(logical, "spawn_nonce"),
+        nonce,
+    )
+    .unwrap();
+    dedupe::install_herdr_execution(logical, nonce);
+    dedupe::admit_herdr_execution(logical, nonce);
     assert!(
         dedupe::hosted_source::current_execution_for_adoption(
             &h.shared,
@@ -1132,8 +1167,9 @@ async fn bound_live_hook_without_watcher(
         h.shared
             .tmux_watchers
             .owner_channel_for_tmux_session(logical),
-        None
+        Some(h.channel_id)
     );
+    assert!(h.shared.tmux_watchers.get(&h.channel_id).is_none());
     assert!(
         rig.sends().is_empty(),
         "mirroring a typed prompt sends no provider input"
@@ -1160,3 +1196,6 @@ async fn bound_live_hook_without_watcher(
 #[cfg(unix)]
 #[path = "prompt_identity_e2e_tests/herdr_direct_roundtrip_tests.rs"]
 mod herdr_direct_roundtrip_tests;
+#[cfg(unix)]
+#[path = "prompt_identity_e2e_tests/late_hook_tests.rs"]
+mod late_hook_tests;

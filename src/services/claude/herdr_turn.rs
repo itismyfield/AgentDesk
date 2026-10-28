@@ -155,6 +155,8 @@ pub(crate) struct AttachRequest<'a> {
     pub session_id: &'a str,
     pub transcript: &'a Path,
     pub target: &'a HerdrTarget,
+    #[cfg(test)]
+    pub resume_source: Option<&'a crate::services::tui_prompt_dedupe::binding_events::SourceId>,
 }
 
 /// What a turn takes from its caller: launch host, hook events and the source reconcile.
@@ -387,9 +389,26 @@ fn pending_source(
     record: &HostedExecution,
 ) -> Result<Attached, String> {
     let nonce = &record.execution_nonce;
-    let session_id = execution_context("claude", nonce)?
+    let context = execution_context("claude", nonce)?;
+    let session_id = context
         .expected_native_session_id
+        .clone()
         .ok_or("herdr turn: the pending launch named no session")?;
+    #[cfg(test)]
+    if context.claude_resume.is_some() {
+        let source = crate::services::tmux_common::with_tmux_source_authority(
+            &turn.owner.logical_key,
+            |_| {
+                crate::services::tui_prompt_dedupe::binding_events::claude_resume_start::started_source(&context)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "herdr turn: resume has no durable start".to_owned())
+            },
+        )?;
+        if record.expected.is_none() {
+            never_attached::probe_again(turn, runtime, ports)?;
+        }
+        return attach(turn, runtime, ports, nonce, &session_id, Some(&source));
+    }
     let started = latest_logged(turn).is_some_and(|event| {
         event.execution_nonce.as_deref() == Some(nonce.as_str())
             && logged_session(&event.new) == Some(session_id.as_str())
@@ -401,7 +420,7 @@ fn pending_source(
     if record.expected.is_none() {
         never_attached::probe_again(turn, runtime, ports)?;
     }
-    attach(turn, runtime, ports, nonce, &session_id)
+    attach(turn, runtime, ports, nonce, &session_id, None)
 }
 
 /// The pane's latest logged record that moved it; refusal audits do not.
@@ -589,7 +608,7 @@ fn launched_source(
         &fresh.session_id,
         turn.cancel.as_deref(),
     )?;
-    attach(turn, runtime, ports, &nonce, &fresh.session_id)
+    attach(turn, runtime, ports, &nonce, &fresh.session_id, None)
 }
 
 fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>) -> HerdrLaunch {
@@ -624,6 +643,32 @@ fn session_started(
     session_id: &str,
     cancel: Option<&CancelToken>,
 ) -> Result<(), String> {
+    session_started_selected(runtime, hooks, session_id, cancel, None)
+}
+
+#[cfg(test)]
+pub(crate) fn resumed_session_started(
+    runtime: &Handle,
+    hooks: &mut broadcast::Receiver<HookEvent>,
+    context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    cancel: Option<&CancelToken>,
+) -> Result<(), String> {
+    let session = context
+        .expected_native_session_id
+        .as_deref()
+        .ok_or("herdr turn: resume session absent")?;
+    session_started_selected(runtime, hooks, session, cancel, Some(context))
+}
+
+fn session_started_selected(
+    runtime: &Handle,
+    hooks: &mut broadcast::Receiver<HookEvent>,
+    session_id: &str,
+    cancel: Option<&CancelToken>,
+    resume: Option<&crate::services::tui_prompt_dedupe::binding_context::BindingContext>,
+) -> Result<(), String> {
+    #[cfg(not(test))]
+    let _ = resume;
     let deadline = Instant::now() + SESSION_START_WAIT;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -637,6 +682,10 @@ fn session_started(
                     && event.kind == HookEventKind::SessionStart
                     && event.session_id == session_id =>
             {
+                #[cfg(test)]
+                if resume.is_some_and(|context| !crate::services::tui_prompt_dedupe::binding_events::claude_resume_start::matches_start(context, &event)) {
+                    continue;
+                }
                 return Ok(());
             }
             Ok(Err(RecvError::Closed)) => return Err("herdr turn: hook events closed".into()),
@@ -669,6 +718,7 @@ fn attach(
     ports: &dyn HerdrTurnPorts,
     nonce: &str,
     session_id: &str,
+    resume_source: Option<&crate::services::tui_prompt_dedupe::binding_events::SourceId>,
 ) -> Result<Attached, String> {
     let record = match runtime.block_on(load(turn.pool, &turn.owner)) {
         HostedLookup::Found(found) => match found.record {
@@ -678,13 +728,32 @@ fn attach(
         other => return Err(format!("herdr turn: row unreadable: {other:?}")),
     };
     let target = gate(&record)?;
-    let transcript = claude_transcript_path(Path::new(turn.working_dir), session_id, None)?;
+    #[cfg(test)]
+    let transcript = if let Some(source) = resume_source {
+        if source.session_id != session_id
+            || !crate::services::tui_prompt_dedupe::binding_events::codex::source_file_matches(
+                source,
+            )
+        {
+            return Err("herdr turn: resume source changed before attach".into());
+        }
+        source.path.clone()
+    } else {
+        claude_transcript_path(Path::new(turn.working_dir), session_id, None)?
+    };
+    #[cfg(not(test))]
+    let transcript = {
+        let _ = resume_source;
+        claude_transcript_path(Path::new(turn.working_dir), session_id, None)?
+    };
     let request = AttachRequest {
         owner: &turn.owner,
         record: &record,
         session_id,
         transcript: &transcript,
         target: &target,
+        #[cfg(test)]
+        resume_source,
     };
     let bound = ports.attach(&request)?;
     Ok(Attached {

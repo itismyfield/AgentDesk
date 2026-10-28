@@ -32,6 +32,7 @@ fn context(root: &Path, tmux: &str, policy: &str) -> BindingContext {
         provider_root: Some(root.canonicalize().unwrap()),
         first_prompt_digest: None,
         source_policy: Some(policy.into()),
+        claude_resume: None,
     }
 }
 

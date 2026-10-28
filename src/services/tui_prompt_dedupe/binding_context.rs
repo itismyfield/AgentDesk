@@ -34,6 +34,14 @@ pub(crate) struct BindingContext {
     pub first_prompt_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_resume: Option<ClaudeResumeSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ClaudeResumeSource {
+    pub source: crate::services::tui_o::shadow::SourceId,
+    pub previous_nonce: String,
 }
 
 #[derive(Debug)]
@@ -346,6 +354,7 @@ impl PreparedIncarnation {
             provider_root,
             first_prompt_digest: pinned.0,
             source_policy: pinned.1,
+            claude_resume: None,
         };
         sweep(
             provider,

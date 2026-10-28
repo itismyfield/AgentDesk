@@ -47,6 +47,7 @@ impl Fixture {
             provider_root: Some(root.path().to_owned()),
             first_prompt_digest: None,
             source_policy: Some(policy.into()),
+            claude_resume: None,
         };
         let prepared = PreparedIncarnation::create(context.clone()).unwrap();
         let tc = crate::services::tmux_common::session_temp_path;

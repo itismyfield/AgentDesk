@@ -280,6 +280,7 @@ async fn a_codex_proof_read_after_a_renumber_still_allows_the_stored_cursor() {
         provider_root: Some(root.path().canonicalize().unwrap()),
         first_prompt_digest: None,
         source_policy: Some("verified".into()),
+        claude_resume: None,
     };
     PreparedIncarnation::create(context.clone()).unwrap();
     let marker = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");

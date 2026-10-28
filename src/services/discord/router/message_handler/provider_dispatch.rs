@@ -610,6 +610,25 @@ mod herdr {
 
         fn attach(&self, request: &AttachRequest<'_>) -> Result<bool, String> {
             let reader = GateReader::of(request.record, request.target)?;
+            #[cfg(test)]
+            if let Some(source) = request.resume_source {
+                let attached = Handle::current().block_on(
+                    crate::services::discord::tui_prompt_relay::herdr_source::attach_resumed_herdr_source(
+                        self.pool,
+                        request.owner,
+                        self.channel_id,
+                        &request.record.execution_nonce,
+                        source,
+                        &reader,
+                    ),
+                );
+                return match attached {
+                    HerdrSourceAttach::Published { bound, .. } => Ok(bound),
+                    other => Err(format!(
+                        "herdr turn: resumed source not attached: {other:?}"
+                    )),
+                };
+            }
             let attached = Handle::current().block_on(attach_launched_herdr_source(
                 self.pool,
                 request.owner,

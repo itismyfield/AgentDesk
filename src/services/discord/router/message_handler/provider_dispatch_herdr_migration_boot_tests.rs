@@ -731,6 +731,7 @@ fn actual_dispatch_shadow_latency_and_history_lock_samples_pg() {
             ),
             first_prompt_digest: None,
             source_policy: None,
+            claude_resume: None,
         },
     )
     .unwrap();

@@ -1,0 +1,3 @@
+resolver | src/services/claude_tui/hook_server/claude_resume_start.rs
+resolver | src/services/discord/tui_prompt_relay/herdr_source/claude_resume_start.rs
+resolver | src/services/tui_prompt_dedupe/binding_events/claude_resume_start.rs

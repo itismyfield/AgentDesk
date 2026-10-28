@@ -312,6 +312,10 @@ pub(crate) fn capture_hook(
 #[path = "hosted_source/source_tests.rs"]
 pub(crate) mod tests;
 
+#[cfg(all(test, unix))]
+#[path = "hosted_source/late_hook_tests.rs"]
+mod late_hook_tests;
+
 pub(crate) async fn adoption_channel(
     shared: &Arc<SharedData>,
     prompt: &super::ObservedTuiPrompt,
@@ -325,14 +329,41 @@ pub(crate) async fn adoption_channel(
         );
         return None;
     };
-    if !current_execution_for_adoption(
-        shared,
-        &prompt.provider,
-        channel_id,
-        &prompt.tmux_session_name,
-    )
-    .await
-    {
+    let pin = prompt.hosted_source.as_ref();
+    let requires_pin = if prompt.provider == "claude" {
+        match herdr_evidence(channel_id.get(), &prompt.tmux_session_name, None) {
+            Ok(required) => required || pin.is_some_and(|pin| pin.hosted_admission_required),
+            Err(_) => return None,
+        }
+    } else {
+        false
+    };
+    let current = if requires_pin {
+        let pin = pin?;
+        if pin.provider != prompt.provider
+            || pin.channel_id != channel_id.get()
+            || pin.logical_key != prompt.tmux_session_name
+        {
+            return None;
+        }
+        current_execution_for_adoption_pinned(
+            shared,
+            &prompt.provider,
+            channel_id,
+            &prompt.tmux_session_name,
+            Some(&pin.execution_nonce),
+        )
+        .await
+    } else {
+        current_execution_for_adoption(
+            shared,
+            &prompt.provider,
+            channel_id,
+            &prompt.tmux_session_name,
+        )
+        .await
+    };
+    if !current {
         return None;
     }
     Some(channel_id)
@@ -345,10 +376,20 @@ pub(crate) async fn current_execution_for_adoption(
     channel: ChannelId,
     logical: &str,
 ) -> bool {
+    current_execution_for_adoption_pinned(shared, provider, channel, logical, None).await
+}
+
+async fn current_execution_for_adoption_pinned(
+    shared: &Arc<SharedData>,
+    provider: &str,
+    channel: ChannelId,
+    logical: &str,
+    expected_nonce: Option<&str>,
+) -> bool {
     match herdr_evidence(channel.get(), logical, None) {
-        Ok(false) => return true,
+        Ok(false) if expected_nonce.is_none() => return true,
         Err(_) => return false,
-        Ok(true) => {}
+        Ok(_) => {}
     }
     let Some(pool) = shared.pg_pool.as_ref() else {
         return false;
@@ -368,7 +409,10 @@ pub(crate) async fn current_execution_for_adoption(
     let HostedRecord::Known(record) = &observed.record else {
         return false;
     };
-    if record.state != HostedState::Bound || record.owner.logical_key != logical {
+    if record.state != HostedState::Bound
+        || record.owner.logical_key != logical
+        || expected_nonce.is_some_and(|nonce| nonce != record.execution_nonce)
+    {
         return false;
     }
     execution_current(record).await

@@ -32,6 +32,7 @@ pub(crate) fn launch(channel: u64, source: &SourceId) -> PreparedLaunch {
             provider_root: source.path.parent().map(Path::to_path_buf),
             first_prompt_digest: Some(format!("sha256:{}", "a".repeat(64))),
             source_policy: Some("verified".into()),
+            claude_resume: None,
         },
         episode: TurnEpisodeRef {
             channel_id: channel,

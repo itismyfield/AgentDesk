@@ -18,6 +18,8 @@ mod hook_event;
 pub use hook_event::HookEvent;
 pub(crate) use hook_event::HookFanout;
 pub(crate) mod adoption_retry;
+#[cfg(all(test, unix))]
+pub(crate) mod claude_resume_start;
 pub(crate) mod observation_ingress;
 pub(crate) mod relay_receipts;
 pub(crate) use adoption_retry::retry_deferred_claude_adoptions;
@@ -128,6 +130,8 @@ pub struct HookServerState {
     claude_projects_root: Option<PathBuf>,
     #[cfg(test)]
     pub(crate) broadcast_probe: Option<std::sync::Arc<HookBroadcastProbe>>,
+    #[cfg(all(test, unix))]
+    pub(crate) claude_resume_start: Option<Arc<claude_resume_start::Capability>>,
 }
 
 impl HookServerState {
@@ -139,6 +143,8 @@ impl HookServerState {
             relay_receipts: RelayReceiptLedger::default(),
             #[cfg(test)]
             broadcast_probe: None,
+            #[cfg(all(test, unix))]
+            claude_resume_start: None,
             claude_projects_root:
                 crate::services::claude_tui::hook_output_guard::configured_claude_projects_root(),
         }
@@ -255,6 +261,32 @@ fn hook_routing_session_ids(
     }
 }
 
+fn observe_received_binding(
+    state: &HookServerState,
+    provider: &str,
+    event: &str,
+    command: Option<&str>,
+    payload_session: Option<&str>,
+    payload: &Value,
+    headers: &HeaderMap,
+) -> observation_ingress::IngressOutcome {
+    #[cfg(all(test, unix))]
+    if let Some(outcome) = state.claude_resume_start.as_ref().and_then(|capability| {
+        capability.observe(provider, event, command, payload_session, payload, headers)
+    }) {
+        return outcome;
+    }
+    let _ = state;
+    observation_ingress::observe_binding_hook(
+        provider,
+        event,
+        command,
+        payload_session,
+        payload,
+        headers,
+    )
+}
+
 async fn receive_hook(
     State(state): State<HookServerState>,
     Path((provider, event)): Path<(String, String)>,
@@ -293,7 +325,8 @@ async fn receive_hook(
     let command_session_id = query.session_id.as_deref().and_then(non_empty_string);
     let observed_payload_session_id = payload_session_id(&payload);
     // Persist-before-ACK: nothing below may run for a hook whose binding evidence is not durable.
-    let ingress = observation_ingress::observe_binding_hook(
+    let ingress = observe_received_binding(
+        &state,
         &provider,
         &event,
         command_session_id.as_deref(),

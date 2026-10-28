@@ -88,6 +88,7 @@ impl Fixture {
             provider_root: Some(sessions.canonicalize().unwrap()),
             first_prompt_digest: Some(digest(PROMPT)),
             source_policy: policy.map(str::to_owned),
+            claude_resume: None,
         };
         let prepared = PreparedIncarnation::create(context.clone()).unwrap();
         let marker =

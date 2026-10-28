@@ -444,6 +444,7 @@ mod pg {
                 provider_root: None,
                 first_prompt_digest: None,
                 source_policy: None,
+                claude_resume: None,
             };
             PreparedIncarnation::create(launch).unwrap();
             let marker =
@@ -619,6 +620,7 @@ mod pg {
                 provider_root: None,
                 first_prompt_digest: None,
                 source_policy: None,
+                claude_resume: None,
             })
             .unwrap();
             let marker =
@@ -724,6 +726,7 @@ mod pg {
                 provider_root: None,
                 first_prompt_digest: None,
                 source_policy: None,
+                claude_resume: None,
             };
             PreparedIncarnation::create(launch).unwrap();
             // A cleared session's transcript appears with its first prompt: two clears are outlived

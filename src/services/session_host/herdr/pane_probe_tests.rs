@@ -162,6 +162,7 @@ pub(crate) fn context(nonce: &str) -> PathBuf {
         provider_root: None,
         first_prompt_digest: None,
         source_policy: None,
+        claude_resume: None,
     };
     PreparedIncarnation::create(context).unwrap().path
 }

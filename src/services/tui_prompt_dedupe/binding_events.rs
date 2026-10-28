@@ -24,6 +24,8 @@ pub(crate) use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
 pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
 mod claude_fold;
+#[cfg(all(test, unix))]
+pub(crate) mod claude_resume_start;
 use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
 #[cfg(unix)]
@@ -665,8 +667,7 @@ impl Writer {
                 file.set_len(read.complete_len)?;
             }
             // Lines read back after a restart may predate their fsync, so make them durable before use.
-            fault("reload")?;
-            file.sync_all()?;
+            sync_event_file(&file, "reload")?;
             fsync_parent_dir(path)?;
             fsync_parent_dir(dir)?;
         }
@@ -982,8 +983,7 @@ impl Writer {
         let mut write = || -> io::Result<()> {
             fault("write")?;
             file.write_all(&line)?;
-            fault("sync")?;
-            file.sync_all()?;
+            sync_event_file(&file, "sync")?;
             if !parents_synced {
                 // The first append of this process also makes the file and directory entries durable.
                 fsync_parent_dir(path)?;
@@ -1000,6 +1000,51 @@ impl Writer {
         self.parents_synced = true;
         Ok(())
     }
+}
+
+fn sync_event_file(file: &fs::File, step: &'static str) -> io::Result<()> {
+    #[cfg(test)]
+    file_sync_observed(FileSyncPoint::Entered(step));
+    fault(step)?;
+    file.sync_all()?;
+    #[cfg(test)]
+    file_sync_observed(FileSyncPoint::Completed(step));
+    Ok(())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileSyncPoint {
+    Entered(&'static str),
+    Completed(&'static str),
+}
+
+#[cfg(test)]
+type FileSyncObserver = std::sync::Arc<dyn Fn(FileSyncPoint) + Send + Sync>;
+
+#[cfg(test)]
+thread_local! {
+    static FILE_SYNC_OBSERVER: std::cell::RefCell<Option<FileSyncObserver>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn file_sync_observed(point: FileSyncPoint) {
+    let observer = FILE_SYNC_OBSERVER.with_borrow(Clone::clone);
+    if let Some(observer) = observer {
+        observer(point);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_file_sync_observer<R>(observer: FileSyncObserver, run: impl FnOnce() -> R) -> R {
+    struct Restore(Option<FileSyncObserver>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FILE_SYNC_OBSERVER.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+    let _restore = Restore(FILE_SYNC_OBSERVER.with(|slot| slot.replace(Some(observer))));
+    run()
 }
 
 #[cfg(test)]

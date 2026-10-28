@@ -62,6 +62,7 @@ fn actual_verified_warm_consumes_ticket_without_sealing_or_later_reuse() {
         provider_root: Some(sessions.clone()),
         first_prompt_digest: Some(format!("sha256:{:x}", Sha256::digest(prompt.as_bytes()))),
         source_policy: Some("verified".into()),
+        claude_resume: None,
     };
     PreparedIncarnation::create(context.clone()).unwrap();
     dedupe::codex_verified::set_permission_for_tests(

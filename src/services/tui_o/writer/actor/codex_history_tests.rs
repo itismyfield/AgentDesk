@@ -77,6 +77,7 @@ fn inputs(mode: &str) -> Inputs {
             provider_root: Some(abs("/native").into()),
             first_prompt_digest: Some("first prompt".into()),
             source_policy: Some("shadow".into()),
+            claude_resume: None,
         },
         current: source(1),
         events: vec![event(1, NONCE, None, BindingTarget::Source(source(1)))],

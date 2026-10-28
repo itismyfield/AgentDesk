@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Owner {
+pub(crate) struct Owner {
     pub runtime_root: PathBuf,
     pub provider: String,
     pub token_hash: String,
@@ -135,7 +136,7 @@ pub(super) trait Host {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum Invalidation {
+pub(crate) enum Invalidation {
     Clear,
     Resume,
 }
@@ -172,16 +173,25 @@ enum Step {
     FileSync,
     Rename,
     ParentSync,
+    MigrationSync,
+    RootSync,
 }
 
-pub(super) struct Store {
+#[derive(Default)]
+struct PublicationTrace {
+    phase: Option<Phase>,
+    operations: Vec<(Step, bool)>,
+}
+
+pub(crate) struct Store {
     root: PathBuf,
     dir: PathBuf,
     owner: Owner,
     fail: Option<Step>,
+    publication: Arc<Mutex<PublicationTrace>>,
 }
 
-struct Lock(File);
+pub(crate) struct Lock(File);
 impl Drop for Lock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
@@ -202,7 +212,7 @@ fn safe_dir(path: &Path) -> io::Result<()> {
 }
 
 impl Store {
-    pub(super) fn open(root: &Path, owner: &Owner) -> io::Result<Self> {
+    pub(crate) fn open(root: &Path, owner: &Owner) -> io::Result<Self> {
         if owner.provider != "claude"
             || owner.channel == 0
             || owner.logical_key.is_empty()
@@ -223,7 +233,12 @@ impl Store {
             dir,
             owner: owner.clone(),
             fail: None,
+            publication: Arc::new(Mutex::new(PublicationTrace::default())),
         })
+    }
+
+    pub(crate) fn direct_effect_permit(&self) -> io::Result<Lock> {
+        self.lock("effect.lock")
     }
 
     fn lock(&self, name: &str) -> io::Result<Lock> {
@@ -268,12 +283,18 @@ impl Store {
         Ok(Some(receipt))
     }
 
-    fn strike(&self, step: Step) -> io::Result<()> {
-        if self.fail == Some(step) {
+    fn operation(&self, step: Step, work: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+        let result = if self.fail == Some(step) {
             Err(io::Error::other(format!("injected {step:?}")))
         } else {
-            Ok(())
-        }
+            work()
+        };
+        self.publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .operations
+            .push((step, result.is_ok()));
+        result
     }
 
     fn publish(&self, intent: &Intent, state: Phase) -> io::Result<()> {
@@ -286,6 +307,13 @@ impl Store {
         if bytes.len() > 64 * 1024 {
             return Err(io::Error::other("oversized receipt"));
         }
+        *self
+            .publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = PublicationTrace {
+            phase: Some(receipt.state),
+            operations: Vec::new(),
+        };
         let path = self.dir.join("receipt.json");
         let tmp = self.dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
         use std::os::unix::fs::OpenOptionsExt;
@@ -294,24 +322,24 @@ impl Store {
             .write(true)
             .mode(0o600)
             .open(&tmp)?;
-        self.strike(Step::Write)?;
-        file.write_all(&bytes)?;
-        self.strike(Step::FileSync)?;
-        file.sync_all()?;
-        self.strike(Step::Rename)?;
-        fs::rename(tmp, &path)?;
-        self.strike(Step::ParentSync)?;
-        runtime_store::fsync_parent_dir(&path)?;
-        runtime_store::fsync_parent_dir(&self.dir)?;
-        runtime_store::fsync_parent_dir(
-            self.dir
-                .parent()
-                .ok_or_else(|| io::Error::other("no receipt parent"))?,
-        )
+        self.operation(Step::Write, || file.write_all(&bytes))?;
+        self.operation(Step::FileSync, || file.sync_all())?;
+        self.operation(Step::Rename, || fs::rename(tmp, &path))?;
+        self.operation(Step::ParentSync, || runtime_store::fsync_parent_dir(&path))?;
+        self.operation(Step::MigrationSync, || {
+            runtime_store::fsync_parent_dir(&self.dir)
+        })?;
+        self.operation(Step::RootSync, || {
+            runtime_store::fsync_parent_dir(
+                self.dir
+                    .parent()
+                    .ok_or_else(|| io::Error::other("no receipt parent"))?,
+            )
+        })
     }
 
     /// Invalidation and the short selector/revision commit share one gate, including absent receipts.
-    pub(super) fn with_selector_change<R>(
+    pub(crate) fn with_selector_change<R>(
         &self,
         cause: Invalidation,
         commit: impl FnOnce() -> Result<R, String>,

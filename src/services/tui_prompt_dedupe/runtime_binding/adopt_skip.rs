@@ -188,6 +188,23 @@ pub(crate) fn herdr_claim_admission(
     }
 }
 
+/// The caller's source authority keeps this exact admission unchanged through the claim.
+/// Drop the map guard here so the claim may safely acquire the dedupe state lock.
+pub(crate) fn herdr_hook_admitted_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    execution_nonce: &str,
+) -> bool {
+    !execution_nonce.is_empty()
+        && herdr_claim_admission(authority.session(), true)
+            .ok()
+            .flatten()
+            .is_some_and(|executions| {
+                executions
+                    .get(authority.session())
+                    .is_some_and(|(nonce, admitted)| nonce == execution_nonce && *admitted)
+            })
+}
+
 /// A launch installed execution `nonce` on `logical`: it is held until a reconcile admits it, and
 /// an earlier execution's admission ends here.
 pub(crate) fn install_herdr_execution(logical: &str, nonce: &str) {

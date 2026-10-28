@@ -232,6 +232,7 @@ impl CanaryFixture {
             provider_root: Some(sessions.canonicalize().unwrap()),
             first_prompt_digest: Some(format!("sha256:{:x}", Sha256::digest(PROMPT.as_bytes()))),
             source_policy: Some("verified".into()),
+            claude_resume: None,
         };
         if prefix > 0 {
             let directory = root.path().join(p5::BINDING_EVENTS_DIR);

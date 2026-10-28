@@ -45,6 +45,19 @@ pub(crate) struct Ingress {
 }
 
 impl Ingress {
+    pub(crate) fn router_for_tests(&self) -> Router {
+        self.app.clone()
+    }
+
+    pub(crate) fn enable_resume_start(
+        &mut self,
+        context: crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    ) {
+        self.state.claude_resume_start = Some(std::sync::Arc::new(
+            super::super::claude_resume_start::Capability { context },
+        ));
+        self.app = hook_receiver_router_with_state(self.state.clone());
+    }
     pub(crate) fn new() -> Self {
         let state_lock = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let rotations = lock_claude_session_rotations_for_tests();

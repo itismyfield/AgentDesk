@@ -56,6 +56,7 @@ fn fixture() -> (Snapshot, Vec<BindingEvent>) {
         provider_root: Some("/native".into()),
         first_prompt_digest: None,
         source_policy: Some("shadow".into()),
+        claude_resume: None,
     };
     let events = vec![
         event(1, PRIOR, None, BindingTarget::Source(source(1))),

@@ -33,6 +33,11 @@ use crate::services::tui_prompt_dedupe::{self as dedupe, Persisted, Record, TuiR
 use dedupe::withhold_herdr_execution;
 use dedupe::{admit_herdr_execution, runtime_binding_for_tmux_session_under_source_authority};
 
+#[cfg(all(test, unix))]
+mod claude_resume_start;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use claude_resume_start::attach_resumed_herdr_source;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum HerdrSourceAttach {
     /// The row holds no hosted execution; the tmux path keeps it.

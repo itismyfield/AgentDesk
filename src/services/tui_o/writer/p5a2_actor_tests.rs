@@ -130,6 +130,7 @@ impl Fixture {
             provider_root: Some(base.clone()),
             first_prompt_digest: Some(format!("sha256:{}", "a".repeat(64))),
             source_policy: Some("verified".into()),
+            claude_resume: None,
         };
         PreparedIncarnation::create(context.clone()).unwrap();
         let marker = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");

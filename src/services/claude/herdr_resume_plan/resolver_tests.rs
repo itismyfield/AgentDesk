@@ -405,6 +405,7 @@ fn context(fx: &Fixture) -> BindingContext {
         provider_root: Some(fx.home.join("projects")),
         first_prompt_digest: None,
         source_policy: None,
+        claude_resume: None,
     }
 }
 

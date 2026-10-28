@@ -244,6 +244,7 @@ impl Terminating {
             provider_root: Some(sessions.clone()),
             first_prompt_digest: None,
             source_policy: None,
+            claude_resume: None,
         };
         let prepared = PreparedIncarnation::create(context).unwrap();
         let key = (token_hash.as_str(), session_key.as_str());

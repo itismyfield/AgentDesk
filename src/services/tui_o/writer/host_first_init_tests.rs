@@ -484,6 +484,7 @@ fn settled_resume_for_first_init(channel: u64, history: bool) -> (Harness, Settl
         provider_root: Some(sessions.canonicalize().unwrap()),
         first_prompt_digest: None,
         source_policy: Some("verified".into()),
+        claude_resume: None,
     };
     PreparedIncarnation::create(context.clone()).unwrap();
     let marker = tc::session_temp_path(&context.tmux_session, "spawn_nonce");

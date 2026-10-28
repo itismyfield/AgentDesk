@@ -48,6 +48,7 @@ fn launched(root: &Path) -> BindingContext {
         provider_root: Some(root.canonicalize().unwrap()),
         first_prompt_digest: None,
         source_policy: Some("shadow".into()),
+        claude_resume: None,
     };
     PreparedIncarnation::create(context.clone()).unwrap();
     context

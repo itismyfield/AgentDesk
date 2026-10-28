@@ -68,6 +68,7 @@ impl Pane {
             provider_root: None,
             first_prompt_digest: None,
             source_policy: None,
+            claude_resume: None,
         })
         .unwrap();
         std::fs::write(tc::session_temp_path(&tmux, "spawn_nonce"), &nonce).unwrap();

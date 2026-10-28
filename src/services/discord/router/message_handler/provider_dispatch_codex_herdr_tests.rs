@@ -759,6 +759,7 @@ fn without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg() 
             provider_root: Some(fx.home.join("sessions")),
             first_prompt_digest: None,
             source_policy: None,
+            claude_resume: None,
         },
     )
     .unwrap();

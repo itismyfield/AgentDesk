@@ -8,6 +8,26 @@ const OLD_NONCE: &str = "11111111111141118111111111111111";
 const SUCCESSOR: &str = "22222222222242228222222222222222";
 const OTHER_NONCE: &str = "33333333333343338333333333333333";
 const READY: &str = include_str!("../../../../tests/fixtures/tui_input/claude-2.1.293-idle.txt");
+const RECEIPT_STEPS: [Step; 6] = [
+    Step::Write,
+    Step::FileSync,
+    Step::Rename,
+    Step::ParentSync,
+    Step::MigrationSync,
+    Step::RootSync,
+];
+
+fn assert_publication_synced(publication: &Arc<Mutex<PublicationTrace>>, phase: &Phase) {
+    let trace = publication
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(trace.phase.as_ref(), Some(phase), "current receipt phase");
+    assert_eq!(
+        trace.operations,
+        RECEIPT_STEPS.map(|step| (step, true)),
+        "effect requires every receipt operation to succeed in order"
+    );
+}
 
 struct Rig {
     root: tempfile::TempDir,
@@ -92,6 +112,7 @@ struct FakeHost {
     created: Create,
     bad_at: Option<Effect>,
     store_dir: PathBuf,
+    publication: Option<Arc<Mutex<PublicationTrace>>>,
     control_race: Option<OldProbe>,
     prepare_race: Option<OldProbe>,
     pending_race: Option<OldProbe>,
@@ -116,6 +137,7 @@ impl FakeHost {
             created: Create::Acknowledged,
             bad_at: None,
             store_dir: PathBuf::new(),
+            publication: None,
             control_race: None,
             prepare_race: None,
             pending_race: None,
@@ -174,6 +196,12 @@ impl Host for FakeHost {
             self.probes.push_front(replacement);
         }
         prewrite(self)?;
+        assert_publication_synced(
+            self.publication
+                .as_ref()
+                .expect("store publication observer"),
+            &Phase::ExitMayHaveBeenSent,
+        );
         let bytes = fs::read(self.store_dir.join("receipt.json"));
         assert!(
             bytes.is_ok(),
@@ -224,6 +252,7 @@ impl Host for FakeHost {
 }
 fn run(rig: &Rig, host: &mut FakeHost) -> Outcome {
     host.store_dir = rig.store.dir.clone();
+    host.publication = Some(rig.store.publication.clone());
     drive(&rig.store, &rig.intent, host)
 }
 fn held(outcome: Outcome) {
@@ -465,14 +494,29 @@ fn pending_receipt_with_legacy_row_is_uncertain_and_does_not_send_or_create() {
 
 #[test]
 fn every_durability_failure_prevents_control_even_if_rename_is_visible() {
-    for step in [Step::Write, Step::FileSync, Step::Rename, Step::ParentSync] {
+    for step in RECEIPT_STEPS {
         let mut rig = Rig::new();
         let mut host = rig.host();
         rig.store.fail = Some(step);
         held(run(&rig, &mut host));
         host.assert_zero();
+        let trace = rig
+            .store
+            .publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let failed = RECEIPT_STEPS
+            .iter()
+            .position(|candidate| *candidate == step)
+            .unwrap();
+        assert_eq!(trace.operations.len(), failed + 1);
+        assert_eq!(trace.operations.last(), Some(&(step, false)));
+        drop(trace);
         rig.store.fail = None;
-        if step == Step::ParentSync {
+        if matches!(
+            step,
+            Step::ParentSync | Step::MigrationSync | Step::RootSync
+        ) {
             host.probes.clear();
             host.default_probe = OldProbe::Alive(Box::new(rig.intent.old.clone()), READY.into());
             assert_eq!(run(&rig, &mut host), Outcome::WaitingForOldExit);
@@ -517,9 +561,23 @@ fn clear_and_resume_invalidate_without_waiting_for_long_handoff_lock() {
             .publish(&rig.intent, Phase::ExitMayHaveBeenSent)
             .unwrap();
         let long = rig.store.lock("handoff.lock").unwrap();
+        let mut committed = false;
         rig.store
-            .with_selector_change(cause.clone(), || Ok(()))
+            .with_selector_change(cause.clone(), || {
+                assert_publication_synced(
+                    &rig.store.publication,
+                    &Phase::Invalidated {
+                        cause: cause.clone(),
+                    },
+                );
+                committed = true;
+                Ok(())
+            })
             .unwrap();
+        assert!(
+            committed,
+            "selector commit must follow every successful sync"
+        );
         drop(long);
         assert_eq!(
             rig.store.read().unwrap().unwrap().state,
@@ -868,7 +926,7 @@ fn selector_commit_with_no_receipt_is_fenced_and_clear_aba_stays_invalid() {
 
 #[test]
 fn failed_invalidation_durability_never_enters_the_selector_commit() {
-    for step in [Step::Write, Step::FileSync, Step::Rename, Step::ParentSync] {
+    for step in RECEIPT_STEPS {
         let mut rig = Rig::new();
         rig.store
             .publish(&rig.intent, Phase::ExitMayHaveBeenSent)
@@ -884,6 +942,23 @@ fn failed_invalidation_durability_never_enters_the_selector_commit() {
                 .is_err()
         );
         assert!(!committed);
+        let trace = rig
+            .store
+            .publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            trace.phase,
+            Some(Phase::Invalidated {
+                cause: Invalidation::Resume
+            })
+        );
+        let failed = RECEIPT_STEPS
+            .iter()
+            .position(|candidate| *candidate == step)
+            .unwrap();
+        assert_eq!(trace.operations.len(), failed + 1);
+        assert_eq!(trace.operations.last(), Some(&(step, false)));
     }
 }
 

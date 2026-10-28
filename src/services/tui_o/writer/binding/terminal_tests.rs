@@ -49,6 +49,7 @@ impl Fixture {
             provider_root: Some(sessions.canonicalize().unwrap()),
             first_prompt_digest: None,
             source_policy: Some("verified".into()),
+            claude_resume: None,
         };
         let path = context
             .provider_root

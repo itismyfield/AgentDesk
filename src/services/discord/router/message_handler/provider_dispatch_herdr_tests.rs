@@ -1428,3 +1428,6 @@ mod start_offset_tests;
 
 #[path = "provider_dispatch_herdr_migration_boot_tests.rs"]
 mod migration_boot;
+
+#[path = "provider_dispatch_herdr_resume_start_tests.rs"]
+mod resume_start;

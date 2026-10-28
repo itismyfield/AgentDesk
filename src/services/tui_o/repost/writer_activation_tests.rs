@@ -564,6 +564,7 @@ fn revoke_retained_source(root: &std::path::Path) {
         provider_root: Some(root.canonicalize().unwrap()),
         first_prompt_digest: None,
         source_policy: Some("verified".into()),
+        claude_resume: None,
     };
     PreparedIncarnation::create(context.clone()).unwrap();
     let marker = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");

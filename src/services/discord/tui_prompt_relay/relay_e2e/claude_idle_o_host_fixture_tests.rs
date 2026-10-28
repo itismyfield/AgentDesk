@@ -107,6 +107,7 @@ impl Pane {
             provider_root: Some(home),
             first_prompt_digest: None,
             source_policy: None,
+            claude_resume: None,
         };
         let prepared = PreparedIncarnation::create(context).unwrap();
         let script = tc::session_temp_path(&tmux, tc::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT);

@@ -91,6 +91,7 @@ impl Case {
             provider_root: None,
             first_prompt_digest: None,
             source_policy: None,
+            claude_resume: None,
         })
         .unwrap()
         .path;

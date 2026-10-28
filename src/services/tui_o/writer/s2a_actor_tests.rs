@@ -413,6 +413,7 @@ async fn actual_driver_case(mode: &'static str) {
         provider_root: Some(harness._runtime.path().to_path_buf()),
         first_prompt_digest: Some(format!("sha256:{}", hex::encode(Sha256::digest(b"first")))),
         source_policy: Some("verified".into()),
+        claude_resume: None,
     };
     let canonical = PreparedIncarnation::create(context.clone()).unwrap().path;
     let archive_dir =

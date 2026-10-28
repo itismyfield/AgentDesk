@@ -190,6 +190,7 @@ impl Observer for Observed {
             provider_root: self.sources[0].path.parent().map(Path::to_path_buf),
             first_prompt_digest: Some(if delta.context { "changed" } else { "launch" }.into()),
             source_policy: Some("shadow".into()),
+            claude_resume: None,
         };
         let event = |seq, pane: &str, old, new| p5::BindingEvent {
             seq,

@@ -18,6 +18,7 @@ fn context() -> binding_context::BindingContext {
         provider_root: Some("/private/test-provider".into()),
         first_prompt_digest: None,
         source_policy: Some("verified".into()),
+        claude_resume: None,
     }
 }
 

@@ -22,22 +22,57 @@ pub(crate) fn observe_hook_at(
     payload: &serde_json::Value,
     context: Option<&BindingContext>,
 ) -> PromptObservation {
-    let pin = dedupe::owner_channel_for_tmux_session(logical)
-        .and_then(|channel| capture_hook(provider, logical, channel, payload, context));
-    let evidence = if native_turn.is_some() {
-        handoff::Evidence::Live
-    } else {
-        handoff::Evidence::Unattributed
+    let logical = logical.trim();
+    let channel = dedupe::owner_channel_for_tmux_session(logical);
+    let pin =
+        channel.and_then(|channel| capture_hook(provider, logical, channel, payload, context));
+    let observe = |pin| {
+        let evidence = if native_turn.is_some() {
+            handoff::Evidence::Live
+        } else {
+            handoff::Evidence::Unattributed
+        };
+        observe_inner(
+            provider,
+            logical,
+            &[prompt.to_owned()],
+            (None, prompt_id.map(ClaudePromptId::HookSubmit), native_turn),
+            PromptObservationEffect::NotifyAndLease,
+            at,
+            (evidence, pin),
+        )
     };
-    observe_inner(
-        provider,
-        logical,
-        &[prompt.to_owned()],
-        (None, prompt_id.map(ClaudePromptId::HookSubmit), native_turn),
-        PromptObservationEffect::NotifyAndLease,
-        at,
-        (evidence, pin),
-    )
+    if provider != "claude" {
+        return observe(pin);
+    }
+    let order = dedupe::herdr_listing_order(logical);
+    let _order = order.lock().unwrap_or_else(|error| error.into_inner());
+    crate::services::tmux_common::with_tmux_source_authority(logical, |authority| {
+        let required = match super::herdr_evidence(channel.unwrap_or(0), logical, None) {
+            Ok(required) => {
+                required
+                    || pin
+                        .as_ref()
+                        .is_some_and(|pin| pin.hosted_admission_required)
+            }
+            Err(_) => return PromptObservation::Ignored,
+        };
+        if required {
+            let Some(original) = pin.as_ref() else {
+                return PromptObservation::Ignored;
+            };
+            if super::binding_context::observe_spawn_nonce_marker(logical)
+                != super::SpawnNonceMarker::Known(original.execution_nonce.clone())
+                || !dedupe::herdr_hook_admitted_under_source_authority(
+                    authority,
+                    &original.execution_nonce,
+                )
+            {
+                return PromptObservation::Ignored;
+            }
+        }
+        observe(pin)
+    })
 }
 
 #[cfg(unix)]

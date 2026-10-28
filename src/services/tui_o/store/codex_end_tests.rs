@@ -18,6 +18,7 @@ fn context(channel: u64) -> BindingContext {
         provider_root: Some("/codex".into()),
         first_prompt_digest: None,
         source_policy: Some("shadow".into()),
+        claude_resume: None,
     }
 }
 
