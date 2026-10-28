@@ -617,7 +617,7 @@ fn current_home_dir() -> Option<PathBuf> {
 }
 
 fn load_runtime_config() -> Option<Config> {
-    crate::config::config_path::load_runtime_config_file().map(|(config, _)| config)
+    crate::config::runtime_config_optional()
 }
 
 fn load_codex_sync_state_from_path(path: &Path) -> CodexMcpSyncState {
@@ -920,3 +920,7 @@ fn run_codex_command_vec(codex_bin: &str, args: &[String]) -> Result<(), String>
         )
     })
 }
+
+#[cfg(test)]
+#[path = "mcp_config_snapshot_tests.rs"]
+mod snapshot_tests;

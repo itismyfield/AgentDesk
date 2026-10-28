@@ -274,7 +274,11 @@ pub(crate) async fn refresh_worker_node_runtime_capabilities(
     pool: &PgPool,
     instance_id: &str,
 ) -> Result<(), String> {
-    let base = super::session_routing::node_capabilities(&crate::config::load_graceful());
+    let base = crate::config::snapshot()
+        .map(|config| super::session_routing::node_capabilities(&config))
+        .unwrap_or_else(|| {
+            super::session_routing::node_capabilities(&crate::config::Config::default())
+        });
     let capabilities = capabilities_with_runtime_state(&base);
     sqlx::query(
         "UPDATE worker_nodes SET capabilities = $2, updated_at = NOW() WHERE instance_id = $1",

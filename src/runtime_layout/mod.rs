@@ -404,6 +404,11 @@ fn migrate_legacy_credential_entries(legacy: &Path, canonical: &Path) -> Result<
 }
 
 fn load_memory_backend_from_yaml(root: &Path) -> Option<MemoryBackendConfig> {
+    if crate::config::runtime_root().as_deref() == Some(root)
+        && let Some(config) = crate::config::snapshot()
+    {
+        return config.memory.clone().map(memory_backend_from_config);
+    }
     let path = crate::config::config_path::config_path_in(root);
     let config = crate::config::config_path::load_config_file(&path).ok()??;
     config.memory.map(memory_backend_from_config)
@@ -758,3 +763,6 @@ mod credential_layout_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod snapshot_reader_tests;

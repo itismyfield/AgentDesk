@@ -207,9 +207,11 @@ async fn put_voice_config_inner(
     Ok(response_from_config(config, Some(path)))
 }
 
-/// Voice config as currently saved in agentdesk.yaml, so dashboard edits apply
-/// to browser voice requests without a restart.
+/// Use the validated snapshot, retaining the existing file fallback before boot publishes it.
 pub(crate) fn live_voice_config(fallback: &crate::voice::VoiceConfig) -> crate::voice::VoiceConfig {
+    if let Some(config) = crate::config::snapshot() {
+        return config.voice.clone();
+    }
     match load_editable_config() {
         Ok((config, _, true)) => config.voice,
         _ => fallback.clone(),
@@ -569,3 +571,7 @@ mod tests {
         assert_secrets_on_disk(&path);
     }
 }
+
+#[cfg(test)]
+#[path = "voice_config_snapshot_tests.rs"]
+mod snapshot_tests;

@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts.check_release_token_wiring import REPO, observe
+from scripts.check_release_token_wiring import REPO, observe, prepare
 from scripts import build_token as bt
 
 VARIANTS = {
@@ -58,6 +58,27 @@ class ReleaseTokenWiringTests(unittest.TestCase):
         for target in ("x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"):
             with self.subTest(target=target):
                 self.assertEqual(observe(REPO, "build-release.sh", "release", target=target)["errors"], [])
+
+    def test_config_resolver_stub_accepts_only_its_fixture_path_and_root(self):
+        with tempfile.TemporaryDirectory(prefix="release-resolver-stub-") as temp:
+            root = Path(temp).resolve()
+            env = prepare(root, REPO, "build-release.sh")
+            resolver = str(root / "repo/scripts/resolve-config-path.sh")
+            release = str(root / "release")
+            command = [str(root / "bin/bash")]
+            result = subprocess.run(command + [resolver, release], env=env,
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, str(root / "release/config/agentdesk.yaml") + "\n")
+            for args in ([str(root / "other/resolve-config-path.sh"), release],
+                         [str(root.parent / "resolve-config-path.sh"), release],
+                         [resolver, str(root / "other-release")],
+                         [resolver, release, "extra"], [resolver]):
+                with self.subTest(args=args):
+                    result = subprocess.run(command + args, env=env,
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 97, result.stdout + result.stderr)
+                    self.assertIn("unexpected Bash call", (root / "blocked").read_text())
 
     def test_indirect_release_calls_fail_where_the_old_scanner_passed(self):
         for script in ("build-release.sh", "deploy-release.sh"):

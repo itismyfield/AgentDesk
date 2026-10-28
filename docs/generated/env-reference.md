@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 136
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 137
 - Platform and third-party variables: 30
 
 ## AgentDesk variables
@@ -55,6 +55,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_TEST_HOME_COMMAND_MUTANT` | `src/server/routes/queue_api.rs` | Cancel the active turn in a channel. |
 | `ADK_TEST_INPUT_MUTANT` | `src/services/tui_input/mod.rs` | A named fault a test run switches on to check that the live input tests catch it. |
 | `ADK_TEST_PROCESS_WRAPPER_EXE` | `src/services/claude/process_session_launch.rs` | Execute Claude via ProcessBackend (direct child process, no tmux). |
+| `ADK_TEST_REGISTERED_SNAPSHOT_RESTORE` | `src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs` |  |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs` |  |
 | `ADK_TURN_PRESENCE_TAIL` | `src/services/discord/turn_presence/activity/tail.rs` |  |
 | `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
@@ -80,7 +81,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_SHADOW_TEST_MUTATION` | `src/services/codex_tui/session/source_observation.rs`, `src/services/tui_prompt_dedupe/runtime_binding/codex_hook.rs` |  |
 | `AGENTDESK_CODEX_SNAPSHOT_MUTANT` | `src/services/tui_o/writer/actor/codex_history.rs` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs` |  |
-| `AGENTDESK_CONFIG` | `src/config/config_path.rs`, `src/services/discord/router/intake_dispatch/queued.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` | The file `load`, `load_graceful` and the config watcher use: `$AGENTDESK_CONFIG`, the runtime root, the working directory, then `~/.adk/release`. |
+| `AGENTDESK_CONFIG` | `src/config/config_path.rs`, `src/config/config_path/selection.rs`, `src/services/discord/router/intake_dispatch/queued.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` | The file `load`, `load_graceful` and the config watcher use: `$AGENTDESK_CONFIG`, the runtime root, the working directory, then `~/.adk/release`. |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs` |  |
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs` |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs` |  |
