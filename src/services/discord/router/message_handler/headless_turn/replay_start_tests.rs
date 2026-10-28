@@ -1144,3 +1144,61 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"fixture answer","
         assert_eq!(notices,0,"no active owner has been lost");
     });
 }
+
+/// The real headless start of a scheduled snapshot turn marks its durable row with the
+/// launch turn id as isolated, the mark every completer settles that delivery by.
+#[test]
+fn a_scheduled_snapshot_headless_start_marks_its_row_isolated_pg() {
+    use crate::services::scheduled_messages::turn_completion::tests::launch_agent_delivery;
+    let name = concat!(
+        module_path!(),
+        "::a_scheduled_snapshot_headless_start_marks_its_row_isolated_pg"
+    );
+    if !child(name) {
+        return;
+    }
+    intake_replay_rt().block_on(async {
+        let channel = ChannelId::new(7_420_501);
+        let host = Host::new(&[channel]).await;
+        let reservation = health::reserve_headless_agent_turn(channel);
+        let turn_id = reservation.turn_id().to_owned();
+        let launched =
+            launch_agent_delivery(&host.pool, "i7420-headless", &turn_id, true, "fail").await;
+        // Same metadata and snapshot label the scheduler passes on a snapshot launch.
+        let label = format!("scheduled:{}", launched.message_id);
+        let metadata = serde_json::json!({
+            "agent_id": "i7420-headless", "scheduled_message_id": launched.message_id,
+            "turn_id": turn_id, "parent_channel_id": channel.get().to_string(),
+            "scheduled_snapshot_session_label": label,
+        });
+        let outcome = health::start_reserved_headless_agent_turn_with_owner_channel(
+            &host.registry,
+            channel,
+            channel,
+            ProviderKind::Claude,
+            "scheduled prompt".into(),
+            Some("scheduled_message".into()),
+            Some(metadata),
+            Some(format!("headless-fixture-{channel}")),
+            Some(label),
+            reservation,
+        )
+        .await
+        .expect("scheduled headless start");
+        assert_eq!(outcome.turn_id, turn_id);
+        let row = crate::services::discord::inflight::load_inflight_state(
+            &ProviderKind::Claude,
+            channel.get(),
+        )
+        .expect("the started row");
+        assert_eq!(
+            row.scheduled,
+            crate::services::discord::scheduled_turn::ScheduledTurnMark::Scheduled {
+                turn_id,
+                isolated: true,
+                outcome: None,
+            }
+        );
+        host.close().await;
+    });
+}
