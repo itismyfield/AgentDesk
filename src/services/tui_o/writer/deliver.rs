@@ -557,6 +557,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                         unit_key: original.unit_key.clone(),
                         index: original.piece_index,
                         payload: original.payload.clone(),
+                        notice_origin: None,
                     },
                     Some(rejected_serial),
                 )

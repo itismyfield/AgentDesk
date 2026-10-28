@@ -481,6 +481,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                         unit_key: piece.unit_key.clone(),
                         index: piece.piece_index,
                         payload: piece.payload.clone(),
+                        notice_origin: None,
                     },
                 )
             })

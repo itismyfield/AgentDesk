@@ -46,6 +46,13 @@ use self::observed_prompt_decision::{
     RelayObservedPromptInjectionDecision, relay_observed_prompt_injected_prompt_decision,
 };
 
+/// Shares the live human-only policy and renderer with transcript projections.
+pub(crate) fn input_notice_content(prompt: &str) -> Option<String> {
+    let decision = relay_observed_prompt_injected_prompt_decision(prompt);
+    (decision.injected_class.is_human_active_turn() && !decision.local_only_slash)
+        .then(|| format_ssh_direct_prompt_notification("claude", "", prompt))
+}
+
 mod idle_tail_state;
 pub(in crate::services::discord) use self::idle_tail_state::claude_idle_tail_running;
 mod idle_transcript_scan;

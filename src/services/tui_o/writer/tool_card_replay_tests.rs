@@ -317,6 +317,7 @@ async fn rollback_identity_mode_does_not_recreate_synthetic_card_or_turn_work() 
         },
         index: 0,
         payload: "-# ✅ 1초 · 📦 1%".into(),
+        notice_origin: None,
     };
     deliver_all(&mut writer, &[Derived::Piece(summary.clone())]).await;
     let before = std::fs::read(ledger_path(&harness)).unwrap();

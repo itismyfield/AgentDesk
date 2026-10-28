@@ -421,6 +421,7 @@ fn piece(native_key: &str, payload: &str) -> Derived {
         unit_key: unit(native_key),
         index: 0,
         payload: payload.into(),
+        notice_origin: None,
     })
 }
 

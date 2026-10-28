@@ -1,3 +1,5 @@
+#[path = "input_notice_actor_tests.rs"]
+mod input_notice_composition;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[path = "tool_card_actor_tests.rs"]

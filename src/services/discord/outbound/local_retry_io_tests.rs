@@ -94,6 +94,7 @@ async fn local_retry_http_uses_the_ledger_payload_and_spends_only_one_additional
             unit_key: unit(channel, 99),
             index: 0,
             payload: PAYLOAD.into(),
+            notice_origin: None,
         });
         assert_eq!(writer.deliver(&item).await, Step::Done, "row {case}");
         let root = writer.store().ledger().piece(0).unwrap();

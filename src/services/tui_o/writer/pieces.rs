@@ -23,6 +23,7 @@ pub struct PieceWork {
     pub unit_key: UnitKey,
     pub index: u32,
     pub payload: String,
+    pub notice_origin: Option<Box<super::input_notices::NoticeOrigin>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +55,7 @@ pub struct UnitDeriver {
     seals: SealRegistry,
     cards: Option<ToolCardRun>,
     summary: Option<TurnSummaryRun>,
+    notices: super::input_notices::Projection,
 }
 
 impl UnitDeriver {
@@ -65,6 +67,7 @@ impl UnitDeriver {
             seals,
             cards: None,
             summary: None,
+            notices: super::input_notices::Projection::default(),
         }
     }
 
@@ -77,6 +80,35 @@ impl UnitDeriver {
     pub fn with_turn_summary(mut self, inputs: SummaryInputs) -> Self {
         self.summary = Some(TurnSummaryRun::new(self.provider, inputs));
         self
+    }
+
+    pub(crate) fn with_input_notices(mut self, notices: super::input_notices::Projection) -> Self {
+        self.notices = notices;
+        self
+    }
+
+    pub(crate) fn input_notices_enabled(&self) -> bool {
+        self.notices.enabled()
+    }
+
+    pub(crate) fn derive_scoped(
+        &mut self,
+        record: &CapturedRecord,
+        version: u32,
+        origin: Result<super::input_notices::NoticeOrigin, String>,
+    ) -> Vec<Derived> {
+        let mut derived = self.derive_with_version(record, version);
+        if self.notices.enabled() {
+            match self
+                .notices
+                .project(self.channel, self.provider, record, origin)
+            {
+                Ok(Some(piece)) => derived.insert(0, Derived::Piece(piece)),
+                Ok(None) => {}
+                Err(reason) => derived.insert(0, Derived::Blocked { reason }),
+            }
+        }
+        derived
     }
 
     /// Units in record order; a repeated key with the same plan (a fork copy) yields nothing.
@@ -276,6 +308,7 @@ impl UnitDeriver {
                         unit_key: unit_key.clone(),
                         index,
                         payload,
+                        notice_origin: None,
                     })
                 };
                 pieces.map(piece).collect()

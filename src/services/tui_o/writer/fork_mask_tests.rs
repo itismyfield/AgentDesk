@@ -1,3 +1,5 @@
+#[path = "input_notice_source_tests.rs"]
+mod input_notice_projection;
 use super::*;
 #[path = "tool_card_fork_tests.rs"]
 mod tool_cards;

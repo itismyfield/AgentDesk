@@ -4,7 +4,10 @@
 use std::collections::VecDeque;
 
 use super::fork_lineage::{Class, RowIds};
-use super::{BindingEvents, Boundary, Derived, Sources, UnitDeriver, claude_boundary};
+use super::{
+    BindingEvents, BindingRecord, BindingTarget, Boundary, Derived, Sources, UnitDeriver,
+    claude_boundary,
+};
 use crate::services::tui_o::shadow::{CapturedRecord, SourceId};
 use crate::services::tui_o::store::rotation::SourceLink;
 use crate::services::tui_o::store::spool::source_key;
@@ -46,7 +49,7 @@ impl<B: BindingEvents> Sources<B> {
             owed.owe(
                 source,
                 record,
-                deriver.derive_with_version(record, identity_version),
+                self.derive_record(deriver, source, record, identity_version),
             );
             return;
         };
@@ -58,7 +61,7 @@ impl<B: BindingEvents> Sources<B> {
                         Ok(false) => owed.owe(
                             source,
                             record,
-                            deriver.derive_with_version(record, identity_version),
+                            self.derive_record(deriver, source, record, identity_version),
                         ),
                         Ok(true) => {}
                         Err(reason) => owed.owe(
@@ -87,7 +90,7 @@ impl<B: BindingEvents> Sources<B> {
                         owed.owe(
                             source,
                             record,
-                            deriver.derive_with_version(record, identity_version),
+                            self.derive_record(deriver, source, record, identity_version),
                         );
                         self.decide(&key, Boundary::Owed { from: record.start });
                     }
@@ -95,6 +98,64 @@ impl<B: BindingEvents> Sources<B> {
                 }
             }
         }
+    }
+
+    fn derive_record(
+        &self,
+        deriver: &mut UnitDeriver,
+        source: &SourceId,
+        record: &CapturedRecord,
+        version: u32,
+    ) -> Vec<Derived> {
+        if !deriver.input_notices_enabled() {
+            return deriver.derive_with_version(record, version);
+        }
+        let origin = self.notice_origin(source, record);
+        deriver.derive_scoped(record, version, origin)
+    }
+
+    fn notice_origin(
+        &self,
+        source: &SourceId,
+        record: &CapturedRecord,
+    ) -> Result<super::super::input_notices::NoticeOrigin, String> {
+        let events = self.bindings.binding_events_since(self.channel, 0)?;
+        let matches_source = |event: &super::BindingEvent| match &event.record {
+            BindingRecord::Bound {
+                new: BindingTarget::Source(bound),
+                ..
+            } => bound == source,
+            BindingRecord::Bound {
+                new: BindingTarget::Pending { .. },
+                ..
+            } => events.iter().any(|resolved| {
+                matches!(&resolved.record, BindingRecord::Resolved { resolves_seq, source: bound }
+                    if *resolves_seq == event.seq && bound == source)
+            }),
+            _ => false,
+        };
+        // Root sources predate rotation links; their first exact binding is the attachment proof.
+        let event = match self.rotation.link(source) {
+            Some(link) => events.iter().find(|event| event.seq == link.seq),
+            None => events.iter().find(|event| matches_source(event)),
+        }
+        .ok_or("input notice original binding is missing")?;
+        if !matches_source(event)
+            || event.channel_id != self.channel
+            || event.provider != self.provider
+        {
+            return Err("input notice binding belongs to another owner".into());
+        }
+        Ok(super::super::input_notices::NoticeOrigin {
+            record: crate::services::tui_o::shadow::SourceRange {
+                source: source.clone(),
+                start: record.start,
+                end: record.end,
+            },
+            logical_session: event.tmux_session.clone(),
+            binding_seq: event.seq,
+            execution_nonce: event.execution_nonce.clone(),
+        })
     }
 
     /// Masks only identities consumed within the parent's publishing responsibility.

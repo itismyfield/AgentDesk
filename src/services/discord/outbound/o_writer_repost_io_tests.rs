@@ -783,6 +783,7 @@ mod settle_over_http {
             unit_key: unit_key.clone(),
             index: 0,
             payload,
+            notice_origin: None,
         });
         let started = Instant::now();
         assert_eq!(writer.deliver(&piece).await, Step::Done);

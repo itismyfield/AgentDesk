@@ -36,6 +36,7 @@ pub(crate) fn pending(ledger: &LedgerState) -> Option<Pending> {
                 unit_key: root.unit_key.clone(),
                 index: root.piece_index,
                 payload: root.payload.clone(),
+                notice_origin: None,
             },
             due,
         })

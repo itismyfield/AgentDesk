@@ -191,7 +191,7 @@ pub fn extract_qwen_jsonl_user_prompt(json: &Value) -> Option<String> {
 /// collapsed ones (codex #3527). Scan the WHOLE string: find `[User: `, then any
 /// following `(ID: <digits>)]` (author may itself contain parens). A v1 header counts only as a
 /// new turn's; input pasted into a running turn is settled by the injected-input ledger.
-pub(super) fn is_discord_relayed_user_prompt(prompt: &str) -> bool {
+pub(crate) fn is_discord_relayed_user_prompt(prompt: &str) -> bool {
     let Some(user_at) = prompt.find("[User: ") else {
         return false;
     };
