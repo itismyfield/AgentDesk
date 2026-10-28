@@ -61,7 +61,7 @@ async fn owner_bootstrap_pg_snapshot_precedes_restore_for_all_runtime_roles() {
 
 #[test]
 fn owner_bootstrap_read_is_wired_before_shared_watchers_and_role_branches() {
-    let source = include_str!("../../runtime_bootstrap.rs");
+    let source = include_str!("../../../runtime_bootstrap.rs");
     let read = source
         .find("owner_execution::prepare(&provider, pg_pool.as_ref()).await;")
         .unwrap();
