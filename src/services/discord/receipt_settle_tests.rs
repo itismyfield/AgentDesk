@@ -313,9 +313,8 @@ async fn a_forced_stop_that_removes_the_row_records_the_cancel_pg() {
     db.drop().await;
 }
 
-/// Boot: a marked row is recorded with its own mark and never reaches a restore branch; a row an
-/// earlier boot's eviction marked is recorded failed; a row a restore branch removes without any
-/// recorded ending is failed after the restore, while an earlier receipt of it wins.
+/// Boot records a marked row with its own mark, an evicted origin row as failed, and a row restore
+/// removed without an ending as failed after the restore, unless an earlier receipt exists.
 #[tokio::test(flavor = "current_thread")]
 async fn a_boot_records_marked_and_silently_removed_rows_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();

@@ -370,9 +370,8 @@ fn blocked_pool() -> sqlx::PgPool {
         .unwrap()
 }
 
-/// While the receipt cannot commit, the bridge keeps the ended execution's row marked rather
-/// than removing it; the origin already reads terminal from the mark, and the next admission on
-/// the channel records exactly that receipt and removes the row.
+/// While the receipt cannot commit the bridge keeps the ended row marked, which already reads
+/// terminal; the next admission records exactly that receipt and removes the row.
 #[tokio::test(flavor = "current_thread")]
 async fn a_blocked_commit_keeps_the_row_marked_until_admission_records_it_pg() {
     let root = tempfile::tempdir().unwrap();

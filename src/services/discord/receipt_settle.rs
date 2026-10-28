@@ -1,6 +1,5 @@
-//! Execution receipts written by every owner that ends an execution and removes its row, and
-//! the settlement of rows kept marked because that commit failed. A receipt always commits
-//! before its row goes; a marked row goes only once boot or the next admission records it.
+//! Receipts of every owner that ends an execution and removes its row, committed before the row
+//! goes; a row whose commit failed stays marked until boot or the next admission records it.
 
 use std::time::Duration;
 
@@ -316,9 +315,8 @@ pub(in crate::services::discord) async fn stopped(
     }
 }
 
-/// A watcher whose pane died ends the turn it pinned, when the row still names that pane: as
-/// cancelled after a recent user stop of that range, else as failed. False keeps the row marked
-/// because the commit failed.
+/// A dead pane ends the pinned turn its row still names: cancelled after a recent user stop of
+/// that range, else failed. False keeps the row marked because the commit failed.
 pub(in crate::services::discord) async fn pane_dead(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -344,9 +342,8 @@ pub(in crate::services::discord) async fn pane_dead(
     record_or_stamp(shared.pg_pool.as_ref(), &row, outcome).await
 }
 
-/// A bridge that could not establish its entry ends this execution as failed, but only when
-/// the row is still this turn's own with no other relay owner and the unwind released its
-/// claim. A row another turn, a restart marker or a watcher holds is that owner's to settle.
+/// A refused bridge entry fails its execution only when the row is still solely this turn's; a
+/// row another turn, a restart marker or a watcher holds is that owner's to settle.
 pub(in crate::services::discord) async fn entry_aborted(
     shared: &SharedData,
     channel_id: ChannelId,
