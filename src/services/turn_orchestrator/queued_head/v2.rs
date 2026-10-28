@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub(crate) mod actor;
 mod attempt;
 mod commit;
+pub(crate) mod control;
 mod migration;
 mod retained;
 pub(crate) mod source_admission;

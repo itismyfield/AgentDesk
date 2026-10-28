@@ -1,0 +1,232 @@
+//! While an actor holds a V2 owner, every queue-changing arm reaches the owner here or is refused.
+//! The match has no wildcard, so a new arm cannot compile until it is classified.
+use super::*;
+use crate::services::turn_orchestrator::{
+    CancelQueuedMessageResult, ChannelMailboxMsg as M, ChannelMailboxState, ClearChannelResult,
+    EnqueueInterventionResult, EnqueueRefusalReason, HasPendingSoftQueueResult,
+    HydratePendingQueueResult, Intervention, RequeueInterventionResult, RestartDrainResult,
+    TakeNextSoftResult,
+    clear_channel::ActivePolicy,
+    lease_release::release_active_turn_anchor,
+    pending_queue_persistence::{
+        pending_queue_item_from_intervention, pending_queue_item_to_intervention,
+    },
+};
+use poise::serenity_prelude::{ChannelId, MessageId};
+use source_admission::{Admitted, Custody};
+use std::time::{Instant, SystemTime};
+
+/// Answer of an arm the V2 owner does not serve: nothing was absorbed or moved.
+const HELD: &str = "the V2 owner holds this queue; the legacy queue path is refused";
+
+pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg: M) -> Option<M> {
+    let Some(owner) = state.queued_head.v2.as_mut() else {
+        return Some(msg);
+    };
+    match msg {
+        // Reads, turn lifecycle and injection keep the V1 path: the V1 queue is empty and every
+        // V1 queue write they could attempt is refused by the legacy guard on the V2 file.
+        M::CommitCapturedReadyDelivery { .. }
+        | M::Snapshot { .. }
+        | M::HasActiveTurn { .. }
+        | M::HasBlockingActiveTurn { .. }
+        | M::ActiveTurnKind { .. }
+        | M::CancelToken { .. }
+        | M::CancelActiveTurnWithReason { .. }
+        | M::CancelActiveTurnIfCurrent { .. }
+        | M::CancelActiveTurnIfCurrentWithReason { .. }
+        | M::CancelActiveTurnIfCurrentUnlessHerdr { .. }
+        | M::CancelActiveTurnIfUserMessageWithReason { .. }
+        | M::CancelActiveBackgroundTurnIfCurrent { .. }
+        | M::TryStartTurn { .. }
+        | M::RestoreActiveTurn { .. }
+        | M::RecoveryKickoff { .. }
+        | M::ClearRecoveryMarker { .. }
+        | M::FinishTurn { .. }
+        | M::FinishTurnIfToken { .. }
+        | M::FinishTurnIfMatches { .. }
+        | M::ReleaseWitnessedEpisode(_)
+        | M::PolicyClose { .. }
+        | M::ClaimPolicyTail(_)
+        | M::HardStop { .. }
+        | M::FinishCancelledTurn { .. }
+        | M::CloseIfIdle { .. }
+        | M::Injection(_)
+        // The checked purge owns their V2 forms; the V1 forms refuse a V2 file before any write.
+        | M::PurgeQueue { .. } => return Some(msg),
+        #[cfg(unix)]
+        M::PurgeQueueIfUnchanged(_) | M::CaptureOwnQueue(_) => return Some(msg),
+        #[cfg(test)]
+        M::AgeActiveTurnForTest { .. }
+        | M::AgeInboundWaitsForTest { .. }
+        | M::AgeValveClearedDispatchForTest { .. } => return Some(msg),
+        M::Enqueue {
+            intervention,
+            persistence,
+            reply,
+            ..
+        } => {
+            let role = persistence.dispatch_role_override;
+            let _ = reply.send(enqueue(owner, &intervention, channel_id, role));
+        }
+        M::HasPendingSoftQueue { reply, .. } => {
+            let _ = reply.send(HasPendingSoftQueueResult {
+                has_pending: !owner.snapshot.items.is_empty(),
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+            });
+        }
+        // Withheld, never dispatched: the owner bootstrap that starts a fresh turn is not wired.
+        M::TakeNextSoft { reply, .. } => {
+            let queue_len_after = owner.snapshot.items.len();
+            let _ = reply.send(TakeNextSoftResult {
+                selection_stale: false,
+                intervention: None,
+                dispatch_lease: None,
+                has_more: queue_len_after > 0,
+                queue_len_after,
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+            });
+        }
+        M::CancelQueuedPrimaryMessage {
+            message_id, reply, ..
+        } => {
+            let _ = reply.send(cancel(owner, message_id));
+        }
+        M::Clear {
+            persistence,
+            active,
+            reply,
+        } => {
+            let mut result = clear(owner);
+            if active == ActivePolicy::Release {
+                let provider = Some(&persistence.provider);
+                result.removed_token = release_active_turn_anchor(state, channel_id, provider);
+            }
+            let _ = reply.send(result);
+        }
+        M::RestartDrain { reply, .. } => {
+            let _ = reply.send(RestartDrainResult {
+                queued_count: owner.snapshot.items.len(),
+                persistence_error: None,
+            });
+        }
+        M::RequeueFront { reply, .. } => {
+            let _ = reply.send(RequeueInterventionResult {
+                enqueued: false,
+                refusal_reason: None,
+                queue_exit_events: Vec::new(),
+                persistence_error: Some(HELD.into()),
+            });
+        }
+        M::AbandonPendingDispatch { reply, .. } => {
+            let _ = reply.send(false);
+        }
+        M::HydratePendingQueueFromDisk { reply, .. }
+        | M::MergeRestoredQueueItems { reply, .. }
+        | M::MergeRestoredDispatchMarker { reply, .. } => {
+            let _ = reply.send(HydratePendingQueueResult {
+                queue_len_after: owner.snapshot.items.len(),
+                persistence_error: Some(HELD.into()),
+                ..Default::default()
+            });
+        }
+        // Dropping the reply is the refusal its caller observes.
+        #[cfg(test)]
+        M::ReplaceQueue { .. } => {}
+    }
+    None
+}
+
+fn enqueue(
+    owner: &mut Owner,
+    intervention: &Intervention,
+    channel_id: ChannelId,
+    role: Option<u64>,
+) -> EnqueueInterventionResult {
+    let (now, instant) = (SystemTime::now(), Instant::now());
+    let item = pending_queue_item_from_intervention(intervention, channel_id, role, now, instant);
+    let result = |enqueued, refusal_reason, persistence_error| EnqueueInterventionResult {
+        enqueued,
+        merged: false,
+        refusal_reason,
+        queue_exit_events: Vec::new(),
+        persistence_error,
+    };
+    match Custody::new(&item).advance(owner) {
+        Ok(Admitted::Queued | Admitted::RetainedOpaque) => result(true, None, None),
+        Ok(Admitted::Duplicate) => result(
+            false,
+            Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+            None,
+        ),
+        Err(error) => result(
+            false,
+            None,
+            Some(format!("V2 admission refused: {error:?}")),
+        ),
+    }
+}
+
+/// Items behind an attempted head are untried; the head itself stays in custody.
+fn untried(owner: &Owner) -> usize {
+    usize::from(owner.snapshot.head_injection.is_some())
+}
+
+fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult {
+    let first = untried(owner);
+    let mut next = owner.snapshot.clone();
+    let found = next
+        .items
+        .iter()
+        .skip(first)
+        .position(|item| item.message_id == message_id.get());
+    let (removed, persistence_error) = match found {
+        None => (None, None),
+        Some(at) => {
+            let item = next.items.remove(at + first);
+            match owner.commit(next) {
+                Ok(()) => {
+                    let (now, instant) = (SystemTime::now(), Instant::now());
+                    (
+                        Some(pending_queue_item_to_intervention(item, now, instant)),
+                        None,
+                    )
+                }
+                Err(error) => (None, Some(error)),
+            }
+        }
+    };
+    CancelQueuedMessageResult {
+        removed,
+        queue_exit_events: Vec::new(),
+        persistence_error,
+    }
+}
+
+/// Discards only untried items; the attempted head, retained inputs and terminals stay.
+fn clear(owner: &mut Owner) -> ClearChannelResult {
+    let mut next = owner.snapshot.clone();
+    let discarded: Vec<PendingQueueItem> = next.items.drain(untried(owner)..).collect();
+    let mut result = ClearChannelResult::default();
+    match owner.commit(next) {
+        Ok(()) => {
+            result.discarded_message_ids = discarded
+                .iter()
+                .flat_map(|item| sources::identity(item).sources)
+                .map(|source| MessageId::new(source.message_id))
+                .collect();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "V2 clear could not commit; nothing was discarded");
+            result.persistence.failed.push("queue_publish");
+            result.persistence.count_unknown = true;
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+#[path = "control_tests.rs"]
+mod tests;

@@ -410,6 +410,17 @@ pub(super) fn withhold_take(
     Some(withheld)
 }
 
+/// Runs after the closed gate: an actor holding a V2 owner serves or refuses every queue-changing
+/// arm there, so the V1 handlers never write beside it.
+#[cfg(test)]
+pub(super) fn route_v2(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    msg: super::ChannelMailboxMsg,
+) -> Option<super::ChannelMailboxMsg> {
+    v2::control::route(state, channel_id, msg)
+}
+
 /// A turn claim never starts ahead of a reserved or unresolved head, nor over an unreadable record.
 pub(super) fn blocks_claims(
     state: &mut ChannelMailboxState,

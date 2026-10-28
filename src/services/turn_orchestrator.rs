@@ -1748,6 +1748,10 @@ fn input_mailbox_step(
     let Some(msg) = registry_purge::gate_closed_arm(&state, channel_id, msg) else {
         return state;
     };
+    #[cfg(test)]
+    let Some(msg) = queued_head::route_v2(&mut state, channel_id, msg) else {
+        return state;
+    };
     match msg {
         ChannelMailboxMsg::CommitCapturedReadyDelivery { commit, reply } => {
             let committed = (!state.closed)
