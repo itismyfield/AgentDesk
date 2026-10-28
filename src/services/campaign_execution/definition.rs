@@ -117,6 +117,12 @@ fn hash(value: &impl Serialize) -> Result<String, DefinitionError> {
         .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
         .map_err(|_| error(DefinitionErrorCode::InvalidField, "encoding"))
 }
+pub fn profile_hash(
+    repository: Repository,
+    profile_version: &str,
+) -> Result<String, DefinitionError> {
+    hash(&(repository, profile_version, WORKFLOW_VERSION))
+}
 fn graph_error(value: DagError) -> DefinitionError {
     use DefinitionErrorCode as C;
     match value {
@@ -153,7 +159,7 @@ pub fn validate_definition(input: DefinitionInput) -> Result<ValidatedDefinition
     }
     let mut ids = std::collections::HashMap::new();
     let mut hashes = BTreeMap::new();
-    let profile = hash(&(input.repository, &input.profile_version, WORKFLOW_VERSION))?;
+    let profile = profile_hash(input.repository, &input.profile_version)?;
     for node in &input.nodes {
         dag::insert_node(&mut ids, &node.id).map_err(graph_error)?;
         let issue = url::Url::parse(&node.issue_url).ok();
