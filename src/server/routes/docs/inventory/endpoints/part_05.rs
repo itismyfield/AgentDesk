@@ -164,7 +164,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/github/repos/{owner}/{repo}/sync",
             "github",
-            "Synchronously fetch GitHub issues for one registered repo, triage newly discovered issues into kanban cards, reconcile closed/mainline-linked issues into card state, and update github_repos.last_synced_at. Request body: none. Requirements: the repo must already exist in github_repos (register with POST /api/github/repos or configure it), Postgres must be available, and the server host must have authenticated gh CLI access to the target repo. Auth: include Authorization: Bearer <token> when config.server.auth_token is set; local unauthenticated use is allowed only when server auth is disabled.",
+            "Synchronously fetch GitHub issues for one registered repo, triage newly discovered issues into kanban cards, reconcile closed/mainline-linked issues into card state, make linked campaign nodes follow their issues, and update github_repos.last_synced_at. `campaign_nodes_failed` is true when the campaign step could not load campaigns or read issues from GitHub; `deferred_nodes` only waited for a fresher read. Request body: none. Requirements: the repo must already exist in github_repos (register with POST /api/github/repos or configure it), Postgres must be available, and the server host must have authenticated gh CLI access to the target repo. Auth: include Authorization: Bearer <token> when config.server.auth_token is set; local unauthenticated use is allowed only when server auth is disabled.",
         )
         .with_params([
             (
@@ -192,7 +192,9 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "issues_fetched": 12,
                 "cards_created": 2,
                 "cards_closed": 1,
-                "inconsistencies": 0
+                "inconsistencies": 0,
+                "campaign_nodes": {"changed_nodes": 1, "deferred_nodes": 0, "errors": 0, "fetch_errors": 0},
+                "campaign_nodes_failed": false
             }),
         )
         .with_error_example(

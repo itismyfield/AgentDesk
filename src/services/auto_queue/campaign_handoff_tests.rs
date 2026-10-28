@@ -494,6 +494,29 @@ async fn postgres_campaign_handoff_drops_nodes_when_a_newer_save_lands_first_pg(
     fixture.drop().await;
 }
 
+/// Keeps the sync's campaign issue reads off the network: every GitHub call fails.
+struct OfflineGitHub;
+
+impl crate::github::GitHubAdapter for OfflineGitHub {
+    fn is_available(&self) -> bool {
+        false
+    }
+
+    fn run(&self, _args: &[&str]) -> Result<String, String> {
+        Err("offline".into())
+    }
+
+    fn run_async<'a>(
+        &'a self,
+        _args: Vec<String>,
+        _timeout: std::time::Duration,
+        _timeout_context: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
+    {
+        Box::pin(async { Err("offline".into()) })
+    }
+}
+
 #[tokio::test]
 async fn postgres_minute_handoff_catches_cards_closed_by_github_sync_pg() {
     let fixture = TestPostgresDb::create().await;
@@ -526,9 +549,14 @@ async fn postgres_minute_handoff_catches_cards_closed_by_github_sync_pg() {
         gh_issue(2, "OPEN"),
         gh_issue(4, "OPEN"),
     ];
-    let synced = crate::github::sync::sync_github_issues_for_repo_pg(&pool, REPO, &issues)
-        .await
-        .expect("github sync");
+    let synced = crate::github::sync::sync_github_issues_for_repo_pg_with_adapter(
+        &pool,
+        REPO,
+        &issues,
+        &OfflineGitHub,
+    )
+    .await
+    .expect("github sync");
     assert_eq!(synced.closed_count, 1, "closing #1 finishes a's card");
 
     hand_off_auto_campaigns_pg(&pool, &engine)

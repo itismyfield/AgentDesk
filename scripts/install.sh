@@ -24,6 +24,10 @@ INSTALL_PORT="${AGENTDESK_INSTALL_PORT:-}"
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 CONFIG_PATH="$INSTALL_DIR/config/agentdesk.yaml"
 LEGACY_CONFIG_PATH="$INSTALL_DIR/agentdesk.yaml"
+INSTALL_SUPPORT_REF="a7182f11c9b2d3be48cfbf5cc1d527fafc022ea9"
+INSTALL_SUPPORT_HELPER_SHA256="e9fd618c9739c2065554bba1bb833e7b54e919d6064ce857e1ec241a005c1f45"
+INSTALL_SUPPORT_CONTRACT_SHA256="6e908a118af50d8952931936900173f783ce0eaae5ef9790c01f0a78ec672934"
+READINESS_TIMEOUT_SECONDS=60
 
 # Read defaults from defaults.json if available (single source of truth)
 _read_default() {
@@ -190,6 +194,165 @@ agentdesk_supports_emit_launchd_label() {
   "$1" emit-launchd-plist --help 2>&1 | grep -q -- "--label"
 }
 
+INSTALL_STAGE=""
+INSTALL_SCRATCH=""
+BINARY_REPLACED=0
+OLD_BINARY_PRESENT=0
+OLD_BINARY_LOCKED=0
+INSTALL_COMMITTED=0
+INSTALL_SUPPORT_DIR=""
+
+verify_install_support() {
+  python3 -c '
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+try:
+    valid = all(hashlib.sha256((root / name).read_bytes()).hexdigest() == digest
+                for name, digest in zip(("install_runtime_assets.py", "runtime-assets.txt"), sys.argv[2:]))
+except OSError:
+    valid = False
+sys.exit(0 if valid else 1)
+' "$1" "$INSTALL_SUPPORT_HELPER_SHA256" "$INSTALL_SUPPORT_CONTRACT_SHA256"
+}
+
+prepare_install_support() {
+  local installer="${BASH_SOURCE[0]:-}" local_support="" name
+  INSTALL_SUPPORT_DIR="$INSTALL_SCRATCH/installer-support"
+  mkdir -p "$INSTALL_SUPPORT_DIR"
+  if [ -n "$installer" ]; then
+    local_support=$(cd "$(dirname "$installer")" && pwd -P)
+  fi
+  if [ -n "$local_support" ] && verify_install_support "$local_support"; then
+    cp "$local_support/install_runtime_assets.py" "$INSTALL_SUPPORT_DIR/"
+    cp "$local_support/runtime-assets.txt" "$INSTALL_SUPPORT_DIR/"
+  else
+    for name in install_runtime_assets.py runtime-assets.txt; do
+      curl -fSL --connect-timeout 10 --max-time 30 \
+        "https://raw.githubusercontent.com/$REPO/$INSTALL_SUPPORT_REF/scripts/$name" \
+        -o "$INSTALL_SUPPORT_DIR/$name" || fail "Cannot fetch installer support: $name"
+    done
+  fi
+  verify_install_support "$INSTALL_SUPPORT_DIR" || fail "Installer support checksum mismatch"
+}
+
+finish_install() {
+  local status="$?" target="$INSTALL_DIR/bin/agentdesk"
+  trap - EXIT
+  if [ "$INSTALL_COMMITTED" = 0 ] && [ -n "$INSTALL_STAGE" ]; then
+    if [ "$OLD_BINARY_PRESENT" = 1 ]; then
+      if [ "$BINARY_REPLACED" = 1 ] && [ ! -f "$INSTALL_STAGE/agentdesk" ]; then
+        [ ! -f "$target" ] || chflags nouchg "$target" || status=1
+        if ! mv -f "$INSTALL_STAGE/previous" "$target"; then
+          [ ! -f "$target" ] || chflags uchg "$target"
+          [ "$OLD_BINARY_LOCKED" = 0 ] || chflags uchg "$INSTALL_STAGE/previous"
+          warn "Binary recovery failed; previous binary retained at $INSTALL_STAGE/previous"
+          exit 1
+        fi
+      fi
+      if [ "$OLD_BINARY_LOCKED" = 1 ]; then
+        chflags uchg "$target" || status=1
+      fi
+    elif [ "$BINARY_REPLACED" = 1 ] && [ -f "$target" ]; then
+      chflags uchg "$target" || status=1
+      warn "Installed binary retained after incomplete setup: $target"
+    fi
+  fi
+  if [ -n "$INSTALL_STAGE" ]; then
+    # Only installer-created staging files are removed.
+    rm -f "$INSTALL_STAGE/agentdesk" "$INSTALL_STAGE/previous" || status=1
+    rmdir "$INSTALL_STAGE" || status=1
+  fi
+  if [ -n "$INSTALL_SCRATCH" ]; then
+    cd /
+    rm -r "$INSTALL_SCRATCH" || status=1
+  fi
+  exit "$status"
+}
+
+install_runtime() {
+  local source="$1" binary="$2" target="$INSTALL_DIR/bin/agentdesk" flags
+  mkdir -p "$INSTALL_DIR"/{bin,config,data,logs}
+  INSTALL_STAGE=$(mktemp -d "$INSTALL_DIR/bin/.agentdesk-install.XXXXXX")
+  if [ -L "$target" ] || { [ -e "$target" ] && [ ! -f "$target" ]; }; then
+    fail "Existing agentdesk binary is not a regular file"
+  fi
+  cp "$binary" "$INSTALL_STAGE/agentdesk"
+  chmod +x "$INSTALL_STAGE/agentdesk"
+  sign_binary_with_fallback "$INSTALL_STAGE/agentdesk"
+  "$INSTALL_STAGE/agentdesk" --version
+  python3 "$INSTALL_SUPPORT_DIR/install_runtime_assets.py" "$source" "$INSTALL_DIR" \
+    --contract "$INSTALL_SUPPORT_DIR/runtime-assets.txt"
+  if [ -d "$source/dashboard/dist" ]; then
+    mkdir -p "$INSTALL_DIR/dashboard/dist"
+    cp -R "$source/dashboard/dist/." "$INSTALL_DIR/dashboard/dist/"
+  fi
+  if [ -f "$target" ]; then
+    flags=$(stat -f '%Sf' "$target")
+    case ",$flags," in *,uchg,*) OLD_BINARY_LOCKED=1 ;; esac
+    cp -p "$target" "$INSTALL_STAGE/previous"
+    chflags nouchg "$INSTALL_STAGE/previous"
+    OLD_BINARY_PRESENT=1
+    chflags nouchg "$target"
+  fi
+  # Rename replaces the directory entry atomically; the saved binary remains available for rollback.
+  BINARY_REPLACED=1
+  mv -f "$INSTALL_STAGE/agentdesk" "$target"
+  chflags uchg "$target"
+}
+
+verify_installed_policies() {
+  local response timeout="$1"
+  [ "$timeout" -gt 0 ] || return 1
+  response=$(curl -fsS --max-time "$timeout" \
+    -H "Origin: http://${DEFAULT_LOOPBACK}:$INSTALL_PORT" \
+    "http://${DEFAULT_LOOPBACK}:$INSTALL_PORT/api/policies") || return 1
+  python3 -c '
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1]).resolve() / "policies"
+policies = json.load(sys.stdin)["policies"]
+for name in ("auto-queue", "timeouts", "kanban-rules"):
+    expected = str(root / (name + ".js"))
+    if not any(p.get("name") == name and pathlib.Path(p.get("file", "")).is_absolute()
+               and str(pathlib.Path(p["file"]).resolve()) == expected for p in policies):
+        sys.exit("Required policy did not register from installation: " + name)
+' "$INSTALL_DIR" <<< "$response"
+}
+
+read_boot_incarnation() {
+  local response timeout="${1:-5}"
+  [ "$timeout" -gt 0 ] || return 1
+  response=$(curl -sS --max-time "$timeout" \
+    -H "Origin: http://${DEFAULT_LOOPBACK}:$INSTALL_PORT" \
+    "http://${DEFAULT_LOOPBACK}:$INSTALL_PORT/api/health/detail") || return 1
+  python3 -c '
+import json, sys
+value = json.load(sys.stdin).get("boot_incarnation")
+if not isinstance(value, str) or not value:
+    sys.exit(1)
+print(value)
+' <<< "$response"
+}
+
+wait_for_installed_policies() {
+  local deadline=$((SECONDS + READINESS_TIMEOUT_SECONDS)) current after remaining
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$((deadline - SECONDS))
+    if current=$(read_boot_incarnation "$remaining" 2>/dev/null) \
+      && [ "$current" != "$PREVIOUS_BOOT_INCARNATION" ]; then
+      remaining=$((deadline - SECONDS))
+      if [ "$remaining" -gt 0 ] && verify_installed_policies "$remaining" 2>/dev/null; then
+        remaining=$((deadline - SECONDS))
+        if [ "$remaining" -gt 0 ] && after=$(read_boot_incarnation "$remaining" 2>/dev/null) \
+          && [ "$current" = "$after" ] && [ "$SECONDS" -lt "$deadline" ]; then
+          return 0
+        fi
+      fi
+    fi
+    [ "$SECONDS" -ge "$deadline" ] || sleep 1
+  done
+  return 1
+}
+
 emit_launchd_plist() {
   local agentdesk_bin="$1" plist_path="$2"
   if [ "$LAUNCHD_LABEL" = "com.agentdesk.release" ]; then
@@ -259,6 +422,14 @@ fi
 if ! command -v tar &>/dev/null; then
   fail "tar is required but not found"
 fi
+if ! command -v python3 &>/dev/null; then
+  fail "python3 is required for runtime asset installation and policy verification"
+fi
+trap finish_install EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+INSTALL_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-install.XXXXXX")
+prepare_install_support
 
 # ── Download latest release ───────────────────────────────────────────────────
 ARTIFACT="agentdesk-${OS}-${ARCH}"
@@ -288,7 +459,7 @@ if [ -z "$LATEST_TAG" ]; then
     fail "git is required for source build"
   fi
 
-  TMPDIR_BUILD="${TMPDIR:-/tmp}/agentdesk-install-$$"
+  TMPDIR_BUILD="$INSTALL_SCRATCH/source"
   info "Cloning repository..."
   git clone --depth 1 "https://github.com/$REPO.git" "$TMPDIR_BUILD"
 
@@ -323,32 +494,14 @@ if [ -z "$LATEST_TAG" ]; then
     fi
   fi
 
-  # Install
-  mkdir -p "$INSTALL_DIR"/{bin,config,data,logs,policies,dashboard,skills}
-  cp target/release/agentdesk "$INSTALL_DIR/bin/"
-  chmod +x "$INSTALL_DIR/bin/agentdesk"
-
-  if [ -d "dashboard/dist" ]; then
-    cp -r dashboard/dist "$INSTALL_DIR/dashboard/dist"
-  fi
-
-  if [ -d "policies" ]; then
-    cp policies/*.js "$INSTALL_DIR/policies/"
-  fi
-
-  if [ -d "skills" ]; then
-    rsync -a --delete "skills/" "$INSTALL_DIR/skills/"
-  fi
-
+  install_runtime "$TMPDIR_BUILD" "$TMPDIR_BUILD/target/release/agentdesk"
   cd /
-  rm -rf "$TMPDIR_BUILD"
   ok "Built and installed from source"
 else
   DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST_TAG/${ARTIFACT}.tar.gz"
   info "Downloading $LATEST_TAG..."
 
-  TMPDIR_DL="${TMPDIR:-/tmp}/agentdesk-install-$$"
-  mkdir -p "$TMPDIR_DL"
+  TMPDIR_DL="$INSTALL_SCRATCH"
 
   if ! curl -fSL "$DOWNLOAD_URL" -o "$TMPDIR_DL/${ARTIFACT}.tar.gz"; then
     fail "Download failed. URL: $DOWNLOAD_URL"
@@ -358,36 +511,13 @@ else
   cd "$TMPDIR_DL"
   tar xzf "${ARTIFACT}.tar.gz"
 
-  # Install
-  mkdir -p "$INSTALL_DIR"/{bin,config,data,logs,skills}
-  cp "${ARTIFACT}/agentdesk" "$INSTALL_DIR/bin/"
-  chmod +x "$INSTALL_DIR/bin/agentdesk"
-
-  if [ -d "${ARTIFACT}/dashboard" ]; then
-    rm -rf "$INSTALL_DIR/dashboard"
-    cp -r "${ARTIFACT}/dashboard" "$INSTALL_DIR/dashboard"
-  fi
-
-  if [ -d "${ARTIFACT}/policies" ]; then
-    mkdir -p "$INSTALL_DIR/policies"
-    cp "${ARTIFACT}/policies/"*.js "$INSTALL_DIR/policies/"
-  fi
-
-  if [ -d "${ARTIFACT}/skills" ]; then
-    rsync -a --delete "${ARTIFACT}/skills/" "$INSTALL_DIR/skills/"
-  fi
-
+  install_runtime "$TMPDIR_DL/$ARTIFACT" "$TMPDIR_DL/$ARTIFACT/agentdesk"
   cd /
-  rm -rf "$TMPDIR_DL"
   ok "Installed $LATEST_TAG"
 fi
 
 # ── Code signing (macOS) ──────────────────────────────────────────────────────
 if [ "$OS" = "darwin" ]; then
-  chflags nouchg "$INSTALL_DIR/bin/agentdesk" 2>/dev/null || true
-  sign_binary_with_fallback "$INSTALL_DIR/bin/agentdesk"
-  chflags uchg "$INSTALL_DIR/bin/agentdesk"
-
   # Register with firewall
   FW=/usr/libexec/ApplicationFirewall/socketfilterfw
   if [ -f "$FW" ]; then
@@ -444,6 +574,7 @@ ok "Launchd plist: $PLIST_PATH"
 # ── Start dcserver ────────────────────────────────────────────────────────────
 info "Starting AgentDesk..."
 LAUNCHD_DOMAIN="$(launchd_domain)"
+PREVIOUS_BOOT_INCARNATION=$(read_boot_incarnation 2>/dev/null || true)
 
 # Stop existing instance if running
 launchctl bootout "$LAUNCHD_DOMAIN/$LAUNCHD_LABEL" 2>/dev/null || true
@@ -453,19 +584,13 @@ sleep 1
 xattr -d com.apple.quarantine "$PLIST_PATH" 2>/dev/null || true
 
 # Start
-if launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST_PATH" 2>/dev/null; then
-  sleep 3
-
-  # Health check
-  if curl -sf --max-time 5 "http://${DEFAULT_LOOPBACK}:$INSTALL_PORT/api/health" | grep -q '"status":"healthy"'; then
-    ok "AgentDesk is running on port $INSTALL_PORT"
-  else
-    warn "Service started but health check pending. Check logs: $INSTALL_DIR/logs/"
-  fi
-else
-  warn "launchd bootstrap failed. Try manually:"
-  echo "  launchctl bootstrap $LAUNCHD_DOMAIN $PLIST_PATH"
+if ! launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST_PATH" 2>/dev/null; then
+  fail "launchd bootstrap failed. Check logs: $INSTALL_DIR/logs/"
 fi
+
+wait_for_installed_policies || fail "Could not verify a new AgentDesk process and required policies within ${READINESS_TIMEOUT_SECONDS}s. Check logs: $INSTALL_DIR/logs/"
+ok "AgentDesk API and required policies are ready on port $INSTALL_PORT"
+INSTALL_COMMITTED=1
 
 # ── Open browser ──────────────────────────────────────────────────────────────
 DASHBOARD_URL="http://${DEFAULT_LOOPBACK}:$INSTALL_PORT"

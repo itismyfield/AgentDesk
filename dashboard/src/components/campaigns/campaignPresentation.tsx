@@ -26,6 +26,11 @@ export const COLORS: Record<string, string> = {
 export function Badge({ status, tr }: { status: string; tr: Tr }) {
   return <span className={`campaign-badge campaign-status-${status}`}>{LABELS[status] ? tr(...LABELS[status]) : status}</span>;
 }
+/** Work left after merge keeps a closed issue from completing the node. */
+export function HoldBadge({ hold, tr }: { hold: string | null | undefined; tr: Tr }) {
+  if (!hold) return null;
+  return <span className="campaign-badge campaign-status-blocked" title={hold}>{tr("보류: 머지 뒤 남은 일", "On hold: post-merge work")}</span>;
+}
 
 const DISPATCH_TYPES: Record<string, [string, string]> = {
   implementation: ["구현", "Implementation"],
