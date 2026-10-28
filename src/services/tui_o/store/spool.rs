@@ -23,7 +23,7 @@ pub const SEGMENT_MAX_BYTES: u64 = 64 << 20;
 /// Per-channel spool ceiling; reaching it pauses the source instead of dropping records.
 pub const SPOOL_CAP_BYTES: u64 = 1 << 30;
 /// Replay keeps each segment's body-selection version; new appends roll forward to current rules.
-const READABLE_IDENTITY_VERSIONS: [u32; 5] = [2, 3, 4, 5, 6];
+const READABLE_IDENTITY_VERSIONS: [u32; 6] = [2, 3, 4, 5, 6, 7];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {

@@ -211,6 +211,23 @@ fn an_open_turn_before_legacys_cursor_is_not_adopted() {
 }
 
 #[test]
+fn compact_summary_does_not_reopen_an_adoption_source() {
+    let channel = Channel::new(748801);
+    let summary = serde_json::json!({"type":"user", "uuid":"summary", "isCompactSummary":true,
+        "message":{"content":"compacted context"}});
+    append(&channel.source.path, &format!("{summary}\n"));
+    *channel.legacy.cursor.lock().unwrap() = Some(channel.end());
+    channel
+        .pin()
+        .expect("a summary leaves the delivered turn closed");
+    let user =
+        serde_json::json!({"type":"user", "uuid":"real-input", "message":{"content":"/compact"}});
+    append(&channel.source.path, &format!("{user}\n"));
+    *channel.legacy.cursor.lock().unwrap() = Some(channel.end());
+    assert!(channel.pin().unwrap_err().contains("still open"));
+}
+
+#[test]
 fn a_running_legacy_tail_releases_the_channel() {
     let channel = Channel::new(641004);
     let store = channel.store();
