@@ -83,12 +83,13 @@ mod phase1_sweep;
 mod phase2;
 mod phase2_sweep;
 pub(in crate::services::discord) mod retry_state;
+mod scan_progress;
 mod settled_frontier;
 mod settled_ledger_consult;
 
 #[cfg(test)]
 #[path = "catch_up/classification_order_tests.rs"]
-mod classification_order_tests;
+pub(in crate::services::discord) mod classification_order_tests;
 
 use api::{CatchUpDiscordApi, CatchUpFetchRequest, SerenityCatchUpDiscordApi};
 use classification::{
@@ -131,18 +132,6 @@ fn arm_catch_up_retry_pending(shared: &SharedData, channel_id: ChannelId, retry_
     arm_catch_up_retry_state(shared, channel_id, CatchUpRetryState::new(retry_after)).checkpoint
 }
 
-fn catch_up_checkpoint_for_scan(
-    disk_checkpoint: u64,
-    live_checkpoint: Option<u64>,
-    retry_checkpoint: Option<u64>,
-) -> u64 {
-    retry_checkpoint.unwrap_or_else(|| {
-        live_checkpoint
-            .map(|checkpoint| disk_checkpoint.max(checkpoint))
-            .unwrap_or(disk_checkpoint)
-    })
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CatchUpFetchMode {
     After(u64),
@@ -158,27 +147,12 @@ impl CatchUpFetchMode {
     }
 }
 
-fn catch_up_fetch_mode_for_scan(
-    candidate: &CatchUpChannelCandidate,
-    live_checkpoint: Option<u64>,
-    retry_checkpoint: Option<u64>,
-) -> CatchUpFetchMode {
-    if let Some(disk_checkpoint) = candidate.disk_checkpoint {
-        return CatchUpFetchMode::After(catch_up_checkpoint_for_scan(
-            disk_checkpoint,
-            live_checkpoint,
-            retry_checkpoint,
-        ));
-    }
-
-    if let Some(retry_checkpoint) = retry_checkpoint {
-        return CatchUpFetchMode::After(retry_checkpoint);
-    }
-    if let Some(live_checkpoint) = live_checkpoint {
-        return CatchUpFetchMode::After(live_checkpoint);
-    }
-
-    CatchUpFetchMode::Recent
+fn catch_up_fetch_mode_for_scan(progress: Option<u64>, retry: Option<u64>) -> CatchUpFetchMode {
+    let after = match (progress, retry) {
+        (Some(progress), Some(retry)) => Some(progress.min(retry)),
+        (progress, retry) => retry.or(progress),
+    };
+    after.map_or(CatchUpFetchMode::Recent, CatchUpFetchMode::After)
 }
 
 #[derive(Debug, Clone)]
@@ -225,7 +199,9 @@ fn catch_up_candidate_allowed_for_bot(
     provider: &ProviderKind,
     candidate: &CatchUpChannelCandidate,
 ) -> bool {
-    if candidate.disk_checkpoint.is_some() {
+    if candidate.disk_checkpoint.is_some()
+        || scan_progress::has_file(provider, candidate.channel_id)
+    {
         return settings::bot_settings_allow_channel(
             settings,
             provider,
@@ -253,6 +229,22 @@ fn collect_catch_up_channel_candidates(
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            if let Some(channel_id) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".sweep.json"))
+                .and_then(|name| name.parse::<u64>().ok())
+                .filter(|id| *id != 0)
+            {
+                insert_configured_catch_up_candidate(
+                    &mut candidates,
+                    provider,
+                    provider,
+                    channel_id,
+                    None,
+                );
+                continue;
+            }
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
@@ -646,12 +638,12 @@ mod catch_up_recovery_tests {
     use super::retry_state::merge_catch_up_retry_checkpoint;
     use super::{
         CATCH_UP_RECENT_MAX_PAGES, CATCH_UP_RETRY_DEFERRED_REARM_LIMIT,
-        CATCH_UP_RETRY_FETCH_FAILURE_LIMIT, CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate,
-        CatchUpClassification, CatchUpDeps, CatchUpDiscordApi, CatchUpFetchMode,
-        CatchUpMessageView, CatchUpRetryScanDecision, CatchUpRetryState, ChannelId, MessageId,
-        Phase2EnqueueCommit, ProviderKind, RecentPageDecision, RuntimeChannelBindingStatus,
-        SystemClock, advance_phase2_checkpoint, arm_catch_up_retry_pending,
-        catch_up_enqueue_accepted, catch_up_fetch_mode_for_scan, catch_up_intervention_created_at,
+        CATCH_UP_RETRY_FETCH_FAILURE_LIMIT, CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpClassification,
+        CatchUpDeps, CatchUpDiscordApi, CatchUpFetchMode, CatchUpMessageView,
+        CatchUpRetryScanDecision, CatchUpRetryState, ChannelId, MessageId, Phase2EnqueueCommit,
+        ProviderKind, RecentPageDecision, RuntimeChannelBindingStatus, SystemClock,
+        advance_phase2_checkpoint, arm_catch_up_retry_pending, catch_up_enqueue_accepted,
+        catch_up_fetch_mode_for_scan, catch_up_intervention_created_at,
         catch_up_last_item_dedup_is_checkpoint_safe, catch_up_message_age_reference_time,
         catch_up_remaining_queue_capacity, classify_catch_up_message,
         classify_phase2_enqueue_commit, collect_catch_up_retry_pending_channels,
@@ -727,6 +719,15 @@ mod catch_up_recovery_tests {
             checkpoint.to_string(),
         )
         .expect("write last_message checkpoint");
+        let progress = serde_json::json!({
+            "version": 1, "provider": provider.as_str(), "channel_id": channel_id.get(),
+            "after": checkpoint, "origin": "observed_frontier",
+        });
+        std::fs::write(
+            dir.join(format!("{}.sweep.json", channel_id.get())),
+            progress.to_string(),
+        )
+        .expect("seed scanner checkpoint");
     }
 
     struct TestCatchUpDiscordApi {
@@ -934,7 +935,7 @@ mod catch_up_recovery_tests {
         assert!(candidate.checkpoint_path.is_none());
         assert!(candidate.disk_checkpoint.is_none());
         assert_eq!(
-            catch_up_fetch_mode_for_scan(candidate, None, None),
+            catch_up_fetch_mode_for_scan(None, None),
             CatchUpFetchMode::Recent
         );
     }
@@ -967,26 +968,15 @@ mod catch_up_recovery_tests {
         assert!(candidate.checkpoint_path.is_some());
         assert_eq!(candidate.fallback_name.as_deref(), Some("adk-cc"));
         assert_eq!(
-            catch_up_fetch_mode_for_scan(candidate, Some(1504812094456070175), None),
-            CatchUpFetchMode::After(1504812094456070175)
+            catch_up_fetch_mode_for_scan(None, None),
+            CatchUpFetchMode::Recent
         );
     }
 
     #[test]
     fn retry_checkpoint_overrides_live_cursor_for_recent_scan_retry() {
-        let candidate = CatchUpChannelCandidate {
-            channel_id: ChannelId::new(1479671298497183835),
-            fallback_name: Some("adk-cc".to_string()),
-            checkpoint_path: None,
-            disk_checkpoint: None,
-        };
-
         assert_eq!(
-            catch_up_fetch_mode_for_scan(
-                &candidate,
-                Some(1504812094456070999),
-                Some(1504812094456070000)
-            ),
+            catch_up_fetch_mode_for_scan(Some(1504812094456070999), Some(1504812094456070000)),
             CatchUpFetchMode::After(1504812094456070000)
         );
     }
@@ -1218,14 +1208,8 @@ mod catch_up_recovery_tests {
         // Regression guard: the `After` (checkpoint) fetch mode keeps its single
         // precise lower bound; the backward-pagination loop is gated on
         // `matches!(fetch_mode, Recent)` only.
-        let candidate = CatchUpChannelCandidate {
-            channel_id: ChannelId::new(99),
-            fallback_name: None,
-            checkpoint_path: None,
-            disk_checkpoint: Some(1_500_000_000_000_000_000),
-        };
         assert!(matches!(
-            catch_up_fetch_mode_for_scan(&candidate, None, None),
+            catch_up_fetch_mode_for_scan(Some(1_500_000_000_000_000_000), None),
             CatchUpFetchMode::After(_)
         ));
     }
@@ -2088,6 +2072,9 @@ mod catch_up_recovery_tests {
 
     #[test]
     fn exhausted_recovery_stale_busy_retry_cannot_resurrect_ttl_retired_message() {
+        let _env = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let shared = super::super::make_shared_data_for_tests();
         let channel_id = ChannelId::new(6_813_299);
         let retry = CatchUpRetryState {
@@ -2116,6 +2103,12 @@ mod catch_up_recovery_tests {
         assert!(!shared.catch_up_scan_in_progress.contains_key(&channel_id));
         assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
         shared.last_message_ids.insert(channel_id, 200);
+        super::scan_progress::advance(
+            &shared.provider,
+            channel_id,
+            200,
+            super::scan_progress::Origin::ObservedFrontier,
+        );
         assert!(super::retry_state::try_channel_scan(&shared, channel_id, Some(retry)).is_none());
         assert_eq!(
             super::retry_state::catch_up_retry_prior(&shared, channel_id, Some(hold)),

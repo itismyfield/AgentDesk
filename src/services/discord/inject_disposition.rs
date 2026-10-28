@@ -451,3 +451,6 @@ pub(crate) mod test_support;
 #[cfg(test)]
 #[path = "inject_disposition_tests.rs"]
 mod tests;
+
+/// Durable claim evidence read only by catch-up scanners.
+pub(in crate::services::discord) mod dispatched;

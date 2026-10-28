@@ -92,7 +92,9 @@ valid edit in the live snapshot, but only `live` fields act on it. A change to a
 | `agents.*.channels.*.dispatch_profile` | live | `src/services/discord/agentdesk_config.rs` resolve_dispatch_profile |
 | `agents.*.channels.*.isolate_override` | live | `src/services/discord/agentdesk_config.rs` resolve_worktree_isolation_policy |
 | `agents.*.channels.*.cache_ttl_minutes` | live | `src/services/discord/agentdesk_config.rs` resolve_cache_ttl_minutes |
-| `agents.*.keywords` | live | `src/services/discord/agentdesk_config.rs` load_meeting_config / load_peer_agents (disk) |
+| `agents.*.keywords` | live | `src/voice/commands.rs` agent_voice_aliases / `src/services/discord/agentdesk_config.rs` load_meeting_config fallback |
+| `agents.*.peer_keywords` | live | `src/services/discord/agentdesk_config.rs` load_peer_agents (directory only; disk per prompt) |
+| `agents.*.peer_directory` | live | `src/services/discord/agentdesk_config.rs` load_peer_agents (disk per prompt) |
 | `agents.*.department` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (agents.department) |
 | `agents.*.avatar_emoji` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (agents.avatar_emoji) |
 | `agents.*.preferred_intake_node_labels` | seeded-at-boot | `src/db/postgres/agent_sync.rs` upsert_agent_from_config_pg (COALESCE: absent key keeps DB value) |

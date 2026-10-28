@@ -78,10 +78,150 @@ fn test_role_binding(role_id: &str) -> RoleBinding {
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: true,
-        quality_feedback_injection_enabled: true,
         auth_profile: "default".to_string(),
         memory: Default::default(),
     }
+}
+
+#[tokio::test]
+async fn rendered_system_prompts_omit_agent_performance_with_quality_data_pg() {
+    use crate::services::observability::{
+        QualityRankingMetric, QualityRankingWindow, query_agent_quality_ranking_with,
+        query_agent_quality_summary,
+    };
+
+    if crate::db::postgres::postgres_test_database_url_base().is_none() {
+        return;
+    }
+    // The direct API context is process-global; keep the fixture out of parallel tests.
+    const CHILD: &str = "ADK_PROMPT_QUALITY_FIXTURE_CHILD";
+    const TEST: &str = "services::discord::prompt_builder::dispatch_contract_tests::rendered_system_prompts_omit_agent_performance_with_quality_data_pg";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .expect("isolated quality fixture");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success()
+                && stdout.contains("1 passed; 0 failed")
+                && stderr.contains("quality fixture verified: 18 rendered prompts"),
+            "{stdout}\n{stderr}"
+        );
+        eprintln!("{stderr}");
+        return;
+    }
+
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "prompt_without_performance",
+        "system prompt quality fixture",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    sqlx::query(
+        "INSERT INTO agent_quality_daily
+            (agent_id, day, turn_success_rate_7d, turn_success_rate_30d,
+             turn_sample_size_7d, sample_size_7d, measurement_unavailable_7d, computed_at)
+         VALUES ('prompt-quality-fixture', CURRENT_DATE, 0.75, 0.90, 8, 8, FALSE,
+                 TIMESTAMPTZ '2026-10-27 00:00:00+00')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed existing quality metrics");
+    let summary = query_agent_quality_summary(Some(&pool), "prompt-quality-fixture", 30, 60)
+        .await
+        .expect("quality summary remains available");
+    assert!(!summary.fallback_from_events);
+    assert_eq!(summary.daily.len(), 1);
+    assert_eq!(
+        summary
+            .current
+            .as_ref()
+            .unwrap()
+            .rolling_7d
+            .turn_success_rate,
+        Some(0.75)
+    );
+    let ranking = query_agent_quality_ranking_with(
+        Some(&pool),
+        50,
+        QualityRankingMetric::TurnSuccessRate,
+        QualityRankingWindow::Seven,
+        5,
+    )
+    .await
+    .expect("quality ranking remains available");
+    assert_eq!(ranking.agents.len(), 1);
+    assert_eq!(ranking.agents[0].agent_id, "prompt-quality-fixture");
+    assert_eq!(ranking.agents[0].metric_value, Some(0.75));
+    for (label, mut payload) in [
+        ("summary", serde_json::to_value(&summary).unwrap()),
+        ("ranking", serde_json::to_value(&ranking).unwrap()),
+    ] {
+        payload.as_object_mut().unwrap().remove("generatedAt");
+        eprintln!("quality-{label}-fixture: {payload}");
+    }
+    super::super::internal_api::init(0, Some(pool.clone()));
+    let mut binding = test_role_binding("prompt-quality-fixture");
+    binding.peer_agents_enabled = false;
+
+    for queued_turn in [false, true] {
+        for profile in [
+            DispatchProfile::Full,
+            DispatchProfile::Lite,
+            DispatchProfile::ReviewLite,
+        ] {
+            for profiles in [
+                PromptProfiles::foreground(profile),
+                PromptProfiles::headless(profile),
+                PromptProfiles::inspection(profile),
+            ] {
+                let built = build_system_prompt_with_manifest(
+                    "ctx",
+                    &[],
+                    "/tmp",
+                    ChannelId::new(7_452),
+                    ChannelId::new(7_452),
+                    "tok",
+                    Some(&binding),
+                    queued_turn,
+                    profiles,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    None,
+                    Some("turn-without-agent-performance"),
+                );
+                assert!(
+                    !built.system_prompt.contains("[Agent Performance"),
+                    "{profiles:?}, queued={queued_turn}: obsolete quality block was injected"
+                );
+                let manifest = built.manifest.expect("prompt manifest");
+                assert!(manifest.layers.iter().all(|layer| {
+                    layer.layer_name != "agent_performance"
+                        && !layer
+                            .full_content
+                            .as_deref()
+                            .is_some_and(|content| content.contains("[Agent Performance"))
+                }));
+            }
+        }
+    }
+
+    super::super::internal_api::init(0, None);
+    pool.close().await;
+    db.drop().await;
+    eprintln!("quality fixture verified: 18 rendered prompts");
 }
 
 #[test]
@@ -834,7 +974,6 @@ fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: true,
-        quality_feedback_injection_enabled: true,
         auth_profile: "default".to_string(),
         memory: Default::default(),
     };
@@ -1498,4 +1637,260 @@ fn system_prompt_inspection_preserves_pending_restore_for_the_next_turn() {
         crate::services::agent_recovery::take_restore_packet(&id).is_none(),
         "normal turns still consume restore packets"
     );
+}
+
+fn peer_directory_prompt() -> String {
+    build_system_prompt(
+        "ctx",
+        &[],
+        "/tmp",
+        ChannelId::new(1),
+        "tok",
+        Some(&test_role_binding("family-counsel")),
+        false,
+        DispatchProfile::Full,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    )
+}
+
+#[test]
+fn peer_directory_shared_keywords_are_not_voice_aliases_or_meeting_keywords() {
+    let root = tempfile::tempdir().unwrap();
+    let _guard = crate::config::set_agentdesk_root_for_test(root.path());
+    let path = crate::runtime_layout::config_file_path(root.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "server: {}\ndatabase: {enabled: false}\nvoice: {enabled: true}\nagents:\n  - {id: ch-tad, name: TechnicalArt, name_ko: 테크아트, keywords: [기술미술], peer_keywords: [아트]}\n  - {id: ch-ad, name: ArtDirector, name_ko: 아트디렉터, keywords: [미술감독], peer_keywords: [아트]}\n  - {id: voice-only, name: VoiceOnly, name_ko: 목소리, keywords: [음성전용]}\nmeeting:\n  channel_name: fixture\n  summary_agent: ch-tad\n  available_agents:\n    - ch-tad\n    - {role_id: ch-ad}\n    - voice-only\n",
+    )
+    .unwrap();
+    let config = crate::config::load_from_path(&path).expect("valid shared keyword fixture");
+    let aliases = crate::voice::commands::validate_agent_alias_collisions(&config.agents);
+    let loaded = crate::services::discord_config_audit::load_runtime_config(root.path())
+        .expect("config audit voice precheck accepts shared directory keywords");
+    assert!(
+        aliases.is_ok(),
+        "shared directory keywords collided: {aliases:?}"
+    );
+    assert!(loaded.config.voice.enabled, "audit must keep voice enabled");
+    let audit = crate::services::discord_config_audit::audit_and_reconcile_config_only(
+        root.path(),
+        loaded.config,
+        loaded.path,
+        loaded.existed,
+        &Default::default(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(audit.report.status, "ok");
+    assert_eq!(audit.report.warnings_count, 0);
+    let mut voice_collision = config.agents.clone();
+    for agent in &mut voice_collision[..2] {
+        agent.keywords = vec!["음성충돌".to_string()];
+    }
+    assert!(crate::voice::commands::validate_agent_alias_collisions(&voice_collision).is_err());
+
+    let prompt = peer_directory_prompt();
+    let directory = prompt.split("[Peer Agent Directory]").nth(1).unwrap();
+    for id in ["ch-tad", "ch-ad"] {
+        let line = directory
+            .lines()
+            .find(|line| line.starts_with(&format!("- {id} ")))
+            .unwrap();
+        assert!(
+            line.contains("best for: 아트"),
+            "missing shared keyword: {line}"
+        );
+    }
+    assert!(directory.contains("(목소리)"));
+    assert!(!directory.contains("음성전용"));
+    let meeting = crate::services::discord::agentdesk_config::load_meeting_config().unwrap();
+    assert_eq!(meeting.available_agents[0].keywords, ["기술미술"]);
+    assert_eq!(meeting.available_agents[1].keywords, ["미술감독"]);
+}
+
+#[test]
+fn peer_directory_example_hides_e2e_and_keeps_specialist_names() {
+    let example = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agentdesk.example.yaml"),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _guard = crate::config::set_agentdesk_root_for_test(root.path());
+    let path = crate::runtime_layout::config_file_path(root.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let fixture_home = root.path().to_string_lossy().replace('\\', "/");
+    let isolated = example.replace("~/", &format!("{fixture_home}/"));
+    std::fs::write(&path, isolated).unwrap();
+    let config = crate::config::load_from_path(&path).expect("valid example config");
+    let e2e_agents: Vec<_> = config
+        .agents
+        .iter()
+        .filter(|agent| agent.id.starts_with("adk-") && agent.id.contains("e2e"))
+        .collect();
+    assert!(
+        !e2e_agents.is_empty(),
+        "example must exercise E2E visibility"
+    );
+
+    let prompt = peer_directory_prompt();
+    let directory = prompt.split("[Peer Agent Directory]").nth(1).unwrap();
+    for agent in e2e_agents {
+        assert!(
+            !directory.contains(&agent.id),
+            "example E2E agent {} leaked: {directory}",
+            agent.id
+        );
+    }
+    assert!(directory.contains("ch-td"));
+    assert!(directory.contains("(테크니컬 디렉터)"));
+}
+
+#[test]
+fn peer_directory_next_prompt_reads_added_agents_without_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let _guard = crate::config::set_agentdesk_root_for_test(root.path());
+    let path = crate::runtime_layout::config_file_path(root.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let initial = "server: {}\ndatabase: {enabled: false}\nagents:\n  - {id: family-counsel, name: Counsel}\n  - {id: chef-goat, name: Chef, name_ko: 셰프, peer_keywords: [요리, 식단, 재료, 레시피, 미표시]}\nmeeting:\n  channel_name: fixture\n  available_agents: [family-counsel, chef-goat]\n";
+    std::fs::write(&path, initial).unwrap();
+    crate::config::load_from_path(&path).expect("valid peer directory fixture");
+    let before = peer_directory_prompt();
+    assert!(
+        before.contains("chef-goat"),
+        "initial directory must exist: {before}"
+    );
+    assert!(!before.contains("family-smarthome"));
+    assert_eq!(before, peer_directory_prompt());
+
+    let mut config: crate::config::Config = serde_yaml::from_str(initial).unwrap();
+    for id in [
+        "family-smarthome",
+        "family-camping",
+        "personal-obiseo",
+        "personal-yobiseo",
+    ] {
+        config
+            .agents
+            .push(serde_yaml::from_str(&format!("id: {id}\nname: {id}\n")).unwrap());
+    }
+    std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    let after = peer_directory_prompt();
+    for id in [
+        "chef-goat",
+        "family-smarthome",
+        "family-camping",
+        "personal-obiseo",
+        "personal-yobiseo",
+    ] {
+        assert!(after.contains(id), "next prompt must include {id}: {after}");
+    }
+    let directory = after.split("[Peer Agent Directory]").nth(1).unwrap();
+    assert!(!directory.contains("- family-counsel"));
+    assert!(directory.contains("(셰프) — best for: 요리, 식단, 재료, 레시피"));
+    assert!(!directory.contains("미표시"));
+    config.meeting.as_mut().unwrap().available_agents.clear();
+    std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    assert_eq!(after, peer_directory_prompt());
+    config.meeting = None;
+    std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    assert_eq!(after, peer_directory_prompt());
+    config.agents[1].peer_keywords = vec!["새로운전문분야".to_string()];
+    std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    let updated = peer_directory_prompt();
+    assert!(updated.contains("best for: 새로운전문분야"));
+    assert!(!updated.contains("요리, 식단, 재료, 레시피"));
+    let mut value = serde_yaml::to_value(config).unwrap();
+    value["agents"][1]["peer_directory"] = serde_yaml::Value::Bool(false);
+    std::fs::write(&path, serde_yaml::to_string(&value).unwrap()).unwrap();
+    let hidden = peer_directory_prompt();
+    assert!(!hidden.contains("chef-goat"));
+    assert!(hidden.contains("family-smarthome"));
+}
+
+#[test]
+fn peer_directory_excludes_meeting_only_and_hidden_agents() {
+    let root = tempfile::tempdir().unwrap();
+    let _guard = crate::config::set_agentdesk_root_for_test(root.path());
+    let path = crate::runtime_layout::config_file_path(root.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut yaml = "server: {}\ndatabase: {enabled: false}\nagents:\n  - {id: family-counsel, name: Counsel}\n  - {id: chef-goat, name: Chef, name_ko: 셰프, peer_keywords: [요리]}\n  - {id: english-only, name: English}\n  - {id: blank-ko, name: Fallback, name_ko: ' '}\n".to_string();
+    for id in [
+        "adk-claude-e2e",
+        "adk-codex-e2e",
+        "adk-gemini-e2e",
+        "adk-qwen-e2e",
+        "adk-opencode-e2e",
+        "adk-kilo-e2e",
+        "adk-hermes-e2e",
+        "adk-e2e-orchestrator",
+    ] {
+        yaml.push_str(&format!(
+            "  - {{id: {id}, name: Hidden, peer_directory: false}}\n"
+        ));
+    }
+    yaml.push_str("meeting:\n  channel_name: fixture\n  available_agents:\n    - {role_id: meeting-only, display_name: Ghost, keywords: [ghost]}\n");
+    std::fs::write(&path, yaml).unwrap();
+    let config = crate::config::load_from_path(&path).expect("valid visibility fixture");
+    crate::config::save_to_path(&path, &config).unwrap();
+    let reloaded = crate::config::load_from_path(&path).unwrap();
+    assert_eq!(reloaded.agents[1].peer_keywords, ["요리"]);
+    let saved: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(saved["agents"][2].get("peer_keywords").is_none());
+    let prompt = peer_directory_prompt();
+    assert!(
+        !prompt.contains("meeting-only"),
+        "meeting-only agent leaked: {prompt}"
+    );
+    assert!(
+        !prompt.contains("Hidden"),
+        "hidden e2e agent leaked: {prompt}"
+    );
+    assert!(prompt.contains("(셰프)"));
+    assert!(prompt.contains("(English)"));
+    assert!(prompt.contains("(Fallback)"));
+}
+
+#[test]
+fn peer_directory_never_restores_legacy_sources_when_agents_are_empty() {
+    let root = tempfile::tempdir().unwrap();
+    let _guard = crate::config::set_agentdesk_root_for_test(root.path());
+    let path = crate::runtime_layout::config_file_path(root.path());
+    let org = crate::runtime_layout::org_schema_path(root.path());
+    let role_map = crate::runtime_layout::role_map_path(root.path());
+    for file in [&path, &org, &role_map] {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    }
+    std::fs::write(
+        &org,
+        "version: 1\nagents:\n  legacy-org: {display_name: Legacy}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &role_map,
+        r#"{"meeting":{"available_agents":[{"roleId":"legacy-role-map","displayName":"Legacy"}]}}"#,
+    )
+    .unwrap();
+    for org_present in [true, false] {
+        if !org_present {
+            std::fs::remove_file(&org).unwrap();
+        }
+        for yaml in [
+            "server: {}\nagents: []\n",
+            "server: {}\nagents:\n  - {id: hidden, name: Hidden, peer_directory: false}\n",
+            "agents: [invalid\n",
+        ] {
+            std::fs::write(&path, yaml).unwrap();
+            assert!(!peer_directory_prompt().contains("[Peer Agent Directory]"));
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert!(!peer_directory_prompt().contains("[Peer Agent Directory]"));
+    }
 }

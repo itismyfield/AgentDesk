@@ -96,7 +96,12 @@ impl Fixture {
         while let Some(dir) = dirs.pop() {
             for entry in std::fs::read_dir(&dir).unwrap().flatten() {
                 let path = entry.path();
-                if path.is_dir() && path != rows {
+                if path.is_dir()
+                    && path != rows
+                    && path
+                        .file_name()
+                        .is_none_or(|name| name != "discord_pending_o_deliveries")
+                {
                     dirs.push(path);
                 } else if path.is_file() {
                     files.insert(path.clone(), std::fs::read(&path).unwrap());
@@ -578,4 +583,44 @@ async fn an_actor_registered_before_cleanup_is_left_alone() {
             .is_some_and(|current| Arc::ptr_eq(&current, &token))
     );
     assert!(fixture.durable().is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441b_herdr_admitted_completed_projects_actual_o_body_after_clear() {
+    let fixture = Fixture::new("o-exact-delivery");
+    let f = crate::services::discord::outbound::o_delivery_evidence::tests::Fixture::new(
+        CHANNEL,
+        ProviderKind::Claude,
+        &["Herdr answer"],
+    )
+    .await;
+    let (http, _http) = f.http().await;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        CHANNEL,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    let mut row = f.row.clone();
+    row.born_generation = 0;
+    row.tmux_session_name = fixture.row.tmux_session_name.clone();
+    row.tui_terminal_kind = Some(NativeTerminalKind::Completed);
+    let row = fixture.persist(&row);
+    assert_eq!(
+        fixture.terminal(&row).settle(&http, &shared, &row).await,
+        AdmittedRestart::Settled
+    );
+    assert!(fixture.durable().is_none());
+    super::super::outbound::completed_turn_ledger::o_pending::project(
+        &shared,
+        &ProviderKind::Claude,
+        CHANNEL,
+    )
+    .await;
+    assert!(
+        super::super::outbound::completed_turn_ledger::settled_user_msg_ids(
+            &ProviderKind::Claude,
+            CHANNEL
+        )
+        .contains(&row.user_msg_id)
+    );
 }

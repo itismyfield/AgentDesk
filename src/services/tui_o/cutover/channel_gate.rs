@@ -71,6 +71,22 @@ pub(crate) fn peek_o_owns_tui_output_for_channel(
     decide(channel_id, Use::Peek, || kind).map(|peeked| peeked.owned)
 }
 
+/// Observe capture eligibility without raising a writer alarm when no body is offered.
+#[cfg(unix)]
+pub(crate) fn peek_o_owns_tui_output_for_channel_quiet(
+    channel_id: u64,
+    kind: Option<RuntimeHandoffKind>,
+) -> Result<bool, IdentityError> {
+    let enabled = super::writer_enabled();
+    if !enabled {
+        return Ok(false);
+    }
+    super::test_override::with_channels(|snapshot| {
+        decide_with_snapshot(enabled, snapshot, channel_id, Use::Peek, None, || kind)
+    })
+    .map(|peeked| peeked.owned)
+}
+
 pub(crate) fn peek_o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,

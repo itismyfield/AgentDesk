@@ -33,12 +33,14 @@ async fn hand_off_after_done(
     state: &mut TerminalOutcomeDeliveryState,
 ) -> (bool, WatcherHandoffClaimOutcome) {
     let channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
-    let transcript = driver
-        ._temp
-        .path()
-        .join("driver.jsonl")
-        .display()
-        .to_string();
+    let transcript = state.inflight_state.output_path.clone().unwrap_or_else(|| {
+        driver
+            ._temp
+            .path()
+            .join("driver.jsonl")
+            .display()
+            .to_string()
+    });
     let message = RuntimeHandoffLoopMessage::RuntimeReady {
         handoff: crate::services::agent_protocol::RuntimeHandoff::ClaudeTui {
             transcript_path: transcript,
@@ -359,5 +361,88 @@ async fn o_turn_without_an_after_done_body_stays_delegated() {
             posted.iter().all(|text| !text.contains(ORDER_BODY)),
             "{case}: {posted:?}"
         );
+    }
+}
+
+#[tokio::test]
+async fn i7441b_o_tick_empty_tail_nonempty_tail_and_after_done_settle_pg() {
+    use crate::services::discord::catch_up::classification_order_tests::i7441_tests::assert_aged_delivery_settled;
+    use crate::services::discord::outbound::o_delivery_evidence::tests::Fixture;
+    for mode in 0..3 {
+        let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "i7441b_tick",
+            "O tick capture",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+
+        Arc::get_mut(&mut driver.shared).unwrap().pg_pool = Some(pool.clone());
+        let bodies = if mode == 1 {
+            vec![DRIVER_BODY, " tail"]
+        } else {
+            vec![DRIVER_BODY]
+        };
+        let f = Fixture::new(DRIVER_CHANNEL_ID, ProviderKind::Claude, &bodies).await;
+        let (_http, _http_guard) = f.http().await;
+        driver.inflight = f.row.clone();
+        driver.inflight.user_msg_id = DRIVER_USER_MSG_ID;
+        driver.inflight.current_msg_id = DRIVER_CURRENT_MSG_ID;
+        driver.inflight.tmux_session_name = Some(DRIVER_TMUX_SESSION.into());
+        driver.body = DRIVER_BODY.into();
+        prove_claude_input(driver._temp.path(), &mut driver.inflight);
+        {
+            let channel = ChannelId::new(DRIVER_CHANNEL_ID);
+            let old = driver.shared.tmux_watchers.get(&channel).unwrap();
+            let handle = crate::services::discord::TmuxWatcherHandle {
+                tmux_session_name: old.tmux_session_name.clone(),
+                output_path: f.source.path.display().to_string(),
+                paused: old.paused.clone(),
+                resume_offset: old.resume_offset.clone(),
+                cancel: old.cancel.clone(),
+                pause_epoch: old.pause_epoch.clone(),
+                turn_delivered: old.turn_delivered.clone(),
+                last_heartbeat_ts_ms: old.last_heartbeat_ts_ms.clone(),
+            };
+            drop(old);
+            driver.shared.tmux_watchers.insert(channel, handle);
+        }
+
+        inflight::save_inflight_state(&driver.inflight).unwrap();
+        let _o = test_override::force_channels(&[(DRIVER_CHANNEL_ID, ClaudeTui)]);
+        let (sent, _, row) =
+            super::super::drive_bridge_stream_tick(&driver, driver.inflight.clone()).await;
+        assert_eq!(sent, DRIVER_BODY.len(), "actual O tick consumes its prefix");
+        let (mut ctx, mut state) = driver.parts();
+        state.full_response = f.body.clone();
+        state.response_sent_offset = sent;
+        state.inflight_state = row;
+        if mode == 2 {
+            let (delegated, claim) = hand_off_after_done(&driver, &mut state).await;
+            assert!(!delegated, "after-Done adoption retains bridge terminal");
+            ctx.bridge_relay_delegated_to_watcher = delegated;
+            ctx.bridge_output_owner = classify_bridge_output_owner(false, delegated);
+            ctx.watcher_handoff_claim_outcome = claim;
+        }
+        let output = run(ctx, state).await;
+        assert!(output.terminal_delivery_committed);
+        let clear_row = output.inflight_state.clone();
+        run_postlude(&driver, output, false, false).await;
+        assert!(
+            inflight::load_inflight_state(&ProviderKind::Claude, DRIVER_CHANNEL_ID).is_none(),
+            "normal completion must clear its row: {:?}",
+            clear_row.turn_nonce
+        );
+        assert_aged_delivery_settled(
+            driver._temp.path(),
+            &driver.shared,
+            &ProviderKind::Claude,
+            ChannelId::new(DRIVER_CHANNEL_ID),
+            MessageId::new(DRIVER_USER_MSG_ID),
+        )
+        .await;
+        assert!(f.get_calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        pool.close().await;
+        db.drop().await;
     }
 }

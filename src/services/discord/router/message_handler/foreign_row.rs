@@ -320,7 +320,7 @@ mod tests {
 
     const INTAKE_TURN: &str = include_str!("intake_turn.rs");
     const CREATE: &str =
-        "let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);";
+        "let row = save_intake_inflight(codex_seed.as_ref(), &mut inflight_state);";
     const ADMIT: &str = "if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {\n        return Ok(IntakeExecution::deferred(channel_id));\n    }";
 
     fn compact(text: &str) -> String {
@@ -328,7 +328,7 @@ mod tests {
     }
 
     /// Classification 2: create → admit → verdict → provider → bridge, as written without
-    /// whitespace or comments; the count spans the production create and the builder test.
+    /// whitespace or comments; the counts pin one production create and the builder test's direct one.
     fn row_admission_gaps(source: &str) -> Vec<String> {
         use crate::services::discord::router::source_guard_support::Lexed;
         let src = Lexed::new(source).compact();
@@ -354,7 +354,9 @@ mod tests {
         if !adjacent.is_some_and(|(c, a)| c + create.len() == a) {
             gaps.push("the foreign-row verdict must directly follow the row create".into());
         }
-        if src.count("save_inflight_state_create_new(") != 2 {
+        if src.count("save_intake_inflight(") != 1
+            || src.count("save_inflight_state_create_new(") != 1
+        {
             gaps.push("intake must keep one production row create".into());
         }
         gaps

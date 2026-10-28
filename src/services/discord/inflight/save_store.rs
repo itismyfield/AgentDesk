@@ -1147,12 +1147,38 @@ fn final_name_is_occupied_with_metadata(
     }
 }
 
-fn save_inflight_state_create_new_in_root_with_io(
+/// Create-new whose caller runs `fence` under the row's sidecar lock; `fence` publishes through the
+/// given writer, which does not take the lock again, so a fence may take the tmux source authority.
+pub(in crate::services::discord) fn save_inflight_state_create_new_fenced(
+    state: &mut InflightTurnState,
+    fence: impl FnOnce(
+        &mut InflightTurnState,
+        &dyn Fn(&InflightTurnState) -> Result<(), CreateNewInflightError>,
+    ) -> Result<(), CreateNewInflightError>,
+) -> Result<(), CreateNewInflightError> {
+    let Some(root) = inflight_runtime_root() else {
+        return Err(CreateNewInflightError::Internal(
+            "Home directory not found".to_string(),
+        ));
+    };
+    let path = create_new_state_path(&root, state)?;
+    let (provider, channel_id) = (state.provider.clone(), state.channel_id);
+    let _lock = lock_inflight_state_path(&path).map_err(CreateNewInflightError::Internal)?;
+    fence(state, &|state| {
+        if state.provider != provider || state.channel_id != channel_id {
+            return Err(CreateNewInflightError::Internal(
+                "fenced create-new moved the row off its sidecar lock".to_string(),
+            ));
+        }
+        let metadata = |path: &Path| fs::symlink_metadata(path);
+        create_new_under_lock(&root, &path, state, metadata, create_new_atomic_write)
+    })
+}
+
+fn create_new_state_path(
     root: &Path,
     state: &InflightTurnState,
-    metadata: impl FnOnce(&Path) -> std::io::Result<fs::Metadata>,
-    write: impl FnOnce(&Path, &str) -> Result<(), String>,
-) -> Result<(), CreateNewInflightError> {
+) -> Result<std::path::PathBuf, CreateNewInflightError> {
     let Some(provider) = state.provider_kind() else {
         return Err(CreateNewInflightError::Internal(format!(
             "Unknown provider '{}'",
@@ -1163,11 +1189,32 @@ fn save_inflight_state_create_new_in_root_with_io(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
     }
+    Ok(path)
+}
+
+fn save_inflight_state_create_new_in_root_with_io(
+    root: &Path,
+    state: &InflightTurnState,
+    metadata: impl FnOnce(&Path) -> std::io::Result<fs::Metadata>,
+    write: impl FnOnce(&Path, &str) -> Result<(), String>,
+) -> Result<(), CreateNewInflightError> {
+    let path = create_new_state_path(root, state)?;
     // This stable sidecar lock is the create-new CAS authority. Every
     // cooperating writer takes it, so the exact final-path existence check and
     // the atomic temp+sync+rename publication below are one serialized action.
     let _lock = lock_inflight_state_path(&path).map_err(CreateNewInflightError::Internal)?;
-    match final_name_is_occupied_with_metadata(&path, metadata) {
+    create_new_under_lock(root, &path, state, metadata, write)
+}
+
+/// The create-new body; the caller holds `path`'s sidecar lock.
+fn create_new_under_lock(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    metadata: impl FnOnce(&Path) -> std::io::Result<fs::Metadata>,
+    write: impl FnOnce(&Path, &str) -> Result<(), String>,
+) -> Result<(), CreateNewInflightError> {
+    match final_name_is_occupied_with_metadata(path, metadata) {
         Ok(true) => return Err(CreateNewInflightError::AlreadyExists),
         Ok(false) => {}
         Err(error) => return Err(CreateNewInflightError::Internal(error.to_string())),
@@ -1176,13 +1223,12 @@ fn save_inflight_state_create_new_in_root_with_io(
     updated.ensure_finalizer_turn_id();
     validate_inflight_state_for_save(
         root,
-        &path,
+        path,
         &updated,
         "src/services/discord/inflight.rs:save_inflight_state_create_new_in_root",
     );
     updated.updated_at = now_string();
-    bump_save_generation_for_write(&path, &mut updated)
-        .map_err(CreateNewInflightError::Internal)?;
+    bump_save_generation_for_write(path, &mut updated).map_err(CreateNewInflightError::Internal)?;
     let json = serde_json::to_string_pretty(&updated)
         .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
 
@@ -1190,7 +1236,7 @@ fn save_inflight_state_create_new_in_root_with_io(
     // compare-and-set authority. Publish through the shared durable writer so
     // a write/sync failure or crash before rename cannot leave an empty or
     // partial final row that permanently converts retries into AlreadyExists.
-    write(&path, &json).map_err(CreateNewInflightError::Internal)?;
+    write(path, &json).map_err(CreateNewInflightError::Internal)?;
     if !is_synthetic_create_state(&updated) {
         create_monotonic_observer::observe_successful_real_create(&updated);
     }

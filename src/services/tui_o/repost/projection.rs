@@ -121,3 +121,34 @@ async fn receipted(
     }
     Ok(receipted)
 }
+
+/// Receipt ids are candidates, including receipts found only by a later shared probe.
+#[cfg(unix)]
+pub(crate) async fn delivery_candidates(
+    pool: &PgPool,
+    key: &super::o_piece_delivery::PieceKey,
+    sender: u64,
+    payload: &str,
+) -> Result<Vec<u64>, LedgerError> {
+    let sql = "SELECT r.message_id FROM o_piece_delivery d JOIN o_piece_receipts r \
+        USING (channel_id, provider, native_key, kind, piece_index) \
+        WHERE d.channel_id=$1 AND d.provider=$2 AND d.native_key=$3 AND d.kind=$4 \
+        AND d.piece_index=$5 AND d.identity_version=$6 AND d.split_version=$7 \
+        AND d.sender_id=$8 AND r.author_id=d.sender_id AND d.payload_sha256=$9 \
+        AND d.payload=$10 ORDER BY r.message_id LIMIT 8";
+    let rows = key
+        .bind(sqlx::query(sql))
+        .bind(IDENTITY_VERSION)
+        .bind(SPLIT_VERSION)
+        .bind(to_pg(sender, "sender")?)
+        .bind(payload_sha256(payload))
+        .bind(payload.to_owned())
+        .fetch_all(pool)
+        .await?;
+    rows.iter()
+        .map(|row| {
+            let id: i64 = row.try_get("message_id")?;
+            u64::try_from(id).map_err(|_| LedgerError::Invalid("receipt message id".into()))
+        })
+        .collect()
+}
