@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 
+use super::turn_completion::{self, ScheduledTurnOutcome};
 use crate::db::scheduled_messages as db;
 #[cfg(test)]
-use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
-use crate::services::provider_error_transcript::is_strong_provider_error_transcript;
+use crate::db::session_transcripts::SessionTranscriptEvent;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum TurnEvidence {
@@ -17,30 +17,36 @@ pub(super) fn transcript_delivery_evidence(
     assistant_message: &str,
     events: &[SessionTranscriptEvent],
 ) -> TurnEvidence {
-    let has_terminal_error_event = events
-        .iter()
-        .rev()
-        .find(|event| event.kind != SessionTranscriptEventKind::System)
-        .is_some_and(|event| event.kind == SessionTranscriptEventKind::Error);
-    transcript_delivery_evidence_with_terminal_error(assistant_message, has_terminal_error_event)
+    transcript_delivery_evidence_with_terminal_error(
+        assistant_message,
+        turn_completion::terminal_error_event(events),
+    )
 }
 
 fn transcript_delivery_evidence_with_terminal_error(
     assistant_message: &str,
     has_terminal_error_event: bool,
 ) -> TurnEvidence {
-    if assistant_message.trim().eq_ignore_ascii_case("NO_REPLY") {
-        TurnEvidence::TerminalFailure("agent turn returned NO_REPLY".to_string())
-    } else if has_terminal_error_event || is_strong_provider_error_transcript(assistant_message) {
-        TurnEvidence::TerminalFailure(
-            "agent turn returned terminal provider error transcript".to_string(),
-        )
-    } else {
-        TurnEvidence::Delivered
+    outcome_evidence(
+        turn_completion::classify(assistant_message, has_terminal_error_event, false).unwrap_or(
+            if has_terminal_error_event {
+                ScheduledTurnOutcome::ProviderError
+            } else {
+                ScheduledTurnOutcome::Delivered
+            },
+        ),
+    )
+}
+
+fn outcome_evidence(outcome: ScheduledTurnOutcome) -> TurnEvidence {
+    match outcome.failure_reason() {
+        None => TurnEvidence::Delivered,
+        Some(reason) => TurnEvidence::TerminalFailure(reason.to_string()),
     }
 }
 
-/// Transcript-based completion evidence, same sources as
+/// Completion evidence: the turn's own record on this delivery row first (all an
+/// isolated snapshot turn leaves), otherwise transcript evidence, same sources as
 /// `RoutineAgentExecutor::find_turn_completion`: a non-empty assistant
 /// transcript proves relay delivery unless its final non-`System` typed event
 /// is `Error` or it uses a narrow provider-generated error-only envelope. An
@@ -49,18 +55,43 @@ fn transcript_delivery_evidence_with_terminal_error(
 /// runtime acknowledgement while excluding unrelated stale evidence.
 pub(super) async fn find_turn_delivery_evidence(
     pool: &PgPool,
+    delivery_id: &str,
     turn_id: &str,
     launch_committed_at: DateTime<Utc>,
 ) -> Result<Option<TurnEvidence>, sqlx::Error> {
     let mut connection = pool.acquire().await?;
-    find_turn_delivery_evidence_on_connection(&mut connection, turn_id, launch_committed_at).await
+    find_turn_delivery_evidence_on_connection(
+        &mut connection,
+        delivery_id,
+        turn_id,
+        launch_committed_at,
+    )
+    .await
 }
 
 pub(super) async fn find_turn_delivery_evidence_on_connection(
     connection: &mut PgConnection,
+    delivery_id: &str,
     turn_id: &str,
     launch_committed_at: DateTime<Utc>,
 ) -> Result<Option<TurnEvidence>, sqlx::Error> {
+    let recorded: Option<String> = sqlx::query_scalar(
+        "SELECT turn_outcome FROM scheduled_message_deliveries
+         WHERE id = $1 AND turn_id = $2 AND turn_outcome_at >= $3",
+    )
+    .bind(delivery_id)
+    .bind(turn_id)
+    .bind(launch_committed_at)
+    .fetch_optional(&mut *connection)
+    .await?
+    .flatten();
+    if let Some(outcome) = recorded
+        .as_deref()
+        .and_then(ScheduledTurnOutcome::from_db_str)
+    {
+        return Ok(Some(outcome_evidence(outcome)));
+    }
+
     let delivered: Option<(String, bool)> = sqlx::query_as(
         "SELECT assistant_message,
                 COALESCE((

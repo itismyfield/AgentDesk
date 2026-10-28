@@ -43,6 +43,7 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
         assert!(futures::poll!(&mut request).is_pending());
         let bindings = Arc::new(ChannelBindingLog::new(7, ShadowProvider::Claude));
         let mut actor = Actor {
+            replay_deferred: false,
             writer,
             deriver: UnitDeriver::new(7, ShadowProvider::Claude),
             owed: VecDeque::new(),
@@ -113,6 +114,7 @@ where
     );
     let port = port.with_suspension(suspension.clone());
     let mut actor = Actor {
+        replay_deferred: false,
         writer,
         deriver,
         owed: VecDeque::new(),
@@ -317,6 +319,7 @@ where
     let wall: Wall = Arc::new(move || w0 + (Instant::now() - t0));
     let (port, receiver) = TransitionPort::new(82, gate, wall, stopped.clone());
     let mut actor = Actor {
+        replay_deferred: false,
         writer,
         deriver,
         owed: VecDeque::new(),

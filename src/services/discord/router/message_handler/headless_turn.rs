@@ -843,6 +843,12 @@ async fn start_reserved_headless_turn_admitted(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
+    inflight_state.scheduled =
+        crate::services::discord::scheduled_turn::ScheduledTurnMark::at_headless_start(
+            metadata.as_ref(),
+            reservation.turn_id(channel_id),
+            scheduled_snapshot_turn,
+        );
     replay_request
         .bind_inflight(
             &mut inflight_state,

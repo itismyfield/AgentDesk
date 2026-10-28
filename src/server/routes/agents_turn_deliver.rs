@@ -18,6 +18,8 @@ use crate::services::discord::health::{
 };
 use crate::services::imsg_reply;
 
+mod legacy_origin;
+
 const MAX_ORIGIN_ID_LEN: usize = 256;
 const MAX_SOURCE_LEN: usize = 64;
 
@@ -64,6 +66,18 @@ async fn observed_delivery(
     request: HumanInputRequest,
     reply: Option<imsg_reply::ReplyObligation>,
 ) -> Result<HumanInputDelivery, HumanInputError> {
+    observed_execution(async {
+        match reply {
+            Some(reply) => deliver_with_reply(registry, request, reply).await,
+            None => deliver_human_input(registry, request).await,
+        }
+    })
+    .await
+}
+
+async fn observed_execution(
+    delivery: impl std::future::Future<Output = Result<HumanInputDelivery, HumanInputError>>,
+) -> Result<HumanInputDelivery, HumanInputError> {
     #[cfg(test)]
     if let Ok(probe) = DELIVERY_PROBE_FOR_TEST.try_with(Clone::clone) {
         probe
@@ -76,10 +90,7 @@ async fn observed_delivery(
             release.notified().await;
         }
     }
-    match reply {
-        Some(reply) => deliver_with_reply(registry, request, reply).await,
-        None => deliver_human_input(registry, request).await,
-    }
+    delivery.await
 }
 
 fn failure(status: StatusCode, error: &str) -> RouteResponse {
@@ -183,16 +194,20 @@ pub async fn deliver_turn_input(
         }})),
         channel_name_hint,
     };
-    if let (true, Some(origin_id)) = (obligations_enabled, origin_id.as_deref()) {
+    if let Some(origin_id) = origin_id.as_deref() {
+        let provider = request.provider.clone();
         let input = imsg_reply::AdmissionInput {
             origin_id,
             agent_id: &id,
+            provider: provider.as_str(),
             channel_id,
             author_id,
             source: &source,
             text,
         };
-        let provider = request.provider.clone();
+        if !obligations_enabled {
+            return legacy_origin::deliver(pool, registry, &input, request).await;
+        }
         let reply = imsg_reply::ReplyObligation::new(pool.clone(), origin_id);
         imsg_reply::deliver_once(
             pool,
@@ -544,3 +559,6 @@ mod tests {
 
 #[cfg(test)]
 mod pg_tests;
+
+#[cfg(all(test, unix))]
+mod legacy_origin_tests;

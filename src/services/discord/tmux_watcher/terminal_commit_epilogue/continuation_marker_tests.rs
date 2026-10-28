@@ -50,6 +50,7 @@ async fn stop(
             inflight_state: &None,
             inflight_before_relay: &None,
             full_response: &String::new(),
+            channel_effects: crate::services::discord::scheduled_turn::ChannelEffects::Allowed,
             watcher_turn_nonce: &None,
             resolved_did: &None,
             dispatch_ok: true,
@@ -386,6 +387,8 @@ async fn exercise_zero_id_cleanup(name: &str, newer: bool) {
                     inflight_state: &late_row,
                     inflight_before_relay: &None,
                     full_response: &String::new(),
+                    channel_effects:
+                        crate::services::discord::scheduled_turn::ChannelEffects::Allowed,
                     watcher_turn_nonce: &watcher_nonce,
                     resolved_did: &None,
                     dispatch_ok: false,

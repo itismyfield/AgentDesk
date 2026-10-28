@@ -10,6 +10,18 @@ use crate::services::agent_protocol::StatusEvent;
 
 const CAPACITY: usize = 64;
 const DISPLAY_LIMIT: usize = 6;
+/// Record times before 2020-09 are not plausible tool times.
+const MIN_SOURCE_UNIX: i64 = 1_600_000_000;
+/// Numeric record times at or above this are milliseconds (seconds here would be year 5138).
+const MILLIS_FROM: i64 = 100_000_000_000;
+
+/// Codex collaboration calls whose results decide a spawned agent's final state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentCall {
+    Spawn,
+    Wait,
+    Close,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Row {
@@ -18,10 +30,14 @@ struct Row {
     summary: Option<String>,
     started: Instant,
     started_unix: i64,
+    /// Record time of the start, kept apart from the clamped display time for elapsed.
+    source_started: Option<i64>,
     result: Option<bool>,
     elapsed: Option<u64>,
     background: bool,
-    codex_spawn: bool,
+    agent_call: Option<AgentCall>,
+    /// Spawn: agent id from the launch ack. Close: the closed target.
+    agent: Option<String>,
     launched: bool,
 }
 
@@ -63,16 +79,22 @@ impl ToolActivityRing {
                 success,
                 source_unix,
             } => {
+                let source = source_unix.filter(|stamp| *stamp >= MIN_SOURCE_UNIX);
                 if let Some(success) = success {
-                    self.finish(tool_use_id.as_deref(), *success, false);
+                    self.finish(tool_use_id.as_deref(), *success, false, source);
+                    if let Some(facts) = input.as_deref() {
+                        self.apply_agent_facts(tool_use_id.as_deref(), *success, facts, source);
+                    }
                 } else if let Some(name) = name {
                     if let Some(existing) = tool_use_id
                         .as_ref()
                         .and_then(|id| self.rows.iter_mut().find(|r| r.id.as_ref() == Some(id)))
                     {
-                        if let Some(source) = source_unix.filter(|stamp| *stamp > 0) {
+                        if let Some(source) = source {
                             existing.started_unix =
                                 existing.started_unix.min(source.min(observed_unix()));
+                            existing.source_started =
+                                Some(existing.source_started.map_or(source, |s| s.min(source)));
                         }
                         if existing.summary.is_none() {
                             existing.summary = input
@@ -89,10 +111,20 @@ impl ToolActivityRing {
                     }
                     self.total = self.total.saturating_add(1);
                     self.completed = false;
-                    let codex_spawn = name
-                        .rsplit('.')
-                        .next()
-                        .is_some_and(|key| key.eq_ignore_ascii_case("spawn_agent"));
+                    let agent_call = name.rsplit('.').next().and_then(|key| {
+                        [
+                            ("spawn_agent", AgentCall::Spawn),
+                            ("wait_agent", AgentCall::Wait),
+                            ("close_agent", AgentCall::Close),
+                        ]
+                        .into_iter()
+                        .find_map(|(tool, call)| key.eq_ignore_ascii_case(tool).then_some(call))
+                    });
+                    let codex_spawn = agent_call == Some(AgentCall::Spawn);
+                    let agent = (agent_call == Some(AgentCall::Close))
+                        .then(|| input.as_deref().map(super::status_events::tool_input_value))
+                        .flatten()
+                        .and_then(|value| value.get("target")?.as_str().map(str::to_owned));
                     self.rows.push_back(Row {
                         id: tool_use_id.clone(),
                         class: class(name),
@@ -100,13 +132,12 @@ impl ToolActivityRing {
                             .as_deref()
                             .and_then(|input| safe_tool_summary(name, input, cwd)),
                         started: super::panel_now(),
-                        started_unix: source_unix
-                            .filter(|stamp| *stamp > 0)
-                            .unwrap_or_else(observed_unix)
-                            .min(observed_unix()),
+                        started_unix: source.unwrap_or_else(observed_unix).min(observed_unix()),
+                        source_started: source,
                         result: None,
                         elapsed: None,
-                        codex_spawn,
+                        agent_call,
+                        agent,
                         launched: false,
                         background: codex_spawn
                             || matches!(class(name).as_str(), "Task" | "Bash")
@@ -144,7 +175,7 @@ impl ToolActivityRing {
                     .iter()
                     .any(|r| r.class == "Task" && r.id.as_ref() == Some(id))
                 {
-                    self.finish(Some(id), *success, true);
+                    self.finish(Some(id), *success, true, None);
                 }
             }
             StatusEvent::BackgroundTaskStart {
@@ -167,7 +198,7 @@ impl ToolActivityRing {
                     .iter()
                     .any(|r| r.class == "Bash" && r.id.as_ref() == Some(id))
                 {
-                    self.finish(Some(id), *success, true);
+                    self.finish(Some(id), *success, true, None);
                 }
             }
             StatusEvent::TurnCompleted { .. } => self.completed = true,
@@ -175,7 +206,7 @@ impl ToolActivityRing {
         }
     }
 
-    fn finish(&mut self, id: Option<&str>, success: bool, terminal: bool) {
+    fn finish(&mut self, id: Option<&str>, success: bool, terminal: bool, source: Option<i64>) {
         let exact = id.and_then(|id| self.rows.iter().position(|r| r.id.as_deref() == Some(id)));
         if id.is_some() && exact.is_none() {
             return;
@@ -200,18 +231,65 @@ impl ToolActivityRing {
             return;
         }
         if row.background && success && !terminal {
-            if row.codex_spawn {
+            if row.agent_call == Some(AgentCall::Spawn) {
                 row.launched = true;
             }
             return;
         }
-        row.result = Some(success);
-        row.elapsed = Some(
-            super::panel_now()
-                .saturating_duration_since(row.started)
-                .as_secs(),
-        );
+        settle(row, success, source);
         self.failed = self.failed.saturating_add(usize::from(!success));
+    }
+
+    /// Applies Codex agent identities and final states carried by a collaboration result:
+    /// the spawn ack names the agent, and `wait_agent`/`close_agent` settle its launch row.
+    fn apply_agent_facts(
+        &mut self,
+        id: Option<&str>,
+        success: bool,
+        facts: &str,
+        source: Option<i64>,
+    ) {
+        let Some(id) = id else { return };
+        let Ok(facts) = serde_json::from_str::<Value>(facts) else {
+            return;
+        };
+        let Some(row) = self.rows.iter_mut().find(|r| r.id.as_deref() == Some(id)) else {
+            return;
+        };
+        let outcomes: Vec<(String, bool)> = match row.agent_call {
+            Some(AgentCall::Spawn) if row.launched => {
+                row.agent = facts["agent_id"].as_str().map(str::to_owned);
+                return;
+            }
+            Some(AgentCall::Wait) => facts["status"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(agent, status)| {
+                    let status = status.as_str()?;
+                    (!matches!(status, "pending_init" | "running" | "interrupted"))
+                        .then(|| (agent.clone(), agent_status_ok(status)))
+                })
+                .collect(),
+            // A successful close ends the agent whatever state it was in.
+            Some(AgentCall::Close) if success => row
+                .agent
+                .clone()
+                .zip(facts["previous_status"].as_str().map(agent_status_ok))
+                .into_iter()
+                .collect(),
+            _ => return,
+        };
+        for (agent, ok) in outcomes {
+            for row in self.rows.iter_mut().filter(|r| {
+                r.agent_call == Some(AgentCall::Spawn)
+                    && r.result.is_none()
+                    && r.agent.as_deref() == Some(agent.as_str())
+            }) {
+                settle(row, ok, source);
+                self.failed = self.failed.saturating_add(usize::from(!ok));
+            }
+        }
     }
 
     pub(super) fn render(&self, limit: usize) -> String {
@@ -279,6 +357,35 @@ impl ToolActivityRing {
     }
 }
 
+/// Codex reports only errored and missing agents as failed; every other final state completed.
+fn agent_status_ok(status: &str) -> bool {
+    !matches!(status, "errored" | "not_found")
+}
+
+/// Elapsed uses the record times when both ends carry one, so replays keep the real duration.
+fn settle(row: &mut Row, success: bool, source: Option<i64>) {
+    row.result = Some(success);
+    row.elapsed = Some(match row.source_started.zip(source) {
+        Some((start, end)) => end.saturating_sub(start).max(0) as u64,
+        None => super::panel_now()
+            .saturating_duration_since(row.started)
+            .as_secs(),
+    });
+}
+
+/// Reads a record timestamp as Unix seconds: RFC 3339 text, or seconds/milliseconds numbers.
+/// Values before `MIN_SOURCE_UNIX` are dropped so the observed time is used instead.
+pub(super) fn source_unix(stamp: &Value) -> Option<i64> {
+    let unix = match stamp.as_i64().or_else(|| stamp.as_f64().map(|n| n as i64)) {
+        Some(n) if n >= MILLIS_FROM => n / 1000,
+        Some(n) => n,
+        None => chrono::DateTime::parse_from_rfc3339(stamp.as_str()?)
+            .ok()?
+            .timestamp(),
+    };
+    (unix >= MIN_SOURCE_UNIX).then_some(unix)
+}
+
 fn observed_unix() -> i64 {
     let now = chrono::Utc::now().timestamp();
     #[cfg(test)]
@@ -322,20 +429,64 @@ pub(super) fn json_result_observations(
             .iter()
             .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
         {
+            let failed = block
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || code_mode_script_failed(block);
             events.push(observation(
                 None,
-                None,
+                agent_facts(block).as_deref(),
                 block.get("tool_use_id").and_then(Value::as_str),
-                Some(
-                    !block
-                        .get("is_error")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                ),
+                Some(!failed),
             ));
         }
     }
     events
+}
+
+/// Code-mode `exec` reports a thrown script only in its first output line.
+fn code_mode_script_failed(block: &Value) -> bool {
+    block
+        .get("content")
+        .and_then(Value::as_str)
+        .and_then(|content| serde_json::from_str::<Value>(content).ok())
+        .is_some_and(|output| {
+            output.pointer("/0/type").and_then(Value::as_str) == Some("input_text")
+                && output
+                    .pointer("/0/text")
+                    .and_then(Value::as_str)
+                    .and_then(|text| text.lines().next())
+                    == Some("Script failed")
+        })
+}
+
+/// Reduces a Codex collaboration result to agent ids and status names; agent messages are dropped.
+fn agent_facts(block: &Value) -> Option<String> {
+    let output = serde_json::from_str::<Value>(block.get("content")?.as_str()?).ok()?;
+    let status_name = |status: &Value| {
+        status
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| status.as_object()?.keys().next().cloned())
+    };
+    let mut facts = serde_json::Map::new();
+    if let Some(agent) = output.get("agent_id").filter(|id| id.is_string()) {
+        facts.insert("agent_id".into(), agent.clone());
+    }
+    if let Some(statuses) = output.get("status").and_then(Value::as_object) {
+        let names = statuses
+            .iter()
+            .filter_map(|(agent, status)| {
+                Some((agent.clone(), Value::String(status_name(status)?)))
+            })
+            .collect();
+        facts.insert("status".into(), Value::Object(names));
+    }
+    if let Some(status) = output.get("previous_status").and_then(status_name) {
+        facts.insert("previous_status".into(), Value::String(status));
+    }
+    (!facts.is_empty()).then(|| Value::Object(facts).to_string())
 }
 
 pub(super) fn fit_panel(sections: Vec<String>) -> String {
