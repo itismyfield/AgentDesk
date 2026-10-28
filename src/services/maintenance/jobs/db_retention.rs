@@ -324,11 +324,13 @@ async fn retain_turns(pool: &PgPool, dry_run: bool, report: &mut RetentionReport
         "INSERT INTO turns_archive \
              (turn_id, session_key, thread_id, thread_title, channel_id, agent_id, \
               provider, session_id, dispatch_id, started_at, finished_at, duration_ms, \
-              input_tokens, cache_create_tokens, cache_read_tokens, output_tokens, created_at) \
+              input_tokens, cache_create_tokens, cache_read_tokens, output_tokens, created_at, \
+              consumed_origin_ids, terminal_outcome, terminal_confirmed_at) \
          SELECT t.turn_id, t.session_key, t.thread_id, t.thread_title, t.channel_id, \
                 t.agent_id, t.provider, t.session_id, t.dispatch_id, t.started_at, \
                 t.finished_at, t.duration_ms, t.input_tokens, t.cache_create_tokens, \
-                t.cache_read_tokens, t.output_tokens, t.created_at \
+                t.cache_read_tokens, t.output_tokens, t.created_at, \
+                t.consumed_origin_ids, t.terminal_outcome, t.terminal_confirmed_at \
          FROM turns t \
          WHERE t.finished_at < NOW() - ($1::INT || ' days')::INTERVAL \
            AND NOT EXISTS ( \
