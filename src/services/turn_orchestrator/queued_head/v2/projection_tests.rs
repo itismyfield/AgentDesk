@@ -612,3 +612,62 @@ fn planning_reads_without_removing_stale_writer_files_and_reports_scan_errors() 
     });
     assert_eq!(std::fs::read(&namespace_dir).unwrap(), b"not a directory");
 }
+
+/// The V2 plan only reads; the V1 recovery entry removes stale writer temp files of its namespace
+/// and nothing else, then restores the queue.
+#[test]
+fn v1_recovery_entry_removes_only_stale_temp_files_that_the_plan_left() {
+    let _root = TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(7_272_681);
+    let file = seed(
+        channel.get(),
+        &serde_json::to_string(&vec![item(100)]).unwrap(),
+    );
+    let ctx = ctx();
+    save_channel_pending_dispatch_marker(
+        &ctx.provider,
+        &ctx.token_hash,
+        channel,
+        &intervention(100),
+        None,
+    )
+    .unwrap();
+    let dir = file.parent().unwrap().to_path_buf();
+    let (stale, recent) = (
+        dir.join("7272681.json.tmp"),
+        dir.join("7272681.json.next.tmp"),
+    );
+    std::fs::write(&stale, b"half written").unwrap();
+    std::fs::write(&recent, b"being written").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    let file_at = |path: &PathBuf| std::fs::File::options().write(true).open(path).unwrap();
+    file_at(&stale).set_modified(old).unwrap();
+    let listing = || {
+        let mut entries: Vec<(PathBuf, Vec<u8>)> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .map(|path| (path.clone(), std::fs::read(path).unwrap()))
+            .collect();
+        entries.sort();
+        entries
+    };
+    let before = listing();
+    assert!(plan(&ctx, NAMESPACE).is_ok());
+    assert_eq!(listing(), before, "the plan removes nothing");
+
+    let recovered =
+        crate::services::turn_orchestrator::pending_queue_persistence::load_pending_queues_checked(
+            &ctx.provider,
+            &ctx.token_hash,
+        );
+    let mut expected = before;
+    expected.retain(|(path, _)| *path != stale);
+    assert_eq!(listing(), expected, "only the stale temp file is gone");
+    let restored = recovered.queues.get(&channel).map(|queue| {
+        queue
+            .iter()
+            .map(|input| input.message_id.get())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(restored, Some(vec![100]), "the queue is restored");
+}

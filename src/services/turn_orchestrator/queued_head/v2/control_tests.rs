@@ -352,3 +352,52 @@ fn a_v2_clear_still_releases_the_running_turn_when_asked() {
         );
     });
 }
+
+/// A V1 enqueue that saw Pending is acknowledged on its retry; a fresh custody per retry would
+/// call the recovered input refused or a duplicate.
+#[test]
+fn enqueue_keeps_one_custody_across_pending_retries() {
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    let _root = TestRuntimeRootGuard::new();
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(7_272_691);
+        let path = super::super::super::pending_queue_file_path(
+            &ctx().provider,
+            &ctx().token_hash,
+            channel,
+        )
+        .unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let handle = registry.handle(channel);
+        handle
+            .v2_adopt(path.clone(), "control".into())
+            .await
+            .unwrap();
+        let watch = Watch::new(
+            &path,
+            Plan {
+                fail: vec![Step::ParentSync],
+                ..Default::default()
+            },
+        );
+        let first = handle.enqueue(intervention(500), ctx()).await;
+        assert!(!first.enqueued && first.persistence_error.is_some());
+        drop(watch);
+        let retry = handle.enqueue(intervention(500), ctx()).await;
+        assert!(
+            retry.enqueued && retry.persistence_error.is_none(),
+            "{:?} {:?}",
+            retry.refusal_reason,
+            retry.persistence_error
+        );
+        let again = handle.enqueue(intervention(500), ctx()).await;
+        assert!(!again.enqueued && again.refusal_reason.is_some());
+        let snapshot = v2(&handle).await;
+        assert_eq!(ids(&snapshot), [500]);
+        assert_eq!(
+            snapshot["admission_receipts"].as_array().map(Vec::len),
+            Some(1)
+        );
+    });
+}

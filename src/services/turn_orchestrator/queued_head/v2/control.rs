@@ -1,5 +1,6 @@
 //! While an actor holds a V2 owner, every queue-changing arm reaches the owner here or is refused.
 //! The match has no wildcard, so a new arm cannot compile until it is classified.
+use super::Ticket;
 use super::*;
 use crate::services::turn_orchestrator::{
     CancelQueuedMessageResult, ChannelMailboxMsg as M, ChannelMailboxState, ClearChannelResult,
@@ -14,7 +15,7 @@ use crate::services::turn_orchestrator::{
     },
 };
 use poise::serenity_prelude::{ChannelId, MessageId};
-use source_admission::{Admitted, Custody};
+use source_admission::{AdmitError, Admitted, Custody};
 use std::time::{Instant, SystemTime};
 
 /// Answer of an arm the V2 owner does not serve: nothing was absorbed or moved.
@@ -159,9 +160,12 @@ fn enqueue(
         queue_exit_events: Vec::new(),
         persistence_error,
     };
-    match Custody::new(&item).advance(owner) {
+    // One logical input keeps one receipt across its Pending retries; its sources name it.
+    let mut custody = Custody::with_ticket(&item, Ticket::of_sources(&item));
+    match custody.advance(owner) {
         Ok(Admitted::Queued | Admitted::RetainedOpaque) => result(true, None, None),
-        Ok(Admitted::Duplicate) => result(
+        // Its sources are already admitted, under this receipt or with another body.
+        Ok(Admitted::Duplicate) | Err(AdmitError::Conflict(_)) => result(
             false,
             Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
             None,

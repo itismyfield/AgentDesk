@@ -85,6 +85,50 @@ fn replay_all(binding: &SourceBinding) -> Result<(TurnState, bool), String> {
     whole
 }
 
+#[test]
+fn compact_summary_does_not_replace_a_resumed_readers_carried_state() {
+    for closed in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("parent.jsonl");
+        let mut records = vec![
+            json!({"type":"user", "uuid":"original", "message":{"content":"request"}}).to_string(),
+        ];
+        if closed {
+            records.push(json!({"type":"system", "subtype":"turn_duration"}).to_string());
+        }
+        records.push(json!({"type":"user", "uuid":"blocked", "message":{"content":[{"type":"tool_result", "content":"unkeyed"}]}}).to_string());
+        lines(&path, &records);
+        let binding = bind(&path, ShadowProvider::Claude);
+        let mut facts = InputFacts::open(binding.clone()).unwrap();
+        assert!(facts.poll(u64::MAX).is_err());
+        let resume = facts.resume_point().unwrap().clone();
+        let expected = if closed {
+            TurnState::Idle
+        } else {
+            open_turn("original")
+        };
+        assert_eq!(resume.carried, expected);
+        lines(
+            &path,
+            &[
+                json!({"type":"user", "uuid":"summary", "isCompactSummary":true,
+            "message":{"content":"compacted context"}})
+                .to_string(),
+            ],
+        );
+        let mut facts = InputFacts::resume(binding, &resume).unwrap();
+        assert_eq!(facts.poll(u64::MAX).unwrap().state, TurnState::Unknown);
+        assert!(facts.awaiting_boundary());
+        assert_eq!(facts.carried, expected);
+        lines(
+            &path,
+            &[json!({"type":"system", "subtype":"turn_duration"}).to_string()],
+        );
+        assert_eq!(facts.poll(u64::MAX).unwrap().state, TurnState::Idle);
+        assert!(!facts.awaiting_boundary());
+    }
+}
+
 /// A typed Blocked record keeps the turn it interrupted: a foreign abort cannot close it, and
 /// its own closer or a new opener ends the wait.
 #[test]

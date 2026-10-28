@@ -362,6 +362,32 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn compact_summary_preserves_the_manifests_real_input_and_body() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    for (index, marker) in ["isCompactSummary", "is_compact_summary"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut summary =
+            json!({"type":"user", "uuid":"summary", "message":{"content":"compacted context"}});
+        summary[marker] = true.into();
+        let fixture = Fixture::new_with_terminal(
+            748810 + index as u64,
+            ProviderKind::Claude,
+            &["before compaction", "after compaction"],
+            0,
+            Some(summary),
+        )
+        .await;
+        let plan = fixture.plan();
+        assert_eq!(plan.input.as_deref(), Some("input"));
+        assert_eq!(plan.body, fixture.body);
+        assert!(!plan.body.contains("compacted context"));
+    }
+}
+
+#[tokio::test]
 async fn i7441b_local_native_receipts_require_whole_episode_and_exact_payload() {
     for (index, provider) in [ProviderKind::Claude, ProviderKind::Codex]
         .into_iter()

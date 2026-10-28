@@ -15,6 +15,7 @@ mod sources;
 pub(crate) use attempt::AttemptRef;
 pub(crate) use commit::Fault;
 use source_admission::AdmitError;
+pub(crate) use source_admission::Ticket;
 
 pub(crate) struct Owner {
     pub(crate) snapshot: SnapshotV2,
@@ -22,6 +23,8 @@ pub(crate) struct Owner {
     bytes: Option<String>,
     pending: Option<(String, SnapshotV2)>,
     pub(crate) fault: Fault,
+    /// Ticket admissions committed while their caller saw Pending, with the outcome owed to it.
+    unacknowledged: Vec<(String, source_admission::Admitted)>,
 }
 
 impl Owner {
@@ -50,6 +53,7 @@ impl Owner {
             bytes,
             pending: None,
             fault: Fault::None,
+            unacknowledged: Vec::new(),
         };
         // A restored bootstrap is possibly sent; missing deadline never proves NotSent.
         let mut restored = owner.snapshot.clone();
