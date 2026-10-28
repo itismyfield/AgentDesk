@@ -20,6 +20,9 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission;
 type Coordinate = (SourceId, Range<u64>);
 
 pub(crate) struct OwedLog {
+    #[cfg(test)]
+    replay_metadata: Option<ReplayMetadata>,
+    replay_deferred: bool,
     channel: u64,
     provider: ShadowProvider,
     pub work: Vec<OwedWork>,
@@ -33,6 +36,9 @@ impl OwedLog {
     pub(crate) fn new(channel: u64, provider: ShadowProvider) -> Self {
         let (work, associations) = (Vec::new(), BTreeMap::new());
         Self {
+            #[cfg(test)]
+            replay_metadata: None,
+            replay_deferred: false,
             channel,
             provider,
             work,
@@ -62,6 +68,21 @@ impl OwedLog {
 }
 
 impl Owe for OwedLog {
+    fn finish_replay(&mut self, ledger: &LedgerState) -> super::ReplaySummary {
+        #[cfg(test)]
+        {
+            self.replay_metadata = Some(ReplayMetadata {
+                associations: self.associations.clone(),
+                cards: self.card_members.clone(),
+                pending: self.pending_card_members.clone(),
+            });
+        }
+        let summary =
+            super::replay::filter(ledger, |keep| self.work.retain(|work| keep(&work.derived)));
+        self.replay_deferred = summary.deferred;
+        summary
+    }
+
     fn owe(&mut self, source: &SourceId, record: &CapturedRecord, derived: Vec<Derived>) {
         let range = record.start..record.end;
         let value = serde_json::from_slice(&record.line).unwrap_or_default();
@@ -107,6 +128,23 @@ impl Owe for OwedLog {
                 origin: None,
             });
         }
+    }
+}
+
+#[cfg(test)]
+struct ReplayMetadata {
+    associations: BTreeMap<UnitKey, Vec<Coordinate>>,
+    cards: BTreeMap<UnitKey, Vec<UnitKey>>,
+    pending: Vec<UnitKey>,
+}
+
+impl OwedLog {
+    pub(super) fn refilter_after_open(
+        &mut self,
+        ledger: &LedgerState,
+    ) -> Option<super::ReplaySummary> {
+        super::replay::after_open(&mut self.replay_deferred, ledger)
+            .then(|| self.finish_replay(ledger))
     }
 }
 
@@ -276,7 +314,11 @@ pub(crate) async fn deliver_owed<P: DiscordPort, L: DeliveryLease, A: AlarmSink>
     }
     let (mut held_units, mut held_episodes) = (HashSet::new(), HashSet::new());
     let mut at = 0;
+    let mut budget = super::replay::Budget::new();
     while at < log.work.len() {
+        if writer.stopping() {
+            return;
+        }
         let work = &log.work[at];
         let unit = unit_key(&work.derived).cloned();
         let episode = (work.origin.as_ref()).map(|o| {
@@ -300,6 +342,16 @@ pub(crate) async fn deliver_owed<P: DiscordPort, L: DeliveryLease, A: AlarmSink>
             }
             Err(_) => Step::Withheld,
         };
+        if step == Step::Done {
+            writer.boot.drained();
+        }
+        if let Some(summary) = log.refilter_after_open(writer.store().ledger()) {
+            writer.boot.replay("refilter", 0, summary, 0);
+            delivered(writer, log);
+            at = 0;
+            budget.yield_if_due().await;
+            continue;
+        }
         match step {
             Step::Done if acked(writer.store().ledger(), &log.work[at].derived) => {
                 if let Some(key) = card_key(&log.work[at].derived) {
@@ -307,6 +359,7 @@ pub(crate) async fn deliver_owed<P: DiscordPort, L: DeliveryLease, A: AlarmSink>
                 }
                 log.work.remove(at);
                 delivered(writer, log);
+                budget.yield_if_due().await;
                 continue;
             }
             Step::Done | Step::Withheld => {}
@@ -315,6 +368,7 @@ pub(crate) async fn deliver_owed<P: DiscordPort, L: DeliveryLease, A: AlarmSink>
         held_units.extend(unit);
         held_episodes.extend(episode);
         at += 1;
+        budget.yield_if_due().await;
     }
 }
 

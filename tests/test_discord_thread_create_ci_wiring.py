@@ -20,13 +20,16 @@ class DiscordThreadCreateCiWiringTests(unittest.TestCase):
         self.assertNotIn("Discord thread-create cross-process lock", job)
         self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', job.split("    steps:\n", 1)[0])
         self.assertIn('CARGO_PROFILE_TEST_DEBUG: "0"', job.split("    steps:\n", 1)[0])
-        marker = "      - name: Compare and run non-PG lib tests\n"
-        start = job.index(marker)
-        end = job.index("\n      - name:", start + len(marker))
-        step = job[start:end]
-        self.assertIn("run: bash scripts/ci/nextest-native.sh windows windows-lib pg-classifier", step)
-        self.assertNotIn("continue-on-error", step)
-        self.assertIn("BASH_ENV: /dev/null", step)
+        for name, phase in (("Build and plan non-PG lib tests", "prepare"),
+                            ("Run and audit non-PG lib tests", "run")):
+            with self.subTest(phase=phase):
+                marker = f"      - name: {name}\n"
+                start = job.index(marker)
+                end = job.index("\n      - name:", start + len(marker))
+                step = job[start:end]
+                self.assertIn(f"run: bash scripts/ci/nextest-native.sh windows windows-lib pg-classifier {phase}\n", step)
+                self.assertNotIn("continue-on-error", step)
+                self.assertIn("BASH_ENV: /dev/null", step)
 
     def test_whole_job_guard_tracks_compile_only_pr_lane(self) -> None:
         guard = (ROOT / "scripts/check-ci-runner-hardening.sh").read_text(encoding="utf-8")

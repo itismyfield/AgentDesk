@@ -209,6 +209,7 @@ impl<H> Drop for LeaseReturn<H> {
 }
 
 pub struct ChannelWriter<P, L, A> {
+    pub(super) boot: super::boot::Trace,
     pub(super) suspension: super::suspension::Suspension,
     channel: u64,
     store: ChannelStore,
@@ -281,6 +282,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             posts
         };
         let mut writer = Self {
+            boot: super::boot::Trace::new(channel, None, 0, 0),
             suspension: super::suspension::Suspension::default(),
             channel,
             store,
@@ -339,6 +341,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     pub(crate) fn with_repost_stop(mut self, stop: watch::Receiver<bool>) -> Self {
         self.repost_stops.push(stop);
         self
+    }
+
+    pub(super) fn stopping(&self) -> bool {
+        self.repost_stops.iter().any(|stop| *stop.borrow())
     }
 
     /// Outstanding ordinary pieces pin retired cursors; re-post turns have nothing owed.
@@ -452,9 +458,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     /// Appends one ledger entry; a store error or a violation the entry exposed stops the channel.
     pub(super) fn record(&mut self, entry: LedgerEntry) -> Result<(), Step> {
         let posted = match entry {
-            LedgerEntry::Posted { msg_id, .. } => Some(msg_id),
+            LedgerEntry::Posted { serial, msg_id } => Some((serial, msg_id)),
             _ => None,
         };
+        #[cfg(test)]
+        self.boot.before_record(&entry);
         if let Err(error) = self.store.append_ledger(entry) {
             return Err(self.stop(WriterAlarm::Halted {
                 detail: format!("{error:?}"),
@@ -463,7 +471,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         match self.store.ledger().violation().map(str::to_string) {
             Some(detail) => Err(self.stop(WriterAlarm::LedgerViolation { detail })),
             None => {
-                if let Some(msg_id) = posted {
+                if let Some((serial, msg_id)) = posted {
+                    self.boot.posted(self.store.ledger(), serial, msg_id);
                     note_posted(self.channel, msg_id);
                 }
                 Ok(())
@@ -610,6 +619,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         let (gate, port, channel) = (Arc::clone(&self.gate), Arc::clone(&self.port), self.channel);
         let mut posts = self.posts.clone();
         let stops = self.repost_stops.clone();
+        let boot = self.boot.clone();
         let store = &mut self.store;
         // The first poll of the request runs under the gate, so no request starts after a
         // transition; the rest runs outside the lock.
@@ -654,6 +664,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                             "[tui_o] operator approval consumed by Prepared");
                     }
                     let running = posts.take().map(Running::start);
+                    #[cfg(test)]
+                    boot.constructing(serial, epoch);
                     let post = port.post_origin(
                         channel,
                         piece.payload.clone(),
@@ -667,6 +679,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                         })),
                         None => Box::pin(post),
                     };
+                    boot.first_post(serial, epoch);
                     Ok(match request.as_mut().poll(cx) {
                         Poll::Ready(outcome) => Started::Done(outcome),
                         Poll::Pending => Started::Running(request),

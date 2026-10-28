@@ -33,6 +33,8 @@ const CHANNEL: u64 = 584_521;
 
 #[derive(Default)]
 pub(crate) struct Port {
+    history_override: Mutex<Option<Vec<SeenMessage>>>,
+    history_reads: std::sync::atomic::AtomicUsize,
     posts: Mutex<Vec<String>>,
     /// Runs inside each POST's first poll, under the gate and any record lock.
     on_post: Mutex<Option<Box<dyn Fn() + Send>>>,
@@ -79,6 +81,15 @@ impl DiscordPort for Port {
 
     /// A readable channel where only another author spoke after `after`.
     async fn history_after(&self, _channel: u64, after: u64) -> Result<Vec<SeenMessage>, String> {
+        self.history_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(history) = &*self.history_override.lock().unwrap() {
+            return Ok(history
+                .iter()
+                .filter(|message| message.id > after)
+                .cloned()
+                .collect());
+        }
         let (id, author_id, content) = (after + 1, 7, "chatter".to_owned());
         Ok(vec![SeenMessage {
             id,

@@ -25,9 +25,9 @@ All routes are under `/api` and use the same protected admin middleware as
 
 | Method | Route | Result |
 | --- | --- | --- |
-| GET | `/campaigns?limit=100&offset=0` | `{campaigns: Campaign[], live, limit, offset}`; latest updated first, limit 1–500 |
+| GET | `/campaigns?limit=100&offset=0` | `{campaigns: Campaign[], live, issue_drift, limit, offset}`; latest updated first, limit 1–500 |
 | POST | `/campaigns` | HTTP 201 `{campaign}`; optional client ID, otherwise UUID; existing ID returns 409 |
-| GET | `/campaigns/{id}` | `{campaign, live}`; missing ID returns 404 |
+| GET | `/campaigns/{id}` | `{campaign, live, issue_drift}`; missing ID returns 404 |
 | PUT | `/campaigns/{id}` | `{campaign}`; requires `expected_revision`, replaces complete aggregate |
 | GET | `/campaigns/{id}/history` | `{revisions: Campaign[]}`; the retained newest 10 revisions, descending; older ones are deleted, not archived |
 
@@ -48,6 +48,14 @@ session details; the existing dispatch/session fields retain their latest-record
 meaning. `live` is computed on every read and never written back, so it can
 disagree with a node's saved `status`.
 
+`issue_drift` lists completed nodes whose linked issue github-sync last saw open
+(list: campaign id → entries; single read: entries), each with `node_id`,
+`issue_url`, `node_status`, `reason` and `observed_at`. `open_issue` means the node
+was completed while the issue stayed open (for example a bundle PR that only
+mentions `(#N)`); `changed_after_auto_close` means the issue reopened after an
+automatic close but a person had changed the node, so it was left alone. The
+server never closes the issue; that is a decision for a person.
+
 Campaign fields: `id`, `title`, `description`, `status`, `round`, `revision`,
 `auto_queue`, `nodes`, `created_at`, `updated_at`. `auto_queue` defaults to false;
 a POST or PUT that omits it keeps the stored value, so older writers cannot turn
@@ -56,8 +64,8 @@ it off by accident. Status is `planned`, `active`, `paused`,
 
 Node fields: `id`, `title`, `status`, `stage`, `group`, `round`, `assignee`, `session_id`,
 `provider`, `dependencies`, `issue_url`, `pr_url`, `head_sha`, `evidence`,
-`next_action`, `blocker`, `summary`, `benefit`, `details`, `acceptance`, `findings`,
-`evidence_records`, `updated_at`. Status is `pending`, `running`, `blocked`, `completed`, `failed`, or
+`next_action`, `blocker`, `summary`, `benefit`, `post_merge_hold`, `details`, `acceptance`, `findings`,
+`evidence_records`, `updated_at`, and the server-owned `auto_closed_from` and `issue_drift`. Status is `pending`, `running`, `blocked`, `completed`, `failed`, or
 `skipped`. Stage is a separate free-text workflow label. Optional scalar fields
 may be null; arrays default to empty. `details` defaults to an empty string.
 `group` is an optional, caller-supplied organizational label independent of
@@ -68,6 +76,9 @@ changes use the same revision CAS and durable history as other node changes.
 `summary` (one-line plain-language gist) and `benefit` (expected effect once done)
 are optional text for the dashboard's first screen; documents written before they
 existed read them as null, and writers that omit them are unaffected.
+`post_merge_hold` names work left after the merge (deploy, observation); while it
+is set, a closed issue does not complete the node, and the dashboard shows the
+node as on hold. Clear it when that work is done.
 Evidence records contain a required `summary` and optional `command`, `result`,
 `head_sha`, `recorded_at` (RFC3339), and `references` (string array).
 
@@ -102,8 +113,41 @@ dispatch joins the auto-queue run of the card's assigned agent: the newest
 active run for that repo and agent, in a new lane of its current phase, or a new
 run labelled `campaign` with phase gates off (up to four lanes at once). Backlog
 cards are moved to ready first, as `/api/queue/generate` does. Auto-queue's
-minute tick dispatches the new entries. The ledger is never written: the node's
-card and `live` show its progress, and a person still saves the node's status.
+minute tick dispatches the new entries. The handoff never writes the ledger: the
+node's card and `live` show its progress.
+
+## Issue sync
+
+Each github-sync cycle (`github.sync_interval_minutes`) makes the nodes of active
+campaigns follow the GitHub issue in their `issue_url`, whether or not the issue
+has a card. Issues outside the synced issue list, and every issue whose node may
+change, are read by number together with the closing event.
+
+- Closed as completed → `completed`; closed as not planned or duplicate →
+  `skipped`, with stage `완료: 이슈 닫힘 자동 반영` / `건너뜀: 이슈 닫힘 자동 반영`.
+  An evidence record names what actually closed the issue (the closing pull
+  request or commit, or the person who closed it by hand) and when. Nodes with
+  `post_merge_hold`, and nodes already completed or skipped, are left alone.
+- The previous status, stage and time go to `auto_closed_from`. Reopening the
+  issue puts them back on the next sync, unless a person changed the node's status
+  or stage after the automatic close (even back to the same values); then the node
+  is kept and reported in `issue_drift` as `changed_after_auto_close`. A node a
+  person reopened is not closed again for the same closing.
+- `auto_closed_from` and `issue_drift` are owned by the server: PUT and POST
+  ignore them and keep the stored values, and both are dropped when the node's
+  `issue_url` changes.
+- The server writes under the same row lock and revision fence as PUT, so a
+  writer that read an older revision gets 409 and must reload. A node written
+  after the issue was read waits for the next cycle. Paused, completed and other
+  inactive campaigns are not touched, including reopen recovery.
+- Only a read by number made after an `issue_drift` report clears it once the
+  issue is closed; the synced issue list never does. When GitHub answers without
+  one of the issues, its listed state can still raise `issue_drift`, but the
+  node's status does not change.
+- A failed GitHub read leaves those nodes unchanged for that cycle. The sync
+  response carries `campaign_nodes` (`changed_nodes`, `deferred_nodes`, `errors`,
+  `fetch_errors`) and `campaign_nodes_failed`; the periodic sync logs the failure
+  and counts the cycle as failed. `deferred_nodes` alone is not a failure.
 
 Ready nodes that cannot be queued are listed in `waiting` with a reason:
 `no_issue_card`, `no_assigned_agent`, `previous_attempt_stopped` (its last queue

@@ -49,6 +49,7 @@ struct Fixture {
     holder_message: MessageId,
     http: Arc<serenity::Http>,
     channel_gets: Arc<AtomicUsize>,
+    parent_gets: Arc<AtomicUsize>,
     /// While set, every read of the channel itself fails; it counts the reads it refused.
     refuse_reads: Arc<(std::sync::atomic::AtomicBool, AtomicUsize)>,
     /// How the fake API answers name lookups ("answer", "fail" or "slow"), and who wrote every
@@ -148,6 +149,8 @@ impl Fixture {
 
         let channel_gets = Arc::new(AtomicUsize::new(0));
         let counted_gets = channel_gets.clone();
+        let parent_gets = Arc::new(AtomicUsize::new(0));
+        let counted_parent_gets = parent_gets.clone();
         let refuse_reads = Arc::new((
             std::sync::atomic::AtomicBool::new(false),
             AtomicUsize::new(0),
@@ -168,6 +171,7 @@ impl Fixture {
             },
         )).fallback(move |method: Method, uri: axum::http::Uri| {
             let (counted_gets, refused) = (counted_gets.clone(), refused.clone());
+            let counted_parent_gets = counted_parent_gets.clone();
             let queue_path = queue_path.clone();
             let (lookup, writer) = *named.lock().unwrap();
             async move {
@@ -228,6 +232,7 @@ impl Fixture {
                     answer["parent_id"] = json!(parent.get().to_string());
                 }
             } else if let Some(parent) = parent.filter(|p| uri.path().ends_with(&format!("/{p}"))) {
+                counted_parent_gets.fetch_add(1, Relaxed);
                 answer["id"] = json!(parent.get().to_string());
             }
             axum::Json(answer).into_response()
@@ -281,6 +286,7 @@ impl Fixture {
             holder_message,
             http,
             channel_gets,
+            parent_gets,
             refuse_reads,
             names,
             server,
@@ -324,13 +330,17 @@ impl Fixture {
 
     /// The route's answer to one external input.
     async fn deliver(&self, text: &str) -> Value {
+        self.deliver_as(text, 200).await
+    }
+
+    async fn deliver_as(&self, text: &str, author: u64) -> Value {
         let request = Request::builder()
             .method(Method::POST)
             .uri("/agents/s2b-head-agent/turn/deliver")
             .header("content-type", "application/json")
             .extension(crate::server::routes::auth::loopback_peer())
             .body(Body::from(
-                json!({ "text": text, "author_discord_user_id": "200", "source": "imessage" })
+                json!({ "text": text, "author_discord_user_id": author.to_string(), "source": "imessage" })
                     .to_string(),
             ))
             .unwrap();
@@ -558,9 +568,68 @@ async fn s2b_actual_router_kickoff_keeps_each_gate_independently_off_pg() {
         assert_eq!(fixture.bytes(), before);
         assert_eq!(format!("{:?}", fixture.queue().await), queue);
         if !queued_open || mode == "off" {
-            // Main's busy KICKOFF performs three routing GETs and has no parent lookup afterward.
-            assert_eq!(fixture.gets() - gets, 3, "queued_open={queued_open}");
+            assert_eq!(fixture.gets() - gets, 1, "queued_open={queued_open}");
         }
+        fixture.assert_holder_kept().await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn kickoff_reuses_channel_routing_lookup_before_queued_head_attempt_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (channel, parent, author, expected_child_gets) in [
+        (7_484_210, None, 1, 1),
+        (7_484_211, Some(ChannelId::new(7_484_209)), 1, 1),
+        (7_484_212, None, 200, 2),
+    ] {
+        let fixture = Fixture::build_in(channel, "all", parent).await;
+        fixture
+            .shared
+            .settings
+            .write()
+            .await
+            .allowed_user_ids
+            .push(1);
+        let _gate = router::busy_inject_support::open_gate(parent.map_or(channel, |id| id.get()));
+        if parent.is_some() {
+            assert!(!router::queued_head_inject_covers(fixture.channel, None));
+            assert!(router::queued_head_inject_covers(fixture.channel, parent));
+        }
+        let transition = fixture
+            .shared
+            .session_transition_lock(fixture.channel)
+            .lock_owned()
+            .await;
+        // System heads isolate routing reads; a user head also reads its author-name context.
+        let delivered = queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+            fixture.deliver_as("lookup budget", author),
+        )
+        .await;
+        assert_eq!(delivered["delivery"], "queued", "{delivered}");
+        drop(transition);
+        let head = fixture.queue().await.remove(0);
+        assert_eq!(head.author_id, UserId::new(author));
+        let channel_gets = fixture.gets();
+        let parent_gets = fixture.parent_gets.load(Relaxed);
+        assert!(!ATTEMPT_ROWS.lock().unwrap().iter().any(|row| {
+            row.channel_id == channel && row.head_message_id == head.message_id.get()
+        }));
+
+        fixture.kick().await;
+
+        let rows = ATTEMPT_ROWS.lock().unwrap().clone();
+        let row = rows
+            .iter()
+            .find(|row| row.channel_id == channel && row.head_message_id == head.message_id.get())
+            .expect("the real kickoff must reach queued_head_attempt");
+        assert_eq!((row.trigger, row.outcome), ("idle_kickoff", "injected"));
+        let reads = (
+            fixture.gets() - channel_gets,
+            fixture.parent_gets.load(Relaxed) - parent_gets,
+        );
+        assert_eq!(reads, (expected_child_gets, usize::from(parent.is_some())));
+        assert!(reads.0 + reads.1 <= 2);
+        assert!(fixture.queue().await.is_empty());
         fixture.assert_holder_kept().await;
     }
 }
@@ -1475,6 +1544,7 @@ async fn menu_keeps_the_queued_head_without_any_key_pg() {
                 &deps,
                 &ProviderKind::Claude,
                 fixture.channel,
+                None,
                 Some(|_, _| true),
                 "menu-held"
             )
@@ -1516,6 +1586,7 @@ async fn unread_idle_composer_consumes_the_queued_head_without_notice_pg() {
             &deps,
             &ProviderKind::Claude,
             fixture.channel,
+            None,
             Some(|_, _| true),
             "idle-unread"
         )
