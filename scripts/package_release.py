@@ -20,14 +20,8 @@ import tempfile
 import tomllib
 import zipfile
 
+from install_runtime_assets import runtime_assets
 
-RUNTIME_ASSETS = (
-    "policies", "routines", "skills", "scripts/launchd-migrated",
-    "scripts/_defaults.sh", "scripts/queue-stability-batch.sh",
-    "scripts/install-windows-runtime-task.ps1", "scripts/agentdesk-dcserver.service",
-    "scripts/install-windows-worker-firewall.ps1",
-    "defaults.json", "agentdesk.example.yaml", "LICENSE",
-)
 TARGETS = {
     "aarch64-apple-darwin": ("darwin", "aarch64"),
     "x86_64-apple-darwin": ("darwin", "x86_64"),
@@ -107,7 +101,7 @@ def package(root: Path, binary: Path, target: str, output: Path, dashboard: bool
         binary_name = "agentdesk.exe" if system == "windows" else "agentdesk"
         copy_file(binary, staging / binary_name, binary.parent)
         (staging / binary_name).chmod(0o755)
-        assets = git(root, "ls-files", "-z", "--", *RUNTIME_ASSETS).split("\0")
+        assets = git(root, "ls-files", "-z", "--", *runtime_assets(root)).split("\0")
         for relative in filter(None, assets):
             copy_file(root / relative, staging / relative, root)
         if dashboard:
