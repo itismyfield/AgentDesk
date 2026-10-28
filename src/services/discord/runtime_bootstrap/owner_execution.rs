@@ -60,7 +60,7 @@ pub(super) async fn prepare(provider: &ProviderKind, pool: Option<&sqlx::PgPool>
             Ok(None) => None,
             Ok(Some(permit)) => Some(Ok(permit)),
             Err(reason) => {
-                tracing::warn!(provider=provider.as_str(),channel,%reason,"execution restore held");
+                tracing::warn!(provider=provider.as_str(),channel_id=channel,%reason,"execution restore held");
                 Some(Err(reason))
             }
         };

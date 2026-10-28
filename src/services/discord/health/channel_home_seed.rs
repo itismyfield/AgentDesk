@@ -31,11 +31,11 @@ pub(crate) async fn inspect_at_boot(
             Ok(true) => continue,
             Ok(false) => "channel_home_seed_missing",
             Err(error) => {
-                tracing::warn!(%error, provider=provider.as_str(), channel=channel.get(), "channel home seed check failed");
+                tracing::warn!(%error, provider=provider.as_str(), channel_id=channel.get(), "channel home seed check failed");
                 "channel_home_seed_check_failed"
             }
         };
-        tracing::warn!(provider=provider.as_str(), channel=channel.get(), %legacy_instance, reason, "legacy channel home override has no confirmed shared preference");
+        tracing::warn!(provider=provider.as_str(), channel_id=channel.get(), %legacy_instance, reason, "legacy channel home override has no confirmed shared preference");
         issues.push(Issue {
             runtime: runtime.into(),
             provider: provider.as_str().into(),
