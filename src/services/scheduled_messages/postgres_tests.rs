@@ -1260,7 +1260,7 @@ async fn postgres_transcript_event_probe_tolerates_unknown_or_legacy_json() {
         .expect("seed forward-compatible transcript event evidence");
 
         assert_eq!(
-            find_turn_delivery_evidence(&pool, turn_id, lower_bound)
+            find_turn_delivery_evidence(&pool, "no-delivery-row", turn_id, lower_bound)
                 .await
                 .expect("query forward-compatible transcript evidence"),
             Some(TurnEvidence::Delivered)
@@ -1740,6 +1740,69 @@ async fn postgres_image_handoff_requires_loaded_snapshot_and_preserves_bytes() {
         count, 1,
         "handoff replay must preserve the original durable row"
     );
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// A snapshot turn leaves no channel transcript; the outcome its completer
+/// recorded on the delivery is what settles it, per `on_agent_failure`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_recorded_turn_outcome_settles_without_transcript_evidence() {
+    use turn_completion::ScheduledTurnOutcome as Outcome;
+    let (pg_db, pool) = create_test_pool(
+        "agentdesk_smsg_recorded_outcome",
+        "scheduled message recorded turn outcome",
+    )
+    .await;
+    let cases = [
+        (Outcome::Delivered, "fail", db::DELIVERY_SENT, false),
+        (Outcome::Delivered, "push_raw", db::DELIVERY_SENT, false),
+        (Outcome::NoReply, "fail", db::DELIVERY_FAILED, false),
+        (Outcome::ProviderError, "fail", db::DELIVERY_FAILED, false),
+        (Outcome::EmptyResponse, "fail", db::DELIVERY_FAILED, false),
+        (Outcome::ProviderError, "push_raw", db::DELIVERY_SENT, true),
+        (Outcome::EmptyResponse, "push_raw", db::DELIVERY_SENT, true),
+    ];
+    for (n, (outcome, on_failure, status, fallback)) in cases.into_iter().enumerate() {
+        let agent = format!("recorded-outcome-agent-{n}");
+        let turn_id = format!("recorded-outcome-turn-{n}");
+        let message = insert_one_shot_agent_message(&pool, &agent, on_failure).await;
+        let fire = claim_one(&pool, &agent).await;
+        record_confirmed_agent_turn(&pool, &fire, &turn_id).await;
+        let mut running = db::list_running_agent_deliveries_pg(&pool, &agent, LEASE_SECS, 10)
+            .await
+            .expect("poll recorded-outcome turn");
+        let delivery = running.pop().expect("recorded-outcome delivery");
+        assert!(
+            !resolve_agent_delivery(&pool, &delivery, false).await,
+            "case {n}: no evidence yet keeps the delivery running"
+        );
+
+        assert_eq!(
+            turn_completion::record(&pool, &turn_id, outcome)
+                .await
+                .unwrap(),
+            turn_completion::RecordOutcome::Recorded
+        );
+        assert!(resolve_agent_delivery(&pool, &delivery, false).await);
+        let deliveries = db::list_deliveries_pg(&pool, &message.id, 10, None)
+            .await
+            .expect("read recorded-outcome delivery");
+        assert_eq!(deliveries.len(), 1, "case {n}: no replacement delivery");
+        assert_eq!(
+            deliveries[0].status, status,
+            "case {n}: {outcome:?}/{on_failure}"
+        );
+        assert_eq!(
+            deliveries[0].fallback_outbox_id.is_some(),
+            fallback,
+            "case {n}"
+        );
+        if status == db::DELIVERY_FAILED {
+            assert_eq!(deliveries[0].error.as_deref(), outcome.failure_reason());
+        }
+    }
+
     pool.close().await;
     pg_db.drop().await;
 }

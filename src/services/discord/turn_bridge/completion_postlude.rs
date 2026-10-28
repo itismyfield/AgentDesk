@@ -283,6 +283,7 @@ pub(super) async fn run_completion_postlude(
             &provider,
             adk_session_key.as_deref(),
             turn_id.as_str(),
+            &inflight_state,
         )
         .await;
     let routine_attempt_owns_turn = routine_attempt_owns_turn && !cancelled;
@@ -508,6 +509,20 @@ pub(super) async fn run_completion_postlude(
             "standby_relay": bridge_output_owner == Some(BridgeOutputOwner::StandbyRelay),
         }),
     );
+    let scheduled = channel_writeback::ScheduledCompletion {
+        answer_committed: should_record_final_turn && !cancelled,
+        empty_response: turn_outcome == "empty_response",
+        full_response: &full_response,
+        transcript_events: &transcript_events,
+        provider_failure,
+    };
+    channel_writeback::record_scheduled_completion(
+        &shared_owned,
+        &cancel_token,
+        &inflight_state,
+        scheduled,
+    )
+    .await;
 
     if should_persist_transcript
         && shared_owned.pg_pool.is_some()

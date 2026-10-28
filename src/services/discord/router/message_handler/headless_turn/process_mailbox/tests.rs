@@ -34,7 +34,15 @@ impl Fixture {
         provider: ProviderKind,
         user_message_id: u64,
     ) -> (Self, ProcessMailbox) {
-        let mut shared = make_shared_data_for_tests_with_storage(None);
+        Self::with_storage(provider, user_message_id, None).await
+    }
+
+    async fn with_storage(
+        provider: ProviderKind,
+        user_message_id: u64,
+        pg_pool: Option<sqlx::PgPool>,
+    ) -> (Self, ProcessMailbox) {
+        let mut shared = make_shared_data_for_tests_with_storage(pg_pool);
         Arc::get_mut(&mut shared)
             .expect("unshared fixture")
             .provider = provider.clone();

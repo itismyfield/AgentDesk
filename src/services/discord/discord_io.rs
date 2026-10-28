@@ -378,17 +378,17 @@ pub async fn send_file_to_channel(
     let channel = ChannelId::new(channel_id);
     let attachment = CreateAttachment::path(path).await?;
 
-    channel
-        .send_message(
-            &http,
-            CreateMessage::new()
-                .content(format!(
-                    "📎 {}",
-                    path.file_name().unwrap_or_default().to_string_lossy()
-                ))
-                .add_file(attachment),
-        )
-        .await?;
+    super::http::dispatch_channel_message(
+        &http,
+        channel,
+        CreateMessage::new()
+            .content(format!(
+                "📎 {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ))
+            .add_file(attachment),
+    )
+    .await?;
 
     Ok(())
 }
@@ -620,5 +620,61 @@ mod tests {
             }
         }
         assert!(mismatches.is_empty(), "wrapper mismatches: {mismatches:#?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cli_send_message_wire_allowed_mentions_preserves_users_and_default_client() {
+        use axum::{Json, Router, extract::State, routing::post};
+        use serde_json::{Value, json};
+        use std::sync::Mutex;
+
+        use crate::services::discord::outbound::DiscordOutboundClient;
+
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let payloads = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let app =
+            Router::new()
+                .route(
+                    "/channels/7001/messages",
+                    post(
+                        |State(payloads): State<Arc<Mutex<Vec<Value>>>>,
+                         Json(payload): Json<Value>| async move {
+                            payloads.lock().expect("payload lock").push(payload);
+                            Json(json!({"id": "9001"}))
+                        },
+                    ),
+                )
+                .with_state(Arc::clone(&payloads));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Discord proxy");
+        let base = format!("http://{}", listener.local_addr().expect("proxy address"));
+        let _env = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_DISCORD_API_BASE_URL",
+            std::ffi::OsStr::new(&base),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve Discord proxy");
+        });
+
+        let content = "<@42> @everyone @here <@&99>";
+        send_message_to_channel("test-token", 7001, content)
+            .await
+            .expect("send public CLI message");
+        let default_content = "<@42> @everyone @here <@&99> default client";
+        HttpOutboundClient::new(reqwest::Client::new(), "test-token", base)
+            .post_message("7001", default_content)
+            .await
+            .expect("send default HTTP client message");
+        server.abort();
+
+        let payloads = payloads.lock().expect("payload lock");
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0]["content"], content);
+        assert_eq!(payloads[0]["allowed_mentions"]["parse"], json!(["users"]));
+        assert_eq!(payloads[1]["content"], default_content);
+        assert_eq!(payloads[1]["allowed_mentions"]["parse"], json!(["users"]));
     }
 }

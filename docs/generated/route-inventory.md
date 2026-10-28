@@ -35,7 +35,7 @@
 | `GET` | `/api/agents/{id}/timeline` | `agents::agent_timeline` | `src/server/routes/agents.rs:931` | `src/server/routes/domains/runtime.rs:143` |
 | `GET` | `/api/agents/{id}/transcripts` | `agents::agent_transcripts` | `src/server/routes/agents.rs:954` | `src/server/routes/domains/runtime.rs:138` |
 | `GET` | `/api/agents/{id}/turn` | `agents::agent_turn` | `src/server/routes/agents.rs:705` | `src/server/routes/domains/runtime.rs:131` |
-| `POST` | `/api/agents/{id}/turn/deliver` | `agents_turn_deliver::deliver_turn_input` | `src/server/routes/agents_turn_deliver.rs:111` | `src/server/routes/domains/runtime.rs:133` |
+| `POST` | `/api/agents/{id}/turn/deliver` | `agents_turn_deliver::deliver_turn_input` | `src/server/routes/agents_turn_deliver.rs:122` | `src/server/routes/domains/runtime.rs:133` |
 | `POST` | `/api/agents/{id}/turn/start` | `agents::start_agent_turn` | `src/server/routes/agents.rs:723` | `src/server/routes/domains/runtime.rs:132` |
 | `POST` | `/api/agents/{id}/turn/stop` | `agents::stop_agent_turn` | `src/server/routes/agents_stop.rs:4` | `src/server/routes/domains/runtime.rs:137` |
 | `GET` | `/api/analytics` | `analytics::analytics` | `src/server/routes/analytics.rs:267` | `src/server/routes/domains/analytics.rs:10` |
@@ -51,11 +51,11 @@
 | `POST` | `/api/automation-candidates/{card_id}/iteration-result` | `automation_candidates::submit_iteration_result` | `src/server/routes/automation_candidates.rs:143` | `src/server/routes/domains/kanban.rs:65` |
 | `GET` | `/api/automation-candidates/{card_id}/iterations` | `automation_candidates::list_iterations` | `src/server/routes/automation_candidates.rs:190` | `src/server/routes/domains/kanban.rs:69` |
 | `POST` | `/api/automation-candidates/{card_id}/prepare-worktree` | `automation_candidates::prepare_worktree` | `src/server/routes/automation_candidates.rs:286` | `src/server/routes/domains/kanban.rs:81` |
-| `GET` | `/api/campaigns` | `campaigns::list` | `src/server/routes/campaigns.rs:80` | `src/server/routes/domains/admin.rs:18` |
-| `POST` | `/api/campaigns` | `campaigns::create` | `src/server/routes/campaigns.rs:115` | `src/server/routes/domains/admin.rs:18` |
-| `GET` | `/api/campaigns/{id}` | `campaigns::get` | `src/server/routes/campaigns.rs:96` | `src/server/routes/domains/admin.rs:19` |
-| `PUT` | `/api/campaigns/{id}` | `campaigns::replace` | `src/server/routes/campaigns.rs:130` | `src/server/routes/domains/admin.rs:19` |
-| `GET` | `/api/campaigns/{id}/history` | `campaigns::history` | `src/server/routes/campaigns.rs:106` | `src/server/routes/domains/admin.rs:23` |
+| `GET` | `/api/campaigns` | `campaigns::list` | `src/server/routes/campaigns.rs:81` | `src/server/routes/domains/admin.rs:18` |
+| `POST` | `/api/campaigns` | `campaigns::create` | `src/server/routes/campaigns.rs:126` | `src/server/routes/domains/admin.rs:18` |
+| `GET` | `/api/campaigns/{id}` | `campaigns::get` | `src/server/routes/campaigns.rs:104` | `src/server/routes/domains/admin.rs:19` |
+| `PUT` | `/api/campaigns/{id}` | `campaigns::replace` | `src/server/routes/campaigns.rs:141` | `src/server/routes/domains/admin.rs:19` |
+| `GET` | `/api/campaigns/{id}/history` | `campaigns::history` | `src/server/routes/campaigns.rs:117` | `src/server/routes/domains/admin.rs:23` |
 | `GET` | `/api/channels/{channel_id}/monitoring` | `monitoring::list_monitoring` | `src/server/routes/monitoring.rs:69` | `src/server/routes/domains/runtime.rs:114` |
 | `POST` | `/api/channels/{channel_id}/monitoring` | `monitoring::upsert_monitoring` | `src/server/routes/monitoring.rs:19` | `src/server/routes/domains/runtime.rs:114` |
 | `DELETE` | `/api/channels/{channel_id}/monitoring/{key}` | `monitoring::remove_monitoring` | `src/server/routes/monitoring.rs:52` | `src/server/routes/domains/runtime.rs:118` |

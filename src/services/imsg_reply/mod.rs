@@ -1,23 +1,19 @@
-//! Off-by-default iMessage admission reserves each GUID before delivery can have an effect.
+//! iMessage reply contracts layered over durable origin admission.
 
+pub(crate) mod admission;
 mod contract;
 pub(crate) mod episode;
 
 use std::future::Future;
 use std::sync::OnceLock;
 
-use axum::{Json, http::StatusCode};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
-use crate::db::imsg_reply::{
-    AdmissionIdentity, AdmissionSettlement, Obligation, bind_episode, bind_queued, hand_back_busy,
-    read_obligation, release_episode, reserve_admission, settle_admission,
-};
+use crate::db::imsg_reply::{bind_episode, bind_queued, hand_back_busy, release_episode};
 use crate::services::discord::health::{HumanInputDelivery, HumanInputError};
 
-pub(crate) type AdmissionResponse = (StatusCode, Json<Value>);
+pub(crate) use admission::{AdmissionInput, AdmissionResponse};
 
 /// The delivery error when a GUID could not be bound before an effect; nothing was delivered.
 pub(crate) const UNBOUND: &str = "reply_unbound";
@@ -114,15 +110,6 @@ pub(crate) fn with_started_contract(
     ))
 }
 
-pub(crate) struct AdmissionInput<'a> {
-    pub origin_id: &'a str,
-    pub agent_id: &'a str,
-    pub channel_id: u64,
-    pub author_id: u64,
-    pub source: &'a str,
-    pub text: &'a str,
-}
-
 pub(crate) fn parse_enabled(value: Option<&str>) -> bool {
     value.is_some_and(|value| {
         matches!(
@@ -142,48 +129,7 @@ pub(crate) fn enabled_for_source(enabled: bool, source: &str) -> bool {
     enabled && source.trim() == "imessage"
 }
 
-fn request_hash(input: &AdmissionInput<'_>) -> String {
-    let normalized = json!([
-        input.text.trim(),
-        input.source.trim(),
-        input.channel_id.to_string(),
-        input.author_id.to_string(),
-    ]);
-    format!("{:x}", Sha256::digest(normalized.to_string().as_bytes()))
-}
-
-fn failure(status: StatusCode, error: &str) -> AdmissionResponse {
-    (status, Json(json!({"ok": false, "error": error})))
-}
-
-fn replay(row: &Obligation, identity: &AdmissionIdentity<'_>) -> AdmissionResponse {
-    if row.source != "imessage"
-        || row.agent_id != identity.agent_id
-        || row.channel_id != identity.channel_id
-        || row.person_id != identity.person_id
-        || row.request_hash != identity.request_hash
-    {
-        return failure(StatusCode::CONFLICT, "origin_conflict");
-    }
-    match row.admission.as_str() {
-        "admitting" => failure(StatusCode::ACCEPTED, "admission_pending"),
-        "unknown" => failure(StatusCode::ACCEPTED, "admission_unknown"),
-        "admitted" | "refused" => {
-            let stored = row.admission_result.as_ref();
-            let status = stored
-                .and_then(|stored| stored["status"].as_u64())
-                .and_then(|status| u16::try_from(status).ok())
-                .and_then(|status| StatusCode::from_u16(status).ok());
-            match (status, stored.and_then(|stored| stored.get("body"))) {
-                (Some(status), Some(body)) => (status, Json(body.clone())),
-                _ => failure(StatusCode::SERVICE_UNAVAILABLE, "admission_unavailable"),
-            }
-        }
-        _ => failure(StatusCode::SERVICE_UNAVAILABLE, "admission_unavailable"),
-    }
-}
-
-/// The enabled iMessage route supplies authorization and its unchanged delivery/response functions.
+/// The iMessage route retains its reply binding and original admission source.
 pub(crate) async fn deliver_once<A, AF, D, DF, S>(
     pool: &PgPool,
     input: &AdmissionInput<'_>,
@@ -198,84 +144,12 @@ where
     DF: Future<Output = Result<HumanInputDelivery, HumanInputError>>,
     S: FnOnce(Result<HumanInputDelivery, HumanInputError>) -> AdmissionResponse,
 {
-    if let Err(error) = authorize().await {
-        return serialize(Err(error));
-    }
-    let Ok(person_id) = i64::try_from(input.author_id) else {
-        return failure(StatusCode::UNPROCESSABLE_ENTITY, "invalid_author_id");
-    };
-    let channel_id = input.channel_id.to_string();
-    let request_hash = request_hash(input);
-    let identity = AdmissionIdentity {
-        origin_id: input.origin_id,
-        agent_id: input.agent_id,
-        channel_id: &channel_id,
-        person_id,
-        request_hash: &request_hash,
-    };
-    match reserve_admission(pool, &identity).await {
-        Ok(true) => {}
-        Ok(false) => {
-            // Read after the INSERT completes: its conflict snapshot may predate the winning row.
-            return match read_obligation(pool, input.origin_id).await {
-                Ok(Some(row)) => replay(&row, &identity),
-                _ => failure(StatusCode::SERVICE_UNAVAILABLE, "admission_unavailable"),
-            };
-        }
-        Err(_) => return failure(StatusCode::SERVICE_UNAVAILABLE, "admission_unavailable"),
-    }
-
-    let result = deliver().await;
-    let (admission, kind, confirmed, turn_id) = match &result {
-        Ok(HumanInputDelivery::Started { turn_id }) => (
-            "admitted",
-            Some("started"),
-            Some(true),
-            Some(turn_id.clone()),
-        ),
-        Ok(HumanInputDelivery::Queued { turn_id, .. }) => (
-            "admitted",
-            Some("queued"),
-            Some(true),
-            Some(turn_id.clone()),
-        ),
-        Ok(HumanInputDelivery::Injected { turn_id }) => {
-            ("admitted", Some("injected"), Some(true), turn_id.clone())
-        }
-        Ok(HumanInputDelivery::Unconfirmed { turn_id, .. }) => (
-            "admitted",
-            Some("unconfirmed"),
-            Some(false),
-            turn_id.clone(),
-        ),
-        Err(HumanInputError::AuthorNotAllowed) => ("refused", None, None, None),
-        // Delivery errors can follow pane or handback effects; absence of evidence is not refusal.
-        Err(_) => ("unknown", None, None, None),
-    };
-    let response = serialize(result);
-    let stored = json!({"status": response.0.as_u16(), "body": response.1.0});
-    let settlement = AdmissionSettlement {
-        admission,
-        kind,
-        result: &stored,
-        delivery_confirmed: confirmed,
-        turn_id: turn_id.as_deref(),
-    };
-    if matches!(
-        settle_admission(pool, input.origin_id, &settlement).await,
-        Ok(true)
-    ) {
-        response
-    } else {
-        failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "admission_settlement_failed",
-        )
-    }
+    admission::deliver_once(pool, input, "imessage", authorize, deliver, serialize).await
 }
 
 #[cfg(test)]
 mod tests {
+    use super::admission::request_hash;
     use super::*;
 
     #[test]
@@ -316,6 +190,7 @@ mod tests {
         let mut input = AdmissionInput {
             origin_id: "Case-Preserved-GUID",
             agent_id: "agent-a",
+            provider: "claude",
             channel_id: 7,
             author_id: 9,
             source: " imessage ",

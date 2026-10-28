@@ -62,39 +62,48 @@ pub(in crate::services::discord::runtime_bootstrap) async fn eventually(
     done()
 }
 
-/// One SIGTERM handler per runtime that keeps its shutdown slot, none where the slot is returned.
-#[test]
-fn every_slot_holding_runtime_registers_one_sigterm_handler() {
+/// How often `call` appears in each `run_bot` branch: REST worker, standby, gateway, utility skip
+/// and lease failure, in that order.
+fn run_bot_branch_counts(call: &str) -> [usize; 5] {
     const BOOT: &str = include_str!("../runtime_bootstrap.rs");
     let body = BOOT.split_once("pub(crate) async fn run_bot(").unwrap().1;
     let body = body.split_once("\n}\n").unwrap().0;
-    let handler = "run_bot_spawn_sigterm_handler(&shared, provider.clone());";
     let branch = |from: &str, to: &str| {
         let rest = body.split_once(from).expect(from).1;
-        rest.split_once(to).expect(to).0.matches(handler).count()
+        rest.split_once(to).expect(to).0.matches(call).count()
     };
-    assert_eq!(body.matches(handler).count(), 3);
-    assert_eq!(branch("if !modules.gateway {", "return;"), 1, "REST worker");
     assert_eq!(
+        body.matches(call).count(),
+        3,
+        "{call} outside the three runtimes"
+    );
+    [
+        branch("if !modules.gateway {", "return;"),
         branch("GatewayLeaseOutcome::Standby => {", "return;"),
-        1,
-        "standby"
-    );
-    // The lease match's last arm closes it; everything after belongs to the gateway branch.
-    let gateway = "GatewayLeaseOutcome::Failed => {";
-    assert_eq!(
-        branch(gateway, "run_bot_start_gateway_runtime("),
-        1,
-        "gateway"
-    );
-    let utility = "should_skip_agent_runtime_launch(token) {";
-    assert_eq!(branch(utility, "return;"), 0, "utility");
-    assert_eq!(
+        // The lease match's last arm closes it; everything after belongs to the gateway branch.
+        branch(
+            "GatewayLeaseOutcome::Failed => {",
+            "run_bot_start_gateway_runtime(",
+        ),
+        branch("should_skip_agent_runtime_launch(token) {", "return;"),
         branch("!gateway_outcome.starts_provider_runtime() {", "return;"),
-        0,
-        "lease failure"
-    );
+    ]
+}
+
+/// One SIGTERM handler per runtime that keeps its shutdown slot, none where the slot is returned.
+#[test]
+fn every_slot_holding_runtime_registers_one_sigterm_handler() {
+    let handler = "run_bot_spawn_sigterm_handler(&shared, provider.clone());";
+    assert_eq!(run_bot_branch_counts(handler), [1, 1, 1, 0, 0]);
     assert!(!include_str!("gateway_runtime.rs").contains("run_bot_spawn_sigterm_handler"));
+}
+
+/// Every turn-executing runtime, runner and standby included, starts its execution tasks (and
+/// with them its orphan-delete consumer) once: the orphan store is node-local.
+#[test]
+fn every_turn_executing_runtime_starts_its_orphan_delete_consumer_once() {
+    let tasks = "spawns::run_bot_spawn_execution_runtime_tasks(&shared, &provider);";
+    assert_eq!(run_bot_branch_counts(tasks), [1, 1, 1, 0, 0]);
 }
 
 // The writer recovers through an enabled store, which Windows refuses without a directory fsync.

@@ -186,6 +186,7 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   └── read.rs
 │   ├── campaigns/
+│   │   ├── issue_sync.rs
 │   │   └── tests.rs
 │   ├── dispatched_sessions/
 │   │   ├── hosted_execution/
@@ -390,6 +391,8 @@ src/
 │   └── transition_executor_pg.rs
 ├── github/
 │   ├── sync/
+│   │   ├── campaign_nodes.rs
+│   │   ├── campaign_nodes_tests.rs
 │   │   ├── card_state.rs
 │   │   └── warning_tests.rs
 │   ├── triage/
@@ -443,6 +446,8 @@ src/
 │   │   ├── agents_crud/
 │   │   │   └── agent_read.rs
 │   │   ├── agents_turn_deliver/
+│   │   │   ├── legacy_origin.rs
+│   │   │   ├── legacy_origin_tests.rs
 │   │   │   └── pg_tests.rs
 │   │   ├── auth/
 │   │   │   ├── tailnet_peer.rs
@@ -968,7 +973,8 @@ src/
 │   │   │   ├── first_input/
 │   │   │   │   └── tests.rs
 │   │   │   ├── launch_policy/
-│   │   │   │   └── fresh_tests.rs
+│   │   │   │   ├── fresh_tests.rs
+│   │   │   │   └── symlink_home_tests.rs
 │   │   │   ├── first_input.rs
 │   │   │   └── launch_policy.rs
 │   │   ├── absence_launch.rs
@@ -1326,7 +1332,8 @@ src/
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   ├── inject_codex_v2_tests.rs
-│   │   │   │   └── inject_tests.rs
+│   │   │   │   ├── inject_tests.rs
+│   │   │   │   └── prepared.rs
 │   │   │   ├── unbound_owners/
 │   │   │   │   └── tests.rs
 │   │   │   ├── watcher_respawn/
@@ -1713,7 +1720,8 @@ src/
 │   │   │   │   ├── ready_without_output_tests.rs
 │   │   │   │   ├── replay_decision.rs
 │   │   │   │   ├── replay_hold.rs
-│   │   │   │   └── replay_hold_tests.rs
+│   │   │   │   ├── replay_hold_tests.rs
+│   │   │   │   └── scheduled_body_restore_tests.rs
 │   │   │   ├── terminal_text_idempotency/
 │   │   │   │   └── anchor_identity.rs
 │   │   │   ├── analytics_transcript.rs
@@ -1919,6 +1927,8 @@ src/
 │   │   │   │   │   ├── runtime_transition.rs
 │   │   │   │   │   ├── session_preparation.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
+│   │   │   │   │   ├── start_placeholder.rs
+│   │   │   │   │   ├── start_placeholder_tests.rs
 │   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
@@ -2104,6 +2114,9 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── standby_relay/
+│   │   │   ├── scheduled_settle.rs
+│   │   │   └── scheduled_settle_tests.rs
 │   │   ├── startup_reclaim/
 │   │   │   ├── tests/
 │   │   │   │   └── source_guard_tests.rs
@@ -2262,11 +2275,14 @@ src/
 │   │   │   ├── post_stream_exit.rs
 │   │   │   ├── post_stream_exit_host_tests.rs
 │   │   │   ├── pre_emit_guard.rs
+│   │   │   ├── pre_emit_guard_scheduled_tests.rs
 │   │   │   ├── prompt_observe.rs
 │   │   │   ├── provider_output_guard.rs
 │   │   │   ├── provider_session_persistence.rs
+│   │   │   ├── provider_session_persistence_tests.rs
 │   │   │   ├── read_source_switch_tests.rs
 │   │   │   ├── rowless_delivery_authority.rs
+│   │   │   ├── scheduled_watcher_harness_tests.rs
 │   │   │   ├── session_bound_ack.rs
 │   │   │   ├── session_bound_ack_tests.rs
 │   │   │   ├── single_message_footer.rs
@@ -2492,7 +2508,8 @@ src/
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── legacy_summary.rs
 │   │   │   │   ├── legacy_summary_tests.rs
-│   │   │   │   └── prelude_lifecycle.rs
+│   │   │   │   ├── prelude_lifecycle.rs
+│   │   │   │   └── scheduled_completion_tests.rs
 │   │   │   ├── entry_abort_cold_error_tests/
 │   │   │   │   └── provider_failure_tests.rs
 │   │   │   ├── finalize_epilogue/
@@ -2945,6 +2962,8 @@ src/
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs
 │   │   ├── runtime_store_checkpoint_lock_tests.rs
+│   │   ├── scheduled_turn.rs
+│   │   ├── scheduled_turn_tests.rs
 │   │   ├── semantic_boundaries.rs
 │   │   ├── session_banner.rs
 │   │   ├── session_canonical_identity.rs
@@ -3078,6 +3097,7 @@ src/
 │   ├── herdr_launch_tests/
 │   │   └── retired_hold_tests.rs
 │   ├── imsg_reply/
+│   │   ├── admission.rs
 │   │   ├── contract.rs
 │   │   ├── episode.rs
 │   │   └── mod.rs
@@ -3284,7 +3304,9 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   ├── provider_targets.rs
 │   │   ├── push_handoff.rs
-│   │   └── timing.rs
+│   │   ├── timing.rs
+│   │   ├── turn_completion.rs
+│   │   └── turn_completion_tests.rs
 │   ├── session_backend/
 │   │   ├── auth_profiles.rs
 │   │   ├── output.rs
@@ -3617,6 +3639,7 @@ src/
 │   │   │   ├── always_on_repost_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── bo_post_tests.rs
+│   │   │   ├── boot.rs
 │   │   │   ├── boundary_pending_health_tests.rs
 │   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_end_empty_session_tests.rs
@@ -3684,7 +3707,10 @@ src/
 │   │   │   ├── recovery_tests.rs
 │   │   │   ├── renumber_tests.rs
 │   │   │   ├── renumbered.rs
+│   │   │   ├── replay.rs
+│   │   │   ├── replay_metadata_tests.rs
 │   │   │   ├── repost_turn_tests.rs
+│   │   │   ├── restart_replay_host_tests.rs
 │   │   │   ├── resume.rs
 │   │   │   ├── resume_tests.rs
 │   │   │   ├── retire_tests.rs

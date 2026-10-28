@@ -394,6 +394,19 @@ pub(super) async fn retire_captured_ready_response<F, Fut>(
         .recovery_actor
         .as_ref()
         .and_then(std::sync::Weak::upgrade);
+    // Settle the delivered scheduled turn before this row can be dropped.
+    if committed.terminal_delivery_completed() {
+        let outcome = crate::services::discord::scheduled_turn::recovered_outcome(
+            committed,
+            &committed.full_response,
+        );
+        crate::services::discord::scheduled_turn::settle(
+            shared.pg_pool.as_ref(),
+            committed,
+            outcome,
+        )
+        .await;
+    }
     let outcome = finalize(snapshot).await;
     match outcome {
         Some(FinalizeOutcome::Deferred) => return,

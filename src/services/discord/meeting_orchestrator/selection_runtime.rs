@@ -112,11 +112,14 @@ impl DiscordOutboundClient for MeetingOutboundClient<'_> {
     ) -> Result<String, DispatchMessagePostError> {
         let channel_id = parse_meeting_channel_id(target_channel)?;
         rate_limit_wait(self.shared, channel_id).await;
-        channel_id
-            .send_message(self.http, serenity::CreateMessage::new().content(content))
-            .await
-            .map(|message| message.id.get().to_string())
-            .map_err(meeting_post_error)
+        super::super::http::dispatch_channel_message(
+            self.http,
+            channel_id,
+            serenity::CreateMessage::new().content(content),
+        )
+        .await
+        .map(|message| message.id.get().to_string())
+        .map_err(meeting_post_error)
     }
 
     async fn edit_message(
@@ -843,4 +846,52 @@ pub(super) fn build_fallback_meeting_summary(
         discussion = discussion_block,
         conclusion = conclusion,
     )
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::services::discord::admin_host_guard::tests::Recorder;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn meeting_agenda_p2_allowed_mentions_preserve_users() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let api = Recorder::start().await;
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(72_281_742);
+        let agenda = "<@1234> @everyone @here <@&5678> 회의 안건";
+        let rendered = build_meeting_start_status_message(
+            agenda,
+            "meeting-mentions",
+            None,
+            &ProviderKind::Claude,
+            &ProviderKind::Codex,
+            None,
+        );
+
+        let message_id = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            send_meeting_message(&api.http, channel, &shared, rendered.clone()),
+        )
+        .await
+        .expect("meeting POST finishes")
+        .expect("meeting agenda delivered");
+        assert_eq!(message_id, Some(serenity::MessageId::new(900001)));
+
+        let calls = api.take();
+        assert_eq!(calls.len(), 1, "one rendered meeting POST: {calls:?}");
+        let prefix = format!("POST /api/v10/channels/{}/messages ", channel.get());
+        let body: serde_json::Value = serde_json::from_str(
+            calls[0]
+                .strip_prefix(&prefix)
+                .expect("captured request is the meeting POST"),
+        )
+        .expect("actual meeting request JSON");
+        assert_eq!(body["content"], rendered);
+        assert!(body["content"].as_str().unwrap().contains(agenda));
+        assert_eq!(
+            body["allowed_mentions"]["parse"],
+            serde_json::json!(["users"])
+        );
+    }
 }

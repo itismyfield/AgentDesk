@@ -80,7 +80,10 @@ pub(in crate::services::codex) fn prepare_codex_tui_incarnation_with_policy(
         channel,
         options.resume_session_id.as_deref(),
         options.resume_session_id.is_some(),
-        codex_tui_home(overlay).0.map(|home| home.join("sessions")),
+        // Ownership compares canonical rollout paths to this root, so record it unaliased.
+        codex_tui_home(overlay)
+            .0
+            .map(|home| home.canonicalize().unwrap_or(home).join("sessions")),
         (Some(digest), Some(policy.to_owned())),
     )
     .map_err(CodexTuiLaunchRefused::PreparationUnavailable)
@@ -261,3 +264,5 @@ pub(crate) fn validate_herdr_fresh_argv(
 
 #[cfg(all(test, unix))]
 mod fresh_tests;
+#[cfg(all(test, unix))]
+mod symlink_home_tests;

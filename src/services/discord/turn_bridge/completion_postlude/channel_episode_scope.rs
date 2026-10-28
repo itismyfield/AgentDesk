@@ -578,7 +578,8 @@ mod tests {
         ] {
             want(process_fixture, fixture, None);
         }
-        want(process_bridge, &spawn, Some(1));
+        // Both process bridge entries hand off the fixture's claimed token.
+        want(process_bridge, &spawn, Some(2));
         want(
             process_bridge,
             "Fixture::with_user_message(ProviderKind::Codex, USER_MESSAGE).await;",
@@ -587,7 +588,7 @@ mod tests {
         want(
             process_bridge,
             "spawn_turn_bridge(fixture.shared.clone(), fixture.token.clone(), rx, context);",
-            None,
+            Some(2),
         );
         want(codex_replacement, &spawn, Some(1));
         want(

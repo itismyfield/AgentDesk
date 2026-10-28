@@ -231,6 +231,12 @@ pub(super) fn fail_parent_comparison_after_a_poll(f: &Fixture, e: &mut Engine) {
         removed: bool,
     }
     impl Owe for RemoveParent<'_> {
+        fn finish_replay(
+            &mut self,
+            ledger: &crate::services::tui_o::store::ledger::LedgerState,
+        ) -> crate::services::tui_o::writer::ReplaySummary {
+            self.owed.finish_replay(ledger)
+        }
         fn owe(&mut self, source: &SourceId, _: &CapturedRecord, derived: Vec<Derived>) {
             if *source == self.parent && !self.removed {
                 let path = &self.f.pane.path;
