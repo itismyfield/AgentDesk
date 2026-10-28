@@ -39,7 +39,12 @@
       "unknown": false,
       "failed_count": 0,
       "blocked_count": 0,
-      "reasons": [],
+      "reasons": [
+        {
+          "code": "execution_unavailable",
+          "target": "campaign"
+        }
+      ],
       "commands": [
         {
           "command": "edit_definition",
