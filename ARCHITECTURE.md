@@ -777,6 +777,8 @@ src/
 │   │   ├── mod.rs
 │   │   ├── model.rs
 │   │   ├── model_tests.rs
+│   │   ├── profile.rs
+│   │   ├── profile_tests.rs
 │   │   ├── view.rs
 │   │   └── view_tests.rs
 │   ├── claude/
