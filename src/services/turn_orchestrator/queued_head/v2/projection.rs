@@ -53,10 +53,17 @@ impl Step {
     }
 }
 
-/// Every catalog channel as the adoption under `namespace` would see it, phase by phase.
-pub(crate) fn plan(persistence: &QueuePersistenceContext, namespace: &str) -> Vec<Step> {
+/// Every catalog channel as the adoption under `namespace` would see it, phase by phase; a scan
+/// error is an error, never a shorter plan. A missing namespace is an empty plan.
+pub(crate) fn plan(
+    persistence: &QueuePersistenceContext,
+    namespace: &str,
+) -> Result<Vec<Step>, String> {
     let (provider, token_hash) = (&persistence.provider, persistence.token_hash.as_str());
     let catalog = read_catalog(provider, token_hash);
+    if !catalog.scan_errors.is_empty() {
+        return Err(catalog.scan_errors.join("; "));
+    }
     let mut steps: Vec<Step> = catalog
         .quarantined
         .into_iter()
@@ -93,19 +100,19 @@ pub(crate) fn plan(persistence: &QueuePersistenceContext, namespace: &str) -> Ve
         }
     }
     steps.sort_by_key(|step| (step.phase(), step.channel()));
-    steps
+    Ok(steps)
 }
 
 /// Adopts every planned channel whose actor holds no owner, so a mailbox the registry dropped
-/// keeps its retained inputs and notices; returns the channels adopted.
+/// keeps its retained inputs and notices; returns the channels adopted, or the plan's scan error.
 pub(crate) async fn readopt(
     registry: &ChannelMailboxRegistry,
     persistence: &QueuePersistenceContext,
     namespace: &str,
-) -> Vec<Result<ChannelId, String>> {
+) -> Result<Vec<Result<ChannelId, String>>, String> {
     let (provider, token_hash) = (&persistence.provider, persistence.token_hash.as_str());
     let mut adopted = Vec::new();
-    for step in plan(persistence, namespace) {
+    for step in plan(persistence, namespace)? {
         let Step::Adopt(channel) = step else {
             continue;
         };
@@ -119,7 +126,7 @@ pub(crate) async fn readopt(
         let result = handle.v2_adopt(path, namespace.into()).await;
         adopted.push(result.map(|()| channel));
     }
-    adopted
+    Ok(adopted)
 }
 
 impl Owner {
@@ -144,15 +151,21 @@ impl ChannelMailboxState {
             .any(|item| other(&item.message_id) || item.source_message_ids.iter().any(other))
     }
 
-    /// Discards the untried items only while the owner still holds `expected`; the attempted head,
-    /// retained inputs and terminals stay, and the file is replaced only through the owner's CAS.
+    /// Discards the untried items only when `path` is the owner's file and it still holds `expected`;
+    /// the attempted head, retained inputs and terminals stay, and only the owner's CAS writes.
     #[cfg(unix)]
     pub(crate) fn v2_purge_if_unchanged(
         &mut self,
+        path: &std::path::Path,
         expected: &str,
     ) -> Result<Vec<PendingQueueItem>, PurgeStop> {
         let owner =
             (self.queued_head.v2.as_mut()).ok_or(PurgeStop::Refused("no V2 owner".into()))?;
+        if owner.path != path {
+            return Err(PurgeStop::Refused(
+                "the request names another queue file than the owner's".into(),
+            ));
+        }
         if owner.fingerprint().map_err(PurgeStop::Refused)? != expected {
             return Err(PurgeStop::Refused(
                 "the V2 queue or namespace changed since the capture".into(),

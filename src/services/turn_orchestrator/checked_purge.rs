@@ -303,8 +303,8 @@ mod herdr {
             let _ = self.reply.send(purge);
         }
 
-        /// The V2 form: the same namespace and V1 shape, then the owner's CAS only while it still
-        /// holds the captured snapshot. The marker and any file removal are left alone.
+        /// The V2 form: the request's queue file must be the owner's and the V1 shape unchanged, then the
+        /// owner's CAS runs only while it still holds the captured snapshot. Marker and files stay.
         #[cfg(test)]
         pub(in crate::services::turn_orchestrator) fn run_v2(
             self,
@@ -313,10 +313,14 @@ mod herdr {
         ) {
             use super::super::pending_queue_persistence::pending_queue_item_to_intervention;
             use super::V2PurgeStop as PurgeStop;
-            let checked = own_namespace(state, &self.persistence)
-                .and_then(|()| self.expected.differs(state).map_or(Ok(()), Err))
-                .and_then(|()| self.expected.v2.ok_or_else(|| "no V2 capture".to_string()));
-            let purge = match checked.map(|expected| state.v2_purge_if_unchanged(&expected)) {
+            let (provider, token) = (&self.persistence.provider, &self.persistence.token_hash);
+            let checked = pending_queue_file_path(provider, token, channel_id)
+                .ok_or_else(|| "the request names no queue file".to_string())
+                .and_then(|path| self.expected.differs(state).map_or(Ok(path), Err))
+                .and_then(|path| Ok((path, self.expected.v2.ok_or("no V2 capture")?)));
+            let purge = match checked
+                .map(|(path, expected)| state.v2_purge_if_unchanged(&path, &expected))
+            {
                 Ok(Ok(drained)) => CheckedPurge {
                     receipt: (drained.into_iter())
                         .map(|item| {

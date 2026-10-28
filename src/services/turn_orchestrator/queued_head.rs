@@ -427,6 +427,12 @@ pub(super) fn blocks_claims(
     channel_id: ChannelId,
     persistence: Option<&QueuePersistenceContext>,
 ) -> bool {
+    // A V2 owner holds the file the V1 check cannot read. Until it hands an input to a turn, its
+    // attempted head (`items[0]`) and withheld queue block every claim; retained inputs do not.
+    #[cfg(test)]
+    if let Some(owner) = &state.queued_head.v2 {
+        return !owner.snapshot.items.is_empty();
+    }
     if persistence.is_some_and(|p| validate_disk(state, channel_id, p).is_err()) {
         return true;
     }

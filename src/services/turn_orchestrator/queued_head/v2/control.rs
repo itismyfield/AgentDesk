@@ -8,6 +8,7 @@ use crate::services::turn_orchestrator::{
     TakeNextSoftResult,
     clear_channel::ActivePolicy,
     lease_release::release_active_turn_anchor,
+    mark_turn_finished_signal_done,
     pending_queue_persistence::{
         pending_queue_item_from_intervention, pending_queue_item_to_intervention,
     },
@@ -105,6 +106,8 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
             if active == ActivePolicy::Release {
                 let provider = Some(&persistence.provider);
                 result.removed_token = release_active_turn_anchor(state, channel_id, provider);
+                // Released even when the queue commit failed, so the turn's waiters wake now.
+                mark_turn_finished_signal_done(channel_id);
             }
             let _ = reply.send(result);
         }

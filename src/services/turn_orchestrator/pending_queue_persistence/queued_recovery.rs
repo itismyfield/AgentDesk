@@ -22,6 +22,16 @@ pub(crate) fn load_pending_queues_checked(
     provider: &ProviderKind,
     token_hash: &str,
 ) -> PendingQueueRecovery {
+    // V1 recovery clears stale writer temp files just before its scan; the catalog itself only reads.
+    if let Some(root) = pending_queue_root() {
+        let _ = cleanup_stale_pending_queue_tmp_files_in_dir(
+            provider,
+            token_hash,
+            &root.join(provider.as_str()).join(token_hash),
+            SystemTime::now(),
+            STALE_PENDING_QUEUE_TMP_AGE,
+        );
+    }
     let catalog = read_catalog(provider, token_hash);
     let mut recovery = PendingQueueRecovery {
         quarantined: catalog.quarantined,
@@ -69,13 +79,6 @@ pub(crate) fn read_catalog(provider: &ProviderKind, token_hash: &str) -> Snapsho
         return recovery;
     };
     let dir = root.join(provider.as_str()).join(token_hash);
-    let _ = cleanup_stale_pending_queue_tmp_files_in_dir(
-        provider,
-        token_hash,
-        &dir,
-        SystemTime::now(),
-        STALE_PENDING_QUEUE_TMP_AGE,
-    );
     let entries = match read_queue_dir(&dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return recovery,

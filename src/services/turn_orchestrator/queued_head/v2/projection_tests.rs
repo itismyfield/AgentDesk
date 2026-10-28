@@ -22,6 +22,11 @@ fn ctx() -> QueuePersistenceContext {
     QueuePersistenceContext::new(&ProviderKind::Claude, "v2-projection", None)
 }
 
+/// Another token namespace of the same provider; its queue file does not exist.
+fn other_ctx() -> QueuePersistenceContext {
+    QueuePersistenceContext::new(&ProviderKind::Claude, "v2-projection-b", None)
+}
+
 fn item(id: u64) -> PendingQueueItem {
     serde_json::from_value(json!({"author_id":7,"message_id":id,"channel_id":7272,
         "source_message_ids":[id],"queued_generation":5,"text":format!("input {id}")}))
@@ -189,7 +194,7 @@ fn boot_plan_orders_phases_adopts_metadata_only_and_holds_what_does_not_migrate(
         files.push((path(channel), std::fs::read(path(channel)).unwrap()));
     }
 
-    let steps = plan(&ctx, NAMESPACE);
+    let steps = plan(&ctx, NAMESPACE).unwrap();
     let channels = |want: fn(&Step) -> bool| -> Vec<u64> {
         let mut ids: Vec<u64> = steps
             .iter()
@@ -249,7 +254,10 @@ fn a_retained_only_mailbox_the_registry_dropped_is_readopted_with_its_notice() {
             MailboxPurgeOutcome::Removed
         );
 
-        assert_eq!(readopt(&registry, &ctx(), NAMESPACE).await, [Ok(channel)]);
+        assert_eq!(
+            readopt(&registry, &ctx(), NAMESPACE).await,
+            Ok(vec![Ok(channel)])
+        );
         let retained = registry
             .handle(channel)
             .v2_request(|slot| {
@@ -272,40 +280,66 @@ fn a_retained_only_mailbox_the_registry_dropped_is_readopted_with_its_notice() {
             "re-adoption rewrites nothing"
         );
         assert!(
-            readopt(&registry, &ctx(), NAMESPACE).await.is_empty(),
+            readopt(&registry, &ctx(), NAMESPACE).await == Ok(vec![]),
             "a held owner is not adopted twice"
         );
     });
 }
 
 #[test]
-fn queued_v2_inputs_hold_a_behind_queue_claim_but_retained_inputs_do_not() {
+fn a_v2_owner_lets_persisted_claims_past_retained_inputs_only() {
     let _root = TestRuntimeRootGuard::new();
     run(async {
         let registry = ChannelMailboxRegistry::default();
-        // Unpersisted, so the V1 disk check before the order check does not read the V2 file.
-        let claim = |handle: ChannelMailboxHandle| async move {
+        let claim = |handle: ChannelMailboxHandle, id: u64, order, persisted: bool| async move {
             handle
                 .try_start_turn_kinded_result(
                     Arc::new(CancelToken::new()),
                     poise::serenity_prelude::UserId::new(7),
-                    MessageId::new(900),
+                    MessageId::new(id),
                     ActiveTurnKind::UserOrAgent,
-                    TurnAdmissionOrder::BehindQueue,
-                    None,
+                    order,
+                    persisted.then(ctx),
                 )
                 .await
                 .started
         };
-        let (retained_only, _) = owned(&registry, 7_272_621, &[], true).await;
-        assert!(
-            claim(retained_only).await,
-            "a retained input is not a barrier"
+        let (behind, now) = (
+            TurnAdmissionOrder::BehindQueue,
+            TurnAdmissionOrder::Immediate,
         );
-        let (backlog, _) = owned(&registry, 7_272_622, &[200], false).await;
+        for persisted in [true, false] {
+            let base = if persisted { 7_272_620 } else { 7_272_660 };
+            let (retained_only, _) = owned(&registry, base + 1, &[], true).await;
+            assert!(
+                claim(retained_only, 900, behind, persisted).await,
+                "retained is no barrier"
+            );
+            let (other, _) = owned(&registry, base + 2, &[200], false).await;
+            assert!(
+                !claim(other, 900, behind, persisted).await,
+                "older queued work goes first"
+            );
+            let (attempted, _) = owned(&registry, base + 3, &[100], false).await;
+            attempt_head(&attempted).await;
+            assert!(
+                !claim(attempted, 900, now, persisted).await,
+                "an attempted head is never passed"
+            );
+        }
+        // No owner hands its queued input to a turn yet, so the claimant's own input is withheld.
+        for (channel, order) in [(7_272_624, behind), (7_272_625, now)] {
+            let (sole, _) = owned(&registry, channel, &[900], false).await;
+            assert!(
+                !claim(sole.clone(), 900, order, true).await,
+                "no turn beside its queued original"
+            );
+            assert_eq!(queued(&sole).await, (vec![900], false));
+        }
+        let unowned = registry.handle(ChannelId::new(7_272_626));
         assert!(
-            !claim(backlog).await,
-            "a queued V2 input is older work ahead of the claim"
+            claim(unowned, 900, behind, true).await,
+            "without an owner the V1 rules apply"
         );
     });
 }
@@ -373,6 +407,39 @@ fn a_foreign_legacy_file_under_a_v2_owner_is_never_hydrated_or_requeued_into_v1(
     });
 }
 
+#[test]
+fn a_requeue_under_a_v2_owner_is_refused_in_any_namespace_without_a_prior_claim() {
+    let _root = TestRuntimeRootGuard::new();
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = ChannelId::new(7_272_651);
+        let (handle, file) = owned(&registry, channel.get(), &[100, 200], false).await;
+        attempt_head(&handle).await;
+        let before = std::fs::read(&file).unwrap();
+        let (b, b_file) = (other_ctx(), {
+            let other = other_ctx();
+            pending_queue_file_path(&other.provider, &other.token_hash, channel).unwrap()
+        });
+        for persistence in [b, ctx()] {
+            let requeued = handle
+                .requeue_front_inner(intervention(500), persistence, None)
+                .await;
+            assert!(!requeued.enqueued && requeued.persistence_error.is_some());
+            assert!(handle.snapshot().await.intervention_queue.is_empty());
+            assert_eq!(queued(&handle).await, (vec![100, 200], true));
+            assert_eq!(
+                std::fs::read(&file).unwrap(),
+                before,
+                "the owner's file is untouched"
+            );
+            assert!(
+                !b_file.exists(),
+                "no queue file appears in the other namespace"
+            );
+        }
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn a_v2_checked_purge_discards_untried_items_only_while_the_capture_still_holds() {
@@ -413,6 +480,18 @@ fn a_v2_checked_purge_discards_untried_items_only_while_the_capture_still_holds(
         assert_eq!(queued(&handle).await, (vec![100, 200, 300, 400], true));
 
         let current = fingerprint().await;
+        let before = std::fs::read(&file).unwrap();
+        let elsewhere = handle
+            .try_purge_queue_if_unchanged(other_ctx(), expected().await.with_v2(current.clone()));
+        let elsewhere = elsewhere.await.unwrap();
+        assert!(elsewhere.failed.is_some() && elsewhere.receipt.is_empty());
+        assert_eq!(
+            elsewhere.queue_preserved(),
+            Some(true),
+            "another namespace purges nothing"
+        );
+        assert_eq!(queued(&handle).await, (vec![100, 200, 300, 400], true));
+        assert_eq!(std::fs::read(&file).unwrap(), before);
         let purged = purge(expected().await.with_v2(current)).await.unwrap();
         assert!(purged.failed.is_none());
         let receipt: Vec<u64> = purged.receipt.iter().map(|i| i.message_id.get()).collect();
@@ -428,4 +507,64 @@ fn a_v2_checked_purge_discards_untried_items_only_while_the_capture_still_holds(
             Ok(compat::SnapshotRead::ReadOnlyV2(_))
         ));
     });
+}
+
+#[test]
+fn planning_reads_without_removing_stale_writer_files_and_reports_scan_errors() {
+    let _root = TestRuntimeRootGuard::new();
+    let file = seed(7_272_671, &serde_json::to_string(&vec![item(100)]).unwrap());
+    let ctx = ctx();
+    let channel = ChannelId::new(7_272_671);
+    save_channel_pending_dispatch_marker(
+        &ctx.provider,
+        &ctx.token_hash,
+        channel,
+        &intervention(100),
+        None,
+    )
+    .unwrap();
+    let dir = file.parent().unwrap().to_path_buf();
+    let stale = dir.join("7272671.json.tmp");
+    std::fs::write(&stale, b"half written").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let listing = || {
+        let mut entries: Vec<(PathBuf, Vec<u8>)> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .map(|path| (path.clone(), std::fs::read(path).unwrap()))
+            .collect();
+        entries.sort();
+        entries
+    };
+    let before = listing();
+    assert_eq!(
+        plan(&ctx, NAMESPACE).unwrap().first(),
+        Some(&Step::Adopt(channel))
+    );
+    assert_eq!(listing(), before, "the plan removes and rewrites nothing");
+
+    let blocked = ChannelId::new(7_272_672);
+    let other = other_ctx();
+    let namespace_dir = pending_queue_file_path(&other.provider, &other.token_hash, blocked)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::fs::create_dir_all(namespace_dir.parent().unwrap()).unwrap();
+    std::fs::write(&namespace_dir, b"not a directory").unwrap();
+    assert!(
+        plan(&other, NAMESPACE).is_err(),
+        "a scan error is not an empty plan"
+    );
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        assert!(readopt(&registry, &other, NAMESPACE).await.is_err());
+    });
+    assert_eq!(std::fs::read(&namespace_dir).unwrap(), b"not a directory");
 }

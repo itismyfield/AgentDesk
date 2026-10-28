@@ -121,6 +121,16 @@ fn v2_queue_arms_reach_the_owner_or_refuse_without_a_v1_writer() {
     run(async {
         let registry = ChannelMailboxRegistry::default();
         let (handle, path) = seeded(&registry, 7_272_401, &[200, 300]).await;
+        let marker_path = path.with_extension("dispatch");
+        let marker = std::fs::read(&marker_path).ok();
+        let context = ctx();
+        let channel = ChannelId::new(7_272_401);
+        crate::services::turn_orchestrator::pending_queue_persistence::save_channel_pending_dispatch_marker(
+            &context.provider, &context.token_hash, channel, &intervention(100), None,
+        )
+        .unwrap();
+        assert!(marker.is_none());
+        let marker = std::fs::read(&marker_path).expect("a real dispatch marker");
         let held = |snapshot: &Value| snapshot["head_injection"]["identity"]["primary"] == 100;
 
         assert!(handle.has_pending_soft_queue(ctx()).await.has_pending);
@@ -188,6 +198,11 @@ fn v2_queue_arms_reach_the_owner_or_refuse_without_a_v1_writer() {
             );
         }
         assert_eq!(handle.restart_drain(ctx()).await.queued_count, 3);
+        assert_eq!(
+            std::fs::read(&marker_path).unwrap(),
+            marker,
+            "refusals keep the marker"
+        );
         assert_eq!(
             ids(&single_writer(&handle, &path, "refusals").await),
             [100, 200, 400]
@@ -267,19 +282,46 @@ fn a_closed_actor_refuses_v2_requests_and_a_successor_readopts_the_same_bytes() 
     });
 }
 
+/// A running turn on `channel`, started before the owner holds the queue it seeds.
+async fn running(
+    registry: &ChannelMailboxRegistry,
+    channel: u64,
+    fault: bool,
+) -> (
+    ChannelMailboxHandle,
+    PathBuf,
+    std::sync::Arc<crate::services::turn_orchestrator::TurnFinishedSignal>,
+) {
+    let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+    let owner = poise::serenity_prelude::UserId::new(7);
+    let idle = registry.handle(ChannelId::new(channel));
+    assert!(idle.try_start_turn(token, owner, MessageId::new(900)).await);
+    let (handle, path) = seeded(registry, channel, &[200]).await;
+    if fault {
+        handle
+            .v2_request(|slot| {
+                slot.as_mut().ok_or("no owner")?.fault = super::super::Fault::Before;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    let signal = crate::services::turn_orchestrator::turn_finished_signal(ChannelId::new(channel));
+    (handle, path, signal)
+}
+
+async fn finished(signal: &crate::services::turn_orchestrator::TurnFinishedSignal) -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(1), signal.wait())
+        .await
+        .is_ok()
+}
+
 #[test]
 fn a_v2_clear_still_releases_the_running_turn_when_asked() {
     let _root = TestRuntimeRootGuard::new();
     run(async {
         let registry = ChannelMailboxRegistry::default();
-        let (handle, path) = seeded(&registry, 7_272_404, &[200]).await;
-        let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
-        let owner = poise::serenity_prelude::UserId::new(7);
-        assert!(
-            handle
-                .try_start_turn(token, owner, MessageId::new(900))
-                .await
-        );
+        let (handle, path, signal) = running(&registry, 7_272_404, false).await;
         let cleared = handle.clear(ctx()).await;
         assert!(
             cleared.removed_token.is_some(),
@@ -287,5 +329,26 @@ fn a_v2_clear_still_releases_the_running_turn_when_asked() {
         );
         assert!(handle.snapshot().await.cancel_token.is_none());
         assert_eq!(ids(&single_writer(&handle, &path, "clear").await), [100]);
+        assert!(
+            finished(&signal).await,
+            "a waiter that subscribes after the clear still wakes"
+        );
+
+        let (kept, _, signal) = running(&registry, 7_272_405, false).await;
+        let waiting = kept.discard_waiting_or_refused(ctx()).await.unwrap();
+        assert!(waiting.removed_token.is_none());
+        assert!(
+            !finished(&signal).await,
+            "a clear that keeps the turn signals nothing"
+        );
+
+        let (failing, _, signal) = running(&registry, 7_272_406, true).await;
+        let cleared = failing.clear(ctx()).await;
+        assert!(cleared.persistence.failed.contains(&"queue_publish"));
+        assert!(cleared.removed_token.is_some());
+        assert!(
+            finished(&signal).await,
+            "a released turn signals even when the queue did not publish"
+        );
     });
 }
