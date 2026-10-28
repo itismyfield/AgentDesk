@@ -481,3 +481,119 @@ impl super::super::super::ChannelMailboxHandle {
 
 #[cfg(test)]
 mod tests;
+
+impl Owner {
+    fn admission_context(
+        &self,
+        original: &PendingQueueItem,
+        ticket: &Ticket,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let prefix = format!("context:{}:", ticket.receipt(original));
+        let record = self
+            .snapshot
+            .admission_receipts
+            .iter()
+            .find_map(|entry| entry.strip_prefix(&prefix));
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        let context: super::super::v2_types::AdmissionContext =
+            serde_json::from_str(record).map_err(|e| e.to_string())?;
+        if context.original.as_ref()
+            != Some(&serde_json::to_value(original).map_err(|e| e.to_string())?)
+        {
+            return Err("admission original differs from stored context".into());
+        }
+        Ok(context.execution)
+    }
+
+    fn admit_with_context(
+        &mut self,
+        original: &PendingQueueItem,
+        ticket: Ticket,
+        context: serde_json::Value,
+    ) -> Result<Admitted, AdmitError> {
+        if self.pending.is_some() && self.recover().is_err() && self.pending.is_some() {
+            return Err(AdmitError::Pending);
+        }
+        if self
+            .snapshot
+            .admission_receipts
+            .iter()
+            .any(|r| r.starts_with(&ticket.prefix()))
+        {
+            let stored = self
+                .admission_context(original, &ticket)
+                .map_err(AdmitError::Conflict)?;
+            if stored.as_ref() != Some(&context) {
+                return Err(AdmitError::Conflict(
+                    "admission provenance differs or is absent".into(),
+                ));
+            }
+            return Custody::with_ticket(original, ticket).advance(self);
+        }
+        let (next, outcome) = self.fresh_candidate(original)?;
+        let Some(mut next) = next else {
+            return Err(AdmitError::Conflict(
+                "source already fenced without this context".into(),
+            ));
+        };
+        let receipt = ticket.receipt(original);
+        let stored = super::super::v2_types::AdmissionContext {
+            original: Some(
+                serde_json::to_value(original)
+                    .map_err(|e| AdmitError::NotCommitted(e.to_string()))?,
+            ),
+            execution: Some(context),
+        };
+        let encoded =
+            serde_json::to_string(&stored).map_err(|e| AdmitError::NotCommitted(e.to_string()))?;
+        // The additional record shares the original's snapshot commit; the ticket bytes stay unchanged.
+        next.admission_receipts
+            .push(format!("context:{receipt}:{encoded}"));
+        match self.admit_commit(next, Some(receipt.clone())) {
+            Err(AdmitError::Pending) => {
+                self.unacknowledged.push((receipt, outcome));
+                Err(AdmitError::Pending)
+            }
+            Ok(()) => Ok(outcome),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl super::super::super::ChannelMailboxHandle {
+    pub(crate) async fn v2_admit_ticket_with_context(
+        &self,
+        original: PendingQueueItem,
+        ticket: String,
+        context: serde_json::Value,
+    ) -> Result<Admitted, AdmitError> {
+        let ticket = Ticket::new(&ticket).map_err(AdmitError::NotCommitted)?;
+        self.v2_request(move |slot| {
+            Ok(match slot.as_mut() {
+                Some(owner) => owner.admit_with_context(&original, ticket, context),
+                None => Err(AdmitError::NotCommitted("V2 not adopted".into())),
+            })
+        })
+        .await
+        .map_err(|_| AdmitError::Pending)?
+    }
+
+    pub(crate) async fn v2_admission_context(
+        &self,
+        original: PendingQueueItem,
+        ticket: String,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let ticket = Ticket::new(&ticket)?;
+        self.v2_request(move |slot| {
+            slot.as_ref()
+                .ok_or_else(|| "V2 not adopted".into())?
+                .admission_context(&original, &ticket)
+        })
+        .await
+    }
+}
+
+#[cfg(test)]
+mod context_tests;

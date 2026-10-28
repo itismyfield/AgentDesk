@@ -118,3 +118,13 @@ pub(crate) struct TerminalIdentity {
     pub(crate) identity: QueueIdentity,
     pub(crate) settled_at_ms: u64,
 }
+
+/// Optional caller provenance stored with an admission receipt in the existing snapshot.
+#[cfg(test)]
+#[derive(Default, Serialize, Deserialize)]
+pub(crate) struct AdmissionContext {
+    #[serde(default)]
+    pub(crate) original: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) execution: Option<serde_json::Value>,
+}
