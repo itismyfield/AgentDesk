@@ -32,6 +32,7 @@ pub(super) fn legacy(items: Vec<PendingQueueItem>, meta: Option<Box<SnapshotMeta
         version: 2,
         admission_receipts: vec![],
         admission_sequence: 0,
+        admission_binds: Vec::new(),
         items,
         head_injection: head,
         retained_inputs: vec![],

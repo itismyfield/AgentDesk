@@ -15,6 +15,34 @@ pub(crate) struct SnapshotV2 {
     pub(crate) admission_receipts: Vec<String>,
     #[serde(default)]
     pub(crate) admission_sequence: u64,
+    /// Which admission ticket each queued, attempted or settled input came in under.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) admission_binds: Vec<AdmissionBind>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct AdmissionBind {
+    pub(crate) receipt: String,
+    pub(crate) at: BindAt,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum BindAt {
+    /// The queued item at `index`, whose canonical digest is `item`.
+    Queued { index: usize, item: String },
+    /// A retained input that was never attempted.
+    Opaque,
+    Attempt {
+        identity: QueueIdentity,
+        attempt: AttemptIdentity,
+    },
+    /// Delivered; dropped with the terminal identities after the same window.
+    Settled {
+        attempt: String,
+        source: Option<serde_json::Value>,
+        settled_at_ms: u64,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]

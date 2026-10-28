@@ -40,6 +40,7 @@ impl Owner {
                 version: 2,
                 admission_receipts: vec![],
                 admission_sequence: 0,
+                admission_binds: Vec::new(),
                 items: vec![],
                 head_injection: None,
                 retained_inputs: vec![],
@@ -80,6 +81,7 @@ impl Owner {
             return Err(AdmitError::Full);
         }
         let mut next = self.snapshot.clone();
+        next.prune_binds();
         next.items.push(item.clone());
         self.admit_commit(next, None)?;
         Ok(true)
@@ -118,6 +120,7 @@ impl Owner {
             preparation_hold: None,
             legacy_attempt: None,
         });
+        next.bind_reserved();
         self.commit(next)?;
         Ok(key)
     }

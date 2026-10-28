@@ -101,6 +101,8 @@ async fn a_ticket_never_names_a_second_original() {
     );
 }
 
+/// Only an armed attempt is the ticket's turn: before admission it is absent, and queued or
+/// reserved it is held but not armed.
 #[tokio::test]
 async fn the_exact_turn_is_the_attempt_armed_for_the_ticket_original() {
     let _root = TestRuntimeRootGuard::new();
@@ -108,18 +110,72 @@ async fn the_exact_turn_is_the_attempt_armed_for_the_ticket_original() {
     let (handle, _) = owner(&registry, 727_394).await;
     let ticket = AdmissionTicket::new();
     let original = input(8_000_000_000_000_001_940, "routine prompt");
-    assert_eq!(exact_turn(&handle, &ticket, &original).await, Ok(None));
+    let state = || exact_turn(&handle, &ticket, &original);
+    assert_eq!(state().await, Ok(TurnBind::Absent));
     assert_eq!(
         admit(&handle, &original, ticket.clone()).await,
         Admission::Accepted(ticket.clone())
     );
-    assert_eq!(exact_turn(&handle, &ticket, &original).await, Ok(None));
-    handle.v2_arm_head_for_tests("attempt-1").await.unwrap();
-    let turn = exact_turn(&handle, &ticket, &original)
+    assert_eq!(state().await, Ok(TurnBind::NotArmed));
+    handle
+        .v2_reserve_head_for_tests("attempt-1", false)
         .await
-        .unwrap()
         .unwrap();
+    assert_eq!(
+        state().await,
+        Ok(TurnBind::NotArmed),
+        "reserved is not armed"
+    );
+    handle.v2_arm_head_for_tests("attempt-1").await.unwrap();
+    let Ok(TurnBind::Armed(turn)) = state().await else {
+        panic!("the armed attempt is the ticket's turn");
+    };
     assert!(turn.is("attempt-1", None) && !turn.is("attempt-2", None));
     let other = AdmissionTicket::new();
-    assert_eq!(exact_turn(&handle, &other, &original).await, Ok(None));
+    assert_eq!(
+        exact_turn(&handle, &other, &original).await,
+        Ok(TurnBind::Absent)
+    );
+    let edited = input(8_000_000_000_000_001_940, "edited prompt");
+    assert!(exact_turn(&handle, &ticket, &edited).await.is_err());
+}
+
+/// A delivery keeps the ticket's exact turn for the terminal window; after it the owner keeps no
+/// record and the committed ticket reads as Unknown, never as re-issuable.
+#[tokio::test]
+async fn a_settled_turn_keeps_its_bind_for_the_terminal_window() {
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    let (handle, _) = owner(&registry, 727_395).await;
+    let ticket = AdmissionTicket::new();
+    let original = input(8_000_000_000_000_001_950, "routine prompt");
+    let state = || exact_turn(&handle, &ticket, &original);
+    assert_eq!(
+        admit(&handle, &original, ticket.clone()).await,
+        Admission::Accepted(ticket.clone())
+    );
+    handle.v2_arm_head_for_tests("attempt-9").await.unwrap();
+    let advance = |now: u64, settle: bool| {
+        handle.v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            if settle {
+                let key = owner.active_attempt()?;
+                owner.settle(&key, true, now)?;
+            }
+            owner.tick(now)
+        })
+    };
+    advance(1_000, true).await.unwrap();
+    let Ok(TurnBind::Settled(turn)) = state().await else {
+        panic!("a delivered turn keeps its bind");
+    };
+    assert!(turn.is("attempt-9", None));
+    advance(1_000 + 86_400_000 - 1, false).await.unwrap();
+    assert!(matches!(state().await, Ok(TurnBind::Settled(_))));
+    advance(1_000 + 86_400_000, false).await.unwrap();
+    assert_eq!(state().await, Ok(TurnBind::Unknown));
+    assert_eq!(
+        status(&handle, &ticket).await,
+        Ok(AdmissionState::Committed)
+    );
 }

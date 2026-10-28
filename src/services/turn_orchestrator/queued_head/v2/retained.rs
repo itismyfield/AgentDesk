@@ -27,6 +27,7 @@ impl Owner {
             });
         }
         super::migration::anchor_terminals(&mut next, now);
+        super::source_admission::expire_binds(&mut next, now);
         next.terminal_identities
             .retain(|terminal| now.saturating_sub(terminal.settled_at_ms) < 86_400_000);
         self.commit(next)?;
@@ -61,6 +62,7 @@ impl Owner {
             return Err("stale exact attempt".into());
         }
         if delivered {
+            super::source_admission::settle_binds(&mut next, key, now);
             if active {
                 next.head_injection = None;
                 remove_first(&mut next, &key.identity)?;
@@ -158,5 +160,6 @@ fn remove_first(snapshot: &mut SnapshotV2, identity: &QueueIdentity) -> Result<(
         return Err("queue first item differs from selected head".into());
     }
     snapshot.items.remove(0);
+    snapshot.unbind_item(0);
     Ok(())
 }
