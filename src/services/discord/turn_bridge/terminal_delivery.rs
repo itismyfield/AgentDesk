@@ -809,7 +809,14 @@ impl PinnedBridgeDeliveryLease {
         let source_generation = exact.generation_mtime_ns;
         let tmux = exact.tmux_session_name.clone();
         let generation_current = || dr::current_generation_mtime_ns(&tmux) == source_generation;
-        let record = dr::record_historical_pinned_delivery;
+        let strict_created = self.receipt_before_advance;
+        let record = |source: &dr::ExactJsonlSourceIdentity, id| {
+            dr::record_historical_pinned_delivery(source, id)?;
+            if strict_created {
+                crate::services::discord::body_create::confirm_created_receipt(source, id)?;
+            }
+            Ok::<(), String>(())
+        };
         let disposition =
             crate::services::tmux_common::with_tmux_source_authority(&tmux, |authority| {
                 let identity = watcher_mutation::watcher_delivery_identity(
@@ -857,6 +864,14 @@ impl PinnedBridgeDeliveryLease {
                 if self.committed_current == Some(true) && source_is_live {
                     match dr::record_current_pinned_delivery(&exact, message_id) {
                         Ok(()) => {
+                            if self.receipt_before_advance
+                                && crate::services::discord::body_create::confirm_created_receipt(
+                                    &exact, message_id,
+                                )
+                                .is_err()
+                            {
+                                return None;
+                            }
                             if self.receipt_before_advance
                                 && !guard.as_ref().is_some_and(|mutation| {
                                     mutation.advance(
