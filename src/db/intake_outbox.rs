@@ -564,6 +564,8 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     })
 }
 pub(crate) mod consent_handoff;
+#[cfg(all(test, unix))]
+pub(crate) mod migration_wait;
 mod worker_status;
 #[cfg(test)]
 use worker_status::confirm_claim;

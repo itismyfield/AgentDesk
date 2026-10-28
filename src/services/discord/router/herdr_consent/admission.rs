@@ -412,15 +412,26 @@ async fn notify_unverified(deps: &IntakeDeps<'_>, request: &IntakeRequest, refus
     }
 }
 
+#[cfg(test)]
 pub(in crate::services::discord::router) async fn worker(
     deps: &IntakeDeps<'_>,
     request: &IntakeRequest,
     proof: Option<crate::services::cluster::intake_worker::BeforeEffects>,
 ) -> bool {
-    let provider = &deps.shared.provider;
-    let Some(held) = check(deps, provider, request).await else {
+    let Some(held) = check(deps, &deps.shared.provider, request).await else {
         return false;
     };
+    worker_selected(deps, request, held, proof).await;
+    true
+}
+
+pub(in crate::services::discord::router) async fn worker_selected(
+    deps: &IntakeDeps<'_>,
+    request: &IntakeRequest,
+    held: Result<Hold, Refusal>,
+    proof: Option<crate::services::cluster::intake_worker::BeforeEffects>,
+) {
+    let provider = &deps.shared.provider;
     let mut proof = proof;
     let row_id = proof
         .as_ref()
@@ -508,7 +519,6 @@ pub(in crate::services::discord::router) async fn worker(
             }
         }
     }
-    true
 }
 
 #[derive(Debug)]

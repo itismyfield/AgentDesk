@@ -119,6 +119,14 @@ pub(crate) async fn admit_queued_intake(
     };
     let admission = admit_text_intake(deps, &submission).await;
     let local_permit = match admission {
+        #[cfg(all(test, unix))]
+        IntakeAdmission::MigrationWaiting(held) => {
+            let Some(dispatch_lease) = dispatch_lease else { return QueuedAdmissionDisposition::RejectedRestore; };
+            let owner = QueuedRestoreOwner { original: intervention.clone(), provider: submission.provider.clone(), channel_id, dispatch_lease };
+            tracing::info!(reason=?held.waiting.reason,"migration restores its original queued admission");
+            owner.restore(deps).await;
+            return QueuedAdmissionDisposition::Deferred;
+        }
         #[cfg(unix)]
         IntakeAdmission::ConsentHeld(hold) => {
             let Some(dispatch_lease) = dispatch_lease else {
@@ -271,6 +279,29 @@ pub(crate) async fn finish_admitted_queued_intake(
                 Ok(owner.restore(deps).await)
             }
             Err(error) => {
+                #[cfg(all(test, unix))]
+                let error = match error.downcast::<super::super::migration_wait::QueuedProtected>()
+                {
+                    Ok(_) => {
+                        let _ = super::super::super::mailbox_abandon_pending_dispatch(
+                            deps.shared,
+                            &owner.provider,
+                            owner.channel_id,
+                            owner.original.message_id,
+                        )
+                        .await;
+                        return Ok(super::super::IntakeExecution::ConsumedProtected);
+                    }
+                    Err(error) => error,
+                };
+                #[cfg(all(test, unix))]
+                let error = match error.downcast::<super::super::migration_wait::QueuedWaiting>() {
+                    Ok(waiting) => {
+                        tracing::info!(reason=?waiting.0.reason,"migration restores its original queued input");
+                        return Ok(owner.restore(deps).await);
+                    }
+                    Err(error) => error,
+                };
                 #[cfg(unix)]
                 let error =
                     match error.downcast::<super::super::herdr_consent::admission::QueuedHold>() {

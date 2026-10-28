@@ -33,6 +33,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 mod o_input;
+#[cfg(all(test, unix))]
+pub(crate) use o_input::request_from_row_for_tests;
 #[cfg(unix)]
 pub(crate) use o_input::{BeforeEffects, take_before_effects};
 use o_input::{execute_before_effects as execute_intake_turn_core, hold_off_o_gateway};

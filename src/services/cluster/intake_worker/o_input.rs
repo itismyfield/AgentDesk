@@ -139,5 +139,10 @@ pub(super) async fn execute_before_effects(
 }
 
 #[cfg(all(test, unix))]
+pub(crate) fn request_from_row_for_tests(row: &IntakeOutboxRow) -> IntakeRequest {
+    intake_request_from_row(row).expect("fixture row converts to the original request")
+}
+
+#[cfg(all(test, unix))]
 #[path = "consent_scope_tests.rs"]
 mod tests;

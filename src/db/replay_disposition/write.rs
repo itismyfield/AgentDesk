@@ -7,7 +7,7 @@ pub(crate) use hold_notice::recover_hold_notice;
 pub(crate) use hold_notice::withhold_and_notify;
 pub(crate) use start::{
     BeginAck, BeginFrom, CanonicalInput, EffectProjection, begin, bind_session,
-    ensure_same_request, register_or_reuse,
+    ensure_same_request, ensure_same_request_on_connection, register_or_reuse,
 };
 
 use crate::services::discord::replay_policy::live::{NoEffectEvidence, TerminalEvidence};

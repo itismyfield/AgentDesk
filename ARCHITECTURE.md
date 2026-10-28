@@ -217,6 +217,8 @@ src/
 │   ├── intake_outbox/
 │   │   ├── consent_handoff.rs
 │   │   ├── consent_handoff_tests.rs
+│   │   ├── migration_wait.rs
+│   │   ├── migration_wait_tests.rs
 │   │   ├── owner_fence_pg_tests.rs
 │   │   ├── postgres_tests.rs
 │   │   └── worker_status.rs
@@ -1996,6 +1998,8 @@ src/
 │   │   │   │   ├── voice_announcement_scope.rs
 │   │   │   │   ├── watchdog.rs
 │   │   │   │   └── watchdog_host_tests.rs
+│   │   │   ├── migration_wait/
+│   │   │   │   └── entry_tests.rs
 │   │   │   ├── response_format/
 │   │   │   │   ├── retry_prompt_context/
 │   │   │   │   │   ├── store.rs
@@ -2008,6 +2012,7 @@ src/
 │   │   │   ├── intake_gate.rs
 │   │   │   ├── intake_queue_transaction.rs
 │   │   │   ├── message_handler.rs
+│   │   │   ├── migration_wait.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── queue_status_presentation.rs
 │   │   │   ├── response_format.rs

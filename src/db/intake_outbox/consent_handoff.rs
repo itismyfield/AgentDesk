@@ -60,7 +60,7 @@ struct Snapshot {
     last_error: Option<String>,
 }
 
-fn payload(row: &IntakeOutboxRow) -> Result<String, String> {
+pub(super) fn payload(row: &IntakeOutboxRow) -> Result<String, String> {
     let fields = serde_json::json!([
         row.id,
         row.target_instance_id,

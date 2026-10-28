@@ -87,6 +87,14 @@ pub(crate) struct LocalAdmissionPermit {
 }
 
 impl LocalAdmissionPermit {
+    #[cfg(all(test, unix))]
+    pub(super) fn transfer_waiting_uploads(self, submission: &mut IntakeSubmission) {
+        if !self.prepared_uploads.is_empty() {
+            submission.preloaded_uploads.extend(self.prepared_uploads);
+            submission.attachments.clear();
+        }
+    }
+
     fn for_submission(submission: &IntakeSubmission) -> Self {
         Self {
             channel_id: submission.request.channel_id,
@@ -95,7 +103,7 @@ impl LocalAdmissionPermit {
         }
     }
 
-    fn permits_submission(&self, submission: &IntakeSubmission) -> bool {
+    pub(super) fn permits_submission(&self, submission: &IntakeSubmission) -> bool {
         self.channel_id == submission.request.channel_id
             && self.request_owner == submission.request.request_owner
     }
@@ -109,6 +117,8 @@ pub(crate) enum IntakeAdmission {
             Result<super::herdr_consent::admission::Hold, super::herdr_consent::admission::Refusal>,
         >,
     ),
+    #[cfg(all(test, unix))]
+    MigrationWaiting(Box<super::migration_wait::WaitingAdmission>),
     Local(LocalAdmissionPermit),
     Forwarded {
         target_instance_id: String,
@@ -212,6 +222,23 @@ pub(in crate::services::discord::router) async fn turn_mode_uploads(
 }
 
 pub(crate) async fn admit_text_intake(
+    deps: &IntakeDeps<'_>,
+    submission: &IntakeSubmission,
+) -> IntakeAdmission {
+    let admission = admit_text_intake_inner(deps, submission).await;
+    #[cfg(all(test, unix))]
+    if let IntakeAdmission::Local(permit) = admission {
+        return match super::migration_wait::waiting(&submission.provider, &submission.request) {
+            Some(waiting) => IntakeAdmission::MigrationWaiting(Box::new(
+                super::migration_wait::WaitingAdmission { waiting, permit },
+            )),
+            None => IntakeAdmission::Local(permit),
+        };
+    }
+    admission
+}
+
+async fn admit_text_intake_inner(
     deps: &IntakeDeps<'_>,
     submission: &IntakeSubmission,
 ) -> IntakeAdmission {
@@ -556,6 +583,9 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
         #[cfg(all(test, unix))]
         super::herdr_consent::admission::tests::after_preflight(&submission).await;
         let waits = admission_waits_for_custody(&admission);
+        #[cfg(all(test, unix))]
+        let waits = waits
+            || super::migration_wait::waiting(&submission.provider, &submission.request).is_some();
         #[cfg(unix)]
         let waits =
             waits || super::herdr_consent::endpoint(submission.request.channel_id.get()).is_some();
@@ -575,6 +605,8 @@ pub(crate) async fn finish_nonlocal_attachment_admission(
     submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
     let waits = matches!(admission, IntakeAdmission::DeferredTurnMode(_));
+    #[cfg(all(test, unix))]
+    let waits = waits || matches!(admission, IntakeAdmission::MigrationWaiting(_));
     #[cfg(unix)]
     let waits = waits || matches!(admission, IntakeAdmission::ConsentHeld(_));
     if !waits {
@@ -594,6 +626,10 @@ pub(crate) async fn finish_nonlocal_attachment_admission(
 }
 
 fn admission_waits_for_custody(admission: &IntakeAdmission) -> bool {
+    #[cfg(all(test, unix))]
+    if matches!(admission, IntakeAdmission::MigrationWaiting(_)) {
+        return true;
+    }
     #[cfg(unix)]
     if matches!(admission, IntakeAdmission::ConsentHeld(_)) {
         return true;
@@ -622,6 +658,10 @@ pub(crate) async fn finish_text_intake_admission(
     mut submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
     match admission {
+        #[cfg(all(test, unix))]
+        IntakeAdmission::MigrationWaiting(held) => {
+            super::migration_wait::hold_live(deps, submission, *held).await?;
+        }
         #[cfg(unix)]
         IntakeAdmission::ConsentHeld(hold) => {
             super::herdr_consent::admission::hold_live(deps, submission, *hold).await?;
@@ -706,6 +746,32 @@ pub(crate) async fn finish_admitted_local(
         super::herdr_consent::admission::hold_live(deps, submission, hold).await?;
         return Ok(super::IntakeExecution::Deferred);
     }
+    #[cfg(all(test, unix))]
+    if let Some(waiting) = super::migration_wait::waiting(&submission.provider, &submission.request)
+    {
+        if matches!(submission.origin, IntakeOrigin::QueuedDrain(_)) {
+            if waiting.original != submission.request {
+                return Err(Box::new(super::migration_wait::QueuedWaiting(waiting)));
+            }
+            if super::migration_wait::replay_eligibility(
+                deps,
+                &submission.provider,
+                &waiting.original,
+            )
+            .await
+                == super::migration_wait::Eligibility::Protected
+            {
+                return Err(Box::new(super::migration_wait::QueuedProtected));
+            }
+            return Err(Box::new(super::migration_wait::QueuedWaiting(waiting)));
+        }
+        return super::migration_wait::hold_live(
+            deps,
+            submission,
+            super::migration_wait::WaitingAdmission { waiting, permit },
+        )
+        .await;
+    }
     let preserve_on_cancel = submission.preserve_on_cancel;
     local_turn(deps, submission, preserve_on_cancel).await
 }
@@ -772,6 +838,18 @@ pub(in crate::services::discord::router) async fn defer_live_submission(
     if matches!(submission.origin, IntakeOrigin::QueuedDrain(_)) {
         return true;
     }
+    let (provider, channel_id, intervention) = deferred_input(submission, all_sources);
+    defer_original(deps, &provider, channel_id, intervention).await
+}
+
+pub(super) fn deferred_input(
+    submission: IntakeSubmission,
+    all_sources: bool,
+) -> (
+    ProviderKind,
+    serenity::ChannelId,
+    crate::services::discord::Intervention,
+) {
     let request = submission.request;
     let channel_id = request.channel_id;
     let mut intervention = super::response_format::build_race_requeued_intervention(
@@ -802,30 +880,39 @@ pub(in crate::services::discord::router) async fn defer_live_submission(
         intervention.source_message_queued_generations.push(queued);
     }
     #[cfg(unix)]
-    if super::herdr_consent::endpoint(channel_id.get()).is_some() {
-        let origin = if intervention.voice_announcement.is_some() {
-            "Voice".into()
-        } else {
-            format!("{:?}", submission.origin)
-        };
-        for source in &mut intervention.source_message_queued_generations {
-            source.origin = Some(origin.clone());
+    {
+        let keeps_origin = super::herdr_consent::endpoint(channel_id.get()).is_some();
+        #[cfg(all(test, unix))]
+        let keeps_origin = keeps_origin || super::migration_wait::channel_selected(channel_id);
+        if keeps_origin {
+            let origin = if intervention.voice_announcement.is_some() {
+                "Voice".into()
+            } else {
+                format!("{:?}", submission.origin)
+            };
+            for source in &mut intervention.source_message_queued_generations {
+                source.origin = Some(origin.clone());
+            }
         }
     }
+    (submission.provider, channel_id, intervention)
+}
+
+pub(super) async fn defer_original(
+    deps: &IntakeDeps<'_>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    intervention: crate::services::discord::Intervention,
+) -> bool {
     let outcome = super::super::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
-        super::super::mailbox_enqueue_intervention(
-            deps.shared,
-            &submission.provider,
-            channel_id,
-            intervention,
-        ),
+        super::super::mailbox_enqueue_intervention(deps.shared, provider, channel_id, intervention),
     )
     .await;
     // The in-memory enqueue may still have succeeded when durable persistence
     // reports an error. Always arm the lost-wakeup net when backlog exists.
     super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
         deps.shared,
-        &submission.provider,
+        provider,
         channel_id,
         "intake_open_route_deferred",
     )
@@ -842,6 +929,10 @@ pub(in crate::services::discord::router) async fn defer_live_submission(
 
 fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_msg_id: &str) {
     match admission {
+        #[cfg(all(test, unix))]
+        IntakeAdmission::MigrationWaiting(held) => {
+            tracing::info!(channel_id,user_msg_id,reason=?held.waiting.reason,"migration keeps original input custody")
+        }
         #[cfg(unix)]
         IntakeAdmission::ConsentHeld(_) => {
             tracing::info!(channel_id, user_msg_id, "consent keeps original custody")

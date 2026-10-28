@@ -21,6 +21,34 @@ pub(crate) struct CanonicalInput {
 }
 
 impl CanonicalInput {
+    /// The canonical Discord request retains its representative and every absorbed source.
+    pub(crate) fn discord(
+        provider: &str,
+        channel: u64,
+        user_msg_id: u64,
+        sources: impl IntoIterator<Item = u64>,
+        original_text: &str,
+    ) -> Self {
+        let mut sources: Vec<String> = std::iter::once(user_msg_id)
+            .chain(sources)
+            .map(|id| id.to_string())
+            .collect();
+        sources.sort_unstable();
+        sources.dedup();
+        Self {
+            request_key: format!("discord:{}:{channel}:{user_msg_id}", provider.to_lowercase()),
+            provider: provider.to_string(),
+            channel: channel.to_string(),
+            sources,
+            original_text: original_text.to_string(),
+            owner_id: String::new(),
+            agent_id: String::new(),
+            attachments: serde_json::json!([]),
+            reply_context: None,
+            provenance: "new_input",
+        }
+    }
+
     /// Hash of the original text, independent of any history added to the executed prompt.
     pub(crate) fn original_hash(&self) -> String {
         hex::encode(Sha256::digest(self.original_text.as_bytes()))
@@ -63,7 +91,16 @@ pub(crate) async fn ensure_same_request(
     input: &CanonicalInput,
 ) -> Result<(), WriteError> {
     let mut conn = pool.acquire().await.map_err(WriteError::Storage)?;
-    match stored_request(&mut conn, StoredBy::Id(receipt_id)).await? {
+    ensure_same_request_on_connection(&mut conn, receipt_id, input).await
+}
+
+/// Reuses the caller's fenced connection without borrowing another pool slot.
+pub(crate) async fn ensure_same_request_on_connection(
+    conn: &mut sqlx::PgConnection,
+    receipt_id: i64,
+    input: &CanonicalInput,
+) -> Result<(), WriteError> {
+    match stored_request(conn, StoredBy::Id(receipt_id)).await? {
         Some(stored) if stored.names(input) => Ok(()),
         Some(_) => Err(WriteError::IdentityConflict(receipt_id)),
         None => Err(WriteError::CasMiss),

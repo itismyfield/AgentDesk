@@ -124,27 +124,7 @@ pub(crate) fn discord_input(
     sources: impl IntoIterator<Item = u64>,
     original_text: &str,
 ) -> CanonicalInput {
-    let mut sources: Vec<String> = std::iter::once(user_msg_id)
-        .chain(sources)
-        .map(|id| id.to_string())
-        .collect();
-    sources.sort_unstable();
-    sources.dedup();
-    CanonicalInput {
-        request_key: format!(
-            "discord:{}:{channel}:{user_msg_id}",
-            provider.to_lowercase()
-        ),
-        provider: provider.to_string(),
-        channel: channel.to_string(),
-        sources,
-        original_text: original_text.to_string(),
-        owner_id: String::new(),
-        agent_id: String::new(),
-        attachments: serde_json::json!([]),
-        reply_context: None,
-        provenance: "new_input",
-    }
+    CanonicalInput::discord(provider, channel, user_msg_id, sources, original_text)
 }
 
 /// The right to make a provider start's first input: a dormant build's legacy start, or one

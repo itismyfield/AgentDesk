@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "../migration_wait/entry_tests.rs"]
+mod migration_wait_tests;
 use crate::services::discord::router::intake_dispatch::{
     self as intake, IntakeAdmission, QueuedAdmissionDisposition,
 };

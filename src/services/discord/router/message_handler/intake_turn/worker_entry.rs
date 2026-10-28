@@ -63,11 +63,19 @@ pub(crate) async fn execute_intake_turn_core(
             shared,
             token,
         };
-        if crate::services::discord::router::herdr_consent::admission::worker(
-            &deps, &request, proof,
-        )
-        .await
+        use crate::services::discord::router::herdr_consent::admission as consent;
+        if let Some(held) = consent::check(&deps, &shared.provider, &request).await {
+            consent::worker_selected(&deps, &request, held, proof).await;
+            return Ok(IntakeExecution::Deferred);
+        }
+        #[cfg(all(test, unix))]
+        if let Some(waiting) =
+            crate::services::discord::router::migration_wait::waiting(&shared.provider, &request)
         {
+            crate::services::discord::router::migration_wait::park_worker(
+                &deps, &request, waiting, proof,
+            )
+            .await;
             return Ok(IntakeExecution::Deferred);
         }
     }
