@@ -55,21 +55,13 @@ impl RetiredProbe {
             .location
             .as_ref()
             .ok_or("missing retired location")?;
-        let fence = execution_fence(
+        let held = execution_fence(
             &self.endpoint,
             &location.pane_id,
             &self.record.execution_nonce,
-        );
-        let permit = fence
-            .acquire(Mutation::Terminate)
-            .map_err(|error| format!("{error:?}"))?;
-        let was_closing = {
-            let mut state = fence.state.lock().unwrap_or_else(PoisonError::into_inner);
-            let closing = state.1;
-            state.1 = true;
-            closing
-        };
-        let held = TerminationFence(permit, was_closing);
+        )
+        .exclude_termination()
+        .map_err(|error| format!("{error:?}"))?;
         let proof =
             RetiredEnd::observe_with_os(&self.endpoint, self.transport, &self.record, self.os)
                 .map_err(|error| format!("{error:?}"))?;

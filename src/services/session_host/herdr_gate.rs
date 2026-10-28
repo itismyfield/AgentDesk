@@ -158,6 +158,14 @@ impl ExecutionFence {
             fence: self.clone(),
         })
     }
+
+    fn exclude_termination(self: &Arc<Self>) -> Result<TerminationFence, HerdrGateRefusal> {
+        let permit = self.acquire(Mutation::Terminate)?;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let was_closing = state.1;
+        state.1 = true;
+        Ok(TerminationFence(permit, was_closing))
+    }
 }
 
 pub(crate) struct TerminationFence(MutationPermit, bool);
@@ -306,16 +314,7 @@ impl HerdrTarget {
 
     /// Keeps this nonce closed and excludes all pane writes through settlement.
     pub(crate) fn termination_fence(&self) -> Result<TerminationFence, HerdrGateRefusal> {
-        let permit = self.0.fence.acquire(Mutation::Terminate)?;
-        let mut state = self
-            .0
-            .fence
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let was_closing = state.1;
-        state.1 = true;
-        Ok(TerminationFence(permit, was_closing))
+        self.0.fence.exclude_termination()
     }
 
     pub(crate) fn revalidate_termination_reads(&self) -> Result<ServerWitness, HerdrGateRefusal> {
