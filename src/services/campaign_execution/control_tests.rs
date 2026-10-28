@@ -169,6 +169,7 @@ fn acknowledge(state: &CampaignState) -> CampaignState {
     step(
         state,
         Command::AcknowledgeFence {
+            expected_run: run.id.clone(),
             target,
             control_version: run.control_version,
         },
@@ -217,6 +218,7 @@ fn restored_action_without_sessions_requires_exact_fence_and_initiation_classifi
     error(
         &requested,
         Command::AcknowledgeFence {
+            expected_run: run.id.clone(),
             target: run.actions["action"].target.clone(),
             control_version: 2,
         },
@@ -231,10 +233,17 @@ fn restored_action_without_sessions_requires_exact_fence_and_initiation_classifi
         .as_mut()
         .unwrap()
         .acknowledgements
-        .push(FenceAcknowledgement {
-            target: run.actions["action"].target.clone(),
-            control_version: 2,
-        });
+        .extend(
+            run.stop
+                .as_ref()
+                .unwrap()
+                .targets
+                .iter()
+                .map(|target| FenceAcknowledgement {
+                    target: target.clone(),
+                    control_version: 2,
+                }),
+        );
     error(
         &ack_only,
         Command::ConfirmStopFence,
@@ -264,6 +273,7 @@ fn restored_action_without_sessions_requires_exact_fence_and_initiation_classifi
     let acknowledged = step(
         &acknowledged,
         Command::AcknowledgeFence {
+            expected_run: binding(&classified).run_id,
             target: binding(&classified).session.gate,
             control_version: 2,
         },
@@ -541,6 +551,7 @@ fn fence_ack_requires_exact_gate_incarnation_and_current_version_after_restore()
     error(
         &requested,
         Command::AcknowledgeFence {
+            expected_run: requested.run.as_ref().unwrap().id.clone(),
             target: old_gate.clone(),
             control_version: 2,
         },
@@ -549,6 +560,7 @@ fn fence_ack_requires_exact_gate_incarnation_and_current_version_after_restore()
     error(
         &requested,
         Command::AcknowledgeFence {
+            expected_run: requested.run.as_ref().unwrap().id.clone(),
             target: target.clone(),
             control_version: 1,
         },
@@ -975,4 +987,74 @@ fn execution_is_unavailable_without_a_production_runtime_caller() {
     ] {
         error(&state, command, RejectionCode::ExecutionUnavailable);
     }
+}
+
+#[test]
+fn fence_ack_rejects_other_run_with_same_gate_and_version_before_state_changes() {
+    let state = stop(
+        &with_action(ActionState::Started, true),
+        StopMode::Immediate,
+    );
+    let run = state.run.as_ref().unwrap();
+    let target = run.actions["action"].target.clone();
+    let command = envelope(Command::AcknowledgeFence {
+        expected_run: "previous-run".into(),
+        target: target.clone(),
+        control_version: run.control_version,
+    });
+    let encoded = serde_json::to_vec(&command).unwrap();
+    let restored: CommandEnvelope = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(restored, command);
+    let before = state.clone();
+    assert_eq!(
+        decide(&state, &restored).unwrap_err().code,
+        RejectionCode::StaleRun
+    );
+    assert_eq!(state, before);
+    assert!(run.stop.as_ref().unwrap().acknowledgements.is_empty());
+    error(
+        &state,
+        Command::ConfirmStopFence,
+        RejectionCode::FenceIncomplete,
+    );
+    let accepted = decide(
+        &state,
+        &envelope(Command::AcknowledgeFence {
+            expected_run: run.id.clone(),
+            target: target.clone(),
+            control_version: run.control_version,
+        }),
+    )
+    .unwrap();
+    assert_eq!(accepted.events.len(), 1);
+    assert_eq!(
+        accepted.events[0].kind,
+        EventKind::FenceAcknowledged { target }
+    );
+    assert_eq!(accepted.state.event_sequence, state.event_sequence + 1);
+    assert_eq!(
+        accepted
+            .state
+            .run
+            .as_ref()
+            .unwrap()
+            .stop
+            .as_ref()
+            .unwrap()
+            .acknowledgements
+            .len(),
+        1
+    );
+    let confirmed = step(&accepted.state, Command::ConfirmStopFence);
+    assert!(
+        confirmed
+            .run
+            .as_ref()
+            .unwrap()
+            .stop
+            .as_ref()
+            .unwrap()
+            .confirmed_event
+            .is_some()
+    );
 }

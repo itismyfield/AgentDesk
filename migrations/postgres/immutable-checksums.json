@@ -770,6 +770,11 @@
       "path": "migrations/postgres/0151_relay_dead_letter_redelivery_state_validate.sql",
       "sha256": "61d8f804e14f89afab672508d9fb66aec316c0897a7e57a38fe66a5b381204fd",
       "version": 151
+    },
+    {
+      "path": "migrations/postgres/0152_server_campaigns.sql",
+      "sha256": "ce84944787b4b464f184c8a8e5a272845c4a1057026d824e36bc153bedde3fa8",
+      "version": 152
     }
   ],
   "version": 1

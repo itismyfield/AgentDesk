@@ -56,6 +56,7 @@ mod runtime_profile_tests;
 #[cfg(unix)]
 mod herdr_legacy_tests;
 pub mod scheduled_messages;
+mod server_campaigns;
 pub(crate) mod session_activity;
 mod session_evidence;
 pub mod settings;

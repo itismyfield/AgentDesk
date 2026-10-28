@@ -1,0 +1,93 @@
+{
+  "campaign": {
+    "definition": {
+      "repository": "adk",
+      "title": "Campaign",
+      "goal": "Verified work",
+      "profile_version": "v1",
+      "nodes": [
+        {
+          "id": "a",
+          "title": "A",
+          "issue_url": "https://github.com/itismyfield/AgentDesk/issues/7438",
+          "acceptance": [
+            {
+              "id": "ac-a",
+              "description": "Prove A",
+              "verification": "test"
+            }
+          ],
+          "dependencies": [],
+          "group": null
+        }
+      ]
+    },
+    "view": {
+      "execution_mode": "server",
+      "campaign_id": "campaign",
+      "as_of": "2026-10-28T00:00:00Z",
+      "definition_revision": 1,
+      "run_id": null,
+      "control_version": null,
+      "last_event_sequence": 1,
+      "last_event_at": "2026-10-28T00:00:00Z",
+      "control": "prepared",
+      "stop_mode": null,
+      "stop_confirmed": false,
+      "display": "prepared",
+      "execution_readiness": "unavailable",
+      "unknown": false,
+      "failed_count": 0,
+      "blocked_count": 0,
+      "reasons": [],
+      "commands": [
+        {
+          "command": "edit_definition",
+          "rejection": null
+        },
+        {
+          "command": "start",
+          "rejection": "execution_unavailable"
+        },
+        {
+          "command": "stop_immediate",
+          "rejection": "invalid_state"
+        },
+        {
+          "command": "stop_finish_stage",
+          "rejection": "invalid_state"
+        },
+        {
+          "command": "resume",
+          "rejection": "execution_unavailable"
+        },
+        {
+          "command": "prepare_retry",
+          "rejection": "execution_unavailable"
+        }
+      ],
+      "nodes": [
+        {
+          "id": "a",
+          "runtime": {
+            "stage": "requirements",
+            "disposition": "pending",
+            "series": 1,
+            "quality_failures": 0,
+            "repair_cycles": 0,
+            "review_rounds": 0,
+            "current_attempt": null,
+            "main_integrated": false,
+            "acceptance_complete": false,
+            "evidence_current": false,
+            "wait_reason": null
+          },
+          "direct_successors": [],
+          "ready_after_main": []
+        }
+      ],
+      "sessions": [],
+      "unreconciled_actions": []
+    }
+  }
+}

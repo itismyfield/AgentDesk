@@ -277,6 +277,12 @@ src/
 │   │   ├── outbox.rs
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
+│   ├── server_campaigns/
+│   │   ├── mod.rs
+│   │   ├── read.rs
+│   │   ├── recovery_tests.rs
+│   │   ├── storage_tests.rs
+│   │   └── write.rs
 │   ├── session_observability/
 │   │   └── background_ordering_pg_tests.rs
 │   ├── turns/
@@ -473,6 +479,7 @@ src/
 │   │   │   │       ├── part_10.rs
 │   │   │   │       ├── part_11.rs
 │   │   │   │       ├── public_surfaces.rs
+│   │   │   │       ├── server_campaigns.rs
 │   │   │   │       └── session_evidence.rs
 │   │   │   ├── group_response.rs
 │   │   │   ├── guides.rs
@@ -543,6 +550,11 @@ src/
 │   │   │   ├── postgres_tests.rs
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
+│   │   ├── server_campaigns/
+│   │   │   ├── dto.rs
+│   │   │   ├── http_tests.rs
+│   │   │   ├── mod.rs
+│   │   │   └── protocol.rs
 │   │   ├── tests/
 │   │   │   ├── preflight_harness/
 │   │   │   │   ├── types.rs
@@ -751,11 +763,15 @@ src/
 │   │   ├── recovery.rs
 │   │   └── worker.rs
 │   ├── campaign_execution/
+│   │   ├── control.rs
+│   │   ├── control_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
-│   │   └── model_tests.rs
+│   │   ├── model_tests.rs
+│   │   ├── view.rs
+│   │   └── view_tests.rs
 │   ├── claude/
 │   │   ├── first_input/
 │   │   │   └── tests.rs

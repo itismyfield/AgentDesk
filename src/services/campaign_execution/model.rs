@@ -297,6 +297,7 @@ pub enum Command {
         observation: SessionObservation,
     },
     AcknowledgeFence {
+        expected_run: String,
         target: HostGate,
         control_version: u64,
     },
