@@ -345,6 +345,24 @@ fn both_profiles_reject_candidate_or_binding_drift() {
             evidence.validate_execution(&plan, &binding),
             Err(ContractError::CandidateMismatch)
         );
+
+        let (mut plan, binding, evidence) = execution(&adapter);
+        evidence.validate_execution(&plan, &binding).unwrap();
+        plan.stage = Stage::Review;
+        assert_eq!(
+            evidence.validate_execution(&plan, &binding),
+            Err(ContractError::BindingMismatch),
+            "plan-stage-drift"
+        );
+
+        let (mut plan, binding, evidence) = execution(&adapter);
+        evidence.validate_execution(&plan, &binding).unwrap();
+        plan.candidate.base_sha = "different-base".into();
+        assert_eq!(
+            evidence.validate_execution(&plan, &binding),
+            Err(ContractError::CandidateMismatch),
+            "plan-candidate-base-drift"
+        );
     }
 }
 
@@ -428,6 +446,16 @@ fn both_profiles_reject_zero_missing_skipped_unknown_and_duplicate_required_test
             changed.validate_execution(&plan, &binding),
             Err(ContractError::RequiredTestMissing("candidate-test".into()))
         );
+        {
+            let (plan, binding, mut changed) = execution(&adapter);
+            changed.validate_execution(&plan, &binding).unwrap();
+            changed.actual[0].check_id = "other-check".into();
+            assert_eq!(
+                changed.validate_execution(&plan, &binding),
+                Err(ContractError::RequiredTestMissing("candidate-test".into())),
+                "actual-check-id-drift"
+            );
+        }
         for outcome in [
             TestOutcome::Skipped {
                 reason: "environment missing".into(),
@@ -704,6 +732,13 @@ fn observations_keep_exact_targets_and_unknown_never_becomes_observed() {
             let restored: TargetObservation =
                 serde_json::from_str(&serde_json::to_string(&observation).unwrap()).unwrap();
             assert!(restored.observation.observed_evidence().is_none());
+            let unknown = FixtureAdapter { repository }.observe(&target).unwrap();
+            unknown.validate_target(&target).unwrap();
+            assert_eq!(
+                unknown.validate_target(&other),
+                Err(ContractError::ObservationTargetMismatch),
+                "unknown-outer-target-drift"
+            );
             observation.observation = Observation::NotYet {
                 reason: "still pending".into(),
                 observed_at: at(),
