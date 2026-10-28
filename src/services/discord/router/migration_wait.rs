@@ -88,14 +88,14 @@ pub(super) async fn park_worker(
 ) {
     if waiting.original != *request {
         tracing::warn!(
-            channel = request.channel_id.get(),
+            channel_id = request.channel_id.get(),
             "migration wait request changed; custody remains held"
         );
         return;
     }
     let (Some(pool), Some(proof)) = (deps.shared.pg_pool.as_ref(), proof) else {
         tracing::warn!(
-            channel = request.channel_id.get(),
+            channel_id = request.channel_id.get(),
             "migration wait has no exact worker custody proof"
         );
         return;
@@ -103,7 +103,7 @@ pub(super) async fn park_worker(
     let result =
         crate::db::intake_outbox::migration_wait::park_before_effects(pool, proof, &waiting.intent)
             .await;
-    tracing::info!(channel = request.channel_id.get(), reason = ?waiting.reason, ?result, "migration wait retains the original worker input");
+    tracing::info!(channel_id = request.channel_id.get(), reason = ?waiting.reason, ?result, "migration wait retains the original worker input");
 }
 
 #[derive(Debug)]
@@ -298,7 +298,7 @@ pub(super) async fn hold_live(
         if acknowledged && durable_original(deps, &provider, channel, &original).await {
             return Ok(super::IntakeExecution::Deferred);
         }
-        tracing::warn!(channel=channel.get(), reason=?waiting.reason, "migration retains its original input until durable queue custody is verified");
+        tracing::warn!(channel_id=channel.get(), reason=?waiting.reason, "migration retains its original input until durable queue custody is verified");
         tokio::time::sleep(super::super::queue_io::DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY).await;
     }
 }
