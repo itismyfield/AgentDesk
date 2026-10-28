@@ -37,8 +37,10 @@ pub enum CommandOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandReply {
+    #[cfg(test)]
     pub outcome: CommandOutcome,
     pub response: ReceiptResponse,
+    #[cfg(test)]
     pub replayed: bool,
 }
 
@@ -146,6 +148,7 @@ async fn apply(
             return Err(StoreError::IdempotencyConflict);
         }
         return Ok(CommandReply {
+            #[cfg(test)]
             outcome: saved.try_get::<Json<CommandOutcome>, _>("outcome")?.0,
             response: ReceiptResponse {
                 status: u16::try_from(saved.try_get::<i32, _>("response_status")?)
@@ -154,6 +157,7 @@ async fn apply(
                     .try_get::<Json<serde_json::Value>, _>("response_body")?
                     .0,
             },
+            #[cfg(test)]
             replayed: true,
         });
     }
@@ -194,8 +198,10 @@ async fn apply(
         .bind(i32::from(response.status)).bind(Json(&response.body))
         .execute(&mut **tx).await?;
     Ok(CommandReply {
+        #[cfg(test)]
         outcome,
         response,
+        #[cfg(test)]
         replayed: false,
     })
 }

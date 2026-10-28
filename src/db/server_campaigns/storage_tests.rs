@@ -553,6 +553,7 @@ async fn prune_preserves_execution_failure_evidence_pins_actions_and_receipts_pg
             &h.pool,
             "ack",
             Command::AcknowledgeFence {
+                expected_run: binding.run_id.clone(),
                 target: binding.session.gate.clone(),
                 control_version: 2,
             },

@@ -12,16 +12,97 @@ fn observe(binding: &AttemptBinding, observation: ActionObservation) -> Command 
     }
 }
 
-async fn ack(pool: &PgPool, key: &str, gate: &HostGate, version: u64) -> CommandOutcome {
+async fn ack(
+    pool: &PgPool,
+    key: &str,
+    expected_run: &str,
+    gate: &HostGate,
+    version: u64,
+) -> CommandOutcome {
     send(
         pool,
         key,
         Command::AcknowledgeFence {
+            expected_run: expected_run.into(),
             target: gate.clone(),
             control_version: version,
         },
     )
     .await
+}
+
+#[tokio::test]
+async fn fence_ack_other_run_with_same_gate_and_version_persists_only_rejection_pg() {
+    let mut h = Harness::new().await;
+    let state = domain::with_action(ActionState::Claimed, false);
+    let binding = domain::binding(&state);
+    h.seed(state).await;
+    applied(send(&h.pool, "stop", stop(StopMode::Immediate)).await);
+    h.reconnect().await;
+    let before = get(&h.pool, "campaign").await.unwrap().unwrap();
+    let bad = envelope(
+        "old-run-ack",
+        Command::AcknowledgeFence {
+            expected_run: "previous-run".into(),
+            target: binding.session.gate.clone(),
+            control_version: 2,
+        },
+    );
+    let bad: CommandEnvelope = serde_json::from_value(serde_json::to_value(bad).unwrap()).unwrap();
+    let reply = execute(&h.pool, "campaign", &bad).await.unwrap();
+    rejected(reply.outcome.clone(), RejectionCode::StaleRun);
+    assert_eq!(
+        get(&h.pool, "campaign").await.unwrap(),
+        Some(before.clone())
+    );
+    assert_eq!(
+        events(&h.pool, "campaign", None, 0, 100)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        run_history(&h.pool, "campaign", "run", 0, 100)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        action_history(&h.pool, "campaign", "run", "action", 0, 100)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM server_campaign_receipts")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(receipts, 2);
+    h.reconnect().await;
+    let replay = execute(&h.pool, "campaign", &bad).await.unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.response, reply.response);
+    assert_eq!(
+        get(&h.pool, "campaign").await.unwrap(),
+        Some(before.clone())
+    );
+    applied(
+        ack(
+            &h.pool,
+            "current-run-ack",
+            &binding.run_id,
+            &binding.session.gate,
+            2,
+        )
+        .await,
+    );
+    let after = get(&h.pool, "campaign").await.unwrap().unwrap();
+    assert_eq!(after.event_sequence, before.event_sequence + 1);
+    assert_eq!(after.run.unwrap().stop.unwrap().acknowledgements.len(), 1);
+    h.close().await;
 }
 
 #[tokio::test]
@@ -76,7 +157,7 @@ async fn stop_uses_run_definition_cas_while_events_advance_and_binding_stays_pin
         send(&h.pool, "old-definition", stale_definition).await,
         RejectionCode::StaleDefinition,
     );
-    applied(ack(&h.pool, "ack-v2", &binding.session.gate, 2).await);
+    applied(ack(&h.pool, "ack-v2", &binding.run_id, &binding.session.gate, 2).await);
     applied(send(&h.pool, "fenced-v2", Command::ConfirmStopFence).await);
     let escalation = applied(send(&h.pool, "escalate", stop(StopMode::Immediate)).await);
     assert_eq!(escalation.control_version, Some(3));
@@ -102,10 +183,17 @@ async fn stop_uses_run_definition_cas_while_events_advance_and_binding_stays_pin
     assert!(run.stop.as_ref().unwrap().acknowledgements.is_empty());
     assert!(control::validate_result_binding(&restored, &binding).is_err());
     rejected(
-        ack(&h.pool, "stale-ack", &binding.session.gate, 2).await,
+        ack(
+            &h.pool,
+            "stale-ack",
+            &binding.run_id,
+            &binding.session.gate,
+            2,
+        )
+        .await,
         RejectionCode::StaleFence,
     );
-    applied(ack(&h.pool, "ack-v3", &binding.session.gate, 3).await);
+    applied(ack(&h.pool, "ack-v3", &binding.run_id, &binding.session.gate, 3).await);
     applied(send(&h.pool, "fenced-v3", Command::ConfirmStopFence).await);
     applied(send(&h.pool, "weak-stop", stop(StopMode::FinishStage)).await);
     assert_eq!(
@@ -141,7 +229,7 @@ async fn alive_unknown_unreconciled_action_and_wrong_incarnation_block_edit_and_
         };
         h.seed(state).await;
         applied(send(&h.pool, "stop", stop(mode)).await);
-        applied(ack(&h.pool, "ack", &binding.session.gate, 2).await);
+        applied(ack(&h.pool, "ack", &binding.run_id, &binding.session.gate, 2).await);
         applied(send(&h.pool, "fenced", Command::ConfirmStopFence).await);
         h.reconnect().await;
         rejected(
@@ -294,15 +382,24 @@ async fn action_only_host_requires_exact_ack_after_reconnect_and_binding_cannot_
     let mut old_gate = effect_gate.clone();
     old_gate.incarnation = "old-boot".into();
     rejected(
-        ack(&h.pool, "old-boot", &old_gate, 2).await,
+        ack(&h.pool, "old-boot", &binding.run_id, &old_gate, 2).await,
         RejectionCode::StaleBinding,
     );
-    applied(ack(&h.pool, "session-gate", &binding.session.gate, 2).await);
+    applied(
+        ack(
+            &h.pool,
+            "session-gate",
+            &binding.run_id,
+            &binding.session.gate,
+            2,
+        )
+        .await,
+    );
     rejected(
         send(&h.pool, "still-missing", Command::ConfirmStopFence).await,
         RejectionCode::FenceIncomplete,
     );
-    applied(ack(&h.pool, "effect-gate", &effect_gate, 2).await);
+    applied(ack(&h.pool, "effect-gate", &binding.run_id, &effect_gate, 2).await);
     applied(send(&h.pool, "fenced", Command::ConfirmStopFence).await);
     applied(send(&h.pool, "stopped", Command::ConfirmStopped).await);
     let mut wrong = binding.clone();
@@ -445,7 +542,14 @@ async fn fake_gate_fence_first_cancels_intent_claim_and_inflight_without_restart
         assert_eq!(FakeGate::initiate(&h.pool, &binding, false).await, None);
         if phase == ActionState::StartPending {
             rejected(
-                ack(&h.pool, "early-ack", &binding.session.gate, 2).await,
+                ack(
+                    &h.pool,
+                    "early-ack",
+                    &binding.run_id,
+                    &binding.session.gate,
+                    2,
+                )
+                .await,
                 RejectionCode::UnreconciledActions,
             );
             applied(
@@ -462,7 +566,7 @@ async fn fake_gate_fence_first_cancels_intent_claim_and_inflight_without_restart
                 .await,
             );
         }
-        applied(ack(&h.pool, "ack", &binding.session.gate, 2).await);
+        applied(ack(&h.pool, "ack", &binding.run_id, &binding.session.gate, 2).await);
         applied(send(&h.pool, "fenced", Command::ConfirmStopFence).await);
         applied(send(&h.pool, "stopped", Command::ConfirmStopped).await);
         assert_eq!(FakeGate::load(&h.pool).await.effects, 0);
@@ -517,7 +621,7 @@ async fn fake_gate_start_first_recovers_receipt_and_unknown_session_after_pool_r
         )
         .await,
     );
-    applied(ack(&h.pool, "ack", &binding.session.gate, 2).await);
+    applied(ack(&h.pool, "ack", &binding.run_id, &binding.session.gate, 2).await);
     applied(send(&h.pool, "fenced", Command::ConfirmStopFence).await);
     rejected(
         send(&h.pool, "not-gone", Command::ConfirmStopped).await,
@@ -567,7 +671,14 @@ async fn fake_gate_crash_after_start_before_receipt_keeps_unknown_and_never_repe
     FakeGate::fence(&h.pool, 2).await;
     h.reconnect().await;
     rejected(
-        ack(&h.pool, "unclassified-ack", &binding.session.gate, 2).await,
+        ack(
+            &h.pool,
+            "unclassified-ack",
+            &binding.run_id,
+            &binding.session.gate,
+            2,
+        )
+        .await,
         RejectionCode::UnreconciledActions,
     );
     rejected(

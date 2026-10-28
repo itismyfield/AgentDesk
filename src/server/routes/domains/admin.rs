@@ -7,7 +7,7 @@ use axum::{
 
 use super::super::{
     ApiRouter, AppState, campaigns, departments, escalation, home_metrics, protected_api_domain,
-    settings, stats, voice_config,
+    server_campaigns, settings, stats, voice_config,
 };
 
 // Category: admin
@@ -29,6 +29,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
         Router::new()
             .merge(campaign_router())
+            .merge(server_campaigns::router())
             .route(
                 "/departments",
                 get(departments::list_departments).post(departments::create_department),
