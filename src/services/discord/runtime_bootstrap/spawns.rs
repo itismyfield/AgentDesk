@@ -206,6 +206,74 @@ async fn deferred_restart_marked(provider: &ProviderKind) -> bool {
     true
 }
 
+/// Background work each turn-executing runtime (gateway, confirmed standby, REST runner) starts
+/// once its role is settled; each posts placeholders, so each consumes its own orphan deletes.
+pub(in crate::services::discord) fn run_bot_spawn_execution_runtime_tasks(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+) {
+    run_bot_spawn_deferred_restart_poller(shared, provider);
+    #[cfg(unix)]
+    run_bot_spawn_reachability_observation(shared, provider);
+    run_bot_spawn_orphan_delete_retry(shared, provider);
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) static ORPHAN_RETRY_CADENCE_FOR_TESTS: std::sync::Mutex<
+    Option<(std::time::Duration, std::time::Duration)>,
+> = std::sync::Mutex::new(None);
+
+fn orphan_retry_cadence() -> (std::time::Duration, std::time::Duration) {
+    #[cfg(test)]
+    if let Some(cadence) = *ORPHAN_RETRY_CADENCE_FOR_TESTS.lock().unwrap() {
+        return cadence;
+    }
+    (
+        std::time::Duration::from_secs(
+            crate::services::discord::placeholder_sweeper::INITIAL_DELAY_SECS,
+        ),
+        std::time::Duration::from_secs(
+            crate::services::discord::placeholder_sweeper::SWEEP_INTERVAL_SECS,
+        ),
+    )
+}
+
+/// The runtime's only consumer of its node-local orphan-delete store; the stall sweeper runs on a
+/// gateway alone, so a runner or standby would otherwise never retry a failed delete.
+fn run_bot_spawn_orphan_delete_retry(shared: &Arc<SharedData>, provider: &ProviderKind) {
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
+        tracing::warn!(
+            provider = provider.as_str(),
+            "no Discord REST client; orphan message deletes stay queued"
+        );
+        return;
+    };
+    let shared = shared.clone();
+    let provider = provider.clone();
+    let name = format!("{}:orphan_delete_retry", provider.as_str());
+    crate::services::resident_loops::spawn_resident(name, async move {
+        let (initial, interval) = orphan_retry_cadence();
+        tokio::time::sleep(initial).await;
+        loop {
+            let cleared = crate::services::discord::status_panel_orphan_store::drain(
+                &http,
+                &shared,
+                &provider,
+                &shared.token_hash,
+            )
+            .await;
+            if cleared > 0 {
+                tracing::info!(
+                    provider = provider.as_str(),
+                    cleared,
+                    "orphan delete retry cleared queued messages"
+                );
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
+}
+
 /// Background: poll for the deferred restart marker for gateway and standby
 /// runtimes. The marker first fences admissions and cancels intake polling;
 /// health counters then provide the drain proof before the wrapper boots out.
