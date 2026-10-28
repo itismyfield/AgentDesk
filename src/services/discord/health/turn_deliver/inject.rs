@@ -451,6 +451,11 @@ async fn resolve(
     })
 }
 
+/// Checks the existing effect-free target predicate before origin admission.
+pub(super) async fn external_ready(shared: &Arc<SharedData>, request: &HumanInputRequest) -> bool {
+    resolve(shared, request, false).await.is_ok()
+}
+
 pub(crate) async fn attempt(
     shared: &Arc<SharedData>,
     request: &HumanInputRequest,
