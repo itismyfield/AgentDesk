@@ -710,6 +710,103 @@ fn payloads(owed: &VecDeque<Derived>) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn compact_summary_mixed_v6_v7_spool_replays_historical_summaries_once() {
+    let (harness, ids, bindings) = fixture(1);
+    let source = &ids[0];
+    let turn = |id: &str, second: u8| {
+        let stamp = |offset: u8| format!("2026-10-28T00:00:{:02}Z", second + offset);
+        [
+            json!({"type":"user", "uuid":format!("prompt-{id}"), "timestamp":stamp(0), "message":{"content":"actual request"}}),
+            json!({"type":"user", "uuid":format!("summary-{id}"), "timestamp":stamp(5), "isCompactSummary":true, "message":{"content":"compacted context"}}),
+            json!({"type":"assistant", "uuid":format!("body-{id}"), "timestamp":stamp(6), "apiBlockIndex":0, "message":{"id":id, "content":[{"type":"text", "text":id}]}}),
+            json!({"type":"system", "subtype":"turn_duration", "timestamp":stamp(10)}),
+        ].iter().map(|value| format!("{value}\n")).collect::<String>()
+    };
+    let summary_deriver = |writer: &mut Writer| {
+        let ledger = writer.store().ledger();
+        UnitDeriver::new(CHANNEL, ShadowProvider::Claude).with_turn_summary(pieces::SummaryInputs {
+            turn_marks: ledger.summary_turn_marks(),
+            disposed: ledger.disposed_unit_hashes(),
+            context_window: None,
+        })
+    };
+    append(&source.path, turn("old", 0).as_bytes());
+    let mut writer = harness.writer();
+    let mut capture = SourceCapture::open(source.clone(), 0).unwrap();
+    let CaptureOutcome::Batch(batch) = capture.poll(MAX_READ_BYTES) else {
+        panic!("capture")
+    };
+    writer
+        .store()
+        .append_spool(&batch, &capture.prefix_hash())
+        .unwrap();
+    let mut deriver = summary_deriver(&mut writer);
+    let mut original = VecDeque::new();
+    for record in &batch.records {
+        for item in deriver.derive_with_version(record, 6) {
+            // Keep the summary pending across the upgrade after its body is Posted.
+            if !matches!(&item, Derived::Piece(piece) if piece.unit_key.native_key.ends_with("#turn_end"))
+            {
+                assert_eq!(writer.deliver(&item).await, Step::Done);
+            }
+            original.push_back(item);
+        }
+    }
+    let old_payloads = payloads(&original);
+    assert_eq!(old_payloads, ["old", "-# ⏱️ 5초"]);
+    assert_eq!(harness.port.posts(), ["old"]);
+    drop(writer);
+    let old_segment = segments(&harness).pop().unwrap();
+    header_version(&old_segment, Some(6));
+    let old_bytes = std::fs::read(&old_segment).unwrap();
+
+    let mut writer = harness.writer();
+    let mut sources = Sources::new(CHANNEL, ShadowProvider::Claude, bindings.clone());
+    let mut deriver = summary_deriver(&mut writer);
+    let mut owed = VecDeque::new();
+    sources
+        .resume(&mut writer, &mut deriver, &mut owed)
+        .unwrap();
+    sources.follow(&mut writer).unwrap();
+    assert_eq!(payloads(&owed), ["-# ⏱️ 5초"]);
+    assert_eq!(sources.replayed.posted, 1);
+    while let Some(item) = owed.pop_front() {
+        assert_eq!(writer.deliver(&item).await, Step::Done);
+    }
+    assert_eq!(harness.port.posts(), old_payloads);
+    append(&source.path, turn("new", 20).as_bytes());
+    sources
+        .capture(&mut writer, &mut deriver, &mut owed)
+        .unwrap();
+    assert_eq!(payloads(&owed), ["new", "-# ⏱️ 10초"]);
+    while let Some(item) = owed.pop_front() {
+        assert_eq!(writer.deliver(&item).await, Step::Done);
+    }
+    let expected = harness.port.posts();
+    drop((sources, writer));
+    let mixed = segments(&harness);
+    assert_eq!(mixed.len(), 2);
+    assert_eq!(header_version(&mixed[0], None), 6);
+    assert_eq!(header_version(&mixed[1], None), u64::from(IDENTITY_VERSION));
+    assert_eq!(std::fs::read(&old_segment).unwrap(), old_bytes);
+    let ledger_before = std::fs::read(ledger_path(&harness)).unwrap();
+    let mut writer = harness.writer();
+    let mut sources = Sources::new(CHANNEL, ShadowProvider::Claude, bindings);
+    let mut deriver = summary_deriver(&mut writer);
+    sources
+        .resume(&mut writer, &mut deriver, &mut owed)
+        .unwrap();
+    assert!(
+        owed.is_empty(),
+        "durably posted pieces leave the replay queue"
+    );
+    assert_eq!(sources.replayed.posted, expected.len());
+    assert_eq!(harness.port.posts(), expected);
+    assert_eq!(std::fs::read(ledger_path(&harness)).unwrap(), ledger_before);
+    assert_eq!(harness.alarms.taken(), []);
+}
+
+#[tokio::test]
 async fn a_v2_codex_spool_resumes_under_the_current_version_without_reposting_a_delivered_piece() {
     let (harness, ids, bindings) = fixture(1);
     let long = "중단 전 긴 본문".repeat(400);

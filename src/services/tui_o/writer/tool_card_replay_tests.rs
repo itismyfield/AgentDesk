@@ -84,6 +84,25 @@ fn card(items: &[Derived]) -> PieceWork {
 }
 
 #[tokio::test(start_paused = true)]
+async fn compact_summary_keeps_a_tool_card_open_until_its_real_result() {
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    let mut derive = deriver(&mut writer, Arc::new(AtomicBool::new(true)));
+    deliver_all(&mut writer, &derive.derive(&tool("m1", "Bash"))).await;
+    let summary = captured(serde_json::json!({"type":"user", "isCompactSummary":true,
+        "message":{"content":"compacted context"}}));
+    assert_eq!(derive.derive(&summary), []);
+    deliver_all(&mut writer, &derive.derive(&result("m1"))).await;
+    let closing = derive.derive(&body("m2"));
+    let card = card(&closing);
+    assert_eq!(card.unit_key, card_key("m1"));
+    assert!(card.payload.contains('✓'), "{}", card.payload);
+    deliver_all(&mut writer, &closing).await;
+    assert_eq!(harness.port.posts(), [card.payload, "answer".into()]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_old_panel_disposition_is_never_backfilled_when_cards_default_on() {
     let harness = Harness::new();
     harness.gate.acquired();
@@ -428,7 +447,10 @@ async fn a_refused_card_stays_blocked_when_off_until_approval_resends_saved_byte
         writer.deliver(&Derived::Piece(saved.clone())).await,
         Step::Stopped
     );
-    assert_eq!(harness.port.posts(), [saved.payload.clone()]);
+    assert_eq!(
+        harness.port.posts().as_slice(),
+        std::slice::from_ref(&saved.payload)
+    );
     drop(writer);
     harness
         .store

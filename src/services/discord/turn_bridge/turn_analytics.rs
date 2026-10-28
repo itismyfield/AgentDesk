@@ -1,5 +1,64 @@
 use super::*;
-use crate::db::turns::PersistTurnOwned;
+use crate::db::turns::{PersistTurnOwned, TerminalOutcome, TurnReceipt, record_turn_receipt};
+
+#[cfg(test)]
+#[path = "terminal_receipt_tests.rs"]
+mod terminal_receipt_tests;
+
+const RECEIPT_ATTEMPTS: u32 = 3;
+const RECEIPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The terminal a bridge outcome label confirms. A relay, hand-off or retry keeps the execution
+/// running under another owner, so it confirms none and its final owner records the end.
+pub(super) fn terminal_receipt_outcome(label: &str) -> Option<TerminalOutcome> {
+    match label {
+        "completed" => Some(TerminalOutcome::Completed),
+        "empty_response" => Some(TerminalOutcome::Empty),
+        "cancelled" => Some(TerminalOutcome::Cancelled),
+        "prompt_too_long" | "transport_error" => Some(TerminalOutcome::Failed),
+        _ => None,
+    }
+}
+
+/// Awaits the execution's receipt, retrying briefly. Only a turn with its own Discord message has
+/// a managed execution id, so a message-less (TUI-direct) turn writes none here.
+pub(super) async fn record_terminal_receipt(
+    pg_pool: Option<&sqlx::PgPool>,
+    (provider, channel_id, user_msg_id): (&ProviderKind, ChannelId, Option<MessageId>),
+    role_binding: Option<&RoleBinding>,
+    session_key: Option<&str>,
+    inflight_state: &InflightTurnState,
+    outcome: TerminalOutcome,
+) {
+    let (Some(pool), Some(user_msg_id)) = (pg_pool, user_msg_id) else {
+        return;
+    };
+    let turn_id = discord_turn_id(provider, channel_id, Some(user_msg_id), session_key, None);
+    let channel = inflight_state
+        .logical_channel_id
+        .unwrap_or(channel_id.get())
+        .to_string();
+    let receipt = TurnReceipt {
+        turn_id: &turn_id,
+        channel_id: &channel,
+        agent_id: role_binding.map(|binding| binding.role_id.as_str()),
+        provider: provider.as_str(),
+        session_key,
+        started_at: Some(inflight_state.started_at.as_str()),
+        consumed_origin_ids: &inflight_state.input_origin_ids,
+        outcome,
+        confirmed_at: chrono::Utc::now(),
+    };
+    for attempt in 1..=RECEIPT_ATTEMPTS {
+        match record_turn_receipt(pool, &receipt).await {
+            Ok(()) => return,
+            Err(error) if attempt == RECEIPT_ATTEMPTS => {
+                tracing::warn!(%error, turn_id, "turn receipt not committed; inflight cleared as before");
+            }
+            Err(_) => tokio::time::sleep(RECEIPT_RETRY_DELAY * attempt).await,
+        }
+    }
+}
 
 pub(super) fn pending_delivery_outcome(
     primary_outcome: &'static str,

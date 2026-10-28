@@ -682,6 +682,14 @@ pub(super) async fn run_terminal_relay_plan<'a>(
             drop(o_evidence);
             None
         };
+        if orphan_facts.existing_record_required() && o_tail_covered.is_none() {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                lookup_candidate,
+                source_known = context.evidence_source.is_some(),
+                "terminal orphan has no O delivery proof"
+            );
+        }
         orphan_facts.o_tail_covered = o_tail_covered.as_ref();
         orphan_terminal_frame::observe_orphan_terminal_frame(
             shared,

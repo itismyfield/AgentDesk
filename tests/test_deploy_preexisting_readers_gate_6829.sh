@@ -217,6 +217,7 @@ rollback_with_body() {
         CURL_FIXTURE_RC=0
         _rollback_would_brick_on_migration() { return 1; }
         _rollback_would_revert_o_writer() { return 1; }
+        _rollback_would_revert_o_spool() { return 1; }
         _rollback_would_revert_o_ledger() { return 1; }
         _launchd_domain() { printf 'fixture/domain'; }
         _wait_release_stopped() { return 0; }

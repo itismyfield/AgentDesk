@@ -1066,6 +1066,42 @@ _rollback_would_revert_o_writer() {
     return 0
 }
 
+_rollback_would_revert_o_spool() {
+    # Refuse before stopping when the target cannot prove it reads the current writer's format.
+    local reason
+    if reason="$(python3 - "${REL_BINARY:-}" "${REL_BINARY_BACKUP:-}" 2>/dev/null <<'PY'
+import json
+import subprocess
+import sys
+
+def capability(binary):
+    run = subprocess.run([binary, "build-info"], capture_output=True, timeout=30, check=True)
+    data = json.loads(run.stdout)
+    if not isinstance(data, dict) or type(data.get("schema")) is not int or data["schema"] != 1:
+        raise ValueError("unknown build-info schema")
+    return data
+
+try:
+    version = capability(sys.argv[1]).get("o_spool_write_version")
+    versions = capability(sys.argv[2]).get("o_spool_readable_versions")
+    if type(version) is not int or version <= 0 or not isinstance(versions, list) or not versions:
+        raise ValueError("missing or malformed spool capabilities")
+    if any(type(item) is not int or item <= 0 for item in versions):
+        raise ValueError("malformed spool reader versions")
+except Exception:
+    print("could not read valid O spool build-info capabilities")
+    sys.exit(1)
+if version not in versions:
+    print(f"rollback target cannot read O spool write version {version}")
+    sys.exit(1)
+PY
+)"; then
+        return 1
+    fi
+    echo "  ▸ [rollback-guard] ${reason:-O spool capability check failed} — unsafe to roll back" >&2
+    return 0
+}
+
 _external_artifact_would_skip_o_writer() {
     # 0 (refuse) when the AGENTDESK_DEPLOY_BINARY artifact may run the O writer or OperatorResume;
     # an artifact without `build-info` reads unknown and is refused.
@@ -1216,6 +1252,12 @@ _rollback_release_binary() {
 
     if _rollback_would_revert_o_ledger; then
         echo "🛑 ROLLBACK REFUSED — O ledger floor requires a compatible reader"
+        echo "   The new binary stays live; $rel_backup is preserved. Fix forward with a compatible build."
+        return 0
+    fi
+
+    if _rollback_would_revert_o_spool; then
+        echo "🛑 ROLLBACK REFUSED — the rollback target must read the current O spool format"
         echo "   The new binary stays live; $rel_backup is preserved. Fix forward with a compatible build."
         return 0
     fi

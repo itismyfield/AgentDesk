@@ -47,7 +47,7 @@ fn spool_versions(f: &Fixture, relabel: Option<u32>) -> Vec<u32> {
 fn retained_v5_thinking_stays_excluded_while_new_v6_bodies_post_in_order() {
     run(async |f| {
         use crate::services::tui_o::shadow::identity::V5Rule;
-        use crate::services::tui_o::shadow::{UnitKey, UnitKind};
+        use crate::services::tui_o::shadow::{IDENTITY_VERSION, UnitKey, UnitKind};
         let row = |id: &str, thought: &str, text: &str| {
             format!(
                 "{}\n",
@@ -115,7 +115,7 @@ fn retained_v5_thinking_stays_excluded_while_new_v6_bodies_post_in_order() {
             ["X_OLD", "T_NEW", "X_NEW"],
             "new v6 bodies must retain their native order"
         );
-        assert_eq!(spool_versions(&f, None), [5, 6]);
+        assert_eq!(spool_versions(&f, None), [5, IDENTITY_VERSION]);
         drop(resumed);
         let mut restarted = f.engine();
         restarted.capture().unwrap();

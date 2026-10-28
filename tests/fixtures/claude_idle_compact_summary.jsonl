@@ -1,0 +1,8 @@
+{"type":"user","uuid":"prompt-before-compaction","sessionId":"compact-session","timestamp":"2026-10-27T21:45:00.000Z","message":{"role":"user","content":"작업 상태를 알려줘"}}
+{"type":"assistant","uuid":"answer-before-compaction","sessionId":"compact-session","timestamp":"2026-10-27T21:45:19.000Z","apiBlockIndex":0,"message":{"id":"msg-before-compaction","role":"assistant","content":[{"type":"text","text":"작업을 완료했습니다."}]}}
+{"type":"system","subtype":"turn_duration","uuid":"closed-before-compaction","timestamp":"2026-10-27T21:45:20.000Z","durationMs":20000}
+{"type":"system","subtype":"compact_boundary","uuid":"compact-boundary","timestamp":"2026-10-27T22:40:00.000Z","compactMetadata":{"trigger":"auto","preTokens":150000}}
+{"type":"user","isCompactSummary":true,"uuid":"compact-summary","sessionId":"compact-session","timestamp":"2026-10-27T22:40:01.000Z","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. 이전 작업은 완료되었고 새 사용자 입력은 없습니다."}}
+{"type":"attachment","uuid":"compact-attachment","attachment":{"type":"hook_success","hookName":"SessionStart:compact","content":"Session context restored"}}
+{"type":"attachment","uuid":"compact-files","attachment":{"type":"edited_text_file","filename":"notes.md","content":"Previous session notes"}}
+{"type":"system","subtype":"informational","uuid":"compact-info","message":"Compaction complete","timestamp":"2026-10-27T22:40:02.000Z"}
