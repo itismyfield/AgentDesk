@@ -144,9 +144,6 @@ fn inbound_order_defers_claim(
                 .iter()
                 .any(|id| *id != user_message_id)
     });
-    // A V2 owner's queued inputs are backlog too; its retained inputs never hold the slot.
-    #[cfg(test)]
-    let foreign_backlog = foreign_backlog || state.v2_queued_ahead_of(user_message_id);
     let reserved =
         state.pending_user_dispatch.is_some() && !pending_dispatch_lease_is_orphaned(state);
     if !foreign_backlog && !reserved {

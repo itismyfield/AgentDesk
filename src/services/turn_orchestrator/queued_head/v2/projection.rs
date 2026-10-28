@@ -10,7 +10,7 @@ use crate::services::turn_orchestrator::pending_queue_persistence::{
 use crate::services::turn_orchestrator::{
     ChannelMailboxRegistry, ChannelMailboxState, QueuePersistenceContext,
 };
-use poise::serenity_prelude::{ChannelId, MessageId};
+use poise::serenity_prelude::ChannelId;
 
 /// Boot recovery runs every channel's queue before any inflight, marker or placeholder step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -139,16 +139,6 @@ impl Owner {
 impl ChannelMailboxState {
     pub(crate) fn v2_len(&self) -> Option<usize> {
         (self.queued_head.v2.as_ref()).map(|owner| owner.snapshot.items.len())
-    }
-
-    /// A queued V2 input other than `claimant`; retained inputs never hold the slot.
-    pub(crate) fn v2_queued_ahead_of(&self, claimant: MessageId) -> bool {
-        let Some(owner) = &self.queued_head.v2 else {
-            return false;
-        };
-        let other = |id: &u64| *id != claimant.get();
-        (owner.snapshot.items.iter())
-            .any(|item| other(&item.message_id) || item.source_message_ids.iter().any(other))
     }
 
     /// Discards the untried items only when `path` is the owner's file and it still holds `expected`;
