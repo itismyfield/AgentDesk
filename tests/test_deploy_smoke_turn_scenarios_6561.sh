@@ -5,10 +5,12 @@
 # The production functions run against a fake driver and fake dcserver log; the
 # preflight is the only other stub. The judge and config resolver are real.
 set -euo pipefail
+unset AGENTDESK_CONFIG
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEPLOY_SH="${DEPLOY_SH_OVERRIDE:-$REPO_ROOT/scripts/deploy-release.sh}"
+SCRIPT_DIR="$REPO_ROOT/scripts"
 # Bash 3.2 aborts on an empty [@] expansion under nounset, even inside an OR guard.
 # Check the optional expansions before exercising empty E-51 arguments and draft sections.
 python3 - "$DEPLOY_SH" <<'PY_COMPAT'
@@ -32,7 +34,7 @@ extract_function() {
         printing && /^}$/ { exit }
     ' "$DEPLOY_SH"
 }
-for fn in _post_deploy_smoke_note _post_deploy_smoke_fail \
+for fn in _release_config_path _post_deploy_smoke_note _post_deploy_smoke_fail \
     _post_deploy_smoke_log_identity_and_size _post_deploy_smoke_log_head_fingerprint \
     _post_deploy_smoke_classified_note _post_deploy_smoke_check_relay_round_trip \
     _post_deploy_smoke_run_turn_scenario \

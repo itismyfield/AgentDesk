@@ -48,9 +48,9 @@ impl GatewayHandbackBreaker {
                     .as_secs()
             },
             || {
-                crate::config::load_graceful()
-                    .cluster
-                    .gateway_handback_breaker
+                crate::config::snapshot()
+                    .map(|config| config.cluster.gateway_handback_breaker.clone())
+                    .unwrap_or_default()
             },
         )
     }

@@ -3,6 +3,7 @@
 # temp release tree with launchd/health stubbed: live binary and policies stay one generation.
 
 set -euo pipefail
+unset AGENTDESK_CONFIG
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -71,9 +72,11 @@ ADK_DEFAULT_LOOPBACK=127.0.0.1
 POST_DEPLOY_SMOKE_RELAY_CELL=""
 POST_DEPLOY_SMOKE_CODEX_TURNS_CELL=""
 _launchd_domain() { echo gui/501; }
+_release_config_path() { printf '%s/config/agentdesk.yaml\n' "$ADK_REL"; }
 _deploy_e2e_smoke_channel_ids() { echo ""; }
 _rollback_would_brick_on_migration() { [ "${FIXTURE_MIGRATION_AHEAD:-0}" = 1 ]; }
 _rollback_would_revert_o_writer() { return 1; }
+_rollback_would_revert_o_spool() { return 1; }
 _rollback_would_revert_o_ledger() { return 1; }
 _cleanup_owned_pg_tunnel_preflight() { :; }
 _rollback_pg_tunnel_migration() { :; }

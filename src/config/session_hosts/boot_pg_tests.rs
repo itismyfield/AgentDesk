@@ -172,7 +172,8 @@ fn boot_entries_select_approved_hosts_pg() {
                 .await
                 .unwrap();
         } else if entry == "dcserver" && scenario != "no-pool" {
-            crate::bootstrap::prepare_dcserver_boot(&candidate, &pool).await;
+            let _config_hot_reload_guard =
+                crate::bootstrap::prepare_dcserver_boot(&candidate, &pool).await;
         } else if entry == "runserver" {
             crate::launch::after_database_ready(&candidate, passed_pool, || async { Ok(()) })
                 .await

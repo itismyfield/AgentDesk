@@ -360,3 +360,50 @@ fn pending_create_and_rename_failures_refuse_yield_and_settlement_retries_origin
         assert!(!owner.suppressed());
     }
 }
+
+#[test]
+fn gateway_snapshot_for_owner_observes_live_breaker_without_touching_state() {
+    let _live = crate::config_live_reload::test_live_guard(
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
+    );
+    let fixture = Fixture::new();
+    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        fixture.root.path(),
+    );
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &fixture.root.path().join("config.yaml"),
+    );
+    let path = fixture.path("snapshot");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let state = serde_json::to_vec(&State {
+        manual: true,
+        ..State::default()
+    })
+    .unwrap();
+    std::fs::write(&path, &state).unwrap();
+    let mut live = crate::config::Config::default();
+    live.data.dir = fixture.root.path().join("data");
+    live.cluster.gateway_handback_breaker.enabled = false;
+    let mut disk = live.clone();
+    disk.cluster.gateway_handback_breaker.enabled = true;
+    crate::config::save_to_path(&fixture.root.path().join("config.yaml"), &disk).unwrap();
+    crate::config_live_reload::install(live.clone());
+    let mut owner = GatewayHandbackBreaker::for_owner("claude", "discord_snapshot");
+    assert!(
+        !owner.suppressed(),
+        "unpublished disk enabled must not override disabled snapshot"
+    );
+    assert!(owner.record_yield());
+    owner.observe(Ok(true));
+    assert_eq!(std::fs::read(&path).unwrap(), state);
+    live.cluster.gateway_handback_breaker.enabled = true;
+    crate::config_live_reload::install(live);
+    assert!(
+        owner.suppressed(),
+        "existing owner observes the next installed snapshot"
+    );
+    assert!(!owner.record_yield());
+    assert_eq!(std::fs::read(&path).unwrap(), state);
+}

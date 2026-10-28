@@ -39,7 +39,57 @@ pub(super) fn register_channel(harness: &RelayE2eHarness) {
          channels:\n      claude:\n        id: \"{CHANNEL_ID}\"\n        name: \"{FALLBACK}\"\n        \
          workspace: \"{workspace}\"\n"
     );
-    std::fs::write(config, yaml).unwrap();
+    std::fs::write(&config, yaml).unwrap();
+    let validated = crate::config::load_from_path(&config).unwrap();
+    crate::config_live_reload::install(validated);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn registered_channel_snapshot_is_restored_after_harness_drop() {
+    const CHILD: &str = "ADK_TEST_REGISTERED_SNAPSHOT_RESTORE";
+    if std::env::var_os(CHILD).is_none() {
+        let path = concat!(
+            module_path!(),
+            "::registered_channel_snapshot_is_restored_after_harness_drop"
+        );
+        let name = path.split_once("::").unwrap().1;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success()
+                && stdout.lines().any(|line| line
+                    .starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    assert!(crate::config::snapshot().is_none());
+    for installed in [false, true] {
+        if installed {
+            let mut config = crate::config::Config::default();
+            config.server.port = 39134;
+            crate::config_live_reload::install(config);
+        }
+        let previous = crate::config::snapshot();
+        let harness = RelayE2eHarness::start().await;
+        register_channel(&harness);
+        let registered = crate::config::snapshot().unwrap();
+        assert_eq!(registered.agents[0].id, "p4c1f");
+        drop(harness);
+        let restored = crate::config::snapshot();
+        match (previous, restored) {
+            (None, None) => {}
+            (Some(previous), Some(restored)) => {
+                assert!(std::sync::Arc::ptr_eq(&previous, &restored));
+            }
+            _ => panic!("the harness must restore the previous snapshot presence"),
+        }
+    }
 }
 
 async fn seed(trace: Trace, pool: &sqlx::PgPool, own: &str) {

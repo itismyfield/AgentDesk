@@ -476,6 +476,7 @@ mod tests {
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/o_after_done_chain_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/o_stream_regression_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
+                "services/discord/turn_bridge/terminal_receipt_tests.rs",
                 "services/discord/turn_bridge/tmux_runtime/native_stop_contract_tests.rs",
             ],
             "every bridge entry file must declare its mailbox token-registration contract"
@@ -577,7 +578,8 @@ mod tests {
         ] {
             want(process_fixture, fixture, None);
         }
-        want(process_bridge, &spawn, Some(1));
+        // Both process bridge entries hand off the fixture's claimed token.
+        want(process_bridge, &spawn, Some(2));
         want(
             process_bridge,
             "Fixture::with_user_message(ProviderKind::Codex, USER_MESSAGE).await;",
@@ -586,7 +588,7 @@ mod tests {
         want(
             process_bridge,
             "spawn_turn_bridge(fixture.shared.clone(), fixture.token.clone(), rx, context);",
-            None,
+            Some(2),
         );
         want(codex_replacement, &spawn, Some(1));
         want(

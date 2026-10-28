@@ -816,6 +816,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                     busy_attempt_cost,
                     #[cfg(unix)]
                     bridge_tui_gate_outcome_early,
+                    transcript_terminal_error: crate::services::scheduled_messages::turn_completion::terminal_error_event(&transcript_events),
                 },
                 terminal_outcome_delivery::TerminalOutcomeDeliveryState {
                     shared_owned,

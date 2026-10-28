@@ -775,6 +775,16 @@
       "path": "migrations/postgres/0152_imsg_external_admission.sql",
       "sha256": "ee3c4f314cf8938327e10fd1f09152e637caf5f9e9eebe23a71cbb077fcb8f18",
       "version": 152
+    },
+    {
+      "path": "migrations/postgres/0155_scheduled_delivery_turn_outcome.sql",
+      "sha256": "4777c8d5d9ac09636a8d111bdb1a69ce59d0f09be0860eaa6cee5e70d4141065",
+      "version": 155
+    },
+    {
+      "path": "migrations/postgres/0156_turn_execution_receipt.sql",
+      "sha256": "ee61a92c65ca656ba7a9faa5a84b7037dc047761b1cdb3fa332a140f75a0a0ed",
+      "version": 156
     }
   ],
   "version": 1

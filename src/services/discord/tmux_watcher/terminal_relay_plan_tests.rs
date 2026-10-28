@@ -1148,3 +1148,249 @@ async fn a_body_the_duplicate_guard_already_saw_is_not_admitted_to_the_record_59
 // Main-behaviour baselines for a dropped terminal body under a later commit.
 #[path = "owed_range_baseline_tests.rs"]
 mod owed_range_baseline_tests;
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c2_bounded_terminal_proof_preserves_real_orphans_pg() {
+    bounded_terminal_cases(&[0, 1]).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c2_unposted_body_is_not_covered_pg() {
+    bounded_terminal_cases(&[1]).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c2_same_inode_windows_and_get_races_remain_fail_closed_pg() {
+    bounded_terminal_cases(&[2, 3, 4, 5, 6, 7, 8]).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c3_large_ledger_covers_only_posted_terminal_pg() {
+    bounded_terminal_cases(&[9]).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c3_large_ledger_unposted_body_remains_orphan_pg() {
+    bounded_terminal_cases(&[10]).await;
+}
+
+async fn bounded_terminal_cases(cases: &[u8]) {
+    use crate::services::discord::inflight::load_inflight_state;
+    use crate::services::discord::outbound::o_delivery_evidence::tests::Fixture;
+    use crate::services::discord::outbound::o_delivery_evidence::{self, Frame};
+    use orphan_terminal_frame::OrphanTerminalFrameFacts;
+    use std::sync::atomic::Ordering;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7441c2_bounded",
+        "bounded rowless soft terminal",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    let body = "background task finished. ".repeat(270);
+    for &mode in cases {
+        let delivered = matches!(mode, 0 | 2 | 3 | 7 | 9);
+        let prefix = if mode < 2 || mode == 3 {
+            107_680_321
+        } else {
+            16384
+        };
+        let mut f = Fixture::injected_with_prefix(744300 + u64::from(mode), &[&body], prefix).await;
+        assert!(load_inflight_state(&ProviderKind::Claude, f.row.channel_id).is_none());
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let path = f.source.path.clone();
+        let write_byte = |at: u64| {
+            let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(at)).unwrap();
+            file.write_all(b"X").unwrap();
+        };
+        if mode == 1 || mode == 10 {
+            f.port.messages.lock().unwrap().clear();
+        }
+        if mode == 2 || mode == 3 {
+            write_byte(if mode == 2 { 0 } else { 1 << 20 });
+        }
+        if mode == 5 || mode == 6 {
+            let mut file = std::fs::File::open(&f.source.path).unwrap();
+            file.seek(SeekFrom::Start(f.row.turn_start_offset.unwrap()))
+                .unwrap();
+            let mut raw = Vec::new();
+            file.take(f.row.last_offset - f.row.turn_start_offset.unwrap())
+                .read_to_end(&mut raw)
+                .unwrap();
+            let at = raw
+                .windows(f.body.len())
+                .position(|part| part == f.body.as_bytes())
+                .unwrap() as u64
+                + f.row.turn_start_offset.unwrap();
+            if mode == 6 {
+                write_byte(at);
+                f.body.replace_range(..1, "X");
+            } else {
+                let path = f.source.path.clone();
+                *f.port.on_get.lock().unwrap() = Some(Box::new(move || {
+                    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                    file.seek(SeekFrom::Start(at)).unwrap();
+                    file.write_all(b"X").unwrap();
+                }));
+            }
+        }
+        if mode == 4 || mode == 7 {
+            let path = f.source.path.clone();
+            *f.port.on_get.lock().unwrap() = Some(Box::new(move || {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .append(mode == 7)
+                    .open(&path)
+                    .unwrap();
+                if mode == 7 {
+                    file.write_all(b"{\"type\":\"system\",\"subtype\":\"metadata\"}\n")
+                        .unwrap();
+                } else {
+                    file.seek(SeekFrom::Start(0)).unwrap();
+                    file.write_all(b"X").unwrap();
+                }
+            }));
+        }
+        if mode >= 9 {
+            let ledger = f
+                .root
+                .join("o_store")
+                .join(f.row.channel_id.to_string())
+                .join("ledger.jsonl");
+            let original = std::fs::read_to_string(&ledger).unwrap();
+            let entries: Vec<serde_json::Value> = original
+                .lines()
+                .map(|line| {
+                    serde_json::from_str::<serde_json::Value>(line).unwrap()["entry"].clone()
+                })
+                .collect();
+            let prepared: Vec<_> = entries
+                .iter()
+                .filter(|entry| entry["type"] == "prepared")
+                .collect();
+            let mut key = prepared[0]["unit_key"].clone();
+            let mut serial = prepared
+                .iter()
+                .map(|entry| entry["serial"].as_u64().unwrap())
+                .max()
+                .unwrap()
+                + 1;
+            let mut anchor = entries
+                .iter()
+                .filter_map(|entry| entry["msg_id"].as_u64())
+                .max()
+                .unwrap();
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&ledger)
+                .unwrap();
+            let mut size = file.metadata().unwrap().len();
+            while size < 36_878_824 {
+                key["native_key"] = serde_json::json!(format!("unrelated-history-{serial}"));
+                for entry in [
+                    serde_json::json!({"type": "prepared", "serial": serial, "unit_key": key, "piece_index": 0,
+                        "payload": "한".repeat(1333), "anchor_id": anchor, "epoch": 1}),
+                    serde_json::json!({"type": "posted", "serial": serial, "msg_id": anchor + (1 << 22)}),
+                ] {
+                    let mut line = serde_json::to_vec(
+                        &serde_json::json!({"at": "2026-10-28T00:00:00Z", "entry": entry}),
+                    )
+                    .unwrap();
+                    line.push(b'\n');
+                    file.write_all(&line).unwrap();
+                    size += line.len() as u64;
+                }
+                anchor += 1 << 22;
+                serial += 1;
+            }
+            eprintln!(
+                "C3_LEDGER mode={mode} bytes={size} posted_pieces={} historical_records={serial}",
+                prepared.len()
+            );
+        }
+        let (http, _http) = f.http().await;
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let began = tokio::time::Instant::now();
+        let proof = o_delivery_evidence::tail(
+            &http,
+            &shared,
+            Frame {
+                provider: &ProviderKind::Claude,
+                channel: ChannelId::new(f.row.channel_id),
+                path: &f.source.path,
+                file: (f.source.dev, f.source.ino),
+                range: (f.row.turn_start_offset.unwrap(), f.row.last_offset),
+                body: &f.body,
+                sent: 0,
+            },
+            if mode == 8 {
+                began
+            } else if mode >= 9 {
+                began + std::time::Duration::from_millis(9900)
+            } else {
+                began + std::time::Duration::from_millis(250)
+            },
+        )
+        .await;
+        eprintln!(
+            "C2_TAIL mode={mode} delivered={delivered} covered={} elapsed_us={} gets={}",
+            proof.is_some(),
+            began.elapsed().as_micros(),
+            f.get_calls.load(Ordering::SeqCst)
+        );
+        assert!(began.elapsed() < std::time::Duration::from_secs(if mode >= 9 { 11 } else { 1 }));
+        let facts = OrphanTerminalFrameFacts {
+            o_tail_covered: proof.as_ref(),
+            denial: Some(SoftTerminalAuthorityDenial::NoInflightRow),
+            watcher_direct_fallback_requested: true,
+            watcher_direct_fallback_authorized: false,
+            session_bound_relay_owns_terminal_delivery: false,
+            duplicate_guard_refused_body: false,
+            current_response: &f.body,
+            response_sent_offset: 0,
+            full_response_len: f.body.len(),
+            data_start_offset: f.row.turn_start_offset.unwrap(),
+            current_offset: f.row.last_offset,
+            terminal_event_consumed_offset: f.row.last_offset,
+            watcher_resend_committed: 0,
+            terminal_kind: Some(WatcherTerminalKind::SoftStopHookSummary),
+            session_bound_ack_outcome: SessionBoundRelayAckOutcome::TimedOut,
+            inflight_present: false,
+            inflight_relay_owner: "none",
+            startup_snapshot_authority: false,
+            tmux_session_name: "i7441c2-fixture",
+            placeholder_msg_id: None,
+            request_owner_user_id: None,
+        };
+        assert!(facts.existing_record_required());
+        orphan_terminal_frame::observe_orphan_terminal_frame(
+            &shared,
+            ChannelId::new(f.row.channel_id),
+            &ProviderKind::Claude,
+            &facts,
+        );
+        o_evidence_tests::flush_dlq_tasks().await;
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT content FROM relay_dead_letter WHERE channel_id=$1")
+                .bind(f.row.channel_id.to_string())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            if delivered {
+                vec![]
+            } else {
+                vec![f.body.clone()]
+            }
+        );
+        if delivered {
+            assert!(f.get_calls.load(Ordering::SeqCst) > 0);
+        }
+    }
+    pool.close().await;
+    db.drop().await;
+}
