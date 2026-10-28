@@ -248,6 +248,16 @@ pub(super) async fn run_standby_relay(
                 return;
             };
             if delivered {
+                scheduled_settle::settle(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    &output_path,
+                    placeholder_msg_id,
+                    &turn_binding,
+                    result_text,
+                )
+                .await;
                 complete_standby_inflight_state(
                     &provider,
                     channel_id,
@@ -1022,6 +1032,7 @@ async fn deliver_response(
     }
 }
 
+mod scheduled_settle;
 #[cfg(test)]
 mod tests {
     use super::*;

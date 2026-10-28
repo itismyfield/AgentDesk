@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import posixpath
 import random
+import re
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -63,6 +64,74 @@ issue = "#1"
 expires = 2026-12-31
 reason = "fixture"
 """
+
+
+def filter_shape_and_matches(expr, universe=()):
+    """Parse the emitted subset independently, tracking left-associative operator depth and IDs."""
+    values, operators = [], []
+    matches = [{}, {}]
+    for test_id in universe:
+        for field in (0, 1):
+            matches[field].setdefault(test_id[field], set()).add(test_id)
+    precedence = {"|": 1, "&": 2}
+    position = depth = max_depth = 0
+
+    def reduce():
+        right, right_depth = values.pop()
+        left, left_depth = values.pop()
+        op = operators.pop()
+        values.append((left | right if op == "|" else left & right,
+                       1 + max(left_depth, right_depth)))
+
+    for match in re.finditer(r"(binary_id|test)\(=([^()]+)\)|[()&|]", expr):
+        if expr[position:match.start()].strip():
+            raise AssertionError(f"unparsed filter at {position}")
+        position = match.end()
+        token = match.group()
+        if match.group(1):
+            field = 0 if match.group(1) == "binary_id" else 1
+            values.append((matches[field].get(match.group(2), set()), 0))
+            max_depth = max(max_depth, depth + 1)
+        elif token == "(":
+            operators.append(token)
+            depth += 1
+            max_depth = max(max_depth, depth)
+        elif token == ")":
+            while operators[-1] != "(":
+                reduce()
+            operators.pop()
+            depth -= 1
+        else:
+            while operators and operators[-1] != "(" and precedence[operators[-1]] >= precedence[token]:
+                reduce()
+            operators.append(token)
+    if expr[position:].strip() or depth:
+        raise AssertionError("incomplete filter")
+    while operators:
+        reduce()
+    if len(values) != 1:
+        raise AssertionError("filter did not reduce to one value")
+    selected, operator_depth = values[0]
+    return operator_depth, max_depth, selected
+
+
+class FilterDepth(unittest.TestCase):
+    def test_nightly_size_bounds_both_name_and_binary_operator_depth(self):
+        for ids in ([(BIN, f"m::t{i}") for i in range(9135)],
+                    [(f"bin{i}", "m::same") for i in range(9135)]):
+            with self.subTest(binaries=len({b for b, _ in ids})):
+                operator_depth, paren_depth, _ = filter_shape_and_matches(nci.default_filter(ids))
+                self.assertLessEqual(operator_depth, 15)
+                self.assertLessEqual(paren_depth, 17)
+
+    def test_exact_ids_survive_grouping_and_input_reordering(self):
+        ids = {(BIN, "m::a"), (BIN, "m::ab"), (BIN, "m::b"), (BIN, "m::c"),
+               ("other", "m::b"), ("third", "m::c")}
+        universe = {(b, n) for b in (BIN, "other", "third", "absent")
+                    for n in ("m::a", "m::ab", "m::b", "m::c", "m::absent")}
+        expr = nci.default_filter(sorted(ids))
+        self.assertEqual(filter_shape_and_matches(expr, universe)[2], ids)
+        self.assertEqual(nci.default_filter(reversed(sorted(ids))), expr)
 
 
 class Fixture(unittest.TestCase):
@@ -153,6 +222,27 @@ class Plan(Fixture):
         forward = nci.lpt({t: 1.0 for t in ids}, 3)
         self.assertEqual(nci.lpt({t: 1.0 for t in reversed(ids)}, 3), forward)
 
+    def test_plan_configs_verify_with_windows_text_newlines(self):
+        write_text = Path.write_text
+
+        def windows_write_text(path, text, encoding=None, errors=None, newline=None):
+            if newline is None:
+                text = text.replace("\n", "\r\n")
+                newline = ""
+            return write_text(path, text, encoding=encoding, errors=errors, newline=newline)
+
+        with mock.patch.object(Path, "write_text", windows_write_text):
+            plan = self.plan_ok(self.NAMES, workers=2)
+            self.assertIn(b"\r\n", (self.dir / "plan/plan.json").read_bytes())
+            for worker in plan["workers"]:
+                index = worker["index"]
+                with self.subTest(worker=index):
+                    rc, err = self.run_cli(
+                        "verify-archive", "--plan", self.dir / "plan/plan.json", "--worker", index,
+                        "--archive", self.archive, "--config", self.dir / f"plan/worker-{index}.toml",
+                        "--sha", SHA, "--run-id", "7", "--record", self.dir / f"results/worker-{index}")
+                    self.assertEqual(rc, 0, err)
+
     def test_slow_tests_are_spread_by_duration_not_count(self):
         times = {"m::slow": 100, "m::a": 30, "m::b": 30, "m::c": 30, "m::d": 1, "m::e": 1}
         plan = self.plan_ok(list(times), workers=2,
@@ -188,6 +278,28 @@ class Plan(Fixture):
     def test_single_worker_takes_every_test(self):
         one = self.plan_ok(self.NAMES, workers=1)
         self.assertEqual(len(one["workers"][0]["tests"]), len(self.NAMES))
+
+    def test_nightly_size_configs_verify_and_audit_on_one_and_six_workers(self):
+        import tomllib
+        names = [f"m::t{i}" for i in range(9134)] + [FLAKY]
+        universe = {(BIN, n) for n in names}
+        for workers in (1, 6):
+            for mode in ("policy", "all-once"):
+                with self.subTest(workers=workers, mode=mode):
+                    plan = self.plan_ok(names, workers=workers, mode=mode)
+                    selected = set()
+                    for worker in plan["workers"]:
+                        cfg = tomllib.loads((self.dir / f"plan/worker-{worker['index']}.toml").read_text())
+                        expr = cfg["profile"]["ci"]["default-filter"]
+                        ids = {tuple(t) for t in worker["tests"]}
+                        self.assertEqual(filter_shape_and_matches(expr, universe)[2], ids)
+                        selected |= ids
+                    self.assertEqual(selected, universe)
+                    results = f"results-{workers}-{mode}"
+                    self.worker_artifacts(plan, results=results)
+                    rc, verdict, err = self.audit(results=results)
+                    self.assertEqual((rc, verdict["verdict"], verdict["totals"]["executed"]),
+                                     (0, "pass", 9135), err)
 
     def test_worker_count_below_one_is_refused(self):
         for workers in (0, -1):

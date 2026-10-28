@@ -222,8 +222,17 @@ def load_policy(path, scope, today, universe, ignored):
     return sorted(entries, key=lambda e: (e["binary_id"], e["test"]))
 
 
+def _balanced_or(terms):
+    """Bound nextest's recursive filter tree depth even on small main-thread stacks."""
+    terms = list(terms)
+    while len(terms) > 1:
+        terms = [f"({terms[i]} | {terms[i + 1]})" if i + 1 < len(terms) else terms[i]
+                 for i in range(0, len(terms), 2)]
+    return terms[0] if terms else ""
+
+
 def _exact(binary_id, tests):
-    names = " | ".join(f"test(={t})" for t in tests)
+    names = _balanced_or(f"test(={t})" for t in tests)
     return f"binary_id(={binary_id}) & ({names})"
 
 
@@ -231,7 +240,7 @@ def default_filter(tests):
     by_binary = {}
     for binary_id, name in tests:
         by_binary.setdefault(binary_id, []).append(name)
-    return " | ".join(f"({_exact(b, sorted(n))})" for b, n in sorted(by_binary.items()))
+    return _balanced_or(f"({_exact(b, sorted(n))})" for b, n in sorted(by_binary.items()))
 
 
 def _check_base_config(cfg):
@@ -365,7 +374,7 @@ def cmd_plan(args):
     workers = []
     for index, tests in enumerate(buckets):
         text = worker_config(base_text, tests, policy, args.retry_mode)
-        (out / f"worker-{index}.toml").write_text(text)
+        (out / f"worker-{index}.toml").write_bytes(text.encode())
         workers.append({"index": index, "tests": [list(t) for t in tests],
                         "expected_seconds": round(loads[index], 3),
                         "config_sha256": hashlib.sha256(text.encode()).hexdigest()})

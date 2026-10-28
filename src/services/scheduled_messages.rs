@@ -22,6 +22,7 @@ pub(crate) mod provider_targets;
 mod push_handoff;
 use push_handoff::fire_push;
 mod timing;
+pub(crate) mod turn_completion;
 
 #[cfg(test)]
 use evidence::transcript_delivery_evidence;
@@ -524,7 +525,14 @@ async fn poll_agent_delivery(pool: &PgPool, delivery: RunningAgentDelivery) -> b
         return false;
     };
 
-    match find_turn_delivery_evidence(pool, turn_id, delivery.launch_committed_at).await {
+    match find_turn_delivery_evidence(
+        pool,
+        &delivery.delivery_id,
+        turn_id,
+        delivery.launch_committed_at,
+    )
+    .await
+    {
         Ok(Some(_)) => resolve_agent_delivery(pool, &delivery, false).await,
         Ok(None) => {
             let deadline =
@@ -626,9 +634,13 @@ async fn resolve_agent_delivery_inner(
         return Ok(false);
     }
 
-    let evidence =
-        find_turn_delivery_evidence_on_connection(&mut tx, turn_id, delivery.launch_committed_at)
-            .await?;
+    let evidence = find_turn_delivery_evidence_on_connection(
+        &mut tx,
+        &delivery.delivery_id,
+        turn_id,
+        delivery.launch_committed_at,
+    )
+    .await?;
     let now = Utc::now();
     let deadline = delivery.started_at + chrono::Duration::seconds(AGENT_COMPLETION_TIMEOUT_SECS);
     let timed_out = evidence.is_none() && allow_timeout && now >= deadline;

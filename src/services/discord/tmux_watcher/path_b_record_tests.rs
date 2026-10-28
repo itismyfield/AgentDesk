@@ -93,6 +93,9 @@ async fn persist(pool: &sqlx::PgPool, record: &PathBRecord<'_>, fallback_called:
                 agent_id: None,
                 assistant_message: "watcher body",
                 events: &[],
+                channel_effects: crate::services::discord::scheduled_turn::ChannelEffects::Allowed,
+                completion_range: ("", 0),
+                settle_pin: None,
             },
             || {
                 fallback_called.store(true, Ordering::SeqCst);
@@ -192,6 +195,106 @@ async fn a_pinned_record_never_borrows_a_later_thread_dispatch_pg() {
         Some(LATER_DISPATCH)
     );
     assert!(called.load(Ordering::SeqCst));
+
+    pool.close().await;
+    db.drop().await;
+}
+
+fn marked(user_msg_id: u64, start: u64, turn_id: Option<&str>) -> InflightTurnState {
+    let mut state = row(user_msg_id, start);
+    state.scheduled = match turn_id {
+        Some(turn_id) => crate::services::discord::scheduled_turn::ScheduledTurnMark::Scheduled {
+            turn_id: turn_id.to_string(),
+            isolated: true,
+            outcome: None,
+        },
+        None => crate::services::discord::scheduled_turn::ScheduledTurnMark::NotScheduled,
+    };
+    state
+}
+
+/// The committed range settles the turn pinned before its relay, else the late
+/// row, and only a turn that started inside the range.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn path_b_settles_only_the_scheduled_turn_that_owns_the_committed_range_pg() {
+    use crate::services::discord::scheduled_turn::ChannelEffects;
+    use crate::services::scheduled_messages::turn_completion::tests::{
+        launch_agent_delivery, stored_outcome,
+    };
+    let (db, pool) = create_pool().await;
+    for turn in ["pin-a", "late-b", "newer-c", "late-d"] {
+        launch_agent_delivery(&pool, turn, turn, true, "fail").await;
+    }
+    let settle = |late: Option<InflightTurnState>, pin: Option<InflightTurnState>| {
+        let pool = pool.clone();
+        async move {
+            let record = PathBRecord::select(late.as_ref(), pin.as_ref(), TMUX, 100);
+            let record = record.unwrap_or(PathBRecord {
+                state: late.as_ref().or(pin.as_ref()).unwrap(),
+                source: PathBSource::Late,
+            });
+            record
+                .persist_transcript(
+                    PathBTranscript {
+                        pool: Some(&pool),
+                        channel_id: ChannelId::new(CHANNEL),
+                        provider: &ProviderKind::Claude,
+                        agent_id: None,
+                        assistant_message: "watcher body",
+                        events: &[],
+                        channel_effects: ChannelEffects::Suppressed,
+                        completion_range: (TMUX, 100),
+                        settle_pin: pin.as_ref(),
+                    },
+                    || async { None },
+                )
+                .await;
+        }
+    };
+
+    // A snapshot pin A owns the range even when a live late row B was re-read.
+    settle(
+        Some(marked(1_420_000_000_000_000_011, 50, None)),
+        Some(marked(1_420_000_000_000_000_012, 10, Some("pin-a"))),
+    )
+    .await;
+    assert_eq!(
+        stored_outcome(&pool, "pin-a").await.as_deref(),
+        Some("delivered")
+    );
+    // A live pin keeps a snapshot late row B from taking this range's outcome.
+    settle(
+        Some(marked(1_420_000_000_000_000_013, 10, Some("late-b"))),
+        Some(marked(1_420_000_000_000_000_014, 10, None)),
+    )
+    .await;
+    assert_eq!(stored_outcome(&pool, "late-b").await, None);
+    // A pin that starts at the range end is a newer turn, not this range's owner.
+    settle(
+        None,
+        Some(marked(1_420_000_000_000_000_015, 100, Some("newer-c"))),
+    )
+    .await;
+    assert_eq!(stored_outcome(&pool, "newer-c").await, None);
+    // Without a pin the late row settles when it owns the range.
+    settle(
+        Some(marked(1_420_000_000_000_000_016, 10, Some("late-d"))),
+        None,
+    )
+    .await;
+    assert_eq!(
+        stored_outcome(&pool, "late-d").await.as_deref(),
+        Some("delivered")
+    );
+
+    let transcripts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_transcripts")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        transcripts, 0,
+        "a suppressed completion writes no channel transcript"
+    );
 
     pool.close().await;
     db.drop().await;

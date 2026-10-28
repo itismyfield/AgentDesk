@@ -116,6 +116,7 @@ fn terminal_commit_between_reservation_and_adoption_invalidates_episode_pin() {
                 last_offset: 8,
                 last_watcher_relayed_offset: Some(8),
                 last_watcher_relayed_generation_mtime_ns: None,
+                scheduled_outcome: None,
             },
         ),
         super::inflight::WatcherTerminalCommitOutcome::Committed,
