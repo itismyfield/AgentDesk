@@ -374,3 +374,179 @@ fn cold_handed_pending_does_not_claim_external_completion_or_republish() {
         Some(append::Decision::HandedPending)
     );
 }
+
+fn bind_response_receipt(
+    path: &Path,
+    tmux: &str,
+    prompt: &str,
+    turn: Option<&str>,
+) -> append::Receipt {
+    let record = serde_json::json!({"type":"event_msg","payload":{
+        "type":"item_completed","turn_id":turn,
+        "item":{"type":"UserMessage","id":"response-row","content":[{"type":"text","text":prompt}]}
+    }});
+    let start = std::fs::metadata(path).unwrap().len();
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(file, "{record}").unwrap();
+    let receipt = append::bind_record(tmux, path, start, &record).unwrap();
+    assert_eq!(receipt.native_turn.as_deref(), turn);
+    receipt
+}
+
+fn observe_response_record(
+    tmux: &str,
+    prompt: &str,
+    own_turn: Option<&str>,
+    inferred_turn: Option<&str>,
+) -> PromptObservation {
+    let record = serde_json::json!({"type":"response_item","payload":{
+        "type":"message","role":"user","id":"response-row",
+        "content":[{"type":"input_text","text":prompt}],
+        "internal_chat_message_metadata_passthrough":{
+            "turn_id":own_turn,"create_time":Utc::now().timestamp_millis() as f64 / 1000.0
+        }
+    }});
+    let (extracted, row, evidence) =
+        extract_codex_rollout_user_prompt_with_evidence(&record).unwrap();
+    assert_eq!(extracted, prompt);
+    assert_eq!(row.as_deref(), Some("response-row"));
+    assert_eq!(evidence.turn_id.as_deref(), own_turn);
+    observe_codex_record_prompt_at(
+        tmux,
+        &extracted,
+        row.as_deref(),
+        inferred_turn,
+        &evidence,
+        Utc::now(),
+    )
+}
+
+fn assert_response_still_unowned(
+    tmux: &str,
+    nonce: &str,
+    rx: &mut tokio::sync::broadcast::Receiver<ObservedTuiPrompt>,
+) {
+    assert_eq!(
+        append::projection("codex", tmux, nonce).unwrap().decision,
+        None
+    );
+    let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    assert!(
+        !state
+            .native_turn_by_tmux
+            .contains_key(&PromptKey::new("codex", tmux))
+    );
+    drop(state);
+    assert!(!external_input_relay_lease_present("codex", tmux, 7504));
+    assert_eq!(
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|event| event.tmux_session_name == tmux)
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn response_inferred_turn_cannot_settle_a_turnless_append_receipt() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    for inferred in ["target", "other-turn"] {
+        let tmux = format!("receipt-no-turn-{}", uuid::Uuid::new_v4());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("native.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let prompt = frame("response cannot supply missing receipt turn");
+        register_append(
+            &path,
+            &tmux,
+            "repair-no-turn",
+            "target",
+            &prompt,
+            false,
+            Some(751),
+        );
+        let receipt = bind_response_receipt(&path, &tmux, &prompt, None);
+        let mut rx = subscribe_observed_prompts();
+        assert_eq!(
+            observe_codex_prompt_in_turn_at(
+                &tmux,
+                &receipt.prompt,
+                Some(&receipt.row),
+                receipt.native_turn.as_deref(),
+                Utc::now(),
+            ),
+            PromptObservation::InjectedDeferred
+        );
+        assert_response_still_unowned(&tmux, "repair-no-turn", &mut rx);
+        assert_eq!(
+            observe_response_record(&tmux, &prompt, None, Some(inferred)),
+            PromptObservation::InjectedDeferred,
+            "inferred {inferred} is not receipt evidence"
+        );
+        assert_response_still_unowned(&tmux, "repair-no-turn", &mut rx);
+    }
+}
+
+#[test]
+fn response_native_turn_must_match_the_receipt_before_first_settlement() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    for target in ["t1", "old-target"] {
+        let tmux = format!("receipt-turn-match-{}", uuid::Uuid::new_v4());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("native.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let prompt = frame("receipt owns the native turn");
+        register_append(
+            &path,
+            &tmux,
+            "repair-match",
+            target,
+            &prompt,
+            false,
+            Some(751),
+        );
+        bind_response_receipt(&path, &tmux, &prompt, Some("t1"));
+        let mut rx = subscribe_observed_prompts();
+        assert_eq!(
+            observe_response_record(&tmux, &prompt, Some("t2"), Some("t1")),
+            PromptObservation::InjectedDeferred
+        );
+        assert_response_still_unowned(&tmux, "repair-match", &mut rx);
+        let (expected, decision) = if target == "t1" {
+            (PromptObservation::InjectedSteer, append::Decision::Joined)
+        } else {
+            (
+                PromptObservation::PublishedSshDirect,
+                append::Decision::HandedPending,
+            )
+        };
+        assert_eq!(
+            observe_response_record(&tmux, &prompt, Some("t1"), Some("t2")),
+            expected
+        );
+        assert_eq!(
+            append::projection("codex", &tmux, "repair-match")
+                .unwrap()
+                .decision,
+            Some(decision)
+        );
+        let published = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|event| event.tmux_session_name == tmux)
+            .count();
+        assert_eq!(published, usize::from(target != "t1"));
+        if target == "t1" {
+            STATE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .injected_steer_by_tmux
+                .remove(&PromptKey::new("codex", &tmux));
+            assert_eq!(
+                observe_response_record(&tmux, &prompt, None, None),
+                PromptObservation::InjectedSteer,
+                "a settled Joined row reuses its durable decision"
+            );
+            assert!(rx.try_recv().is_err());
+        }
+    }
+}

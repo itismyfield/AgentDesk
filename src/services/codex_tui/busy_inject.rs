@@ -154,6 +154,71 @@ pub(crate) fn inject(
     locked.unwrap_or(Outcome::NotSent(Veto::LockContended))
 }
 
+#[derive(PartialEq, Eq)]
+struct ComposerProof {
+    identity: (String, u32),
+    geometry: (usize, usize),
+}
+
+fn composer_proof(pane: &Pane) -> Result<ComposerProof, Veto> {
+    let query = [
+        "display-message",
+        "-p",
+        "-t",
+        pane.target(),
+        "#{pane_id}|#{pane_pid}|#{pane_width}|#{pane_height}|#{cursor_x}|#{cursor_y}|#{pane_in_mode}",
+    ];
+    let before = pane.ok(&query).ok_or(Veto::PaneUnavailable)?;
+    let capture = pane
+        .ok(&["capture-pane", "-p", "-e", "-t", pane.target()])
+        .ok_or(Veto::ComposerUnread)?;
+    let after = pane.ok(&query).ok_or(Veto::PaneUnavailable)?;
+    let shown = screen::read(&capture);
+    if shown.modal {
+        return Err(Veto::Modal);
+    }
+    if let Some(veto) = screen::append_veto(&capture, &shown) {
+        return Err(veto);
+    }
+    tracing::debug!(native_queue = shown.queued, "Codex composer admission");
+    if before != after {
+        return Err(Veto::ComposerUnread);
+    }
+    let fields: Vec<_> = after.trim().split('|').collect();
+    let [id, pid, width, height, "2", y, "0"] = fields.as_slice() else {
+        return Err(Veto::ComposerUnread);
+    };
+    let pid = pid
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or(Veto::ComposerUnread)?;
+    let width = width
+        .parse::<usize>()
+        .ok()
+        .filter(|width| *width > 0)
+        .ok_or(Veto::ComposerUnread)?;
+    let height = height
+        .parse::<usize>()
+        .ok()
+        .filter(|height| *height > 0)
+        .ok_or(Veto::ComposerUnread)?;
+    let y = y.parse::<usize>().ok().ok_or(Veto::ComposerUnread)?;
+    let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&capture);
+    let rows: Vec<_> = plain.lines().collect();
+    if id.is_empty()
+        || rows.len() != height
+        || y >= height
+        || rows.iter().rposition(|row| row.starts_with('›')) != Some(y)
+    {
+        return Err(Veto::ComposerUnread);
+    }
+    Ok(ComposerProof {
+        identity: (id.to_string(), pid),
+        geometry: (width, height),
+    })
+}
+
 fn inject_locked(
     pane: &Pane,
     request: &Request<'_>,
@@ -162,19 +227,10 @@ fn inject_locked(
     timing: &Timing,
 ) -> Outcome {
     let not_sent = Outcome::NotSent;
-    let Some(pane_id) = pane.ok(&["display-message", "-p", "-t", pane.target(), "#{pane_id}"])
-    else {
-        return not_sent(Veto::PaneUnavailable);
+    let before = match composer_proof(pane) {
+        Ok(proof) => proof,
+        Err(veto) => return not_sent(veto),
     };
-    let before = pane.capture().unwrap_or_default();
-    let shown = screen::read(&before);
-    if shown.modal {
-        return not_sent(Veto::Modal);
-    }
-    tracing::debug!(native_queue = shown.queued, "Codex composer admission");
-    if let Some(veto) = screen::append_veto(&before, &shown) {
-        return not_sent(veto);
-    }
     // Register every subsequent native record for the diagnostic observer.
     let Ok(offset) = std::fs::metadata(request.rollout).map(|meta| meta.len()) else {
         return not_sent(Veto::TranscriptUnavailable);
@@ -227,19 +283,20 @@ fn inject_locked(
             Veto::LedgerFull
         });
     }
-    let current_pane = pane.ok(&["display-message", "-p", "-t", pane.target(), "#{pane_id}"]);
-    let final_veto = if current_pane.as_deref() != Some(pane_id.as_str()) {
-        Some(Veto::PaneUnavailable)
-    } else {
-        match read_turn(request.rollout) {
-            Some(TurnVerdict::KnownModelTurn(turn)) if turn == request.target_turn => None,
-            Some(TurnVerdict::KnownModelTurn(_)) => Some(Veto::TurnChanged),
-            Some(TurnVerdict::NotBusy) => Some(Veto::NotBusy),
-            Some(TurnVerdict::NonSteerable(_)) => Some(Veto::NotSteerable),
-            Some(TurnVerdict::Unknown) => Some(Veto::TurnUnknown),
-            None => Some(Veto::TranscriptUnavailable),
-        }
-    };
+    let final_veto = match read_turn(request.rollout) {
+        Some(TurnVerdict::KnownModelTurn(turn)) if turn == request.target_turn => None,
+        Some(TurnVerdict::KnownModelTurn(_)) => Some(Veto::TurnChanged),
+        Some(TurnVerdict::NotBusy) => Some(Veto::NotBusy),
+        Some(TurnVerdict::NonSteerable(_)) => Some(Veto::NotSteerable),
+        Some(TurnVerdict::Unknown) => Some(Veto::TurnUnknown),
+        None => Some(Veto::TranscriptUnavailable),
+    }
+    .or_else(|| match composer_proof(pane) {
+        Ok(current) if current.identity != before.identity => Some(Veto::PaneUnavailable),
+        Ok(current) if current != before => Some(Veto::ComposerUnread),
+        Ok(_) => None,
+        Err(veto) => Some(veto),
+    });
     if let Some(veto) = final_veto {
         drop_buffer();
         ledger.withdraw();

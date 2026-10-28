@@ -143,6 +143,11 @@ pub(super) fn claim_injected_steer(
         if saved.decision == Some(append::Decision::Joined) {
             return Some(Claim::Joined { first: false });
         }
+        if saved.decision.is_none()
+            && (saved.native_turn.is_none() || saved.native_turn.as_deref() != native_turn)
+        {
+            return Some(Claim::Deferred);
+        }
         let ledger = state.injected_steer_by_tmux.entry(key.clone()).or_default();
         if !ledger.iter().any(|entry| entry.value.nonce == saved.id) {
             // A row already admitted is restored, never reserved against the pending limit again.

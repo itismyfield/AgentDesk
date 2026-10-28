@@ -20,9 +20,23 @@ const TURN: &str = "turn-open";
 const FAKE_TMUX: &str = r##"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
+screen_query() {
+  python3 - "$d" "$1" <<'PYSCREEN'
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+f = p / ('cap.pasted' if (p / 'pasted').exists() else 'cap.before')
+rows = f.read_text().splitlines()[-24:]
+rows = [''] * (24-len(rows)) + rows
+plain = [re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', row) for row in rows]
+y = next((i for i in range(23,-1,-1) if plain[i].startswith('›')),0)
+print(f'pane-codex|7504|80|24|2|{y}|0' if sys.argv[2] == 'meta' else '\n'.join(rows))
+PYSCREEN
+}
 case "$2" in
-display-message) echo "0,,80,24" ;;
-capture-pane) if [ -f "$d/pasted" ]; then cat "$d/cap.pasted"; else cat "$d/cap.before"; fi ;;
+display-message) case "$*" in *'#{pane_id}|#{pane_pid}|#{pane_width}'*) screen_query meta ;; *) echo "0,,80,24" ;; esac ;;
+capture-pane) case "$*" in *' -S '*)
+  if [ -f "$d/pasted" ]; then cat "$d/cap.pasted"; else cat "$d/cap.before"; fi ;;
+  *) screen_query view ;; esac ;;
 load-buffer) for last do :; done; cp "$last" "$d/buffer" ;;
 paste-buffer|send-keys)
   shift; echo "$*" >> "$d/keys"

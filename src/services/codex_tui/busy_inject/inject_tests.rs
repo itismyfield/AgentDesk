@@ -294,13 +294,19 @@ next() { n=$(cat "$d/$1.n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/$1.
 echo "$*" >> "$d/log"
 [ -f "$d/fail.$2" ] && exit 1
 case "$2" in
-display-message) [ -f "$d/gone" ] && exit 1; if [ -f "$d/loaded" ] && [ -f "$d/replace_pane" ]; then echo pane-other; else echo pane-7504; fi ;;
+display-message)
+  [ -f "$d/gone" ] && exit 1
+  case "$*" in *pane_width*) python3 "$d/screen.py" meta ;;
+  *) if [ -f "$d/loaded" ] && [ -f "$d/replace_pane" ]; then echo pane-other; else echo pane-7504; fi ;; esac ;;
 capture-pane)
   [ -f "$d/pasted" ] && [ -f "$d/fail_post_capture" ] && exit 1
-  next cap ;;
+  next cap > "$d/last-cap"
+  [ -f "$d/loaded" ] && [ -f "$d/cap.after" ] && cp "$d/cap.after" "$d/last-cap"
+  case "$*" in *' -S '*) cat "$d/last-cap" ;; *) python3 "$d/screen.py" view ;; esac ;;
 load-buffer)
   for last do :; done; cp "$last" "$d/buffer"
   touch "$d/loaded"
+  [ -f "$d/composer.after.json" ] && cp "$d/composer.after.json" "$d/composer.json"
   [ -f "$d/on_load" ] && cat "$d/on_load" >> '@T@'
   [ -f "$d/gone_after_load" ] && touch "$d/gone" ;;
 paste-buffer)
@@ -314,6 +320,24 @@ send-keys)
 esac
 [ -f "$d/fail_after.$2" ] && exit 1
 exit 0
+"#;
+
+const FAKE_SCREEN: &str = r#"import json, pathlib, re, sys
+p = pathlib.Path(__file__).parent
+m = {'id': 'pane-7504', 'pid': 7504, 'width': 80, 'height': 24, 'x': 2, 'mode': 0}
+f = p / ('meta.after.json' if (p / 'loaded').exists() and (p / 'meta.after.json').exists() else 'meta.json')
+if f.exists(): m.update(json.loads(f.read_text()))
+f = p / ('cap.after' if (p / 'loaded').exists() and (p / 'cap.after').exists() else 'last-cap')
+if not f.exists(): f = p / 'cap.1'
+rows = f.read_text().splitlines()[-m['height']:]
+rows = [''] * (m['height'] - len(rows)) + rows
+plain = [re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', row) for row in rows]
+m.setdefault('y', next((i for i in range(len(rows)-1, -1, -1) if plain[i].startswith('›')), 0))
+if (p / 'loaded').exists() and (p / 'replace_pane').exists(): m['id'] = 'pane-other'
+if sys.argv[1] == 'meta':
+    print('|'.join(str(m[k]) for k in ['id', 'pid', 'width', 'height', 'x', 'y', 'mode']))
+else:
+    print('\n'.join(rows))
 "#;
 
 #[derive(Default)]
@@ -340,8 +364,7 @@ struct Fake {
 }
 
 impl Fake {
-    /// An unattended 80x24 pane over an open model turn T, an empty composer before the paste and
-    /// the captured frame after it.
+    /// An unattended 80x24 viewport over an open turn with two empty pre-paste snapshots.
     fn new() -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/codex-busy-inject-tmp");
         fs::create_dir_all(&root).unwrap();
@@ -354,14 +377,26 @@ impl Fake {
         let program = dir.path().join("tmux");
         fs::write(&program, script).unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dir.path().join("screen.py"), FAKE_SCREEN).unwrap();
         let fake = Self { dir, rollout };
         fake.answers("attach", &["0,,80,24"]);
-        fake.caps(&["busy_empty.ansi", "busy_frame_v1.ansi"]);
+        fake.caps(&["busy_empty.ansi", "busy_empty.ansi", "busy_frame_v1.ansi"]);
         fake
     }
 
     /// Answers in call order; the last one repeats.
     fn answers(&self, name: &str, values: &[&str]) {
+        for entry in fs::read_dir(self.dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            let file = path.file_name().unwrap().to_string_lossy();
+            if file
+                .strip_prefix(&format!("{name}."))
+                .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
+            {
+                fs::remove_file(&path).unwrap();
+            }
+        }
+        fs::write(self.dir.path().join(format!("{name}.n")), "0").unwrap();
         for (i, value) in values.iter().enumerate() {
             fs::write(self.dir.path().join(format!("{name}.{}", i + 1)), value).unwrap();
         }
@@ -407,6 +442,15 @@ impl Fake {
         .unwrap();
     }
 
+    fn session(&self) -> String {
+        let name = self.dir.path().file_name().unwrap().to_string_lossy();
+        let name: String = name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        format!("codex-busy-{name}")
+    }
+
     fn run(&self, ledger: &FakeLedger) -> Outcome {
         self.run_with(ledger, BODY)
     }
@@ -416,12 +460,7 @@ impl Fake {
     }
 
     fn run_with_nonce(&self, ledger: &FakeLedger, text: &str, nonce: &str) -> Outcome {
-        let name = self.dir.path().file_name().unwrap().to_string_lossy();
-        let name: String = name
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        let session = format!("codex-busy-{name}");
+        let session = self.session();
         let pane = Pane::with_program(&session, self.dir.path().join("tmux"));
         let request = Request {
             session: &session,
@@ -548,7 +587,7 @@ fn the_turn_is_rechecked_before_the_paste() {
     }
 }
 
-/// Folded or oversized composer renders and unknown geometry still get exactly one Enter.
+/// A stable empty composer submits a payload once without predicting its post-paste wrapping.
 #[test]
 fn unpredictable_renders_still_send_once() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
@@ -564,7 +603,7 @@ fn unpredictable_renders_still_send_once() {
             Outcome::Injected
         );
         assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
-        assert_eq!(fake.calls("capture-pane"), 1);
+        assert_eq!(fake.calls("capture-pane"), 2);
     }
 }
 
@@ -597,19 +636,19 @@ fn the_ledger_brackets_the_paste() {
     assert_eq!((ledger.withdrawn.get(), fake.enters()), (0, 0));
 }
 
-/// Attach changes and foreign post-paste text never introduce another UI check.
+/// Attachment counts and post-paste text do not add checks after the final composer proof.
 #[test]
 fn attached_people_and_post_paste_text_do_not_withhold_enter() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     for attach in ["1,,80,24", "0,,80,24"] {
         let fake = Fake::new();
         fake.answers("attach", &[attach, "1,1791496900,12,10"]);
-        fake.caps(&["busy_empty.ansi", "busy_draft.ansi"]);
+        fake.caps(&["busy_empty.ansi", "busy_empty.ansi", "busy_draft.ansi"]);
         assert_eq!(fake.run(&FakeLedger::default()), Outcome::Injected);
         assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
-        assert_eq!(fake.calls("capture-pane"), 1);
+        assert_eq!(fake.calls("capture-pane"), 2);
         let log = fs::read_to_string(fake.dir.path().join("log")).unwrap();
-        assert!(!log.contains("session_attached") && !log.contains("pane_width"));
+        assert!(!log.contains("session_attached") && log.contains("pane_width"));
     }
 }
 
@@ -648,11 +687,18 @@ fn an_image_draft_is_refused_only_before_the_paste() {
     assert_eq!((writes, ledger.registered.get()), (0, 0));
     let fake = Fake::new();
     let after = with_image(&fixture("busy_frame_v1.ansi"));
-    fake.answers("cap", &[&fixture("busy_empty.ansi"), &after]);
+    fake.answers(
+        "cap",
+        &[
+            &fixture("busy_empty.ansi"),
+            &fixture("busy_empty.ansi"),
+            &after,
+        ],
+    );
     let outcome = fake.run(&FakeLedger::default());
     assert_eq!(outcome, Outcome::Injected);
     assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
-    assert_eq!(fake.calls("capture-pane"), 1);
+    assert_eq!(fake.calls("capture-pane"), 2);
 }
 
 /// Blank lines and tall pasted text need no post-paste rendering proof.
@@ -819,7 +865,14 @@ fn common_glyphs_submit_without_a_width_allowlist() {
     );
     let fake = Fake::new();
     fake.answers("attach", &["0,,80,50"]);
-    fake.answers("cap", &[&fixture("busy_empty.ansi"), &shown]);
+    fake.answers(
+        "cap",
+        &[
+            &fixture("busy_empty.ansi"),
+            &fixture("busy_empty.ansi"),
+            &shown,
+        ],
+    );
     fake.accept_into(T);
     let on_enter = fake.dir.path().join("on_enter");
     let record = fs::read_to_string(&on_enter).unwrap().replace(
@@ -845,7 +898,7 @@ fn a_plan_unread_composers_fall_back_and_known_empty_composers_submit() {
     ] {
         let fake = Fake::new();
         fake.answers("attach", &[size]);
-        fake.answers("cap", &[&before, "unread post-paste screen"]);
+        fake.answers("cap", &[&before, &before, "unread post-paste screen"]);
         let outcome = fake.run(&FakeLedger::default());
         if before == "\n› \n\n  GPT-6-Luna xh" {
             assert_eq!(outcome, Outcome::NotSent(Veto::ComposerUnread));
@@ -854,7 +907,14 @@ fn a_plan_unread_composers_fall_back_and_known_empty_composers_submit() {
             assert_eq!(outcome, Outcome::Injected);
             assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
         }
-        assert_eq!(fake.calls("capture-pane"), 1);
+        assert_eq!(
+            fake.calls("capture-pane"),
+            if before == "\n› \n\n  GPT-6-Luna xh" {
+                1
+            } else {
+                2
+            }
+        );
     }
 }
 
@@ -878,7 +938,7 @@ fn a_plan_unread_next_snapshot_falls_back_and_recovers_without_retyping() {
         Outcome::Injected
     );
     assert_eq!((fake.calls("paste-buffer"), fake.enters()), (2, 2));
-    assert_eq!(fake.calls("capture-pane"), 3);
+    assert_eq!(fake.calls("capture-pane"), 5);
 }
 
 /// Every menu fixture is refused before buffer loading or input registration.
@@ -991,7 +1051,7 @@ fn late_or_unreadable_receipts_are_diagnostic_only() {
     )
     .unwrap();
     wait_receipt(&fake);
-    assert_eq!((fake.calls("capture-pane"), fake.enters()), (1, 1));
+    assert_eq!((fake.calls("capture-pane"), fake.enters()), (2, 1));
     let fake = Fake::new();
     fake.flag("remove_rollout");
     assert_eq!(fake.run(&FakeLedger::default()), Outcome::Injected);

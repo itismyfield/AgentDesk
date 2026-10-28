@@ -6,7 +6,12 @@ use crate::services::codex_tui::input::{
 };
 
 /// Words that only Codex's status row carries below the composer.
-const STATUS_MARKERS: &[&str] = &["context left", "% left", "tab to queue message"];
+const STATUS_MARKERS: &[&str] = &[
+    "context left",
+    "% left",
+    "tab to queue message",
+    " · ← for agents",
+];
 /// Footers of the transcript overlay and the review pickers, which hide the composer.
 const MODAL_FOOTERS: &[&str] = &[
     "q close",
@@ -114,7 +119,9 @@ fn composer(raw: &[&str], plain: &[String]) -> (Composer, bool) {
     }
     let first = plain[top].trim_start_matches('›');
     let first = first.strip_prefix(' ').unwrap_or(first);
-    if top == last && (first.trim().is_empty() || only_dim_after_mark(raw[top])) {
+    if top == last
+        && (first.is_empty() || (!first.trim().is_empty() && only_dim_after_mark(raw[top])))
+    {
         return (Composer::Empty, attachments);
     }
     let rest = plain[top + 1..=last]
@@ -219,7 +226,11 @@ pub(super) fn append_veto(capture: &str, shown: &Screen) -> Option<super::Veto> 
         return Some(Veto::DraftPlaceholderUnproven);
     }
     // Selection absence and cursor coordinates alone do not establish default editor semantics.
-    if capture.contains("[7m") || capture.contains(";7m") {
+    if capture
+        .lines()
+        .skip(top.unwrap_or(0))
+        .any(|row| row.contains("[7m") || row.contains(";7m"))
+    {
         return Some(Veto::DraftSelectionUnproven);
     }
     match &shown.composer {

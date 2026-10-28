@@ -76,6 +76,7 @@ pub(crate) struct Projection {
     pub admitted: bool,
     pub bound: bool,
     pub row: Option<String>,
+    pub native_turn: Option<String>,
     pub decision: Option<Decision>,
 }
 
@@ -96,6 +97,7 @@ fn projected(entry: &Entry) -> Projection {
         admitted: a.admission == Admission::Admitted,
         bound: a.receipt.is_some(),
         row: a.receipt.as_ref().map(|r| r.row.clone()),
+        native_turn: a.receipt.as_ref().and_then(|r| r.turn.clone()),
         decision: a.decision,
     }
 }
