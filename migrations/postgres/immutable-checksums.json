@@ -773,7 +773,7 @@
     },
     {
       "path": "migrations/postgres/0152_server_campaigns.sql",
-      "sha256": "0d4abf7105b3c363eca9dbb0f7d1a09da37e981db0352661d680b800c66f1898",
+      "sha256": "ce84944787b4b464f184c8a8e5a272845c4a1057026d824e36bc153bedde3fa8",
       "version": 152
     }
   ],

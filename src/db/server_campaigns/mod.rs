@@ -38,8 +38,17 @@ pub enum CommandOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandReply {
     pub outcome: CommandOutcome,
+    pub response: ReceiptResponse,
     pub replayed: bool,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiptResponse {
+    pub status: u16,
+    pub body: serde_json::Value,
+}
+
+pub type RenderReceipt = fn(&CommandOutcome) -> StoreResult<ReceiptResponse>;
 
 #[derive(Clone, Copy)]
 enum Request<'a> {
@@ -47,15 +56,16 @@ enum Request<'a> {
     Command(&'a Command),
 }
 
-/// B2 supplies a stable campaign ID and maps this saved outcome to its HTTP response.
+/// B2 supplies a stable ID and a pure response renderer; replay uses the saved response.
 pub async fn create(
     pool: &PgPool,
     id: &str,
     input: &DefinitionInput,
     key: &str,
     observed_at: DateTime<Utc>,
+    render: RenderReceipt,
 ) -> StoreResult<CommandReply> {
-    transact(pool, id, key, observed_at, Request::Create(input)).await
+    transact(pool, id, key, observed_at, Request::Create(input), render).await
 }
 
 /// Internal domain commands are not an HTTP request DTO or an execution toggle.
@@ -63,6 +73,7 @@ pub async fn execute(
     pool: &PgPool,
     id: &str,
     envelope: &CommandEnvelope,
+    render: RenderReceipt,
 ) -> StoreResult<CommandReply> {
     transact(
         pool,
@@ -70,6 +81,7 @@ pub async fn execute(
         &envelope.idempotency_key,
         envelope.observed_at,
         Request::Command(&envelope.command),
+        render,
     )
     .await
 }
@@ -80,9 +92,10 @@ async fn transact(
     key: &str,
     observed_at: DateTime<Utc>,
     request: Request<'_>,
+    render: RenderReceipt,
 ) -> StoreResult<CommandReply> {
     let mut tx = pool.begin().await?;
-    let reply = apply(&mut tx, id, key, observed_at, request).await?;
+    let reply = apply(&mut tx, id, key, observed_at, request, render).await?;
     tx.commit().await?;
     Ok(reply)
 }
@@ -93,6 +106,7 @@ async fn apply(
     key: &str,
     observed_at: DateTime<Utc>,
     request: Request<'_>,
+    render: RenderReceipt,
 ) -> StoreResult<CommandReply> {
     if !definition::valid_id(id) || key.trim().is_empty() {
         return Err(StoreError::InvalidIdentity);
@@ -120,14 +134,26 @@ async fn apply(
          ON d.campaign_id = r.campaign_id AND d.run_id = r.run_id WHERE d.campaign_id = $1 FOR UPDATE OF r",
     ).bind(id).fetch_optional(&mut **tx).await?;
     let saved = sqlx::query(
-        "SELECT fingerprint, outcome FROM server_campaign_receipts WHERE campaign_id = $1 AND idempotency_key = $2",
-    ).bind(id).bind(key).fetch_optional(&mut **tx).await?;
+        "SELECT fingerprint, outcome, response_status, response_body FROM server_campaign_receipts \
+         WHERE campaign_id = $1 AND idempotency_key = $2",
+    )
+    .bind(id)
+    .bind(key)
+    .fetch_optional(&mut **tx)
+    .await?;
     if let Some(saved) = saved {
         if saved.try_get::<String, _>("fingerprint")? != fingerprint {
             return Err(StoreError::IdempotencyConflict);
         }
         return Ok(CommandReply {
             outcome: saved.try_get::<Json<CommandOutcome>, _>("outcome")?.0,
+            response: ReceiptResponse {
+                status: u16::try_from(saved.try_get::<i32, _>("response_status")?)
+                    .map_err(|_| StoreError::InconsistentState)?,
+                body: saved
+                    .try_get::<Json<serde_json::Value>, _>("response_body")?
+                    .0,
+            },
             replayed: true,
         });
     }
@@ -159,13 +185,17 @@ async fn apply(
         Some(Err(rejection)) => CommandOutcome::Decided(Err(rejection)),
         None => CommandOutcome::NotFound,
     };
+    let response = render(&outcome)?;
     sqlx::query(
-        "INSERT INTO server_campaign_receipts (campaign_id, idempotency_key, fingerprint, outcome, observed_at) \
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO server_campaign_receipts \
+         (campaign_id, idempotency_key, fingerprint, outcome, observed_at, response_status, response_body) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     ).bind(id).bind(key).bind(fingerprint).bind(Json(&outcome)).bind(observed_at)
+        .bind(i32::from(response.status)).bind(Json(&response.body))
         .execute(&mut **tx).await?;
     Ok(CommandReply {
         outcome,
+        response,
         replayed: false,
     })
 }

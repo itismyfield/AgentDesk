@@ -2,6 +2,46 @@ use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::campaign_execution::control::tests as domain;
 
+pub(super) fn render(outcome: &CommandOutcome) -> StoreResult<ReceiptResponse> {
+    Ok(ReceiptResponse {
+        status: match outcome {
+            CommandOutcome::Decided(Ok(_)) => 200,
+            CommandOutcome::Decided(Err(_)) => 409,
+            CommandOutcome::NotFound => 404,
+        },
+        body: serde_json::to_value(outcome)?,
+    })
+}
+
+fn changed_render(_: &CommandOutcome) -> StoreResult<ReceiptResponse> {
+    Ok(ReceiptResponse {
+        status: 208,
+        body: serde_json::json!({"changed_renderer": true}),
+    })
+}
+
+fn failed_render(_: &CommandOutcome) -> StoreResult<ReceiptResponse> {
+    Err(StoreError::InconsistentState)
+}
+
+pub(super) async fn create(
+    pool: &PgPool,
+    id: &str,
+    input: &DefinitionInput,
+    key: &str,
+    observed_at: DateTime<Utc>,
+) -> StoreResult<CommandReply> {
+    super::create(pool, id, input, key, observed_at, render).await
+}
+
+pub(super) async fn execute(
+    pool: &PgPool,
+    id: &str,
+    envelope: &CommandEnvelope,
+) -> StoreResult<CommandReply> {
+    super::execute(pool, id, envelope, render).await
+}
+
 pub(super) struct Harness {
     pub fixture: TestPostgresDb,
     pub pool: PgPool,
@@ -115,6 +155,7 @@ async fn concurrent_create_same_key_and_lost_response_replay_before_stale_pg() {
     );
     let (a, b) = (a.unwrap(), b.unwrap());
     assert_eq!(a.outcome, b.outcome);
+    assert_eq!(a.response, b.response);
     assert_ne!(a.replayed, b.replayed);
     assert_eq!(applied(a.outcome.clone()).event_sequence, 1);
     applied(send(&h.pool, "edit", edit(1, "Changed after response loss")).await);
@@ -124,6 +165,18 @@ async fn concurrent_create_same_key_and_lost_response_replay_before_stale_pg() {
         .unwrap();
     assert!(retry.replayed);
     assert_eq!(retry.outcome, a.outcome);
+    assert_eq!(retry.response, a.response);
+    let retry_with_changed_renderer = super::create(
+        &h.pool,
+        "campaign",
+        &input,
+        "create",
+        domain::now(),
+        changed_render,
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry_with_changed_renderer.response, a.response);
     assert_eq!(
         events(&h.pool, "campaign", None, 0, 500)
             .await
@@ -286,6 +339,18 @@ async fn failed_create_and_missing_target_receipts_survive_new_pool_pg() {
         .unwrap();
     assert!(retry.replayed);
     assert_eq!(retry.outcome, failed.outcome);
+    let retry_with_changed_renderer = super::create(
+        &h.pool,
+        "campaign",
+        &invalid,
+        "bad-create",
+        domain::now(),
+        changed_render,
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry_with_changed_renderer.response, failed.response);
+    assert_eq!(retry_with_changed_renderer.response.status, 409);
     assert_eq!(
         execute(&h.pool, "campaign", &missing)
             .await
@@ -326,6 +391,7 @@ async fn rollback_and_receipt_insert_failure_leave_no_partial_action_or_event_pg
             "rolled-back",
             domain::now(),
             Request::Command(&command),
+            render,
         )
         .await
         .unwrap()
@@ -333,6 +399,17 @@ async fn rollback_and_receipt_insert_failure_leave_no_partial_action_or_event_pg
     );
     assert_eq!(get(&h.pool, "campaign").await.unwrap(), Some(state.clone()));
     tx.rollback().await.unwrap();
+    assert!(matches!(
+        super::execute(
+            &h.pool,
+            "campaign",
+            &envelope("render-failure", command.clone()),
+            failed_render
+        )
+        .await,
+        Err(StoreError::InconsistentState)
+    ));
+    assert_eq!(get(&h.pool, "campaign").await.unwrap(), Some(state.clone()));
     // A failure after all state writes must roll the entire command back.
     sqlx::query("CREATE FUNCTION reject_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected receipt failure'; END $$")
         .execute(&h.pool).await.unwrap();
@@ -390,6 +467,7 @@ async fn run_lock_holds_command_until_commit_and_replays_response_loss_pg() {
         "stop",
         domain::now(),
         Request::Command(&command),
+        render,
     )
     .await
     .unwrap();

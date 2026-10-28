@@ -101,6 +101,8 @@ CREATE TABLE server_campaign_receipts (
     idempotency_key TEXT NOT NULL,
     fingerprint TEXT NOT NULL,
     outcome JSONB NOT NULL,
+    response_status INTEGER NOT NULL CHECK (response_status BETWEEN 100 AND 599),
+    response_body JSONB NOT NULL,
     observed_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (campaign_id, idempotency_key)
 );
