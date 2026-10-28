@@ -215,7 +215,7 @@ pub(super) struct RelayE2eHarness {
     _provider_guard: crate::config::TestEnvVarGuard,
     _config_guard: crate::config::TestEnvVarGuard,
     _root_guard: crate::config::TestEnvVarGuard,
-    _env_lock: SharedTestEnvLockGuard,
+    _env_lock: crate::config_live_reload::TestLiveGuard,
     root: tempfile::TempDir,
 }
 
@@ -298,6 +298,7 @@ impl RelayE2eHarness {
         bind_with_pool: bool,
         env_lock: SharedTestEnvLockGuard,
     ) -> Self {
+        let live_guard = crate::config_live_reload::test_live_guard(env_lock);
         let root = tempfile::tempdir().expect("isolated AgentDesk root");
         let root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",
@@ -376,7 +377,7 @@ impl RelayE2eHarness {
             _provider_guard: provider_guard,
             _config_guard: config_guard,
             _root_guard: root_guard,
-            _env_lock: env_lock,
+            _env_lock: live_guard,
             root,
         }
     }
