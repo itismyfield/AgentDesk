@@ -490,12 +490,16 @@ class HerdrProviderHold(unittest.TestCase):
             message["author"] = {"id": author, "bot": message.pop("author_bot")}
         return rows
 
-    def run_hold(self, provider, rows):
+    def run_hold(self, provider, rows, *, real_wait=False):
         self.args.cell = provider + "-herdr"
         self.cancel.reset_mock()
+        self.client.fetch_messages.reset_mock()
         self.client.fetch_messages.return_value = rows
-        self.client.wait_for_message.side_effect = lambda _channel, *, predicate, **kw: (
-            next((message for message in rows if predicate(message)), None), rows)
+        if real_wait:
+            self.client.wait_for_message.side_effect = driver.discord.DiscordClient.wait_for_message.__get__(self.client)
+        else:
+            self.client.wait_for_message.side_effect = lambda _channel, *, predicate, **kw: (
+                next((message for message in rows if predicate(message)), None), rows)
         scenario = dict(id="E-18", agent_mode="real_live", coverage_class="live", assertions=[], steps=[
             {"send_provider_hold_prompt": {"ok_marker": self.OK, "late_marker": self.LATE, "hold_seconds": 60}},
             {"wait_for_provider_hold_state": {"ok_marker": self.OK, "late_marker": self.LATE}},
@@ -544,6 +548,18 @@ class HerdrProviderHold(unittest.TestCase):
                 self.assertEqual(result["status"], "fail", result)
                 self.assertIn("Herdr Discord marker timeout: " + self.OK, result["reason"])
                 self.cancel.assert_not_called()
+
+    def test_real_wait_observes_same_poll_late_before_cancel(self):
+        for provider in self.PROVIDERS:
+            with self.subTest(provider=provider):
+                rows = self.capture(provider) + [bot(1562545294149943328, self.LATE,
+                                                    author={"id": self.PROVIDERS[provider], "bot": True})]
+                result = self.run_hold(provider, rows, real_wait=True)
+                self.assertEqual(self.cancel.call_count, 0,
+                                 f"{provider}: cancel_calls={self.cancel.call_count}, status={result['status']}")
+                self.assertEqual(result["status"], "fail", result)
+                self.assertIn("Herdr hold already ended before operation", result["reason"])
+                self.client.fetch_messages.assert_called_once_with(self.args.channel_id, after_id="100", limit=100)
 
 
 class HerdrTextClear(unittest.TestCase):
