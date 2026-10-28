@@ -1144,13 +1144,33 @@ async fn i7441b_local_snapshot_reuses_mtime_and_refreshes_changed_ledger() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let f = Fixture::new(744203, ProviderKind::Claude, &["body"]).await;
-    let first = super::local_snapshot(f.root.clone(), f.row.channel_id, None)
-        .await
-        .unwrap();
+    let requested = || {
+        f.plan()
+            .pieces
+            .into_iter()
+            .map(|p| (p.key, p.index))
+            .collect()
+    };
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    let first = super::local_snapshot(
+        f.root.clone(),
+        f.row.channel_id,
+        requested(),
+        deadline,
+        None,
+    )
+    .await
+    .unwrap();
     let first_state = first.1.clone().unwrap();
-    let cached = super::local_snapshot(f.root.clone(), f.row.channel_id, Some(first))
-        .await
-        .unwrap();
+    let cached = super::local_snapshot(
+        f.root.clone(),
+        f.row.channel_id,
+        requested(),
+        deadline,
+        Some(first),
+    )
+    .await
+    .unwrap();
     assert!(std::sync::Arc::ptr_eq(
         &first_state,
         cached.1.as_ref().unwrap()
@@ -1162,14 +1182,26 @@ async fn i7441b_local_snapshot_reuses_mtime_and_refreshes_changed_ledger() {
         .join("ledger.jsonl");
     let original = std::fs::read(&ledger).unwrap();
     std::fs::remove_file(&ledger).unwrap();
-    let missing = super::local_snapshot(f.root.clone(), f.row.channel_id, Some(cached))
-        .await
-        .unwrap();
+    let missing = super::local_snapshot(
+        f.root.clone(),
+        f.row.channel_id,
+        requested(),
+        deadline,
+        Some(cached),
+    )
+    .await
+    .unwrap();
     assert!(missing.1.is_none());
     std::fs::write(&ledger, original).unwrap();
-    let refreshed = super::local_snapshot(f.root.clone(), f.row.channel_id, Some(missing))
-        .await
-        .unwrap();
+    let refreshed = super::local_snapshot(
+        f.root.clone(),
+        f.row.channel_id,
+        requested(),
+        deadline,
+        Some(missing),
+    )
+    .await
+    .unwrap();
     assert!(refreshed.1.is_some());
     assert!(!std::sync::Arc::ptr_eq(
         &first_state,
