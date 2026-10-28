@@ -1930,6 +1930,8 @@ src/
 │   │   │   │   │   ├── runtime_transition.rs
 │   │   │   │   │   ├── session_preparation.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
+│   │   │   │   │   ├── start_placeholder.rs
+│   │   │   │   │   ├── start_placeholder_tests.rs
 │   │   │   │   │   ├── system_prompt_tests.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs

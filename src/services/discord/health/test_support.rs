@@ -19,6 +19,8 @@ pub(in crate::services::discord) type Answer =
 /// Local Discord stand-in that logs each request as `METHOD path`.
 pub(in crate::services::discord) struct MockDiscord {
     pub(in crate::services::discord) http: Arc<Http>,
+    /// Also serves the runtime API, for fixtures that point it here.
+    pub(in crate::services::discord) port: u16,
     calls: Arc<Mutex<Vec<String>>>,
     requests: Arc<Mutex<Vec<String>>>,
     successful_requests: Arc<Mutex<Vec<String>>>,
@@ -99,6 +101,7 @@ impl MockDiscord {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         Self {
             http: Arc::new(http),
+            port,
             calls,
             requests,
             successful_requests,

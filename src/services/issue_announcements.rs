@@ -441,6 +441,75 @@ fn trim_non_empty(value: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn p2_allowed_mentions_issue_title_announcement_wire_preserves_content_on_retry() {
+        use axum::{
+            Json, Router,
+            extract::State,
+            http::{StatusCode, header::RETRY_AFTER},
+            response::{IntoResponse, Response},
+            routing::post,
+        };
+        use serde_json::{Value, json};
+        use std::sync::{Arc, Mutex};
+
+        async fn receive(
+            State(payloads): State<Arc<Mutex<Vec<Value>>>>,
+            Json(payload): Json<Value>,
+        ) -> Response {
+            let attempt = {
+                let mut payloads = payloads.lock().unwrap();
+                payloads.push(payload);
+                payloads.len()
+            };
+            if attempt == 1 {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(RETRY_AFTER, "0")],
+                    Json(json!({"retry_after": 0, "message": "rate limited"})),
+                )
+                    .into_response()
+            } else {
+                Json(json!({"id": "9001"})).into_response()
+            }
+        }
+
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let payloads = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let app = Router::new()
+            .route("/channels/123/messages", post(receive))
+            .with_state(payloads.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let _env = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_DISCORD_API_BASE_URL",
+            std::ffi::OsStr::new(&base),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let title = "<@1234> @everyone @here <@&5678> 이슈 제목";
+        let content = render_active_card(7419, title, Some("project-agentdesk"), Utc::now());
+        let correlation = format!("p2-issue-wire:{}", uuid::Uuid::new_v4());
+        let id = send_issue_announcement_message(
+            "test-token",
+            "123",
+            None,
+            &content,
+            &correlation,
+            "created",
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(id, "9001");
+        let payloads = payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 2);
+        for payload in payloads.iter() {
+            assert_eq!(payload["content"], content);
+            assert!(payload["content"].as_str().unwrap().contains(title));
+            assert_eq!(payload["allowed_mentions"]["parse"], json!(["users"]));
+        }
+    }
+
     #[test]
     fn renders_active_card_with_agent_and_timestamp() {
         let created_at = DateTime::parse_from_rfc3339("2026-04-29T00:00:00Z")

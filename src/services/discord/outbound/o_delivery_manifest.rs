@@ -67,8 +67,21 @@ pub(super) fn provider(kind: &ProviderKind) -> Option<ShadowProvider> {
     }
 }
 
-/// Prefix hashing is bounded too; an oversized history cannot bypass the caller's deadline.
 pub(super) fn build(root: &Path, query: Query<'_>, deadline: Instant) -> Option<Manifest> {
+    build_with_prefix_limit(root, query, deadline, PREFIX_CAP as u64)
+}
+
+/// Terminal evidence verifies the full captured prefix within the shared ACK deadline.
+pub(super) fn build_terminal(root: &Path, query: Query<'_>, deadline: Instant) -> Option<Manifest> {
+    build_with_prefix_limit(root, query, deadline, u64::MAX)
+}
+
+fn build_with_prefix_limit(
+    root: &Path,
+    query: Query<'_>,
+    deadline: Instant,
+    prefix_limit: u64,
+) -> Option<Manifest> {
     let cursor = delivery_evidence::source(root, query.channel, query.path, query.file)?;
     let (start, end) = query.range;
     if start >= end || end - start > SOURCE_CAP as u64 {
@@ -84,12 +97,12 @@ pub(super) fn build(root: &Path, query: Query<'_>, deadline: Instant) -> Option<
     let mut chunk = [0; 8192];
     let mut position = 0_u64;
     while position < cursor.captured_through {
-        if Instant::now() >= deadline || position >= PREFIX_CAP as u64 {
+        if Instant::now() >= deadline || position >= prefix_limit {
             return None;
         }
         let remaining = (cursor.captured_through - position)
             .min(chunk.len() as u64)
-            .min(PREFIX_CAP as u64 - position);
+            .min(prefix_limit - position);
         let read = file.read(&mut chunk[..remaining as usize]).ok()?;
         if read == 0 {
             return None;
