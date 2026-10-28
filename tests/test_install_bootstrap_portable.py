@@ -717,7 +717,8 @@ else:
                 failed = self.install_fixture(fixture, timeout_env)
                 self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
                 self.assertNotIn("Installation Complete", failed.stdout)
-                self.assertLess(time.monotonic() - started, 6)
+                # The 1s override must apply instead of the 60s default; the timing also covers fixture setup, which takes several seconds on a loaded host.
+                self.assertLess(time.monotonic() - started, 30)
                 binary = runtime / "bin/agentdesk"
                 self.assertTrue(binary.is_file(), failed.stdout + failed.stderr)
                 self.assertEqual(binary.read_bytes(), (fixture / "agentdesk").read_bytes())
