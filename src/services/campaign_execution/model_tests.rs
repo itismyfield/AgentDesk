@@ -202,3 +202,41 @@ fn model_fence_ack_requires_run_identity_even_when_gate_and_version_are_known() 
     ack["expected_run"] = json!("run-1");
     assert!(serde_json::from_value::<Command>(ack).is_ok());
 }
+
+#[test]
+fn model_rejection_definition_error_is_backward_compatible_and_preserves_typed_details() {
+    use crate::db::server_campaigns::CommandOutcome;
+    use crate::services::campaign_execution::definition::DefinitionErrorCode;
+
+    let legacy = json!({"code":"invalid_definition","target":null});
+    let rejection: Rejection = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(rejection, Rejection::new(RejectionCode::InvalidDefinition));
+    assert!(rejection.definition_error.is_none());
+    assert_eq!(serde_json::to_value(rejection).unwrap(), legacy);
+    let legacy_outcome = json!({"Decided":{"Err":legacy}});
+    let outcome: CommandOutcome = serde_json::from_value(legacy_outcome.clone()).unwrap();
+    assert_eq!(serde_json::to_value(outcome).unwrap(), legacy_outcome);
+
+    let detail = DefinitionError {
+        code: DefinitionErrorCode::MissingDependency,
+        target: Some("a".into()),
+        path: vec!["absent".into()],
+    };
+    let rejection = Rejection::invalid_definition(detail.clone());
+    assert_eq!(rejection.target, detail.target);
+    assert_eq!(rejection.definition_error, Some(detail));
+    let encoded = json!({
+        "code":"invalid_definition", "target":"a",
+        "definition_error":{"code":"missing_dependency","target":"a","path":["absent"]}
+    });
+    assert_eq!(serde_json::to_value(&rejection).unwrap(), encoded);
+    assert_eq!(
+        serde_json::from_value::<Rejection>(encoded).unwrap(),
+        rejection
+    );
+    let outcome = CommandOutcome::Decided(Err(rejection));
+    assert_eq!(
+        serde_json::from_value::<CommandOutcome>(serde_json::to_value(&outcome).unwrap()).unwrap(),
+        outcome
+    );
+}

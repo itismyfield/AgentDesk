@@ -252,8 +252,8 @@ pub fn create_definition(
     if !definition::valid_id(&id) || idempotency_key.trim().is_empty() {
         return Err(reject(RejectionCode::InvalidDefinition));
     }
-    let definition = definition::validate_definition(input)
-        .map_err(|_| reject(RejectionCode::InvalidDefinition))?;
+    let definition =
+        definition::validate_definition(input).map_err(Rejection::invalid_definition)?;
     let nodes = definition
         .input()
         .nodes
@@ -291,7 +291,7 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
             revision(state, *expected_revision)?;
             edit_guard(state)?;
             let validated = definition::validate_definition(definition.clone())
-                .map_err(|_| reject(RejectionCode::InvalidDefinition))?;
+                .map_err(Rejection::invalid_definition)?;
             let superseded_nodes = state.definition.superseded_nodes(&validated);
             if !superseded_nodes.is_empty()
                 && !change.as_ref().is_some_and(|c| {

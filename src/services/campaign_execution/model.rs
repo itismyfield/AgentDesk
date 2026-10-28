@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::definition::{DefinitionHashes, DefinitionInput, ValidatedDefinition};
+use super::definition::{DefinitionError, DefinitionHashes, DefinitionInput, ValidatedDefinition};
 
 macro_rules! domain_enum {
     ($name:ident { $($variant:ident),+ $(,)? }) => {
@@ -104,10 +104,23 @@ domain_enum!(ReasonCode {
 pub struct Rejection {
     pub code: RejectionCode,
     pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_error: Option<DefinitionError>,
 }
 impl Rejection {
     pub fn new(code: RejectionCode) -> Self {
-        Self { code, target: None }
+        Self {
+            code,
+            target: None,
+            definition_error: None,
+        }
+    }
+    pub fn invalid_definition(error: DefinitionError) -> Self {
+        Self {
+            code: RejectionCode::InvalidDefinition,
+            target: error.target.clone(),
+            definition_error: Some(error),
+        }
     }
 }
 

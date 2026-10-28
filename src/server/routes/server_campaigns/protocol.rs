@@ -90,9 +90,14 @@ fn rejection(rejection: &Rejection) -> AppError {
         }
         _ => AppError::conflict("server campaign command rejected"),
     };
-    error
+    let error = error
         .with_context("rejection", rejection.code)
-        .with_context("target", &rejection.target)
+        .with_context("target", &rejection.target);
+    if let Some(detail) = &rejection.definition_error {
+        error.with_context("definition_error", detail)
+    } else {
+        error
+    }
 }
 
 fn render(outcome: &CommandOutcome, status: StatusCode) -> StoreResult<ReceiptResponse> {

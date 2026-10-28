@@ -310,7 +310,18 @@ async fn failed_create_and_missing_target_receipts_survive_new_pool_pg() {
     let failed = create(&h.pool, "campaign", &invalid, "bad-create", domain::now())
         .await
         .unwrap();
-    rejected(failed.outcome.clone(), RejectionCode::InvalidDefinition);
+    assert_eq!(
+        failed.outcome,
+        CommandOutcome::Decided(Err(Rejection {
+            code: RejectionCode::InvalidDefinition,
+            target: Some("a".into()),
+            definition_error: Some(definition::DefinitionError {
+                code: definition::DefinitionErrorCode::EmptyAcceptance,
+                target: Some("a".into()),
+                path: Vec::new(),
+            }),
+        }))
+    );
     let missing = envelope(
         "missing",
         Command::Start {

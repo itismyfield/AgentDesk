@@ -571,38 +571,129 @@ async fn internal_commands_and_unknown_nested_execution_fields_are_400_without_m
 #[tokio::test]
 async fn invalid_definition_returns_400_and_durable_failure_receipt_pg() {
     let mut h = Harness::new().await;
-    let mut definitions = Vec::new();
-    let mut invalid = definition();
-    invalid["nodes"][0]["acceptance"] = json!([]);
-    definitions.push(invalid);
+    let mut cases = Vec::new();
     let mut invalid = definition();
     invalid["nodes"][0]["dependencies"] = json!(["a"]);
-    definitions.push(invalid);
+    cases.push((
+        "cycle",
+        invalid,
+        json!({"code":"cycle","target":null,"path":["a","a"]}),
+    ));
+    let mut invalid = definition();
+    invalid["nodes"][0]["acceptance"] = json!([]);
+    cases.push((
+        "empty_ac",
+        invalid,
+        json!({"code":"empty_acceptance","target":"a","path":[]}),
+    ));
     let mut invalid = definition();
     invalid["nodes"][0]["dependencies"] = json!(["absent"]);
-    definitions.push(invalid);
+    cases.push((
+        "missing_dependency",
+        invalid,
+        json!({"code":"missing_dependency","target":"a","path":["absent"]}),
+    ));
     let mut invalid = definition();
     let duplicate = invalid["nodes"][0].clone();
     invalid["nodes"].as_array_mut().unwrap().push(duplicate);
-    definitions.push(invalid);
+    cases.push((
+        "duplicate_node",
+        invalid,
+        json!({"code":"duplicate_node","target":"a","path":[]}),
+    ));
+    let mut invalid = definition();
+    let duplicate = invalid["nodes"][0]["acceptance"][0].clone();
+    invalid["nodes"][0]["acceptance"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate);
+    cases.push((
+        "duplicate_ac",
+        invalid,
+        json!({"code":"duplicate_acceptance","target":"ac-a","path":[]}),
+    ));
     let mut invalid = definition();
     invalid["profile_version"] = json!("unsupported");
-    definitions.push(invalid);
+    cases.push((
+        "unsupported_profile",
+        invalid,
+        json!({"code":"unsupported_profile","target":"profile_version","path":[]}),
+    ));
+    assert_eq!(
+        request(&h.app, "POST", "/server-campaigns", Some(create_body()))
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    for (index, (case, definition, expected)) in cases.iter().enumerate() {
+        let post =
+            json!({"id":format!("bad-{index}"),"idempotency_key":"bad","definition":definition});
+        let put = json!({"idempotency_key":format!("bad-{index}"),"expected_definition_revision":1,"definition":definition});
+        for (method, path, body) in [
+            ("POST", "/server-campaigns", post),
+            ("PUT", "/server-campaigns/campaign/definition", put),
+        ] {
+            let failed = request(&h.app, method, path, Some(body.clone())).await;
+            assert_eq!(failed.0, StatusCode::BAD_REQUEST, "{method} {case}");
+            assert_eq!(
+                failed.1["context"]["definition_error"], *expected,
+                "typed definition error must survive {method} {case}"
+            );
+            assert_eq!(failed.1["context"]["rejection"], "invalid_definition");
+            assert_eq!(failed.1["context"]["target"], expected["target"]);
+            println!(
+                "F1B_API_R2_ERROR_JSON={}",
+                json!({"method":method,"case":case,"status":failed.0.as_u16(),"body":failed.1})
+            );
+            h.reconnect().await;
+            assert_eq!(
+                request(&h.app, method, path, Some(body)).await,
+                failed,
+                "saved response must replay after reconnect: {method} {case}"
+            );
+        }
+    }
+    let receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM server_campaign_receipts")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(receipts, i64::try_from(cases.len()).unwrap() * 2 + 1);
+
+    // Invalid serde input never reaches domain validation or creates a receipt.
     let mut invalid = definition();
     invalid["nodes"][0]["acceptance"][0]["verification"] = json!("PASS");
-    definitions.push(invalid);
-    for (index, definition) in definitions.into_iter().enumerate() {
-        let body =
-            json!({"id":format!("bad-{index}"),"idempotency_key":"bad","definition":definition});
-        let failed = request(&h.app, "POST", "/server-campaigns", Some(body.clone())).await;
+    for (method, path, body) in [
+        (
+            "POST",
+            "/server-campaigns",
+            json!({"id":"bad-serde","idempotency_key":"bad","definition":invalid}),
+        ),
+        (
+            "PUT",
+            "/server-campaigns/campaign/definition",
+            json!({"idempotency_key":"bad-serde","expected_definition_revision":1,"definition":invalid}),
+        ),
+    ] {
+        let failed = request(&h.app, method, path, Some(body)).await;
         assert_eq!(failed.0, StatusCode::BAD_REQUEST);
-        h.reconnect().await;
-        assert_eq!(
-            request(&h.app, "POST", "/server-campaigns", Some(body)).await,
-            failed
-        );
+        assert!(failed.1["context"].get("definition_error").is_none());
     }
-    assert!(store::list(&h.pool, 100, 0).await.unwrap().is_empty());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM server_campaign_receipts")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap(),
+        receipts
+    );
+    assert_eq!(store::list(&h.pool, 100, 0).await.unwrap().len(), 1);
+    assert_eq!(
+        store::get(&h.pool, "campaign")
+            .await
+            .unwrap()
+            .unwrap()
+            .definition_revision,
+        1
+    );
     h.close().await;
 }
 
