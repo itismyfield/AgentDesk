@@ -361,11 +361,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     );
                     continue;
                 }
-                // Mark the user message completed only after terminal delivery
-                // commits (else the channel shows completion without the final
-                // message). A message-less turn (user_msg_id == 0) has no analytics
-                // row to key (`discord:<ch>:0` is bogus) and `MessageId::new(0)`
-                // panics; the transcript persist below stays unconditional.
                 // Settle before the visible completion, which may already drop the row.
                 super::analytics_transcript::settle_recovered_answer(
                     shared.pg_pool.as_ref(),
@@ -373,6 +368,11 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     &assistant_response,
                 )
                 .await;
+                // Mark the user message completed only after terminal delivery
+                // commits (else the channel shows completion without the final
+                // message). A message-less turn (user_msg_id == 0) has no analytics
+                // row to key (`discord:<ch>:0` is bogus) and `MessageId::new(0)`
+                // panics; the transcript persist below stays unconditional.
                 let user_msg_id = optional_message_id(state.user_msg_id);
                 let visible_outcome = complete_recovery_visible_turn(
                     http,
