@@ -76,7 +76,7 @@ fn claude(record: &Value, identity_version: u32) -> Vec<RecordFact> {
         Some("assistant") => std::iter::once(RecordFact::Assistant)
             .chain(claude_blocks(record, identity_version))
             .collect(),
-        Some("user") => claude_user(record),
+        Some("user") => claude_user(record, identity_version),
         _ => Vec::new(),
     }
 }
@@ -190,8 +190,16 @@ fn claude_body(resumed: bool, block: &Value) -> UnitContent {
     payload(text)
 }
 
-fn claude_user(record: &Value) -> Vec<RecordFact> {
-    let native = record.get("isMeta") != Some(&Value::Bool(true));
+/// Claude's top-level compaction marker, including the underscored spelling.
+pub(crate) fn record_is_compact_summary(record: &Value) -> bool {
+    ["isCompactSummary", "is_compact_summary"]
+        .into_iter()
+        .any(|key| record.get(key).and_then(Value::as_bool).unwrap_or(false))
+}
+
+fn claude_user(record: &Value, identity_version: u32) -> Vec<RecordFact> {
+    let native = record.get("isMeta") != Some(&Value::Bool(true))
+        && (identity_version < 7 || !record_is_compact_summary(record));
     match record
         .get("message")
         .and_then(|message| message.get("content"))
@@ -344,6 +352,62 @@ mod tests {
             payload["turn_id"] = turn_id.into();
         }
         json!({"type": "event_msg", "payload": payload})
+    }
+
+    #[test]
+    fn compact_summary_v7_excludes_only_explicit_markers_from_prompts() {
+        use super::{RecordFact, classify, classify_with_version};
+        let text = "This session is being continued from a previous conversation... /compact";
+        for marker in ["isCompactSummary", "is_compact_summary"] {
+            for content in [json!(text), json!([{"type":"text", "text":text}])] {
+                let mut record =
+                    json!({"type":"user", "uuid":"summary", "message":{"content":content}});
+                record[marker] = true.into();
+                for version in 2..=6 {
+                    assert_eq!(
+                        classify_with_version(ShadowProvider::Claude, &record, version),
+                        [RecordFact::Prompt(true, text.into())],
+                        "v{version} retains its original rules"
+                    );
+                }
+                assert!(classify_with_version(ShadowProvider::Claude, &record, 7).is_empty());
+                assert!(classify(ShadowProvider::Claude, &record).is_empty());
+            }
+            for flag in [Value::Null, json!(false), json!("true"), json!(1)] {
+                let mut record = json!({"type":"user", "message":{"content":text}});
+                record[marker] = flag;
+                assert_eq!(
+                    classify(ShadowProvider::Claude, &record),
+                    [RecordFact::Prompt(true, text.into())]
+                );
+            }
+        }
+        for text in [text, "/compact"] {
+            let record =
+                json!({"type":"user", "message":{"isCompactSummary":true, "content":text}});
+            assert_eq!(
+                classify(ShadowProvider::Claude, &record),
+                [RecordFact::Prompt(true, text.into())]
+            );
+        }
+    }
+
+    #[test]
+    fn compact_summary_keeps_tool_result_seals_without_opening_a_turn() {
+        use super::{RecordFact, classify, classify_with_version};
+        for marker in ["isCompactSummary", "is_compact_summary"] {
+            let mut record = json!({"type":"user", "message":{"content":[
+                {"type":"tool_result", "tool_use_id":"existing-tool", "content":"internal"},
+                {"type":"text", "text":"compacted context"}
+            ]}});
+            record[marker] = true.into();
+            let old = classify_with_version(ShadowProvider::Claude, &record, 6);
+            assert!(matches!(old.last(), Some(RecordFact::Prompt(true, _))));
+            assert_eq!(
+                classify(ShadowProvider::Claude, &record),
+                old[..old.len() - 1]
+            );
+        }
     }
 
     /// Only a synthetic non-error row that is nothing but resume chrome is excluded; API errors

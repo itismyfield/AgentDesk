@@ -40,6 +40,7 @@ use poise::serenity_prelude::ChannelId;
 use serde_json::Value;
 
 use crate::services::agent_protocol::StatusEvent;
+use crate::services::tui_o::shadow::identity::record_is_compact_summary;
 
 use super::PlaceholderLiveEvents;
 use super::background_task_events::{notification_is_terminal, tool_use_id_from_notification};
@@ -314,15 +315,6 @@ fn last_compact_boundary_offset_within_tail(
         }
     }
     Ok(boundary)
-}
-
-/// `true` for a Claude Code compaction boundary record. The marker is the
-/// top-level `isCompactSummary` flag; the underscored spelling is accepted
-/// defensively.
-fn record_is_compact_summary(value: &Value) -> bool {
-    ["isCompactSummary", "is_compact_summary"]
-        .into_iter()
-        .any(|key| value.get(key).and_then(Value::as_bool).unwrap_or(false))
 }
 
 /// Pulls the subagent / background-task Start events out of one transcript
