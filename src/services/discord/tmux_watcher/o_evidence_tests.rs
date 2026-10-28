@@ -14,7 +14,7 @@ pub(super) fn retain_dlq_task(task: Option<tokio::task::JoinHandle<()>>) {
         DLQ_TASKS.with(|tasks| tasks.borrow_mut().push(task));
     }
 }
-async fn flush_dlq_tasks() {
+pub(super) async fn flush_dlq_tasks() {
     let tasks = DLQ_TASKS.with(|tasks| std::mem::take(&mut *tasks.borrow_mut()));
     for task in tasks {
         tokio::time::timeout(std::time::Duration::from_secs(2), task)

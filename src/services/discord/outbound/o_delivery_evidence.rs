@@ -178,21 +178,15 @@ pub(in crate::services::discord) struct Frame<'a> {
     pub sent: usize,
 }
 
-pub(in crate::services::discord) async fn tail(
-    http: &Arc<serenity::Http>,
-    shared: &SharedData,
-    frame: Frame<'_>,
-    deadline: Instant,
-) -> Option<TailCovered> {
-    let root = crate::config::runtime_root()?;
+async fn terminal_manifest(root: &Path, frame: &Frame<'_>, deadline: Instant) -> Option<Manifest> {
     let (build_root, provider, path) = (
-        root.clone(),
+        root.to_path_buf(),
         frame.provider.clone(),
         frame.path.to_path_buf(),
     );
     let channel = frame.channel.get();
     let (file, range) = (frame.file, frame.range);
-    let plan = tokio::time::timeout_at(
+    tokio::time::timeout_at(
         deadline,
         tokio::task::spawn_blocking(move || {
             manifest::build_terminal(
@@ -211,27 +205,76 @@ pub(in crate::services::discord) async fn tail(
     .await
     .ok()?
     .ok()
-    .flatten()?;
-    if plan.range != frame.range || plan.body != frame.body {
-        return None;
+    .flatten()
+}
+
+fn unavailable(
+    frame: &Frame<'_>,
+    stage: &str,
+    began: Instant,
+    local_readable: Option<bool>,
+) -> Option<TailCovered> {
+    tracing::warn!(
+        channel_id = frame.channel.get(),
+        stage,
+        local_readable = ?local_readable,
+        elapsed_ms = began.elapsed().as_millis() as u64,
+        frame_start = frame.range.0,
+        frame_end = frame.range.1,
+        body_bytes = frame.body.len(),
+        "O terminal evidence unavailable"
+    );
+    None
+}
+
+pub(in crate::services::discord) async fn tail(
+    http: &Arc<serenity::Http>,
+    shared: &SharedData,
+    frame: Frame<'_>,
+    deadline: Instant,
+) -> Option<TailCovered> {
+    let began = Instant::now();
+    let root = crate::config::runtime_root()?;
+    let channel = frame.channel.get();
+    let Some(plan) = terminal_manifest(&root, &frame, deadline).await else {
+        return unavailable(&frame, "source_manifest", began, None);
+    };
+    if plan.range != frame.range {
+        return unavailable(&frame, "manifest_range", began, None);
     }
-    let bot = tokio::time::timeout_at(deadline, http.get_current_user())
-        .await
-        .ok()?
-        .ok()?
-        .id
-        .get();
+    if plan.body != frame.body {
+        tracing::warn!(
+            channel_id = channel,
+            manifest_bytes = plan.body.len(),
+            frame_bytes = frame.body.len(),
+            "O terminal manifest body differs"
+        );
+        return unavailable(&frame, "manifest_body", began, None);
+    }
+    let Ok(Ok(bot)) = tokio::time::timeout_at(deadline, http.get_current_user()).await else {
+        return unavailable(&frame, "bot_identity", began, None);
+    };
+    let bot = bot.id.get();
     let port = GatewayPort::new(Arc::clone(http), bot);
     let mut local = None;
     loop {
         if Instant::now() >= deadline {
-            return None;
+            return unavailable(
+                &frame,
+                "receipt_or_exact_get_deadline",
+                began,
+                Some(
+                    local
+                        .as_ref()
+                        .is_some_and(|snapshot: &LocalSnapshot| snapshot.1.is_some()),
+                ),
+            );
         }
         local = tokio::time::timeout_at(deadline, local_snapshot(root.clone(), channel, local))
             .await
             .ok()
             .flatten();
-        if tokio::time::timeout_at(
+        let covered = tokio::time::timeout_at(
             deadline,
             verify(
                 shared.pg_pool.as_ref(),
@@ -245,9 +288,16 @@ pub(in crate::services::discord) async fn tail(
         .await
         .ok()
         .flatten()
-        .is_some()
-        {
-            return Some(TailCovered { _private: () });
+        .is_some();
+        if covered {
+            let Some(current) = terminal_manifest(&root, &frame, deadline).await else {
+                return unavailable(&frame, "source_revalidation", began, None);
+            };
+            return if current == plan && Instant::now() < deadline {
+                Some(TailCovered { _private: () })
+            } else {
+                unavailable(&frame, "source_changed_or_expired", began, None)
+            };
         }
         let pause = deadline
             .saturating_duration_since(Instant::now())

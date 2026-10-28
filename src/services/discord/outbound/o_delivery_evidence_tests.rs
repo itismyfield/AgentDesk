@@ -128,11 +128,20 @@ impl Fixture {
         uncertain: u8,
         ending: Option<serde_json::Value>,
     ) -> Self {
-        Self::new_scoped(channel, provider, bodies, uncertain, ending, None).await
+        Self::new_scoped(channel, provider, bodies, uncertain, ending, None, 0).await
     }
 
     pub async fn injected_with_prefix(channel: u64, bodies: &[&str], prefix: usize) -> Self {
-        Self::new_scoped(channel, ProviderKind::Claude, bodies, 0, None, Some(prefix)).await
+        Self::new_scoped(
+            channel,
+            ProviderKind::Claude,
+            bodies,
+            0,
+            None,
+            Some(prefix),
+            0,
+        )
+        .await
     }
 
     async fn new_scoped(
@@ -142,6 +151,7 @@ impl Fixture {
         uncertain: u8,
         ending: Option<serde_json::Value>,
         prefix: Option<usize>,
+        padding: usize,
     ) -> Self {
         let root = crate::config::runtime_root().unwrap();
         std::fs::create_dir_all(&root).unwrap();
@@ -156,6 +166,10 @@ impl Fixture {
             ProviderKind::Codex => { values.push(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}));
                 values.push(json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"input"}]}})); },
             _ => panic!("native fixture provider"),
+        }
+        if padding > 0 {
+            values
+                .push(json!({"type":"system","subtype":"metadata","padding":"x".repeat(padding)}));
         }
         let mut body = String::new();
         for (index, text) in bodies.iter().enumerate() {
@@ -1161,4 +1175,118 @@ async fn i7441b_local_snapshot_reuses_mtime_and_refreshes_changed_ledger() {
         &first_state,
         refreshed.1.as_ref().unwrap()
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c2_terminal_manifest_cost_at_operational_size() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    for (index, prefix) in [0, 107_680_321].into_iter().enumerate() {
+        let f =
+            Fixture::injected_with_prefix(744280 + index as u64, &["background result"], prefix)
+                .await;
+        for budget in [9900, 250] {
+            manifest::SOURCE_BYTES.store(0, Ordering::SeqCst);
+            let began = Instant::now();
+            let result = manifest::build_terminal(
+                &f.root,
+                manifest::Query {
+                    provider: &ProviderKind::Claude,
+                    channel: f.row.channel_id,
+                    path: &f.source.path,
+                    file: (f.source.dev, f.source.ino),
+                    range: (f.row.turn_start_offset.unwrap(), f.row.last_offset),
+                },
+                began + std::time::Duration::from_millis(budget),
+            );
+            eprintln!(
+                "C2_SOURCE_COST prefix={prefix} frame={} budget_ms={budget} elapsed_us={} bytes={} covered={}",
+                f.row.last_offset - prefix as u64,
+                began.elapsed().as_micros(),
+                manifest::SOURCE_BYTES.load(Ordering::SeqCst),
+                result.is_some()
+            );
+            assert!(began.elapsed() < std::time::Duration::from_secs(11));
+            assert!(result.is_some());
+            assert!(
+                manifest::SOURCE_BYTES.load(Ordering::SeqCst)
+                    <= (f.row.last_offset - prefix as u64) as usize + 8192
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c2_frame_read_bound_and_expired_deadline_are_exact() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    for (index, (prefix, padding)) in [(0, 0), (107_680_321, 0), (107_680_321, 800_000)]
+        .into_iter()
+        .enumerate()
+    {
+        let f = Fixture::new_scoped(
+            744290 + index as u64,
+            ProviderKind::Claude,
+            &["bounded answer"],
+            0,
+            None,
+            Some(prefix),
+            padding,
+        )
+        .await;
+        let query = || manifest::Query {
+            provider: &ProviderKind::Claude,
+            channel: f.row.channel_id,
+            path: &f.source.path,
+            file: (f.source.dev, f.source.ino),
+            range: (f.row.turn_start_offset.unwrap(), f.row.last_offset),
+        };
+        manifest::SOURCE_BYTES.store(0, Ordering::SeqCst);
+        let began = Instant::now();
+        let plan =
+            manifest::build_terminal(&f.root, query(), began + std::time::Duration::from_secs(1))
+                .unwrap();
+        let bytes = manifest::SOURCE_BYTES.load(Ordering::SeqCst);
+        let frame = f.row.last_offset as usize - prefix;
+        assert_eq!(bytes, frame + 2 * prefix.min(4096));
+        assert_eq!(plan.body, f.body);
+        eprintln!(
+            "C2_BOUNDED_SOURCE prefix={prefix} frame={frame} bytes={bytes} elapsed_us={}",
+            began.elapsed().as_micros()
+        );
+        manifest::SOURCE_BYTES.store(0, Ordering::SeqCst);
+        assert!(manifest::build_terminal(&f.root, query(), Instant::now()).is_none());
+        assert_eq!(manifest::SOURCE_BYTES.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441c2_prefix_edit_keeps_the_input_prefix_contract_strict() {
+    use std::io::{Seek, SeekFrom, Write};
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let f = Fixture::injected_with_prefix(744295, &["already posted"], 16384).await;
+    let query = || manifest::Query {
+        provider: &ProviderKind::Claude,
+        channel: f.row.channel_id,
+        path: &f.source.path,
+        file: (f.source.dev, f.source.ino),
+        range: (f.row.turn_start_offset.unwrap(), f.row.last_offset),
+    };
+    let deadline = Instant::now() + std::time::Duration::from_secs(1);
+    assert!(manifest::build(&f.root, query(), deadline).is_some());
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&f.source.path)
+        .unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.write_all(b"X").unwrap();
+    assert_eq!(
+        crate::services::tui_o::shadow::capture::file_identity(&file.metadata().unwrap()),
+        (f.source.dev, f.source.ino)
+    );
+    assert!(manifest::build(&f.root, query(), deadline).is_none());
+    let frame = manifest::build_terminal(&f.root, query(), deadline).unwrap();
+    assert_eq!(frame.body, f.body);
+    assert!(frame.prefix.starts_with("terminal-frame-v1:"));
 }
