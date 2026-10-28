@@ -64,6 +64,9 @@
 
 use super::super::super::DiscordSession;
 use super::super::memory_lifecycle::TurnEndMemoryPlan;
+use crate::db::session_transcripts::SessionTranscriptEvent;
+use crate::services::discord::scheduled_turn;
+use crate::services::scheduled_messages::turn_completion::{self, ScheduledTurnOutcome};
 use crate::ui::ai_screen::{HistoryItem, HistoryType};
 
 /// A held or unclassified protected request keeps its session and takes no ordinary outcome.
@@ -78,17 +81,23 @@ pub(super) async fn replay_withheld(
 
 /// Re-admission authorizes only the isolated attempt's own transcript;
 /// it grants no channel effects and the postlude also rejects cancelled turns.
+/// A scheduled snapshot turn is isolated by its launch mark as well, so a
+/// renamed channel or a restart kickoff cannot re-admit its channel writeback.
 pub(super) async fn resolve_completion_scope(
     shared: &std::sync::Arc<super::super::super::SharedData>,
     channel_id: poise::serenity_prelude::ChannelId,
     provider: &crate::services::provider::ProviderKind,
     turn_key: Option<&str>,
     turn_id: &str,
+    inflight: &crate::services::discord::inflight::InflightTurnState,
 ) -> (bool, bool) {
     let canonical =
         super::super::super::adk_session::build_adk_session_key(shared, channel_id, provider, None)
             .await;
-    let isolated = turn_key.is_some_and(|key| canonical.as_deref() != Some(key));
+    let isolated = turn_key.is_some_and(|key| canonical.as_deref() != Some(key))
+        || scheduled_turn::channel_effects(shared.pg_pool.as_ref(), &[Some(inflight)])
+            .await
+            .suppressed();
     let routine = isolated
         && crate::db::session_transcripts::routine_attempt_owns_turn_pg(
             shared.pg_pool.as_ref(),
@@ -97,6 +106,61 @@ pub(super) async fn resolve_completion_scope(
         )
         .await;
     (isolated, routine)
+}
+
+/// What this completion proved about its turn, for the scheduled delivery.
+pub(in crate::services::discord::turn_bridge) struct ScheduledCompletion<'a> {
+    /// The final answer was committed and recorded (not cancelled).
+    pub(in crate::services::discord::turn_bridge) answer_committed: bool,
+    pub(in crate::services::discord::turn_bridge) empty_response: bool,
+    pub(in crate::services::discord::turn_bridge) full_response: &'a str,
+    pub(in crate::services::discord::turn_bridge) transcript_events: &'a [SessionTranscriptEvent],
+    pub(in crate::services::discord::turn_bridge) provider_failure: bool,
+}
+
+impl ScheduledCompletion<'_> {
+    /// The outcome mirrored with the delivery commit wins, so this completion and a
+    /// restart recovery of the same row settle identically.
+    fn outcome(
+        &self,
+        inflight: &crate::services::discord::inflight::InflightTurnState,
+    ) -> Option<ScheduledTurnOutcome> {
+        if self.empty_response {
+            return Some(ScheduledTurnOutcome::EmptyResponse);
+        }
+        if !self.answer_committed {
+            return None;
+        }
+        inflight.scheduled.outcome().or_else(|| {
+            turn_completion::classify(
+                self.full_response,
+                turn_completion::terminal_error_event(self.transcript_events),
+                self.provider_failure,
+            )
+        })
+    }
+}
+
+/// Settle this turn's scheduled delivery before the inflight row is
+/// dropped. A cancelled or replay-withheld turn takes no ordinary outcome.
+pub(in crate::services::discord::turn_bridge) async fn record_scheduled_completion(
+    shared: &super::super::super::SharedData,
+    token: &crate::services::provider::CancelToken,
+    inflight: &crate::services::discord::inflight::InflightTurnState,
+    completion: ScheduledCompletion<'_>,
+) {
+    if !inflight.scheduled.may_settle()
+        || super::super::should_suppress_headless_delivery_for_cancel(Some(token))
+    {
+        return;
+    }
+    let Some(outcome) = completion.outcome(inflight) else {
+        return;
+    };
+    if replay_withheld(shared, token, inflight).await {
+        return;
+    }
+    scheduled_turn::settle(shared.pg_pool.as_ref(), inflight, Some(outcome)).await;
 }
 
 /// Outcome of the end-of-turn channel-session writeback.
@@ -418,3 +482,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "scheduled_completion_tests.rs"]
+mod scheduled_completion_tests;

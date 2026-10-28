@@ -1497,3 +1497,47 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
         }
     }
 }
+
+/// A scheduled answer captured but not delivered before the restart is relayed
+/// by recovery; retiring its row settles the delivery with that commit's outcome.
+#[tokio::test(flavor = "current_thread")]
+async fn a_captured_answer_relayed_after_boot_settles_its_scheduled_delivery_pg() {
+    use crate::services::scheduled_messages::turn_completion::tests as delivery;
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    delivery::launch_agent_delivery(&pool, "retire-hook", "retire-hook-turn", true, "fail").await;
+    let mut fixture = Fixture::new(5_074_201);
+    fixture.shared =
+        crate::services::discord::host_teardown_gate::test_support::shared_on(&pool).await;
+    fixture.state.scheduled =
+        crate::services::discord::scheduled_turn::ScheduledTurnMark::Scheduled {
+            turn_id: "retire-hook-turn".to_string(),
+            isolated: true,
+            outcome: None,
+        };
+    let state = fixture.state.clone();
+    fixture.claim().await;
+
+    let mut relayed = 0;
+    assert!(
+        fixture
+            .settle(&state, |_| {
+                relayed += 1;
+                std::future::ready(RecoveryRelayOutcome::Delivered)
+            })
+            .await
+    );
+    assert_eq!(relayed, 1);
+    assert!(fixture.load().is_none(), "the delivered row is retired");
+    assert_eq!(
+        delivery::stored_outcome(&pool, "retire-hook-turn")
+            .await
+            .as_deref(),
+        Some("delivered")
+    );
+
+    drop(fixture);
+    pool.close().await;
+    db.drop().await;
+}

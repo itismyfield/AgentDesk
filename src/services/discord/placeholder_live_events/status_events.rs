@@ -368,13 +368,9 @@ pub(in crate::services::discord) fn status_events_from_json_for_footer_mode(
         "background_event" => background_status_events(value),
         _ => Vec::new(),
     };
-    let source_unix = value.get("timestamp").and_then(|stamp| {
-        stamp.as_i64().or_else(|| {
-            chrono::DateTime::parse_from_rfc3339(stamp.as_str()?)
-                .ok()
-                .map(|stamp| stamp.timestamp())
-        })
-    });
+    let source_unix = value
+        .get("timestamp")
+        .and_then(super::tool_activity::source_unix);
     for event in &mut events {
         if let StatusEvent::ToolActivity {
             source_unix: source,
