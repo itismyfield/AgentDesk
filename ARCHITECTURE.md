@@ -445,6 +445,8 @@ src/
 │   │   ├── agents_crud/
 │   │   │   └── agent_read.rs
 │   │   ├── agents_turn_deliver/
+│   │   │   ├── legacy_origin.rs
+│   │   │   ├── legacy_origin_tests.rs
 │   │   │   └── pg_tests.rs
 │   │   ├── auth/
 │   │   │   ├── tailnet_peer.rs
@@ -1325,7 +1327,8 @@ src/
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   ├── inject_codex_v2_tests.rs
-│   │   │   │   └── inject_tests.rs
+│   │   │   │   ├── inject_tests.rs
+│   │   │   │   └── prepared.rs
 │   │   │   ├── unbound_owners/
 │   │   │   │   └── tests.rs
 │   │   │   ├── watcher_respawn/
@@ -3077,6 +3080,7 @@ src/
 │   ├── herdr_launch_tests/
 │   │   └── retired_hold_tests.rs
 │   ├── imsg_reply/
+│   │   ├── admission.rs
 │   │   ├── contract.rs
 │   │   ├── episode.rs
 │   │   └── mod.rs
