@@ -5,7 +5,7 @@
   verify-archive  worker preflight: archive digest, checkout SHA, run and config must match the plan
   audit           per-worker artifacts -> verdict JSON and Markdown summary; any gap is red
   base-diff       compare a plan with the plan of a fixed comparison base SHA; every lost test needs a
-                  matching scripts/ci/test-removal-justifications.txt row and every row a matching loss
+                  matching scripts/ci/test-removal-justifications.txt row; landed rows only warn
   required-gate, comparison-base, classify-worker   see nextest_required.py
 
 Every input format carries a version and is rejected when it does not match; a missing or
@@ -623,7 +623,7 @@ def load_justifications(path):
 
 
 def platform_losses(path, binary_id):
-    """{(ID text, kind): platforms} the macOS/Windows sources lost or newly ignore; Linux is the plan's job."""
+    """Native losses and IDs present in either source tree; unknown presence stays fail-closed."""
     try:
         doc = json.loads(Path(path).read_text())
         lost = {(kind, p): doc[key][p] for kind, key in (("removed", "removed"), ("runnable->ignored", "runnable_to_ignored"))
@@ -634,7 +634,13 @@ def platform_losses(path, binary_id):
     for (kind, platform), names in lost.items():
         for name in names:
             found.setdefault((_id_text(_check_id(binary_id, name)), kind), []).append(platform)
-    return found
+    presence = doc.get("present_tests")
+    if not isinstance(presence, dict) or any(not isinstance(presence.get(p), list) for p in ("macos", "windows")):
+        return found, None
+    names = presence["macos"] + presence["windows"]
+    if any(not isinstance(name, str) or not ID_RE.fullmatch(name) for name in names):
+        return found, None
+    return found, {_check_id(binary_id, name) for name in names}
 
 
 def cmd_base_diff(args):
@@ -663,7 +669,7 @@ def cmd_base_diff(args):
     binaries = {t[0] for t in run | ign}
     if len(binaries) != 1:
         raise PlanError(f"source removals need one lib binary in the plan, found {sorted(binaries)}")
-    platform_lost = platform_losses(args.source_removed, binaries.pop())
+    platform_lost, native_present = platform_losses(args.source_removed, binaries.pop())
     diff = {"comparison_base_sha": args.comparison_base_sha, "scope": plan["identity"]["scope"],
             "removed": sorted(_id_text(t) for t in (base_run | base_ign) - (run | ign)),
             "runnable_to_ignored": sorted(_id_text(t) for t in base_run & ign),
@@ -673,16 +679,25 @@ def cmd_base_diff(args):
     lost = {(t, "removed") for t in diff["removed"]} | set(platform_lost)
     lost |= {(t, "runnable->ignored") for t in diff["runnable_to_ignored"]}
     diff["unjustified"] = sorted(f"{t} | {kind}" for t, kind in lost - set(justified))
-    diff["stale_justifications"] = sorted(f"{t} | {kind}" for t, kind in set(justified) - lost)
+    stale = set(justified) - lost
+    present = base_run | base_ign | run | ign
+    landed = {(t, kind) for t, kind in stale
+              if native_present is not None and tuple(t.split(" ")) not in present | native_present}
+    diff["stale_justifications"] = sorted(f"{t} | {kind}" for t, kind in stale)
+    diff["landed_justifications"] = sorted(f"{t} | {kind}" for t, kind in landed)
     Path(args.json_out).write_text(json.dumps(diff, indent=1, sort_keys=True) + "\n")
     print(f"removed {len(diff['removed'])} · runnable->ignored {len(diff['runnable_to_ignored'])} · "
           f"platform losses {len(platform_lost)} · ignored->runnable {len(diff['ignored_to_runnable'])} · "
           f"added {len(diff['added'])} · justified {len(lost) - len(diff['unjustified'])}")
     for row in diff["unjustified"]:
         print(f"ERROR lost without a justification row: {row}", file=sys.stderr)
-    for row in diff["stale_justifications"]:
+    for t, kind in sorted(landed):
+        print(f"WARN justification row refers to a test absent from base and head; clear in any PR: "
+              f"{t} | {kind} | {justified[(t, kind)]}", file=sys.stderr)
+    for t, kind in sorted(stale - landed):
+        row = f"{t} | {kind}"
         print(f"ERROR justification row matches no loss against {args.comparison_base_sha}: {row}", file=sys.stderr)
-    return 1 if diff["unjustified"] or diff["stale_justifications"] else 0
+    return 1 if diff["unjustified"] or stale - landed else 0
 
 
 # The plan and JUnit readers that nextest_required reuses.
