@@ -445,7 +445,10 @@ async fn a_refused_card_stays_blocked_when_off_until_approval_resends_saved_byte
         writer.deliver(&Derived::Piece(saved.clone())).await,
         Step::Stopped
     );
-    assert_eq!(harness.port.posts(), [saved.payload.clone()]);
+    assert_eq!(
+        harness.port.posts().as_slice(),
+        std::slice::from_ref(&saved.payload)
+    );
     drop(writer);
     harness
         .store
