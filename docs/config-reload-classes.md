@@ -113,7 +113,7 @@ seconds with content comparison, independently of native filesystem notification
 | `github.sync_interval_minutes` | restart | `src/server/worker_registry/registry.rs` start_worker (GithubSync arm captures sync_interval) |
 | `policies` | restart | `src/engine/mod.rs` PolicyEngine::new_with_runtime_deps (runtime limits and watcher dir) |
 | `data.dir` | restart | `src/services/cluster/readiness.rs` collect (boot-captured config; fallback root only when runtime_root() is None) |
-| `data.db_name` | live | `src/cli/doctor/orchestrator.rs` check_db_integrity via run_doctor_report (load_graceful per doctor run) |
+| `data.db_name` | live | `src/cli/doctor/orchestrator.rs` check_db_integrity via run_doctor_report (validated snapshot per doctor run; standalone fallback) |
 | `database` | restart | `src/db/postgres.rs` connect (pool built once + install_foreground_reserve) |
 | `cluster.enabled` | restart | `src/services/cluster/node_registry.rs` bootstrap |
 | `cluster.instance_id` | restart | `src/services/cluster/node_registry.rs` bootstrap (SELF_INSTANCE_ID OnceLock via resolve_instance_id) |
@@ -213,13 +213,13 @@ seconds with content comparison, independently of native filesystem notification
 | `onboarding.provider_suffix_map` | live | `src/services/provider.rs` ProviderKind::from_channel_suffix (current()) |
 | `onboarding.provider_options` | live | `src/config.rs` OnboardingConfig::is_empty (no daemon reader) |
 | `onboarding.default_provider` | live | `src/services/provider.rs` ProviderKind::default_channel_provider (current()) |
-| `memory.backend` | live | `src/runtime_layout/mod.rs` load_memory_backend (load_from_path per call) via services/discord/settings/memory.rs:configured_memory_backend_name |
-| `memory.file.sak_path` | live | `src/runtime_layout/mod.rs` load_memory_backend (load_from_path per call) via runtime_layout/mod.rs:shared_agent_knowledge_path |
+| `memory.backend` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/discord/settings/memory.rs:configured_memory_backend_name |
+| `memory.file.sak_path` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via runtime_layout/mod.rs:shared_agent_knowledge_path |
 | `memory.file.sam_path` | live | `src/runtime_layout/mod.rs` memory_backend_from_config (no daemon reader) |
-| `memory.file.ltm_root` | live | `src/runtime_layout/mod.rs` load_memory_backend (load_from_path per call) via runtime_layout/mod.rs:long_term_memory_root |
+| `memory.file.ltm_root` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via runtime_layout/mod.rs:long_term_memory_root |
 | `memory.file.auto_memory_root` | live | `src/runtime_layout/mod.rs` memory_backend_from_config (no daemon reader) |
-| `memory.mcp.endpoint` | live | `src/runtime_layout/mod.rs` load_memory_backend (load_from_path per call) via services/memory/memento.rs:runtime_config |
-| `memory.mcp.access_key_env` | live | `src/runtime_layout/mod.rs` load_memory_backend (load_from_path per call) via services/memory/memento.rs:runtime_config |
+| `memory.mcp.endpoint` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/memory/memento.rs:runtime_config |
+| `memory.mcp.access_key_env` | live | `src/runtime_layout/mod.rs` load_memory_backend (validated snapshot for the runtime root; disk only before publication or for another root) via services/memory/memento.rs:runtime_config |
 | `prompt_manifest_retention` | restart | `src/db/prompt_manifests/retention.rs` install_retention_config (OnceLock set from bootstrap::initialize) |
 | `tui_o.writer.channels` | restart | `src/services/tui_o/channel_policy.rs` install (BOOT OnceLock; bootstrap::install_boot_snapshots) |
 | `tui_o.writer.all_tui` | restart | `src/services/tui_o/channel_policy.rs` install (BOOT OnceLock; bootstrap::install_boot_snapshots) |

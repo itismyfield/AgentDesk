@@ -22,23 +22,54 @@ fn snapshot_source_metadata_is_excluded_from_write_roundtrip() {
 }
 
 #[test]
-fn snapshot_source_normalization_still_rejects_changed_values_and_secrets() {
+fn snapshot_source_normalization_reads_back_disk_document_with_secrets() {
     isolated(|| {
         let fixture = Fixture::new();
         fixture.write("server: {port: 41, auth_token: synthetic-secret}");
         let expected = crate::config::load_from_path(&fixture.path).unwrap();
+        let rendered = serde_yaml::to_string(&disk_document(&expected).unwrap()).unwrap();
+        check_reads_back(&expected, &rendered).unwrap();
+    });
+}
+
+#[test]
+fn snapshot_source_normalization_rejects_changed_values_with_secrets_kept() {
+    isolated(|| {
+        let fixture = Fixture::new();
+        fixture.write("server: {port: 41, auth_token: synthetic-secret}");
+        let expected = crate::config::load_from_path(&fixture.path).unwrap();
+        let rendered = serde_yaml::to_string(&disk_document(&expected).unwrap()).unwrap();
+        check_reads_back(&expected, &rendered).unwrap();
         let mut changed = expected.clone();
         changed.server.port = 73;
-        let error = check_reads_back(&expected, &serde_yaml::to_string(&changed).unwrap())
+        let rendered = serde_yaml::to_string(&disk_document(&changed).unwrap()).unwrap();
+        let actual: Config = serde_yaml::from_str(&rendered).unwrap();
+        assert_eq!(actual.server.auth_token, expected.server.auth_token);
+        let error = check_reads_back(&expected, &rendered)
             .unwrap_err()
             .to_string();
         assert!(error.contains("typed section server"), "{error}");
         assert!(!error.contains("synthetic-secret"));
+    });
+}
+
+#[test]
+fn snapshot_source_normalization_rejects_missing_secrets_with_values_unchanged() {
+    isolated(|| {
+        let fixture = Fixture::new();
+        fixture.write("server: {port: 41, auth_token: synthetic-secret}");
+        let expected = crate::config::load_from_path(&fixture.path).unwrap();
+        let rendered = serde_yaml::to_string(&disk_document(&expected).unwrap()).unwrap();
+        check_reads_back(&expected, &rendered).unwrap();
         let mut stripped = expected.clone();
         stripped.server.auth_token = None;
-        let error = check_reads_back(&expected, &serde_yaml::to_string(&stripped).unwrap())
+        let rendered = serde_yaml::to_string(&disk_document(&stripped).unwrap()).unwrap();
+        let actual: Config = serde_yaml::from_str(&rendered).unwrap();
+        assert_eq!(actual.server.port, expected.server.port);
+        let error = check_reads_back(&expected, &rendered)
             .unwrap_err()
             .to_string();
         assert!(error.contains("typed section server"), "{error}");
+        assert!(!error.contains("synthetic-secret"));
     });
 }

@@ -23,6 +23,7 @@ src/
 ├── cli/
 │   ├── client/
 │   │   ├── runtime_config.rs
+│   │   ├── snapshot_reader_tests.rs
 │   │   └── transport.rs
 │   ├── dcserver/
 │   │   ├── replay_recovery.rs
@@ -55,6 +56,7 @@ src/
 │   │   │   ├── provider_credentials.rs
 │   │   │   ├── repair_response.rs
 │   │   │   ├── report_display.rs
+│   │   │   ├── snapshot_reader_tests.rs
 │   │   │   └── stale_mailbox_repair.rs
 │   │   ├── startup/
 │   │   │   └── herdr_checker_tests.rs
@@ -425,6 +427,7 @@ src/
 │   ├── paths.rs
 │   ├── skill_refresh.rs
 │   ├── skill_sync.rs
+│   ├── snapshot_reader_tests.rs
 │   └── windows_links.rs
 ├── server/
 │   ├── dashboard_auth/
