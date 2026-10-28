@@ -36,7 +36,7 @@ pub(in crate::services::discord) async fn notify_voice_alert(
     let base = crate::services::dispatches::discord_delivery::discord_api_base_url();
     let target = channel_id.get().to_string();
     if let Err(error) = crate::services::dispatches::discord_delivery::post_raw_message_once(
-        &client, &token, &base, &target, &content, None,
+        &client, &token, &base, &target, &content,
     )
     .await
     {

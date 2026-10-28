@@ -444,8 +444,7 @@ async fn deliver_channel_message(
         reqwest::Client::new(),
         token.to_string(),
         crate::services::dispatches::discord_delivery::discord_api_base_url(),
-    )
-    .with_allowed_mentions(super::http::relay_allowed_mentions());
+    );
     let mut policy = DiscordOutboundPolicy::review_notification();
     if delivery_id.is_none() {
         policy = policy.without_idempotency();
@@ -664,8 +663,9 @@ mod tests {
         send_message_to_channel("test-token", 7001, content)
             .await
             .expect("send public CLI message");
+        let default_content = "<@42> @everyone @here <@&99> default client";
         HttpOutboundClient::new(reqwest::Client::new(), "test-token", base)
-            .post_message("7001", "default client")
+            .post_message("7001", default_content)
             .await
             .expect("send default HTTP client message");
         server.abort();
@@ -674,7 +674,7 @@ mod tests {
         assert_eq!(payloads.len(), 2);
         assert_eq!(payloads[0]["content"], content);
         assert_eq!(payloads[0]["allowed_mentions"]["parse"], json!(["users"]));
-        assert_eq!(payloads[1]["content"], "default client");
-        assert!(payloads[1].get("allowed_mentions").is_none());
+        assert_eq!(payloads[1]["content"], default_content);
+        assert_eq!(payloads[1]["allowed_mentions"]["parse"], json!(["users"]));
     }
 }

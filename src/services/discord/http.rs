@@ -110,11 +110,18 @@ fn channel_message_builder(
 /// (`<@requester>` — prompt-too-long, escalation) keep working. Tightening the
 /// residual agent-echoed user-ping case is deferred to the relay-content path
 /// in the delivery-lease consolidation (it must not break directed pings).
-pub(in crate::services::discord) fn relay_allowed_mentions() -> CreateAllowedMentions {
+pub(crate) fn relay_allowed_mentions() -> CreateAllowedMentions {
     CreateAllowedMentions::new()
         .all_users(true)
         .everyone(false)
         .all_roles(false)
+}
+
+pub(crate) fn relay_message_payload(content: &str) -> serde_json::Value {
+    serde_json::json!({
+        "content": content,
+        "allowed_mentions": relay_allowed_mentions(),
+    })
 }
 
 pub(in crate::services::discord) async fn send_channel_message(
@@ -124,6 +131,24 @@ pub(in crate::services::discord) async fn send_channel_message(
 ) -> serenity::Result<Message> {
     let message = channel_message_builder(content, None, None).map_err(serenity::Error::Other)?;
     dispatch_channel_message(http, channel_id, message).await
+}
+
+/// Preserve the SDK reply's author-ping behavior while applying the relay policy.
+pub(in crate::services::discord) async fn send_channel_message_reply(
+    http: &serenity::Http,
+    original: &Message,
+    content: impl Into<String>,
+) -> serenity::Result<Message> {
+    original
+        .channel_id
+        .send_message(
+            http,
+            CreateMessage::new()
+                .content(content)
+                .reference_message(original)
+                .allowed_mentions(relay_allowed_mentions().replied_user(false)),
+        )
+        .await
 }
 
 pub(in crate::services::discord) async fn dispatch_channel_message(
@@ -396,6 +421,49 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn p2_allowed_mentions_sdk_reply_wire_preserves_reference_and_no_author_ping() {
+        let (address, request) = recording_error_server();
+        let http = HttpBuilder::new("test-token")
+            .proxy(format!("http://{address}"))
+            .ratelimiter_disabled(true)
+            .default_allowed_mentions(relay_allowed_mentions())
+            .build();
+        let mut original = super::serenity::Message::default();
+        original.id = MessageId::new(90_062);
+        original.channel_id = ChannelId::new(4_055);
+        original.guild_id = Some(super::serenity::GuildId::new(70_001));
+        original.author.id = super::serenity::UserId::new(70_002);
+        original.content = "!restart original command".to_owned();
+        let content = "<@1234> @everyone @here <@&5678> original reply body";
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            super::send_channel_message_reply(&http, &original, content),
+        )
+        .await
+        .expect("reply returns from owned HTTP boundary");
+        let (line, body) = request.join().expect("reply request recorded");
+        assert!(line.starts_with("POST "));
+        assert!(line.contains("/channels/4055/messages"));
+        let error = response.expect_err("owned fixture deliberately rejects the reply");
+        assert!(matches!(
+            error,
+            super::serenity::Error::Http(super::serenity::http::HttpError::UnsuccessfulRequest(response))
+                if response.status_code.as_u16() == 400 && response.error.code == 50035
+        ));
+        assert_eq!(body["content"], content);
+        assert_eq!(original.content, "!restart original command");
+        assert_eq!(body["message_reference"]["message_id"], "90062");
+        assert_eq!(body["message_reference"]["channel_id"], "4055");
+        assert_eq!(body["message_reference"]["guild_id"], "70001");
+        assert!(body["message_reference"]["fail_if_not_exists"].is_null());
+        assert_eq!(body["allowed_mentions"]["replied_user"], false);
+        assert_eq!(
+            body["allowed_mentions"]["parse"],
+            serde_json::json!(["users"])
+        );
+    }
+
     #[test]
     fn relay_allowed_mentions_suppresses_everyone_and_roles_allows_users() {
         // #2839: agent output echoing "@everyone"/"@here"/role mentions must
@@ -572,6 +640,9 @@ mod tests {
                     Err(error) => panic!("owned accept failed: {error}"),
                 }
             };
+            socket
+                .set_nonblocking(false)
+                .expect("blocking reads on accepted socket");
             socket
                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                 .expect("bounded request read");

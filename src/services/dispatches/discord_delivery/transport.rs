@@ -1,4 +1,3 @@
-use poise::serenity_prelude::CreateAllowedMentions;
 use sqlx::PgPool;
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
@@ -293,13 +292,9 @@ pub(crate) async fn post_raw_message_once(
     base_url: &str,
     channel_id: &str,
     message: &str,
-    allowed_mentions: Option<&CreateAllowedMentions>,
 ) -> Result<String, DispatchMessagePostError> {
     let message_url = discord_api_url(base_url, &format!("/channels/{channel_id}/messages"));
-    let mut payload = serde_json::json!({"content": message});
-    if let Some(allowed_mentions) = allowed_mentions {
-        payload["allowed_mentions"] = serde_json::json!(allowed_mentions);
-    }
+    let payload = crate::services::discord::http::relay_message_payload(message);
     let response = send_with_rate_limit_retry(|| {
         client
             .post(&message_url)
@@ -880,6 +875,150 @@ mod tests {
     use super::*;
     use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
     use std::sync::{Arc, Mutex};
+
+    type MentionPayloads = Arc<Mutex<Vec<serde_json::Value>>>;
+
+    #[derive(Clone)]
+    struct MentionWire {
+        payloads: MentionPayloads,
+        replies: Arc<Vec<StatusCode>>,
+    }
+
+    async fn capture_mention_request(
+        State(state): State<MentionWire>,
+        axum::Json(payload): axum::Json<serde_json::Value>,
+    ) -> axum::response::Response {
+        let status = {
+            let mut payloads = state.payloads.lock().unwrap();
+            let index = payloads.len();
+            payloads.push(payload);
+            state
+                .replies
+                .get(index)
+                .copied()
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+        };
+        match status {
+            StatusCode::TOO_MANY_REQUESTS => (
+                status,
+                [(axum::http::header::RETRY_AFTER, "0")],
+                axum::Json(serde_json::json!({"retry_after": 0, "message": "rate limited"})),
+            )
+                .into_response(),
+            StatusCode::BAD_REQUEST => (
+                status,
+                axum::Json(serde_json::json!({
+                    "code": 50035,
+                    "message": "BASE_TYPE_MAX_LENGTH: Must be 2000 or fewer in length."
+                })),
+            )
+                .into_response(),
+            _ => (
+                status,
+                axum::Json(serde_json::json!({"id": "p2-wire-message"})),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn mention_proxy(
+        replies: Vec<StatusCode>,
+    ) -> (MentionPayloads, String, tokio::task::JoinHandle<()>) {
+        let payloads = MentionPayloads::default();
+        let app = Router::new()
+            .route("/channels/123/messages", post(capture_mention_request))
+            .with_state(MentionWire {
+                payloads: payloads.clone(),
+                replies: Arc::new(replies),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (payloads, base, server)
+    }
+
+    fn assert_user_mentions_only(payload: &serde_json::Value) {
+        assert_eq!(
+            payload["allowed_mentions"]["parse"],
+            serde_json::json!(["users"])
+        );
+        assert!(payload["content"].as_str().unwrap().contains("<@1234>"));
+    }
+
+    #[tokio::test]
+    async fn p2_allowed_mentions_default_http_client_wire_keeps_users() {
+        use crate::services::discord::outbound::{DiscordOutboundClient, HttpOutboundClient};
+
+        let (payloads, base, server) = mention_proxy(vec![StatusCode::OK]).await;
+        let content = "<@1234> @everyone @here <@&5678> 기본 알림";
+        let id = HttpOutboundClient::new(reqwest::Client::new(), "test-token", base)
+            .post_message("123", content)
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(id, "p2-wire-message");
+        let payloads = payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["content"], content);
+        assert_user_mentions_only(&payloads[0]);
+    }
+
+    #[tokio::test]
+    async fn p2_allowed_mentions_raw_post_without_override_wire_keeps_users() {
+        let (payloads, base, server) = mention_proxy(vec![StatusCode::OK]).await;
+        let content = "<@1234> @everyone @here <@&5678> 직접 알림";
+        let id =
+            post_raw_message_once(&reqwest::Client::new(), "test-token", &base, "123", content)
+                .await
+                .unwrap();
+        server.abort();
+        assert_eq!(id, "p2-wire-message");
+        let payloads = payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["content"], content);
+        assert_user_mentions_only(&payloads[0]);
+    }
+
+    #[tokio::test]
+    async fn p2_allowed_mentions_dispatch_fallback_and_rate_limit_retries_wire() {
+        let (payloads, base, server) = mention_proxy(vec![
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::BAD_REQUEST,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::OK,
+        ])
+        .await;
+        let mentions = "<@1234> @everyone @here <@&5678>";
+        let primary = format!("{mentions} {}", "A".repeat(180));
+        let minimal = format!("minimal {mentions}");
+        let outcome = post_dispatch_message_to_channel_with_delivery(
+            &reqwest::Client::new(),
+            "test-token",
+            &base,
+            "123",
+            &primary,
+            &minimal,
+            None,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(outcome.message_id, "p2-wire-message");
+        assert_eq!(outcome.delivery.status, "fallback");
+        assert_eq!(
+            outcome.delivery.fallback_kind.as_deref(),
+            Some("MinimalFallback")
+        );
+        let payloads = payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 4);
+        for (payload, content) in payloads
+            .iter()
+            .zip([&primary, &primary, &minimal, &minimal])
+        {
+            assert_eq!(payload["content"], *content);
+            assert_user_mentions_only(payload);
+        }
+    }
 
     #[test]
     fn discord_api_url_normalizes_boundaries() {

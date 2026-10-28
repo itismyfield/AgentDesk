@@ -14,6 +14,50 @@ impl Drop for Recorder {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn monitoring_description_p2_allowed_mentions_preserve_rendered_text() {
+    let api = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
+    let channel = ChannelId::new(72_281_741);
+    let monitoring = Arc::new(Mutex::new(MonitoringStore::default()));
+    monitoring.lock().await.upsert(
+        channel.get(),
+        "mentions".into(),
+        "@everyone @here <@&5678> <@1234>".into(),
+    );
+    let rendered = format_monitoring_message(&monitoring.lock().await.list(channel.get()))
+        .expect("monitoring description renders");
+
+    tokio::time::timeout(
+        StdDuration::from_secs(5),
+        render_channel_monitoring_from_store(&api.http, &monitoring, None, channel),
+    )
+    .await
+    .expect("monitoring POST finishes")
+    .expect("monitoring description delivered");
+
+    let calls = api.take();
+    assert_eq!(calls.len(), 1, "one rendered monitoring POST: {calls:?}");
+    let prefix = format!("POST /api/v10/channels/{}/messages ", channel.get());
+    let body: serde_json::Value = serde_json::from_str(
+        calls[0]
+            .strip_prefix(&prefix)
+            .expect("captured request is the monitoring POST"),
+    )
+    .expect("actual monitoring request JSON");
+    assert_eq!(body["content"], rendered);
+    let content = body["content"].as_str().unwrap();
+    assert!(content.contains("@everyone @here ‹@&5678› ‹@1234›"));
+    assert_eq!(
+        body["allowed_mentions"]["parse"],
+        serde_json::json!(["users"])
+    );
+    assert_eq!(
+        monitoring.lock().await.get_rendered_msg(channel.get()),
+        Some(900001)
+    );
+}
+
 #[tokio::test]
 async fn monitoring_store_render_posts_and_edits_one_inline_provider_surface() {
     let _root = crate::config::TestRuntimeRootGuard::new();
