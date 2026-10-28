@@ -841,9 +841,12 @@ async fn drop_untried(
 #[tokio::test]
 async fn a_dropped_input_leaves_no_bind_for_the_input_that_takes_its_place() {
     let _root = TestRuntimeRootGuard::new();
-    let mut ways = vec!["clear", "clear then restart"];
-    #[cfg(unix)]
-    ways.push("checked purge");
+    let ways = [
+        "clear",
+        "clear then restart",
+        #[cfg(unix)]
+        "checked purge",
+    ];
     let input = original(8_000_000_000_000_001_890, "same body");
     for (n, way) in ways.into_iter().enumerate() {
         let channel = ChannelId::new(727_390 + n as u64);
