@@ -55,6 +55,8 @@ pub(super) async fn run_completion_postlude(
     let status_panel_msg_id = state.status_panel_msg_id;
     let mut last_status_panel_text = state.last_status_panel_text;
     let completion_footer_terminal_text = state.completion_footer_terminal_text;
+    // A queued retry or busy requeue runs this same input again, so clearing here ends no execution.
+    let input_runs_again = state.auto_retry.queued() || state.busy_requeue_outcome.is_some();
     let mut busy_requeue_outcome = state.busy_requeue_outcome;
     let spin_idx = state.spin_idx;
     let status_panel_generation = state.status_panel_generation;
@@ -441,7 +443,7 @@ pub(super) async fn run_completion_postlude(
         cache_read_tokens: accumulated_cache_read_tokens,
         output_tokens: accumulated_output_tokens,
     };
-    let turn_outcome = if cancelled {
+    let primary_turn_outcome = if cancelled {
         "cancelled"
     } else if recovery_retry {
         "recovery_retry"
@@ -461,7 +463,7 @@ pub(super) async fn run_completion_postlude(
         "completed"
     };
     let turn_outcome = turn_analytics::pending_delivery_outcome(
-        turn_outcome,
+        primary_turn_outcome,
         completion_guard.completion_signal(),
         preserve_inflight_for_cleanup_retry,
         bridge_skip_holder_owns_inflight,
@@ -843,6 +845,20 @@ pub(super) async fn run_completion_postlude(
             ),
             "inflight clear must only run when neither preserving for retry nor delegating output"
         );
+        // Only this clearing branch ends the execution; the receipt commits before the row goes.
+        if let Some(outcome) = turn_analytics::terminal_receipt_outcome(primary_turn_outcome)
+            .filter(|_| !input_runs_again)
+        {
+            turn_analytics::record_terminal_receipt(
+                shared_owned.pg_pool.as_ref(),
+                (&provider, channel_id, user_msg_id),
+                role_binding.as_ref(),
+                adk_session_key.as_deref(),
+                &inflight_state,
+                outcome,
+            )
+            .await;
+        }
         // #2838 (relay-stability P0-1): detect the missing-answer vector
         // (root causes #1b / #4). We are about to clear inflight (not
         // preserving, no delegated owner). If a non-empty full_response was

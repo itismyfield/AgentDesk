@@ -1144,3 +1144,6 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"fixture answer","
         assert_eq!(notices,0,"no active owner has been lost");
     });
 }
+
+#[path = "replay_start_origin_tests.rs"]
+mod origin_tests;
