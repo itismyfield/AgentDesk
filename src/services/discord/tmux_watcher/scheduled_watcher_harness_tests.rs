@@ -11,9 +11,8 @@ const T0: &str = "I7420 T0 delivered before the restart";
 const BODY: &str = "I7420 scheduled snapshot answer from the restored watcher";
 const TURN: &str = "i7420-restored-watcher-turn";
 
-/// The watcher records the outcome before its pre-panel release drops the Managed row;
-/// with Path B's late record cut away (a crash after the release), the next poll still
-/// settles the same delivery and a restart resends nothing.
+/// The watcher records before its pre-panel release drops the Managed row, so with no late
+/// Path B record the next poll settles the delivery and a restart resends nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restored_watcher_records_the_scheduled_outcome_before_its_release_pg() {
     let test = "a_restored_watcher_records_the_scheduled_outcome_before_its_release_pg";

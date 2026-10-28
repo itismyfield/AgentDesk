@@ -23,10 +23,8 @@ enum BodyPath {
     OutputTerminalSuccess,
 }
 
-/// Each direct body path records the outcome before its visible completion drops
-/// the row: with the late transcript-side record cut away (a crash right after the
-/// visible completion), the delivery still holds the outcome and the poll settles it.
-/// The isolated answer never becomes a channel transcript.
+/// Each direct body path records before its visible completion drops the row, so the poll
+/// settles it with no late record; the isolated answer writes no channel transcript.
 #[tokio::test]
 async fn each_direct_body_restore_records_before_its_visible_completion_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
