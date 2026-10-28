@@ -39,8 +39,12 @@ pub struct EvidenceRecord {
 }
 
 // One joined statement gives a coherent projection even during command commits.
-const PROJECTION: &str = "SELECT d.*, r.document AS run_document FROM server_campaign_definitions d \
-    LEFT JOIN server_campaign_runs r ON r.campaign_id = d.campaign_id AND r.run_id = d.run_id";
+const PROJECTION_BY_ID: &str = "SELECT d.*, r.document AS run_document FROM server_campaign_definitions d \
+    LEFT JOIN server_campaign_runs r ON r.campaign_id = d.campaign_id AND r.run_id = d.run_id \
+    WHERE d.campaign_id = $1";
+const PROJECTION_PAGE: &str = "SELECT d.*, r.document AS run_document FROM server_campaign_definitions d \
+    LEFT JOIN server_campaign_runs r ON r.campaign_id = d.campaign_id AND r.run_id = d.run_id \
+    ORDER BY d.campaign_id LIMIT $1 OFFSET $2";
 
 fn decode(row: sqlx::postgres::PgRow) -> StoreResult<CampaignState> {
     let revision: i64 = row.try_get("revision")?;
@@ -61,7 +65,7 @@ fn decode(row: sqlx::postgres::PgRow) -> StoreResult<CampaignState> {
 }
 
 pub async fn get(pool: &PgPool, id: &str) -> StoreResult<Option<CampaignState>> {
-    sqlx::query(&format!("{PROJECTION} WHERE d.campaign_id = $1"))
+    sqlx::query(PROJECTION_BY_ID)
         .bind(id)
         .fetch_optional(pool)
         .await?
@@ -73,7 +77,7 @@ pub(super) async fn get_in(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
 ) -> StoreResult<Option<CampaignState>> {
-    sqlx::query(&format!("{PROJECTION} WHERE d.campaign_id = $1"))
+    sqlx::query(PROJECTION_BY_ID)
         .bind(id)
         .fetch_optional(&mut **tx)
         .await?
@@ -82,16 +86,14 @@ pub(super) async fn get_in(
 }
 
 pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> StoreResult<Vec<CampaignState>> {
-    sqlx::query(&format!(
-        "{PROJECTION} ORDER BY d.campaign_id LIMIT $1 OFFSET $2"
-    ))
-    .bind(limit.clamp(1, 100))
-    .bind(offset.max(0))
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(decode)
-    .collect()
+    sqlx::query(PROJECTION_PAGE)
+        .bind(limit.clamp(1, 100))
+        .bind(offset.max(0))
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(decode)
+        .collect()
 }
 
 #[cfg(test)]

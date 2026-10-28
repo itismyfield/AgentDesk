@@ -147,7 +147,7 @@ impl Harness {
         self.fixture.drop().await;
     }
 
-    // Until F3/F4 can create runs, only this isolated fixture supplies execution state.
+    // Only this isolated fixture supplies execution state until run creation is available.
     async fn seed_running(&self) -> CampaignState {
         let state = domain::with_action(ActionState::StartPending, false);
         let body = json!({"id":"campaign","idempotency_key":"create","definition":state.definition.input()});
@@ -219,6 +219,8 @@ async fn read_envelope_matches_f8_fixture_and_definition_view_share_identity_pg(
     let (status, mut list) =
         request(&h.app, "GET", "/server-campaigns?limit=1&offset=0", None).await;
     assert_eq!(status, StatusCode::OK);
+    println!("F1B_HTTP_DETAIL_JSON={detail}");
+    println!("F1B_HTTP_LIST_JSON={list}");
     for document in [&mut detail["campaign"], &mut list["campaigns"][0]] {
         assert_eq!(document["definition"], definition());
         assert!(document["definition"].get("input").is_none());

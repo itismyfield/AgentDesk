@@ -772,9 +772,9 @@
       "version": 151
     },
     {
-      "path": "migrations/postgres/0152_server_campaigns.sql",
+      "path": "migrations/postgres/0153_server_campaigns.sql",
       "sha256": "ce84944787b4b464f184c8a8e5a272845c4a1057026d824e36bc153bedde3fa8",
-      "version": 152
+      "version": 153
     }
   ],
   "version": 1

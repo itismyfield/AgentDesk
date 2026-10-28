@@ -215,7 +215,7 @@ async fn alive_unknown_unreconciled_action_and_wrong_incarnation_block_edit_and_
         let mut h = Harness::new().await;
         let mut state = domain::with_action(ActionState::Started, true);
         let binding = domain::binding(&state);
-        // FinishStage's unfinished attempt must be settled by F3; this fixture is already settled.
+        // This fixture has already settled the attempt allowed to finish its stage.
         state
             .run
             .as_mut()
