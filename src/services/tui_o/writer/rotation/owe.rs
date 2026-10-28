@@ -111,10 +111,10 @@ impl<B: BindingEvents> Sources<B> {
             return deriver.derive_with_version(record, version);
         }
         let origin = self.notice_origin(source, record);
-        deriver.derive_scoped(record, version, origin)
+        deriver.derive_scoped(record, source, version, origin)
     }
 
-    fn notice_origin(
+    pub(crate) fn notice_origin(
         &self,
         source: &SourceId,
         record: &CapturedRecord,
@@ -143,6 +143,9 @@ impl<B: BindingEvents> Sources<B> {
         if !matches_source(event)
             || event.channel_id != self.channel
             || event.provider != self.provider
+            || event.tmux_session.trim().is_empty()
+            || event.execution_nonce.trim().is_empty()
+            || event.seq == 0
         {
             return Err("input notice binding belongs to another owner".into());
         }

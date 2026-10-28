@@ -359,6 +359,7 @@ async fn local_retry_budget_follows_explicit_owner_even_with_a_hook_present() {
 
 #[tokio::test(start_paused = true)]
 async fn input_notice_origin_survives_prepared_restart_and_local_retry() {
+    let _guard = crate::config::TestRuntimeRootGuard::new();
     let harness = Harness::new();
     harness.gate.acquired();
     harness.port.say(BOT + 1, "readable");
@@ -368,26 +369,12 @@ async fn input_notice_origin_survives_prepared_restart_and_local_retry() {
         .lock()
         .unwrap()
         .extend([Reply::Unsent, Reply::Created]);
-    let origin = Box::new(super::super::input_notices::NoticeOrigin {
-        record: crate::services::tui_o::shadow::SourceRange {
-            source: crate::services::tui_o::shadow::SourceId {
-                session_id: "native-session".into(),
-                path: harness._runtime.path().join("native.jsonl"),
-                dev: 1,
-                ino: 2,
-            },
-            start: 10,
-            end: 100,
-        },
-        logical_session: "original-pane".into(),
-        binding_seq: 3,
-        execution_nonce: "original-incarnation".into(),
-    });
-    let Derived::Piece(mut item) = piece("native-input", "-# ⌨️ native input") else {
-        panic!("fixture must produce a piece");
-    };
-    item.unit_key.kind = UnitKind::InputNotice;
-    item.notice_origin = Some(origin.clone());
+    let (_bindings, item) = super::input_notice_transport_tests::materialized_notice(
+        &harness,
+        "native-input",
+        "native input",
+    );
+    let origin = item.notice_origin.clone().unwrap();
     let mut writer = harness.writer();
     assert_eq!(
         writer.deliver(&Derived::Piece(item.clone())).await,

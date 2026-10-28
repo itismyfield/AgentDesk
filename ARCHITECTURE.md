@@ -3399,6 +3399,7 @@ src/
 │   │   ├── herdr_gate/
 │   │   │   ├── legacy_return.rs
 │   │   │   ├── legacy_return_tests.rs
+│   │   │   ├── notice_fence_tests.rs
 │   │   │   ├── policy_tests.rs
 │   │   │   ├── root_replaced.rs
 │   │   │   └── root_replaced_tests.rs
@@ -3598,6 +3599,8 @@ src/
 │   │   │   │   ├── codex_retention_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
+│   │   │   │   ├── notice_work.rs
+│   │   │   │   ├── notice_work_tests.rs
 │   │   │   │   ├── scoped_submission_tests.rs
 │   │   │   │   ├── scoped_transition_tests.rs
 │   │   │   │   ├── transition.rs
@@ -3627,13 +3630,21 @@ src/
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── input_notices/
+│   │   │   │   ├── admission.rs
+│   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── evidence.rs
+│   │   │   │   ├── evidence_tests.rs
 │   │   │   │   ├── history_tests.rs
+│   │   │   │   ├── migration.rs
+│   │   │   │   ├── migration_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── late_adopt/
 │   │   │   │   ├── codex/
 │   │   │   │   │   ├── prefix.rs
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   └── codex.rs
+│   │   │   ├── local_retry/
+│   │   │   │   └── notice_selection.rs
 │   │   │   ├── rotation/
 │   │   │   │   ├── claude_boundary.rs
 │   │   │   │   ├── clear_end.rs
@@ -3699,6 +3710,7 @@ src/
 │   │   │   ├── input_facts.rs
 │   │   │   ├── input_notice_actor_tests.rs
 │   │   │   ├── input_notice_source_tests.rs
+│   │   │   ├── input_notice_transport_tests.rs
 │   │   │   ├── input_notices.rs
 │   │   │   ├── late_adopt.rs
 │   │   │   ├── late_adopt_binding_tests.rs
@@ -3712,6 +3724,7 @@ src/
 │   │   │   ├── local_retry_repost_tests.rs
 │   │   │   ├── local_retry_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── notice_retry_tests.rs
 │   │   │   ├── operator_resume_actor_tests.rs
 │   │   │   ├── operator_resume_delivery_tests.rs
 │   │   │   ├── operator_resume_source_tests.rs

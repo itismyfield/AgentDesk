@@ -290,7 +290,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             retry
         };
         Ok(Obligations {
-            owed: self.owed.len() + retry,
+            owed: self.owed.len() + retry + self.notice_debt_extra(),
             prepared: usize::from(self.writer.store().ledger().unresolved().is_some()),
             unsealed: usize::from(self.deriver.has_unsealed()),
             posting,

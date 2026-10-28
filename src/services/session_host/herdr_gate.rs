@@ -123,9 +123,14 @@ impl Drop for MutationPermit {
     }
 }
 
+type FenceKey = (String, String, String, String, String, String);
+
+fn execution_fences() -> &'static Mutex<HashMap<FenceKey, Arc<ExecutionFence>>> {
+    static FENCES: OnceLock<Mutex<HashMap<FenceKey, Arc<ExecutionFence>>>> = OnceLock::new();
+    FENCES.get_or_init(Default::default)
+}
+
 fn execution_fence(endpoint: &HerdrEndpoint, pane: &str, nonce: &str) -> Arc<ExecutionFence> {
-    type Key = (String, String, String, String, String, String);
-    static FENCES: OnceLock<Mutex<HashMap<Key, Arc<ExecutionFence>>>> = OnceLock::new();
     let key = (
         endpoint.execution_node().to_string(),
         endpoint.config_key().to_string(),
@@ -135,8 +140,7 @@ fn execution_fence(endpoint: &HerdrEndpoint, pane: &str, nonce: &str) -> Arc<Exe
         nonce.to_string(),
     );
     // Closing tombstones must outlive targets so a fresh target cannot reuse an uncertain nonce.
-    FENCES
-        .get_or_init(Default::default)
+    execution_fences()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .entry(key)
@@ -158,6 +162,46 @@ impl ExecutionFence {
             fence: self.clone(),
         })
     }
+}
+
+pub(crate) fn try_notice_fence<R>(
+    endpoint: &crate::config::session_hosts::ChannelEndpoint,
+    nonce: &str,
+    start: impl FnOnce() -> R,
+) -> Result<R, HerdrGateRefusal> {
+    let fences = execution_fences()
+        .try_lock()
+        .map_err(|_| HerdrGateRefusal::NoStoredExecution)?;
+    let mut candidates = fences
+        .iter()
+        .filter(|((node, key, socket, session, _, execution), _)| {
+            node == &endpoint.execution_node
+                && key == &endpoint.key
+                && std::path::Path::new(socket) == endpoint.socket_path
+                && session == &endpoint.herdr_session
+                && execution == nonce
+        });
+    let fence = candidates
+        .next()
+        .map(|(_, fence)| fence.clone())
+        .ok_or(HerdrGateRefusal::NoStoredExecution)?;
+    if candidates.next().is_some() {
+        return Err(HerdrGateRefusal::NoStoredExecution);
+    }
+    drop(fences);
+    let state = fence.state.try_lock().map_err(|error| match error {
+        std::sync::TryLockError::WouldBlock => HerdrGateRefusal::MutationBusy,
+        std::sync::TryLockError::Poisoned(_) => HerdrGateRefusal::NoStoredExecution,
+    })?;
+    if state.1 {
+        return Err(HerdrGateRefusal::ExecutionClosing);
+    }
+    if state.0 {
+        return Err(HerdrGateRefusal::MutationBusy);
+    }
+    let result = start();
+    drop(state);
+    Ok(result)
 }
 
 pub(crate) struct TerminationFence(MutationPermit, bool);

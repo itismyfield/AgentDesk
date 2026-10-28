@@ -1019,8 +1019,12 @@ async fn a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_po
         assert_eq!(harness.port.posts(), ["a"]);
     }
 }
+#[path = "input_notice_transport_tests.rs"]
+mod input_notice_transport_tests;
 #[path = "local_retry_tests.rs"]
 mod local_retry_tests;
+#[path = "notice_retry_tests.rs"]
+mod notice_retry_tests;
 #[path = "tool_card_replay_tests.rs"]
 mod tool_card_replay;
 

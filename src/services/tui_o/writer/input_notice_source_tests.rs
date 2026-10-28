@@ -177,3 +177,49 @@ async fn inherited_rows_are_masked_before_uuid_notice_projection_on_live_and_rep
         }
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn legacy_binding_without_execution_provenance_stays_notice_debt_without_blocking_body() {
+    let _guard = crate::config::TestRuntimeRootGuard::new();
+    let (harness, path, source, bindings) = started(b"");
+    bindings.events.lock().unwrap()[0].execution_nonce.clear();
+    let user = input("legacy-input", "legacy-hook");
+    append(&path, &[user.clone(), row("later", "later body")].concat());
+    let mut writer = harness.writer();
+    let mut sources = Sources::new(CHANNEL, ShadowProvider::Claude, bindings);
+    let record = crate::services::tui_o::shadow::CapturedRecord {
+        start: 0,
+        end: user.len() as u64,
+        line: user[..user.len() - 1].to_vec(),
+    };
+    assert!(
+        sources.notice_origin(&source, &record).is_err(),
+        "a legacy missing nonce must remain withheld, not become invalid durable origin"
+    );
+    let mut deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude)
+        .with_input_notices(Projection::for_tests());
+    let mut owed = RecordingOwe::default();
+    sources
+        .resume(&mut writer, &mut deriver, &mut owed)
+        .unwrap();
+    sources.follow(&mut writer).unwrap();
+    sources
+        .capture(&mut writer, &mut deriver, &mut owed)
+        .unwrap();
+    assert!(!writer.is_stopped());
+    assert!(
+        !owed
+            .derived
+            .iter()
+            .any(|d| matches!(d, Derived::Blocked { .. }))
+    );
+    assert!(
+        owed.derived
+            .iter()
+            .any(|d| matches!(d,Derived::Piece(p) if p.unit_key.kind==UnitKind::Body))
+    );
+    let retained = deriver.take_notice_evidence();
+    assert_eq!(retained.len(), 1);
+    assert!(retained[0].origin.is_none());
+    assert_eq!(retained[0].raw_record, record.line);
+}

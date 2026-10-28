@@ -9,6 +9,8 @@ use super::pieces::PieceWork;
 use super::{AlarmSink, DeliveryLease, DiscordPort};
 use crate::services::tui_o::store::ledger::{LedgerState, LocalRetryMark, PieceOutcome};
 
+mod notice_selection;
+
 pub(crate) const LOCAL_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 pub(crate) struct Pending {
@@ -49,7 +51,7 @@ pub(super) fn may_prepare(
     piece: &PieceWork,
     mark: Option<&LocalRetryMark>,
 ) -> bool {
-    match (mark, pending(ledger)) {
+    match (mark, notice_selection::for_piece(ledger, piece, mark)) {
         (Some(LocalRetryMark::Attempt { root_serial }), Some(root)) => {
             *root_serial == root.root_serial && root.piece == *piece
         }
@@ -60,7 +62,8 @@ pub(super) fn may_prepare(
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     pub(crate) fn has_local_retry(&mut self) -> bool {
-        pending(self.store().ledger()).is_some()
+        notice_selection::candidates(self.store().ledger())
+            .any(|root| !notice_selection::is_notice(&root.piece))
     }
 
     pub(crate) async fn retry_local(&mut self, now: DateTime<Utc>) -> Step {
@@ -76,18 +79,32 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         if settle && let Err(step) = self.settle_open().await {
             return step;
         }
-        let Some(root) = pending(self.store().ledger()) else {
-            return Step::Done;
-        };
-        if let Some(step) = self.exclude_tool_result(&root.piece.unit_key) {
+        let candidates: Vec<_> = notice_selection::candidates(self.store().ledger())
+            .map(|root| root.root_serial)
+            .collect();
+        for serial in candidates {
+            let Some(root) = notice_selection::at(self.store().ledger(), serial) else {
+                continue;
+            };
+            let notice = notice_selection::is_notice(&root.piece);
+            if let Some(step) = self.exclude_tool_result(&root.piece.unit_key) {
+                return step;
+            }
+            if now < root.due {
+                if notice {
+                    continue;
+                }
+                return Step::LeaseBusy;
+            }
+            let mark = LocalRetryMark::Attempt {
+                root_serial: root.root_serial,
+            };
+            let step = self.send_piece(&root.piece, None, Some(mark), None).await;
+            if notice && matches!(step, Step::Withheld | Step::LeaseBusy) {
+                continue;
+            }
             return step;
         }
-        if now < root.due {
-            return Step::LeaseBusy;
-        }
-        let mark = LocalRetryMark::Attempt {
-            root_serial: root.root_serial,
-        };
-        self.send_piece(&root.piece, None, Some(mark), None).await
+        Step::Done
     }
 }

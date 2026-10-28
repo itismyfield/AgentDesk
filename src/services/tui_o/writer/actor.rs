@@ -323,6 +323,7 @@ where
         if actor.writer.is_stopped() {
             break;
         }
+        let mut fresh = Vec::new();
         if !sources_resumed && actor.sources_allowed() {
             let phase = actor.writer.boot.phase("resume");
             let (writer, deriver) = (&mut actor.writer, &mut actor.deriver);
@@ -343,9 +344,11 @@ where
             if !actor.writer.is_stopped() {
                 actor.boot_previous_nonce = None;
                 actor.project_operator_resumes();
+                fresh = actor.persist_notice_evidence();
                 resumed.send_replace(true);
             }
         }
+        actor.prepare_notices(&fresh).await;
         actor.observe_waiting(false);
         let drain = actor.writer.boot.first_drain();
         let serial_before = drain
@@ -382,14 +385,15 @@ where
         // Re-post runs in this same turn and only once nothing is owed, so it never sends beside
         // a piece of this channel. It holds no exact permit, so a verified channel never runs it.
         if actor.verified.is_none()
-            && actor.owed.is_empty()
+            && actor.notice_only_owed()
             && !actor.writer.has_local_retry()
             && actor.delivery_allowed()
         {
             actor.writer.repost_turn().await;
         }
         actor.collect_settled();
-        actor.read_sources();
+        let fresh = actor.read_sources();
+        actor.prepare_notices(&fresh).await;
         actor.poll_transition(sources_resumed, &unsettled).await;
         actor.observe_waiting(sources_resumed);
         progress.publish(actor.progress());
@@ -457,6 +461,7 @@ where
 }
 
 mod fresh_resume;
+mod notice_work;
 #[cfg(test)]
 pub(crate) use fresh_resume::work_for_tests;
 mod automatic;
@@ -656,27 +661,36 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return super::owed::deliver_owed(&mut self.writer, log, delivered).await;
         }
         let mut budget = super::replay::Budget::new();
-        while !self.owed.is_empty() {
+        let visits = self.owed.len();
+        for _ in 0..visits {
             if self.writer.stopping() || !self.delivery_allowed() {
                 return;
             }
             let Some(item) = self.owed.front() else {
                 return;
             };
-            match self.writer.deliver(item).await {
-                Step::Done => {
-                    self.writer.boot.drained();
-                    if !self.refilter_after_open() {
-                        self.owed.pop_front();
-                    }
-                    progress.publish(self.progress());
-                    if self.writer.has_local_retry() {
-                        return;
-                    }
-                    budget.yield_if_due().await;
-                }
-                Step::LeaseBusy | Step::NoGateway | Step::Stopped | Step::Withheld => return,
+            let input = matches!(item, Derived::Piece(piece) if piece.unit_key.kind == crate::services::tui_o::shadow::UnitKind::InputNotice);
+            let step = self.writer.deliver(item).await;
+            if step != Step::Done && !(input && step == Step::Withheld) {
+                return;
             }
+            let acked = !input || super::owed::acked(self.writer.store().ledger(), item);
+            if acked {
+                self.writer.boot.drained();
+            }
+            if self.refilter_after_open() {
+                return;
+            }
+            if acked {
+                self.owed.pop_front();
+            } else {
+                self.owed.rotate_left(1);
+            }
+            progress.publish(self.progress());
+            if self.writer.has_local_retry() {
+                return;
+            }
+            budget.yield_if_due().await;
         }
     }
 
@@ -693,7 +707,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return;
         }
         let open = self.writer.store().ledger().unresolved().is_some();
-        if self.writer.is_stopped() || open || !self.owed.is_empty() || self.deriver.has_unsealed()
+        if self.writer.is_stopped()
+            || open
+            || !self.notice_raw_independent()
+            || self.deriver.has_unsealed()
         {
             return;
         }
@@ -744,8 +761,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     fn progress(&mut self) -> super::progress::ChannelProgress {
         let verified = self.verified.as_ref().map_or(0, |log| log.work.len());
         let (retry, unsealed) = (self.writer.has_local_retry(), self.deriver.has_unsealed());
+        let owed = self.owed.len() + verified + self.notice_debt_extra();
         let ledger = self.writer.store().ledger();
-        super::progress::position(self.owed.len() + verified, retry, ledger, unsealed)
+        super::progress::position(owed, retry, ledger, unsealed)
     }
 
     /// Pieces, an open `Prepared`, unsealed units, sources read short of their end and binds not
@@ -757,7 +775,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let notice = (self.notice).get_or_insert_with(|| self.bindings.subscribe(channel));
         let latest = *notice.borrow();
         let (owed, unsealed) = (
-            self.owed.len() + usize::from(self.writer.has_local_retry()),
+            self.owed.len() + usize::from(self.writer.has_local_retry()) + self.notice_debt_extra(),
             usize::from(self.deriver.has_unsealed()),
         );
         let store = self.writer.store();
@@ -784,9 +802,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     /// Applies new binds first, so a bound source is read in the same poll as its predecessor.
-    fn read_sources(&mut self) {
+    fn read_sources(&mut self) -> Vec<UnitKey> {
         if self.writer.is_stopped() || !self.sources_allowed() {
-            return;
+            return Vec::new();
         }
         let (writer, deriver) = (&mut self.writer, &mut self.deriver);
         let read = (self.sources.follow(writer))
@@ -798,6 +816,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         if let Err(alarm) = read {
             self.writer.stop(alarm);
         }
+        self.persist_notice_evidence()
     }
 }
 

@@ -91,9 +91,16 @@ impl UnitDeriver {
         self.notices.enabled()
     }
 
+    pub(crate) fn take_notice_evidence(
+        &mut self,
+    ) -> Vec<crate::services::tui_o::store::ledger::input_notices::NoticeEvidence> {
+        self.notices.take_evidence()
+    }
+
     pub(crate) fn derive_scoped(
         &mut self,
         record: &CapturedRecord,
+        source: &crate::services::tui_o::shadow::SourceId,
         version: u32,
         origin: Result<super::input_notices::NoticeOrigin, String>,
     ) -> Vec<Derived> {
@@ -101,11 +108,11 @@ impl UnitDeriver {
         if self.notices.enabled() {
             match self
                 .notices
-                .project(self.channel, self.provider, record, origin)
+                .project_record(self.channel, self.provider, source, record, origin)
             {
                 Ok(Some(piece)) => derived.insert(0, Derived::Piece(piece)),
                 Ok(None) => {}
-                Err(reason) => derived.insert(0, Derived::Blocked { reason }),
+                Err(_) => {}
             }
         }
         derived
@@ -335,3 +342,7 @@ fn code_mode_exec_failed(value: &serde_json::Value) -> Option<bool> {
         && output.lines().next()? == "Script failed")
         .then_some(true)
 }
+
+#[cfg(all(test, unix))]
+#[path = "input_notices/evidence_tests.rs"]
+mod notice_evidence_tests;

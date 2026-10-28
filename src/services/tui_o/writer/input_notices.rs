@@ -1,5 +1,8 @@
 //! Native input identity and provenance; production delivery remains disabled until migration.
 
+pub(super) mod admission;
+pub(super) mod evidence;
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +27,7 @@ pub struct NoticeOrigin {
 pub(crate) struct Projection {
     enabled: bool,
     seals: HashMap<UnitKey, [u8; 32]>,
+    pending: Vec<crate::services::tui_o::store::ledger::input_notices::NoticeEvidence>,
 }
 
 impl Projection {

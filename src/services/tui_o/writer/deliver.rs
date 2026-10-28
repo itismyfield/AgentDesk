@@ -29,6 +29,9 @@ use crate::services::tui_o::store::ledger::{
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission::EpisodePermissionRecord;
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::OwedOrigin;
 
+#[path = "input_notices/migration.rs"]
+mod notice_migration;
+
 /// A POST still unanswered by then is treated as uncertain and settled from history.
 pub const POST_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -631,57 +634,68 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 {
                     return Err(Refusal::Later);
                 }
-                // The exact permit is checked first and its lock held through the first poll.
-                let mut start = || {
-                    let prepared = || LedgerEntry::Prepared {
-                        notice_origin: piece.notice_origin.clone(),
-                        serial,
-                        unit_key: piece.unit_key.clone(),
-                        piece_index: piece.index,
-                        payload: piece.payload.clone(),
-                        anchor_id,
-                        epoch,
-                        local_retry: local_retry.clone(),
+                super::input_notices::admission::admit_notice(piece, store, |store| {
+                    // The exact permit is checked first and its lock held through the first poll.
+                    let mut start = || {
+                        let prepared = || LedgerEntry::Prepared {
+                            notice_origin: piece.notice_origin.clone(),
+                            serial,
+                            unit_key: piece.unit_key.clone(),
+                            piece_index: piece.index,
+                            payload: piece.payload.clone(),
+                            anchor_id,
+                            epoch,
+                            local_retry: local_retry.clone(),
+                        };
+                        // Returning here comes before `port.post`, so this piece's POST was never created.
+                        store
+                            .append_ledger(prepared())
+                            .map_err(|error| Refusal::Store {
+                                detail: format!("{error:?}"),
+                                unsent: Unsent::new(prepared()).map(Box::new),
+                            })?;
+                        if let Some(detail) = store.ledger().violation() {
+                            return Err(Refusal::Violation(detail.to_string()));
+                        }
+                        if let Some(rejected_serial) = approved {
+                            tracing::info!(channel, rejected_serial, serial, unit_key = ?piece.unit_key,
+                                "[tui_o] operator approval consumed by Prepared");
+                        }
+                        let running = posts.take().map(Running::start);
+                        #[cfg(test)]
+                        boot.constructing(serial, epoch);
+                        let post = port.post(channel, piece.payload.clone());
+                        // `map` forwards each poll to the request; the count ends when it is ready or dropped.
+                        let mut request: Request = match running {
+                            Some(running) => Box::pin(post.map(move |outcome| {
+                                drop(running);
+                                outcome
+                            })),
+                            None => Box::pin(post),
+                        };
+                        boot.first_post(serial, epoch);
+                        Ok(match request.as_mut().poll(cx) {
+                            Poll::Ready(outcome) => Started::Done(outcome),
+                            Poll::Pending => Started::Running(request),
+                        })
                     };
-                    // Returning here comes before `port.post`, so this piece's POST was never created.
-                    store
-                        .append_ledger(prepared())
-                        .map_err(|error| Refusal::Store {
-                            detail: format!("{error:?}"),
-                            unsent: Unsent::new(prepared()).map(Box::new),
-                        })?;
-                    if let Some(detail) = store.ledger().violation() {
-                        return Err(Refusal::Violation(detail.to_string()));
+                    match admission {
+                        None => start(),
+                        Some((record, origin)) => {
+                            let started = record.admit(origin, start);
+                            started.unwrap_or_else(|reason| Err(Refusal::Withheld(reason)))
+                        }
                     }
-                    if let Some(rejected_serial) = approved {
-                        tracing::info!(channel, rejected_serial, serial, unit_key = ?piece.unit_key,
-                            "[tui_o] operator approval consumed by Prepared");
+                }).unwrap_or_else(|reason| Err(match reason {
+                    super::input_notices::admission::NoticeRefusal::Busy => Refusal::Later,
+                    super::input_notices::admission::NoticeRefusal::Withheld(reason) => {
+                        tracing::info!(channel, reason, unit_key = ?piece.unit_key,
+                            "[tui_o] input notice withheld before Prepared");
+                        Refusal::Withheld("input notice admission withheld")
                     }
-                    let running = posts.take().map(Running::start);
-                    #[cfg(test)]
-                    boot.constructing(serial, epoch);
-                    let post = port.post(channel, piece.payload.clone());
-                    // `map` forwards each poll to the request; the count ends when it is ready or dropped.
-                    let mut request: Request = match running {
-                        Some(running) => Box::pin(post.map(move |outcome| {
-                            drop(running);
-                            outcome
-                        })),
-                        None => Box::pin(post),
-                    };
-                    boot.first_post(serial, epoch);
-                    Ok(match request.as_mut().poll(cx) {
-                        Poll::Ready(outcome) => Started::Done(outcome),
-                        Poll::Pending => Started::Running(request),
-                    })
-                };
-                match admission {
-                    None => start(),
-                    Some((record, origin)) => {
-                        let started = record.admit(origin, start);
-                        started.unwrap_or_else(|reason| Err(Refusal::Withheld(reason)))
-                    }
-                }
+                    super::input_notices::admission::NoticeRefusal::Store(detail) => Refusal::Store { detail, unsent: None },
+                    super::input_notices::admission::NoticeRefusal::Violation(detail) => Refusal::Violation(detail),
+                }))
             }))
         })
         .await;
@@ -808,15 +822,29 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 _ => None,
             });
         let proof_ids: Vec<u64> = posted.take(confirm::PROOF_IDS).collect();
-        let verdict = confirm::settle(
-            &*self.port,
-            self.channel,
-            anchor,
-            &payload,
-            earlier_same_payload,
-            &proof_ids,
-        )
-        .await;
+        let verdict = if open.unit_key.kind == crate::services::tui_o::shadow::UnitKind::InputNotice
+        {
+            confirm::settle_notice(
+                &*self.port,
+                self.channel,
+                anchor,
+                &payload,
+                earlier_same_payload,
+                &proof_ids,
+                ledger.input_notices(),
+            )
+            .await
+        } else {
+            confirm::settle(
+                &*self.port,
+                self.channel,
+                anchor,
+                &payload,
+                earlier_same_payload,
+                &proof_ids,
+            )
+            .await
+        };
         let (entry, alarm) = match verdict {
             Verdict::Posted(msg_id) => (LedgerEntry::Posted { serial, msg_id }, None),
             Verdict::Ambiguous(candidates) => (
