@@ -4,6 +4,13 @@ use crate::services::tui_prompt_dedupe::binding_events::{
     StrictBindingRecord, pending_matches, strict_claude_history,
 };
 
+fn source_of(event: &BindingEvent) -> Option<&SourceId> {
+    match &event.new {
+        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => Some(source),
+        _ => None,
+    }
+}
+
 pub(super) fn reconcile(
     context: &BindingContext,
     records: &[StrictBindingRecord],
@@ -33,20 +40,6 @@ pub(super) fn reconcile(
     }) {
         return Err(refuse());
     }
-    let folded = strict_claude_history(
-        span.iter().copied(),
-        &context.tmux_session,
-        &context.execution_nonce,
-    );
-    if !folded.complete || folded.awaiting.is_some() {
-        return Err(refuse());
-    }
-    let source_of = |event: &BindingEvent| match &event.new {
-        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
-            Some(source.clone())
-        }
-        _ => None,
-    };
     let Some(latest) = span
         .iter()
         .rev()
@@ -55,6 +48,30 @@ pub(super) fn reconcile(
     else {
         return Ok(None);
     };
+    let stable = span
+        .iter()
+        .filter_map(|record| source_of(&record.event))
+        .all(|source| source == latest);
+    let same_launch =
+        context.expected_native_session_id.as_deref() == Some(latest.session_id.as_str());
+    // With one unchanged source and no Pending, replay cannot change current or awaiting.
+    if same_launch
+        && stable
+        && !span
+            .iter()
+            .any(|record| matches!(record.event.new, BindingTarget::Pending { .. }))
+    {
+        return Ok(None);
+    }
+    let folded = strict_claude_history(
+        span.iter().copied(),
+        &context.tmux_session,
+        &context.execution_nonce,
+    );
+    if !folded.complete || folded.awaiting.is_some() {
+        return Err(refuse());
+    }
+
     if folded
         .current
         .as_ref()
@@ -65,18 +82,14 @@ pub(super) fn reconcile(
     let Some(expected) = context.expected_native_session_id.as_deref() else {
         return Ok(None);
     };
-    let sources: Vec<_> = span
-        .iter()
-        .filter_map(|record| source_of(&record.event))
-        .collect();
-    if latest.session_id == expected && sources.iter().all(|source| source == &latest) {
+    if latest.session_id == expected && stable {
         return Ok(None);
     }
     let anchor = span
         .iter()
         .position(|record| source_of(&record.event).is_some())
         .ok_or_else(refuse)?;
-    let mut current = source_of(&span[anchor].event).ok_or_else(refuse)?;
+    let mut current = source_of(&span[anchor].event).cloned().ok_or_else(refuse)?;
     if current.session_id != expected {
         return Err(refuse());
     }
@@ -126,7 +139,7 @@ pub(super) fn reconcile(
             BindingTarget::Rejected { .. } => {}
         }
     }
-    if current != latest
+    if &current != latest
         || folded.current.as_ref().and_then(|visit| visit.pin.as_ref()) != Some(&current)
     {
         return Err(refuse());
