@@ -4,7 +4,37 @@
   "source": "scripts/ci/rust_test_sources.py platform_tests; ci-pr.yml rust_build/rust_tests",
   "tests": [
     {
+      "id": "services::claude_tui::busy_inject::stash::owner_tests::s5_effect_tests::s5_b0_pinned_stash_applied_counts_the_actual_payload_once",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "services::claude_tui::busy_inject::stash::owner_tests::s5_effect_tests::s5_b0_pinned_stash_held_does_not_count_a_successful_shell_exit",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
       "id": "services::session_host::herdr_socket_rig_tests::s5_effect_tests::s5_b0_real_herdr_socket_text_paste_line_and_enter_are_observed",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "services::tui_input::actor::pane::submit_tests::s5_effect_tests::s5_b0_actor_worker_observes_owner_and_refuses_late_unscoped_paste",
       "platforms": [
         "linux",
         "macos"
@@ -75,6 +105,67 @@
     },
     {
       "id": "services::turn_orchestrator::queued_head::compat_tests::s5_fixtures::s5_fixture_writer_goldens_verify_separately_from_generation",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::bounded::s5_b0_worker_context_requires_explicit_capture_and_restore",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::repair_tests::s5_b0_bounded_late_unscoped_write_is_refused_before_spawn",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::repair_tests::s5_b0_bounded_owner_scope_reaches_the_worker_and_observes_paste",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::repair_tests::s5_b0_bounded_pending_drop_keeps_the_physical_writer_until_cleanup",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::repair_tests::s5_b0_failed_buffer_load_cannot_claim_the_requested_payload",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::repair_tests::s5_b0_opaque_shell_requires_producer_effect_metadata",
       "platforms": [
         "linux",
         "macos"
@@ -225,6 +316,17 @@
     },
     {
       "id": "test_support::input_owner::tests::s5_b0_tmux_argv_and_key_only_classification",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "run_mode": "unfiltered-lib",
+      "path_gate": "ci-pr.yml rust_tests: src/** or tests/**; archive all(); every worker starts required PostgreSQL",
+      "ignored": false
+    },
+    {
+      "id": "test_support::input_owner::transport::s5_b0_payload_words_cannot_select_the_tmux_command_verb",
       "platforms": [
         "linux",
         "macos",

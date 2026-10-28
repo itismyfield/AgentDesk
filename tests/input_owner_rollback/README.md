@@ -27,6 +27,22 @@ An unregistered create is create-only and cannot satisfy positive content.
 Use `assert_owner_payload` with the actual prepared frame for acceptance: it compares per-attempt payload digests, so an underscore/probe cannot substitute for content.
 The command/socket lifetime holds a writer interval; overlap is rejected. Content counts only a successful tmux result or a complete Herdr frame write. A failed command is an attempted trace, not proof of NotSent.
 
+The bounded submission, Claude Pane and input actor workers explicitly capture and
+restore the caller's test scopes and producer metadata. The shared bounded runner
+observes before spawning, and its existing `OwnedChild` retains the Flight through
+async cleanup and its destructor. Pinned stash commands declare their physical
+target, operation, buffer and prepared payload before crossing the worker boundary.
+The payload must match the successful buffer cache; unknown or mismatched bytes
+cannot prove that payload. A successful `if-shell` exit counts content only with
+its APPLIED response. HELD never counts.
+An opaque shell without producer metadata is refused on a registered target.
+
+Buffer-load attempts record requested bytes independently of the successful-buffer
+cache. A load invalidates cached knowledge first; complete input and a successful
+child exit are both required before publishing bytes for subsequent paste probes.
+A failed load leaves the buffer unknown, even when a stateful fake proves the old
+bytes remained. Such a paste cannot prove the requested new payload.
+
 The preserved 4h fixture uses `Preserved4h(stable_origin)` on the same registered
 physical TUI. Only its registered payload on that execution descriptor is admitted; rebind invalidates an old 4h registration as well as old owner scopes. Its content goes to a
 separate counter and cannot satisfy target owner content. The actual 4h handler
@@ -41,6 +57,13 @@ regeneration comparison excludes only this nondeterministic timestamp. Expected
 source generations, author/bot, role, reply, voice identity and attachment refs
 are pinned separately. `fixture://` references resolve to the adjacent immutable
 asset bytes in isolated tests. They are not live paths or network URLs.
+A common independent identity projection checks author/bot, channel, role, reply,
+source generations, voice and assets in raw/V1/V2/head/retained/marker records,
+including the original restored from V1. V2 attempt provider/namespace/nonce and
+execution plus the legacy nonce are pinned independently. The legacy canonical
+V1 head omits the role override (`queued_head.rs:123`); its null expectation is
+separate from the queued item's role, which V1 adoption restores into original.
+Golden regeneration cannot change these expectations.
 Unknown and corrupt files are deliberately invalid and must retain their bytes.
 Existing corrupt legacy clear behavior is unchanged: `queued_head/compat.rs:22`
 on main `1fc4b85638e03a157c37e729a8947211372e644c` allows legacy mutation after a parse/read failure. This preparation adds

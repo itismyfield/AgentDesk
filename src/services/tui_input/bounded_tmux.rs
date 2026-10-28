@@ -99,8 +99,16 @@ pub(super) fn spawn_with_budget(
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(test)]
+        let observation = crate::test_support::input_owner::observe_bounded(command)
+            .map_err(|error| BoundedTmuxError::Spawn(io::Error::other(error)))?;
         let child = command.spawn().map_err(BoundedTmuxError::Spawn)?;
-        let cleanup = platform::run(child, budget.min(Duration::from_secs(5)));
+        let cleanup = platform::run(
+            child,
+            budget.min(Duration::from_secs(5)),
+            #[cfg(test)]
+            observation,
+        );
         #[cfg(test)]
         if super::mutant("cleanup_wait") {
             let (start, started) = tokio::sync::oneshot::channel();
@@ -143,6 +151,8 @@ mod platform {
         child: Child,
         owned: bool,
         cleanup_until: Option<Instant>,
+        #[cfg(test)]
+        observation: crate::test_support::input_owner::bounded::BoundedObservation,
     }
 
     impl OwnedChild {
@@ -279,11 +289,14 @@ mod platform {
     pub(super) fn run(
         child: Child,
         budget: Duration,
+        #[cfg(test)] observation: crate::test_support::input_owner::bounded::BoundedObservation,
     ) -> impl std::future::Future<Output = Result<Output, BoundedTmuxError>> {
         let mut owner = OwnedChild {
             child,
             owned: true,
             cleanup_until: None,
+            #[cfg(test)]
+            observation,
         };
         let deadline = Instant::now() + budget;
         async move {
@@ -324,7 +337,11 @@ mod platform {
             }
             .await;
             let source = match result {
-                Ok(Some(output)) => return Ok(output),
+                Ok(Some(output)) => {
+                    #[cfg(test)]
+                    owner.observation.completed(&output);
+                    return Ok(output);
+                }
                 Ok(None) => None,
                 Err(source) => Some(source),
             };

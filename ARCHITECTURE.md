@@ -785,6 +785,7 @@ src/
 │   │   │   ├── ownership.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_interleave_tests.rs
+│   │   │   ├── s5_effect_tests.rs
 │   │   │   ├── screen.rs
 │   │   │   ├── screen_identity_tests.rs
 │   │   │   ├── screen_tests.rs
@@ -3410,6 +3411,7 @@ src/
 │   │   │   ├── gate/
 │   │   │   │   └── own_draft_tests.rs
 │   │   │   ├── pane/
+│   │   │   │   ├── s5_effect_tests.rs
 │   │   │   │   └── submit_tests.rs
 │   │   │   ├── gate.rs
 │   │   │   └── pane.rs
@@ -4031,6 +4033,8 @@ src/
 ├── test_support/
 │   ├── input_owner/
 │   │   └── tests/
+│   │       ├── bounded_tests.rs
+│   │       ├── repair_tests.rs
 │   │       ├── scenarios_tests.rs
 │   │       ├── strict_effect_tests.rs
 │   │       ├── tests.rs

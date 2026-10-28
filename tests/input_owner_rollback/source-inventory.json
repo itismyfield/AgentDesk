@@ -155,6 +155,55 @@
       "symbol": "fn",
       "role": "preserved 4h obligated delivery",
       "integration": "existing foundation or re-audit after 4f"
+    },
+    {
+      "path": "src/services/tui_input/submission_tmux.rs",
+      "line": 16,
+      "symbol": "fn run(",
+      "role": "bounded plain submission: explicit caller-to-worker test context",
+      "integration": "5t cfg(test) hook"
+    },
+    {
+      "path": "src/services/claude_tui/busy_inject.rs",
+      "line": 281,
+      "symbol": "fn run(",
+      "role": "bounded Claude Pane: explicit caller-to-worker test context; merge hook when 4e2 starts",
+      "integration": "5t cfg(test) hook"
+    },
+    {
+      "path": "src/services/tui_input/actor/pane.rs",
+      "line": 101,
+      "symbol": "fn run(",
+      "role": "bounded input actor: explicit caller-to-worker test context",
+      "integration": "5t cfg(test) hook"
+    },
+    {
+      "path": "src/services/tui_input/bounded_tmux.rs",
+      "line": 88,
+      "symbol": "pub(super) fn spawn_with_budget(",
+      "role": "all bounded producers: observe before spawn",
+      "integration": "5t cfg(test) hook"
+    },
+    {
+      "path": "src/services/tui_input/bounded_tmux.rs",
+      "line": 150,
+      "symbol": "struct OwnedChild {",
+      "role": "bounded Flight remains owned through async and Drop cleanup",
+      "integration": "5t cfg(test) hook"
+    },
+    {
+      "path": "src/services/claude_tui/busy_inject/stash.rs",
+      "line": 11,
+      "symbol": "pub(in crate::services::claude_tui) fn submit(",
+      "role": "producer-declared target/operation/payload for paste and Enter, including opaque pinned if-shell",
+      "integration": "5t cfg(test) hook"
+    },
+    {
+      "path": "src/services/platform/tmux.rs",
+      "line": 493,
+      "symbol": "pub fn load_buffer(",
+      "role": "buffer request trace is separate from successful complete-input/child-exit cache",
+      "integration": "5t cfg(test) hook"
     }
   ],
   "coordinate_revision": "lane working tree, fixed at review head; base identifies fixture writer lineage",

@@ -99,9 +99,13 @@ impl TmuxPane {
     }
 
     fn run(&self, args: &[&str]) -> Result<std::process::Output, BoundedTmuxError> {
+        #[cfg(test)]
+        let context = crate::test_support::input_owner::capture_transport_context();
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
+                    #[cfg(test)]
+                    let _context = context.enter();
                     let mut command = self.command(args).map_err(BoundedTmuxError::Spawn)?;
                     tokio::runtime::Builder::new_current_thread()
                         .enable_all()

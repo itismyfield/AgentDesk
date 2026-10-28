@@ -181,6 +181,64 @@ fn s5_fixture_writer_goldens_verify_separately_from_generation() {
     }
 }
 
+fn expected_queue_identity(expected: &Value) -> Value {
+    let generation = expected["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["message_id"] == expected["primary"])
+        .unwrap()["queued_generation"]
+        .clone();
+    json!({"primary":expected["primary"],"queued_generation":generation,"sources":expected["sources"]})
+}
+
+fn assert_item_identity(item: &Value, expected: &Value, canonical_v1: bool) {
+    let actual = json!({
+        "author":item["author_id"],"author_is_bot":item["author_is_bot"],
+        "channel":item["channel_id"],"primary":item["message_id"],
+        "generation":item["queued_generation"],"source_ids":item["source_message_ids"],
+        "sources":item["source_message_queued_generations"],
+        "role_override":item["override_channel_id"],"reply_context":item["reply_context"],
+        "has_reply_boundary":item["has_reply_boundary"],
+        "voice_utterance":item["voice_announcement"]["utterance_id"],"assets":item["pending_uploads"]
+    });
+    let queue = expected_queue_identity(expected);
+    let source_ids: Vec<_> = expected["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|source| source["message_id"].clone())
+        .collect();
+    let role = if canonical_v1 {
+        &expected["v1_head_role_override"]
+    } else {
+        &expected["role_override"]
+    };
+    assert_eq!(
+        actual,
+        json!({
+            "author":expected["author"],"author_is_bot":expected["author_is_bot"],
+            "channel":expected["channel"],"primary":expected["primary"],
+            "generation":queue["queued_generation"],"source_ids":source_ids,"sources":expected["sources"],
+            "role_override":role,"reply_context":expected["reply_context"],
+            "has_reply_boundary":expected["has_reply_boundary"],
+            "voice_utterance":expected["voice_utterance"],"assets":expected["assets"]
+        }),
+        "independent expected identity"
+    );
+}
+
+fn assert_attempt_identity(input: &Value, expected: &Value) {
+    assert_eq!(input["identity"], expected_queue_identity(expected));
+    assert_eq!(input["attempt"]["provider"], expected["provider"]);
+    assert_eq!(input["attempt"]["nonce"], expected["nonce"]);
+    assert_eq!(
+        input["attempt"]["target"]["execution_nonce"],
+        expected["execution_nonce"]
+    );
+    assert_item_identity(&input["original"], expected, false);
+}
+
 #[test]
 fn s5_fixture_legacy_identity_voice_assets_and_metadata_stay_distinct() {
     let _root = TestRuntimeRootGuard::new();
@@ -188,10 +246,6 @@ fn s5_fixture_legacy_identity_voice_assets_and_metadata_stay_distinct() {
         &std::fs::read_to_string(directory().join("expected-identity.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        expected["sources"],
-        serde_json::to_value(identity()).unwrap()["sources"]
-    );
     assert_eq!(expected["channel"], CHANNEL);
     assert_eq!(expected["namespace"], NAMESPACE);
     use sha2::Digest;
@@ -212,53 +266,63 @@ fn s5_fixture_legacy_identity_voice_assets_and_metadata_stay_distinct() {
     ] {
         let raw = std::fs::read_to_string(directory().join(name)).unwrap();
         let value: Value = serde_json::from_str(&raw).unwrap();
-        let item = if name == "legacy.dispatch" {
-            value.clone()
-        } else if name == "metadata-only-v2.json" {
-            value["retained_inputs"][0]["input"]["original"].clone()
-        } else if name == "metadata-only-v1.json" {
-            assert_eq!(value["items"], json!([]));
-            assert_eq!(
-                value["terminal_identities"][0],
-                serde_json::to_value(identity()).unwrap()
-            );
-            continue;
-        } else if name == "raw-array.json" {
-            value[0].clone()
-        } else {
-            value["items"][0].clone()
-        };
-        assert_eq!(item["source_message_ids"], json!([100, 101]));
-        assert_eq!(
-            item["source_message_queued_generations"][1]["queued_generation"],
-            6
-        );
-        assert_eq!(item["voice_announcement"]["utterance_id"], "utterance-1");
-        assert_eq!(item["override_channel_id"], 91);
-        for (index, asset) in ["asset-a.txt", "asset-b.txt"].iter().enumerate() {
-            assert_eq!(item["pending_uploads"][index], format!("fixture://{asset}"));
-            assert!(!std::fs::read(directory().join(asset)).unwrap().is_empty());
-        }
-        if name == "v1.json" {
-            let (_, meta) = parse_snapshot(&raw).unwrap();
-            let legacy = meta.unwrap().head_injection.unwrap().attempt.unwrap();
-            assert_eq!(
-                (legacy.nonce.as_str(), legacy.file, legacy.offset),
-                ("legacy-nonce", (3, 4), 9)
-            );
-            let migrated = v2::Owner::adopt(directory_copy(&raw), NAMESPACE.into()).unwrap();
-            let input = migrated
-                .snapshot
-                .head_injection
-                .as_ref()
-                .expect("legacy Unknown head remains pending until tick");
-            assert_eq!(input.phase, HeadPhase::Unknown);
-            assert!(migrated.snapshot.retained_inputs.is_empty());
-            assert!(
-                input.attempt.is_none(),
-                "legacy marker cannot invent provider/target authority"
-            );
-            assert_eq!(input.legacy_attempt.as_ref().unwrap().nonce, "legacy-nonce");
+        match name {
+            "raw-array.json" => assert_item_identity(&value[0], &expected, false),
+            "legacy.dispatch" => assert_item_identity(&value, &expected, false),
+            "metadata-only-v1.json" => {
+                assert_eq!(value["items"], json!([]));
+                assert_eq!(
+                    value["terminal_identities"][0],
+                    expected_queue_identity(&expected)
+                );
+            }
+            "metadata-only-v2.json" => {
+                assert_eq!(value["namespace"], expected["namespace"]);
+                assert_attempt_identity(&value["retained_inputs"][0]["input"], &expected);
+            }
+            "v2.json" => {
+                assert_eq!(value["namespace"], expected["namespace"]);
+                assert_item_identity(&value["items"][0], &expected, false);
+                assert_attempt_identity(&value["head_injection"], &expected);
+            }
+            "v1.json" => {
+                assert_item_identity(&value["items"][0], &expected, false);
+                assert_item_identity(&value["head_injection"]["original"], &expected, true);
+                assert_eq!(
+                    value["head_injection"]["identity"],
+                    expected_queue_identity(&expected)
+                );
+                let (_, meta) = parse_snapshot(&raw).unwrap();
+                let legacy = meta.unwrap().head_injection.unwrap().attempt.unwrap();
+                assert_eq!(legacy.nonce, expected["legacy_nonce"].as_str().unwrap());
+                assert_eq!((legacy.file, legacy.offset), ((3, 4), 9));
+                let migrated = v2::Owner::adopt(directory_copy(&raw), NAMESPACE.into()).unwrap();
+                let input = migrated
+                    .snapshot
+                    .head_injection
+                    .as_ref()
+                    .expect("legacy Unknown head remains pending until tick");
+                assert_eq!(input.phase, HeadPhase::Unknown);
+                assert!(migrated.snapshot.retained_inputs.is_empty());
+                assert!(
+                    input.attempt.is_none(),
+                    "legacy marker cannot invent provider/target authority"
+                );
+                assert_eq!(
+                    input.legacy_attempt.as_ref().unwrap().nonce,
+                    expected["legacy_nonce"].as_str().unwrap()
+                );
+                assert_item_identity(
+                    &serde_json::to_value(&input.original).unwrap(),
+                    &expected,
+                    false,
+                );
+                assert_eq!(
+                    serde_json::to_value(&input.identity).unwrap(),
+                    expected_queue_identity(&expected)
+                );
+            }
+            _ => unreachable!(),
         }
     }
     for name in ["unknown.json", "corrupt.json"] {

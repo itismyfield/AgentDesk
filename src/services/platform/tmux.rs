@@ -492,7 +492,7 @@ pub fn send_literal(session_name: &str, text: &str) -> Result<Output, String> {
 /// Load literal text into a named tmux buffer via stdin.
 pub fn load_buffer(buffer_name: &str, text: &str) -> Result<Output, String> {
     #[cfg(test)]
-    crate::test_support::input_owner::load_buffer(buffer_name, text);
+    let mut load = crate::test_support::input_owner::begin_load_buffer(buffer_name, text);
     let mut child = tmux_command()
         .map_err(|e| format!("tmux load-buffer failed: {e}"))?
         .args(["load-buffer", "-b", buffer_name, "-"])
@@ -505,10 +505,19 @@ pub fn load_buffer(buffer_name: &str, text: &str) -> Result<Output, String> {
         stdin
             .write_all(text.as_bytes())
             .map_err(|e| format!("tmux load-buffer stdin failed: {e}"))?;
+        #[cfg(test)]
+        load.input_complete();
     }
-    child
+    let output = child
         .wait_with_output()
-        .map_err(|e| format!("tmux load-buffer wait failed: {e}"))
+        .map_err(|e| format!("tmux load-buffer wait failed: {e}"));
+    #[cfg(test)]
+    if let Ok(output) = &output
+        && output.status.success()
+    {
+        load.succeeded();
+    }
+    output
 }
 
 /// Paste a named tmux buffer to the active pane.

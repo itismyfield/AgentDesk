@@ -1,6 +1,8 @@
 //! The A leaf under an owner, read from the transport trace: ready before any key, the payload
 //! start just before content, and paste/Enter that only the pinned pane identity runs.
 use super::*;
+#[path = "s5_effect_tests.rs"]
+mod s5_effect_tests;
 use crate::services::claude_tui::input::submission::tests::{FAST, events, renderer, wait};
 use crate::services::claude_tui::owner_input::{self, Commit, Hold, Pin};
 use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;

@@ -279,6 +279,8 @@ impl Pane {
     }
 
     fn run(&self, args: &[&str]) -> Result<Output, BoundedTmuxError> {
+        #[cfg(test)]
+        let context = crate::test_support::input_owner::capture_transport_context();
         let mut command = Command::new(&self.program);
         command.arg("-u").args(args);
         crate::services::platform::binary_resolver::apply_runtime_path(&mut command);
@@ -286,6 +288,8 @@ impl Pane {
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
+                    #[cfg(test)]
+                    let _context = context.enter();
                     tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()

@@ -14,9 +14,13 @@ pub(crate) struct SubmissionTmux;
 
 impl SubmissionTmux {
     fn run(&self, args: &[&str]) -> Result<Output, String> {
+        #[cfg(test)]
+        let context = crate::test_support::input_owner::capture_transport_context();
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
+                    #[cfg(test)]
+                    let _context = context.enter();
                     let mut command = runtime_command("tmux").map_err(|e| e.to_string())?;
                     command.arg("-u").args(args);
                     tokio::runtime::Builder::new_current_thread()

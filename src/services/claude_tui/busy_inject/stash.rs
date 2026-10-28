@@ -77,12 +77,30 @@ pub(in crate::services::claude_tui) fn submit(
             ]
             .map(String::from)
         };
+        #[cfg(test)]
+        let effect = crate::test_support::input_owner::producer_effect(
+            pane.target(),
+            crate::test_support::input_owner::Op::Paste,
+            text.as_bytes(),
+            PINNED_APPLIED,
+            Some(&buffer),
+        );
         match key(pane, paste) {
             Key::Applied => {}
             Key::Held if stash => return Outcome::Failed(WriteFailure::Stash),
             Key::Held | Key::Failed => return Outcome::Failed(WriteFailure::Paste),
         }
+        #[cfg(test)]
+        drop(effect);
         std::thread::sleep(timing.settle);
+        #[cfg(test)]
+        let _effect = crate::test_support::input_owner::producer_effect(
+            pane.target(),
+            crate::test_support::input_owner::Op::Enter,
+            b"",
+            PINNED_APPLIED,
+            None,
+        );
         match key(pane, |target| {
             ["send-keys", "-t", target, "Enter"].map(String::from)
         }) {

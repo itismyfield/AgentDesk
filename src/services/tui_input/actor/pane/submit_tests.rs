@@ -4,6 +4,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 use super::*;
+#[path = "s5_effect_tests.rs"]
+mod s5_effect_tests;
 
 struct Fixture(tempfile::TempDir);
 

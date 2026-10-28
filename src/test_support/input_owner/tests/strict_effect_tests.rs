@@ -10,7 +10,14 @@ use serde_json::Value;
 mod transport;
 #[cfg(unix)]
 pub(crate) use transport::herdr;
-pub(crate) use transport::{load_buffer, tmux};
+pub(crate) use transport::{begin_load_buffer, tmux};
+#[path = "bounded_tests.rs"]
+pub(crate) mod bounded;
+#[cfg(unix)]
+pub(crate) use bounded::observe_bounded;
+pub(crate) use bounded::{capture_transport_context, producer_effect};
+#[cfg(unix)]
+mod repair_tests;
 #[path = "scenarios_tests.rs"]
 pub(crate) mod scenarios;
 mod tests;
@@ -60,6 +67,7 @@ pub(crate) enum Op {
     Capture,
     Load,
     Control,
+    Unclassified,
 }
 
 pub(super) fn digest(bytes: &[u8]) -> String {
@@ -75,7 +83,7 @@ impl Op {
         )
     }
     fn guarded(self) -> bool {
-        self.content() || matches!(self, Self::Enter | Self::Create)
+        self.content() || matches!(self, Self::Enter | Self::Create | Self::Unclassified)
     }
 }
 
@@ -402,7 +410,7 @@ pub(crate) fn before(host: &str, physical: &str, op: Op, payload: &[u8]) -> Resu
         }
         None => false,
     };
-    let accepted = !op.guarded() || (authorized && state.writers == 0);
+    let accepted = !op.guarded() || (op != Op::Unclassified && authorized && state.writers == 0);
     state.counts.events.push(Event {
         op,
         scope: scope.clone(),

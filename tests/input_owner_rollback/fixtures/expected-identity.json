@@ -27,5 +27,8 @@
   "asset_sha256": {
     "asset-a.txt": "d8de5c8a78d6b6743dcdc69c4fc3a4c026286a30f678049f41b69815e7e08d7a",
     "asset-b.txt": "cb8399899cd9e47bfd76d61064b26393b88494a44785ffd022d4ee5460911851"
-  }
+  },
+  "reply_context": "reply 원문",
+  "has_reply_boundary": true,
+  "v1_head_role_override": null
 }
