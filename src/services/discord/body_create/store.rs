@@ -24,3 +24,16 @@ pub(super) fn publish(root: &Path, path: &Path, attempt: &Attempt) -> Result<(),
         )),
     }
 }
+
+/// Call only under the record's lock after verifying its synced, rename-visible bytes.
+pub(super) fn confirm_existing(root: &Path, path: &Path) -> Result<(), String> {
+    match super::runtime_store::durable_publish::flush_chain_before_publish(root, path) {
+        FlushStatus::Flushed => Ok(()),
+        status => {
+            tracing::warn!(path = %path.display(), ?status, "created settlement remains unconfirmed");
+            Err(format!(
+                "created settlement retained with uncertain flush: {status:?}"
+            ))
+        }
+    }
+}

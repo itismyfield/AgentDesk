@@ -312,7 +312,13 @@ where
         .await;
         return true;
     }
-    if terminal_text_idempotency::captured_terminal_receipt_exists(provider, state) {
+    #[cfg(unix)]
+    let receipt_only_allowed = !super::super::body_create::has_attempt(shared, state);
+    #[cfg(not(unix))]
+    let receipt_only_allowed = true;
+    if receipt_only_allowed
+        && terminal_text_idempotency::captured_terminal_receipt_exists(provider, state)
+    {
         settle_captured_ready_delivery(
             shared,
             provider,

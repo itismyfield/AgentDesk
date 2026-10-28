@@ -105,7 +105,7 @@ impl PendingBind {
         self
     }
     pub(super) fn bind_after_actor_check(
-        mut self,
+        self,
         shared: &SharedData,
         state: &mut InflightTurnState,
     ) -> inflight::GuardedSaveOutcome {
@@ -142,17 +142,8 @@ impl PendingBind {
             return AuthorityPinned;
         }
         if fresh.current_msg_id == self.anchor.get() {
-            drop(guard);
             *state = fresh;
-            return if self
-                .commit
-                .take()
-                .is_none_or(|commit| commit(shared, self.anchor))
-            {
-                Saved
-            } else {
-                AuthorityPinned
-            };
+            return self.commit_bound(shared, state, guard);
         }
         if fresh.current_msg_id != self.expected.current_msg_id {
             return AuthorityPinned;
@@ -169,15 +160,49 @@ impl PendingBind {
             self.anchor.get(),
             self.len,
         );
-        if outcome == Saved
-            && self
-                .commit
-                .take()
-                .is_some_and(|commit| !commit(shared, self.anchor))
+        if outcome != Saved {
+            return outcome;
+        }
+        let Ok(guard) = matching_row(state) else {
+            return AuthorityPinned;
+        };
+        self.commit_bound(shared, state, guard)
+    }
+
+    fn commit_bound(
+        mut self,
+        shared: &SharedData,
+        state: &InflightTurnState,
+        guard: inflight::LockedInflightEpisode,
+    ) -> inflight::GuardedSaveOutcome {
+        use inflight::GuardedSaveOutcome::{AuthorityPinned, Saved};
+        let Some((root, provider)) = runtime_store::runtime_root().zip(state.provider_kind())
+        else {
+            return AuthorityPinned;
+        };
+        let Some(inflight_root) = inflight::inflight_runtime_root() else {
+            return AuthorityPinned;
+        };
+        if guard.state().current_msg_id != self.anchor.get()
+            || guard.state().save_generation != state.save_generation
+            || store::confirm_existing(
+                &root,
+                &inflight::inflight_state_path(&inflight_root, &provider, state.channel_id),
+            )
+            .is_err()
         {
             return AuthorityPinned;
         }
-        outcome
+        drop(guard);
+        if self
+            .commit
+            .take()
+            .is_none_or(|commit| commit(shared, self.anchor))
+        {
+            Saved
+        } else {
+            AuthorityPinned
+        }
     }
 }
 
@@ -219,6 +244,9 @@ pub(super) fn has_attempt(shared: &SharedData, row: &InflightTurnState) -> bool 
 }
 
 pub(super) fn split_for_create(mut body: &str) -> Vec<String> {
+    if !body.is_empty() && !super::formatting::needs_multiple_messages(body) {
+        return vec![body.to_string()];
+    }
     let mut chunks = Vec::new();
     while !body.is_empty() {
         // Keep the raw boundary bytes; the legacy display chunker strips newlines.
@@ -384,10 +412,15 @@ async fn create_parts(
                 return Err("body create result unknown".into());
             }
         };
-        let row_guard = matching_row(row)?;
         let _attempt_guard = inflight::lock_inflight_state_path(&path)?;
         let mut fresh = store::read(&path)?.ok_or("attempt vanished during HTTP")?;
-        if fresh.plan != plan || fresh.source != source {
+        if fresh.version != 1
+            || fresh.episode != key
+            || fresh.scope != "response"
+            || fresh.plan != plan
+            || fresh.source != source
+            || fresh.total != chunks.len()
+        {
             return Err("attempt changed during HTTP".into());
         }
         if fresh.accepted.len() == ordinal && fresh.pending.as_ref() == Some(&part) {
@@ -403,7 +436,8 @@ async fn create_parts(
         }
         verified.push(id.get());
         drop(_attempt_guard);
-        drop(row_guard);
+        // Retain the returned effect even when the mutable row lost publication authority.
+        matching_row(row)?;
     }
 }
 
@@ -439,4 +473,30 @@ mod tests {
             );
         }
     }
+}
+
+/// Reconfirm a created terminal's exact receipt before its raw frontier can advance.
+pub(super) fn confirm_created_receipt(
+    source: &super::outbound::delivery_record::ExactJsonlSourceIdentity,
+    message_id: u64,
+) -> Result<(), String> {
+    use super::outbound::delivery_record as dr;
+    let root = runtime_store::runtime_root().ok_or("runtime root missing")?;
+    let provider = super::super::provider::ProviderKind::from_str(&source.provider)
+        .ok_or("provider missing")?;
+    let path = dr::delivery_record_path(&provider, source.offset_authority_channel_id)
+        .ok_or("receipt path missing")?;
+    let _lock = dr::lock_record_path(&path)?;
+    let record = dr::read_record_at(&path).ok_or("receipt record unreadable")?;
+    if !source.is_authoritative()
+        || message_id == 0
+        || !record.confirmed_deliveries.iter().any(|receipt| {
+            receipt.source == *source
+                && receipt.message_id == message_id
+                && receipt.delivery_channel_id == source.delivery_channel_id
+        })
+    {
+        return Err("created receipt changed before flush confirmation".into());
+    }
+    store::confirm_existing(&root, &path)
 }

@@ -335,9 +335,9 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
         "src/services/discord/session_relay_sink/delivery_frontier.rs": 1,
         "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
     },
-    # terminal_delivery retains its separately pinned function-value binding.
-    # Detached custody records an acknowledged receipt after exact-source checks.
+    # Live and detached custody record acknowledged receipts after exact-source checks.
     "record_historical_pinned_delivery": {
+        "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
         "src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": 1,
     },
     "advance_tmux_relay_confirmed_end": {
@@ -369,11 +369,9 @@ EXPECTED_RAW_ATOMIC_MUTATIONS: dict[str, int] = {
     "src/services/discord/relay_health/frontier.rs": 2,
 }
 
-# Bare-reference pin by symbol/file; current capture is the `record` binding.
+# Bare-reference pin by symbol/file; no named capture remains.
 EXPECTED_BARE_REFERENCES: dict[str, dict[str, int]] = {
-    "record_historical_pinned_delivery": {
-        "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
-    },
+    "record_historical_pinned_delivery": {},
 }
 
 # Pinned-function renames in `use` items are prohibited; empty is a deliberate

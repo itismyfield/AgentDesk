@@ -1415,3 +1415,311 @@ fn direct_tui_gateway_wire_preserves_nonce_and_reference() {
         assert_eq!(remote.messages.lock().unwrap().len(),1);
     });
 }
+
+fn r1_created_flush_case(name: &str, receipt: bool) {
+    if !isolated(name) {
+        return;
+    }
+    use crate::services::discord::runtime_store::durable_publish::flush_probe::{
+        Plan, Step, Watch,
+    };
+    for (index, step) in [Step::ParentOpen, Step::ParentSync, Step::Ancestors]
+        .into_iter()
+        .enumerate()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let channel = 75_071_701 + index as u64 + u64::from(receipt) * 10;
+                let remote = Remote::new(channel).await;
+                let row = admitted(root.path(), channel, "strict created settlement🙂", 0).await;
+                let old = runtime(1);
+                let delivery = recovery_on(&remote, &row, &old).await;
+                assert_eq!(delivery.outcome, RecoveryRelayOutcome::Delivered);
+                let _uncached =
+                    crate::services::discord::runtime_store::without_directory_birth_times_for_test(
+                        &root.path().join("runtime"),
+                    );
+                let scope = root.path().join(if receipt {
+                    "runtime/discord_delivery_records"
+                } else {
+                    "runtime/discord_inflight"
+                });
+                let watch = Watch::new(
+                    &scope,
+                    Plan {
+                        fail: vec![step],
+                        ..Default::default()
+                    },
+                );
+                assert!(
+                    old.mailbox(ChannelId::new(channel))
+                        .commit_captured_ready_delivery(CapturedReadyDeliveryCommit {
+                            shared: old.clone(),
+                            state: row,
+                            actor: None,
+                            delivery,
+                        })
+                        .await
+                        .is_none(),
+                    "{step:?} receipt={receipt}: uncertain flush is not a commit"
+                );
+                assert!(
+                    watch
+                        .events()
+                        .iter()
+                        .any(|event| event.step == step && !event.ok),
+                    "fault hit {step:?}"
+                );
+                assert_eq!(old.committed_relay_offset(ChannelId::new(channel)), 0);
+                let retained =
+                    inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel)
+                        .unwrap();
+                assert!(!retained.terminal_delivery_committed);
+                assert_eq!(retained.response_sent_offset, 0);
+                let accepted: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(attempt_file(root.path(), channel)).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(accepted["accepted"][0][0], retained.current_msg_id);
+                if receipt {
+                    assert!(
+                        super::super::terminal_text_idempotency::captured_terminal_receipt_exists(
+                            &ProviderKind::Claude,
+                            &retained,
+                        ),
+                        "the failed flush left a readable exact receipt"
+                    );
+                }
+                let next = runtime(2);
+                let called = std::sync::atomic::AtomicBool::new(false);
+                let (next_ref, remote_ref, retained_ref, called_ref) =
+                    (&next, &remote, &retained, &called);
+                assert!(
+                    super::super::idle_captured_response::settle_ready_without_output(
+                        &next,
+                        &ProviderKind::Claude,
+                        &retained,
+                        |text| async move {
+                            called_ref.store(true, std::sync::atomic::Ordering::SeqCst);
+                            let gateway = DiscordGateway::new(
+                                remote_ref.http.clone(),
+                                next_ref.clone(),
+                                ProviderKind::Claude,
+                                None,
+                            );
+                            let delivery = relay_captured_recovery_terminal_notice_with_gateway(
+                                &remote_ref.http,
+                                next_ref,
+                                &ProviderKind::Claude,
+                                retained_ref,
+                                &text,
+                                &gateway,
+                            )
+                            .await;
+                            assert_eq!(delivery.outcome, RecoveryRelayOutcome::Delivered);
+                            assert!(
+                                delivery.body_bind.is_some(),
+                                "the actual created settlement retry is reached"
+                            );
+                            delivery
+                        }
+                    )
+                    .await
+                );
+                assert!(
+                    called.load(std::sync::atomic::Ordering::SeqCst),
+                    "a visible receipt must not bypass unresolved creation"
+                );
+                let held = inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel)
+                    .unwrap();
+                assert!(!held.terminal_delivery_committed);
+                assert_eq!(held.response_sent_offset, 0);
+                assert_eq!(next.committed_relay_offset(ChannelId::new(channel)), 0);
+                assert_eq!(post_calls(&remote).len(), 1);
+                assert!(
+                    watch
+                        .events()
+                        .iter()
+                        .filter(|event| event.step == step && !event.ok)
+                        .count()
+                        >= 2,
+                    "winner retry rechecks flush"
+                );
+                drop(watch);
+                drop(old);
+                drop(next);
+                let fresh = runtime(3);
+                let ready = recovery_on(&remote, &held, &fresh).await;
+                let stored = finish(&fresh, &held, ready).await;
+                assert_eq!(stored.current_msg_id, held.current_msg_id);
+                assert_eq!(post_calls(&remote).len(), 1);
+                no_body_delete(&remote);
+            });
+    }
+}
+
+#[test]
+fn r1_created_anchor_flush_uncertainty_holds_even_a_bound_winner() {
+    r1_created_flush_case(
+        concat!(
+            module_path!(),
+            "::r1_created_anchor_flush_uncertainty_holds_even_a_bound_winner"
+        ),
+        false,
+    );
+}
+
+#[test]
+fn r1_created_receipt_flush_uncertainty_cannot_use_the_receipt_shortcut() {
+    r1_created_flush_case(
+        concat!(
+            module_path!(),
+            "::r1_created_receipt_flush_uncertainty_cannot_use_the_receipt_shortcut"
+        ),
+        true,
+    );
+}
+
+#[test]
+fn r1_returned_actual_id_survives_a_restart_marker_before_bind() {
+    if !isolated(concat!(
+        module_path!(),
+        "::r1_returned_actual_id_survives_a_restart_marker_before_bind"
+    )) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let channel = 75_071_721;
+            let remote = Remote::new(channel).await;
+            let row = admitted(root.path(), channel, "accepted before marker", 0).await;
+            *remote.on_post.lock().unwrap() = Some(Box::new(move || {
+                let mut row =
+                    inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel)
+                        .unwrap();
+                row.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
+                inflight::save_inflight_state(&row).unwrap();
+            }));
+            let old = runtime(1);
+            assert_eq!(
+                recovery_on(&remote, &row, &old).await.outcome,
+                RecoveryRelayOutcome::TransientFailure
+            );
+            let path = attempt_file(root.path(), channel);
+            let mut attempt: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let actual = remote.messages.lock().unwrap()[0]["id"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap();
+            assert_eq!(
+                attempt["accepted"][0][0], actual,
+                "save the returned ID before inspecting mutable row authority"
+            );
+            assert!(attempt["pending"].is_null());
+            attempt["last"]["first_ms"] = (chrono::Utc::now().timestamp_millis() - 600_000).into();
+            std::fs::write(&path, serde_json::to_vec(&attempt).unwrap()).unwrap();
+            let mut restored =
+                inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel).unwrap();
+            assert!(restored.restart_mode.is_some());
+            assert_eq!(restored.current_msg_id, 0);
+            assert!(!restored.terminal_delivery_committed);
+            assert_eq!(old.committed_relay_offset(ChannelId::new(channel)), 0);
+            let mut guard = inflight::lock_inflight_episode(
+                &ProviderKind::Claude,
+                channel,
+                &inflight::InflightEpisodePin::from_state(&restored),
+            )
+            .unwrap();
+            assert_eq!(
+                guard.mark_readopted_under_guard(),
+                inflight::GuardedSaveOutcome::Saved
+            );
+            restored = guard.state().clone();
+            drop(guard);
+            let new = runtime(2);
+            let sent = recovery_on(&remote, &restored, &new).await;
+            let stored = finish(&new, &restored, sent).await;
+            assert_eq!(stored.current_msg_id, actual);
+            assert_eq!(
+                post_calls(&remote).len(),
+                1,
+                "expired accepted ID is GET-only"
+            );
+            assert!(
+                remote
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(route, _)| route.starts_with("GET ")
+                        && route.ends_with(&format!("/channels/{channel}/messages/{actual}")))
+            );
+            no_body_delete(&remote);
+        });
+}
+
+#[test]
+fn r1_short_terminal_boundaries_create_one_message() {
+    if !isolated(concat!(
+        module_path!(),
+        "::r1_short_terminal_boundaries_create_one_message"
+    )) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for (index, body) in [
+                "a".repeat(1990),
+                "a".repeat(1991),
+                "a".repeat(2000),
+                "🙂".repeat(1000),
+                format!("{}a", "🙂".repeat(999)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let channel = 75_071_730 + index as u64;
+                let remote = Remote::new(channel).await;
+                assert!(!crate::services::discord::formatting::needs_multiple_messages(&body));
+                let row = admitted(root.path(), channel, &body, 0).await;
+                let old = runtime(1);
+                let sent = recovery_on(&remote, &row, &old).await;
+                let stored = finish(&old, &row, sent).await;
+                assert_eq!(
+                    post_calls(&remote).len(),
+                    1,
+                    "short body must fit in one message"
+                );
+                assert_eq!(stored.current_msg_len, body.len());
+                assert_eq!(remote.messages.lock().unwrap()[0]["content"], body);
+                let next = runtime(2);
+                let sent = recovery_on(&remote, &stored, &next).await;
+                if sent.body_bind.is_some() {
+                    finish(&next, &stored, sent).await;
+                }
+                assert_eq!(
+                    post_calls(&remote).len(),
+                    1,
+                    "restart cannot add another short part"
+                );
+                no_body_delete(&remote);
+            }
+        });
+}
