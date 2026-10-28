@@ -150,6 +150,7 @@ pub(crate) fn local(
                 anchor_id,
                 epoch,
                 local_retry,
+                notice_origin,
             } => {
                 if serial != next_serial {
                     return None;
@@ -179,6 +180,7 @@ pub(crate) fn local(
                             prepared_at: parsed.at,
                             outcome: None,
                             local_retry,
+                            notice_origin,
                             outcome_at: None,
                         },
                     ),
