@@ -34,8 +34,12 @@ pub(super) async fn handle(
         }
     }
     .await;
-    msg.reply(&ctx.http, result.unwrap_or_else(|error| error))
-        .await?;
+    crate::services::discord::http::send_channel_message_reply(
+        &ctx.http,
+        msg,
+        result.unwrap_or_else(|error| error),
+    )
+    .await?;
     Ok(true)
 }
 

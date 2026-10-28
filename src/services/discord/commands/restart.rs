@@ -340,7 +340,7 @@ pub(super) async fn run_text_restart(
     channel_id: serenity::ChannelId,
 ) -> Result<(), Error> {
     let say = |text: String| async move {
-        msg.reply(&ctx.http, text)
+        crate::services::discord::http::send_channel_message_reply(&ctx.http, msg, text)
             .await
             .map(|_| ())
             .map_err(Error::from)

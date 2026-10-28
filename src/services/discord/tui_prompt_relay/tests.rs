@@ -6719,3 +6719,218 @@ mod fenced_admission_tests;
 
 #[cfg(unix)]
 mod codex_direct_owner_tests;
+
+#[cfg(unix)]
+async fn observed_prompt_note_on_wire(active_loop: bool) -> serde_json::Value {
+    use crate::services::discord::admin_host_guard::tests::Recorder;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let api = if active_loop {
+        // A lost receipt ends the active path immediately after its real note POST.
+        Recorder::start_with(Arc::new(|_, _| {
+            Some(serde_json::json!({"receipt": "unreadable"}))
+        }))
+        .await
+    } else {
+        Recorder::start().await
+    };
+    let registry = Arc::new(super::super::health::HealthRegistry::new());
+    let mut shared = super::super::make_shared_data_for_tests_with_storage(None);
+    Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+    let channel = ChannelId::new(if active_loop { 74_190_202 } else { 74_190_201 });
+    shared.settings.write().await.allowed_channel_ids = vec![channel.get()];
+    registry.register("claude".into(), shared.clone()).await;
+    let _http = super::super::shared_state::test_rest::install(api.http.clone());
+    let tmux = format!("p2-mentions-{}", uuid::Uuid::new_v4());
+    shared
+        .tmux_watchers
+        .restore_owner_channel_for_tmux_session(&tmux, channel);
+    let body = if active_loop {
+        "/loop @everyone @here <@&5678> <@1234> inspect relay"
+    } else {
+        "<local-command-stdout>@everyone @here <@&5678> <@1234> local result</local-command-stdout>"
+    };
+    let kind = if active_loop {
+        "/loop"
+    } else {
+        "local-command-stdout"
+    };
+    let rendered = format_slash_command_control_note(&tmux, kind, body);
+    assert!(rendered.contains("@everyone @here ‹@&5678› ‹@1234›"));
+    let prompt = local_control_prompt(&tmux, body, "p2-mentions-entry");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        relay_observed_prompt(&shared, prompt),
+    )
+    .await
+    .expect("observed prompt reaches its POST boundary");
+
+    if active_loop {
+        assert!(
+            super::super::inflight::load_inflight_state_read_only(
+                &ProviderKind::Claude,
+                channel.get()
+            )
+            .is_none(),
+            "the invalid receipt must return before creating the synthetic inflight"
+        );
+    }
+    let calls = api.take();
+    assert_eq!(calls.len(), 1, "one actual observed note POST: {calls:?}");
+    let prefix = format!("POST /api/v10/channels/{}/messages ", channel.get());
+    let body: serde_json::Value = serde_json::from_str(
+        calls[0]
+            .strip_prefix(&prefix)
+            .expect("actual observed note POST"),
+    )
+    .unwrap();
+    assert_eq!(body["content"], rendered);
+    body
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn local_stdout_note_p2_allowed_mentions_preserve_rendered_body() {
+    let body = observed_prompt_note_on_wire(false).await;
+    assert_eq!(
+        body["allowed_mentions"]["parse"],
+        serde_json::json!(["users"])
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn active_loop_note_p2_allowed_mentions_preserve_rendered_body() {
+    let body = observed_prompt_note_on_wire(true).await;
+    assert_eq!(
+        body["allowed_mentions"]["parse"],
+        serde_json::json!(["users"])
+    );
+}
+
+#[cfg(unix)]
+async fn synthetic_prompt_note_on_wire(route: u8) -> serde_json::Value {
+    use crate::services::discord::admin_host_guard::tests::Recorder;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let api = Recorder::start().await;
+    let registry = Arc::new(super::super::health::HealthRegistry::new());
+    let mut shared = super::super::make_shared_data_for_tests_with_storage(None);
+    Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+    let channel = ChannelId::new(74_190_210 + u64::from(route));
+    shared.settings.write().await.allowed_channel_ids = vec![channel.get()];
+    registry.register("claude".into(), shared.clone()).await;
+    let _http = super::super::shared_state::test_rest::install(api.http.clone());
+    let tmux = format!("p2-@everyone @here-{}", uuid::Uuid::new_v4());
+    let raw = match route {
+        0 => "/clear",
+        1 => "/loop @everyone @here <@&5678> <@1234> inspect relay",
+        2 => "@everyone @here <@&5678> <@1234> steering input",
+        _ => unreachable!(),
+    };
+    let mut prompt = local_control_prompt(&tmux, raw, "p2-synthetic-entry");
+    prompt.steer_echo = route == 2;
+    let rendered = if route == 2 {
+        format_ssh_direct_prompt_notification("claude", &tmux, raw)
+    } else {
+        format_slash_command_control_note(&tmux, if route == 0 { "/clear" } else { "/loop" }, raw)
+    };
+    let confirmed = (route == 1)
+        .then(|| crate::services::tui_o::turn_mode::TestConfirmation::new(channel.get()));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        match route {
+            0 => {
+                synthetic_start_wiring::post_suppressed_injection_note(
+                    &api.http,
+                    channel,
+                    &prompt,
+                    InjectedPromptClass::SlashCommandControl,
+                    Some("/clear"),
+                )
+                .await
+            }
+            1 => {
+                let decision = relay_observed_prompt_injected_prompt_decision(raw);
+                let observation = task_notification_prompt::observe(
+                    &shared,
+                    &prompt,
+                    channel,
+                    decision.injected_class,
+                );
+                assert!(
+                    synthetic_start_wiring::post_passive_prompt_notice(
+                        &shared,
+                        &prompt,
+                        channel,
+                        &decision,
+                        observation
+                    )
+                    .await
+                    .is_none(),
+                    "the confirmed prompt must take the notice-only sender"
+                );
+            }
+            2 => synthetic_start_wiring::post_steer_echo(&shared, &prompt, channel).await,
+            _ => unreachable!(),
+        }
+    })
+    .await
+    .expect("synthetic note POST finishes");
+    drop(confirmed);
+    let calls = api.take();
+    assert_eq!(calls.len(), 1, "one actual synthetic note POST: {calls:?}");
+    let prefix = format!("POST /api/v10/channels/{}/messages ", channel.get());
+    let body: serde_json::Value = serde_json::from_str(
+        calls[0]
+            .strip_prefix(&prefix)
+            .expect("actual synthetic note POST"),
+    )
+    .unwrap();
+    assert_eq!(body["content"], rendered);
+    if route == 2 {
+        assert!(
+            body["content"]
+                .as_str()
+                .unwrap()
+                .contains("@\u{200b}everyone"),
+            "steer echo keeps its existing mention escape"
+        );
+    } else {
+        assert!(
+            body["content"]
+                .as_str()
+                .unwrap()
+                .contains("@everyone @here")
+        );
+    }
+    body
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn suppressed_prompt_note_p2_allowed_mentions_preserve_body() {
+    let body = synthetic_prompt_note_on_wire(0).await;
+    assert_eq!(
+        body["allowed_mentions"]["parse"],
+        serde_json::json!(["users"])
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn passive_loop_note_p2_allowed_mentions_preserve_body() {
+    let body = synthetic_prompt_note_on_wire(1).await;
+    assert_eq!(
+        body["allowed_mentions"]["parse"],
+        serde_json::json!(["users"])
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn steer_echo_note_p2_allowed_mentions_preserve_existing_escape() {
+    let body = synthetic_prompt_note_on_wire(2).await;
+    assert_eq!(
+        body["allowed_mentions"]["parse"],
+        serde_json::json!(["users"])
+    );
+}

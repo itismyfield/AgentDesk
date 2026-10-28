@@ -316,7 +316,7 @@ async fn create_forum_post(
     let body = serde_json::to_vec(&json!({
         "name": name,
         "auto_archive_duration": auto_archive_minutes,
-        "message": { "content": starter },
+        "message": crate::services::discord::http::relay_message_payload(starter),
         "applied_tags": applied_tags.iter().map(u64::to_string).collect::<Vec<_>>(),
     }))
     .map_err(|err| format!("serialize forum post {name:?}: {err}"))?;
@@ -699,6 +699,45 @@ mod tests {
         assert_eq!(bodies[0]["applied_tags"], json!(["42", "41"]));
         assert_eq!(bodies[0]["auto_archive_duration"], 1440);
         assert!(bodies[0].get("type").is_none());
+    }
+
+    async fn assert_starter_mentions(kind: serenity::ChannelType) {
+        let starter = "  <@42> <@&99> @everyone @here\n본문 유지  ";
+        let mut state = mock_state(kind);
+        state.available_tag_ids = vec![41, 42];
+        let bodies = state.post_bodies.clone();
+        let (http, server) = mock_http(state).await;
+        let name = format!("mention-policy-{}", u8::from(kind));
+
+        let result = create(&http, "100", &name, Some(starter), &[42, 41, 42], 4320)
+            .await
+            .expect("forum/media post succeeds");
+        server.abort();
+
+        assert_eq!(result["created"], true);
+        assert_eq!(result["name"], name);
+        let bodies = bodies.lock().expect("captured post bodies");
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["name"], name);
+        assert_eq!(bodies[0]["message"]["content"], starter);
+        assert_eq!(
+            bodies[0]["message"]["allowed_mentions"]["parse"],
+            json!(["users"])
+        );
+        assert!(bodies[0].get("allowed_mentions").is_none());
+        assert_eq!(bodies[0]["applied_tags"], json!(["42", "41"]));
+        assert_eq!(bodies[0]["auto_archive_duration"], 4320);
+        assert!(bodies[0].get("type").is_none());
+    }
+
+    #[tokio::test]
+    async fn forum_starter_p2_allowed_mentions_preserve_users_and_options() {
+        assert_starter_mentions(serenity::ChannelType::Forum).await;
+    }
+
+    #[tokio::test]
+    async fn media_starter_p2_allowed_mentions_preserve_users_and_options() {
+        assert_starter_mentions(serenity::ChannelType::Unknown(16)).await;
     }
 
     #[tokio::test]
