@@ -53,7 +53,7 @@ pub(in crate::services::discord) fn stamp_terminal_receipt_if_matches_identity(
 }
 
 /// Under the caller's row lock: a row about to be discarded while it still owes an origin its
-/// receipt is marked failed and kept instead. Returns the kept row once the mark is durable.
+/// receipt is kept instead, marked failed, or unmarked when the mark cannot be written.
 pub(super) fn keep_owed_row_marked(
     path: &Path,
     row: &InflightTurnState,
@@ -66,7 +66,11 @@ pub(super) fn keep_owed_row_marked(
         outcome: TerminalOutcome::Failed,
         confirmed_at: chrono::Utc::now(),
     });
-    (publish(path, &mut marked) == GuardedSaveOutcome::Saved).then_some(marked)
+    if publish(path, &mut marked) == GuardedSaveOutcome::Saved {
+        Some(marked)
+    } else {
+        Some(row.clone())
+    }
 }
 
 fn publish(path: &Path, row: &mut InflightTurnState) -> GuardedSaveOutcome {

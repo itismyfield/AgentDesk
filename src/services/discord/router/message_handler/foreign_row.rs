@@ -58,9 +58,8 @@ pub(super) async fn admit_headless(
     )))
 }
 
-/// Intake turn: on a foreign row, releases the claim and front-requeues the prompt behind the
-/// slow backstop, so it starts once after the row clears. `Ok(false)` stops before any spawn.
-/// A row kept marked for its receipt is recorded and removed here, so that retry can start.
+/// Intake turn: a marked row is recorded and removed first; on a foreign row, releases the claim
+/// and front-requeues the prompt to start once after it clears. `Ok(false)` stops before spawn.
 pub(super) async fn admit(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

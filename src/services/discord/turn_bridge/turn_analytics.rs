@@ -20,9 +20,8 @@ pub(super) fn terminal_receipt_outcome(label: &str) -> Option<TerminalOutcome> {
     }
 }
 
-/// Awaits the execution's receipt, retrying briefly. Only a turn with its own Discord message has
-/// a managed execution id, so a message-less (TUI-direct) turn writes none here. False when the
-/// commit failed and the row stays marked for boot or the next admission to record.
+/// Awaits the execution's receipt, retrying briefly; a message-less (TUI-direct) turn has no id and
+/// writes none. False when the commit failed and the row stays for boot or the next admission.
 pub(super) async fn record_terminal_receipt(
     pg_pool: Option<&sqlx::PgPool>,
     (provider, channel_id, user_msg_id): (&ProviderKind, ChannelId, Option<MessageId>),

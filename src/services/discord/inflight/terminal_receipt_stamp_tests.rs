@@ -105,3 +105,42 @@ fn a_stale_generation_origin_row_is_kept_marked_failed_not_discarded() {
     let again = load_inflight_states_from_root(temp.path(), &provider);
     assert_eq!(again[0].terminal_receipt, Some(mark));
 }
+
+/// A failed commit whose mark cannot be written either still keeps the owed row, unmarked, both
+/// for an ending producer and for a boot eviction; only a row owing nothing may go.
+#[tokio::test(flavor = "current_thread")]
+async fn an_unwritable_mark_still_keeps_an_owed_row() {
+    use crate::services::discord::runtime_store::durable_publish::flush_probe::{
+        Plan, Step, Watch,
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let provider = ProviderKind::Codex;
+    let blocked = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(50))
+        .connect_lazy("postgres://agentdesk@127.0.0.1:1/blocked")
+        .unwrap();
+    let mut owed = row(7_340_821, Some("G-unwritable"));
+    owed.restart_generation = Some(3);
+    let mut plain = row(7_340_822, None);
+    plain.restart_generation = Some(3);
+    save_inflight_state(&owed).unwrap();
+    save_inflight_state(&plain).unwrap();
+    let root = super::super::inflight_runtime_root().unwrap();
+    let plan = Plan {
+        fail: vec![Step::CreateTemp],
+        ..Plan::default()
+    };
+    let _unwritable = Watch::new(&root, plan);
+
+    let record_or_stamp = crate::services::discord::receipt_settle::record_or_stamp;
+    let failed = TerminalOutcome::Failed;
+    assert!(!record_or_stamp(Some(&blocked), &owed, failed).await);
+    let removed = invalidate_stale_generation_in_root(&root, &provider, 5);
+    assert_eq!(
+        removed,
+        vec![(7_340_822, Some(3))],
+        "only the plain row goes"
+    );
+    let kept = super::super::load_inflight_state(&provider, owed.channel_id).expect("kept");
+    assert!(kept.terminal_receipt.is_none(), "no mark could be written");
+}

@@ -19,6 +19,8 @@ pub(super) struct PostStreamExitContext {
         Option<crate::services::discord::inflight::InflightTurnIdentity>,
     pub(super) watcher_instance_id: u64,
     pub(super) host: Arc<HostSnapshot>,
+    /// Whether the pane death this watcher judged followed a recent stop; None when it judged none.
+    pub(super) tmux_death: Option<bool>,
     #[cfg(test)]
     pub(super) watcher_provider: ProviderKind,
 }
@@ -38,6 +40,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         watcher_turn_identity,
         watcher_instance_id,
         host,
+        tmux_death,
         ..
     } = ctx;
 
@@ -149,8 +152,8 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         // `start_claude` respawn of a fresh same-named session does not
         // get its inflight wiped.
         {
-            // The dead pane ended the turn this watcher pinned as failed; that receipt commits
-            // before the row goes, and a failed commit keeps the row marked instead.
+            // The pane both probes found dead ended the pinned turn; its receipt commits before
+            // the row goes, and a failed commit keeps the row marked instead.
             let pane_dead = {
                 let (sess, provider, host) =
                     (tmux_session_name.clone(), provider.clone(), host.clone());
@@ -167,6 +170,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
                     channel_id,
                     &tmux_session_name,
                     watcher_turn_identity.as_ref(),
+                    tmux_death,
                 )
                 .await;
             let sess_for_inflight = tmux_session_name.clone();
@@ -178,6 +182,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
             let _ = tokio::task::spawn_blocking(move || {
                 let _cleanup = cleanup;
                 if receipt_kept
+                    || !pane_dead
                     || !host_gate::tmux_pane_dead(
                         &provider_for_inflight,
                         channel_id_inflight,

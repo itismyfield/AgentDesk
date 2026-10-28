@@ -96,6 +96,8 @@ pub(crate) fn tmux_death_should_attempt_restart_handoff(
         && !is_normal_completion
 }
 
+/// Returns whether the death followed a recent stop of this turn; the judgment consumes that
+/// stop record, so the watcher's later exit takes this value instead of reading it again.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_tmux_watcher_observed_death(
     channel_id: ChannelId,
@@ -106,7 +108,7 @@ pub(crate) async fn handle_tmux_watcher_observed_death(
     _watcher_provider: &ProviderKind,
     prompt_too_long_killed: bool,
     terminal_delivery_observed: bool,
-) {
+) -> bool {
     let ts = chrono::Local::now().format("%H:%M:%S");
     let diagnostic = build_tmux_death_diagnostic(tmux_session_name, Some(output_path));
     if let Some(diag) = diagnostic.as_deref() {
@@ -187,6 +189,7 @@ pub(crate) async fn handle_tmux_watcher_observed_death(
             resume_aborted_restart_turn(channel_id, http, shared, tmux_session_name, output_path)
                 .await;
     }
+    cancel_induced
 }
 
 #[cfg(test)]

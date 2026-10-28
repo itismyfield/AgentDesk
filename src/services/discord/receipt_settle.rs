@@ -90,7 +90,7 @@ pub(in crate::services::discord) async fn record(
 }
 
 /// Records the terminal before the caller removes the row. False when the row must stay: the
-/// commit failed and the row, which owes an origin its receipt, now carries the mark instead.
+/// commit failed and the row still owes an origin its receipt, marked when the mark was written.
 pub(in crate::services::discord) async fn record_or_stamp(
     pool: Option<&PgPool>,
     state: &InflightTurnState,
@@ -106,8 +106,8 @@ pub(in crate::services::discord) async fn record_or_stamp(
     !keep_marked(state, stamp)
 }
 
-/// After a failed commit: marks the row so it stays until its receipt is recorded. True when
-/// the row is kept marked; a row naming no origin is left to its caller's removal.
+/// After a failed commit: marks the row so it stays until its receipt is recorded. True keeps
+/// the row, even unmarked when the mark cannot be written; a row naming no origin may go.
 pub(in crate::services::discord) fn keep_marked(
     state: &InflightTurnState,
     stamp: TerminalReceiptStamp,
@@ -133,7 +133,14 @@ pub(in crate::services::discord) fn keep_marked(
         state.turn_nonce.as_deref(),
         stamp,
     );
-    marked == GuardedSaveOutcome::Saved
+    if marked != GuardedSaveOutcome::Saved {
+        tracing::warn!(
+            channel_id = state.channel_id,
+            ?marked,
+            "turn receipt mark not written"
+        );
+    }
+    true
 }
 
 /// Records a marked row's terminal and removes the row; false while the commit still fails.
@@ -320,29 +327,34 @@ pub(in crate::services::discord) async fn stopped(
     }
 }
 
-/// A dead pane ends the pinned turn its row still names: cancelled after a recent user stop of
-/// that range, else failed. False keeps the row marked because the commit failed.
+/// A dead pane ends the pinned turn its row still names: cancelled when the death followed a
+/// stop, else failed. `stopped` is the watcher's own death judgment, which consumed the stop.
 pub(in crate::services::discord) async fn pane_dead(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
     pinned: Option<&InflightTurnIdentity>,
+    stopped: Option<bool>,
 ) -> bool {
     let Some(row) = inflight::load_inflight_state_read_only(provider, channel_id.get()) else {
         return true;
     };
     let pinned_row = pinned.is_some_and(|identity| identity.matches_state(&row))
         && row.tmux_session_name.as_deref() == Some(tmux_session_name);
-    if !pinned_row {
+    // A planned restart or rebind keeps its row through the clear, so it ends nothing here.
+    if !pinned_row || row.restart_mode.is_some() || row.rebind_origin {
         return true;
     }
-    let start = row.turn_start_offset.unwrap_or(0);
-    let stopped =
-        super::tmux::recent_turn_stop_for_watcher_range(channel_id, tmux_session_name, start);
-    let outcome = match stopped {
-        Some(_) => TerminalOutcome::Cancelled,
-        None => TerminalOutcome::Failed,
+    let stopped = stopped.unwrap_or_else(|| {
+        let start = row.turn_start_offset.unwrap_or(0);
+        super::tmux::recent_turn_stop_for_watcher_range(channel_id, tmux_session_name, start)
+            .is_some()
+    });
+    let outcome = if stopped {
+        TerminalOutcome::Cancelled
+    } else {
+        TerminalOutcome::Failed
     };
     record_or_stamp(shared.pg_pool.as_ref(), &row, outcome).await
 }

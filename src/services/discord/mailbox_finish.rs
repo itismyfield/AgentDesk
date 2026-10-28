@@ -189,9 +189,8 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
     result
 }
 
-/// Releases only the admitted token when setup ends before bridge guards exist.
-/// No durable-row cleanup or terminal completion is authorized by this unwind.
-/// True when this unwind released the admitted token itself.
+/// Releases only the admitted token when setup ends before bridge guards exist, with no row
+/// cleanup or terminal completion. True when this unwind released that token itself.
 pub(in crate::services::discord) async fn unwind_unstarted_turn(
     shared: &std::sync::Arc<SharedData>,
     channel_id: ChannelId,

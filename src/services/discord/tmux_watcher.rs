@@ -269,6 +269,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     let mut retained_source = None;
     let mut continuation = None;
     let mut prompt_too_long_killed = false;
+    let mut tmux_death = None;
     let mut turn_result_relayed = false;
     let mut terminal_delivery_observed = false;
     let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
@@ -387,6 +388,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     utf8_decoder: &mut utf8_decoder,
                     completion_footer_idle: &mut completion_footer_idle,
                     last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
+                    tmux_death: &mut tmux_death,
                 };
                 let mut post_terminal_state = PostTerminalState {
                     turn_result_relayed,
@@ -581,6 +583,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 monitor_auto_turn_finished: &mut monitor_auto_turn_finished,
                 monitor_auto_turn_synthetic_msg_id: &mut monitor_auto_turn_synthetic_msg_id,
                 monitor_auto_turn_ledger_generation: &mut monitor_auto_turn_ledger_generation,
+                tmux_death: &mut tmux_death,
             };
             handle_no_result_exits(&no_result_context, no_result_locals, &mut no_result_state).await
         };
@@ -2483,7 +2486,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 current_offset,
             )
             .await;
-            handle_tmux_watcher_observed_death(
+            let stopped = handle_tmux_watcher_observed_death(
                 channel_id,
                 &http,
                 &shared,
@@ -2497,6 +2500,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 ),
             )
             .await;
+            tmux_death = Some(stopped);
             finish_monitor_auto_turn_if_claimed(
                 &shared,
                 &watcher_provider,
@@ -2545,6 +2549,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         watcher_turn_identity,
         watcher_instance_id,
         host,
+        tmux_death,
         #[cfg(test)]
         watcher_provider: watcher_provider.clone(),
     })

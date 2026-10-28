@@ -507,9 +507,8 @@ fn capture_entry_abort_notice(
     })
 }
 
-/// Unwinds the refused turn exactly as before, then starts its notice; nothing awaits the send.
-/// When the unwind released this turn's own claim, a row still solely its own ends as failed; a
-/// row another turn, marker or watcher owns is handed over and that owner records the end.
+/// Unwinds the refused turn, then starts its notice unawaited. A row still solely its own ends
+/// failed once the unwind released its own claim; a row another owner holds is that owner's.
 pub(super) async fn unwind_and_notify(
     shared: &std::sync::Arc<SharedData>,
     channel_id: ChannelId,

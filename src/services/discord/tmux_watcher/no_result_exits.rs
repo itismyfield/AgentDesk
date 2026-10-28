@@ -56,6 +56,7 @@ pub(super) struct NoResultExitState<'a> {
     pub(super) monitor_auto_turn_finished: &'a mut bool,
     pub(super) monitor_auto_turn_synthetic_msg_id: &'a mut Option<serenity::MessageId>,
     pub(super) monitor_auto_turn_ledger_generation: &'a mut Option<u64>,
+    pub(super) tmux_death: &'a mut Option<bool>,
 }
 
 pub(super) async fn handle_no_result_exits(
@@ -554,7 +555,7 @@ pub(super) async fn handle_no_result_exits(
         }
 
         if tmux_death_observed {
-            handle_tmux_watcher_observed_death(
+            let stopped = handle_tmux_watcher_observed_death(
                 channel_id,
                 &http,
                 &shared,
@@ -568,6 +569,7 @@ pub(super) async fn handle_no_result_exits(
                 ),
             )
             .await;
+            *state.tmux_death = Some(stopped);
             finish_monitor_auto_turn_if_claimed(
                 &shared,
                 &watcher_provider,
