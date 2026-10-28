@@ -365,7 +365,7 @@ def cmd_plan(args):
     workers = []
     for index, tests in enumerate(buckets):
         text = worker_config(base_text, tests, policy, args.retry_mode)
-        (out / f"worker-{index}.toml").write_text(text)
+        (out / f"worker-{index}.toml").write_bytes(text.encode())
         workers.append({"index": index, "tests": [list(t) for t in tests],
                         "expected_seconds": round(loads[index], 3),
                         "config_sha256": hashlib.sha256(text.encode()).hexdigest()})
