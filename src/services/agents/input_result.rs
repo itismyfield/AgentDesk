@@ -1,8 +1,5 @@
-//! What became of one accepted input, named by its origin id: the managed execution that
-//! consumed it and, once committed, that execution's terminal receipt.
-//!
-//! Only owner records answer: the running execution's inflight row, then its `turns` receipt.
-//! A delivery response is never evidence, so an origin no owner names reads as unknown.
+//! Which execution consumed an accepted input and how it ended, read only from owner records:
+//! its inflight row, then its `turns` receipt. A delivery response is never evidence.
 
 use serde_json::Value;
 use sqlx::PgPool;
