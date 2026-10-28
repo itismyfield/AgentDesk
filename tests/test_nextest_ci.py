@@ -4,11 +4,14 @@ import contextlib
 import importlib.util
 import io
 import json
+import ntpath
 import os
 from pathlib import Path
+import posixpath
 import random
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -856,6 +859,7 @@ class NativeScript(ScriptRepo):
 
     LIB = "mod m {\n#[test]\nfn a() {}\n#[test]\nfn health_b() {}\n#[test]\nfn health_pg_c() {}\n}\n"
     CARGO = """#!/bin/sh
+echo "$*" >> "$NATIVE_CARGO_LOG"
 case "$2" in
   --version) echo "cargo-nextest 0.9.149" ;;
   archive) while [ "$1" != --archive-file ]; do shift; done; echo bytes > "$2" ;;
@@ -867,7 +871,7 @@ esac
 
     def setUp(self):
         super().setUp()
-        (self.bin / "rustc").write_text("#!/bin/sh\necho 'host: aarch64-apple-darwin'\n")
+        (self.bin / "rustc").write_text("#!/bin/sh\nprintf 'host: %s\\n' \"$NATIVE_TARGET\"\n")
         (self.bin / "rustc").chmod(0o755)
         self.write("native-list.json", nextest_list(["m::a", "m::health_b", "m::health_pg_c"]))
         # The real exemptions name repository tests; this tree has none of them.
@@ -876,16 +880,22 @@ esac
         start = text.index("EXEMPT = {")
         classifier.write_text(text[:start] + "EXEMPT = {}\n_UNUSED_EXEMPT = {" + text[start + len("EXEMPT = {"):])
 
-    def native(self, ran, exit_code=0):
+    def native(self, ran, exit_code=0, phase=None, reset=True, platform="macos"):
+        import shutil
         self.write("junit.xml", junit([(n, "", 0.1) for n in ran]))
         temp = self.dir / "runner"
-        self.sp.run(["rm", "-rf", str(temp)], check=True)
-        temp.mkdir()
+        if reset:
+            shutil.rmtree(temp, ignore_errors=True)
+            temp.mkdir()
         env = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(temp),
                "GITHUB_WORKSPACE": str(self.repo), "GITHUB_STEP_SUMMARY": str(self.dir / "summary.md"),
                "NATIVE_LIST": str(self.dir / "native-list.json"), "NATIVE_JUNIT": str(self.dir / "junit.xml"),
-               "NATIVE_EXIT": str(exit_code), "GITHUB_RUN_ID": "9"}
-        done = self.sp.run(["bash", "scripts/ci/nextest-native.sh", "macos", "macos-lib", "pg-classifier"],
+               "NATIVE_EXIT": str(exit_code), "GITHUB_RUN_ID": "9", "NATIVE_CARGO_LOG": str(temp / "cargo.log"),
+               "NATIVE_TARGET": "x86_64-pc-windows-msvc" if platform == "windows" else "aarch64-apple-darwin"}
+        command = ["bash", "scripts/ci/nextest-native.sh", platform, f"{platform}-lib", "pg-classifier"]
+        if phase is not None:
+            command.append(phase)
+        done = self.sp.run(command,
                            cwd=self.repo, env=env, capture_output=True, text=True)
         plan = temp / "nextest/plan/plan.json"
         tests = [t[1] for t in json.loads(plan.read_text())["workers"][0]["tests"]] if plan.exists() else None
@@ -911,6 +921,60 @@ esac
         rc, out, _ = self.native(["m::a", "m::health_b", "m::health_pg_c"], exit_code=100)
         self.assertEqual(rc, 1, out)
         self.assertIn("nextest exited 100", out)
+
+    def test_prepare_then_run_uses_the_same_plan_on_both_native_platforms(self):
+        for platform in ("macos", "windows"):
+            with self.subTest(platform=platform):
+                rc, out, tests = self.native(["m::a", "m::health_b", "m::health_pg_c"],
+                                             phase="prepare", platform=platform)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(tests, ["m::a", "m::health_b", "m::health_pg_c"])
+                directory = self.dir / "runner/nextest"
+                files = ("plan/plan.json", "plan/worker-0.toml", "results/worker-0/worker.json")
+                prepared = {name: (directory / name).read_bytes() for name in files}
+                self.assertFalse((directory / "results/worker-0/exit-code").exists())
+                self.assertFalse((directory / "verdict.json").exists())
+                rc, out, _ = self.native(tests, phase="run", reset=False, platform=platform)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(prepared, {name: (directory / name).read_bytes() for name in files})
+                verdict = json.loads((directory / "verdict.json").read_text())
+                self.assertEqual((verdict["verdict"], verdict["totals"]["executed"]), ("pass", 3))
+                calls = (self.dir / "runner/cargo.log").read_text().splitlines()
+                for operation in ("archive", "list", "run"):
+                    self.assertEqual(sum(line.startswith(f"nextest {operation} ") for line in calls), 1)
+
+    def test_prepare_without_run_fails_execution_audit(self):
+        rc, out, _ = self.native(["m::a", "m::health_b", "m::health_pg_c"], phase="prepare")
+        self.assertEqual(rc, 0, out)
+        directory = self.dir / "runner/nextest"
+        verdict = nci.audit(nci.load_plan(directory / "plan/plan.json"), directory / "results")
+        self.assertEqual((verdict["verdict"], verdict["totals"]["executed"]), ("fail", 0))
+        self.assertLessEqual({"missing-exit-code", "missing-junit"}, {p["kind"] for p in verdict["problems"]})
+
+    def test_run_without_prepared_plan_fails_before_starting_tests(self):
+        rc, out, _ = self.native(["m::a", "m::health_b", "m::health_pg_c"], phase="run")
+        self.assertNotEqual(rc, 0, out)
+        self.assertFalse((self.dir / "runner/cargo.log").exists())
+
+    def test_run_rechecks_the_archive_across_the_step_boundary(self):
+        tests = ["m::a", "m::health_b", "m::health_pg_c"]
+        rc, out, _ = self.native(tests, phase="prepare")
+        self.assertEqual(rc, 0, out)
+        (self.dir / "runner/nextest/lib-tests.tar.zst").write_bytes(b"changed between steps")
+        rc, out, _ = self.native(tests, phase="run", reset=False)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("archive digest differs", out)
+        self.assertFalse(any(line.startswith("nextest run ")
+                             for line in (self.dir / "runner/cargo.log").read_text().splitlines()))
+
+    def test_split_run_still_fails_when_a_planned_test_did_not_run(self):
+        rc, out, _ = self.native(["m::a", "m::health_b", "m::health_pg_c"], phase="prepare")
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = self.native(["m::a", "m::health_b"], phase="run", reset=False)
+        self.assertNotEqual(rc, 0, out)
+        verdict = json.loads((self.dir / "runner/nextest/verdict.json").read_text())
+        self.assertEqual((verdict["verdict"], verdict["totals"]["planned"], verdict["totals"]["executed"]),
+                         ("fail", 3, 2))
 
 
 class RustSources(unittest.TestCase):
@@ -1316,6 +1380,39 @@ mod tests {
         self.assertEqual(problems, [])
         self.assertIn("h::tests::via_child", pg)
 
+    def test_impl_helpers_follow_pg_references_and_preserve_local_item_boundaries(self):
+        self.tree({"src/lib.rs": "#[cfg(test)]\nmod fixtures;\n",
+                   "src/fixtures.rs": """fn open() { TestPostgresDb::new(); }
+struct Rig;
+impl Rig { fn new() -> Self { open(); Rig } }
+struct Relaunched;
+impl Relaunched { fn new() -> Self { Rig::new(); Relaunched } }
+impl Relaunched { fn name() -> &'static str { "fixture" } }
+fn plain() {}
+struct Aliased;
+impl Aliased {
+    fn new() { use self::open as call; call(); }
+    fn other() { use self::plain as call; call(); }
+}
+struct Pure;
+impl Pure {
+    fn new() -> Self {
+        fn unused() { open(); }
+        impl Nested { fn unused() { TestPostgresDb::new(); } }
+        Pure
+    }
+}
+#[test]
+fn via_impl() { Relaunched::new(); }
+#[test]
+fn via_method_import() { Aliased::new(); }
+#[test]
+fn pure() { Pure::new(); }
+"""})
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertEqual(set(pg), {"fixtures::via_impl", "fixtures::via_method_import"})
+
     def test_a_call_through_a_reexport_reaches_the_pg_helper(self):
         self.tree({"src/lib.rs": "mod db;\nmod support;\nmod r;\n",
                    "src/r.rs": "mod inner;\n#[cfg(test)]\npub(crate) use inner::exact_tests::shared_pg;\n"
@@ -1388,6 +1485,108 @@ mod tests {
         self.assertNotIn("u::tests::opaque", pg)
         self.assertEqual(len(problems), 1)
         self.assertIn("unresolved-self-exec: src/u.rs:4: u::tests::opaque", problems[0])
+
+    def impl_self_exec_cases(self):
+        run = ('fn run(test: &str) { std::process::Command::new(std::env::current_exe().unwrap())'
+               '.args(["--exact", test]).output().unwrap(); }')
+        label = 'fn label() -> &\'static str { "pure_child" }'
+        calls = {
+            "opaque": ("Runner::run(&pick());", False, 1),
+            "known_pg": ('Runner::run("fixtures::pg_child");', True, 0),
+            "known_and_opaque": ('Runner::run("fixtures::pure_child"); Runner::run(&pick());', False, 1),
+            "value_receiver": ("let runner = Runner; runner.run(&pick());", False, 1),
+        }
+        for variant in ("absent", "before", "after", "same", "forwarded", "ufcs"):
+            methods = f"impl Runner {{ {run} }}"
+            if variant == "before":
+                methods = f"impl Runner {{ {label} }}\n" + methods
+            elif variant == "after":
+                methods += f"\nimpl Runner {{ {label} }}"
+            elif variant == "same":
+                methods = f"impl Runner {{ {label} {run} }}"
+            elif variant == "forwarded":
+                methods = (f"impl Runner {{ {label} fn run(test: &str) {{ Self::dispatch(test); }} }}\n"
+                           f"impl Runner {{ {run.replace('fn run(', 'fn dispatch(')} }}")
+            elif variant == "ufcs":
+                methods = f"trait Invoke {{ fn run(test: &str); }}\nimpl Invoke for Runner {{ {run} }}\nimpl Runner {{ {label} }}"
+            cases = dict(calls)
+            if variant != "absent":
+                cases.update({"unrelated_label_call": ("Runner::label(); Runner::run(&pick());", False, 1),
+                              "connected_label": ("Runner::run(Runner::label());", False, 0)})
+            for case, (call, parent_pg, problems) in cases.items():
+                if variant in ("forwarded", "ufcs") and case == "value_receiver":
+                    continue
+                if variant == "ufcs":
+                    call = call.replace("Runner::run", "<Runner as Invoke>::run")
+                fixture_methods = methods.replace("fn run(test:", "fn run(&self, test:") if case == "value_receiver" else methods
+                self.tree({"src/lib.rs": "#[cfg(test)]\nmod fixtures;\n",
+                           "src/fixtures.rs": "struct Runner;\n" + fixture_methods + "\n"
+                           'fn pick() -> String { ["fixtures::pg_", "child"].concat() }\n'
+                           "#[test]\nfn opaque() { " + call + " }\n"
+                           "#[test]\nfn pg_child() { TestPostgresDb::new(); }\n"
+                           "#[test]\nfn pure_child() {}\n"})
+                yield f"{variant}/{case}", parent_pg, problems
+
+    def test_impl_self_exec_requires_connected_child_evidence(self):
+        for case, parent_pg, problem_count in self.impl_self_exec_cases():
+            with self.subTest(case=case):
+                pg, problems = pgc.classify(self.root, exempt={})
+                self.assertEqual("fixtures::opaque" in pg, parent_pg)
+                self.assertEqual(len(problems), problem_count)
+                if problem_count:
+                    self.assertIn("unresolved-self-exec:", problems[0])
+
+    def test_impl_self_exec_cli_rejects_unresolved_child_with_a_list(self):
+        listed = {"rust-suites": {"x": {"binary-id": "x", "kind": "lib", "testcases": {
+            name: {"ignored": False} for name in ("fixtures::opaque", "fixtures::pg_child", "fixtures::pure_child")}}}}
+        (self.root / "list.json").write_text(json.dumps(listed))
+        for case, parent_pg, problem_count in self.impl_self_exec_cases():
+            with self.subTest(case=case):
+                rc, err = self.cli("classify", "--list", self.root / "list.json", "--json-out", self.root / "out.json")
+                self.assertEqual(rc, 1 if problem_count else 0, err)
+                result = json.loads((self.root / "out.json").read_text())
+                self.assertEqual("fixtures::opaque" in result["pg"], parent_pg)
+                self.assertEqual(len(result["problems"]), problem_count)
+
+    def test_local_self_exec_ids_use_the_same_paths_on_every_host(self):
+        self.tree({"src/lib.rs": "#[cfg(test)]\nmod local;\n#[cfg(test)]\nmod foreign;\n",
+                   "src/local.rs": """fn run(test: &str) {
+    std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact", test]).output();
+}
+#[test]
+fn literal_parent() { run("child"); }
+#[test]
+fn concat_parent() { run(concat!(module_path!(), "::child")); }
+#[test]
+fn format_parent() { run(&format!("{}::{}", module_path!(), "child")); }
+#[test]
+fn pure_parent() { run("pure_child"); }
+#[test]
+fn child() { TestPostgresDb::new(); }
+#[test]
+fn pure_child() {}
+#[test]
+fn opaque() { run(&pick()); }
+""",
+                   "src/foreign.rs": "#[test]\nfn child() {}\n#[test]\nfn pure_child() { TestPostgresDb::new(); }\n"})
+        inventory = pgc.rust_test_sources.lib_inventory(self.root)
+        expected = {"local::child", "local::literal_parent", "local::concat_parent",
+                    "local::format_parent", "foreign::pure_child"}
+        for normalizer in (posixpath.normpath, ntpath.normpath):
+            for separator in ("/", "\\"):
+                with self.subTest(host=normalizer.__module__, separator=separator):
+                    sites = {name: [(site.replace("src/", "src/../src/").replace("/", separator), cfg)
+                                    for site, cfg in declarations]
+                             for name, declarations in inventory.tests.items()}
+                    host_os = SimpleNamespace(path=SimpleNamespace(normpath=normalizer, relpath=os.path.relpath))
+                    with mock.patch.object(pgc, "os", host_os), \
+                            mock.patch.object(pgc.rust_test_sources, "lib_inventory",
+                                              return_value=SimpleNamespace(tests=sites, modules=inventory.modules)):
+                        pg, problems = pgc.classify(self.root, exempt={})
+                    self.assertEqual(set(pg), expected)
+                    self.assertEqual(len(problems), 1)
+                    self.assertIn("unresolved-self-exec: src/local.rs:", problems[0])
+                    self.assertIn("local::opaque re-runs", problems[0])
 
     def cli(self, *argv):
         err = io.StringIO()
