@@ -68,6 +68,59 @@ fn campaign_validation_rejects_false_completion_and_bad_identity() {
 }
 
 #[test]
+fn campaign_validation_preserves_legacy_empty_acceptance_empty_dag_and_skipped_completion() {
+    let mut campaign = input();
+    for node in &mut campaign.nodes {
+        node.acceptance.clear();
+    }
+    assert!(validate(&campaign).is_ok());
+    campaign.status = CampaignStatus::Completed;
+    campaign.nodes[1].status = NodeStatus::Skipped;
+    assert!(validate(&campaign).is_ok());
+    campaign.nodes.clear();
+    assert_eq!(
+        validate(&campaign).unwrap_err().to_string(),
+        "completed campaign requires all nodes completed or skipped"
+    );
+    campaign.status = CampaignStatus::Active;
+    assert!(validate(&campaign).is_ok());
+}
+
+#[test]
+fn campaign_validation_preserves_error_messages_and_node_validation_order() {
+    let mut campaign = input();
+    campaign.nodes[1].id = campaign.nodes[0].id.clone();
+    campaign.nodes[0].title.clear();
+    assert_eq!(
+        validate(&campaign).unwrap_err().to_string(),
+        "node implement requires title, stage and positive round"
+    );
+    campaign.nodes[0].title = "valid".into();
+    assert_eq!(
+        validate(&campaign).unwrap_err().to_string(),
+        "duplicate node id: implement"
+    );
+    campaign.nodes[1].id = "review".into();
+    campaign.nodes[0].dependencies = vec!["missing".into()];
+    assert_eq!(
+        validate(&campaign).unwrap_err().to_string(),
+        "node implement has missing dependency missing"
+    );
+    campaign.nodes[0].dependencies.clear();
+    campaign.nodes[1].dependencies.push("implement".into());
+    assert_eq!(
+        validate(&campaign).unwrap_err().to_string(),
+        "node review repeats dependency implement"
+    );
+    campaign.nodes[1].dependencies.pop();
+    campaign.nodes[0].dependencies.push("review".into());
+    assert_eq!(
+        validate(&campaign).unwrap_err().to_string(),
+        "campaign dependencies contain a cycle"
+    );
+}
+
+#[test]
 fn campaign_checkpoint_keeps_unchanged_node_time_and_resume_context() {
     let mut first = checkpoint("campaign".into(), input(), None);
     let old = Utc::now() - chrono::Duration::days(1);
