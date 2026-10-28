@@ -13,6 +13,49 @@ use super::{
     reconstructed_inflight_placeholder_body,
 };
 
+#[cfg(test)]
+mod absent_seed_tests {
+    use super::*;
+
+    #[test]
+    fn a2_t08_absent_anchor_preserves_the_entire_restored_seed() {
+        let mut row = super::super::super::inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            75_072_801,
+            None,
+            7,
+            75_072_802,
+            0,
+            "prompt".into(),
+            None,
+            Some("test-absent-seed".into()),
+            Some("/tmp/test-absent-seed.jsonl".into()),
+            None,
+            3,
+        );
+        row.full_response = "prefix\n남은 본문🙂".into();
+        row.response_sent_offset = "prefix\n".len();
+        row.injected_prompt_message_id = Some(row.user_msg_id);
+        row.streaming_rollover_frozen_msg_ids = vec![75_072_803];
+        let restored = restored_watcher_turn_from_inflight(&row, "test-absent-seed", true)
+            .expect("anchor absence must not discard the turn's body and source seed");
+        assert_eq!(restored.injected_prompt_message_id, Some(row.user_msg_id));
+        assert_eq!(
+            restored.turn_identity.as_ref(),
+            Some(&super::super::super::inflight::InflightTurnIdentity::from_state(&row))
+        );
+        let seed = watcher_stream_seed(Some(restored));
+        assert!(seed.placeholder_msg_id.is_none());
+        assert_eq!(seed.full_response, row.full_response);
+        assert_eq!(seed.response_sent_offset, row.response_sent_offset);
+        assert!(seed.finish_mailbox_on_completion);
+        assert_eq!(
+            seed.streaming_rollover_frozen_msg_ids,
+            vec![MessageId::new(75_072_803)]
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(in crate::services::discord) struct RestoredWatcherTurn {
     pub(super) current_msg_id: MessageId,

@@ -206,6 +206,59 @@ fn rewatch_matching_draft_holds(
 mod tests {
     use super::*;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn a2_t06_absent_notice_without_http_preserves_input_and_budget() {
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(75_072_601);
+        let user = MessageId::new(75_072_602);
+        let mut row = inflight(channel, user);
+        row.current_msg_id = 0;
+        super::super::super::inflight::save_inflight_state(&row).unwrap();
+        let before = super::super::super::inflight::load_inflight_state_read_only(
+            &ProviderKind::Claude,
+            channel.get(),
+        )
+        .unwrap();
+        let outcome = requeue_claude_tui_followup_pre_submit_timeout(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+            &row,
+            None,
+            None,
+            attempt("absent-notice"),
+        )
+        .await;
+        assert!(
+            !outcome.requeued,
+            "no actual notice ACK means no successful requeue projection"
+        );
+        let after = super::super::super::inflight::load_inflight_state_read_only(
+            &ProviderKind::Claude,
+            channel.get(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(after).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        assert!(
+            super::super::super::busy_followup_retry_store::load(
+                &ProviderKind::Claude,
+                channel.get(),
+                user.get()
+            )
+            .is_none()
+        );
+        assert!(
+            crate::services::discord::mailbox_snapshot(&shared, channel)
+                .await
+                .intervention_queue
+                .is_empty()
+        );
+    }
+
     /// A failed attempt that cost no bridge time.
     fn attempt(turn_id: &str) -> BusyAttempt<'_> {
         BusyAttempt {

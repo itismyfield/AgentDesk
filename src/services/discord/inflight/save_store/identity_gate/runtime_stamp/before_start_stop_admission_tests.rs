@@ -94,6 +94,33 @@ fn edited() -> Result<ReplaceLongMessageOutcome, String> {
     Ok(ReplaceLongMessageOutcome::EditedOriginal)
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn a2_t10_before_start_receipt_admits_without_a_response_anchor() {
+    let _available =
+        crate::services::turn_orchestrator::policy_close::test_hooks::Settlement::set(true);
+    for basis in [CloseBasis::NoAttempt, CloseBasis::Untouched] {
+        let fixture = Fixture::with(|row| row.current_msg_id = 0);
+        let admitted = admit(&fixture.row, basis)
+            .await
+            .expect("a sealed before-start stop does not require a response message");
+        assert_eq!(admitted.current_msg_id, 0);
+        assert!(
+            admitted
+                .herdr_before_start_stop
+                .as_ref()
+                .unwrap()
+                .supported()
+        );
+        assert!(
+            !admitted
+                .herdr_before_start_stop
+                .as_ref()
+                .unwrap()
+                .notice_delivered()
+        );
+    }
+}
+
 /// The fresh row decides, under the lock: every row that is not this bridge turn, or that another
 /// authority already owns, refuses and stays byte-for-byte.
 #[tokio::test(flavor = "current_thread")]

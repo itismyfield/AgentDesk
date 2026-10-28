@@ -85,6 +85,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a2_t04_changed_response_id_is_not_terminal_delivery_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(75_072_401);
+        let user = MessageId::new(75_072_402);
+        let initial = MessageId::new(75_072_403);
+        let fresh = MessageId::new(75_072_404);
+        let lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
+        let mut row = super::super::build_tui_direct_bridge_inflight_state(
+            provider.clone(),
+            channel,
+            user,
+            fresh,
+            "prompt",
+            "test-completion-id-change",
+            &temp.path().join("source.jsonl"),
+            0,
+            &lease,
+        );
+        row.full_response = "preview only".into();
+        super::super::super::inflight::save_inflight_state(&row).unwrap();
+        assert!(
+            tui_direct_bridge_uncommitted_delivery_error(&provider, channel, user, initial)
+                .is_some(),
+            "a new response ID in the same input's row is not a committed terminal"
+        );
+    }
+
+    #[test]
     fn tui_direct_bridge_completion_rejects_uncommitted_matching_inflight() {
         use crate::services::discord::gateway::HeadlessGateway;
         use crate::services::discord::turn_bridge::BridgeCompletionSignal;

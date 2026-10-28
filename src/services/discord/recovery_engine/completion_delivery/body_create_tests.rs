@@ -128,6 +128,18 @@ async fn admitted_episode(
     provider: ProviderKind,
     episode: u64,
 ) -> inflight::InflightTurnState {
+    admitted_episode_kind(root, channel, body, current, provider, episode, false).await
+}
+
+async fn admitted_episode_kind(
+    root: &std::path::Path,
+    channel: u64,
+    body: &str,
+    current: u64,
+    provider: ProviderKind,
+    episode: u64,
+    synthetic: bool,
+) -> inflight::InflightTurnState {
     let shared = make_shared_data_for_tests();
     let kind = if provider == ProviderKind::Codex {
         RuntimeHandoffKind::CodexTui
@@ -141,10 +153,14 @@ async fn admitted_episode(
     let path = root.join(format!("{channel}.jsonl"));
     std::fs::write(
         &path,
-        format!(
-            "{{\"type\":\"result\",\"result\":{}}}\n",
-            serde_json::to_string(body).unwrap()
-        ),
+        if synthetic && provider == ProviderKind::Codex {
+            "{\"type\":\"turn.completed\"}\n".to_string()
+        } else {
+            format!(
+                "{{\"type\":\"result\",\"result\":{}}}\n",
+                serde_json::to_string(body).unwrap()
+            )
+        },
     )
     .unwrap();
     let path = std::fs::canonicalize(path).unwrap();
@@ -183,11 +199,18 @@ async fn admitted_episode(
     row.runtime_kind = Some(kind);
     row.turn_nonce = actor.turn_nonce().map(str::to_owned);
     row.turn_start_offset = Some(0);
+    if synthetic {
+        row.request_owner_user_id =
+            crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
+        row.turn_source = inflight::TurnSource::ExternalInput;
+        row.external_turn_id = Some(format!("idle-{channel}"));
+        row.injected_prompt_message_id = Some(row.user_msg_id);
+    }
     mailbox_try_start_turn(
         &shared,
         ChannelId::new(channel),
         actor.clone(),
-        UserId::new(7),
+        UserId::new(row.request_owner_user_id),
         MessageId::new(row.user_msg_id),
     )
     .await;
@@ -241,6 +264,73 @@ async fn admitted_episode(
         .expect("actual captured admission");
     assert!(proof.is_some());
     inflight::load_inflight_state(&provider, channel).unwrap()
+}
+
+fn a2_idle_ready_case(name: &str, nonzero: bool) {
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        for (index, provider) in [ProviderKind::Claude, ProviderKind::Codex].into_iter().enumerate() {
+            let channel = 75_072_820 + index as u64 + u64::from(nonzero) * 10;
+            let remote = Remote::new(channel).await;
+            let shared = runtime(2);
+            let gateway = DiscordGateway::new(remote.http.clone(), shared.clone(), provider.clone(), None);
+            let current = if nonzero {
+                gateway.send_message(ChannelId::new(channel), "⠋ 계속 처리 중").await.unwrap().get()
+            } else { 0 };
+            let row = admitted_episode_kind(root.path(), channel, "idle native answer🙂", current, provider.clone(), 0, true).await;
+            let output = std::path::Path::new(row.output_path.as_ref().unwrap());
+            assert!(row.requires_pinned_terminal_recovery());
+            assert_eq!(crate::services::tui_turn_state::jsonl_ready_for_input(&provider, row.runtime_kind, output, Some(row.last_offset)),
+                Some(crate::services::tui_turn_state::TuiReadyState::Ready), "positive readiness premise");
+            assert!(!crate::services::tui_turn_state::pane_ready_fallback_allowed(&provider, row.runtime_kind));
+            let before = remote.calls.lock().unwrap().len();
+            assert!(super::super::idle_captured_response::recover_idle_partial_response(&remote.http, &shared, &row, output).await,
+                "the public idle entry must settle a ready native source");
+            let messages = remote.messages.lock().unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0]["content"], "idle native answer🙂");
+            let actual = messages[0]["id"].as_str().unwrap().parse::<u64>().unwrap();
+            if nonzero { assert_eq!(actual, current); }
+            drop(messages);
+            let calls = remote.calls.lock().unwrap();
+            assert_eq!(calls[before..].iter().filter(|(route,_)| route.starts_with("POST")).count(), usize::from(!nonzero));
+            assert_eq!(calls[before..].iter().filter(|(route,_)| route.starts_with("PATCH")).count(), usize::from(nonzero));
+            assert!(!calls.iter().any(|(route,_)| route.starts_with("DELETE")));
+            let count = calls.len();
+            drop(calls);
+            assert!(inflight::load_inflight_state_read_only(&provider, channel).is_none());
+            let source = inflight::CodexRange::from_retained_tui_terminal(&row).unwrap().source;
+            assert!(crate::services::discord::outbound::delivery_record::confirmed_delivery_receipt_exists(&provider, ChannelId::new(channel), actual, &source));
+            assert!(!super::super::idle_captured_response::recover_idle_partial_response(&remote.http, &shared, &row, output).await);
+            assert_eq!(remote.calls.lock().unwrap().len(), count, "second idle invocation is transport-free");
+        }
+    });
+}
+
+#[test]
+fn a2_t08_public_idle_absent_ready_has_one_body() {
+    a2_idle_ready_case(
+        concat!(
+            module_path!(),
+            "::a2_t08_public_idle_absent_ready_has_one_body"
+        ),
+        false,
+    );
+}
+
+#[test]
+fn a2_t08_public_idle_nonzero_ready_retires_same_message_once() {
+    a2_idle_ready_case(
+        concat!(
+            module_path!(),
+            "::a2_t08_public_idle_nonzero_ready_retires_same_message_once"
+        ),
+        true,
+    );
 }
 
 fn absent_case(name: &str, long: bool, provider: ProviderKind) {
