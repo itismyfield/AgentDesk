@@ -126,6 +126,10 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// `intake_request_from_row` cannot restore these ids after cluster forwarding.
     #[serde(default)]
     pub source_message_ids: Vec<u64>,
+    /// Accepted-input origin ids this execution consumed, copied from its start request.
+    /// Omitted while empty, so a row without one keeps its earlier bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_origin_ids: Vec<String>,
     /// Primary key of the `intake_outbox` row that produced this turn. Worker
     /// turns carry `Some`; leader-local and legacy turns carry `None`. Production
     /// construction sets it through `adopt_intake_outbox`; serde deserialization
@@ -1045,6 +1049,7 @@ impl InflightTurnState {
             request_owner_user_id,
             user_msg_id,
             source_message_ids: Vec::new(),
+            input_origin_ids: Vec::new(),
             intake_outbox_id: None,
             managed_submission: None,
             managed_submission_capability: None,

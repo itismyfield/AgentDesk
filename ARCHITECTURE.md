@@ -284,6 +284,7 @@ src/
 │   ├── session_observability/
 │   │   └── background_ordering_pg_tests.rs
 │   ├── turns/
+│   │   ├── receipt_tests.rs
 │   │   └── timestamp_tests.rs
 │   ├── agent_read.rs
 │   ├── agents.rs
@@ -560,6 +561,8 @@ src/
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_host_guard_tests.rs
+│   │   ├── agents_input_result.rs
+│   │   ├── agents_input_result_tests.rs
 │   │   ├── agents_setup.rs
 │   │   ├── agents_setup_validation_tests.rs
 │   │   ├── agents_stop.rs
@@ -693,6 +696,8 @@ src/
 │   │   ├── tests.rs
 │   │   └── wakeup.rs
 │   ├── agents/
+│   │   ├── input_result.rs
+│   │   ├── input_result_tests.rs
 │   │   ├── mod.rs
 │   │   ├── query.rs
 │   │   ├── serialization.rs
@@ -1915,6 +1920,7 @@ src/
 │   │   │   │   │   ├── process_mailbox.rs
 │   │   │   │   │   ├── recovery_context_take_order_tests.rs
 │   │   │   │   │   ├── replay_start.rs
+│   │   │   │   │   ├── replay_start_origin_tests.rs
 │   │   │   │   │   ├── replay_start_tests.rs
 │   │   │   │   │   └── routine_metadata.rs
 │   │   │   │   ├── input_payload/
@@ -2051,7 +2057,6 @@ src/
 │   │   │   │   │   ├── b1b_repeated_absence_tests.rs
 │   │   │   │   │   ├── b1b_restart_phase_tests.rs
 │   │   │   │   │   └── b1b_terminal_tests.rs
-│   │   │   │   ├── owner_execution_tests/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── owner_execution.rs
 │   │   │   │   └── owner_port.rs
@@ -2734,6 +2739,7 @@ src/
 │   │   │   ├── terminal_controller_cutover.rs
 │   │   │   ├── terminal_delivery.rs
 │   │   │   ├── terminal_outcome_delivery.rs
+│   │   │   ├── terminal_receipt_tests.rs
 │   │   │   ├── thinking.rs
 │   │   │   ├── tmux_runtime.rs
 │   │   │   ├── tmux_runtime_tests.rs

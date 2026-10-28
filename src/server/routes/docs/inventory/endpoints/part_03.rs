@@ -68,6 +68,14 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "Optional Discord user id. When set, the turn is bound to that user's DM channel with the agent's primary bot. Cannot be combined with provider or channel_id.",
                 ),
             ),
+            (
+                "origin_id",
+                body_param(
+                    "string",
+                    false,
+                    "Optional accepted-input id (max 256 chars, any source). Stored at metadata.human_input.origin_id (400 origin_id_conflict when metadata already names another); the started execution's receipt names it for GET input-result",
+                ),
+            ),
         ])
         .with_example(
             json!({
@@ -109,7 +117,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("provider", body_param("string", false, "Optional provider override, as in turn/start")),
             ("channel_id", body_param("string", false, "Optional bound-channel override, as in turn/start")),
             ("source", body_param("string", false, "Source label (max 64 chars)").with_default(json!("external"))),
-            ("origin_id", body_param("string", false, "Caller's message id (max 256 chars), recorded in the started turn's metadata")),
+            ("origin_id", body_param("string", false, "Caller's message id (max 256 chars), recorded in the started turn's metadata; when delivery=started, that execution's receipt names it for GET input-result")),
         ])
         .with_example(
             json!({
@@ -145,6 +153,25 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "/api/agents/{id}/transcripts",
             "agents",
             "List recent completed turn transcripts for agent",
+        ),
+        ep(
+            "GET",
+            "/api/agents/{id}/input-result",
+            "agents",
+            "Report which execution consumed an accepted input and how that execution ended (contract input-result-v1). The answer comes only from owner records: the running execution's inflight row on any of the agent's bound channels (terminal null), then the committed execution receipt in turns or turns_archive (the receipt wins). consumption=consumed means an execution took the input; with outcome cancelled it does not prove the model read it. outcome is completed, cancelled, failed or empty; a cancel before the execution started leaves no receipt, and final_answer_text, final_answer_boundary and final_answer_source are always null in this version. Origins are accepted from any source (turn/start origin_id, turn/deliver origin_id with delivery=started). 404 origin_not_found when no owner record names the input (a delivery status alone is never read as one), 404 agent_not_found, 503 input_result_unavailable when an owner record cannot be read. Only a non-browser process on this host or a holder of the server auth_token as Bearer may call it; any other caller gets 403 caller_not_allowed.",
+        )
+        .with_params([
+            ("id", path_param("Agent id")),
+            ("origin_id", query_param("string", true, "Accepted-input id (max 256 chars)")),
+        ])
+        .with_example(
+            json!({"path": {"id": "family-counsel"}, "query": {"origin_id": "p:0/ABCD-1234"}}),
+            json!({"ok": true, "contract": "input-result-v1", "origin_id": "p:0/ABCD-1234", "agent_id": "family-counsel", "channel_id": "1473922824350601297", "consumption": "consumed", "execution_id": "discord:1473922824350601297:9100000000000000042", "turn_id": "discord:1473922824350601297:9100000000000000042", "terminal": {"outcome": "completed", "confirmed_at": "2026-10-28T01:02:03+00:00", "final_answer_text": null, "final_answer_boundary": null, "final_answer_source": null}}),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"id": "family-counsel"}, "query": {"origin_id": "p:0/UNKNOWN"}}),
+            json!({"ok": false, "contract": "input-result-v1", "error": "origin_not_found"}),
         ),
         ep(
             "GET",
