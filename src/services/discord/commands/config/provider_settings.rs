@@ -126,7 +126,10 @@ impl SharedData {
                 provider.as_str(),
                 &channel_id.get().to_string(),
                 &local,
-                crate::config::load_graceful().cluster.lease_ttl_secs.max(1),
+                crate::config::runtime_config()
+                    .cluster
+                    .lease_ttl_secs
+                    .max(1),
                 false,
             )
             .await
@@ -696,3 +699,7 @@ pub(super) fn local_tui_for_test(channel: u64) -> crate::config::session_hosts::
     let local = crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
     crate::config::session_hosts::force_for_test(Some(&local), &[(channel, &local)])
 }
+
+#[cfg(test)]
+#[path = "provider_settings_snapshot_tests.rs"]
+mod snapshot_tests;

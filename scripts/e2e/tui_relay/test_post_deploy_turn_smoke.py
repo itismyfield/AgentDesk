@@ -861,7 +861,8 @@ class CellResetTest(unittest.TestCase):
 
     def deploy_round_trip(self, *, run_all=False):
         deploy = Path(os.environ.get("DEPLOY_SH_OVERRIDE", ROOT / "scripts/deploy-release.sh")).read_text()
-        names = ["_post_deploy_smoke_check_relay_round_trip", "_post_deploy_smoke_check_durable_record",
+        names = ["_release_config_path", "_post_deploy_smoke_check_relay_round_trip",
+                 "_post_deploy_smoke_check_durable_record",
                  "_post_deploy_smoke_run_turn_scenario", "_post_deploy_smoke_check_turn_scenarios"]
         functions = "\n".join(name + "() {\n" + deploy.split(name + "() {\n", 1)[1].split("\n}\n", 1)[0]
                               + "\n}" for name in names)
@@ -891,6 +892,8 @@ out.mkdir(parents=True, exist_ok=True)
 ''')
         script = """set -euo pipefail
 REPO=$1; fixture=$2; REL_PORT=$3; ADK_DEFAULT_LOOPBACK=127.0.0.1
+SCRIPT_DIR=$REPO/scripts
+unset AGENTDESK_CONFIG
 ADK_REL=$fixture/release
 POST_DEPLOY_SMOKE_RELAY_CELL=claude-tui; POST_DEPLOY_SMOKE_CODEX_TURNS_CELL=codex-tui
 POST_DEPLOY_SMOKE_READY=true; POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=''
@@ -935,7 +938,8 @@ exit "$rc"
                               capture_output=True, text=True, timeout=30)
 
     def test_deploy_resets_both_cells_before_first_idle_guard(self):
-        result = self.deploy_round_trip()
+        with patch.dict(os.environ, {"AGENTDESK_CONFIG": str(self.root / "ambient-unused.yaml")}):
+            result = self.deploy_round_trip()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((self.root / "injected").exists(), result.stdout + result.stderr)
         self.assertEqual(len(self.mutations()), 4)

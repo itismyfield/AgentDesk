@@ -28,7 +28,7 @@ fn fixture_env_lock() -> SharedTestEnvLockGuard {
 }
 
 fn set_fixture_path(
-    _env_lock: &SharedTestEnvLockGuard,
+    _env_lock: &crate::config_live_reload::TestLiveGuard,
     key: &'static str,
     value: &Path,
 ) -> crate::config::TestEnvVarGuard {

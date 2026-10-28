@@ -71,9 +71,65 @@ pub(super) fn build(root: &Path, query: Query<'_>, deadline: Instant) -> Option<
     build_with_prefix_limit(root, query, deadline, PREFIX_CAP as u64)
 }
 
-/// Terminal evidence verifies the full captured prefix within the shared ACK deadline.
+/// Frame and fixed guards are read afresh; receipt readback proves the delivered body.
 pub(super) fn build_terminal(root: &Path, query: Query<'_>, deadline: Instant) -> Option<Manifest> {
-    build_with_prefix_limit(root, query, deadline, u64::MAX)
+    const GUARD: u64 = 4096;
+    let (start, end) = query.range;
+    if start >= end || end - start > SOURCE_CAP as u64 || Instant::now() >= deadline {
+        return None;
+    }
+    let source = delivery_evidence::source(root, query.channel, query.path, query.file)?.source;
+    let mut file = File::open(query.path).ok()?;
+    let matches = |meta: std::fs::Metadata| {
+        shadow::capture::file_identity(&meta) == query.file && meta.len() >= end
+    };
+    if !matches(file.metadata().ok()?) {
+        return None;
+    }
+    let window_start = start.saturating_sub(GUARD);
+    let mut bytes = Vec::new();
+    let mut digest = Sha256::new();
+    digest.update(b"terminal-frame-v1");
+    for (index, (from, through)) in [(0, start.min(GUARD)), (window_start, end)]
+        .into_iter()
+        .enumerate()
+    {
+        digest.update(from.to_le_bytes());
+        digest.update(through.to_le_bytes());
+        file.seek(SeekFrom::Start(from)).ok()?;
+        let mut position = from;
+        let mut chunk = [0; 8192];
+        while position < through {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            let remaining = (through - position).min(chunk.len() as u64);
+            let read = file.read(&mut chunk[..remaining as usize]).ok()?;
+            if read == 0 {
+                return None;
+            }
+            #[cfg(test)]
+            SOURCE_BYTES.fetch_add(read, std::sync::atomic::Ordering::Relaxed);
+            digest.update(&chunk[..read]);
+            if index == 1 {
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+            position += read as u64;
+        }
+    }
+    if !matches(file.metadata().ok()?)
+        || !matches(std::fs::metadata(query.path).ok()?)
+        || Instant::now() >= deadline
+    {
+        return None;
+    }
+    let at = (start - window_start) as usize;
+    if (start > 0 && bytes.get(at - 1) != Some(&b'\n')) || bytes.last() != Some(&b'\n') {
+        return None;
+    }
+    let prefix = format!("terminal-frame-v1:{}", hex::encode(digest.finalize()));
+    let plan = derive(query, source, prefix, bytes.get(at..)?, deadline)?;
+    (Instant::now() < deadline).then_some(plan)
 }
 
 fn build_with_prefix_limit(
