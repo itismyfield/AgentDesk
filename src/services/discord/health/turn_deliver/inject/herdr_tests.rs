@@ -330,7 +330,15 @@ async fn try_busy(shared: &Arc<SharedData>, channel: u64) -> bool {
     let gate = Some(router::queued_head_inject_covers as fn(ChannelId, Option<ChannelId>) -> bool);
     let channel = ChannelId::new(channel);
     let try_busy = crate::services::discord::queue_io::queued_head_inject::try_busy;
-    try_busy(&deps, &ProviderKind::Claude, channel, gate, "herdr_test").await
+    try_busy(
+        &deps,
+        &ProviderKind::Claude,
+        channel,
+        None,
+        gate,
+        "herdr_test",
+    )
+    .await
 }
 
 /// Live intake passes over a Herdr channel, but its queued head reaches the Bound pane once and,
