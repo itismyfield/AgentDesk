@@ -144,7 +144,9 @@ mod tests {
         std::fs::create_dir(&actual).unwrap();
         std::fs::write(actual.join("inside.md"), "inside").unwrap();
         std::os::unix::fs::symlink(&actual, &alias).unwrap();
-        for path in [alias.join("inside.md"), actual.join("inside.md")] {
+        // The temp parent may itself sit under a symlink (macOS /var -> /private/var).
+        let canonical = actual.canonicalize().unwrap();
+        for path in [alias.join("inside.md"), canonical.join("inside.md")] {
             assert_eq!(canonicalize_under_root(&alias, &path).unwrap(), path);
         }
         assert_eq!(
