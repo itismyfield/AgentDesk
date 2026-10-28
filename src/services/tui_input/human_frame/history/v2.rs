@@ -173,6 +173,15 @@ impl Snapshot {
             )
             .find(|(r, _)| r.namespace == namespace && r.key == *key)
     }
+    /// The queue proved this attempt was never sent, so no native row can be its own.
+    fn abandoned(&self, namespace: &str, key: &Value) -> bool {
+        self.passive.iter().any(|p| {
+            p.state == collision::ABANDONED
+                && p.registration
+                    .as_ref()
+                    .is_some_and(|r| r.namespace == namespace && r.key == *key)
+        })
+    }
     fn entries(&self) -> impl Iterator<Item = (Option<&Registration>, &Entry)> {
         self.live
             .iter()
@@ -529,6 +538,9 @@ impl Registry {
             let Some((registration, Some(entry))) = state.locate(namespace, key) else {
                 return Ok(None);
             };
+            if state.abandoned(namespace, key) {
+                return Ok(None);
+            }
             if entry.path != path
                 || entry.file != file
                 || entry.offset > offset
@@ -696,8 +708,9 @@ pub(super) fn scoped_observed(
     Some(
         c.registry
             .inspect(|state| {
-                let matching = state
-                    .locate(&c.namespace, &c.key)
+                let matching = (!state.abandoned(&c.namespace, &c.key))
+                    .then(|| state.locate(&c.namespace, &c.key))
+                    .flatten()
                     .and_then(|(_, e)| e)
                     .filter(|e| {
                         e.provider == provider

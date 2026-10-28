@@ -291,3 +291,51 @@ fn history_v2_cost_is_one_publish_per_change_at_zero_1024_and_5001_rows() {
         }
     }
 }
+
+#[test]
+fn history_v2_an_abandoned_attempt_owns_no_native_row_and_leaves_it_to_a_same_body_successor() {
+    let _root = TestRuntimeRootGuard::new();
+    let (_dir, path, history) = setup();
+    let frame = idle("ann", "7", "abandoned then resent");
+    let a = key(570, &path, false);
+    let ia = input(&a, &frame);
+    history.prepare("history-test", &ia).unwrap();
+    let mut snapshot = projection(None, &[], &[]);
+    snapshot["retained_inputs"] = json!([not_sent(&ia, "reserved")]);
+    history.project(&snapshot).unwrap();
+    let row = (&*path, 0, "codex", Some("row-1"), frame.as_str());
+    assert_eq!(history.receipt("history-test", &a, row), None);
+    with_attempt(&history, "history-test", &a, || {
+        let prompts = [frame.clone()];
+        let observed =
+            super::super::super::observed_attempt("codex", "history-pane", &prompts, Some("row-1"));
+        assert!(matches!(observed, ObservedAttempt::None));
+    })
+    .unwrap();
+    assert!(
+        history.source("history-test", &a).is_ok(),
+        "custody and source restore keep the registration"
+    );
+    let b = key(571, &path, false);
+    history.prepare("history-test", &input(&b, &frame)).unwrap();
+    assert_eq!(history.receipt("history-test", &b, row), Some(true));
+}
+
+#[test]
+fn history_v2_unconfirmed_candidate_that_never_landed_releases_pending_on_the_old_bytes() {
+    let _root = TestRuntimeRootGuard::new();
+    let (_dir, path, history) = setup();
+    history
+        .prepare("history-test", &input(&key(580, &path, false), "A"))
+        .unwrap();
+    let old = read(&history);
+    // The old bytes still stand, as when an unconfirmed candidate never replaced them.
+    *history.pending.lock().unwrap() = Some((old, "{\"never\":\"landed\"}".into()));
+    for (id, frame) in [(581, "B"), (582, "C")] {
+        history
+            .prepare("history-test", &input(&key(id, &path, false), frame))
+            .expect("old bytes confirm the transition was not committed");
+    }
+    assert!(history.pending.lock().unwrap().is_none());
+    assert_eq!(history.json().unwrap()["live"].as_array().unwrap().len(), 3);
+}

@@ -173,7 +173,7 @@ fn v2_and_unknown_objects_refuse_legacy_mutation_before_unlink() {
         let channel = ChannelId::new(7_272_272);
         let (path, _) = seed(channel.get(), &json!([]));
         std::fs::write(&path, "{\"version\":2,").unwrap();
-        assert!(compat::require_legacy_write(&path).is_ok());
+        assert!(compat::require_clearable(&path).is_ok());
         ChannelMailboxRegistry::default()
             .handle(channel)
             .clear(context())
@@ -251,4 +251,55 @@ fn v2_writer_golden_remains_inspectable_as_read_only_and_new_fields_default() {
         ),
         "new V2 fields require serde defaults"
     );
+}
+
+fn intervention(channel: u64, id: u64) -> Intervention {
+    let item = serde_json::from_value(item(channel, id)).unwrap();
+    super::super::pending_queue_persistence::pending_queue_item_to_intervention(
+        item,
+        std::time::SystemTime::now(),
+        Instant::now(),
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_save_keeps_an_unreadable_snapshot_that_a_failed_clear_left() {
+    use std::os::unix::fs::PermissionsExt;
+    let _root = TestRuntimeRootGuard::new();
+    run(async {
+        let channel = ChannelId::new(7_272_296);
+        let (path, _) = seed(channel.get(), &json!([]));
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        assert!(
+            handle
+                .enqueue(intervention(channel.get(), 1), context())
+                .await
+                .enqueued
+        );
+        // A clear that cannot rewrite the file leaves the namespace untrusted, so no write reads it.
+        ChannelMailboxRegistry::fail_clear_removals(channel, false, 2, false);
+        crate::services::turn_orchestrator::test_support::fail_queue_saves(channel, 2);
+        let cleared = handle.clear(context()).await;
+        assert_eq!(
+            cleared.persistence.failed,
+            ["queue_unlink", "queue_publish"]
+        );
+        let before = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read(&path).is_ok();
+        let saved = handle
+            .enqueue(intervention(channel.get(), 2), context())
+            .await;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        if readable {
+            return; // a superuser reads any mode; the refusal cannot be observed
+        }
+        assert!(
+            saved.persistence_error.is_some(),
+            "the save refusal is reported, never as saved"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before, "original kept");
+        assert!(compat::require_clearable(&path).is_ok());
+    });
 }
