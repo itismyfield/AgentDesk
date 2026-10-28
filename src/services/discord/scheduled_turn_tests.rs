@@ -349,6 +349,17 @@ async fn restart_after_the_delivery_commit_settles_the_turn_without_resending_pg
         .unwrap();
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].status, "running");
+    assert!(
+        crate::services::scheduled_messages::turn_completion::tests::poll_once(&pool).await,
+        "the scheduler's poll settles the restored record"
+    );
+    let deliveries = smdb::list_deliveries_pg(&pool, &launched.message_id, 10, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (deliveries.len(), deliveries[0].status.as_str()),
+        (1, "sent")
+    );
 
     pool.close().await;
     db.drop().await;

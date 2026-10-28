@@ -63,6 +63,22 @@ pub(super) fn recovered_transcript_turn_id(
     }
 }
 
+/// Settles the scheduled delivery of a recovered answer the caller relayed.
+/// Callers run it before the visible completion, which may drop the row.
+pub(super) async fn settle_recovered_answer(
+    pg_pool: Option<&sqlx::PgPool>,
+    state: &inflight::InflightTurnState,
+    relayed_answer: &str,
+) -> Option<crate::services::discord::scheduled_turn::Settlement> {
+    let relayed_answer = relayed_answer.trim();
+    if relayed_answer.is_empty() {
+        return None;
+    }
+    let outcome =
+        crate::services::discord::scheduled_turn::recovery_delivered_outcome(state, relayed_answer);
+    crate::services::discord::scheduled_turn::settle(pg_pool, state, outcome).await
+}
+
 pub(super) async fn persist_recovered_transcript(
     pg_pool: Option<&sqlx::PgPool>,
     provider: &ProviderKind,
@@ -74,13 +90,12 @@ pub(super) async fn persist_recovered_transcript(
     if assistant_message.is_empty() {
         return false;
     }
-    // The recovered answer settles its scheduled delivery; an isolated
-    // turn's answer never becomes channel transcript context.
-    let outcome = crate::services::discord::scheduled_turn::recovery_delivered_outcome(
-        state,
-        assistant_message,
-    );
-    let settled = crate::services::discord::scheduled_turn::settle(pg_pool, state, outcome).await;
+    // Idempotent re-settle; an isolated turn's answer never becomes channel transcript context.
+    let settled = if crate::services::discord::scheduled_turn::fallback_settle_enabled() {
+        settle_recovered_answer(pg_pool, state, assistant_message).await
+    } else {
+        None
+    };
     if crate::services::discord::scheduled_turn::channel_effects(pg_pool, &[Some(state)])
         .await
         .suppressed()

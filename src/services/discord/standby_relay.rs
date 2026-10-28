@@ -255,7 +255,7 @@ pub(super) async fn run_standby_relay(
                     &output_path,
                     placeholder_msg_id,
                     &turn_binding,
-                    (result_text, pending_result_retry_offset),
+                    result_text,
                 )
                 .await;
                 complete_standby_inflight_state(

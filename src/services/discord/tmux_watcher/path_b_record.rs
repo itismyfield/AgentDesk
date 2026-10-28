@@ -123,30 +123,47 @@ impl<'a> PathBRecord<'a> {
         dispatch_id
     }
 
-    /// Settle the scheduled delivery of the pinned turn, else this row, only when
-    /// that turn owns this committed range (same session, started before its end).
+    /// Idempotent fallback of [`settle_committed_range`] for the pinned turn, else this row.
     async fn settle_scheduled(&self, target: &PathBTranscript<'_>) {
-        let (tmux_session_name, current_offset) = target.completion_range;
-        let state = target.settle_pin.unwrap_or(self.state);
-        if !state.scheduled.may_settle()
-            || state.user_msg_id == 0
-            || super::turn_identity::pinned_finalize_user_msg_id(
-                Some(state),
-                tmux_session_name,
-                current_offset,
-            ) != state.user_msg_id
-        {
+        if !crate::services::discord::scheduled_turn::fallback_settle_enabled() {
             return;
         }
-        let outcome = crate::services::scheduled_messages::turn_completion::classify(
+        settle_committed_range(
+            target.pool,
+            target.settle_pin.unwrap_or(self.state),
+            target.completion_range,
             target.assistant_message,
-            crate::services::scheduled_messages::turn_completion::terminal_error_event(
-                target.events,
-            ),
-            false,
-        );
-        crate::services::discord::scheduled_turn::settle(target.pool, state, outcome).await;
+            target.events,
+        )
+        .await;
     }
+}
+
+/// Settle `state`'s scheduled delivery only when its turn owns this committed range
+/// (same session, started before its end). The watcher runs it before any release.
+pub(super) async fn settle_committed_range(
+    pool: Option<&sqlx::PgPool>,
+    state: &InflightTurnState,
+    (tmux_session_name, current_offset): (&str, u64),
+    assistant_message: &str,
+    events: &[SessionTranscriptEvent],
+) {
+    if !state.scheduled.may_settle()
+        || state.user_msg_id == 0
+        || super::turn_identity::pinned_finalize_user_msg_id(
+            Some(state),
+            tmux_session_name,
+            current_offset,
+        ) != state.user_msg_id
+    {
+        return;
+    }
+    let outcome = crate::services::scheduled_messages::turn_completion::classify(
+        assistant_message,
+        crate::services::scheduled_messages::turn_completion::terminal_error_event(events),
+        false,
+    );
+    crate::services::discord::scheduled_turn::settle(pool, state, outcome).await;
 }
 
 #[cfg(test)]

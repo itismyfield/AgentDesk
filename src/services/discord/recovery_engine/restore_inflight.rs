@@ -366,6 +366,13 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 // message). A message-less turn (user_msg_id == 0) has no analytics
                 // row to key (`discord:<ch>:0` is bogus) and `MessageId::new(0)`
                 // panics; the transcript persist below stays unconditional.
+                // Settle before the visible completion, which may already drop the row.
+                super::analytics_transcript::settle_recovered_answer(
+                    shared.pg_pool.as_ref(),
+                    &state,
+                    &assistant_response,
+                )
+                .await;
                 let user_msg_id = optional_message_id(state.user_msg_id);
                 let visible_outcome = complete_recovery_visible_turn(
                     http,
@@ -1025,6 +1032,13 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 );
                 continue;
             }
+            // Settle before the visible completion, which may already drop the row.
+            super::analytics_transcript::settle_recovered_answer(
+                shared.pg_pool.as_ref(),
+                &state,
+                &assistant_response,
+            )
+            .await;
             let visible_outcome = complete_recovery_visible_turn(
                 http,
                 shared,
@@ -1283,6 +1297,13 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 );
                 continue;
             }
+            // Settle before the visible completion, which may already drop the row.
+            super::analytics_transcript::settle_recovered_answer(
+                shared.pg_pool.as_ref(),
+                &state,
+                &assistant_response,
+            )
+            .await;
             // Mark user message as completed only after Discord terminal delivery commits.
             let visible_outcome = complete_recovery_visible_turn(
                 http,
@@ -2759,6 +2780,10 @@ mod kickoff_identity_tests;
 #[cfg(test)]
 #[path = "restore_inflight/ready_without_output_tests.rs"]
 mod ready_without_output_tests;
+
 #[cfg(all(test, unix))]
 #[path = "restore_inflight/replay_hold_tests.rs"]
 mod replay_hold_tests;
+#[cfg(test)]
+#[path = "restore_inflight/scheduled_body_restore_tests.rs"]
+mod scheduled_body_restore_tests;

@@ -1144,3 +1144,76 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"fixture answer","
         assert_eq!(notices,0,"no active owner has been lost");
     });
 }
+
+/// A scheduled snapshot turn on the real headless start, bridge and postlude: the start
+/// marks its row with the launch turn id, and the completion settles the delivery on the
+/// scheduler's next production poll, with one provider start.
+#[test]
+fn a_scheduled_snapshot_headless_turn_settles_on_the_next_poll_pg() {
+    use crate::services::scheduled_messages::turn_completion::tests::{
+        delivery_state, launch_agent_delivery, poll_once,
+    };
+    let name = concat!(
+        module_path!(),
+        "::a_scheduled_snapshot_headless_turn_settles_on_the_next_poll_pg"
+    );
+    if !child(name) {
+        return;
+    }
+    intake_replay_rt().block_on(async {
+        let channel = ChannelId::new(7_420_501);
+        let host = Host::new(&[channel]).await;
+        // Holds the answer briefly so the started row can be read before completion.
+        let script = format!(
+            "#!/bin/sh\nprintf 'start\\n' >> '{}'\ncat > '{}.prompt'\nsleep 2\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"scheduled snapshot answer\",\"session_id\":\"74200000-0000-4000-8000-000000000001\"}}'\n",
+            host.calls.display(),
+            host.calls.display()
+        );
+        std::fs::write(host._workspace.path().join("claude"), script).unwrap();
+        let reservation = health::reserve_headless_agent_turn(channel);
+        let turn_id = reservation.turn_id().to_owned();
+        let launched =
+            launch_agent_delivery(&host.pool, "i7420-headless", &turn_id, true, "fail").await;
+        let metadata = serde_json::json!({
+            "agent_id": "i7420-headless", "scheduled_message_id": launched.message_id,
+            "turn_id": turn_id, "parent_channel_id": channel.get().to_string(),
+        });
+        let outcome = health::start_reserved_headless_agent_turn_with_owner_channel(
+            &host.registry,
+            channel,
+            channel,
+            ProviderKind::Claude,
+            "scheduled prompt".into(),
+            Some("scheduled_message".into()),
+            Some(metadata),
+            Some(format!("headless-fixture-{channel}")),
+            Some(format!("scheduled:{}", launched.message_id)),
+            reservation,
+        )
+        .await
+        .expect("scheduled headless start");
+        assert_eq!(outcome.turn_id, turn_id);
+        let row = crate::services::discord::inflight::load_inflight_state(
+            &ProviderKind::Claude,
+            channel.get(),
+        )
+        .expect("the started row");
+        assert_eq!(
+            row.scheduled,
+            crate::services::discord::scheduled_turn::ScheduledTurnMark::Scheduled {
+                turn_id: turn_id.clone(),
+                isolated: true,
+                outcome: None,
+            }
+        );
+        host.settled(channel).await;
+        assert_eq!(
+            delivery_state(&host.pool, &turn_id).await,
+            ("running".to_string(), Some("delivered".to_string()))
+        );
+        assert!(poll_once(&host.pool).await, "the production poll settles it");
+        assert_eq!(delivery_state(&host.pool, &turn_id).await.0, "sent");
+        assert_eq!(host.starts(), 1);
+        host.close().await;
+    });
+}

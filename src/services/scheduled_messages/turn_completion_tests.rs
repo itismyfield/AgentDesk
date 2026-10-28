@@ -117,6 +117,23 @@ pub(crate) async fn stored_outcome(pool: &PgPool, turn_id: &str) -> Option<Strin
         .flatten()
 }
 
+/// One pass of the scheduler's production agent-delivery poll.
+pub(crate) async fn poll_once(pool: &PgPool) -> bool {
+    super::super::poll_running_agent_deliveries(pool, "i7420-poller", super::super::LEASE_SECS, 10)
+        .await
+}
+
+/// `(status, turn_outcome)` of the delivery that launched `turn_id`.
+pub(crate) async fn delivery_state(pool: &PgPool, turn_id: &str) -> (String, Option<String>) {
+    sqlx::query_as(
+        "SELECT status, turn_outcome FROM scheduled_message_deliveries WHERE turn_id = $1",
+    )
+    .bind(turn_id)
+    .fetch_one(pool)
+    .await
+    .expect("read delivery state")
+}
+
 async fn fixture() -> (crate::db::auto_queue::test_support::TestPostgresDb, PgPool) {
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;

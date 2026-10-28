@@ -153,6 +153,26 @@ pub(in crate::services::discord) async fn channel_session_seed(
     state.session_id.clone()
 }
 
+/// Test seam: skips the late fallback settles, as a crash right after the early record would.
+#[cfg(test)]
+pub(in crate::services::discord) static SKIP_FALLBACK_SETTLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+tokio::task_local! {
+    pub(in crate::services::discord) static SKIP_FALLBACK_SETTLE_IN_TASK: ();
+}
+
+/// Whether a late fallback settle runs; always true outside tests.
+pub(in crate::services::discord) fn fallback_settle_enabled() -> bool {
+    #[cfg(test)]
+    if SKIP_FALLBACK_SETTLE.load(std::sync::atomic::Ordering::SeqCst)
+        || SKIP_FALLBACK_SETTLE_IN_TASK.try_with(|_| ()).is_ok()
+    {
+        return false;
+    }
+    true
+}
+
 /// The result of settling one turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum Settlement {

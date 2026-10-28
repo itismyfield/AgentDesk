@@ -4,19 +4,56 @@ use crate::services::scheduled_messages::turn_completion::tests::{
     launch_agent_delivery, stored_outcome,
 };
 
+const PRIOR: &str = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"previous turn failed"}"#;
 const ASSISTANT: &str =
-    r#"{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}"#;
+    r#"{"type":"assistant","message":{"content":[{"type":"text","text":"plain text answer"}]}}"#;
+const OK: &str =
+    r#"{"type":"result","subtype":"success","is_error":false,"result":"plain text answer"}"#;
+const ERROR_WITH_BODY: &str =
+    r#"{"type":"result","subtype":"success","is_error":true,"result":"plain text answer"}"#;
+const ERROR_WITHOUT_BODY: &str =
+    r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["boom"]}"#;
+const ERROR_EMPTY_BODY: &str =
+    r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":""}"#;
 
-fn transcript(dir: &std::path::Path, name: &str, is_error: bool) -> (String, u64) {
+/// A transcript holding a previous turn's failed result, then this turn's lines;
+/// returns the path and this turn's start offset.
+fn transcript(dir: &std::path::Path, name: &str, turn: &[&str]) -> (String, u64) {
     let path = dir.join(name);
-    let result = format!(
-        r#"{{"type":"result","subtype":"success","is_error":{is_error},"result":"plain text answer"}}"#
-    );
-    std::fs::write(&path, format!("{ASSISTANT}\n{result}\n")).unwrap();
-    (path.display().to_string(), ASSISTANT.len() as u64 + 1)
+    let mut text = format!("{PRIOR}\n");
+    for line in turn {
+        text.push_str(line);
+        text.push('\n');
+    }
+    std::fs::write(&path, text).unwrap();
+    (path.display().to_string(), PRIOR.len() as u64 + 1)
 }
 
-fn standby_row(channel: u64, output_path: &str, turn_id: &str) -> InflightTurnState {
+#[test]
+fn only_this_turns_terminal_result_decides_the_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let cases: [(&str, &[&str], Option<bool>); 5] = [
+        ("ok", &[ASSISTANT, OK], Some(false)),
+        ("error-body", &[ASSISTANT, ERROR_WITH_BODY], Some(true)),
+        (
+            "error-no-body",
+            &[ASSISTANT, ERROR_WITHOUT_BODY],
+            Some(true),
+        ),
+        ("error-empty", &[ASSISTANT, ERROR_EMPTY_BODY], Some(true)),
+        ("fallback", &[ASSISTANT], None),
+    ];
+    for (name, lines, expected) in cases {
+        let (path, start) = transcript(dir.path(), name, lines);
+        assert_eq!(terminal_result_is_error(&path, start), expected, "{name}");
+    }
+    assert_eq!(
+        terminal_result_is_error("/nonexistent/standby.jsonl", 0),
+        None
+    );
+}
+
+fn standby_row(channel: u64, output_path: &str, start: u64, turn_id: &str) -> InflightTurnState {
     let mut state = InflightTurnState::new(
         ProviderKind::Claude,
         channel,
@@ -31,7 +68,7 @@ fn standby_row(channel: u64, output_path: &str, turn_id: &str) -> InflightTurnSt
         None,
         0,
     );
-    state.turn_start_offset = Some(0);
+    state.turn_start_offset = Some(start);
     state.scheduled = ScheduledTurnMark::Scheduled {
         turn_id: turn_id.to_string(),
         isolated: true,
@@ -40,76 +77,66 @@ fn standby_row(channel: u64, output_path: &str, turn_id: &str) -> InflightTurnSt
     state
 }
 
-#[test]
-fn only_a_typed_error_result_line_reads_as_an_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let (failed, offset) = transcript(dir.path(), "failed.jsonl", true);
-    let (ok, _) = transcript(dir.path(), "ok.jsonl", false);
-    assert!(result_line_is_error(&failed, offset));
-    assert!(
-        !result_line_is_error(&failed, 0),
-        "the assistant line is no result"
-    );
-    assert!(!result_line_is_error(&ok, offset));
-    assert!(!result_line_is_error(&failed, 10_000));
-    assert!(!result_line_is_error("/nonexistent/standby.jsonl", 0));
-}
-
-/// The standby relay settles only the row of its own binding, and a plain-text
-/// answer of an `is_error` result settles as a provider error.
+/// The standby relay settles only its binding's row, never as delivered when this
+/// turn's terminal result is a typed error, and not at all without a terminal result.
 #[tokio::test]
-async fn standby_settles_only_its_binding_and_never_delivers_an_error_result_pg() {
+async fn standby_settles_only_its_binding_by_its_terminal_result_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let dir = tempfile::tempdir().unwrap();
-    let provider = ProviderKind::Claude;
-    let settle_case = |channel: u64, turn_id: &'static str, is_error: bool, rebind: bool| {
-        let (shared, provider, dir) = (shared.clone(), provider.clone(), dir.path().to_owned());
-        async move {
-            let (path, offset) = transcript(&dir, &format!("{channel}.jsonl"), is_error);
-            let state = standby_row(channel, &path, turn_id);
-            crate::services::discord::inflight::save_inflight_state(&state).unwrap();
-            let mut bound = state.clone();
-            if rebind {
-                bound.turn_start_offset = Some(1);
-            }
-            let binding = StandbyRelayTurnBinding::from_state(&bound);
-            settle(
-                &shared,
-                &provider,
-                ChannelId::new(channel),
-                &path,
-                None,
-                &binding,
-                ("plain text answer", Some(offset)),
-            )
-            .await;
-        }
-    };
-    for turn in ["standby-ok", "standby-error", "standby-other"] {
+    let cases: [(&str, &[&str], bool, Option<&str>); 6] = [
+        ("standby-ok", &[ASSISTANT, OK], false, Some("delivered")),
+        (
+            "standby-error-body",
+            &[ASSISTANT, ERROR_WITH_BODY],
+            false,
+            Some("provider_error"),
+        ),
+        (
+            "standby-error-no-body",
+            &[ASSISTANT, ERROR_WITHOUT_BODY],
+            false,
+            Some("provider_error"),
+        ),
+        (
+            "standby-error-empty",
+            &[ASSISTANT, ERROR_EMPTY_BODY],
+            false,
+            Some("provider_error"),
+        ),
+        ("standby-fallback", &[ASSISTANT], false, None),
+        ("standby-other", &[ASSISTANT, OK], true, None),
+    ];
+    for (n, (turn, lines, other_binding, expected)) in cases.into_iter().enumerate() {
         launch_agent_delivery(&pool, turn, turn, true, "fail").await;
+        let channel = 7_420_101 + n as u64;
+        let (path, start) = transcript(dir.path(), turn, lines);
+        let state = standby_row(channel, &path, start, turn);
+        crate::services::discord::inflight::save_inflight_state(&state).unwrap();
+        let mut bound = state.clone();
+        if other_binding {
+            bound.turn_start_offset = Some(start + 1);
+        }
+        let binding = StandbyRelayTurnBinding::from_state(&bound);
+        settle(
+            &shared,
+            &ProviderKind::Claude,
+            ChannelId::new(channel),
+            &path,
+            None,
+            &binding,
+            "plain text answer",
+        )
+        .await;
+        assert_eq!(
+            stored_outcome(&pool, turn).await.as_deref(),
+            expected,
+            "{turn}"
+        );
     }
-
-    settle_case(7_420_101, "standby-ok", false, false).await;
-    settle_case(7_420_102, "standby-error", true, false).await;
-    settle_case(7_420_103, "standby-other", false, true).await;
-
-    assert_eq!(
-        stored_outcome(&pool, "standby-ok").await.as_deref(),
-        Some("delivered")
-    );
-    assert_eq!(
-        stored_outcome(&pool, "standby-error").await.as_deref(),
-        Some("provider_error")
-    );
-    assert_eq!(
-        stored_outcome(&pool, "standby-other").await,
-        None,
-        "a binding of another turn start settles nothing"
-    );
 
     pool.close().await;
     db.drop().await;

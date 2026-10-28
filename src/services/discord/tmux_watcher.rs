@@ -1451,6 +1451,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     false,
                 ),
             );
+        // Record the scheduled outcome before the pre-panel release can drop the row.
+        if terminal_delivery_committed && let Some(pin) = inflight_before_relay.as_ref() {
+            path_b_record::settle_committed_range(
+                shared.pg_pool.as_ref(),
+                pin,
+                (&tmux_session_name, current_offset),
+                &full_response,
+                &tool_state.transcript_events,
+            )
+            .await;
+        }
 
         // #3646 OBSERVATION-ONLY (event 1/3 — terminal_body_commit): emit once the
         // body commit decision is in hand. The `if terminal_output_committed` guard

@@ -10,7 +10,7 @@ pub(super) async fn settle(
     output_path: &str,
     placeholder_msg_id: Option<MessageId>,
     binding: &StandbyRelayTurnBinding,
-    (result_text, result_offset): (&str, Option<u64>),
+    result_text: &str,
 ) {
     let Some(state) = super::super::inflight::load_inflight_state(provider, channel_id.get())
     else {
@@ -22,35 +22,36 @@ pub(super) async fn settle(
     {
         return;
     }
-    let is_error = result_offset.is_some_and(|offset| result_line_is_error(output_path, offset));
-    let outcome = crate::services::scheduled_messages::turn_completion::classify(
-        result_text,
-        is_error,
-        false,
-    );
+    // Without this turn's terminal result (a drain fallback body) nothing is settled.
+    let Some(is_error) = state
+        .turn_start_offset
+        .and_then(|start| terminal_result_is_error(output_path, start))
+    else {
+        return;
+    };
+    let outcome = if is_error {
+        Some(crate::services::scheduled_messages::turn_completion::ScheduledTurnOutcome::ProviderError)
+    } else {
+        crate::services::scheduled_messages::turn_completion::classify(result_text, false, false)
+    };
     crate::services::discord::scheduled_turn::settle(shared.pg_pool.as_ref(), &state, outcome)
         .await;
 }
 
-/// Whether the result event starting at `offset` is a typed error result.
-pub(super) fn result_line_is_error(output_path: &str, offset: u64) -> bool {
-    let Ok(bytes) = std::fs::read(output_path) else {
-        return false;
-    };
-    let Some(start) = usize::try_from(offset)
+/// Whether the turn's first `result` event at or after `start` is a typed error;
+/// `None` when the turn has no result event yet.
+pub(super) fn terminal_result_is_error(output_path: &str, start: u64) -> Option<bool> {
+    let bytes = std::fs::read(output_path).ok()?;
+    let start = usize::try_from(start)
         .ok()
-        .filter(|start| *start < bytes.len())
-    else {
-        return false;
-    };
-    let line = bytes[start..]
-        .split(|byte| *byte == b'\n')
-        .next()
-        .unwrap_or_default();
-    serde_json::from_slice::<Value>(line).is_ok_and(|parsed| {
-        parsed.get("type").and_then(Value::as_str) == Some("result")
-            && parsed.get("is_error").and_then(Value::as_bool) == Some(true)
-    })
+        .filter(|start| *start <= bytes.len())?;
+    String::from_utf8_lossy(&bytes[start..])
+        .lines()
+        .find_map(|line| {
+            let parsed = serde_json::from_str::<Value>(line.trim()).ok()?;
+            (parsed.get("type").and_then(Value::as_str) == Some("result"))
+                .then(|| parsed.get("is_error").and_then(Value::as_bool) == Some(true))
+        })
 }
 
 #[cfg(test)]
