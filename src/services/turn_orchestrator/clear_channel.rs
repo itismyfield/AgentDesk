@@ -29,7 +29,7 @@ pub(super) fn dispatch(
     reply: super::closed_verdict::VerdictReply<ClearChannelResult>,
 ) {
     let result = clear_channel_state(state, channel_id, persistence, active);
-    if active == ActivePolicy::Release && !result.persistence.failed.contains(&"queue_read_only") {
+    if active == ActivePolicy::Release {
         super::mark_turn_finished_signal_done(channel_id);
     }
     let _ = reply.send(result);
@@ -79,20 +79,15 @@ pub(super) fn clear_channel_state(
     persistence: QueuePersistenceContext,
     active: ActivePolicy,
 ) -> ClearChannelResult {
-    if let Some(path) =
+    // A read-only queue file is kept as it is; the rest of the clear still runs and reports beside it.
+    let read_only =
         pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel_id)
-        && let Err(error) = queued_head::compat::require_clearable(&path)
-    {
-        tracing::warn!(%channel_id, path = %path.display(), %error, "read-only queue refused clear; preserve the original file and inspect with a V2-capable recovery binary");
-        return ClearChannelResult {
-            persistence: ClearPersistence {
-                failed: vec!["queue_read_only"],
-                count_unknown: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-    }
+            .and_then(|path| {
+                let refused = queued_head::compat::require_clearable(&path).err();
+                refused.map(|error| (path, error))
+            })
+            .inspect(|(path, error)| tracing::warn!(%channel_id, path = %path.display(), %error, "read-only queue kept by clear; preserve the original file and inspect with a V2-capable recovery binary"))
+            .is_some();
     state.last_persistence = Some(persistence.clone());
     let namespace = super::remint_fence::namespace(&persistence);
     let disk_trusted = state.remint_fence.trusts_queue(&namespace);
@@ -101,7 +96,7 @@ pub(super) fn clear_channel_state(
         .transpose();
     let marker_unreadable = read.is_err();
     let marker = read.ok().flatten().flatten();
-    let disk = if active == ActivePolicy::Preserve && disk_trusted {
+    let disk = if active == ActivePolicy::Preserve && disk_trusted && !read_only {
         load_channel_pending_queue_checked(
             &persistence.provider,
             &persistence.token_hash,
@@ -178,9 +173,11 @@ pub(super) fn clear_channel_state(
     // An explicit clear discards the queued head too, whatever its phase.
     queued_head::release_for_clear(state, &persistence);
     state.remint_fence.begin_clear();
-    let mut persistence = write_cleared_files(state, channel_id, &persistence, disk_trusted);
+    let mut persistence =
+        write_cleared_files(state, channel_id, &persistence, disk_trusted, read_only);
     persistence.not_waiting = not_waiting;
-    persistence.count_unknown = marker_unreadable || queue_unreadable || unknown_reservation;
+    persistence.count_unknown =
+        marker_unreadable || queue_unreadable || unknown_reservation || read_only;
     ClearChannelResult {
         removed_token,
         queue_exit_events,
@@ -230,17 +227,21 @@ fn write_cleared_files(
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
     disk_trusted: bool,
+    read_only: bool,
 ) -> ClearPersistence {
     let mut report = ClearPersistence::default();
+    if read_only {
+        report.failed.push("queue_read_only");
+    }
     let (provider, token_hash) = (&persistence.provider, persistence.token_hash.as_str());
     let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) else {
         report.fail("queue_files", "pending queue root unavailable");
         return report;
     };
-    if disk_trusted {
+    if disk_trusted && !read_only {
         queued_head::keep_disk_terminal(state, &path);
     }
-    let unlinked = report.attempt("queue_unlink", || {
+    let unlinked = !read_only && report.attempt("queue_unlink", || {
         #[cfg(test)]
         if let Some(after) = take_fault(channel_id, Op::Queue) {
             if after {
@@ -263,7 +264,7 @@ fn write_cleared_files(
     let meta = Some(&state.queued_head.meta).filter(|meta| meta.is_set());
     let snapshot =
         queued_head::snapshot_json(Vec::new(), meta).unwrap_or_else(|_| "[]".to_string());
-    let published = report.attempt("queue_publish", || {
+    let published = !read_only && report.attempt("queue_publish", || {
         #[cfg(test)]
         if super::pending_queue_persistence::save_fault::take(channel_id) {
             return Err(format!(

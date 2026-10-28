@@ -8,6 +8,7 @@ mod attempt;
 mod commit;
 pub(crate) mod control;
 mod migration;
+pub(crate) mod projection;
 mod retained;
 pub(crate) mod source_admission;
 mod sources;

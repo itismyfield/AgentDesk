@@ -52,10 +52,12 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
         | M::FinishCancelledTurn { .. }
         | M::CloseIfIdle { .. }
         | M::Injection(_)
-        // The checked purge owns their V2 forms; the V1 forms refuse a V2 file before any write.
+        // A forced purge refuses a V2 file before any write; the checked purge has a V2 form.
         | M::PurgeQueue { .. } => return Some(msg),
         #[cfg(unix)]
-        M::PurgeQueueIfUnchanged(_) | M::CaptureOwnQueue(_) => return Some(msg),
+        M::PurgeQueueIfUnchanged(request) => request.run_v2(state, channel_id),
+        #[cfg(unix)]
+        M::CaptureOwnQueue(request) => request.refuse_v2(),
         #[cfg(test)]
         M::AgeActiveTurnForTest { .. }
         | M::AgeInboundWaitsForTest { .. }
