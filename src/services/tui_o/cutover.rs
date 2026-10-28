@@ -30,6 +30,10 @@ pub(crate) fn writer_enabled() -> bool {
     test_override::enabled()
 }
 
+pub(crate) fn boot_snapshot() -> Option<BootChannels> {
+    test_override::with_channels(|snapshot| snapshot.cloned())
+}
+
 /// Each boot-snapshot channel with its boot kind and, where this node may host it, its adoption;
 /// the writer host derives its channels from this, never from a reloaded config.
 pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)> {
@@ -42,7 +46,12 @@ pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<C
         let judged = |&channel: &u64| {
             let kind = snapshot.kind(channel);
             let hosted = channel_policy::owns_output(enabled, channels, channel, kind);
-            let candidate = snapshot.candidate(channel).filter(|_| hosted).cloned();
+            let blocked = snapshot
+                .execution(channel)
+                .is_some_and(|view| view.permit.is_err());
+            let candidate = snapshot
+                .output_candidate(channel)
+                .filter(|_| hosted && !blocked);
             (channel, kind, candidate)
         };
         channels.iter().map(judged).collect()
@@ -74,9 +83,12 @@ fn owned_kind(channel: u64) -> Option<RuntimeHandoffKind> {
 
 fn owned_in(snapshot: &BootChannels, channel: u64) -> Option<RuntimeHandoffKind> {
     let kind = snapshot.kind(channel);
+    if snapshot.execution(channel).is_some() {
+        return kind;
+    }
     let hosted = channel_policy::owns_output(true, snapshot.channels(), channel, kind);
     snapshot
-        .candidate(channel)
+        .output_candidate(channel)
         .filter(|c| hosted && c.peek().owned())?;
     kind
 }
@@ -114,11 +126,14 @@ pub(crate) fn mark_codex_turn_admitted(
     }
     test_override::with_channels(|snapshot| {
         let Some(snapshot) = snapshot.filter(|s| {
-            s.site() == &Site::Home && s.kind(channel) == Some(RuntimeHandoffKind::CodexTui)
+            let local = s
+                .execution(channel)
+                .map_or(s.site() == &Site::Home, |view| view.permit.is_ok());
+            local && s.kind(channel) == Some(RuntimeHandoffKind::CodexTui)
         }) else {
             return;
         };
-        if let Some(candidate) = snapshot.candidate(channel) {
+        if let Some(candidate) = snapshot.output_candidate(channel) {
             candidate.mark_turn_admitted(channel, || {
                 ChannelBindingLog::new(channel, super::shadow::ShadowProvider::Codex)
                     .binding_events_since(channel, 0)
@@ -141,6 +156,11 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
         // An unparseable destination may be any selected channel.
         if channel.is_some_and(|channel| !snapshot.channels().contains(&channel)) {
             return Ok(());
+        }
+        if let Some(channel) = channel
+            && let Some(view) = snapshot.execution(channel)
+        {
+            return view.permit.map(|_| ()).map_err(|reason| reason);
         }
         if let Site::Foreign { home } = snapshot.site() {
             let channel = channel.map_or("an unknown channel".into(), |c| c.to_string());

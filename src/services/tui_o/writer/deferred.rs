@@ -12,7 +12,7 @@ use super::adoption::{self, At, Hold, LegacyEpoch, LegacyView, ReadVersion, Refu
 use super::binding::{BindingEvent, BindingEvents};
 use super::host::{Custody, FencedFacts, HostIo, release, stop, until_owned};
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
-use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
+use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::OStore;
 
@@ -437,7 +437,7 @@ async fn commit<I: HostIo>(
     if waiting.late && !io.late_adopt_enabled() {
         return Err(Refused::retry("late adoption disabled before publication"));
     }
-    let GatewayOwnership::Owned { epoch: expected } = waiting.gate.current() else {
+    let Some(expected) = waiting.gate.current().epoch() else {
         return Err(Refused::retry(
             "gateway ownership changed before O activation",
         ));

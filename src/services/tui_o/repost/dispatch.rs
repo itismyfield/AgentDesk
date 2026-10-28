@@ -18,7 +18,7 @@ use super::send::{
     BoundedTransport, DispatchCounts, DispatchReport, RepostEnvelope, RepostIds, WireOutcome,
     hand_over,
 };
-use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
+use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::writer::deliver::POST_TIMEOUT;
 
 /// What the channel's writer lends a re-post turn. The original path, Auto and an operator
@@ -177,10 +177,9 @@ pub(crate) async fn start<W: RepostWriter>(
     let epoch = Arc::clone(&admitted);
     // Checked before every request leaves; the gate is observed, never locked again.
     let live = Arc::new(move || {
-        let owned = GatewayOwnership::Owned {
-            epoch: epoch.load(Ordering::SeqCst),
-        };
-        *observed.borrow() == owned && writer_live() && Instant::now() < deadline
+        observed.borrow().epoch() == Some(epoch.load(Ordering::SeqCst))
+            && writer_live()
+            && Instant::now() < deadline
     });
     let (request, counts) = hand_over(transport, &envelope, live);
     let mut handed = Some(request);

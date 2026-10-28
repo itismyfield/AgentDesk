@@ -37,7 +37,10 @@ struct GatewayHost {
 
 /// With clustering, the configured id the home judgement used, refused when bootstrap published
 /// another; otherwise the published id. The hostname-PID fallback is never taken.
-async fn local_id(configured: Option<&str>, max_wait: Duration) -> Result<String, String> {
+pub(super) async fn local_id(
+    configured: Option<&str>,
+    max_wait: Duration,
+) -> Result<String, String> {
     let published = crate::services::cluster::node_registry::SELF_INSTANCE_ID.get();
     match (configured, published) {
         (Some(configured), Some(published)) if configured != published => Err(format!(

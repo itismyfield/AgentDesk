@@ -17,6 +17,7 @@ mod intake_delivery_reconciler;
 mod intake_delivery_sweep;
 mod o_writer_host;
 mod orphan_recovery;
+mod owner_execution;
 mod queued_placeholders;
 mod queued_recovery;
 
@@ -249,6 +250,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     health::inspect_channel_home_seed_at_boot(
         &health_registry,
         &provider,
+        &token_hash,
         pg_pool.as_ref(),
         &restored_node_overrides,
     )
@@ -260,6 +262,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let restored_codex_goals_channels = restored_codex_goals_enabled_channels(&bot_settings);
     let restored_codex_goals_reset_channels = restored_codex_goals_reset_channels(&bot_settings);
 
+    owner_execution::prepare(&provider, pg_pool.as_ref()).await;
     let shared = run_bot_build_shared_data(
         bot_settings,
         &provider,

@@ -312,6 +312,12 @@ fn decide_with_snapshot(
     }
     let selected =
         channel_policy::owns_output(enabled, snapshot.channels(), channel_id, Some(kind));
+    if snapshot.execution(channel_id).is_some() {
+        return Ok(BodyClaimed {
+            owned: selected,
+            send: None,
+        });
+    }
     let candidate = snapshot.candidate(channel_id);
     // The body and its host share both state and sends.
     let Some(candidate) = candidate.filter(|_| selected) else {

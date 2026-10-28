@@ -8,7 +8,7 @@ use crate::services::tui_o::writer::codex_snapshot::Observation as CodexObservat
 
 use super::*;
 use crate::services::claude_tui::source_verify::SourceHistory;
-use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
+use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::Fingerprint;
 use crate::services::tui_o::store::rotation::{Rotation, Successor};
@@ -302,7 +302,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
 /// Settled only while the writer's gateway gate owns the channel.
 fn home_now(gate: &OwnershipGate) -> Home {
-    if matches!(gate.current(), GatewayOwnership::Owned { .. }) {
+    if gate.current().epoch().is_some() {
         Home::Settled
     } else {
         Home::Moving

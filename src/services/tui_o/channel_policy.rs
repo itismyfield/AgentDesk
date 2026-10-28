@@ -2,7 +2,7 @@
 //! for selected or locally committed channels; other nodes only report their local store state.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
@@ -35,6 +35,8 @@ pub(crate) struct BootChannels {
     site: Site,
     configured_id: Option<String>,
     candidates: BTreeMap<u64, Candidate>,
+    execution: Arc<Mutex<BTreeMap<u64, super::ownership::execution::View>>>,
+    execution_install: Arc<Mutex<()>>,
 }
 
 /// Membership as configured; the adoption states and kept committed channels are process state.
@@ -231,6 +233,8 @@ impl BootChannels {
             site,
             configured_id,
             candidates: BTreeMap::new(),
+            execution: Arc::default(),
+            execution_install: Arc::default(),
         })
     }
 
@@ -332,6 +336,67 @@ impl BootChannels {
     /// The adoption of a selected channel; none off the home or while the writer is off.
     pub(crate) fn candidate(&self, channel: u64) -> Option<&Candidate> {
         self.candidates.get(&channel)
+    }
+
+    pub(crate) fn execution(&self, channel: u64) -> Option<super::ownership::execution::View> {
+        self.execution
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&channel)
+            .cloned()
+    }
+
+    pub(crate) fn output_candidate(&self, channel: u64) -> Option<Candidate> {
+        self.execution(channel)
+            .map(|view| view.candidate)
+            .or_else(|| self.candidate(channel).cloned())
+    }
+
+    pub(crate) fn install_execution(
+        &self,
+        channel: u64,
+        permit: Option<Result<Arc<super::ownership::execution::OwnerPermit>, String>>,
+    ) {
+        use super::ownership::execution::View;
+        let _install = self
+            .execution_install
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let old = self.execution(channel);
+        if let (Some(old), Some(Ok(new))) = (&old, &permit)
+            && let Ok(old) = &old.permit
+            && old.same_execution(new)
+        {
+            return;
+        }
+        if let Some(old) = old
+            && let Ok(old) = old.permit
+        {
+            old.gate().close();
+        }
+        let view = match permit {
+            None => {
+                self.execution
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&channel);
+                return;
+            }
+            Some(Err(reason)) => View::held(reason),
+            Some(Ok(permit)) => {
+                let selected = BTreeSet::from([channel]);
+                let state =
+                    adoption::stored(crate::config::runtime_root().as_deref(), &selected)[&channel];
+                View {
+                    permit: Ok(permit),
+                    candidate: self.seed_candidate(channel, state),
+                }
+            }
+        };
+        self.execution
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(channel, view);
     }
 
     /// Every selected channel starts in `state`, as `seeded` would leave it on the home.

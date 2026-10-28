@@ -7,19 +7,33 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, TryLockError, Try
 
 use tokio::sync::watch;
 
+pub(crate) mod execution;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GatewayOwnership {
     /// This process holds the gateway lease; `epoch` grows with every acquisition.
     Owned { epoch: u64 },
+    /// A channel's PG execution owner; the local epoch is separate from its PG generation.
+    ExecutionOwned { epoch: u64, generation: i64 },
     /// The lease connection failed and re-acquisition has not settled.
     Unknown,
     /// Never held, handed off, or released.
     Lost,
 }
 
+impl GatewayOwnership {
+    pub(crate) fn epoch(self) -> Option<u64> {
+        match self {
+            Self::Owned { epoch } | Self::ExecutionOwned { epoch, .. } => Some(epoch),
+            Self::Unknown | Self::Lost => None,
+        }
+    }
+}
+
 struct GateState {
     ownership: GatewayOwnership,
     last_epoch: u64,
+    execution_generation: Option<i64>,
     /// Set by `close`; a re-acquisition by the closed lease task cannot reopen admission.
     closed: bool,
 }
@@ -35,6 +49,7 @@ impl Default for OwnershipGate {
         let state = Mutex::new(GateState {
             ownership,
             last_epoch: 0,
+            execution_generation: None,
             closed: false,
         });
         Self {
@@ -45,6 +60,12 @@ impl Default for OwnershipGate {
 }
 
 impl OwnershipGate {
+    fn for_execution(generation: i64) -> Self {
+        let gate = Self::default();
+        gate.locked().execution_generation = Some(generation);
+        gate.acquired();
+        gate
+    }
     fn locked(&self) -> MutexGuard<'_, GateState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -97,7 +118,11 @@ impl OwnershipGate {
     fn own(&self, state: &mut GateState) -> u64 {
         state.last_epoch += 1;
         let epoch = state.last_epoch;
-        self.set(state, GatewayOwnership::Owned { epoch });
+        let ownership = match state.execution_generation {
+            Some(generation) => GatewayOwnership::ExecutionOwned { epoch, generation },
+            None => GatewayOwnership::Owned { epoch },
+        };
+        self.set(state, ownership);
         epoch
     }
 
@@ -125,10 +150,7 @@ impl OwnershipGate {
     /// HTTP client without awaiting, so a transition never waits on a response.
     pub fn admit<T>(&self, hand_off: impl FnOnce(u64) -> T) -> Option<T> {
         let state = self.locked();
-        match state.ownership {
-            GatewayOwnership::Owned { epoch } => Some(hand_off(epoch)),
-            GatewayOwnership::Unknown | GatewayOwnership::Lost => None,
-        }
+        state.ownership.epoch().map(hand_off)
     }
 
     /// Rejects contention instead of waiting while the caller holds another admission fence.
@@ -139,10 +161,7 @@ impl OwnershipGate {
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return None,
         };
-        match state.ownership {
-            GatewayOwnership::Owned { epoch } => Some(hand_off(epoch)),
-            GatewayOwnership::Unknown | GatewayOwnership::Lost => None,
-        }
+        state.ownership.epoch().map(hand_off)
     }
 }
 

@@ -7,6 +7,7 @@ use poise::serenity_prelude::ChannelId;
 use sqlx::PgPool;
 
 pub(super) struct Issue {
+    runtime: String,
     provider: String,
     channel: u64,
     reason: &'static str,
@@ -15,6 +16,7 @@ pub(super) struct Issue {
 pub(crate) async fn inspect_at_boot(
     registry: &HealthRegistry,
     provider: &ProviderKind,
+    runtime: &str,
     pool: Option<&PgPool>,
     restored: &[(ChannelId, String)],
 ) {
@@ -35,13 +37,14 @@ pub(crate) async fn inspect_at_boot(
         };
         tracing::warn!(provider=provider.as_str(), channel=channel.get(), %legacy_instance, reason, "legacy channel home override has no confirmed shared preference");
         issues.push(Issue {
+            runtime: runtime.into(),
             provider: provider.as_str().into(),
             channel: channel.get(),
             reason,
         });
     }
     let mut published = registry.channel_home_seed_issues.lock().await;
-    published.retain(|issue| issue.provider != provider.as_str());
+    published.retain(|issue| issue.runtime != runtime || issue.provider != provider.as_str());
     published.extend(issues);
 }
 
@@ -69,23 +72,63 @@ mod tests {
         let registry = HealthRegistry::new();
         let restored = [(ChannelId::new(7336920), "old-local-choice".to_string())];
         let id = OwnerIdentity::new("claude", "7336920");
-        inspect_at_boot(&registry, &ProviderKind::Claude, Some(&pool), &restored).await;
-        assert_eq!(health_reasons(&registry).await, ["channel_home_seed_missing:claude:7336920"]);
+        inspect_at_boot(
+            &registry,
+            &ProviderKind::Claude,
+            "fixture",
+            Some(&pool),
+            &restored,
+        )
+        .await;
+        assert_eq!(
+            health_reasons(&registry).await,
+            ["channel_home_seed_missing:claude:7336920"]
+        );
         assert!(homes::read(&pool, &id).await.unwrap().is_none());
         let health = super::super::build_health_snapshot(&registry).await;
         let json = serde_json::to_value(health).unwrap();
-        assert!(json["degraded_reasons"].as_array().unwrap().iter().any(|reason| reason == "channel_home_seed_missing:claude:7336920"));
-        homes::write(&pool, &id, 0, Uuid::new_v4(), Some("shared-choice")).await.unwrap();
-        inspect_at_boot(&registry, &ProviderKind::Claude, Some(&pool), &restored).await;
+        assert!(
+            json["degraded_reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "channel_home_seed_missing:claude:7336920")
+        );
+        homes::write(&pool, &id, 0, Uuid::new_v4(), Some("shared-choice"))
+            .await
+            .unwrap();
+        inspect_at_boot(
+            &registry,
+            &ProviderKind::Claude,
+            "fixture",
+            Some(&pool),
+            &restored,
+        )
+        .await;
         assert!(health_reasons(&registry).await.is_empty());
         let reset_op = Uuid::new_v4();
         homes::write(&pool, &id, 1, reset_op, None).await.unwrap();
         for _ in 0..2 {
             let restarted = HealthRegistry::new();
-            inspect_at_boot(&restarted, &ProviderKind::Claude, Some(&pool), &restored).await;
+            inspect_at_boot(
+                &restarted,
+                &ProviderKind::Claude,
+                "fixture",
+                Some(&pool),
+                &restored,
+            )
+            .await;
             assert!(health_reasons(&restarted).await.is_empty());
             let row = homes::read(&pool, &id).await.unwrap().unwrap();
-            assert_eq!((row.mode.as_str(), row.home_instance_id, row.revision, row.operation_id), ("inherit", None, 2, reset_op));
+            assert_eq!(
+                (
+                    row.mode.as_str(),
+                    row.home_instance_id,
+                    row.revision,
+                    row.operation_id
+                ),
+                ("inherit", None, 2, reset_op)
+            );
         }
         pool.close().await;
     }
@@ -97,9 +140,42 @@ mod tests {
         pool.close().await;
         let registry = HealthRegistry::new();
         let restored = [(ChannelId::new(7336921), "local".into())];
-        inspect_at_boot(&registry, &ProviderKind::Codex, Some(&pool), &restored).await;
-        assert_eq!(health_reasons(&registry).await, ["channel_home_seed_check_failed:codex:7336921"]);
-        inspect_at_boot(&registry, &ProviderKind::Codex, None, &restored).await;
+        inspect_at_boot(
+            &registry,
+            &ProviderKind::Codex,
+            "fixture",
+            Some(&pool),
+            &restored,
+        )
+        .await;
+        assert_eq!(
+            health_reasons(&registry).await,
+            ["channel_home_seed_check_failed:codex:7336921"]
+        );
+        inspect_at_boot(&registry, &ProviderKind::Codex, "fixture", None, &restored).await;
         assert_eq!(health_reasons(&registry).await.len(), 1);
+    }
+    #[tokio::test]
+    async fn owner_home_seed_checks_do_not_erase_another_runtime_of_the_provider_pg() {
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let registry = HealthRegistry::new();
+        let restored = [(ChannelId::new(7336922), "legacy".into())];
+        inspect_at_boot(
+            &registry,
+            &ProviderKind::Claude,
+            "bot-a",
+            Some(&pool),
+            &restored,
+        )
+        .await;
+        inspect_at_boot(&registry, &ProviderKind::Claude, "bot-b", Some(&pool), &[]).await;
+        assert_eq!(
+            health_reasons(&registry).await,
+            ["channel_home_seed_missing:claude:7336922"]
+        );
+        inspect_at_boot(&registry, &ProviderKind::Claude, "bot-a", Some(&pool), &[]).await;
+        assert!(health_reasons(&registry).await.is_empty());
+        pool.close().await;
     }
 }
