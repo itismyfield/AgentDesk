@@ -190,3 +190,15 @@ fn model_command_input_rejects_self_reported_completion_and_stop_event_cas() {
     event_cas["expected_event_sequence"] = json!(8);
     assert!(serde_json::from_value::<Command>(event_cas).is_err());
 }
+
+#[test]
+fn model_fence_ack_requires_run_identity_even_when_gate_and_version_are_known() {
+    let mut ack = json!({
+        "command": "acknowledge_fence",
+        "target": { "host": "remote", "gate": "launch", "incarnation": "gate-1" },
+        "control_version": 5
+    });
+    assert!(serde_json::from_value::<Command>(ack.clone()).is_err());
+    ack["expected_run"] = json!("run-1");
+    assert!(serde_json::from_value::<Command>(ack).is_ok());
+}
