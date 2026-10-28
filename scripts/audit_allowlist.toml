@@ -32,9 +32,9 @@ route_srp_violations = [
 direct_discord_sends = [
   "src/services/discord/commands/model_picker.rs#direct_discord_sends:9cf1f42bcb8abe4f",
   "src/services/discord/discord_io.rs#direct_discord_sends:2f398342de1e7cd7",
-  "src/services/discord/gateway.rs#direct_discord_sends:b61365ed28b915b2",
-  "src/services/discord/gateway.rs#direct_discord_sends:60a609bdefcf51c2",
-  "src/services/discord/gateway.rs#direct_discord_sends:a78022596f453395",
+  "src/services/discord/gateway.rs#direct_discord_sends:beb04b1b07265574",
+  "src/services/discord/gateway.rs#direct_discord_sends:5388428701eaa1d3",
+  "src/services/discord/gateway.rs#direct_discord_sends:df4846dc14588f3a",
   "src/services/discord/meeting_orchestrator/selection_runtime.rs#direct_discord_sends:64c7fa00eace25a9",
   "src/services/discord/meeting_orchestrator/selection_runtime.rs#direct_discord_sends:5e0310b8b9e373ff",
   "src/services/discord/monitoring_status.rs#direct_discord_sends:6911fe26869c481d",

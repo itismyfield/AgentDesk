@@ -22,7 +22,7 @@ ENTRIES = {}
 # "*" pins a whole file.
 PROTECTED = {
     'src/cli/dcserver.rs': {'handle_dcserver': '903876d162c8f181cf0eb613702698f701c7863d99d690878ef91b8cfdeed1b8'},
-    'src/services/discord/runtime_bootstrap.rs': {'run_bot': 'a062e9f6fd514d1030aed2771d8c33ad917cb59c4f70477183615b371ae61024'},
+    'src/services/discord/runtime_bootstrap.rs': {'run_bot': 'c6eca2beb70897ee7dd2640e2f93755ac4bd672aa83d9f9a686cea4609220091'},
     'src/services/discord/inflight/removal/boot_reaper.rs': {
         'run_once': '6364c6e13da83bbf08092a6460de03dda10281c0af81b5f1293ab51b3ace9858',
         'prepare_before_reap': '9de0e7d478987fc0464a1753bee32171dc54a76cbebd4f8db4a7df6b47068f3e',
@@ -31,7 +31,7 @@ PROTECTED = {
         'reap_inflight_rows_after_preparation': 'f3fee466ddc3d3925b5bfee8805a6678875db72874f30c51a9a74fee38d693bd'},
     'src/services/discord/tui_direct_pending_start/turn_retirement.rs': {'confirm_at_boot': '835b358746ebb4b1dd99bf662b73923f4904b73ce0b973b9aea84fa1d128ad07'},
     'src/services/discord/runtime_bootstrap/o_writer_host.rs': {'adopted': '0fe2f48e1465b84da5a3b7155df25e012efc1510762c78a4c61ae55ea48f2a23'},
-    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': '4730b977981e4e43ee409a37bb322d9820897c60f311e3134977bd2d3b1282cc'}}
+    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': '1e669ee286c18ddb74970ad8ce6ba753202c9f5d317127e1dc15bb58173a18c2'}}
 SYMBOL = re.compile(r"\b(?:Boot(?:Cohort|Slot|Publication|WorkOnce|Roster|Bot|Selection|Result|RetirementHealth)|boot_retirement|boot_status|install_process|wait_released|publish_with)\b")
 # The deleted RETIRED gate (#6325 23C): any production return of its owner or readers fails.
 RETIRED_GATE = re.compile(r"\b(?:legacy_supervision|legacy_retired|retired_in|RetiredForTest)\b")
