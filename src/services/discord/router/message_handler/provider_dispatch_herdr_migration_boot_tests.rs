@@ -278,6 +278,42 @@ fn assert_no_init(root: &Path, opened: bool) {
     }
 }
 
+fn assert_no_migration(root: &Path) {
+    let path = root.join("claude_migration");
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Ok(metadata) => panic!(
+            "migration state must stay absent: {} ({:?})",
+            path.display(),
+            metadata.file_type()
+        ),
+        Err(error) => panic!(
+            "cannot prove migration state absent: {}: {error}",
+            path.display()
+        ),
+    }
+}
+
+#[test]
+fn migration_absence_requires_symlink_metadata_not_found() {
+    let root = tempfile::tempdir().unwrap();
+    assert_no_migration(root.path());
+    let migration = root.path().join("claude_migration");
+    std::fs::create_dir(&migration).unwrap();
+    assert!(std::panic::catch_unwind(|| assert_no_migration(root.path())).is_err());
+    std::fs::remove_dir(&migration).unwrap();
+    std::fs::write(&migration, "not a directory").unwrap();
+    assert!(std::panic::catch_unwind(|| assert_no_migration(root.path())).is_err());
+    std::fs::remove_file(&migration).unwrap();
+    std::os::unix::fs::symlink(root.path().join("missing-target"), &migration).unwrap();
+    assert!(std::panic::catch_unwind(|| assert_no_migration(root.path())).is_err());
+    std::fs::remove_file(&migration).unwrap();
+    let not_directory = root.path().join("not-directory");
+    std::fs::write(&not_directory, "not a directory").unwrap();
+    assert!(std::panic::catch_unwind(|| assert_no_migration(&not_directory)).is_err());
+    assert_no_migration(root.path());
+}
+
 fn old_source(fx: &Fixture) -> (String, PathBuf, Vec<u8>) {
     let session = uuid();
     let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
@@ -354,19 +390,33 @@ fn old_source(fx: &Fixture) -> (String, PathBuf, Vec<u8>) {
     (session, path, bytes)
 }
 
-fn file_tree(path: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
-    fn read(root: &Path, path: &Path, result: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+#[derive(Debug, PartialEq, Eq)]
+enum FileTreeEntry {
+    Directory,
+    File(Vec<u8>),
+}
+
+fn file_tree(path: &Path) -> std::collections::BTreeMap<PathBuf, FileTreeEntry> {
+    fn read(
+        root: &Path,
+        path: &Path,
+        result: &mut std::collections::BTreeMap<PathBuf, FileTreeEntry>,
+    ) {
         if !path.exists() {
             return;
         }
         for entry in std::fs::read_dir(path).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
+                result.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    FileTreeEntry::Directory,
+                );
                 read(root, &path, result);
             } else {
                 result.insert(
                     path.strip_prefix(root).unwrap().to_path_buf(),
-                    std::fs::read(path).unwrap(),
+                    FileTreeEntry::File(std::fs::read(path).unwrap()),
                 );
             }
         }
@@ -374,6 +424,20 @@ fn file_tree(path: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
     let mut result = std::collections::BTreeMap::new();
     read(path, path, &mut result);
     result
+}
+
+#[test]
+fn file_tree_observes_empty_migration_directories() {
+    let root = tempfile::tempdir().unwrap();
+    let before = file_tree(root.path());
+    std::fs::create_dir_all(root.path().join("claude_migration/unused")).unwrap();
+    let after = file_tree(root.path());
+    assert_ne!(
+        after, before,
+        "an empty migration directory is a filesystem effect"
+    );
+    assert!(after.contains_key(Path::new("claude_migration")));
+    assert!(after.contains_key(Path::new("claude_migration/unused")));
 }
 
 fn actual_dispatch(
@@ -473,6 +537,7 @@ fn r13_boot_first_init_and_actual_dispatch_keep_main_effects_pg() {
         before_intake["attachment_refs"].as_array().unwrap().len(),
         1
     );
+    assert_no_migration(&root);
     assert!(
         channel_policy::boot().is_none(),
         "no forced or earlier BOOT snapshot"
@@ -487,6 +552,7 @@ fn r13_boot_first_init_and_actual_dispatch_keep_main_effects_pg() {
             Some(&fx.pool),
         ))
         .unwrap();
+    assert_no_migration(&root);
     assert!(crate::config::session_hosts::herdr_endpoint(CHANNEL).is_some());
     let boot = channel_policy::boot().unwrap();
     assert!(boot.selected().contains(&CHANNEL));
@@ -554,6 +620,7 @@ fn r13_boot_first_init_and_actual_dispatch_keep_main_effects_pg() {
         .recv_timeout(LIMIT)
         .expect("Recovered::Fresh reached first activation admission");
     eprintln!("R13_FIRST_INIT_REACHED");
+    assert_no_migration(&root);
     assert_no_init(&root, true);
     assert_eq!(intake(&fx), before_intake);
     release.send(()).unwrap();
@@ -566,6 +633,7 @@ fn r13_boot_first_init_and_actual_dispatch_keep_main_effects_pg() {
         .await
         .expect("main's first activation refuses the still-pending original input");
     });
+    assert_no_migration(&root);
     assert_no_init(&root, true);
     assert_eq!(boot.candidate(CHANNEL).unwrap().peek(), Adoption::Released);
     assert!(!readiness.is_ready(CHANNEL));
@@ -587,6 +655,7 @@ fn r13_boot_first_init_and_actual_dispatch_keep_main_effects_pg() {
         actual_dispatch(&fx, &launcher, &old, &capture, false),
         Ok(())
     );
+    assert_no_migration(&root);
     // These are main's fresh effects, not a migration handoff: one new UUID and one normal prompt.
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     assert_eq!(fx.rig.sends(), prompt_sends());
@@ -641,6 +710,22 @@ fn r13_boot_first_init_and_actual_dispatch_keep_main_effects_pg() {
             extension,
         ));
         allowed.insert(marker.strip_prefix(&root).unwrap().to_path_buf());
+    }
+    for file in allowed.clone() {
+        for directory in file
+            .ancestors()
+            .skip(1)
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            if !before_dispatch.contains_key(directory) {
+                assert_eq!(
+                    after_dispatch.get(directory),
+                    Some(&FileTreeEntry::Directory),
+                    "a fresh file's new parent is an observed directory"
+                );
+                allowed.insert(directory.to_path_buf());
+            }
+        }
     }
     let changed: std::collections::BTreeSet<_> = before_dispatch
         .keys()
