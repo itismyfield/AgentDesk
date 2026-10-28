@@ -240,6 +240,51 @@ fn claude(root: &Path, rows: &[serde_json::Value]) -> (Probe, std::path::PathBuf
     (probe, path)
 }
 
+fn compact_fixture() -> Vec<serde_json::Value> {
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/claude_idle_compact_summary.jsonl"
+    ))
+    .lines()
+    .map(|line| serde_json::from_str(line).unwrap())
+    .collect()
+}
+
+#[test]
+fn compact_summary_idle_tail_preserves_closed_activity() {
+    let root = tempfile::tempdir().unwrap();
+    let rows = compact_fixture();
+    let (probe, path) = claude(root.path(), &rows[..3]);
+    assert_eq!(probe.settle(), (Activity::Idle, "closed"));
+    write(&path, &rows[3..]);
+    assert_eq!(probe.settle(), (Activity::Idle, "closed"));
+    probe.age(STALE_OPEN_AFTER + Duration::from_secs(1));
+    assert_eq!(probe.settle(), (Activity::Idle, "closed"));
+    write(&path, &[prompt("real-input-after-compaction")]);
+    assert_eq!(probe.settle(), (Activity::Busy, "open"));
+    write(&path, &[end()]);
+    assert_eq!(probe.settle(), (Activity::Idle, "closed"));
+}
+
+#[test]
+fn compact_summary_idle_tail_is_closed_after_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let (probe, _) = claude(root.path(), &compact_fixture());
+    assert_eq!(probe.settle(), (Activity::Idle, "closed"));
+}
+
+#[test]
+fn compact_summary_inside_open_turn_keeps_the_original_close() {
+    let root = tempfile::tempdir().unwrap();
+    let rows = compact_fixture();
+    let (probe, path) = claude(root.path(), &rows[..1]);
+    assert_eq!(probe.settle(), (Activity::Busy, "open"));
+    write(&path, &rows[3..]);
+    assert_eq!(probe.settle(), (Activity::Busy, "open"));
+    write(&path, &rows[1..3]);
+    assert_eq!(probe.settle(), (Activity::Idle, "closed"));
+}
+
 fn codex_probe(root: &Path, rows: &[serde_json::Value]) -> (Probe, std::path::PathBuf) {
     let path = root.join("rollout.jsonl");
     write(&path, &[codex_header(root)]);

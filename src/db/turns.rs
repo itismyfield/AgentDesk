@@ -9,6 +9,10 @@ use crate::db::timestamps::parse_timestamp;
 #[path = "turns/timestamp_tests.rs"]
 mod timestamp_tests;
 
+#[cfg(all(test, unix))]
+#[path = "turns/receipt_tests.rs"]
+mod receipt_tests;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnTokenUsage {
     pub input_tokens: u64,
@@ -208,6 +212,118 @@ async fn upsert_turn_owned_pg(pool: &PgPool, entry: &PersistTurnOwned) -> Result
     .map_err(|e| anyhow!("persist postgres turn failed: {e}"))?;
 
     Ok(())
+}
+
+/// How an execution actually ended; a hand-off or retry that keeps the execution is not one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalOutcome {
+    Completed,
+    Cancelled,
+    Failed,
+    Empty,
+}
+
+impl TerminalOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+            Self::Empty => "empty",
+        }
+    }
+}
+
+/// The receipt an execution leaves on its `turns` row, independent of any answer text.
+pub struct TurnReceipt<'a> {
+    pub turn_id: &'a str,
+    pub channel_id: &'a str,
+    pub agent_id: Option<&'a str>,
+    pub provider: &'a str,
+    pub session_key: Option<&'a str>,
+    pub started_at: Option<&'a str>,
+    pub consumed_origin_ids: &'a [String],
+    pub outcome: TerminalOutcome,
+    pub confirmed_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Commits the receipt before returning. The first terminal wins and origins accumulate, so a
+/// repeated or concurrent write for the same execution changes nothing it already recorded.
+pub async fn record_turn_receipt(pool: &PgPool, receipt: &TurnReceipt<'_>) -> Result<()> {
+    let turn_id = receipt.turn_id.trim();
+    let channel_id = receipt.channel_id.trim();
+    if turn_id.is_empty() || channel_id.is_empty() {
+        return Err(anyhow!("turn receipt needs a turn_id and a channel_id"));
+    }
+    // A row needs a start instant; an unreadable one falls back to the terminal instant.
+    let started_at = normalized_opt(receipt.started_at)
+        .and_then(|value| parse_timestamp(&value).ok())
+        .unwrap_or(receipt.confirmed_at);
+    sqlx::query(
+        "INSERT INTO turns (
+            turn_id, session_key, channel_id, agent_id, provider, started_at, finished_at,
+            consumed_origin_ids, terminal_outcome, terminal_confirmed_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $7)
+         ON CONFLICT(turn_id) DO UPDATE SET
+            consumed_origin_ids = ARRAY(
+                SELECT DISTINCT origin
+                FROM unnest(turns.consumed_origin_ids || EXCLUDED.consumed_origin_ids) AS origin
+                ORDER BY origin
+            ),
+            terminal_outcome = COALESCE(turns.terminal_outcome, EXCLUDED.terminal_outcome),
+            terminal_confirmed_at =
+                COALESCE(turns.terminal_confirmed_at, EXCLUDED.terminal_confirmed_at)",
+    )
+    .bind(turn_id)
+    .bind(normalized_opt(receipt.session_key))
+    .bind(channel_id)
+    .bind(normalized_opt(receipt.agent_id))
+    .bind(receipt.provider)
+    .bind(started_at)
+    .bind(receipt.confirmed_at)
+    .bind(receipt.consumed_origin_ids)
+    .bind(receipt.outcome.as_str())
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow!("persist turn receipt failed: {e}"))?;
+    Ok(())
+}
+
+/// A committed terminal receipt naming one origin.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct OriginReceipt {
+    pub turn_id: String,
+    pub channel_id: String,
+    pub terminal_outcome: String,
+    pub terminal_confirmed_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The terminal receipt of the execution that consumed `origin_id` for this agent, whether the
+/// row is still in `turns` or retention already moved it to `turns_archive`.
+pub async fn find_origin_receipt(
+    pool: &PgPool,
+    origin_id: &str,
+    agent_id: &str,
+    channel_ids: &[String],
+) -> Result<Option<OriginReceipt>> {
+    sqlx::query_as(
+        "SELECT turn_id, channel_id, terminal_outcome, terminal_confirmed_at FROM (
+            SELECT turn_id, channel_id, agent_id, terminal_outcome, terminal_confirmed_at, 0 AS tier
+            FROM turns WHERE consumed_origin_ids @> ARRAY[$1]::TEXT[]
+            UNION ALL
+            SELECT turn_id, channel_id, agent_id, terminal_outcome, terminal_confirmed_at, 1 AS tier
+            FROM turns_archive WHERE consumed_origin_ids @> ARRAY[$1]::TEXT[]
+         ) found
+         WHERE terminal_outcome IS NOT NULL AND (agent_id = $2 OR channel_id = ANY($3))
+         ORDER BY terminal_confirmed_at, tier
+         LIMIT 1",
+    )
+    .bind(origin_id)
+    .bind(agent_id)
+    .bind(channel_ids)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| anyhow!("read turn receipt failed: {e}"))
 }
 
 fn normalized_opt(value: Option<&str>) -> Option<String> {

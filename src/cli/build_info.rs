@@ -13,6 +13,10 @@ pub(crate) fn build_info_json() -> serde_json::Value {
         // CONSUMED-BY: scripts/deploy-release.sh (`_binary_build_flag … o_ledger_operator_resume`).
         "o_ledger_operator_resume":
             crate::services::tui_o::store::ledger::OPERATOR_RESUME_SUPPORTED,
+        // CONSUMED-BY: scripts/deploy-release.sh (`_rollback_would_revert_o_spool`).
+        "o_spool_write_version": crate::services::tui_o::shadow::IDENTITY_VERSION,
+        "o_spool_readable_versions":
+            crate::services::tui_o::store::spool::READABLE_IDENTITY_VERSIONS,
     })
 }
 
@@ -35,6 +39,14 @@ mod tests {
     fn build_info_reports_the_compiled_switches() {
         let info = build_info_json();
         assert_eq!(info["schema"], 1);
+        assert_eq!(
+            info["o_spool_write_version"],
+            crate::services::tui_o::shadow::IDENTITY_VERSION
+        );
+        assert_eq!(
+            info["o_spool_readable_versions"],
+            serde_json::json!(crate::services::tui_o::store::spool::READABLE_IDENTITY_VERSIONS)
+        );
         assert_eq!(
             info["o_tui_writer"],
             crate::services::tui_o::topology::o_tui_writer_build_switch()
