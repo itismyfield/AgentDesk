@@ -39,6 +39,8 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryCont
     #[cfg(unix)]
     pub(in crate::services::discord::turn_bridge) bridge_tui_gate_outcome_early:
         Option<super::super::super::tmux::TuiCompletionGateOutcome>,
+    /// The transcript's final non-System event is an `Error`.
+    pub(in crate::services::discord::turn_bridge) transcript_terminal_error: bool,
 }
 
 pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryState {
@@ -305,4 +307,5 @@ pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) bridge_relay_delegated_to_watcher: bool,
     pub(super) watcher_delivery_pin: Option<&'a WatcherClaimIncarnation>,
     pub(super) inflight_generation: u64,
+    pub(super) transcript_terminal_error: bool,
 }

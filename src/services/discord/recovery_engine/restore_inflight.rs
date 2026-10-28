@@ -62,6 +62,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
     provider: &ProviderKind,
 ) {
     let states = inflight::load_inflight_states(provider);
+    crate::services::discord::scheduled_turn::settle_loaded(shared.pg_pool.as_ref(), &states).await;
     observe_restore_inflight_snapshot(
         provider,
         &states,
@@ -360,6 +361,13 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     );
                     continue;
                 }
+                // Settle before the visible completion, which may already drop the row.
+                super::analytics_transcript::settle_recovered_answer(
+                    shared.pg_pool.as_ref(),
+                    &state,
+                    &assistant_response,
+                )
+                .await;
                 // Mark the user message completed only after terminal delivery
                 // commits (else the channel shows completion without the final
                 // message). A message-less turn (user_msg_id == 0) has no analytics
@@ -702,12 +710,17 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     continue;
                 }
                 {
+                    let seed = crate::services::discord::scheduled_turn::channel_session_seed(
+                        shared.pg_pool.as_ref(),
+                        &state,
+                    )
+                    .await;
                     let mut data = shared.core.lock().await;
                     let session =
                         data.sessions
                             .entry(channel_id)
                             .or_insert_with(|| DiscordSession {
-                                session_id: state.session_id.clone(),
+                                session_id: seed,
                                 memento_context_loaded: false,
                                 memento_reflected: false,
                                 current_path: None,
@@ -1019,6 +1032,13 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 );
                 continue;
             }
+            // Settle before the visible completion, which may already drop the row.
+            super::analytics_transcript::settle_recovered_answer(
+                shared.pg_pool.as_ref(),
+                &state,
+                &assistant_response,
+            )
+            .await;
             let visible_outcome = complete_recovery_visible_turn(
                 http,
                 shared,
@@ -1277,6 +1297,13 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 );
                 continue;
             }
+            // Settle before the visible completion, which may already drop the row.
+            super::analytics_transcript::settle_recovered_answer(
+                shared.pg_pool.as_ref(),
+                &state,
+                &assistant_response,
+            )
+            .await;
             // Mark user message as completed only after Discord terminal delivery commits.
             let visible_outcome = complete_recovery_visible_turn(
                 http,
@@ -1847,12 +1874,17 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                         continue;
                     }
                 };
+                let seed = crate::services::discord::scheduled_turn::channel_session_seed(
+                    shared.pg_pool.as_ref(),
+                    &state,
+                )
+                .await;
                 let mut data = shared.core.lock().await;
                 let session = data
                     .sessions
                     .entry(channel_id)
                     .or_insert_with(|| DiscordSession {
-                        session_id: state.session_id.clone(),
+                        session_id: seed,
                         memento_context_loaded: false,
                         memento_reflected: false,
                         current_path: None,
@@ -2119,12 +2151,17 @@ pub(in crate::services::discord) async fn restore_inflight_states(
         );
 
         {
+            let seed = crate::services::discord::scheduled_turn::channel_session_seed(
+                shared.pg_pool.as_ref(),
+                &state,
+            )
+            .await;
             let mut data = shared.core.lock().await;
             let session = data
                 .sessions
                 .entry(channel_id)
                 .or_insert_with(|| DiscordSession {
-                    session_id: state.session_id.clone(),
+                    session_id: seed,
                     memento_context_loaded: false,
                     memento_reflected: false,
                     current_path: None,
@@ -2743,6 +2780,10 @@ mod kickoff_identity_tests;
 #[cfg(test)]
 #[path = "restore_inflight/ready_without_output_tests.rs"]
 mod ready_without_output_tests;
+
 #[cfg(all(test, unix))]
 #[path = "restore_inflight/replay_hold_tests.rs"]
 mod replay_hold_tests;
+#[cfg(test)]
+#[path = "restore_inflight/scheduled_body_restore_tests.rs"]
+mod scheduled_body_restore_tests;
