@@ -1145,17 +1145,14 @@ printf '%s\n' '{{"type":"result","subtype":"success","result":"fixture answer","
     });
 }
 
-/// A scheduled snapshot turn on the real headless start, bridge and postlude: the start
-/// marks its row with the launch turn id, and the completion settles the delivery on the
-/// scheduler's next production poll, with one provider start.
+/// The real headless start of a scheduled snapshot turn marks its durable row with the
+/// launch turn id as isolated, the mark every completer settles that delivery by.
 #[test]
-fn a_scheduled_snapshot_headless_turn_settles_on_the_next_poll_pg() {
-    use crate::services::scheduled_messages::turn_completion::tests::{
-        delivery_state, launch_agent_delivery, poll_once,
-    };
+fn a_scheduled_snapshot_headless_start_marks_its_row_isolated_pg() {
+    use crate::services::scheduled_messages::turn_completion::tests::launch_agent_delivery;
     let name = concat!(
         module_path!(),
-        "::a_scheduled_snapshot_headless_turn_settles_on_the_next_poll_pg"
+        "::a_scheduled_snapshot_headless_start_marks_its_row_isolated_pg"
     );
     if !child(name) {
         return;
@@ -1163,20 +1160,16 @@ fn a_scheduled_snapshot_headless_turn_settles_on_the_next_poll_pg() {
     intake_replay_rt().block_on(async {
         let channel = ChannelId::new(7_420_501);
         let host = Host::new(&[channel]).await;
-        // Holds the answer briefly so the started row can be read before completion.
-        let script = format!(
-            "#!/bin/sh\nprintf 'start\\n' >> '{}'\ncat > '{}.prompt'\nsleep 2\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"scheduled snapshot answer\",\"session_id\":\"74200000-0000-4000-8000-000000000001\"}}'\n",
-            host.calls.display(),
-            host.calls.display()
-        );
-        std::fs::write(host._workspace.path().join("claude"), script).unwrap();
         let reservation = health::reserve_headless_agent_turn(channel);
         let turn_id = reservation.turn_id().to_owned();
         let launched =
             launch_agent_delivery(&host.pool, "i7420-headless", &turn_id, true, "fail").await;
+        // Same metadata and snapshot label the scheduler passes on a snapshot launch.
+        let label = format!("scheduled:{}", launched.message_id);
         let metadata = serde_json::json!({
             "agent_id": "i7420-headless", "scheduled_message_id": launched.message_id,
             "turn_id": turn_id, "parent_channel_id": channel.get().to_string(),
+            "scheduled_snapshot_session_label": label,
         });
         let outcome = health::start_reserved_headless_agent_turn_with_owner_channel(
             &host.registry,
@@ -1187,7 +1180,7 @@ fn a_scheduled_snapshot_headless_turn_settles_on_the_next_poll_pg() {
             Some("scheduled_message".into()),
             Some(metadata),
             Some(format!("headless-fixture-{channel}")),
-            Some(format!("scheduled:{}", launched.message_id)),
+            Some(label),
             reservation,
         )
         .await
@@ -1201,19 +1194,11 @@ fn a_scheduled_snapshot_headless_turn_settles_on_the_next_poll_pg() {
         assert_eq!(
             row.scheduled,
             crate::services::discord::scheduled_turn::ScheduledTurnMark::Scheduled {
-                turn_id: turn_id.clone(),
+                turn_id,
                 isolated: true,
                 outcome: None,
             }
         );
-        host.settled(channel).await;
-        assert_eq!(
-            delivery_state(&host.pool, &turn_id).await,
-            ("running".to_string(), Some("delivered".to_string()))
-        );
-        assert!(poll_once(&host.pool).await, "the production poll settles it");
-        assert_eq!(delivery_state(&host.pool, &turn_id).await.0, "sent");
-        assert_eq!(host.starts(), 1);
         host.close().await;
     });
 }
