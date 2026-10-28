@@ -711,6 +711,12 @@ fn r13_boot_first_init_and_actual_dispatch_keep_main_effects_pg() {
         ));
         allowed.insert(marker.strip_prefix(&root).unwrap().to_path_buf());
     }
+    // A normal prompt clears its hold file but keeps the parent directory.
+    let holds = PathBuf::from("runtime/herdr_input_holds");
+    if !before_dispatch.contains_key(&holds) {
+        assert_eq!(after_dispatch.get(&holds), Some(&FileTreeEntry::Directory));
+        allowed.insert(holds);
+    }
     for file in allowed.clone() {
         for directory in file
             .ancestors()
