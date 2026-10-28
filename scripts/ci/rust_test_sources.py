@@ -509,7 +509,8 @@ def main(argv=None):
             print(f"ERROR {exc}", file=sys.stderr)
             return 1
         lost = {"removed": {p: sorted(base[p][0] - head[p][0]) for p in PLATFORMS},
-                "runnable_to_ignored": {p: sorted((base[p][0] - base[p][1]) & head[p][1]) for p in PLATFORMS}}
+                "runnable_to_ignored": {p: sorted((base[p][0] - base[p][1]) & head[p][1]) for p in PLATFORMS},
+                "present_tests": {p: sorted(base[p][0] | head[p][0]) for p in PLATFORMS}}
         Path(args.json_out).write_text(json.dumps(lost, indent=1, sort_keys=True) + "\n")
         print(" · ".join(f"{p} -{len(lost['removed'][p])} ignored+{len(lost['runnable_to_ignored'][p])}"
                          for p in PLATFORMS))
