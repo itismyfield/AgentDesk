@@ -165,6 +165,7 @@ fn stop_requested_confirmed_and_stopped_serialize_separately_with_unknown_lock()
     let acknowledged = step(
         &requested,
         Command::AcknowledgeFence {
+            expected_run: requested.run.as_ref().unwrap().id.clone(),
             target,
             control_version: 2,
         },
