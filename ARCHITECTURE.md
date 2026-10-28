@@ -751,11 +751,15 @@ src/
 │   │   ├── recovery.rs
 │   │   └── worker.rs
 │   ├── campaign_execution/
+│   │   ├── control.rs
+│   │   ├── control_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
-│   │   └── model_tests.rs
+│   │   ├── model_tests.rs
+│   │   ├── view.rs
+│   │   └── view_tests.rs
 │   ├── claude/
 │   │   ├── first_input/
 │   │   │   └── tests.rs

@@ -506,9 +506,11 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
             }
         }
         Command::AcknowledgeFence {
+            expected_run,
             target,
             control_version,
         } => {
+            self::target(state, state.definition_revision, expected_run)?;
             if state.control != CampaignControl::Stopping {
                 return Err(reject(RejectionCode::InvalidState));
             }
