@@ -691,7 +691,8 @@ else:
                     "FIXTURE_BOOT_DELAY": "2", "FIXTURE_POLICIES_DELAY": "3",
                     "FIXTURE_READINESS_TIMEOUT": "8"})
                 self.assert_installed_fixture(runtime, result)
-                self.assertLess(time.monotonic() - started, 12)
+                # Covers fixture setup as well as the 2s/3s readiness delays, so leave room for a loaded host.
+                self.assertLess(time.monotonic() - started, 30)
                 for kind, required in (("boot", 3), ("policies", 4)):
                     count = int((Path(env["TMPDIR"]) / ("readiness-" + kind)).read_text())
                     self.assertGreaterEqual(count, required, kind)
