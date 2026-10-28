@@ -108,6 +108,10 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
+/// Hang guard for [`RelayE2eHarness::spawn_turn_held_at_placeholder`]; the POST arrives in
+/// well under a second locally, but stalled CI runners have taken over 2s to reach it.
+pub(super) const PLACEHOLDER_HOLD_LIMIT: Duration = Duration::from_secs(15);
+
 /// Polls `predicate` until it holds or `timeout` expires; reports whether it held.
 pub(super) async fn wait_until(
     timeout: Duration,

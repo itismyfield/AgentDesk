@@ -27,7 +27,7 @@ async fn stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once
         .spawn_turn_held_at_placeholder(
             A_MESSAGE_ID,
             "absorbs the parked placeholder",
-            Duration::from_secs(2),
+            super::PLACEHOLDER_HOLD_LIMIT,
         )
         .await;
     harness.release_held_placeholder();
