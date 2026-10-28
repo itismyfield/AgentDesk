@@ -348,7 +348,7 @@ pub(in crate::services::discord) async fn retry(
     }
     .await;
     if let Err(error) = result {
-        msg.reply(&ctx.http, error).await?;
+        crate::services::discord::http::send_channel_message_reply(&ctx.http, msg, error).await?;
     }
     Ok(true)
 }
