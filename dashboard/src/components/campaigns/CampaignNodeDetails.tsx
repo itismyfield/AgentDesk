@@ -255,6 +255,7 @@ export default function CampaignNodeDetails({
             <p>{node.next_action || tr("아직 기록된 다음 행동이 없습니다.", "No next action recorded yet.")}</p>
           </div>
           {node.blocker && <WidgetState kind="stale" title={tr("막힌 이유", "Blocker")} description={node.blocker} compact />}
+          {node.post_merge_hold && <WidgetState kind="stale" title={tr("보류: 머지 뒤 남은 일", "On hold: post-merge work")} description={node.post_merge_hold} compact />}
           {node.evidence.length > 0 && (
             <div>
               <h4>{tr("검증 근거", "Evidence")}</h4>

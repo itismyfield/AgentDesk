@@ -186,6 +186,7 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   └── read.rs
 │   ├── campaigns/
+│   │   ├── issue_sync.rs
 │   │   └── tests.rs
 │   ├── dispatched_sessions/
 │   │   ├── hosted_execution/
@@ -389,6 +390,8 @@ src/
 │   └── transition_executor_pg.rs
 ├── github/
 │   ├── sync/
+│   │   ├── campaign_nodes.rs
+│   │   ├── campaign_nodes_tests.rs
 │   │   ├── card_state.rs
 │   │   └── warning_tests.rs
 │   ├── triage/
