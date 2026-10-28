@@ -36,7 +36,10 @@ impl CanonicalInput {
         sources.sort_unstable();
         sources.dedup();
         Self {
-            request_key: format!("discord:{}:{channel}:{user_msg_id}", provider.to_lowercase()),
+            request_key: format!(
+                "discord:{}:{channel}:{user_msg_id}",
+                provider.to_lowercase()
+            ),
             provider: provider.to_string(),
             channel: channel.to_string(),
             sources,
