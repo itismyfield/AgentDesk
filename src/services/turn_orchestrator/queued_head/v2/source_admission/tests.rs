@@ -454,6 +454,11 @@ fn legacy_seq_uuid_receipts_keep_their_verdicts_beside_tickets() {
         Custody::new(&legacy).advance(&mut owner),
         Ok(Admitted::Queued)
     );
+    let bytes = std::fs::read_to_string(fixture_path(727370)).unwrap();
+    assert!(
+        !bytes.contains("admission_binds"),
+        "an owner with no ticket binds writes the snapshot it always wrote"
+    );
     // The owner is read back from what a pre-ticket writer left on disk.
     let mut owner = Owner::adopt(fixture_path(727370), "s3b".into()).unwrap();
     let old = owner.snapshot.admission_receipts.clone();
@@ -600,8 +605,9 @@ async fn a_conflicting_ticket_is_refused_before_recovery() {
     refused().await;
 }
 
-/// The receipt names what runs: reply, attachments and a source's route or origin each make another
-/// original, while a retry that differs only in recomputed times and diagnostics is the same one.
+/// The receipt names what runs: reply, attachments, the role override and a source's route or
+/// origin each make another original, while a retry that differs only in recomputed times and
+/// diagnostics is the same one.
 #[tokio::test]
 async fn the_receipt_names_every_field_that_changes_what_runs() {
     let _root = TestRuntimeRootGuard::new();
@@ -623,16 +629,32 @@ async fn the_receipt_names_every_field_that_changes_what_runs() {
             .await,
         Ok(Admitted::Queued)
     );
+    let overridden = with(source.clone(), json!({"override_channel_id":7_272_001}));
+    assert_eq!(
+        handle
+            .v2_admit_ticket(overridden, "run-7272-o".into())
+            .await,
+        Ok(Admitted::Queued)
+    );
     let before = whole(&handle).await;
     let route = json!({"target":7272,"parent":null,"role":null});
-    for (field, variant) in [
+    let other_role = with(source.clone(), json!({"override_channel_id":7_272_002}));
+    for (field, variant, ticket) in [
+        (
+            "override set",
+            with(source.clone(), json!({"override_channel_id":7_272_001})),
+            ticket(),
+        ),
+        ("override changed", other_role, "run-7272-o".to_string()),
         (
             "reply",
             with(source.clone(), json!({"reply_context":"another reply"})),
+            ticket(),
         ),
         (
             "attachment",
             with(source.clone(), json!({"pending_uploads":["/tmp/a.png"]})),
+            ticket(),
         ),
         (
             "route",
@@ -641,6 +663,7 @@ async fn the_receipt_names_every_field_that_changes_what_runs() {
             "route":route}),
                 json!({}),
             ),
+            ticket(),
         ),
         (
             "origin",
@@ -648,13 +671,18 @@ async fn the_receipt_names_every_field_that_changes_what_runs() {
                 json!({"message_id":id,"queued_generation":5,"origin":"http"}),
                 json!({}),
             ),
+            ticket(),
         ),
     ] {
-        let refused = handle.v2_admit_ticket(variant, ticket()).await;
+        let refused = handle
+            .v2_admit_ticket(variant.clone(), ticket.clone())
+            .await;
         assert!(
             matches!(refused, Err(AdmitError::Conflict(_))),
             "{field}: {refused:?}"
         );
+        let looked = handle.v2_exact_turn(variant, ticket).await;
+        assert!(looked.is_err(), "{field}: {looked:?}");
         assert_eq!(whole(&handle).await, before, "{field}");
     }
     let retried = with(
@@ -734,4 +762,333 @@ async fn a_restart_right_after_pending_reads_the_published_ticket() {
     let (texts, receipts) = held(&restarted).await;
     assert_eq!(texts, ["routine prompt"]);
     assert_eq!(receipts.len(), 1);
+}
+
+/// The owner a restart re-adopts from disk for `channel`, on a fresh registry.
+async fn readopted(channel: ChannelId) -> (ChannelMailboxRegistry, Handle) {
+    let registry = ChannelMailboxRegistry::default();
+    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &crate::services::provider::ProviderKind::Claude,
+        "s3b",
+        None,
+    );
+    let adopted = super::super::projection::readopt(&registry, &persistence, "tickets")
+        .await
+        .unwrap();
+    assert!(adopted.contains(&Ok(channel)), "{adopted:?}");
+    let handle = registry.handle(channel);
+    (registry, handle)
+}
+
+async fn turn(handle: &Handle, input: &PendingQueueItem, ticket: &str) -> Result<TurnBind, String> {
+    handle.v2_exact_turn(input.clone(), ticket.into()).await
+}
+
+/// Delivers the armed head.
+async fn settle_head(handle: &Handle) {
+    handle
+        .v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let key = owner.active_attempt()?;
+            owner.settle(&key, true, 1)
+        })
+        .await
+        .unwrap();
+}
+
+/// Drops every untried input the way `how` names, returning the owner that serves the channel next.
+async fn drop_untried(
+    owned: (ChannelMailboxRegistry, Handle),
+    channel: ChannelId,
+    how: &str,
+) -> (ChannelMailboxRegistry, Handle) {
+    let ctx = || {
+        crate::services::turn_orchestrator::QueuePersistenceContext::new(
+            &crate::services::provider::ProviderKind::Claude,
+            "s3b",
+            None,
+        )
+    };
+    let handle = &owned.1;
+    match how {
+        #[cfg(unix)]
+        "checked purge" => {
+            use crate::services::turn_orchestrator::checked_purge::ExpectedQueue;
+            let fingerprint = handle
+                .v2_request(|slot| slot.as_ref().ok_or("no owner")?.fingerprint())
+                .await
+                .unwrap();
+            let expected = ExpectedQueue::of(&handle.snapshot().await).with_v2(fingerprint);
+            let purged = handle
+                .try_purge_queue_if_unchanged(ctx(), expected)
+                .await
+                .unwrap();
+            assert!(purged.failed.is_none(), "{:?}", purged.failed);
+            owned
+        }
+        _ => {
+            assert!(handle.clear(ctx()).await.persistence.failed.is_empty());
+            if how == "clear" {
+                return owned;
+            }
+            drop(owned);
+            readopted(channel).await
+        }
+    }
+}
+
+/// An input dropped before any attempt leaves no bind for the input that next takes its place,
+/// whether a clear, a clear across a restart, or a checked purge dropped it; repeated drops leave
+/// no queued binds behind.
+#[tokio::test]
+async fn a_dropped_input_leaves_no_bind_for_the_input_that_takes_its_place() {
+    let _root = TestRuntimeRootGuard::new();
+    let mut ways = vec!["clear", "clear then restart"];
+    #[cfg(unix)]
+    ways.push("checked purge");
+    let input = original(8_000_000_000_000_001_890, "same body");
+    for (n, way) in ways.into_iter().enumerate() {
+        let channel = ChannelId::new(727_390 + n as u64);
+        let mut owned = ticket_owner(channel.get(), "tickets").await;
+        assert_eq!(
+            owned
+                .1
+                .v2_admit_ticket(input.clone(), "run-t1".into())
+                .await,
+            Ok(Admitted::Queued)
+        );
+        owned = drop_untried(owned, channel, way).await;
+        let handle = &owned.1;
+        assert_eq!(
+            turn(handle, &input, "run-t1").await,
+            Ok(TurnBind::Unknown),
+            "{way}"
+        );
+        assert_eq!(
+            handle.v2_admit_ticket(input.clone(), "run-t2".into()).await,
+            Ok(Admitted::Queued)
+        );
+        handle.v2_arm_head_for_tests("attempt-2").await.unwrap();
+        let armed = TurnBind::Armed {
+            attempt: "attempt-2".into(),
+            source: None,
+        };
+        assert_eq!(turn(handle, &input, "run-t2").await, Ok(armed), "{way}");
+        assert_eq!(
+            turn(handle, &input, "run-t1").await,
+            Ok(TurnBind::Unknown),
+            "{way}"
+        );
+        settle_head(handle).await;
+        let settled = TurnBind::Settled {
+            attempt: "attempt-2".into(),
+            source: None,
+        };
+        assert_eq!(turn(handle, &input, "run-t2").await, Ok(settled), "{way}");
+        assert_eq!(
+            turn(handle, &input, "run-t1").await,
+            Ok(TurnBind::Unknown),
+            "{way}"
+        );
+        for round in 0..4 {
+            let handle = &owned.1;
+            let ticket = format!("run-again-{round}");
+            assert_eq!(
+                handle.v2_admit_ticket(input.clone(), ticket).await,
+                Ok(Admitted::Queued)
+            );
+            let (queued, items) = handle
+                .v2_request(|slot| {
+                    let snapshot = &slot.as_ref().ok_or("no owner")?.snapshot;
+                    let queued = (snapshot.admission_binds.iter())
+                        .filter(|b| matches!(b.at, BindAt::Queued { .. }))
+                        .count();
+                    Ok((queued, snapshot.items.len()))
+                })
+                .await
+                .unwrap();
+            assert!(
+                queued <= items,
+                "{way}: {queued} queued binds for {items} items"
+            );
+            owned = drop_untried(owned, channel, way).await;
+        }
+    }
+}
+
+/// An admission that queued only the unknown part of its original never binds that part's attempt
+/// to the whole original: the whole stays Unknown through arm and delivery.
+#[tokio::test]
+async fn a_partitioned_admission_never_binds_the_whole_original() {
+    let _root = TestRuntimeRootGuard::new();
+    let (_registry, handle) = ticket_owner(727_396, "tickets").await;
+    let (a, b) = (727_396_100_u64, 727_396_200_u64);
+    assert_eq!(
+        handle
+            .v2_admit_ticket(original(a, "known A"), "run-a".into())
+            .await,
+        Ok(Admitted::Queued)
+    );
+    handle.v2_arm_head_for_tests("attempt-a").await.unwrap();
+    settle_head(&handle).await;
+    let mut whole = original(a, "known A\nfresh B");
+    whole.source_message_ids = vec![a, b];
+    whole.source_text_segments = serde_json::from_value(json!([
+        {"message_id":a,"text":"known A"},{"message_id":b,"text":"fresh B"}]))
+    .unwrap();
+    assert_eq!(
+        handle.v2_admit_ticket(whole.clone(), "run-ab".into()).await,
+        Ok(Admitted::Queued)
+    );
+    assert_eq!(held(&handle).await.0, ["fresh B"], "only B was queued");
+    assert_eq!(turn(&handle, &whole, "run-ab").await, Ok(TurnBind::Unknown));
+    handle.v2_arm_head_for_tests("attempt-b").await.unwrap();
+    assert_eq!(
+        turn(&handle, &whole, "run-ab").await,
+        Ok(TurnBind::Unknown),
+        "B's attempt does not stand for AB"
+    );
+    settle_head(&handle).await;
+    assert_eq!(turn(&handle, &whole, "run-ab").await, Ok(TurnBind::Unknown));
+}
+
+/// One ticket's bind keeps its exact attempt and real bound source through retention, delivery and
+/// restarts, while another ticket for the same identity and body stays unarmed.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_ticket_bind_keeps_its_attempt_and_source_through_retention_and_restarts() {
+    use super::super::super::v2_types::{
+        AttemptIdentity, AttemptSource, PreparedPayload, TargetIdentity,
+    };
+    use crate::services::tui_input::human_frame::history::v2::{Registry, Source};
+    use std::os::unix::fs::MetadataExt;
+    let _root = TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(727_397);
+    let mut owned = ticket_owner(channel.get(), "tickets").await;
+    let input = original(8_000_000_000_000_001_970, "same body");
+    for ticket in ["run-ta", "run-tb"] {
+        assert_eq!(
+            owned.1.v2_admit_ticket(input.clone(), ticket.into()).await,
+            Ok(Admitted::Queued)
+        );
+    }
+    let native = crate::config::runtime_root()
+        .unwrap()
+        .join("native/transcript.jsonl");
+    std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+    std::fs::write(&native, "native\n").unwrap();
+    let meta = std::fs::metadata(&native).unwrap();
+    let file = [meta.dev(), meta.ino()];
+    let bound = owned
+        .1
+        .v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let attempt = AttemptIdentity {
+                nonce: "attempt-a".into(),
+                provider: "claude".into(),
+                target: TargetIdentity {
+                    host: "tmux".into(),
+                    owner: "ticket-pane".into(),
+                    root: "/test".into(),
+                    execution_nonce: "execution".into(),
+                },
+                source: AttemptSource::PreSource {
+                    expected_session_id: None,
+                    expected_transcript: None,
+                    binding_watermark: None,
+                },
+            };
+            let payload = PreparedPayload {
+                frame: "frame".into(),
+                digest: "digest".into(),
+                attribution: json!({}),
+            };
+            let key = owner.reserve(attempt, payload)?;
+            drop(owner.arm(&key, 0)?);
+            let history = Registry::runtime()?;
+            owner.prepare_history(&history)?;
+            let source = Source {
+                target: serde_json::to_value(&key.attempt.target).map_err(|e| e.to_string())?,
+                provider: "claude".into(),
+                session_id: "native-session".into(),
+                transcript: native,
+                file,
+                offset: 0,
+                binding_watermark: None,
+            };
+            owner.bind_source(&key, &source, &history)?;
+            serde_json::to_value(&source).map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+    let stands = |owned: &(ChannelMailboxRegistry, Handle)| {
+        let handle = owned.1.clone();
+        let input = input.clone();
+        async move {
+            let a = turn(&handle, &input, "run-ta").await.unwrap();
+            (a, turn(&handle, &input, "run-tb").await.unwrap())
+        }
+    };
+    let armed = TurnBind::Armed {
+        attempt: "attempt-a".into(),
+        source: Some(bound.clone()),
+    };
+    assert_eq!(
+        stands(&owned).await,
+        (armed.clone(), TurnBind::NotArmed),
+        "armed"
+    );
+    let moved =
+        owned
+            .1
+            .v2_request(|slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                owner.tick(40_000)?;
+                Ok(owner.snapshot.head_injection.is_none()
+                    && owner.snapshot.retained_inputs.len() == 1)
+            })
+            .await
+            .unwrap();
+    assert!(moved, "an unconfirmed head is retained");
+    assert_eq!(
+        stands(&owned).await,
+        (armed.clone(), TurnBind::NotArmed),
+        "retained"
+    );
+    drop(owned);
+    owned = readopted(channel).await;
+    assert_eq!(
+        stands(&owned).await,
+        (armed, TurnBind::NotArmed),
+        "readopted"
+    );
+    owned
+        .1
+        .v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let input = &owner.snapshot.retained_inputs[0].input;
+            let key = super::super::AttemptRef {
+                identity: input.identity.clone(),
+                attempt: input.attempt.clone().ok_or("unnamed attempt")?,
+            };
+            owner.settle(&key, true, 50_000)
+        })
+        .await
+        .unwrap();
+    let settled = TurnBind::Settled {
+        attempt: "attempt-a".into(),
+        source: Some(bound),
+    };
+    assert_eq!(
+        stands(&owned).await,
+        (settled.clone(), TurnBind::NotArmed),
+        "settled"
+    );
+    drop(owned);
+    owned = readopted(channel).await;
+    assert_eq!(
+        stands(&owned).await,
+        (settled, TurnBind::NotArmed),
+        "settled and readopted"
+    );
 }
