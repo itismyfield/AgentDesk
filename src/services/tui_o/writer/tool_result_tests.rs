@@ -152,6 +152,7 @@ async fn legacy_tool_result_retries_and_refusals_are_excluded_across_restart() {
         let mut store = harness.channel();
         store
             .append_ledger(LedgerEntry::Prepared {
+                notice_origin: None,
                 serial: 0,
                 unit_key: key("legacy"),
                 piece_index: 0,

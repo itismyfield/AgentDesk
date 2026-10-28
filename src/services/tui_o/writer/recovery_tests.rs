@@ -236,6 +236,7 @@ async fn h4_retained_prepared_payload_identity_and_posted_delivery_survive_resto
     writer
         .store()
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             local_retry: None,
             serial,
             unit_key: open.unit_key.clone(),
@@ -847,4 +848,54 @@ async fn a_codex_session_tool_list_is_skipped_and_the_answer_posts() {
     assert_eq!(harness.port.posts(), ["answer", "-# ✅ 완료"]);
     assert_eq!(harness.alarms.taken(), []);
     halt(stop, task).await;
+}
+
+#[tokio::test]
+async fn input_notice_upgrade_preserves_body_v2_through_v6_and_old_prepared_without_origin() {
+    for version in 2..=6 {
+        let (harness, ids, bindings) = fixture(1);
+        append(
+            &ids[0].path,
+            &[row("old", "already delivered"), row("new", "owed body")].concat(),
+        );
+        let (mut sources, mut writer, mut deriver, mut owed) = resume(&harness, bindings.clone());
+        sources
+            .capture(&mut writer, &mut deriver, &mut owed)
+            .unwrap();
+        let first = owed.pop_front().expect("positive old body capture");
+        assert_eq!(writer.deliver(&first).await, Step::Done);
+        assert_eq!(harness.port.posts(), ["already delivered"]);
+        let expected = owed.clone();
+        assert!(
+            expected
+                .iter()
+                .any(|item| matches!(item, Derived::Piece(_)))
+        );
+        drop((sources, writer));
+        for segment in segments(&harness) {
+            header_version(&segment, Some(version));
+        }
+        let bytes = std::fs::read(ledger_path(&harness)).unwrap();
+        assert!(!String::from_utf8(bytes).unwrap().contains("notice_origin"));
+        let (_, mut writer, _, mut replayed) = resume(&harness, bindings);
+        assert_eq!(
+            writer.store().ledger().piece(0).unwrap().notice_origin,
+            None
+        );
+        assert_eq!(
+            replayed, expected,
+            "Body identity/payload changed for v{version}"
+        );
+        while let Some(item) = replayed.pop_front() {
+            assert_eq!(writer.deliver(&item).await, Step::Done);
+        }
+        assert_eq!(harness.port.posts(), ["already delivered", "owed body"]);
+        assert!(
+            !harness
+                ._runtime
+                .path()
+                .join("o_store/input_notice.floor")
+                .exists()
+        );
+    }
 }

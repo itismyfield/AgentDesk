@@ -572,6 +572,7 @@ async fn restored_prepared_uses_durable_utc_age_and_clamps_future_time() {
     let mut store = harness.channel();
     store
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             local_retry: None,
             serial: 0,
             unit_key: unit("restore"),

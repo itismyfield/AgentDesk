@@ -49,6 +49,19 @@ async fn disabled_notice_composition_captures_restarts_and_keeps_body_transport_
             );
             assert!(harness.port.posts().is_empty());
             assert_eq!(harness.channel().ledger().next_serial(), 0);
+            assert_eq!(std::fs::metadata(ledger_path(&harness)).unwrap().len(), 0);
+            assert_eq!(
+                harness.channel().ledger().input_notices(),
+                &Default::default()
+            );
+            assert!(
+                !harness
+                    ._runtime
+                    .path()
+                    .join("o_store/input_notice.floor")
+                    .exists()
+            );
+            assert!(harness.channel().ledger().gc_segments(&source).is_empty());
             assert_eq!(admissions.load(std::sync::atomic::Ordering::SeqCst), 0);
             if restart == 1 {
                 append(&path, &row("control", "body transport control"));

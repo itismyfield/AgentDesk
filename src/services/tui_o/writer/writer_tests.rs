@@ -675,6 +675,7 @@ async fn a_prepared_left_by_a_crash_is_settled_before_the_next_post() {
         let (unit_key, payload) = (unit(&format!("c{serial}")), payload.to_string());
         let anchor_id = channel.ledger().anchor();
         let prepared = LedgerEntry::Prepared {
+            notice_origin: None,
             local_retry: None,
             serial,
             unit_key,

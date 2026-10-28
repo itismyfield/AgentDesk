@@ -4,6 +4,7 @@ use crate::services::tui_o::writer::local_retry::{self, LOCAL_RETRY_DELAY};
 
 fn prepared(serial: u64, mark: Option<LocalRetryMark>) -> LedgerEntry {
     LedgerEntry::Prepared {
+        notice_origin: None,
         serial,
         unit_key: unit("retry"),
         piece_index: 0,
@@ -354,4 +355,58 @@ async fn local_retry_budget_follows_explicit_owner_even_with_a_hook_present() {
             }
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn input_notice_origin_survives_prepared_restart_and_local_retry() {
+    let harness = Harness::new();
+    harness.gate.acquired();
+    harness.port.say(BOT + 1, "readable");
+    harness
+        .port
+        .replies
+        .lock()
+        .unwrap()
+        .extend([Reply::Unsent, Reply::Created]);
+    let origin = Box::new(super::super::input_notices::NoticeOrigin {
+        record: crate::services::tui_o::shadow::SourceRange {
+            source: crate::services::tui_o::shadow::SourceId {
+                session_id: "native-session".into(),
+                path: harness._runtime.path().join("native.jsonl"),
+                dev: 1,
+                ino: 2,
+            },
+            start: 10,
+            end: 100,
+        },
+        logical_session: "original-pane".into(),
+        binding_seq: 3,
+        execution_nonce: "original-incarnation".into(),
+    });
+    let Derived::Piece(mut item) = piece("native-input", "-# ⌨️ native input") else {
+        panic!("fixture must produce a piece");
+    };
+    item.unit_key.kind = UnitKind::InputNotice;
+    item.notice_origin = Some(origin.clone());
+    let mut writer = harness.writer();
+    assert_eq!(
+        writer.deliver(&Derived::Piece(item.clone())).await,
+        Step::Done
+    );
+    assert_eq!(
+        writer.store().ledger().piece(0).unwrap().notice_origin,
+        Some(origin.clone())
+    );
+    drop(writer);
+    let mut writer = harness.writer();
+    let pending = local_retry::pending(writer.store().ledger()).expect("saved retry debt");
+    assert_eq!(
+        pending.piece, item,
+        "retry must use the complete original provenance"
+    );
+    assert_eq!(writer.retry_local(pending.due).await, Step::Done);
+    drop(writer);
+    let store = harness.channel();
+    assert_eq!(store.ledger().piece(1).unwrap().notice_origin, Some(origin));
+    assert_eq!(harness.port.posts(), [item.payload.clone(), item.payload]);
 }

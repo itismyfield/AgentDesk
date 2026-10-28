@@ -13,6 +13,9 @@ pub(crate) fn build_info_json() -> serde_json::Value {
         // CONSUMED-BY: scripts/deploy-release.sh (`_binary_build_flag … o_ledger_operator_resume`).
         "o_ledger_operator_resume":
             crate::services::tui_o::store::ledger::OPERATOR_RESUME_SUPPORTED,
+        // CONSUMED-BY: scripts/deploy-release.sh (`_binary_build_flag … o_ledger_input_notice`).
+        "o_ledger_input_notice":
+            crate::services::tui_o::store::input_notice_floor::READER_SUPPORTED,
     })
 }
 
@@ -43,6 +46,7 @@ mod tests {
             info["o_ledger_operator_resume"],
             crate::services::tui_o::store::ledger::OPERATOR_RESUME_SUPPORTED
         );
+        assert_eq!(info["o_ledger_input_notice"], false);
     }
 
     #[test]

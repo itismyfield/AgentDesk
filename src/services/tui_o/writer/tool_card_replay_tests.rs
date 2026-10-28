@@ -241,6 +241,7 @@ async fn a_folded_run_is_reconstructed_once_at_every_durable_crash_boundary() {
             writer
                 .store()
                 .append_ledger(LedgerEntry::Prepared {
+                    notice_origin: None,
                     local_retry: Some(LocalRetryMark::Budget),
                     serial: 0,
                     unit_key: expected.unit_key.clone(),

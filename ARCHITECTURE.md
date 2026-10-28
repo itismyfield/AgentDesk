@@ -3541,6 +3541,12 @@ src/
 │   │   │   │   ├── projection.rs
 │   │   │   │   ├── submit_floor.rs
 │   │   │   │   └── submit_floor_tests.rs
+│   │   │   ├── input_notice_floor/
+│   │   │   │   └── tests.rs
+│   │   │   ├── ledger/
+│   │   │   │   ├── input_notices/
+│   │   │   │   │   └── tests.rs
+│   │   │   │   └── input_notices.rs
 │   │   │   ├── spool/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
@@ -3553,6 +3559,8 @@ src/
 │   │   │   ├── codex_provenance_tests.rs
 │   │   │   ├── delivery_evidence.rs
 │   │   │   ├── durable.rs
+│   │   │   ├── input_notice_floor.rs
+│   │   │   ├── input_notice_store_tests.rs
 │   │   │   ├── ledger.rs
 │   │   │   ├── ledger_lock_tests.rs
 │   │   │   ├── local_retry_ledger_tests.rs

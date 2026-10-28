@@ -1,12 +1,12 @@
 //! Native input identity and provenance; production delivery remains disabled until migration.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::pieces::PieceWork;
 use crate::services::tui_input::human_frame::history::{self, ObservedAttempt};
-use crate::services::tui_o::shadow::identity::UnitContent;
-use crate::services::tui_o::shadow::seal::{SealOutcome, SealRegistry};
-use crate::services::tui_o::shadow::unit_plan::plan;
 use crate::services::tui_o::shadow::{
     CapturedRecord, ShadowProvider, SourceRange, UnitKey, UnitKind,
 };
@@ -23,7 +23,7 @@ pub struct NoticeOrigin {
 #[derive(Default)]
 pub(crate) struct Projection {
     enabled: bool,
-    seals: SealRegistry,
+    seals: HashMap<UnitKey, [u8; 32]>,
 }
 
 impl Projection {
@@ -90,14 +90,14 @@ impl Projection {
             native_key,
             kind: UnitKind::InputNotice,
         };
-        // Seal the full input so truncating the visible notice cannot hide a changed UUID.
-        match self
-            .seals
-            .seal(&unit_key, &plan(&UnitContent::Payload(prompt))?)
-        {
-            SealOutcome::Repeat => return Ok(None),
-            SealOutcome::Conflict => return Err("input notice UUID changed its content".into()),
-            SealOutcome::First => {}
+        // Display splitting consumes boundary newlines, so identity seals the extracted bytes.
+        let digest: [u8; 32] = Sha256::digest(prompt.as_bytes()).into();
+        match self.seals.get(&unit_key) {
+            Some(sealed) if sealed == &digest => return Ok(None),
+            Some(_) => return Err("input notice UUID changed its content".into()),
+            None => {
+                self.seals.insert(unit_key.clone(), digest);
+            }
         }
         Ok(Some(PieceWork {
             unit_key,

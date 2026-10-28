@@ -138,6 +138,8 @@ expect() {
 SWITCH_OFF='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":false}'
 SWITCH_ON='{"schema":1,"o_tui_writer":true,"o_ledger_operator_resume":false}'
 CAPABLE='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":true}'
+NOTICE_CAPABLE='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":false,"o_ledger_input_notice":true}'
+BOTH_CAPABLE='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":true,"o_ledger_input_notice":true}'
 OLD_MANIFEST='{"repo_head":"abc","latest_postgres_migration":"0001_init.sql"}'
 LEGACY_MANIFEST='{"repo_head":"abc","o_tui_writer":"false"}'
 O_MANIFEST='{"repo_head":"abc","o_tui_writer":"true"}'
@@ -177,6 +179,42 @@ setup_case "$SWITCH_ON" '{"o_tui_writer":"true","o_ledger_operator_resume":true}
 mkdir -p "$ADK_REL/o_store"
 printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
 expect "floor, compatible target" rolled_back
+
+echo "== InputNotice floor applies before any notice POST =="
+setup_case "$SWITCH_OFF" "$LEGACY_MANIFEST"
+expect "no notice floor, legacy reader" rolled_back
+for target in "$LEGACY_MANIFEST" "not json" "" \
+    '{"o_tui_writer":"false","o_ledger_input_notice":false}' \
+    '{"o_tui_writer":"false","o_ledger_input_notice":"true"}' \
+    '{"o_tui_writer":"false","o_ledger_input_notice":"unknown"}'; do
+    setup_case "$SWITCH_OFF" "$target"
+    mkdir -p "$ADK_REL/o_store"
+    printf '1\n' >"$ADK_REL/o_store/input_notice.floor"
+    AGENTDESK_DEPLOY_FORCE_ROLLBACK=1 expect "notice floor, incompatible target: $target" refused
+done
+setup_case "$SWITCH_OFF" '{"o_tui_writer":"false","o_ledger_input_notice":true}'
+mkdir -p "$ADK_REL/o_store"
+printf '1\n' >"$ADK_REL/o_store/input_notice.floor"
+expect "notice floor, compatible target" rolled_back
+setup_case "$SWITCH_OFF" "$LEGACY_MANIFEST"
+mkdir -p "$ADK_REL/o_store"
+ln -s "$TMP_ROOT/missing-floor" "$ADK_REL/o_store/input_notice.floor"
+expect "notice floor broken symlink, incompatible target" refused
+setup_case "$SWITCH_OFF" '{"o_tui_writer":"false","o_ledger_input_notice":true}'
+mkdir -p "$ADK_REL/o_store"
+printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+printf '1\n' >"$ADK_REL/o_store/input_notice.floor"
+expect "both floors, only notice reader" refused
+setup_case "$SWITCH_OFF" '{"o_tui_writer":"false","o_ledger_operator_resume":true}'
+mkdir -p "$ADK_REL/o_store"
+printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+printf '1\n' >"$ADK_REL/o_store/input_notice.floor"
+expect "both floors, only operator reader" refused
+setup_case "$SWITCH_OFF" '{"o_tui_writer":"false","o_ledger_operator_resume":true,"o_ledger_input_notice":true}'
+mkdir -p "$ADK_REL/o_store"
+printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+printf '1\n' >"$ADK_REL/o_store/input_notice.floor"
+expect "both floors, compatible target" rolled_back
 
 echo "== an unreadable switch counts as on =="
 setup_case "" "$LEGACY_MANIFEST"
@@ -247,19 +285,26 @@ run_floor_check() {
 ${floor_check#fi}
 echo staged"
 }
-# $1 label, $2 built binary's build-info ("" = none), $3 floor (yes|no), $4 expected: staged | refused
+# $1 label, $2 built binary's build-info ("" = none), $3 floor, $4 expected: staged | refused
 expect_build_floor() {
     local actual status=0
     setup_case "$SWITCH_OFF" ""
     make_binary "$ARTIFACT" built "$2"
-    if [ "$3" = yes ]; then
+    if [ "$3" != no ]; then
         mkdir -p "$ADK_REL/o_store"
+    fi
+    if [ "$3" = yes ] || [ "$3" = both ]; then
         printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+    fi
+    if [ "$3" = notice ] || [ "$3" = both ]; then
+        printf '1\n' >"$ADK_REL/o_store/input_notice.floor"
+    elif [ "$3" = notice-symlink ]; then
+        ln -s "$TMP_ROOT/missing-floor" "$ADK_REL/o_store/input_notice.floor"
     fi
     actual="$(run_floor_check "$ARTIFACT" 2>"$TMP_ROOT/floor-error")" || status=$?
     if [ "$4" = refused ]; then
         if [ "$status" -eq 1 ] && [ -z "$actual" ] \
-            && grep -q "OperatorResume floor refuses" "$TMP_ROOT/floor-error"; then
+            && grep -Eq "(OperatorResume|O ledger) floor refuses" "$TMP_ROOT/floor-error"; then
             pass "$1 → refused before staging"
         else
             fail "$1 → expected refusal, got rc=$status output='$actual'"
@@ -293,6 +338,22 @@ import sys
 assert json.load(open(sys.argv[1]))["o_ledger_operator_resume"] is True
 PY
 then pass "manifest records OperatorResume capability"; else fail "manifest misses capability"; fi
+setup_case "$NOTICE_CAPABLE" ""
+_write_release_source_manifest >/dev/null 2>&1 || true
+if python3 - "$MANIFEST" <<'PY'
+import json
+import sys
+assert json.load(open(sys.argv[1]))["o_ledger_input_notice"] is True
+PY
+then pass "manifest records InputNotice capability"; else fail "manifest misses notice capability"; fi
+setup_case "$SWITCH_OFF" ""
+_write_release_source_manifest >/dev/null 2>&1 || true
+if python3 - "$MANIFEST" <<'PY'
+import json
+import sys
+assert json.load(open(sys.argv[1]))["o_ledger_input_notice"] is False
+PY
+then pass "manifest keeps a missing InputNotice capability false"; else fail "manifest invents notice capability"; fi
 setup_case "" ""
 _write_release_source_manifest >/dev/null 2>&1 || true
 recorded="$(_manifest_o_tui_writer || true)"
@@ -304,6 +365,20 @@ expect_build_floor "no floor, legacy build" "$SWITCH_OFF" no staged
 expect_build_floor "floor, legacy build" "$SWITCH_OFF" yes refused
 expect_build_floor "floor, build without build-info" "" yes refused
 expect_build_floor "floor, build without the capability field" '{"schema":1,"o_tui_writer":true}' yes refused
+
+echo "== the InputNotice floor guards the selected build before staging =="
+expect_build_floor "notice floor, capable build" "$NOTICE_CAPABLE" notice staged
+expect_build_floor "no notice floor, legacy build" "$SWITCH_OFF" no staged
+expect_build_floor "notice floor, false capability" "$SWITCH_OFF" notice refused
+expect_build_floor "notice floor, missing build-info" "" notice refused
+expect_build_floor "notice floor, missing capability" '{"schema":1,"o_tui_writer":true}' notice refused
+expect_build_floor "notice floor, string capability" '{"schema":1,"o_ledger_input_notice":"true"}' notice refused
+expect_build_floor "notice floor, unknown schema" '{"schema":2,"o_ledger_input_notice":true}' notice refused
+expect_build_floor "notice floor, malformed build-info" 'not json' notice refused
+expect_build_floor "notice floor broken symlink" "$SWITCH_OFF" notice-symlink refused
+expect_build_floor "both floors, only operator build" "$CAPABLE" both refused
+expect_build_floor "both floors, only notice build" "$NOTICE_CAPABLE" both refused
+expect_build_floor "both floors, capable build" "$BOTH_CAPABLE" both staged
 
 echo "== the binary reports every switch this script reads =="
 for field in o_tui_writer o_ledger_operator_resume; do

@@ -557,7 +557,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                         unit_key: original.unit_key.clone(),
                         index: original.piece_index,
                         payload: original.payload.clone(),
-                        notice_origin: None,
+                        notice_origin: original.notice_origin.clone(),
                     },
                     Some(rejected_serial),
                 )
@@ -570,6 +570,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             && let Some(mut hook) = self.repost.take()
         {
             let record = PieceRecord {
+                notice_origin: piece.notice_origin.clone(),
                 local_retry: None,
                 outcome_at: None,
                 unit_key: piece.unit_key.clone(),
@@ -633,6 +634,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 // The exact permit is checked first and its lock held through the first poll.
                 let mut start = || {
                     let prepared = || LedgerEntry::Prepared {
+                        notice_origin: piece.notice_origin.clone(),
                         serial,
                         unit_key: piece.unit_key.clone(),
                         piece_index: piece.index,
@@ -912,6 +914,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
         let ledger = self.store.ledger();
         let (serial, anchor_id) = (ledger.next_serial(), ledger.anchor());
         let prepared = || LedgerEntry::Prepared {
+            notice_origin: None,
             serial,
             unit_key: permit.key().unit().clone(),
             piece_index: permit.key().piece_index(),

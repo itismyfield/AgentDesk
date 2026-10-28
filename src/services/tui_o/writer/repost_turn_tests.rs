@@ -305,6 +305,7 @@ async fn f6_general_auto_and_resume_never_overlap_posts_pg() {
     let epoch = harness.gate.acquired();
     let mut channel = harness.channel();
     let resumed = LedgerEntry::Prepared {
+        notice_origin: None,
         local_retry: None,
         serial: 0,
         unit_key: unit("resumed"),
@@ -423,6 +424,7 @@ async fn f6_t09_open_prepared_blocks_every_sender_pg() {
     let harness = Harness::new();
     let epoch = harness.gate.acquired();
     let open = LedgerEntry::Prepared {
+        notice_origin: None,
         local_retry: None,
         serial: 0,
         unit_key: unit("left-open"),
@@ -499,6 +501,7 @@ async fn f6_t11_pre_activation_backlog_never_posts_pg() {
     let harness = Harness::new();
     let epoch = harness.gate.acquired();
     let prepared = |serial, native: &str| LedgerEntry::Prepared {
+        notice_origin: None,
         local_retry: None,
         serial,
         unit_key: unit(native),

@@ -50,6 +50,16 @@ fn native_uuid_separates_identical_inputs_and_rejects_changed_identity() {
     assert_eq!(piece.notice_origin, Some(Box::new(origin(&first))));
     assert!(piece.payload.starts_with("-# ⌨️ "));
     assert!(project(&mut projection, &first).unwrap().is_none());
+    let mut metadata: serde_json::Value = serde_json::from_slice(&first.line).unwrap();
+    metadata["promptId"] = json!("rewritten-hook-id");
+    metadata["sessionId"] = json!("forked-native-session");
+    let line = serde_json::to_vec(&metadata).unwrap();
+    let rewritten = CapturedRecord {
+        start: first.start,
+        end: first.start + line.len() as u64 + 1,
+        line,
+    };
+    assert!(project(&mut projection, &rewritten).unwrap().is_none());
     let second = project(&mut projection, &record("native-two", "계속"))
         .unwrap()
         .unwrap();
@@ -65,6 +75,38 @@ fn native_uuid_separates_identical_inputs_and_rejects_changed_identity() {
     );
     assert!(project(&mut projection, &before).unwrap().is_some());
     assert!(project(&mut projection, &after).is_err());
+
+    let (x, y) = ("x".repeat(1990), "y".repeat(1990));
+    let before = format!("{x}\n{y}z");
+    let after = format!("{x}{y}\nz");
+    assert_ne!(before.as_bytes(), after.as_bytes());
+    assert_eq!(
+        discord::input_notice_content(&before),
+        discord::input_notice_content(&after)
+    );
+    let display = |text: &str| {
+        crate::services::tui_o::shadow::unit_plan::plan(
+            &crate::services::tui_o::shadow::identity::UnitContent::Payload(text.into()),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        display(&before),
+        display(&after),
+        "splitter hides moved newline"
+    );
+    let first = record("newline-uuid", &before);
+    assert!(project(&mut projection, &first).unwrap().is_some());
+    assert!(project(&mut projection, &first).unwrap().is_none());
+    assert!(
+        project(&mut projection, &record("newline-uuid", &after)).is_err(),
+        "native UUID must seal the exact extracted prompt bytes"
+    );
+    assert!(
+        project(&mut projection, &record("newline-other-uuid", &after))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]

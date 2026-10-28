@@ -753,6 +753,7 @@ mod settle_over_http {
             let anchor_id = recorded.ledger().anchor();
             let (unit_key, payload) = (unit(channel, serial), format!("earlier {serial}"));
             let prepared = LedgerEntry::Prepared {
+                notice_origin: None,
                 local_retry: None,
                 serial,
                 unit_key,
