@@ -159,10 +159,6 @@ mod herdr {
         /// Why the actor no longer holds this queue: the order, every stored field of each item
         /// as held (nothing derived or filled in) and the dispatch reservation.
         fn differs(&self, state: &ChannelMailboxState) -> Option<String> {
-            #[cfg(test)]
-            if self.v2.is_some() != state.v2_held() {
-                return Some("the V2 owner changed since the capture".into());
-            }
             if (
                 state.pending_user_dispatch,
                 &state.pending_user_dispatch_source_ids,
@@ -338,9 +334,11 @@ mod herdr {
                 Ok(Err(PurgeStop::NotSaved(reason))) => {
                     CheckedPurge::stopped(PurgeStage::NotSaved, reason, state.v2_len().unwrap_or(0))
                 }
-                Ok(Err(PurgeStop::SaveUnknown(reason))) => {
-                    CheckedPurge::stopped(PurgeStage::SaveUnknown, reason, state.v2_len().unwrap_or(0))
-                }
+                Ok(Err(PurgeStop::SaveUnknown(reason))) => CheckedPurge::stopped(
+                    PurgeStage::SaveUnknown,
+                    reason,
+                    state.v2_len().unwrap_or(0),
+                ),
             };
             let _ = self.reply.send(purge);
         }

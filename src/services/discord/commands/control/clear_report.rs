@@ -45,7 +45,10 @@ pub(in crate::services::discord) struct ClearReport {
 impl ClearReport {
     /// One line naming every cause, or none when the clear left nothing behind.
     pub(in crate::services::discord) fn warning(&self) -> Option<String> {
-        let kept = self.failed.contains(&"queue_read_only").then_some(QUEUE_READ_ONLY);
+        let kept = self
+            .failed
+            .contains(&"queue_read_only")
+            .then_some(QUEUE_READ_ONLY);
         let other_failed = self.failed.iter().any(|what| *what != "queue_read_only");
         let saved = match (!other_failed, self.retried.is_empty()) {
             (false, _) if self.execution.is_some() => Some(HERDR_CLEANUP_UNCONFIRMED),
@@ -60,12 +63,18 @@ impl ClearReport {
         let busy = self.transition_busy.then_some(busy_message);
         let stop = self.stop_unconfirmed.then_some(STOP_UNCONFIRMED);
         let end = self.end_unconfirmed.then_some(END_UNCONFIRMED);
-        let causes: Vec<&str> = [kept, saved, busy, stop, end].into_iter().flatten().collect();
+        let causes: Vec<&str> = [kept, saved, busy, stop, end]
+            .into_iter()
+            .flatten()
+            .collect();
         (!causes.is_empty()).then(|| format!("⚠️ {}", causes.join(" ")))
     }
 
     /// The cleared notice, the discarded count, and the warning line under them.
     pub(in crate::services::discord) fn reply(&self) -> String {
+        if self.failed.contains(&"queue_read_only") {
+            return self.warning().unwrap_or_default();
+        }
         let count = match &self.discarded {
             Some(ids) => format!("대기 메시지 {}건을 비웠어요.", ids.len()),
             None => COUNT_UNKNOWN.to_string(),
@@ -252,6 +261,30 @@ mod read_only_tests {
         let mut report = report;
         report.stop_unconfirmed = true;
         assert!(report.reply().contains(STOP_UNCONFIRMED));
+    }
+
+    #[test]
+    fn read_only_clear_names_every_other_write_it_could_not_confirm() {
+        let mut report = ClearReport {
+            failed: vec!["queue_read_only", "session_selector"],
+            ..Default::default()
+        };
+        let reply = report.reply();
+        assert!(
+            reply.contains(QUEUE_READ_ONLY) && reply.contains(RETRY_FAILED),
+            "{reply}"
+        );
+        report.failed = vec!["queue_read_only"];
+        report.retried = vec!["pg_boundary"];
+        let reply = report.reply();
+        assert!(
+            reply.contains(QUEUE_READ_ONLY) && reply.contains(RETRY_LANDED),
+            "{reply}"
+        );
+        assert!(
+            !reply.contains("비웠어요"),
+            "a kept queue is never reported emptied"
+        );
     }
 }
 

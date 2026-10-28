@@ -1,12 +1,12 @@
 //! What the V1 paths may know of a V2 queue: a boot/catalog plan, read-only state views, and the
 //! checked purge's compare-and-commit. Reading never writes; boot wiring that acts on a plan is not here.
 use super::*;
+#[cfg(unix)]
+use crate::services::turn_orchestrator::checked_purge::V2PurgeStop as PurgeStop;
 use crate::services::turn_orchestrator::pending_queue_persistence::{
     load_channel_pending_dispatch_marker_checked, pending_queue_file_path,
     queued_recovery::read_catalog,
 };
-#[cfg(unix)]
-use crate::services::turn_orchestrator::checked_purge::V2PurgeStop as PurgeStop;
 use crate::services::turn_orchestrator::{
     ChannelMailboxRegistry, ChannelMailboxState, QueuePersistenceContext,
 };
@@ -130,10 +130,6 @@ impl Owner {
 }
 
 impl ChannelMailboxState {
-    pub(crate) fn v2_held(&self) -> bool {
-        self.queued_head.v2.is_some()
-    }
-
     pub(crate) fn v2_len(&self) -> Option<usize> {
         (self.queued_head.v2.as_ref()).map(|owner| owner.snapshot.items.len())
     }
@@ -155,7 +151,8 @@ impl ChannelMailboxState {
         &mut self,
         expected: &str,
     ) -> Result<Vec<PendingQueueItem>, PurgeStop> {
-        let owner = (self.queued_head.v2.as_mut()).ok_or(PurgeStop::Refused("no V2 owner".into()))?;
+        let owner =
+            (self.queued_head.v2.as_mut()).ok_or(PurgeStop::Refused("no V2 owner".into()))?;
         if owner.fingerprint().map_err(PurgeStop::Refused)? != expected {
             return Err(PurgeStop::Refused(
                 "the V2 queue or namespace changed since the capture".into(),
@@ -163,7 +160,8 @@ impl ChannelMailboxState {
         }
         let mut next = owner.snapshot.clone();
         let first = usize::from(next.head_injection.is_some());
-        let drained: Vec<PendingQueueItem> = next.items.drain(first.min(next.items.len())..).collect();
+        let drained: Vec<PendingQueueItem> =
+            next.items.drain(first.min(next.items.len())..).collect();
         match owner.commit(next) {
             Ok(()) => Ok(drained),
             Err(error) if owner.pending.is_some() => Err(PurgeStop::SaveUnknown(error)),
