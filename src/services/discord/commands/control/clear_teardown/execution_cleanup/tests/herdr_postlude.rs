@@ -1,7 +1,15 @@
 use super::*;
 use crate::services::session_host::herdr_termination_rig as herdr;
 
-fn case(name: &str, channel: u64, interrupted: bool) {
+#[derive(Clone, Copy, PartialEq)]
+enum Selector {
+    Absent,
+    Same,
+    Successor,
+    Unproven,
+}
+
+fn case(name: &str, channel: u64, interrupted: bool, selector: Selector) {
     if !herdr::in_child(name, channel) {
         return;
     }
@@ -29,6 +37,9 @@ fn case(name: &str, channel: u64, interrupted: bool) {
             .bind(channel.to_string()).fetch_one(&fx.pool).await.unwrap();
         let mut state = discord::inflight::InflightTurnState::new(crate::services::provider::ProviderKind::Claude,
             channel, None, 100, 90100, 9001, "old frame".into(), None, Some(logical.into()), None, None, 0);
+        if matches!(selector, Selector::Same | Selector::Successor) {
+            state.session_id=Some("provider-original".into());
+        }
         state.replay_receipt_id=Some(receipt);
         state.terminal_delivery_committed=true;
         let root=discord::inflight::inflight_runtime_root().unwrap();
@@ -60,7 +71,28 @@ fn case(name: &str, channel: u64, interrupted: bool) {
             assert!(cleanup::due(&fx.pool,"claude",herdr::NODE).await.unwrap().iter().any(|next|next.id==row.id));
             row=cleanup::claim(&fx.pool,&fx.row().await).await.unwrap().unwrap();
         }
+        if selector != Selector::Absent {
+            let shared = shared.clone();
+            discord::herdr_terminate::probe_after_settlement(Box::new(move || Box::pin(async move {
+                let id = if selector == Selector::Same { "provider-original" } else { "provider-successor" };
+                discord::rebind_channel_session(&shared,&shared.provider,ChannelId::new(channel),"/tmp",id).await;
+                let mut core=shared.core.lock().await;
+                let session=core.sessions.get_mut(&ChannelId::new(channel)).unwrap();
+                session.memento_context_loaded=true;session.memento_reflected=true;
+            })));
+        }
         assert_eq!(run(&shared,&row).await,Response::Ended);
+        if selector != Selector::Absent {
+            let core=shared.core.lock().await;
+            let session=&core.sessions[&ChannelId::new(channel)];
+            if selector == Selector::Same {
+                assert!(session.session_id.is_none());
+                assert!(!session.memento_context_loaded && !session.memento_reflected);
+            } else {
+                assert_eq!(session.session_id.as_deref(),Some("provider-successor"),"cleanup must preserve a successor or unproven selector");
+                assert!(session.memento_context_loaded && session.memento_reflected);
+            }
+        }
         let writes=rig.writes();
         let pane=rig.record(hash,&key).location.unwrap().pane_id;
         assert!(writes.iter().all(|(method,actual)|method.ends_with(".close") && actual==&pane),"unexpected write: {writes:?}");
@@ -95,6 +127,7 @@ fn owner_cleanup_herdr_postlude_archives_before_fresh_pg() {
         ),
         73369312,
         false,
+        Selector::Absent,
     );
 }
 #[test]
@@ -106,5 +139,45 @@ fn owner_cleanup_herdr_retired_restart_finishes_without_second_close_pg() {
         ),
         73369313,
         true,
+        Selector::Absent,
+    );
+}
+
+#[test]
+fn owner_cleanup_herdr_matching_selector_cleared_pg() {
+    case(
+        concat!(
+            module_path!(),
+            "::owner_cleanup_herdr_matching_selector_cleared_pg"
+        ),
+        73369314,
+        false,
+        Selector::Same,
+    );
+}
+
+#[test]
+fn owner_cleanup_herdr_successor_selector_preserved_pg() {
+    case(
+        concat!(
+            module_path!(),
+            "::owner_cleanup_herdr_successor_selector_preserved_pg"
+        ),
+        73369315,
+        false,
+        Selector::Successor,
+    );
+}
+
+#[test]
+fn owner_cleanup_herdr_unproven_selector_preserved_pg() {
+    case(
+        concat!(
+            module_path!(),
+            "::owner_cleanup_herdr_unproven_selector_preserved_pg"
+        ),
+        73369316,
+        false,
+        Selector::Unproven,
     );
 }

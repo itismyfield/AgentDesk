@@ -252,7 +252,7 @@ async fn finish_herdr(
     if cleanup::tests::mutant("herdr-postlude") {
         return Response::Ended;
     }
-    let response = archive_completed(shared, row).await;
+    let (response, original_session) = archive_completed_identity(shared, row).await;
     if response != Response::Ended {
         return response;
     }
@@ -263,7 +263,14 @@ async fn finish_herdr(
         .sessions
         .get_mut(&exclusion.channel())
     {
-        session.clear_provider_session();
+        let matches_original = original_session
+            .as_ref()
+            .is_some_and(|id| session.session_id.as_ref() == Some(id));
+        #[cfg(test)]
+        let matches_original = matches_original || cleanup::tests::mutant("selector-unconditional");
+        if matches_original {
+            session.clear_provider_session();
+        }
     }
     Response::Ended
 }
@@ -457,11 +464,19 @@ fn read_native_completion(
 }
 
 async fn archive_completed(shared: &Arc<SharedData>, row: &Record) -> Response {
+    archive_completed_identity(shared, row).await.0
+}
+
+// Only the exact archived sidecar supplies authority to clear its in-memory selector.
+async fn archive_completed_identity(
+    shared: &Arc<SharedData>,
+    row: &Record,
+) -> (Response, Option<String>) {
     use discord::inflight::{self, GuardedClearOutcome, InflightTurnIdentity};
     let state = match inflight_ready(shared, row).await {
-        Ok(None) => return Response::Ended,
+        Ok(None) => return (Response::Ended, None),
         Ok(Some(state)) => state,
-        Err(response) => return response,
+        Err(response) => return (response, None),
     };
     let channel = row.raw_channel_id.parse().unwrap();
     match inflight::archive_inflight_state_if_matches_identity_generation(
@@ -472,8 +487,12 @@ async fn archive_completed(shared: &Arc<SharedData>, row: &Record) -> Response {
         state.save_generation,
         "owner-normal-end",
     ) {
-        GuardedClearOutcome::Cleared | GuardedClearOutcome::Missing => Response::Ended,
-        _ => Response::Retry,
+        GuardedClearOutcome::Cleared => (
+            Response::Ended,
+            state.session_id.filter(|id| !id.trim().is_empty()),
+        ),
+        GuardedClearOutcome::Missing => (Response::Ended, None),
+        _ => (Response::Retry, None),
     }
 }
 
