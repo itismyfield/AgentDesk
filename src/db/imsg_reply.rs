@@ -452,7 +452,7 @@ mod external_admission_tests {
     use serde_json::json;
 
     const SOURCE_MIGRATION: &str =
-        include_str!("../../migrations/postgres/0156_imsg_external_admission.sql");
+        include_str!("../../migrations/postgres/0152_imsg_external_admission.sql");
 
     async fn old_schema() -> (TestPostgresDb, PgPool) {
         let db = TestPostgresDb::create().await;
