@@ -605,9 +605,8 @@ async fn a_conflicting_ticket_is_refused_before_recovery() {
     refused().await;
 }
 
-/// The receipt names what runs: reply, attachments, the role override and a source's route or
-/// origin each make another original, while a retry that differs only in recomputed times and
-/// diagnostics is the same one.
+/// Reply, attachments, role override, a source's route or origin each name another original; a
+/// retry that differs only in recomputed times and diagnostics is the same one.
 #[tokio::test]
 async fn the_receipt_names_every_field_that_changes_what_runs() {
     let _root = TestRuntimeRootGuard::new();
@@ -837,9 +836,8 @@ async fn drop_untried(
     }
 }
 
-/// An input dropped before any attempt leaves no bind for the input that next takes its place,
-/// whether a clear, a clear across a restart, or a checked purge dropped it; repeated drops leave
-/// no queued binds behind.
+/// An untried input dropped by clear, clear and restart, or checked purge leaves no bind for the
+/// input that takes its place, and repeated drops leave no queued binds behind.
 #[tokio::test]
 async fn a_dropped_input_leaves_no_bind_for_the_input_that_takes_its_place() {
     let _root = TestRuntimeRootGuard::new();
