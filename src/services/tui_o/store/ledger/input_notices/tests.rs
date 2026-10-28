@@ -383,3 +383,139 @@ fn prepared_legacy_default_and_notice_origin_roundtrip_preserve_retry_identity()
         assert_eq!(state.violation().is_none(), retain_origin);
     }
 }
+
+#[test]
+fn native_key_partial_evidence_cannot_bypass_conflicts_in_either_order() {
+    let complete = evidence("p", "first", 0);
+    let mut partial = evidence("p", "changed", 1_000);
+    partial.prompt = None;
+    partial.prompt_sha256 = None;
+    let mut missing_digest = evidence("p", "first", 1_000);
+    missing_digest.prompt_sha256 = None;
+    for partial in [partial, missing_digest] {
+        for partial_first in [false, true] {
+            let mut state = NoticeState::default();
+            if !partial_first {
+                state
+                    .apply(NoticeEntry::Materialized {
+                        evidence: Box::new(complete.clone()),
+                    })
+                    .unwrap();
+            }
+            let before = state.clone();
+            assert!(
+                state
+                    .apply(NoticeEntry::Materialized {
+                        evidence: Box::new(partial.clone()),
+                    })
+                    .is_err(),
+                "a native key must never enter storage without a canonical prompt digest"
+            );
+            assert_eq!(state, before);
+            if partial_first {
+                state
+                    .apply(NoticeEntry::Materialized {
+                        evidence: Box::new(complete.clone()),
+                    })
+                    .unwrap();
+            }
+            assert_eq!(state.evidence.len(), 1);
+            assert_eq!(state.evidence.values().next(), Some(&complete));
+            assert!(state.imported.is_empty());
+            assert!(state.reserved_ids.is_empty());
+        }
+    }
+}
+
+#[test]
+fn native_key_only_enrichment_requires_the_retained_canonical_prompt() {
+    let complete = evidence("p", "first", 0);
+    let mut raw_only = complete.clone();
+    raw_only.unit_key = None;
+    raw_only.prompt = None;
+    raw_only.prompt_sha256 = None;
+    raw_only.payload = None;
+    raw_only.origin = None;
+    let mut state = NoticeState::default();
+    state
+        .apply(NoticeEntry::Materialized {
+            evidence: Box::new(raw_only.clone()),
+        })
+        .unwrap();
+    let mut key_only = raw_only.clone();
+    key_only.unit_key = complete.unit_key.clone();
+    let before = state.clone();
+    assert!(
+        state
+            .apply(NoticeEntry::Materialized {
+                evidence: Box::new(key_only.clone()),
+            })
+            .is_err()
+    );
+    assert_eq!(state, before);
+    raw_only.prompt = complete.prompt.clone();
+    raw_only.prompt_sha256 = complete.prompt_sha256.clone();
+    state
+        .apply(NoticeEntry::Materialized {
+            evidence: Box::new(raw_only),
+        })
+        .unwrap();
+    state
+        .apply(NoticeEntry::Materialized {
+            evidence: Box::new(key_only),
+        })
+        .unwrap();
+    let stored = state.evidence.values().next().unwrap();
+    assert_eq!(stored.unit_key, complete.unit_key);
+    assert_eq!(stored.prompt, complete.prompt);
+    assert_eq!(stored.prompt_sha256, complete.prompt_sha256);
+    assert!(!stored.complete());
+}
+
+#[test]
+fn legacy_import_rejects_any_noncanonical_or_conflicting_same_key_evidence() {
+    let complete = evidence("p", "first", 0);
+    let key = complete.unit_key.clone().unwrap();
+    let mut partial = evidence("p", "changed", 1_000);
+    partial.prompt = None;
+    partial.prompt_sha256 = None;
+    let mut forged = evidence("p", "changed", 1_000);
+    forged.prompt_sha256 = complete.prompt_sha256.clone();
+    for invalid in [partial, evidence("p", "changed", 1_000), forged] {
+        for already_imported in [false, true] {
+            let mut state = NoticeState::default();
+            state
+                .apply(NoticeEntry::MigrationStarted {
+                    snapshot: snapshot(&complete),
+                })
+                .unwrap();
+            state
+                .apply(NoticeEntry::Materialized {
+                    evidence: Box::new(complete.clone()),
+                })
+                .unwrap();
+            if already_imported {
+                state
+                    .apply(NoticeEntry::LegacyImported {
+                        input_key: key.clone(),
+                        msg_id: 40,
+                    })
+                    .unwrap();
+            }
+            state
+                .evidence
+                .insert(record_id(&invalid.record), invalid.clone());
+            let before = state.clone();
+            assert!(
+                state
+                    .apply(NoticeEntry::LegacyImported {
+                        input_key: key.clone(),
+                        msg_id: 40,
+                    })
+                    .is_err(),
+                "one complete row cannot authorize a receipt beside conflicting native evidence"
+            );
+            assert_eq!(state, before);
+        }
+    }
+}

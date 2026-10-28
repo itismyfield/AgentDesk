@@ -11,6 +11,8 @@ use std::{
 };
 use tokio::time::Instant;
 
+mod streaming;
+
 pub(crate) fn json<T: DeserializeOwned>(path: &Path, cap: u64) -> Option<T> {
     let mut bytes = Vec::new();
     File::open(path)
@@ -133,7 +135,11 @@ pub(crate) fn local(
         if read == 0 {
             break;
         }
-        if line.len() > LINE_CAP || line.last() != Some(&b'\n') {
+        if line.len() > LINE_CAP {
+            streaming::notice(std::io::Cursor::new(&line).chain(&mut reader), deadline)?;
+            continue;
+        }
+        if line.last() != Some(&b'\n') {
             return None;
         }
         #[cfg(test)]
@@ -238,3 +244,6 @@ pub(crate) fn local(
     }
     Some(state)
 }
+
+#[cfg(all(test, unix))]
+mod tests;

@@ -151,6 +151,17 @@ impl NoticeEvidence {
         Ok(())
     }
 
+    fn canonical_digest(&self) -> Result<Option<&str>, String> {
+        self.validate()?;
+        if self.unit_key.is_none() {
+            return Ok(None);
+        }
+        match (&self.prompt, self.prompt_sha256.as_deref()) {
+            (Some(_), Some(digest)) => Ok(Some(digest)),
+            _ => Err("input notice native key has no canonical prompt digest".into()),
+        }
+    }
+
     fn complete(&self) -> bool {
         self.prompt.is_some()
             && self.prompt_sha256.is_some()
@@ -218,29 +229,31 @@ impl NoticeState {
                     merge(&mut merged.origin, next.origin)?;
                     next = merged;
                 }
-                next.validate()?;
+                let digest = next.canonical_digest()?;
                 for kept in self
                     .evidence
                     .values()
                     .filter(|kept| kept.unit_key.is_some() && kept.unit_key == next.unit_key)
                 {
-                    if kept
-                        .prompt_sha256
-                        .as_ref()
-                        .zip(next.prompt_sha256.as_ref())
-                        .is_some_and(|(a, b)| a != b)
-                        || kept
-                            .prompt
-                            .as_ref()
-                            .zip(next.prompt.as_ref())
-                            .is_some_and(|(a, b)| a != b)
-                    {
+                    if kept.canonical_digest()? != digest {
                         return Err("input notice UUID changed its content".into());
                     }
                 }
                 self.evidence.insert(id, next);
             }
             NoticeEntry::LegacyImported { input_key, msg_id } => {
+                let mut digest = None;
+                for evidence in self
+                    .evidence
+                    .values()
+                    .filter(|evidence| evidence.unit_key.as_ref() == Some(&input_key))
+                {
+                    let canonical = evidence.canonical_digest()?;
+                    if digest.is_some() && digest != canonical {
+                        return Err("input notice UUID changed its content".into());
+                    }
+                    digest = canonical;
+                }
                 if self.imported.get(&input_key) == Some(&msg_id) {
                     return Ok(Some(input_key));
                 }
