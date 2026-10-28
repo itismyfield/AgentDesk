@@ -546,7 +546,7 @@ pub struct MainIntegrationEvidence {
 }
 
 impl MainIntegrationEvidence {
-    // Preserve every requested node in grouped/squash results; F3/F6 decide integration acceptance.
+    // Preserve every requested node in grouped/squash results; integration acceptance is checked separately.
     pub fn validate_mappings(&self, requested: &[NodeArtifact]) -> Result<(), ContractError> {
         if requested.is_empty() || self.nodes.len() != requested.len() {
             return Err(ContractError::NodeMappingMismatch);
