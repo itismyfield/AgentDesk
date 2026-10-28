@@ -243,8 +243,6 @@ impl FinalizerClear {
         let outcome = match event {
             TerminalEvent::Complete => FinalizerOutcome::Body,
             TerminalEvent::RelayMiss => FinalizerOutcome::Fixed(TerminalOutcome::Empty),
-            #[cfg(unix)]
-            TerminalEvent::HostTerminated => FinalizerOutcome::Fixed(TerminalOutcome::Cancelled),
             // A backstop cancel settles a turn whose host was proven gone, not a user stop.
             TerminalEvent::Cancel if ctx.is_backstop_reconcile_path() => {
                 FinalizerOutcome::Fixed(TerminalOutcome::Failed)
@@ -253,6 +251,13 @@ impl FinalizerClear {
             TerminalEvent::GateTimeout { .. } | TerminalEvent::OperatorRelease(_) => {
                 FinalizerOutcome::Fixed(TerminalOutcome::Failed)
             }
+            // The terminated host, which the Herdr census keeps unnamed here, ends as a stop.
+            #[cfg(unix)]
+            other if other.is_mute_settlement() => {
+                FinalizerOutcome::Fixed(TerminalOutcome::Cancelled)
+            }
+            #[cfg(unix)]
+            _ => FinalizerOutcome::Fixed(TerminalOutcome::Failed),
         };
         Self {
             clear: ctx.clear_inflight,
