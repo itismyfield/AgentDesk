@@ -1,0 +1,3 @@
+resolver | src/services/campaign_execution/definition.rs
+resolver | src/services/campaign_execution/mod.rs
+resolver | src/services/campaign_execution/model.rs
