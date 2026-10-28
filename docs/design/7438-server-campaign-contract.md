@@ -55,12 +55,12 @@ F4는 #7272 S4 착지 뒤 진행한다. `auto_queue/**`, `phase_gate.rs`, review
 |---|---|---|
 | Definition | campaign ID, repository, goal/title, revision, nodes, workflow/profile version | prepared/stopped에서 정의 API만 변경 |
 | DefinitionRevision | campaign ID + revision, 정의 snapshot, 변경 근거 | 최신 10개 snapshot; 실행 기록은 참조하는 해시/내용을 자체 보존 |
-| Run | campaign ID + run ID, control version, control state, stop intent, workflow/profile pin | 명령 처리만 쓰며 성공 완료 뒤 재사용하지 않음 |
+| Run | campaign ID + run ID, control version, control state, stop intent, 대상 host/gate 집합과 fence ACK, workflow/profile pin | 명령 처리만 쓰며 성공 완료 뒤 재사용하지 않음 |
 | NodeRun | run ID + node ID, stage, retry series, quality failures, review rounds, main/acceptance 사실 | 카드/이슈 종료와 독립 |
 | Attempt | run/node/series/stage/attempt ID, role/session binding, definition hash, base/head | append 이력; 취소·실패를 덮어쓰지 않음 |
 | Evidence | evidence ID + attempt ID, kind, binding, 원 증거/출처/수용 판정 | 제출은 주장, 채택은 서버 판정. 정의 변경으로 유효성만 바뀜 |
 | Event | run ID + 단조 sequence, command ID, typed event, observed_at | append-only, snapshot prune와 무관 |
-| Action | action ID, run/node/attempt, kind, control version, 상태, 외부 상관 ID/관측 | intent부터 결과 대사까지 영속화 |
+| Action | action ID, run/node/attempt, kind, control version, 대상 host/gate identity, 상태, 외부 상관 ID/관측 | 전송 전 대상 영속화, intent부터 결과 대사까지 보존 |
 | Receipt | campaign ID + idempotency key, 정규화한 요청 fingerprint, status/body | 상태/events/actions와 같은 transaction, 실행 이력과 함께 보존 |
 
 F1은 위 레코드를 서버 전용 행으로 저장한다. 별도 DB/메시지 서비스/범용 event-sourcing 엔진은 만들지 않는다.
@@ -92,6 +92,11 @@ MainVerification | FinalVerification | Complete`를 코드 버전 `campaign-v1`�
 내부 실행 결과는 run/attempt/control version/정의 hash를 검증한다.
 stop은 expected run ID + definition revision만 검사하고 event sequence를 CAS 조건으로 쓰지 않는다.
 동일 키/동일 본문은 과거 결과, 동일 키/다른 본문은 409다. 재전송 receipt 조회가 stale 검사보다 먼저다.
+
+새 개시는 현재 run fence/version으로 검사하지만 결과는 immutable attempt/action binding으로 검사한다.
+FinishStage에서는 중단 경계에서 마무리가 허용된 기존 attempt의 결과만 정상 게이트로 수용한다.
+이미 시작된 외부 효과의 사실 대사는 두 stop 모드에서 허용하며, 새 단계/발사 권한을 되살리지 않는다.
+진행 중 pin을 새 control version으로 변경하거나 옛 attempt 결과를 일괄 수용하지 않는다.
 
 | 명령 | 허용 조건 | 사건/효과 |
 |---|---|---|
@@ -154,6 +159,8 @@ Started는 실행기의 실제 effect initiation receipt가 있어야 한다. �
 5. 서버는 모든 관련 host의 fence ACK와 이전 action 분류를 받은 뒤 같은 run lock에서 StopConfirmed를 commit한다.
    이 commit 뒤에는 오래된 발사 메시지를 보내거나 재전송해도 어떤 host도 개시할 수 없다.
    host 목록에는 intent가 배정된 host도 포함한다. stop 요청 후 새로운 host를 추가할 수 없다.
+   대상 집합과 ACK는 전송 전에 저장한 action의 host/gate identity에서 복구한다.
+   세션 관측이 없는 host도 제외하지 않으며, ACK/복구 확인이 없으면 stop_confirmed=false를 유지한다.
 6. RequestStop API는 접수되면 202와 `stopping`, `stop_confirmed=false`를 반환할 수 있다.
    응답 유실은 같은 멱등키로 대사한다. fence 불명은 stopping/Unknown을 유지하며 확정됐다고 표시하지 않는다.
    stop 요청 접수부터 확정까지 이미 전송 중이던 동작이 먼저 gate를 넘은 경우에만 기존 실행으로 대사한다.
@@ -250,6 +257,12 @@ F4/F5 활성화 전 다음 실제 소비자까지 배타 소유권을 통합해�
 | phase gate 우회/후속 생성 | `policies/lib/auto-queue-phase-gate.js:430,601` |
 | 리뷰/PR/수리/한도 알림 | `policies/review-automation.js:134,285,318,335,593,1635,1654,1786,1837,1873` |
 | 직접 review 보강 | `src/kanban/transition_core.rs:215`, `src/server/routes/kanban.rs:1670`, `src/server/routes/resume.rs:456` |
+| GitHub close의 직접 dispatch 취소 | `src/github/sync.rs:1093`, `src/engine/transition_executor_pg.rs:167` |
+| terminal queue/rework 취소·worktree 정리 | `src/kanban/terminal_cleanup.rs:17,110`; 같은 helper를 호출하는 JS kanban facade도 포함 |
+
+공용 dispatch 활성화 시 GitHub-sync close와 terminal-card의 실제 진입점 시험으로 campaign 소유
+attempt·세션 연결·필요 worktree 보존을 확인한다. 공통 mutation/cleanup 경계의 소유권 분기를 제거하면
+시험이 실패해야 하며, 일반 legacy 항목의 정리 동작은 유지한다.
 
 `docs/relay-state-contract.md`의 #5071 단일 권위를 따른다. 캠페인의 실행 상태는 작업 공정 권위이며
 Discord terminal body/relay lease/active-turn lease의 대체 권위가 아니다.
@@ -288,12 +301,17 @@ F8의 TS 타입/조회 어댑터/fixture는 server 응답을 그대로 전달하
 | B1-02 | server 정의 실행 필드 거부, AC/순환/참조/중복, 같은 issue의 node 분리 | 실제 새 HTTP router + PG |
 | B1-03 | 정의 10 revision 초과 prune 후 실행/증거/실패/action/receipt 보존 | isolated PG migrations/reconnect |
 | B1-04 | 상태+event+action+receipt 원자성, 동시 동일 명령 한 번, 다른 본문 거부 | PG 경쟁/rollback/응답 유실 후 새 pool |
-| B1-05 | stop 대상은 run/정의, event 증가로 stale 거부하지 않음, 강화/재시도 계수 | 순수 전이표+PG command 시험 |
+| B1-05 | stop 대상은 run/정의, event 증가로 stale 거부하지 않음, 강화/재시도 계수, v에서 시작한 attempt의 FinishStage(v+1) 결과 수용과 새 개시 거부 | 순수 전이표+PG command 시험 |
 | B1-06 | Alive/Unknown/미대사 action이면 stopped/편집 금지 | 실제 command store + fake session observation |
 | B1-07 | intent/claim/start 직전·직후 fence 주입, stop 확정 뒤 새 개시 0 | fake 최종 host gate + durable PG 사건; 실제 TUI 증거와 구분 |
 | B1-08 | F1 공개 API로 start 불가, legacy outbox/dispatch 생성 0 | HTTP 요청 후 PG 상태 확인 |
 | B1-09 | ADK/CH exact candidate·editing/verification 차이·자원/Unknown 공통 계약 | 두 profile fixture로 같은 계약 suite |
 | B1-10 | 서버 상태/이유/명령을 TS 어댑터가 그대로 유지 | 실패+실행/실패+차단/준비/리뷰 대기/Unknown fixture |
+
+B1-07은 세션 관측 없이 action만 배정된 host도 새 pool 복구 후 ACK 없이는 stop 확정할 수 없음을
+검사한다. fake host 재시작 뒤 옛 launch 개시 0건, 개시 후 receipt 저장 전 crash의 Unknown과 재실행
+거부를 확인한다. host 집합을 Alive 세션만으로 계산하거나 복구 journal을 비우는 뮤턴트가 실패해야 한다.
+실제 host 재시작·최종 개시 gate 증명은 F4/F7에 남긴다.
 
 기존 보존 시험: `postgres_campaign_concurrent_cas_and_reconnect_preserve_canonical_history_pg`,
 `postgres_campaign_revision_history_stays_bounded_by_retention_pg`,
