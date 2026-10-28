@@ -657,13 +657,11 @@ async fn ignored_enter_case(
     let provider = ProviderKind::Claude;
     let disposition = crate::services::discord::inject_disposition::terminal;
     pane.set("drop.Enter", ignored);
+    let before = submissions(pane).len();
     let result = discord_attempt(shared, pane.channel, message, text).await;
     let buffer = pane.read("buffer").unwrap();
-    let transcript = fs::read_to_string(pane.path(InjectPane::TRANSCRIPT)).unwrap();
-    let received = transcript
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .any(|record| record["type"] == "queue-operation" && record["content"] == buffer.as_str());
+    // Only rows written during this attempt count, so an earlier equal body cannot pass for it.
+    let received = submissions(pane)[before..].contains(&buffer);
     (
         result,
         pane.applied().join("+"),
@@ -672,6 +670,17 @@ async fn ignored_enter_case(
         pane.alarm_count("busy_inject_unconfirmed"),
         queue_texts(shared, pane.channel).await.len(),
     )
+}
+
+/// Bodies of the enqueue rows in the pane's transcript, in order.
+fn submissions(pane: &InjectPane) -> Vec<String> {
+    let transcript = fs::read_to_string(pane.path(InjectPane::TRANSCRIPT)).unwrap();
+    transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|record| record["type"] == "queue-operation")
+        .filter_map(|record| record["content"].as_str().map(str::to_string))
+        .collect()
 }
 
 /// A TUI that ignores the first Enter of a folded paste takes it on one more Enter; one that
@@ -732,41 +741,65 @@ fn expected_ignored_enters(
     ]
 }
 
-/// An earlier input A whose frame extends B drains while B's first Enter is ignored: A's row is
-/// not B's receipt, so B still takes its finishing Enter, or stays Unconfirmed without one.
+/// An earlier input A drains while B's first Enter is ignored: A's frame extending B's, the same
+/// frame behind a person's draft, or B's own body repeated. No earlier row is B's receipt, so B
+/// takes its finishing Enter, or stays Unconfirmed without one.
 #[tokio::test(flavor = "current_thread")]
 async fn an_earlier_drain_containing_the_frame_is_not_its_receipt_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
-    let (once, always) = (7_510_011, 7_510_012);
-    let registry = HealthRegistry::new();
-    let shared = register_inject_runtime(&registry, &[once, always], Some(pool)).await;
     let body = "첫 줄\n둘째 줄\n셋째 줄";
+    let longer = format!("{body}\n추가 지시");
+    let cases = [
+        ("frame", longer.as_str(), "", true),
+        ("behind a draft", longer.as_str(), "사람 초안\n", true),
+        ("repeated", body, "", false),
+    ];
+    let channels: Vec<u64> = (0..cases.len() as u64 * 2).map(|i| 7_510_011 + i).collect();
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &channels, Some(pool)).await;
     let mut observed = Vec::new();
-    for (ch, ignored) in [(once, "1"), (always, "2")] {
-        let mut pane = InjectPane::new(ch, "external");
-        pane.stash("", false);
-        pane.set("fold", "");
-        let earlier = format!("{body}\n추가 지시");
-        let first = discord_attempt(&shared, ch, MessageId::new(ch * 10), &earlier).await;
-        assert_eq!(first, inject::InjectAttempt::Injected { turn_id: None });
-        let drain = serde_json::json!({"type": "attachment", "attachment": {
-            "type": "queued_command", "commandMode": "prompt", "source_uuid": "command-a",
-            "prompt": pane.read("buffer").unwrap()}});
-        pane.set("drain.rec", &format!("{drain}\n"));
-        // A's drain lands with B's first Enter, inside B's first confirm window.
-        let transcript = pane.path(InjectPane::TRANSCRIPT).display().to_string();
-        let land =
-            format!(r#"cat "$d/drain.rec" >> '{transcript}'; rm -f "$d/human.before-Enter""#);
-        pane.set("human.before-Enter", &land);
-        let message = MessageId::new(ch * 10 + 1);
-        observed.push(ignored_enter_case(&shared, &pane, message, body, ignored).await);
+    let mut expected = Vec::new();
+    let mut channel = channels.iter();
+    for (case, earlier, draft, drains) in cases {
+        for ignored in ["1", "2"] {
+            let ch = *channel.next().unwrap();
+            let mut pane = InjectPane::new(ch, "external");
+            pane.stash(draft, false);
+            pane.set("fold", "");
+            let first = discord_attempt(&shared, ch, MessageId::new(ch * 10), earlier).await;
+            assert_eq!(
+                first,
+                inject::InjectAttempt::Injected { turn_id: None },
+                "{case}"
+            );
+            if drains {
+                // A's drain carries what A's Enter actually submitted, draft included.
+                let submitted = submissions(&pane).pop().unwrap();
+                assert!(
+                    submitted.starts_with(draft) && submitted.contains(body),
+                    "{case}"
+                );
+                let drain = serde_json::json!({"type": "attachment", "attachment": {
+                    "type": "queued_command", "commandMode": "prompt",
+                    "source_uuid": "command-a", "prompt": submitted}});
+                pane.set("drain.rec", &format!("{drain}\n"));
+                // It lands with B's first Enter, inside B's first confirm window.
+                let transcript = pane.path(InjectPane::TRANSCRIPT).display().to_string();
+                let land = format!(
+                    r#"cat "$d/drain.rec" >> '{transcript}'; rm -f "$d/human.before-Enter""#
+                );
+                pane.set("human.before-Enter", &land);
+            }
+            let message = MessageId::new(ch * 10 + 1);
+            let result = ignored_enter_case(&shared, &pane, message, body, ignored).await;
+            observed.push((case, result));
+        }
+        let keys = "paste+Enter+paste+Enter+Enter";
+        expected.extend(expected_ignored_enters(keys).map(|outcome| (case, outcome)));
     }
-    assert_eq!(
-        observed,
-        expected_ignored_enters("paste+Enter+paste+Enter+Enter")
-    );
+    assert_eq!(observed, expected);
 }
 
 #[test]

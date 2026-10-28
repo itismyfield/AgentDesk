@@ -228,8 +228,10 @@ pub(super) fn transcript_submission(
                         return Some(confirmed);
                     }
                 } else if text.contains(expected)
-                    // A row that is another attempt's whole frame is that attempt's drain.
-                    && !crate::services::tui_input::human_frame::history::known(&text)
+                    // Another attempt's whole frame, or a mixed row it already took, stays its own.
+                    && (receipt::exact(text.trim(), expected.trim())
+                        || !crate::services::tui_input::human_frame::history::known(&text))
+                    && receipt::take_mixed(path, nonce, &text)
                 {
                     return Some(false);
                 }

@@ -153,3 +153,83 @@ fn a_previous_frame_containing_the_next_one_is_not_its_receipt() {
         Some(true)
     );
 }
+
+/// A's frame submitted behind a person's draft is A's mixed receipt; its later drain contains B's
+/// frame but stays A's, while B's own row behind another draft is still B's receipt.
+#[test]
+fn a_mixed_row_an_earlier_attempt_took_is_not_the_next_receipt() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    std::fs::write(&path, "").unwrap();
+    let session = format!("receipt-mixed-{}", uuid::Uuid::new_v4());
+    let body = "첫 줄\n둘째 줄\n셋째 줄";
+    let first = frame(
+        "discord",
+        "720205",
+        "ann",
+        "ca720271",
+        &format!("{body}\n추가 지시"),
+    );
+    let second = frame("discord", "720205", "ann", "ca720272", body);
+    let append = |record: serde_json::Value| {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{record}").unwrap();
+    };
+    history::register(("claude", &session, "ca720271", "720205"), &path, 0, &first).unwrap();
+    let mixed = format!("사람 초안\n{first}");
+    append(json!({"type": "queue-operation", "operation": "enqueue", "content": mixed}));
+    assert_eq!(
+        transcript_submission(&path, 0, "ca720271", Some(&first)),
+        Some(false)
+    );
+    let offset = std::fs::metadata(&path).unwrap().len();
+    history::register(
+        ("claude", &session, "ca720272", "720205"),
+        &path,
+        offset,
+        &second,
+    )
+    .unwrap();
+    append(json!({"type": "attachment", "attachment": {
+        "type": "queued_command", "commandMode": "prompt", "prompt": mixed}}));
+    assert_eq!(
+        transcript_submission(&path, offset, "ca720272", Some(&second)),
+        None,
+        "A's mixed drain stays A's"
+    );
+    append(json!({"type": "queue-operation", "operation": "enqueue",
+        "content": format!("다른 초안\n{second}")}));
+    assert_eq!(
+        transcript_submission(&path, offset, "ca720272", Some(&second)),
+        Some(false),
+        "B's own row behind a draft is B's"
+    );
+}
+
+/// The current frame recorded with an extra non-text block is still this attempt's submission.
+#[test]
+fn the_current_frame_beside_an_image_is_its_own_mixed_receipt() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    std::fs::write(&path, "").unwrap();
+    let session = format!("receipt-image-{}", uuid::Uuid::new_v4());
+    let text = frame("discord", "720205", "ann", "ca720281", "그림과 함께");
+    history::register(("claude", &session, "ca720281", "720205"), &path, 0, &text).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    let content = json!([{"type": "text", "text": text},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ""}}]);
+    let record = json!({"type": "user", "message": {"content": content}});
+    writeln!(file, "{record}").unwrap();
+    assert_eq!(
+        transcript_submission(&path, 0, "ca720281", Some(&text)),
+        Some(false)
+    );
+}
