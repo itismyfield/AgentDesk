@@ -512,6 +512,45 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a2_windows_receipt_refuses_unproven_file_identity() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unproven-identity.jsonl");
+        let session = format!("a2-unproven-identity-{}", uuid::Uuid::new_v4());
+        let frame = "same-turn exact input";
+        std::fs::write(&path, "").unwrap();
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            &session,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("sid".into()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        let mut receipt = UserReceipt::before(&session, frame, None).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({"type":"user", "sessionId":"sid", "message":{"content":frame}})
+            ),
+        )
+        .unwrap();
+        receipt.seal();
+        let confirmed = receipt.confirmed();
+        tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+        assert!(
+            !confirmed,
+            "an exact same-turn row cannot prove the file identity on Windows"
+        );
+    }
+
     #[test]
     fn a2_receipt_cannot_borrow_a_later_turn_identical_record() {
         let _root = crate::config::TestRuntimeRootGuard::new();
