@@ -1,16 +1,24 @@
 use super::*;
 
+fn utterance_source_config(channel_id: ChannelId) -> (crate::config::Config, ChannelId) {
+    let config = crate::config::runtime_config();
+    let source_channel_id = effective_voice_source_channel(&config, channel_id);
+    (config, source_channel_id)
+}
+
+#[cfg(test)]
+#[path = "utterance_snapshot_tests.rs"]
+mod snapshot_reader_tests;
+
 impl VoiceBargeInRuntime {
-    /// F6 (#2046): `Config` 핫캐시. TTL 안이면 캐시된 `Arc<Config>` 반환,
-    /// 만료 시 spawn_blocking 으로 `load_graceful` 을 1회 호출해 갱신한다.
-    /// 매 utterance 마다 동기 std::fs read + serde_yaml 파싱이 발생하던 hot path 를
-    /// 5초 TTL 로 묶어 부하를 줄이고 async executor 블록도 회피한다.
+    /// Reuse the voice cache for five seconds, then refresh from the runtime config.
+    /// Blocking standalone fallback and join-failure defaults retain their existing behavior.
     pub(super) async fn cached_config(&self) -> Arc<crate::config::Config> {
         let now = Instant::now();
         if let Some(cached) = self.config_cache.lookup_within_ttl(now) {
             return cached;
         }
-        let fresh = tokio::task::spawn_blocking(crate::config::load_graceful)
+        let fresh = tokio::task::spawn_blocking(crate::config::runtime_config)
             .await
             .unwrap_or_else(|_| crate::config::Config::default());
         let arc = Arc::new(fresh);
@@ -38,8 +46,7 @@ impl VoiceBargeInRuntime {
         };
 
         let transcript = transcribed.text.trim();
-        let config_snapshot = crate::config::load_graceful();
-        let source_channel_id = effective_voice_source_channel(&config_snapshot, channel_id);
+        let (config_snapshot, source_channel_id) = utterance_source_config(channel_id);
         let flight_context = VoiceFlightUtteranceContext::from_utterance(
             source_channel_id,
             utterance,

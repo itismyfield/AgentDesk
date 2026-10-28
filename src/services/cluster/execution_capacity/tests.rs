@@ -2,6 +2,48 @@ use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::intake_outbox::{InsertPendingPayload, insert_pending};
 
+#[test]
+fn snapshot_capacity_preserves_local_budget_and_restart_errors() {
+    use super::super::snapshot_tests::{isolated, write_disk_config};
+
+    let Some(root) = isolated() else { return };
+    let mut config = crate::config::Config::default();
+    config.data.dir = root.join("data");
+    crate::config_live_reload::install(config.clone());
+    let cancel = Arc::new(CancelToken::new());
+    assert!(
+        acquire(None, "claude", 42, cancel.clone())
+            .unwrap()
+            .is_none()
+    );
+    config.cluster.enabled = true;
+    config.cluster.execution_slots = Some(99);
+    write_disk_config(&root, &config);
+    config.cluster.execution_slots = Some(2);
+    crate::config_live_reload::install(config.clone());
+    let mut capabilities = serde_json::Map::new();
+    publish(&mut capabilities);
+    assert_eq!(capabilities["execution_capacity"]["slots"], json!(2));
+    assert_eq!(
+        acquire(None, "claude", 42, cancel.clone()).err().as_deref(),
+        Some("execution capacity requires PostgreSQL")
+    );
+    config.cluster.execution_slots = Some(3);
+    crate::config_live_reload::install(config.clone());
+    publish(&mut capabilities);
+    assert_eq!(capabilities["execution_capacity"]["slots"], json!(2));
+    assert_eq!(
+        acquire(None, "claude", 42, cancel.clone()).err().as_deref(),
+        Some("execution_slots changed; restart the node before new execution")
+    );
+    config.cluster.execution_slots = None;
+    crate::config_live_reload::install(config);
+    assert_eq!(
+        acquire(None, "claude", 42, cancel).err().as_deref(),
+        Some("execution_slots changed; restart the node")
+    );
+}
+
 fn payload(node: &str, channel: &str) -> InsertPendingPayload {
     InsertPendingPayload {
         execution_requirements: json!({}),

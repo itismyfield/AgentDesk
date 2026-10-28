@@ -41,7 +41,7 @@ fn shared_discord_http_client() -> &'static reqwest::Client {
 }
 
 fn resolve_dispatch_thread_owner_user_id() -> Option<u64> {
-    crate::config::load_graceful().discord.owner_id
+    crate::config::runtime_config().discord.owner_id
 }
 
 fn context_slot_index(dispatch_context: Option<&serde_json::Value>) -> Option<i64> {
@@ -1520,3 +1520,7 @@ async fn send_review_result_message_via_http(
         },
     }
 }
+
+#[cfg(test)]
+#[path = "owner_snapshot_tests.rs"]
+mod snapshot_tests;

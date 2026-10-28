@@ -274,7 +274,7 @@ pub(crate) async fn admit_text_intake(
         let decision = if matches!(
             mode,
             crate::services::cluster::intake_router_hook::IntakeRoutingMode::Enforce
-        ) || crate::config::load_graceful().cluster.enabled
+        ) || crate::config::runtime_config().cluster.enabled
         {
             IntakeRouterDecision::Blocked {
                 reason: IntakeBlockedReason::RoutingDependencyFailed {

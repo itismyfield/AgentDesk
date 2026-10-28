@@ -26,7 +26,9 @@ pub(crate) fn is_exhausted(error: &sqlx::Error) -> bool {
 }
 
 pub(crate) fn publish(caps: &mut serde_json::Map<String, Value>) {
-    let cluster = crate::config::load_graceful().cluster;
+    let cluster = crate::config::snapshot()
+        .map(|config| config.cluster.clone())
+        .unwrap_or_default();
     caps.remove("execution_capacity");
     if let Some(slots) = LOCAL
         .get()
@@ -44,14 +46,9 @@ pub(crate) fn publish(caps: &mut serde_json::Map<String, Value>) {
 }
 
 pub(crate) fn automatic_enabled() -> bool {
-    crate::config_live_reload::current()
+    crate::config::snapshot()
         .map(|config| config.cluster.intake_routing.capacity_aware)
-        .unwrap_or_else(|| {
-            crate::config::load_graceful()
-                .cluster
-                .intake_routing
-                .capacity_aware
-        })
+        .unwrap_or_default()
 }
 
 /// Order available bounded candidates by occupancy ratio, oldest assignment,
@@ -122,14 +119,13 @@ pub(crate) fn acquire(
     channel: u64,
     cancel: Arc<CancelToken>,
 ) -> Result<Option<ExecutionGuard>, String> {
-    let config = crate::config::load_graceful();
-    if LOCAL.get().is_none()
-        && (!config.cluster.enabled || config.cluster.execution_slots.is_none())
-    {
+    let cluster = crate::config::snapshot()
+        .map(|config| config.cluster.clone())
+        .unwrap_or_default();
+    if LOCAL.get().is_none() && (!cluster.enabled || cluster.execution_slots.is_none()) {
         return Ok(None);
     }
-    let slots = config
-        .cluster
+    let slots = cluster
         .execution_slots
         .ok_or("execution_slots changed; restart the node")?;
     let (configured, semaphore) =

@@ -182,7 +182,7 @@ pub(super) async fn submit_order_with_pg(
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let caller_agent_id =
         crate::services::kanban::resolve_requesting_agent_id_with_pg(pool, headers).await;
-    let config = crate::config::load_graceful();
+    let config = crate::config::runtime_config();
     log_identity_consumption(
         "POST /api/queue/runs/{id}/order",
         principal,
@@ -356,3 +356,7 @@ pub async fn submit_order(
     )
     .await
 }
+
+#[cfg(test)]
+#[path = "order_snapshot_tests.rs"]
+mod snapshot_tests;
