@@ -554,7 +554,7 @@ class HerdrExpectedFailure(unittest.TestCase):
             client = Mock()
             client.send_control.side_effect = [{'id': '100'}, {'id': '200'}, {'id': '300'}, {'id': '400'}]
             def add(text):
-                r = {'id': str(501 + len(rows)), 'content': text, 'author': {'id': '42', 'bot': True}}
+                r = {'id': str(501 + len(rows)), 'content': text, 'author': {'id': assertions.provider_bot_id('claude'), 'bot': True}}
                 rows.append(r)
             def send(channel, text):
                 sends.append(text)
@@ -605,7 +605,7 @@ class HerdrExpectedFailure(unittest.TestCase):
             if 'E18S:OK' in text:
                 rows.clear()
             marker = '[E2E:E18S:OK]' if 'E18S:OK' in text else '[E2E:E18:OK]'
-            rows.append({'id': str(501 + len(rows)), 'content': marker, 'author': {'id': '42', 'bot': True}})
+            rows.append({'id': str(501 + len(rows)), 'content': marker, 'author': {'id': assertions.provider_bot_id('claude'), 'bot': True}})
             return {'id': str(next(ids))}
         client.send.side_effect = send
         client.wait_for_message.side_effect = lambda channel, **k: (next((r for r in rows if k['predicate'](r)), None), list(rows))
