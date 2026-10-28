@@ -841,7 +841,7 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
         .await
         .unwrap();
     let embedded = sqlx::migrate!("./migrations/postgres");
-    let version = 157;
+    let version = 161;
     let main = Migrator::with_migrations(
         embedded
             .iter()
