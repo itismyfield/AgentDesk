@@ -14,8 +14,7 @@ const TAIL_WINDOW: u64 = 4 * 1024 * 1024;
 pub(crate) enum TurnVerdict {
     /// A model turn: Enter steers into it.
     KnownModelTurn(String),
-    /// A shell, compact or review turn, or a sandbox other than full access: Enter queues or the
-    /// turn is out of scope.
+    /// A shell/review turn or a sandbox other than full access: Enter queues or is out of scope.
     NonSteerable(String),
     /// Not proven either way.
     Unknown,
@@ -30,7 +29,6 @@ struct Open {
     context: bool,
     full_access: bool,
     user: bool,
-    compaction: bool,
     closed: bool,
     unreadable: bool,
 }
@@ -87,7 +85,7 @@ pub(crate) fn read_turn(path: &Path) -> Option<TurnVerdict> {
         TurnVerdict::NotBusy
     } else if review == Review::Unknown {
         TurnVerdict::Unknown
-    } else if open.turn != open.root || review != Review::Clear || open.compaction {
+    } else if open.turn != open.root || review != Review::Clear {
         TurnVerdict::NonSteerable(turn)
     } else if !open.context || !open.full_access {
         TurnVerdict::NonSteerable(turn)
@@ -138,10 +136,8 @@ fn apply(record: &Value, open: &mut Option<Open>, review: &mut Review) {
             let Some(open) = open.as_mut().filter(|open| turn_id == Some(&open.turn)) else {
                 return;
             };
-            match item {
-                Some("UserMessage") => open.user = true,
-                Some("ContextCompaction") => open.compaction = true,
-                _ => {}
+            if item == Some("UserMessage") {
+                open.user = true;
             }
         }
         (Some("event_msg"), Some("task_complete" | "turn_aborted")) => {

@@ -118,8 +118,7 @@ fn captured_turns_read_as_enter_met_them() {
     assert_eq!(verdict(""), TurnVerdict::NotBusy);
 }
 
-/// Each condition of a steerable model turn is required on its own: the turn's context, its user
-/// message, both attributed to the same turn, a root turn, no review or compaction, full access.
+/// A model turn needs its own context and user message, a root turn, no review and full access.
 #[test]
 fn a_model_turn_needs_its_own_context_and_user_message() {
     let user = |turn| item(turn, "UserMessage", "go");
@@ -142,8 +141,6 @@ fn a_model_turn_needs_its_own_context_and_user_message() {
     assert_eq!(verdict(&sub_turn), non_steerable("s1"));
     let in_review = item("r1", "EnteredReviewMode", "") + &model("t1");
     assert_eq!(verdict(&in_review), non_steerable("t1"));
-    let compacting = model("t1") + &item("t1", "ContextCompaction", "");
-    assert_eq!(verdict(&compacting), non_steerable("t1"));
     let read_only = started("t1", "t1") + &context("t1", "read-only") + &user("t1");
     assert_eq!(verdict(&read_only), non_steerable("t1"));
     assert_eq!(
@@ -153,6 +150,53 @@ fn a_model_turn_needs_its_own_context_and_user_message() {
     assert_eq!(
         verdict(&(model("t1") + &ended("task_complete", Some("t0")))),
         steerable("t1")
+    );
+}
+
+#[test]
+fn a_model_turn_with_completed_compaction_still_injects() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let rollout = model(T) + &item(T, "ContextCompaction", "");
+    assert_eq!(verdict(&rollout), steerable(T));
+    let fake = Fake::new();
+    fs::write(&fake.rollout, rollout).unwrap();
+    assert_eq!(fake.run(&FakeLedger::default()), Outcome::Injected);
+    assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
+}
+
+#[test]
+fn a_model_turn_with_in_progress_compaction_still_injects() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let compaction = serde_json::json!({"type": "event_msg", "payload": {
+        "type": "item_started", "turn_id": T,
+        "item": {"type": "ContextCompaction", "id": "compacting"}}});
+    let rollout = model(T) + &format!("{compaction}\n");
+    assert_eq!(verdict(&rollout), steerable(T));
+    let fake = Fake::new();
+    fs::write(&fake.rollout, rollout).unwrap();
+    let shown = format!("• Compacting context\n{}", fixture("busy_empty.ansi"));
+    fake.answers("cap", &[&shown]);
+    assert_eq!(fake.run(&FakeLedger::default()), Outcome::Injected);
+    assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
+}
+
+#[test]
+fn compaction_without_a_user_message_never_injects() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let rollout =
+        started(T, T) + &context(T, "danger-full-access") + &item(T, "ContextCompaction", "");
+    assert_eq!(verdict(&rollout), TurnVerdict::Unknown);
+    let fake = Fake::new();
+    fs::write(&fake.rollout, rollout).unwrap();
+    let ledger = FakeLedger::default();
+    assert_eq!(fake.run(&ledger), Outcome::NotSent(Veto::TurnUnknown));
+    assert_eq!(
+        (
+            fake.calls("paste-buffer"),
+            fake.enters(),
+            ledger.registered.get()
+        ),
+        (0, 0, 0)
     );
 }
 
