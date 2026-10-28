@@ -23,7 +23,7 @@ async fn bo_legacy_hosted_post_is_counted_before_the_http_future_exists() {
     assert_eq!(posts_in_flight(CHANNEL), None);
     let mut writer = hosted(&harness).await;
     assert_eq!(posts_in_flight(CHANNEL), Some(0));
-    *harness.port.on_post.lock().unwrap() = Some(Box::new(|| {
+    *harness.port.on_construct.lock().unwrap() = Some(Box::new(|| {
         assert_eq!(
             posts_in_flight(CHANNEL),
             Some(1),

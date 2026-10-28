@@ -20,6 +20,25 @@ use crate::services::tui_o::store::{ChannelStore, InitSource, Initialized, OStor
 const BOT: u64 = 42;
 const CHANNEL: u64 = 7;
 
+thread_local! {
+    static RESTART_POLICY_CALLS: std::cell::Cell<Option<(u64, usize)>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+pub(crate) fn restart_policy_call(channel: u64) {
+    if super::replay::mutant("counter_off") {
+        return;
+    }
+    RESTART_POLICY_CALLS.with(|calls| {
+        if let Some((selected, count)) = calls.get()
+            && selected == channel
+        {
+            calls.set(Some((selected, count + 1)));
+        }
+    });
+}
+
 #[derive(Clone, Copy)]
 enum Reply {
     Created,
@@ -38,6 +57,8 @@ enum Reply {
     CreatedReordered,
 }
 
+type PostHook = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
+
 #[derive(Default)]
 struct FakePort {
     history: Mutex<Vec<SeenMessage>>,
@@ -52,7 +73,9 @@ struct FakePort {
     started: Arc<Mutex<Vec<&'static str>>>,
     /// A lazy request waits on this before it completes.
     hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
-    on_post: Mutex<Option<Box<dyn Fn() + Send>>>,
+    on_post: PostHook,
+    history_reads: AtomicUsize,
+    on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Each POST answers only after this long.
     delay: Mutex<Option<std::time::Duration>>,
 }
@@ -86,6 +109,9 @@ impl DiscordPort for FakePort {
         _channel: u64,
         content: String,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
+        if let Some(hook) = self.on_construct.lock().unwrap().as_ref() {
+            hook();
+        }
         let ledger = self
             .ledger
             .lock()
@@ -127,15 +153,16 @@ impl DiscordPort for FakePort {
                 })
             }
         };
-        if let Some(hook) = self.on_post.lock().unwrap().as_ref() {
-            hook();
-        }
+        let on_post = Arc::clone(&self.on_post);
         let lazy = self.lazy.load(Ordering::SeqCst).then(|| {
             let hold = self.hold.lock().unwrap().take();
             (Arc::clone(&self.started), hold)
         });
         let delay = *self.delay.lock().unwrap();
         async move {
+            if let Some(hook) = on_post.lock().unwrap().as_ref() {
+                hook();
+            }
             if let Some(delay) = delay {
                 tokio::time::sleep(delay).await;
             }
@@ -154,6 +181,7 @@ impl DiscordPort for FakePort {
         _channel: u64,
         after: u64,
     ) -> impl Future<Output = Result<Vec<SeenMessage>, String>> + Send {
+        self.history_reads.fetch_add(1, Ordering::SeqCst);
         // Without history permission Discord lists nothing rather than refusing.
         let readable = !self.unreadable.load(Ordering::SeqCst);
         let history = self.history.lock().unwrap();
