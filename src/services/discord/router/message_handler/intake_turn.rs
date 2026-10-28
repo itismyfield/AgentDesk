@@ -21,6 +21,7 @@ mod retry_prompt;
 mod runtime_transition;
 pub(in crate::services::discord) mod session_preparation;
 mod stale_dispatch_guard;
+mod start_placeholder;
 mod voice_intake;
 mod worker_entry;
 
@@ -1388,6 +1389,11 @@ pub(super) async fn handle_text_message(
                 }
             }
         };
+        let start_placeholder = start_placeholder::StartPlaceholder {
+            channel_id,
+            message_id: placeholder_msg_id,
+            fresh: reusable_busy_notice.is_none(),
+        };
         let prepared_prompt = retry_prompt::prepare(shared, &provider, channel_id, retry_prompt_context).await;
         let session_retry_context = prepared_prompt.recovery.clone();
         let feedback_reminder: Option<String> = None;
@@ -2053,7 +2059,10 @@ pub(super) async fn handle_text_message(
                 }
                 start
             }
-            Err(stopped) => return stopped,
+            Err(stopped) => {
+                start_placeholder.discard_refused(http, shared, user_msg_id, "replay_start").await;
+                return stopped;
+            }
         };
         let turn_host = crate::services::turn_host::for_turn(
             shared.pg_pool.as_ref(),
@@ -2075,13 +2084,23 @@ pub(super) async fn handle_text_message(
         .await
         {
             Ok(registration) => registration,
-            Err(true) => return Ok(IntakeExecution::deferred(channel_id)),
-            Err(false) => return Err("original bridge start deferred; retry enqueue refused".into()),
+            Err(requeued) => {
+                start_placeholder.discard_refused(http, shared, user_msg_id, "bridge_registration").await;
+                return if requeued {
+                    Ok(IntakeExecution::deferred(channel_id))
+                } else {
+                    Err("original bridge start deferred; retry enqueue refused".into())
+                };
+            }
         };
         inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
         let row = save_intake_inflight(codex_seed.as_ref(), &mut inflight_state);
-        if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {
-            return Ok(IntakeExecution::deferred(channel_id));
+        let admitted = super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await;
+        if !matches!(admitted, Ok(true)) {
+            // The recovery read guard is released before the delete waits on Discord.
+            drop(original_registration);
+            start_placeholder.discard_refused(http, shared, user_msg_id, "foreign_row").await;
+            return admitted.map(|_| IntakeExecution::deferred(channel_id)).map_err(Into::into);
         }
         // A replaced Codex source is saved as the wrapper end; the watcher follows the saved row.
         inflight_offset = inflight_state.last_offset;

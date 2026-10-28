@@ -37,6 +37,10 @@ mod session_gc;
 mod shared_data;
 mod shutdown;
 mod spawns;
+#[cfg(test)]
+pub(in crate::services::discord) use spawns::{
+    ORPHAN_RETRY_CADENCE_FOR_TESTS, run_bot_spawn_execution_runtime_tasks,
+};
 mod startup_doctor;
 mod voice;
 
@@ -333,9 +337,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         health_registry
             .register_worker(provider.as_str().to_string(), shared.clone())
             .await;
-        spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
-        #[cfg(unix)]
-        spawns::run_bot_spawn_reachability_observation(&shared, &provider);
+        spawns::run_bot_spawn_execution_runtime_tasks(&shared, &provider);
         run_bot_spawn_sigterm_handler(&shared, provider.clone());
         o_writer_host::spawn_execution(&shared, &provider, boot_config.tui_o.as_ref());
         // REST workers persist the same mailbox state as Gateway runtimes.
@@ -398,9 +400,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             o_writer_host::spawn_execution(&shared, &provider, boot_config.tui_o.as_ref());
             // Standby intake can execute a full turn, so it gets the same
             // marker fence and acknowledgement path as a gateway runtime.
-            spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
-            #[cfg(unix)]
-            spawns::run_bot_spawn_reachability_observation(&shared, &provider);
+            spawns::run_bot_spawn_execution_runtime_tasks(&shared, &provider);
             run_bot_spawn_sigterm_handler(&shared, provider.clone());
             run_bot_maybe_spawn_intake_worker(&shared, &provider);
             spawn_standby_gateway_retry(
@@ -423,9 +423,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     health_registry
         .register(provider.as_str().to_string(), shared.clone())
         .await;
-    spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
-    #[cfg(unix)]
-    spawns::run_bot_spawn_reachability_observation(&shared, &provider);
+    spawns::run_bot_spawn_execution_runtime_tasks(&shared, &provider);
     run_bot_maybe_spawn_intake_worker(&shared, &provider);
     let pg_gateway = gateway_lease.is_some();
     o_writer_host::spawn(&shared, &provider, boot_config.tui_o.as_ref(), pg_gateway);
