@@ -50,6 +50,10 @@ export const campaignNodeSchema = z.looseObject({
   blocker: nullableText,
   summary: nullableText,
   benefit: nullableText,
+  post_merge_hold: nullableText,
+  // Server-owned; PUT ignores them and keeps the stored values.
+  auto_closed_from: z.looseObject({}).optional(),
+  issue_drift: z.looseObject({ reason: z.string() }).optional(),
   updated_at: timestampSchema,
   details: z.string().default(""),
   acceptance: textList,

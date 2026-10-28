@@ -224,6 +224,21 @@ fn native(
     )
 }
 
+/// A hook path outside the recorded root is respelled through its canonical directory, the
+/// same rule the root was recorded with; a path already under the root is kept verbatim.
+fn rooted_spelling(context: &BindingContext, path: &Path) -> std::path::PathBuf {
+    let root = context.provider_root.as_deref();
+    if root.is_none_or(|root| path.starts_with(root)) {
+        return path.to_path_buf();
+    }
+    path.parent()
+        .and_then(|dir| dir.canonicalize().ok())
+        .zip(path.file_name())
+        .map(|(dir, name)| dir.join(name))
+        .filter(|respelled| root.is_some_and(|root| respelled.starts_with(root)))
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 fn source_id(source: &VerifiedCodexHookSource) -> io::Result<binding_events::SourceId> {
     #[cfg(unix)]
     if let crate::services::cluster::stream_relay::SourceFileIdentity::Unix { dev, ino } =
@@ -634,7 +649,10 @@ pub(crate) fn observe_verified_codex_hook(
             use sha2::{Digest, Sha256};
             let claim = Claim {
                 session_id: id.to_owned(),
-                path: hook.transcript_path.as_ref().map(std::path::PathBuf::from),
+                path: hook
+                    .transcript_path
+                    .as_deref()
+                    .map(|path| rooted_spelling(context, Path::new(path))),
                 evidence: ClaimEvidence::NativeHook {
                     event: hook.event.clone(),
                     source: payload["source"].as_str().map(str::to_owned),

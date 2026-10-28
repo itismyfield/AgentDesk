@@ -542,10 +542,13 @@ class VerifyArchive(Fixture):
         self.assertIn("NEXTEST_RETRIES is set", err)
 
 
-def source_losses(removed=None, ignored=None):
+def source_losses(removed=None, ignored=None, present=None):
     """rust_test_sources.py removed JSON: per-platform removed and runnable->ignored names."""
     empty = {"linux": [], "macos": [], "windows": []}
-    return {"removed": {**empty, **(removed or {})}, "runnable_to_ignored": {**empty, **(ignored or {})}}
+    doc = {"removed": {**empty, **(removed or {})}, "runnable_to_ignored": {**empty, **(ignored or {})}}
+    if present is not None:
+        doc["present_tests"] = {**empty, **present}
+    return doc
 
 
 class BaseDiff(Fixture):
@@ -578,13 +581,56 @@ class BaseDiff(Fixture):
     def test_removed_and_newly_ignored_tests_fail_without_rows(self):
         self.plan_ok(["m::a", "m::b", "m::c"], workers=1, out="base")
         self.plan_ok(["m::a", "m::new"], ignored=["m::b"], workers=1)
-        rc, err = self.diff(SHA)
+        rc, err = self.diff(SHA, source=source_losses(present={}))
         diff = json.loads((self.dir / "diff.json").read_text())
         self.assertEqual(rc, 1)
         self.assertEqual((diff["removed"], diff["runnable_to_ignored"], diff["added"]),
                          ([f"{BIN} m::c"], [f"{BIN} m::b"], [f"{BIN} m::new"]))
         self.assertEqual(diff["unjustified"], [f"{BIN} m::b | runnable->ignored", f"{BIN} m::c | removed"])
         self.assertIn(f"lost without a justification row: {BIN} m::c | removed", err)
+
+    def test_landed_removal_rows_warn_with_full_row_and_do_not_fail(self):
+        self.plan_ok(["m::a"], workers=1, out="base")
+        self.plan_ok(["m::a"], workers=1)
+        rows = (f"{BIN} m::landed | removed | merged into m::a\n"
+                f"{BIN} m::typo | runnable->ignored | visibly misspelled row\n")
+        rc, err = self.diff(SHA, rows=rows, source=source_losses(present={}))
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("ERROR", err)
+        warnings = err.splitlines()
+        self.assertEqual(len(warnings), 2)
+        for row in rows.splitlines():
+            self.assertTrue(any(line.startswith("WARN ") and line.endswith(row) for line in warnings), err)
+        diff = json.loads((self.dir / "diff.json").read_text())
+        self.assertEqual(diff["landed_justifications"],
+                         [f"{BIN} m::landed | removed", f"{BIN} m::typo | runnable->ignored"])
+        self.assertEqual(diff["stale_justifications"], diff["landed_justifications"])
+        self.assertEqual(diff["unjustified"], [])
+
+    def test_native_presence_or_incomplete_evidence_keeps_rows_errors(self):
+        self.plan_ok(["m::a"], workers=1, out="base")
+        self.plan_ok(["m::a"], workers=1)
+        sources = [source_losses(), source_losses(present={"macos": ["m::native"]}),
+                   source_losses(present={"windows": ["m::native"]})]
+        for evidence in ({"macos": []}, {"macos": [], "windows": None},
+                         {"macos": [], "windows": [False]}):
+            sources.append({**source_losses(), "present_tests": evidence})
+        for source in sources:
+            with self.subTest(source=source):
+                rc, err = self.diff(SHA, rows=f"{BIN} m::native | removed | native row\n", source=source)
+                self.assertEqual(rc, 1, err)
+                self.assertIn(f"matches no loss against {SHA}: {BIN} m::native | removed", err)
+                self.assertEqual(json.loads((self.dir / "diff.json").read_text())["landed_justifications"], [])
+
+    def test_base_ignored_or_head_only_presence_keeps_rows_errors(self):
+        self.plan_ok(["m::a"], ignored=["m::ignored"], workers=1, out="base")
+        self.plan_ok(["m::a", "m::new"], ignored=["m::ignored"], workers=1)
+        for name in ("m::ignored", "m::new"):
+            with self.subTest(name=name):
+                rc, err = self.diff(SHA, rows=f"{BIN} {name} | removed | still here\n",
+                                    source=source_losses(present={}))
+                self.assertEqual(rc, 1, err)
+                self.assertIn(f"matches no loss against {SHA}: {BIN} {name} | removed", err)
 
     def test_rows_matching_each_loss_exactly_pass(self):
         self.plan_ok(["m::a", "m::b", "m::c"], workers=1, out="base")
@@ -599,7 +645,7 @@ class BaseDiff(Fixture):
                  (f"{BIN} m::b | runnable->ignored | wrong kind\n", f"{BIN} m::b | runnable->ignored"))
         for rows, stale in cases:
             with self.subTest(rows=rows):
-                rc, err = self.diff(SHA, rows=rows)
+                rc, err = self.diff(SHA, rows=rows, source=source_losses(present={}))
                 self.assertEqual(rc, 1)
                 self.assertIn(f"matches no loss against {SHA}: {stale}", err)
         for rows in ("m::b | removed | no binary\n", f"{BIN} m::b | deleted | bad kind\n", f"{BIN} m::b | removed |\n",
@@ -752,8 +798,12 @@ class BaseDiffScript(ScriptRepo):
 
     def test_main_baseline_is_used_when_it_matches(self):
         head = self.head_plan(["m::a", "m::b"])
+        row = f"{BIN} m::landed | removed | removed by the preceding PR"
+        (self.repo / "scripts/ci/test-removal-justifications.txt").write_text(row + "\n")
         rc, out, summary, cargo = self.run_script(head, GH_RUN_ID="5", GH_BASELINE=str(self.baseline(["m::a"])))
         self.assertEqual(rc, 0, out)
+        self.assertIn("WARN ", out)
+        self.assertIn(row, out)
         self.assertIn("against CI Main's baseline", summary)
         self.assertNotIn("archive", cargo)
 
@@ -1118,6 +1168,9 @@ class RustSources(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads((self.root / "removed.json").read_text())["removed"],
                          {"linux": [], "macos": [], "windows": ["gated", "w"]})
+        self.assertEqual(json.loads((self.root / "removed.json").read_text())["present_tests"],
+                         {"linux": ["a", "gated", "new"], "macos": ["a", "gated", "m", "new"],
+                          "windows": ["a", "gated", "new", "w"]})
         (base / "src/lib.rs").write_text("#[cfg(feature = \"unknown\" || x)]\n#[test]\nfn odd() {}\n")
         self.assertEqual(self.cli("removed", "--base-root", base, "--json-out", self.root / "removed.json")[0], 1)
 
@@ -1136,6 +1189,7 @@ class RustSources(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads((self.root / "removed.json").read_text())["runnable_to_ignored"],
                          {"linux": [], "macos": ["m"], "windows": ["all", "w"]})
+        self.assertIn("was_ignored", json.loads((self.root / "removed.json").read_text())["present_tests"]["windows"])
         self.tree({"src/lib.rs": lib.replace("fn w()", "#[cfg_attr(cfg_attr(windows, x), ignore)]\nfn w()")})
         self.assertEqual(self.cli("removed", "--base-root", base, "--json-out", self.root / "removed.json")[0], 1)
 
