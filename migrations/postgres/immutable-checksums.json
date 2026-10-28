@@ -772,24 +772,9 @@
       "version": 151
     },
     {
-      "path": "migrations/postgres/0152_channel_home_preferences.sql",
-      "sha256": "a0523901b63e955bf3d7e9170180ffbc7d9b6763b26bb53015608f4932b84006",
-      "version": 152
-    },
-    {
       "path": "migrations/postgres/0152_imsg_external_admission.sql",
       "sha256": "ee3c4f314cf8938327e10fd1f09152e637caf5f9e9eebe23a71cbb077fcb8f18",
       "version": 152
-    },
-    {
-      "path": "migrations/postgres/0153_intake_routing_custody.sql",
-      "sha256": "aff7f962743210f42e863062e0d56fd84237500320e05f3028a004a6fb24da24",
-      "version": 153
-    },
-    {
-      "path": "migrations/postgres/0154_output_origin.sql",
-      "sha256": "5837484ea11ddcacc7b819e116e5f17d999c6e4b72d33d9ff65cb84769d06414",
-      "version": 154
     },
     {
       "path": "migrations/postgres/0155_scheduled_delivery_turn_outcome.sql",
@@ -797,9 +782,24 @@
       "version": 155
     },
     {
-      "path": "migrations/postgres/0157_execution_cleanup.sql",
-      "sha256": "ec3b055ec391d18d53faa2ca38f58a1d0bbf1f8c7f13509da0aa99c98c0d04ab",
+      "path": "migrations/postgres/0157_channel_home_preferences.sql",
+      "sha256": "a0523901b63e955bf3d7e9170180ffbc7d9b6763b26bb53015608f4932b84006",
       "version": 157
+    },
+    {
+      "path": "migrations/postgres/0158_intake_routing_custody.sql",
+      "sha256": "aff7f962743210f42e863062e0d56fd84237500320e05f3028a004a6fb24da24",
+      "version": 158
+    },
+    {
+      "path": "migrations/postgres/0159_output_origin.sql",
+      "sha256": "5837484ea11ddcacc7b819e116e5f17d999c6e4b72d33d9ff65cb84769d06414",
+      "version": 159
+    },
+    {
+      "path": "migrations/postgres/0160_execution_cleanup.sql",
+      "sha256": "ec3b055ec391d18d53faa2ca38f58a1d0bbf1f8c7f13509da0aa99c98c0d04ab",
+      "version": 160
     }
   ],
   "version": 1
