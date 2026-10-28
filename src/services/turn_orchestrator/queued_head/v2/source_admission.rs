@@ -402,7 +402,11 @@ impl SnapshotV2 {
             Admitted::Duplicate => return,
         };
         let receipt = receipt.to_string();
-        self.admission_binds.push(AdmissionBind { receipt, at });
+        self.admission_binds.push(AdmissionBind {
+            receipt,
+            at,
+            context: None,
+        });
     }
 
     /// Drops queued binds past the end, which a cut of the queue's tail left; run before a push.
@@ -449,8 +453,17 @@ impl SnapshotV2 {
             _ => true,
         });
         if let Some(receipt) = receipt {
+            let context = self
+                .admission_binds
+                .iter()
+                .find(|b| b.receipt == receipt)
+                .and_then(|b| b.context.clone());
             let at = BindAt::Attempt { identity, attempt };
-            self.admission_binds.push(AdmissionBind { receipt, at });
+            self.admission_binds.push(AdmissionBind {
+                receipt,
+                at,
+                context,
+            });
         }
     }
 }
@@ -729,74 +742,63 @@ impl super::super::super::ChannelMailboxHandle {
 mod tests;
 
 impl Owner {
-    fn admission_context(
-        &self,
-        original: &PendingQueueItem,
-        ticket: &Ticket,
-    ) -> Result<Option<serde_json::Value>, String> {
-        let prefix = format!("context:{}:", ticket.receipt(original));
-        let record = self
-            .snapshot
-            .admission_receipts
-            .iter()
-            .find_map(|entry| entry.strip_prefix(&prefix));
-        let Some(record) = record else {
-            return Ok(None);
-        };
-        let context: super::super::v2_types::AdmissionContext =
-            serde_json::from_str(record).map_err(|e| e.to_string())?;
-        if context.original.as_ref()
-            != Some(&serde_json::to_value(original).map_err(|e| e.to_string())?)
-        {
-            return Err("admission original differs from stored context".into());
-        }
-        Ok(context.execution)
+    fn context_in<'a>(
+        snapshot: &'a SnapshotV2,
+        receipt: &str,
+    ) -> Option<&'a super::super::v2_types::AdmissionContext> {
+        snapshot.admission_binds.iter().find_map(|b| {
+            (b.receipt == receipt)
+                .then_some(b.context.as_ref())
+                .flatten()
+        })
     }
 
     fn admit_with_context(
         &mut self,
         original: &PendingQueueItem,
         ticket: Ticket,
-        context: serde_json::Value,
+        execution: serde_json::Value,
     ) -> Result<Admitted, AdmitError> {
+        let receipt = ticket.receipt_for(&canonical(original));
+        let expected = super::super::v2_types::AdmissionContext {
+            original: Some(canonical(original)),
+            execution: Some(execution),
+        };
+        // Refuse conflicting committed or unconfirmed originals before any recovery writes.
+        for snapshot in
+            std::iter::once(&self.snapshot).chain(self.pending.iter().map(|(_, next)| next))
+        {
+            if snapshot
+                .admission_receipts
+                .iter()
+                .any(|r| r.starts_with(&ticket.prefix()))
+            {
+                if !snapshot.admission_receipts.contains(&receipt)
+                    || Self::context_in(snapshot, &receipt) != Some(&expected)
+                {
+                    return Err(AdmitError::Conflict(
+                        "ticket original or execution context differs".into(),
+                    ));
+                }
+            }
+        }
         if self.pending.is_some() && self.recover().is_err() && self.pending.is_some() {
             return Err(AdmitError::Pending);
         }
-        if self
-            .snapshot
-            .admission_receipts
-            .iter()
-            .any(|r| r.starts_with(&ticket.prefix()))
-        {
-            let stored = self
-                .admission_context(original, &ticket)
-                .map_err(AdmitError::Conflict)?;
-            if stored.as_ref() != Some(&context) {
-                return Err(AdmitError::Conflict(
-                    "admission provenance differs or is absent".into(),
-                ));
-            }
+        if self.snapshot.admission_receipts.contains(&receipt) {
             return Custody::with_ticket(original, ticket).advance(self);
         }
         let (next, outcome) = self.fresh_candidate(original)?;
         let Some(mut next) = next else {
-            return Err(AdmitError::Conflict(
-                "source already fenced without this context".into(),
-            ));
+            return Err(AdmitError::SourceAlreadyKnown);
         };
-        let receipt = ticket.receipt(original);
-        let stored = super::super::v2_types::AdmissionContext {
-            original: Some(
-                serde_json::to_value(original)
-                    .map_err(|e| AdmitError::NotCommitted(e.to_string()))?,
-            ),
-            execution: Some(context),
-        };
-        let encoded =
-            serde_json::to_string(&stored).map_err(|e| AdmitError::NotCommitted(e.to_string()))?;
-        // The additional record shares the original's snapshot commit; the ticket bytes stay unchanged.
-        next.admission_receipts
-            .push(format!("context:{receipt}:{encoded}"));
+        next.bind_admitted(&receipt, outcome);
+        let bind = next
+            .admission_binds
+            .iter_mut()
+            .find(|b| b.receipt == receipt)
+            .ok_or_else(|| AdmitError::NotCommitted("admission bind absent".into()))?;
+        bind.context = Some(expected);
         match self.admit_commit(next, Some(receipt.clone())) {
             Err(AdmitError::Pending) => {
                 self.unacknowledged.push((receipt, outcome));
@@ -816,6 +818,11 @@ impl super::super::super::ChannelMailboxHandle {
         context: serde_json::Value,
     ) -> Result<Admitted, AdmitError> {
         let ticket = Ticket::new(&ticket).map_err(AdmitError::NotCommitted)?;
+        if original.queued_generation == 0 {
+            return Err(AdmitError::NotCommitted(
+                "the original's queued generation is unsettled".into(),
+            ));
+        }
         self.v2_request(move |slot| {
             Ok(match slot.as_mut() {
                 Some(owner) => owner.admit_with_context(&original, ticket, context),
@@ -833,9 +840,10 @@ impl super::super::super::ChannelMailboxHandle {
     ) -> Result<Option<serde_json::Value>, String> {
         let ticket = Ticket::new(&ticket)?;
         self.v2_request(move |slot| {
-            slot.as_ref()
-                .ok_or_else(|| "V2 not adopted".into())?
-                .admission_context(&original, &ticket)
+            let owner = slot.as_ref().ok_or("V2 not adopted")?;
+            owner.exact_turn(&ticket, &original)?;
+            let receipt = ticket.receipt_for(&canonical(&original));
+            Ok(Owner::context_in(&owner.snapshot, &receipt).and_then(|c| c.execution.clone()))
         })
         .await
     }

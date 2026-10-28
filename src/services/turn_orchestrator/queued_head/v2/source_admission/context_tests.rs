@@ -7,7 +7,7 @@ use serde_json::json;
 
 fn original() -> PendingQueueItem {
     serde_json::from_value(json!({"author_id":1,"message_id":8000000000000001772u64,
-        "channel_id":7272901,"text":"unchanged routine prompt"}))
+        "channel_id":7272901,"queued_generation":5,"text":"unchanged routine prompt"}))
     .unwrap()
 }
 
@@ -146,12 +146,12 @@ async fn committed_after_local_settle_keeps_context_without_an_exact_live_turn()
             .unwrap()
             .committed()
     );
-    assert_eq!(
+    assert!(
         handle
             .v2_exact_turn(original(), "settled".into())
             .await
-            .unwrap(),
-        None
+            .unwrap()
+            .settled()
     );
     assert_eq!(
         handle

@@ -24,6 +24,8 @@ pub(crate) struct SnapshotV2 {
 pub(crate) struct AdmissionBind {
     pub(crate) receipt: String,
     pub(crate) at: BindAt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) context: Option<AdmissionContext>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -147,9 +149,8 @@ pub(crate) struct TerminalIdentity {
     pub(crate) settled_at_ms: u64,
 }
 
-/// Optional caller provenance stored with an admission receipt in the existing snapshot.
-#[cfg(test)]
-#[derive(Default, Serialize, Deserialize)]
+/// Caller provenance follows the ticket through reservation and settlement.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AdmissionContext {
     #[serde(default)]
     pub(crate) original: Option<serde_json::Value>,
