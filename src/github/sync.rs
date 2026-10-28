@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+mod campaign_nodes;
 mod card_state;
 #[cfg(test)]
 mod warning_tests;
@@ -186,7 +187,22 @@ pub async fn sync_github_issues_for_repo_pg(
     sync_github_issues_for_repo_pg_with_adapter(pool, repo, issues, super::adapter()).await
 }
 
+/// Card sync, then campaign nodes; a card failure does not hold back the nodes.
 pub(crate) async fn sync_github_issues_for_repo_pg_with_adapter(
+    pool: &PgPool,
+    repo: &str,
+    issues: &[GhIssue],
+    adapter: &dyn super::GitHubAdapter,
+) -> Result<SyncResult, String> {
+    let cards = sync_cards_for_repo_pg(pool, repo, issues, adapter).await;
+    let campaign_nodes = campaign_nodes::sync_campaign_nodes(pool, repo, issues, adapter).await;
+    cards.map(|result| SyncResult {
+        campaign_nodes,
+        ..result
+    })
+}
+
+async fn sync_cards_for_repo_pg(
     pool: &PgPool,
     repo: &str,
     issues: &[GhIssue],
@@ -1355,6 +1371,7 @@ pub struct SyncResult {
     pub stale_card_issue_check_count: usize,
     pub stale_card_issue_batch_count: usize,
     pub stale_card_issue_error_count: usize,
+    pub campaign_nodes: crate::db::campaigns::issue_sync::IssueSyncReport,
 }
 
 /// Reason code attached to terminal-card / OPEN-issue mismatch alerts so the
