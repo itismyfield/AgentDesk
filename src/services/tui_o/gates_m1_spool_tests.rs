@@ -10,16 +10,18 @@ use serde_json::Value;
 use super::gates_m1_support::{EmptyBindings, TestWriter, writer as make_writer};
 use crate::services::tui_o::shadow::capture::{SourceCapture, file_identity};
 use crate::services::tui_o::shadow::{
-    CaptureOutcome, CaptureSource, IDENTITY_VERSION, ShadowProvider, SourceId, UnitKey, UnitKind,
+    CaptureOutcome, CaptureSource, CapturedRecord, IDENTITY_VERSION, ShadowProvider, SourceId,
+    UnitKey, UnitKind,
 };
-use crate::services::tui_o::store::ledger::PieceOutcome;
+use crate::services::tui_o::store::ledger::{LedgerState, PieceOutcome};
 use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::store::{ChannelStore, HaltReason, OStore, StoreError, fault};
+use crate::services::tui_o::writer::ReplaySummary;
 use crate::services::tui_o::writer::deliver::Step;
 use crate::services::tui_o::writer::pieces::{
     Derived, PieceWork, TOOL_RESULT_INTERNAL, UnitDeriver,
 };
-use crate::services::tui_o::writer::rotation::Sources;
+use crate::services::tui_o::writer::rotation::{Owe, Sources};
 
 const ORACLE: &str = "5806d1e6038040218ec48b51bf3105fe36992a23";
 
@@ -269,25 +271,49 @@ impl Fixture {
     }
 }
 
-fn resume(fixture: &Fixture, writer: &mut TestWriter) -> Vec<Derived> {
+#[derive(Default)]
+struct Replay {
+    derived: Vec<Derived>,
+    owed: VecDeque<Derived>,
+    finished: bool,
+}
+
+impl Owe for Replay {
+    fn owe(&mut self, source: &SourceId, record: &CapturedRecord, derived: Vec<Derived>) {
+        self.derived.extend(derived.iter().cloned());
+        self.owed.owe(source, record, derived);
+    }
+
+    fn finish_replay(&mut self, ledger: &LedgerState) -> ReplaySummary {
+        assert!(!self.finished, "replay must finish exactly once");
+        self.finished = true;
+        self.owed.finish_replay(ledger)
+    }
+}
+
+fn resume(fixture: &Fixture, writer: &mut TestWriter) -> Replay {
     let mut sources = Sources::new(
         fixture.expected.channel_id,
         fixture.expected.provider,
         Arc::new(EmptyBindings),
     );
     let mut deriver = UnitDeriver::new(fixture.expected.channel_id, fixture.expected.provider);
-    let mut owed = VecDeque::new();
-    sources.resume(writer, &mut deriver, &mut owed).unwrap();
+    let mut replay = Replay::default();
+    sources.resume(writer, &mut deriver, &mut replay).unwrap();
+    assert!(replay.finished, "production replay finish must execute");
+    assert_eq!(sources.replayed.before, replay.derived.len());
+    assert_eq!(sources.replayed.kept, replay.owed.len());
     println!(
-        "PROBE Sources::resume derived_items={} provider={:?}",
-        owed.len(),
+        "PROBE Sources::resume derived_items={} owed_items={} provider={:?}",
+        replay.derived.len(),
+        replay.owed.len(),
         fixture.expected.provider
     );
     assert!(
-        !owed.is_empty(),
+        !replay.derived.is_empty(),
         "production replay must derive actual work"
     );
-    owed.into_iter().collect()
+    replay
 }
 
 fn sorted(mut work: Vec<Derived>) -> Vec<Derived> {
@@ -305,11 +331,25 @@ async fn g2_gate_v2_v3_rederive_same_unitkey_body_frontier() {
         let fixture = Fixture::load(name);
         let (mut writer, port) = make_writer(fixture.open().unwrap());
         fixture.frontier(writer.store());
-        let work = resume(&fixture, &mut writer);
+        let replay = resume(&fixture, &mut writer);
         assert_eq!(
-            sorted(work.clone()),
+            sorted(replay.derived),
             sorted(fixture.expected_work()),
             "v2/current output tuples differ: {name}"
+        );
+        // The identity oracle includes Posted pieces; only their debt is removed after derivation.
+        let pending_work = fixture
+            .expected_work()
+            .into_iter()
+            .filter(|item| {
+                !matches!(item, Derived::Piece(piece) if fixture.expected.pieces.iter().any(|old| {
+                    old.posted.is_some() && old.unit_key == piece.unit_key && old.index == piece.index
+                }))
+            })
+            .collect();
+        assert_eq!(
+            sorted(replay.owed.iter().cloned().collect()),
+            sorted(pending_work)
         );
         let pending = fixture.pending_bodies();
         assert!(!pending.is_empty());
@@ -320,7 +360,7 @@ async fn g2_gate_v2_v3_rederive_same_unitkey_body_frontier() {
                 .iter()
                 .any(|piece| piece.posted.is_some())
         );
-        for item in &work {
+        for item in &replay.owed {
             assert_eq!(writer.deliver(item).await, Step::Done);
         }
         assert_eq!(
@@ -331,7 +371,13 @@ async fn g2_gate_v2_v3_rederive_same_unitkey_body_frontier() {
         fixture.delivered(writer.store(), port.posts().len());
         drop(writer);
         let (mut reopened, second_port) = make_writer(fixture.open().unwrap());
-        for item in resume(&fixture, &mut reopened) {
+        let replay = resume(&fixture, &mut reopened);
+        assert!(
+            replay.owed.is_empty(),
+            "all recovered work is durably acknowledged"
+        );
+        // Exercise the writer's duplicate guard as well as the empty replay debt.
+        for item in replay.derived {
             assert_eq!(reopened.deliver(&item).await, Step::Done);
         }
         assert!(
@@ -488,7 +534,7 @@ async fn g2_gate_v2_to_v3_rollover_crash_matrix() {
             assert_eq!(version(&segments[1]), u64::from(IDENTITY_VERSION));
             let (mut writer, port) = make_writer(recovered);
             let work = resume(&fixture, &mut writer);
-            for item in work {
+            for item in work.owed {
                 assert_eq!(writer.deliver(&item).await, Step::Done);
             }
             let mut pending = fixture.pending_bodies();
@@ -501,7 +547,12 @@ async fn g2_gate_v2_to_v3_rollover_crash_matrix() {
             fixture.delivered(writer.store(), port.posts().len());
             drop(writer);
             let (mut reopened, second_port) = make_writer(fixture.open().unwrap());
-            for item in resume(&fixture, &mut reopened) {
+            let replay = resume(&fixture, &mut reopened);
+            assert!(
+                replay.owed.is_empty(),
+                "rollover recovery has no unacknowledged work"
+            );
+            for item in replay.derived {
                 assert_eq!(reopened.deliver(&item).await, Step::Done);
             }
             assert!(

@@ -615,8 +615,16 @@ async fn host_channel<I: HostIo>(
     (claim, stopping): (&ReadinessClaim, watch::Receiver<bool>),
 ) {
     let alarms = io.alarms();
+    let boot = super::boot::Trace::new(channel, Some(provider), claim.generation, 0);
     let mut bindings = None;
-    let Some(recovered) = recover_boot(&runtime_root, channel, &stopping).await else {
+    let phase = boot.phase("recover");
+    let recovered = recover_boot(&runtime_root, channel, &stopping).await;
+    phase.finish(if recovered.as_ref().is_some_and(Result::is_ok) {
+        "ok"
+    } else {
+        "held"
+    });
+    let Some(recovered) = recovered else {
         return;
     };
     let store = match recovered {
@@ -629,6 +637,7 @@ async fn host_channel<I: HostIo>(
         }
         Ok(Recovered::Store(store)) => store,
         Ok(Recovered::Fresh(fresh)) => {
+            let phase = boot.phase("activate");
             let ids = (channel, provider);
             let started = first_init::start(
                 &io,
@@ -641,19 +650,25 @@ async fn host_channel<I: HostIo>(
             let Some(started) = started.await else {
                 return;
             };
+            phase.finish("ok");
             bindings = Some(started.bindings);
             started.store
         }
         Err(error) => return hold(&alarms, channel, &error.detail),
     };
     // Seeded before the port wait, so a recovered panel tick already knows O's newest post.
-    if !fresh_input::wait_metadata(&store, &alarms, &stopping).await {
+    let phase = boot.phase("wait_metadata");
+    let metadata = fresh_input::wait_metadata(&store, &alarms, &stopping).await;
+    phase.finish(if metadata { "ok" } else { "held" });
+    if !metadata {
         return;
     }
     super::deliver::seed_last_posted(channel, store.ledger());
+    let phase = boot.phase("port");
     let Some(port) = unless_stopped(&stopping, io.port()).await else {
         return;
     };
+    phase.finish("ok");
     let bindings = bindings.unwrap_or_else(|| io.bindings(channel, provider));
     let hosted = Hosted {
         io: &*io,
@@ -666,12 +681,14 @@ async fn host_channel<I: HostIo>(
         bindings,
         alarms,
         stopping,
+        boot,
     };
     hosted.serve(store).await;
 }
 
 /// A channel's running host: what each start of its actor needs.
 struct Hosted<'a, I: HostIo> {
+    boot: super::boot::Trace,
     io: &'a I,
     channel: u64,
     provider: ShadowProvider,
@@ -726,13 +743,17 @@ impl<I: HostIo> Hosted<'_, I> {
 
     /// Starts one actor and returns how it stopped, once it has ended.
     async fn run(&self, store: ChannelStore, attempt: u32) -> Option<StopCause> {
+        let boot = self.boot.attempt(attempt);
         let (channel, gate) = (self.channel, self.gate);
         let (port, lease) = (Arc::clone(&self.port), self.io.lease());
         // Built for each start, so a restarted actor reopens the sidecar and keeps no stale probe.
         let (repost, alarms) = (self.io.repost(channel, &port), self.alarms.clone());
+        let phase = boot.phase("hosted");
         let hosted = ChannelWriter::hosted(store, Arc::clone(gate), port, lease, alarms, repost);
         // A stop during the receipt read ends this start before any actor exists.
-        let writer = unless_stopped(&self.stopping, hosted).await?;
+        let mut writer = unless_stopped(&self.stopping, hosted).await?;
+        phase.finish("ok");
+        writer.boot = boot;
         let writer = writer.with_repost_stop(self.stopping.clone());
         let (stop_tx, stop) = watch::channel(false);
         let (resumed_tx, resumed) = watch::channel(false);
@@ -807,7 +828,10 @@ impl<I: HostIo> Hosted<'_, I> {
                 self.alarms.resume_pending(channel, false);
                 return None;
             }
-            match recover(self.runtime_root, channel, unsent.as_ref()) {
+            let phase = self.boot.attempt(attempt).phase("recover");
+            let recovered = recover(self.runtime_root, channel, unsent.as_ref());
+            phase.finish(if recovered.is_ok() { "ok" } else { "held" });
+            match recovered {
                 Ok(Recovered::Store(store)) => return Some(store),
                 Err(error) if error.transient => {
                     let detail = error.detail;
