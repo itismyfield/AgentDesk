@@ -182,6 +182,10 @@ fn v2_queue_arms_reach_the_owner_or_refuse_without_a_v1_writer() {
                 restored.persistence_error.is_some(),
                 "a refusal is never a success"
             );
+            assert_eq!(
+                restored.queue_len_after, 3,
+                "a refusal is not an empty queue"
+            );
         }
         assert_eq!(handle.restart_drain(ctx()).await.queued_count, 3);
         assert_eq!(
@@ -260,5 +264,28 @@ fn a_closed_actor_refuses_v2_requests_and_a_successor_readopts_the_same_bytes() 
             before,
             "re-adoption rewrites nothing"
         );
+    });
+}
+
+#[test]
+fn a_v2_clear_still_releases_the_running_turn_when_asked() {
+    let _root = TestRuntimeRootGuard::new();
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        let (handle, path) = seeded(&registry, 7_272_404, &[200]).await;
+        let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+        let owner = poise::serenity_prelude::UserId::new(7);
+        assert!(
+            handle
+                .try_start_turn(token, owner, MessageId::new(900))
+                .await
+        );
+        let cleared = handle.clear(ctx()).await;
+        assert!(
+            cleared.removed_token.is_some(),
+            "the running turn is released"
+        );
+        assert!(handle.snapshot().await.cancel_token.is_none());
+        assert_eq!(ids(&single_writer(&handle, &path, "clear").await), [100]);
     });
 }
