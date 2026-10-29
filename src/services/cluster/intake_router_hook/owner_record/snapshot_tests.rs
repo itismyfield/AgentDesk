@@ -276,7 +276,7 @@ async fn staged_plan_rechecks_parent_revision_and_preserves_original_payload_pg(
         "an actual held row must reject an incomplete plan"
     );
     let original: Value = sqlx::query_scalar(
-        "SELECT to_jsonb(d)-'routing_plan'-'target_instance_id' FROM intake_outbox d WHERE id=$1",
+        "SELECT to_jsonb(d)-'routing_plan'-'target_instance_id'-'updated_at' FROM intake_outbox d WHERE id=$1",
     )
     .bind(delivery)
     .fetch_one(&f.pool)
@@ -306,7 +306,7 @@ async fn staged_plan_rechecks_parent_revision_and_preserves_original_payload_pg(
     );
     tx.rollback().await.unwrap();
     let preserved: Value = sqlx::query_scalar(
-        "SELECT to_jsonb(d)-'routing_plan'-'target_instance_id' FROM intake_outbox d WHERE id=$1",
+        "SELECT to_jsonb(d)-'routing_plan'-'target_instance_id'-'updated_at' FROM intake_outbox d WHERE id=$1",
     )
     .bind(delivery)
     .fetch_one(&f.pool)

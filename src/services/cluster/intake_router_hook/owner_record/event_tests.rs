@@ -79,7 +79,7 @@ async fn routing_event_real_outbox_history_and_failed_pointer_reuse_pg() {
         events.iter().map(|r| r.event.nonce.clone()).collect();
     assert_eq!((ids.len(), nonces.len()), (3, 3));
     for status in ["failed", "cancelled", "sent"] {
-        sqlx::query("UPDATE message_outbox SET status=$2 WHERE id=$1")
+        sqlx::query("UPDATE message_outbox SET status=$2,cancelled_at=CASE WHEN $2='cancelled' THEN NOW() ELSE NULL END WHERE id=$1")
             .bind(events[2].outbox_id)
             .bind(status)
             .execute(&f.pool)
