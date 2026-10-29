@@ -45,6 +45,8 @@ use std::sync::{OnceLock, RwLock};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::services::settings::{self, SettingSource};
+
 /// Default GATE danger threshold (utilization %) used when no runtime override
 /// is configured. The dispatch gate defers ONLY when a provider is fully
 /// rate-limited (utilization at/above 100), so this is intentionally distinct
@@ -206,7 +208,10 @@ pub const SNAPSHOT_REFRESH_MIN_INTERVAL_SEC: i64 = 120;
 #[derive(Debug, Clone, Serialize)]
 pub struct DispatchGateDiagnostics {
     pub enabled: bool,
+    /// Layer that supplied `enabled`: `kv_override`, `yaml` or `default`.
+    pub enabled_source: SettingSource,
     pub danger_pct: u64,
+    pub danger_pct_source: SettingSource,
     pub evaluations: u64,
     pub deferrals: u64,
     pub bypasses: u64,
@@ -243,7 +248,7 @@ pub fn set_provider_pressure_snapshot(snapshot: HashMap<String, ProviderPressure
 }
 
 /// Whether `provider`'s cached telemetry defers dispatch right now, at the caller's effective
-/// `danger_pct` (a parameter, not `danger_pct()`, so an off-activation caller cannot drift from
+/// `danger_pct` (a parameter, not a YAML-only read, so an off-activation caller cannot drift from
 /// the gate; `None` when that read failed). Read by the rate-limit sync loop, which must not poll
 /// below its base cadence while such pressure stands (#5727); staleness is excluded (`i64::MAX`)
 /// because an aged-out row is exactly what has to be re-observed.
@@ -519,46 +524,19 @@ pub fn pressure_snapshot_from_payloads(
     map
 }
 
-/// Read the gate-enabled flag from the YAML live config snapshot. Defaults to
-/// `true` (gate ON) when the live config snapshot is unavailable or the field is
-/// unset (`None`). Reading the in-memory `config_live_reload` snapshot is
-/// lock-cheap and does NOT touch the database, so this is safe on the hot path.
-///
-/// NOTE: this reads ONLY the YAML live snapshot — it does NOT see a toggle
-/// persisted via `PUT /api/settings/runtime-config` (which lands in `kv_meta`,
-/// never the YAML snapshot). The activation path resolves the persisted value
-/// first and passes it via [`evaluate_agent_provider_pressure_with_overrides`];
-/// this function is the YAML fallback used when no persisted override exists and
-/// by the diagnostics block.
-pub fn gate_enabled() -> bool {
-    crate::config_live_reload::current()
-        .and_then(|config| config.runtime.dispatch_rate_limit_gate_enabled)
-        .unwrap_or(true)
+/// Resolve a gate setting against the current YAML live snapshot. `kv` is the
+/// persisted override from [`persisted_runtime_overrides`], when the caller has one.
+fn live_setting<T: Copy>(
+    key: &settings::RuntimeSetting<T>,
+    kv: Option<T>,
+) -> settings::Resolved<T> {
+    let live = crate::config_live_reload::current();
+    settings::resolve_with_kv(key, kv, live.as_deref())
 }
 
-/// Read the gate-specific danger threshold (utilization %) from the YAML live
-/// config snapshot. Falls back to [`DEFAULT_DANGER_PCT`] (100) when unset. Uses
-/// the dedicated `dispatch_rate_limit_gate_danger_pct` knob — NOT
-/// `rate_limit_danger_pct` — so the dashboard's 95% danger coloring and any
-/// other `rate_limit_danger_pct` consumer are unaffected by the gate threshold.
-///
-/// Like [`gate_enabled`], this reads ONLY the YAML snapshot; the persisted
-/// runtime-config override is resolved on the activation path and passed
-/// explicitly via [`evaluate_agent_provider_pressure_with_overrides`].
-pub fn danger_pct() -> u64 {
-    crate::config_live_reload::current()
-        .and_then(|config| config.runtime.dispatch_rate_limit_gate_danger_pct)
-        .map(u64::from)
-        .unwrap_or(DEFAULT_DANGER_PCT)
-}
-
-/// Read the live staleness window (seconds). Falls back to
-/// [`DEFAULT_STALE_SEC`] when unset.
+/// The staleness window (seconds) from the YAML live snapshot, else [`DEFAULT_STALE_SEC`].
 pub fn stale_sec() -> i64 {
-    crate::config_live_reload::current()
-        .and_then(|config| config.runtime.rate_limit_stale_sec)
-        .map(|value| value as i64)
-        .unwrap_or(DEFAULT_STALE_SEC)
+    live_setting(&settings::RATE_LIMIT_STALE_SEC, None).value
 }
 
 /// Pure evaluator: given a (possibly absent) provider pressure snapshot and the
@@ -736,8 +714,8 @@ pub fn evaluate_agent_provider_pressure_with_overrides(
 ) -> ProviderPressureDecision {
     GATE_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
 
-    let danger = danger_override.unwrap_or_else(danger_pct);
-    let enabled = enabled_override.unwrap_or_else(gate_enabled);
+    let danger = live_setting(&settings::DISPATCH_GATE_DANGER_PCT, danger_override).value;
+    let enabled = live_setting(&settings::DISPATCH_GATE_ENABLED, enabled_override).value;
     auth_profiles::record_pressure_overrides(
         agent_id,
         (enabled_override, danger_override, stale_override),
@@ -768,7 +746,7 @@ pub fn evaluate_agent_provider_pressure_with_overrides(
             &auth_profiles::agent_fallback_keys(agent_id),
             &map,
             danger,
-            stale_override.unwrap_or_else(stale_sec),
+            live_setting(&settings::RATE_LIMIT_STALE_SEC, stale_override).value,
             now,
         )
     };
@@ -783,26 +761,15 @@ pub fn evaluate_agent_provider_pressure_with_overrides(
     decision
 }
 
-/// Resolve the gate-enabled flag and gate danger threshold from the persisted
-/// runtime-config (`kv_meta` `runtime-config` JSON, written by
-/// `PUT /api/settings/runtime-config`). Returns `(enabled_override,
-/// danger_override)` where each is `Some` only when the operator has persisted an
-/// explicit value; `None` lets the caller fall back to the YAML live snapshot
-/// and then the compiled defaults.
-///
-/// This is the bridge that makes the runtime rollback switch work: the persisted
-/// toggle never reaches `config_live_reload::current()`, so the gate must read it
-/// from `kv_meta` (mirroring `effective_max_entry_retries`). Runs off the
-/// activation path's existing pool read; on any parse/DB error it returns
-/// `(None, None)` (fail back to YAML/defaults, never blocks).
+/// The gate keys' kv layer of [`settings::resolve`] from `kv_meta['runtime-config']`:
+/// `Some` only when the persisted value outranks YAML, which never sees the API toggle.
 pub fn persisted_runtime_overrides(
     runtime_config: Option<&Value>,
 ) -> (Option<bool>, Option<u64>, Option<i64>) {
-    persisted_runtime_overrides_with_fallbacks(
-        runtime_config,
-        gate_enabled(),
-        danger_pct(),
-        stale_sec(),
+    (
+        settings::DISPATCH_GATE_ENABLED.kv_override(runtime_config),
+        settings::DISPATCH_GATE_DANGER_PCT.kv_override(runtime_config),
+        settings::RATE_LIMIT_STALE_SEC.kv_override(runtime_config),
     )
 }
 
@@ -826,44 +793,13 @@ async fn persisted_runtime_overrides_pg(
 /// Effective danger threshold: persisted runtime-config, then YAML, then the default.
 pub async fn effective_danger_pct_pg(pg_pool: &sqlx::PgPool) -> Option<u64> {
     let (_enabled, danger, _stale) = persisted_runtime_overrides_pg(pg_pool).await?;
-    Some(danger.unwrap_or_else(danger_pct))
+    Some(live_setting(&settings::DISPATCH_GATE_DANGER_PCT, danger).value)
 }
 
 /// Effective rate-limit staleness window, resolved like [`effective_danger_pct_pg`].
 pub async fn effective_stale_sec_pg(pg_pool: &sqlx::PgPool) -> Option<i64> {
     let (_enabled, _danger, stale) = persisted_runtime_overrides_pg(pg_pool).await?;
-    Some(stale.unwrap_or_else(stale_sec))
-}
-
-fn persisted_runtime_overrides_with_fallbacks(
-    runtime_config: Option<&Value>,
-    _yaml_enabled: bool,
-    _yaml_danger: u64,
-    _yaml_stale: i64,
-) -> (Option<bool>, Option<u64>, Option<i64>) {
-    let Some(value) = runtime_config else {
-        return (None, None, None);
-    };
-    let explicit_keys = value
-        .as_object()
-        .map(crate::services::settings::explicit_runtime_config_keys)
-        .unwrap_or_default();
-    let enabled = value
-        .get("dispatchRateLimitGateEnabled")
-        .and_then(Value::as_bool)
-        .filter(|enabled| explicit_keys.contains("dispatchRateLimitGateEnabled") || !*enabled);
-    let danger = value
-        .get("dispatchRateLimitGateDangerPct")
-        .and_then(Value::as_u64)
-        .filter(|danger| {
-            explicit_keys.contains("dispatchRateLimitGateDangerPct")
-                || *danger != DEFAULT_DANGER_PCT
-        });
-    let stale = value
-        .get("rateLimitStaleSec")
-        .and_then(Value::as_i64)
-        .filter(|stale| explicit_keys.contains("rateLimitStaleSec") || *stale != DEFAULT_STALE_SEC);
-    (enabled, danger, stale)
+    Some(live_setting(&settings::RATE_LIMIT_STALE_SEC, stale).value)
 }
 
 /// Record that a manual/force dispatch path intentionally bypassed the gate
@@ -883,11 +819,8 @@ pub fn record_gate_bypass() {
 
 /// Build the credential-free diagnostics block for `/api/health/detail`.
 ///
-/// `enabled_override` / `danger_override` let the caller report the EFFECTIVE
-/// values the gate actually uses on the activation path — i.e. the persisted
-/// runtime-config (`kv_meta`) values, which never reach the YAML live snapshot.
-/// Pass `None` for each to fall back to the YAML snapshot then the compiled
-/// defaults (the same precedence the gate uses).
+/// The overrides come from [`persisted_runtime_overrides`]; both settings resolve
+/// against one YAML snapshot and report the layer each value came from.
 pub fn diagnostics_with_overrides(
     enabled_override: Option<bool>,
     danger_override: Option<u64>,
@@ -900,9 +833,22 @@ pub fn diagnostics_with_overrides(
         0 => None,
         value => Some(value as i64),
     };
+    let live = crate::config_live_reload::current();
+    let enabled = settings::resolve_with_kv(
+        &settings::DISPATCH_GATE_ENABLED,
+        enabled_override,
+        live.as_deref(),
+    );
+    let danger = settings::resolve_with_kv(
+        &settings::DISPATCH_GATE_DANGER_PCT,
+        danger_override,
+        live.as_deref(),
+    );
     DispatchGateDiagnostics {
-        enabled: enabled_override.unwrap_or_else(gate_enabled),
-        danger_pct: danger_override.unwrap_or_else(danger_pct),
+        enabled: enabled.value,
+        enabled_source: enabled.source,
+        danger_pct: danger.value,
+        danger_pct_source: danger.source,
         evaluations: GATE_EVALUATIONS.load(Ordering::Relaxed),
         deferrals: GATE_DEFERRALS.load(Ordering::Relaxed),
         bypasses: GATE_BYPASSES.load(Ordering::Relaxed),
@@ -1237,8 +1183,11 @@ mod tests {
             snap(Some(100), None, now - 10, false, false),
         )]));
         install_runtime(None, None, None);
-        assert!(gate_enabled());
-        assert_eq!(danger_pct(), DEFAULT_DANGER_PCT);
+        assert!(live_setting(&settings::DISPATCH_GATE_ENABLED, None).value);
+        assert_eq!(
+            live_setting(&settings::DISPATCH_GATE_DANGER_PCT, None).value,
+            DEFAULT_DANGER_PCT
+        );
         assert_eq!(DEFAULT_DANGER_PCT, 100);
         assert_eq!(
             evaluate_agent_provider_pressure("agent-d", now).verdict,
@@ -1322,6 +1271,30 @@ mod tests {
         assert_eq!(decision.verdict, PressureVerdict::Defer);
     }
 
+    #[test]
+    fn diagnostics_report_the_layer_of_each_setting() {
+        let _guard = global_gate_test_guard();
+        install_runtime(Some(false), None, None);
+        let fallback = diagnostics_with_overrides(None, None);
+        assert_eq!(
+            (fallback.enabled, fallback.enabled_source),
+            (false, SettingSource::Yaml)
+        );
+        assert_eq!(
+            (fallback.danger_pct, fallback.danger_pct_source),
+            (DEFAULT_DANGER_PCT, SettingSource::Default)
+        );
+        let persisted = diagnostics_with_overrides(Some(true), Some(80));
+        assert_eq!(
+            (persisted.enabled, persisted.enabled_source),
+            (true, SettingSource::KvOverride)
+        );
+        assert_eq!(
+            (persisted.danger_pct, persisted.danger_pct_source),
+            (80, SettingSource::KvOverride)
+        );
+    }
+
     // P1 review fix — persisted runtime overrides honored.
     #[test]
     fn persisted_overrides_parse_enable_and_threshold() {
@@ -1371,8 +1344,7 @@ mod tests {
                 "rateLimitStaleSec"
             ],
         });
-        let (enabled, danger, stale) =
-            persisted_runtime_overrides_with_fallbacks(Some(&cfg), false, 95, 900);
+        let (enabled, danger, stale) = persisted_runtime_overrides(Some(&cfg));
         assert_eq!(enabled, Some(true));
         assert_eq!(danger, Some(100));
         assert_eq!(stale, Some(600));

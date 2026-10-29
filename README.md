@@ -447,10 +447,25 @@ AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-su
 | Surface | Canonical owner | Storage / precedence | Persistence and restart semantics | API |
 |---------|------------------|----------------------|-----------------------------------|-----|
 | Company settings | General settings UI / callers that own the merged JSON | `kv_meta['settings']` only. No YAML baseline. | Persists until replaced. `PUT /api/settings` is full replace, so callers must merge hidden keys before saving. Retired legacy keys are stripped server-side. | `GET/PUT /api/settings` |
-| Runtime config | Dashboard live-runtime controls | Hardcoded defaults < `agentdesk.yaml` `runtime:` < `kv_meta['runtime-config']` override JSON | Applies immediately. On reboot, YAML-backed keys are re-applied; saved keys without YAML baselines persist unless `runtime.reset_overrides_on_restart=true`, in which case the whole surface resets to baseline. | `GET/PUT /api/settings/runtime-config` |
+| Runtime config | Dashboard live-runtime controls | Hardcoded defaults < `agentdesk.yaml` `runtime:` < `kv_meta['runtime-config']` override JSON | Applies immediately. Explicit overrides (`__runtimeConfigExplicitKeys`) survive restart ahead of YAML; non-explicit saved values rebase onto YAML/defaults. `runtime.reset_overrides_on_restart=true` resets the whole surface to baseline. | `GET/PUT /api/settings/runtime-config` |
 | Policy/config keys | Dashboard policy controls and automation helpers | Hardcoded defaults < YAML sections (`review:`, `runtime:`, `kanban:`) < individual `kv_meta` rows | `PATCH` writes live overrides. YAML-backed keys are re-seeded on restart, while hardcoded-only keys keep their DB override unless the reset flag is on. `server_port` is surfaced as read-only config metadata. | `GET/PATCH /api/settings/config` |
 | Onboarding/secrets | Dedicated onboarding wizard | Dedicated onboarding keys and flows | Tokens and setup secrets stay outside the general settings form. | `/api/onboarding/*` |
 | Channel provider rules | `onboarding.provider_suffix_map` / `default_provider` | Registry defaults, then YAML entries: add a key, replace its provider, or set its value to `null` to remove that suffix. An empty section preserves registry behavior. | Applied from the server config snapshot (including successful hot reload); offline `show session-name` reads the same YAML. Explicit provider selections win. | Channel dispatch and onboarding |
+
+<!-- BEGIN GENERATED: runtime setting precedence -->
+<!-- Generated from the key table in src/services/settings/resolve; regenerate: ADK_WRITE_SETTINGS_PRECEDENCE_DOC=1 cargo test --lib services::settings::resolve:: -->
+
+Rust readers resolve these `runtime-config` keys with `settings::resolve`: the persisted value when it outranks YAML, else the node's YAML snapshot, else the default.
+
+| `runtime-config` field | YAML field | Default | Persisted value outranks YAML when |
+|---|---|---|---|
+| `dispatchRateLimitGateEnabled` | `runtime.dispatch_rate_limit_gate_enabled` | `true` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
+| `dispatchRateLimitGateDangerPct` | `runtime.dispatch_rate_limit_gate_danger_pct` | `100` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
+| `rateLimitStaleSec` | `runtime.rate_limit_stale_sec` | `600` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
+| `maxEntryRetries` | `runtime.max_entry_retries` | `3` | it has the expected JSON type |
+<!-- END GENERATED: runtime setting precedence -->
+
+Only a single node (`cluster.enabled: false`) or the `cluster.role: hub` node seeds YAML into `kv_meta` at boot. Runner and auto nodes read the hub's seeded values and fail startup until the hub has initialized `server_port` and `runtime-config`; see the ADR's seeding ownership section.
 
 The native clear switches were retired (#7266); old YAML keys are ignored.
 Discord `/clear` and `!clear` use the same general session-reset path.
