@@ -40,7 +40,7 @@ pub(super) async fn hold_a_turn(
     active: u64,
 ) -> (AbortOnDrop<Result<(), Error>>, Arc<CancelToken>) {
     let held = harness
-        .spawn_turn_held_at_placeholder(active, "long running work", Duration::from_secs(2))
+        .spawn_turn_held_at_placeholder(active, "long running work", super::PLACEHOLDER_HOLD_LIMIT)
         .await;
     let token = harness
         .mailbox()

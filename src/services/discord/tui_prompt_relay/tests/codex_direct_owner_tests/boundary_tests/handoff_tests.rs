@@ -553,7 +553,10 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
         fx.append(&answer_for(&turn(3), "NEXT_6903_ANSWER"));
         assert!(fx.delivered("NEXT_6903_ANSWER").await);
         fx.polls(3).await;
-        assert_eq!(fx.sent("NEXT_6903_ANSWER").len(), 1);
+        let next_anchor = fx.anchor_of("NEXT_6903_ANSWER");
+        assert_eq!(fx.wait_completed_turns(&[next_anchor]).await, 1);
+        tracing::debug!(requests = ?fx.sent("NEXT_6903_ANSWER"), "sealed answer edits");
+        fx.assert_answer("NEXT_6903_ANSWER", next_anchor);
         assert_eq!(
             fx.sent(STEER_ANSWER).len(),
             prior,

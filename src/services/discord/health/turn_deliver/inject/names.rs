@@ -22,8 +22,14 @@ pub(super) fn codex_veto_name(veto: codex_inject::Veto) -> &'static str {
         Veto::LockContended => "lock_contended",
         Veto::PaneUnavailable => "pane_unavailable",
         Veto::Modal => "modal",
-        Veto::Draft => "draft",
-        Veto::QueueShown => "queue_shown",
+        Veto::ComposerUnread => "composer_unread",
+        Veto::DraftNavigationUnproven => "draft_navigation_unproven",
+        Veto::DraftSelectionUnproven => "draft_selection_unproven",
+        Veto::DraftCommandUnproven => "draft_command_unproven",
+        Veto::DraftPasteTransformUnproven => "draft_paste_transform_unproven",
+        Veto::DraftPlaceholderUnproven => "draft_placeholder_unproven",
+        Veto::DraftNotFullyVisible => "draft_not_fully_visible",
+        Veto::DraftImagePositionUnproven => "draft_image_position_unproven",
         Veto::NotSteerable => "not_steerable",
         Veto::NotBusy => NOT_BUSY,
         Veto::TurnUnknown => "turn_unknown",
@@ -31,6 +37,7 @@ pub(super) fn codex_veto_name(veto: codex_inject::Veto) -> &'static str {
         Veto::TranscriptUnavailable => "transcript_unavailable",
         Veto::LoadFailed => "load_failed",
         Veto::LedgerFull => "ledger_full",
+        Veto::AmbiguousIdenticalPending => "ambiguous_identical_pending",
     }
 }
 

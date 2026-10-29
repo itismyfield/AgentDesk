@@ -76,6 +76,14 @@ REQUIRED_INVOCATIONS = (
         '"$PYTHON" -m unittest tests.test_destructive_call_site_ratchet',
     ),
     RequiredInvocation(
+        "config snapshot disk-reader guard",
+        '"$PYTHON" scripts/check_config_snapshot_readers.py',
+    ),
+    RequiredInvocation(
+        "config snapshot disk-reader unittest module",
+        '"$PYTHON" -m unittest tests.test_config_snapshot_readers',
+    ),
+    RequiredInvocation(
         "CI runner hardening gate",
         "./scripts/check-ci-runner-hardening.sh",
     ),
@@ -124,6 +132,7 @@ def check_text(text: str) -> list[str]:
             positions[required.label] = matches[0]
 
     ordered_pairs = (
+        ("config snapshot disk-reader guard", "config snapshot disk-reader unittest module"),
         ("durable-frontier writer gate", "durable-frontier writer unittest module"),
         ("intake-outbox done-writer gate", "intake-outbox done-writer unittest module"),
         ("destructive call-site ratchet gate", "destructive call-site ratchet unittest module"),

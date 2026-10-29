@@ -14,10 +14,12 @@
 # positive: on a non-standby node the round-trip path is actually entered.
 
 set -euo pipefail
+unset AGENTDESK_CONFIG
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEPLOY_SH="${DEPLOY_SH_OVERRIDE:-$REPO_ROOT/scripts/deploy-release.sh}"
+SCRIPT_DIR="$REPO_ROOT/scripts"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-smoke-standby-test.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -31,6 +33,7 @@ extract_function() {
 }
 
 # Exercise the production functions without executing the deploy script.
+eval "$(extract_function _release_config_path)"
 eval "$(extract_function _post_deploy_smoke_note)"
 eval "$(extract_function _post_deploy_smoke_fail)"
 eval "$(extract_function _post_deploy_smoke_resolve_cluster_standby)"

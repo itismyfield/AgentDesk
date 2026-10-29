@@ -16,10 +16,6 @@ use crate::services::agent_identity::{identity_from_parts, identity_label};
 use crate::services::provider::ProviderKind;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
-fn load_agentdesk_config_with_path() -> Option<(Config, std::path::PathBuf)> {
-    crate::config::config_path::load_runtime_config_file()
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct AgentSetupConfigInput {
     pub agent_id: String,
@@ -135,22 +131,7 @@ fn agent_setup_config_matches(agent: &AgentDef, input: &AgentSetupConfigInput) -
 }
 
 pub(super) fn load_agentdesk_config() -> Option<Config> {
-    load_agentdesk_config_with_path().map(|(config, _)| config)
-}
-
-fn meeting_available_agents_explicitly_empty(config_path: &std::path::Path) -> bool {
-    let Ok(raw) = std::fs::read_to_string(config_path) else {
-        return false;
-    };
-    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&raw) else {
-        return false;
-    };
-    value
-        .get("meeting")
-        .and_then(|meeting| meeting.get("available_agents"))
-        .and_then(|agents| agents.as_sequence())
-        .map(|agents| agents.is_empty())
-        .unwrap_or(false)
+    crate::config::runtime_config_optional()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -739,10 +720,12 @@ pub(super) fn is_known_agent(role_id: &str) -> Option<bool> {
 }
 
 pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
-    let Some(config) = load_agentdesk_config() else {
-        return Vec::new();
-    };
+    load_agentdesk_config()
+        .map(|config| peer_agents_from_config(&config))
+        .unwrap_or_default()
+}
 
+pub(super) fn peer_agents_from_config(config: &Config) -> Vec<PeerAgentInfo> {
     let mut peers = config
         .agents
         .iter()
@@ -772,7 +755,7 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
 }
 
 pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
-    let (config, config_path) = load_agentdesk_config_with_path()?;
+    let config = load_agentdesk_config()?;
     let meeting = config.meeting.as_ref()?;
     let summary_agent = match meeting.summary_agent.as_ref()? {
         MeetingSummaryAgentDef::Static(agent) => SummaryAgentConfig::Static(agent.clone()),
@@ -788,8 +771,10 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         },
     };
 
-    let explicit_empty_available_agents =
-        meeting_available_agents_explicitly_empty(config_path.as_path());
+    let explicit_empty_available_agents = config
+        .runtime_source
+        .as_ref()
+        .is_some_and(|source| source.meeting_available_agents_explicitly_empty);
     let available_agents =
         if meeting.available_agents.is_empty() && !explicit_empty_available_agents {
             config
@@ -1050,3 +1035,7 @@ agents:
         });
     }
 }
+
+#[cfg(test)]
+#[path = "agentdesk_config_snapshot_tests.rs"]
+mod snapshot_tests;

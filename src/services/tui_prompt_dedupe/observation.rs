@@ -1,6 +1,6 @@
 use super::extract::{Decision, Observation, decide_observation};
 use super::*;
-use crate::services::tui_input::human_frame::opens_inject;
+use crate::services::tui_input::human_frame::{history, opens_inject};
 
 pub fn record_discord_originated_prompt(provider: &str, tmux_session_name: &str, prompt: &str) {
     let tmux_session_name = tmux_session_name.trim();
@@ -318,6 +318,24 @@ pub(super) fn observe_inner(
     let entry_id = entry_id.map(str::trim).filter(|value| !value.is_empty());
     let prompt_id = prompt_id.filter(|id| !id.value().trim().is_empty());
     let native_turn = native_turn.map(str::trim).filter(|turn| !turn.is_empty());
+    if provider == "codex"
+        && crate::services::tui_input::human_frame::history::append::pending_candidate(
+            &provider,
+            tmux_session_name,
+            prompts,
+            entry_id,
+        )
+    {
+        return PromptObservation::InjectedDeferred;
+    }
+    let append_row = provider == "codex"
+        && match history::observed_attempt(&provider, tmux_session_name, prompts, entry_id) {
+            history::ObservedAttempt::Known(id) => {
+                history::append::projection(&provider, tmux_session_name, &id)
+                    .is_some_and(|saved| saved.bound && saved.row.as_deref() == entry_id)
+            }
+            _ => false,
+        };
     // The reserved Discord prompt binds its handoff and is never an input of its own.
     if handoff::bind_matching_origin(
         &provider,
@@ -333,7 +351,11 @@ pub(super) fn observe_inner(
     }
     let mut candidates = Vec::new();
     for prompt in prompts {
-        let prompt = prompt.trim();
+        let prompt = if append_row {
+            prompt.as_str()
+        } else {
+            prompt.trim()
+        };
         // #3527: skip AgentDesk's own `[User: … (ID: …)]` Discord-relay lines so a
         // re-observation (after the discord-originated ledger entry was consumed)
         // never publishes a spurious SSH-direct turn. Treated like other synthetic
@@ -341,7 +363,8 @@ pub(super) fn observe_inner(
         if prompt.is_empty() || is_synthetic_tui_user_prompt_for_provider(&provider, prompt) {
             continue;
         }
-        if is_discord_relayed_user_prompt(prompt)
+        if !append_row
+            && is_discord_relayed_user_prompt(prompt)
             && !is_user_prefixed_subagent_notification_machine_event(prompt)
         {
             // The Discord turn owns the native turn its injected prompt opened, so a steer joins it.
@@ -379,6 +402,7 @@ pub(super) fn observe_inner(
     let unvouched = claim.is_none()
         && provider == "codex"
         && candidates.iter().any(|prompt| opens_inject(prompt));
+    let first_handed_row = matches!(claim, Some(Claim::Handed { verified_row: true }));
     match claim {
         Some(Claim::Deferred) => return PromptObservation::InjectedDeferred,
         Some(Claim::Joined { first }) => {
@@ -396,7 +420,7 @@ pub(super) fn observe_inner(
             return PromptObservation::InjectedSteer;
         }
         Some(Claim::HandedBefore) => return PromptObservation::SuppressedRecentDuplicate,
-        Some(Claim::Handed) | None => {}
+        Some(Claim::Handed { .. }) | None => {}
     }
     // #4567: structured task lifecycle records are status events, not positive
     // user-input provenance. Publish them for the task-card/status observer, but
@@ -519,6 +543,7 @@ pub(super) fn observe_inner(
             candidates: &candidates,
             entry_id,
             native_turn,
+            first_handed_row,
             local_only: local_only_control.is_some(),
             may_park: record.is_none() && effect == PromptObservationEffect::NotifyAndLease,
             effect,

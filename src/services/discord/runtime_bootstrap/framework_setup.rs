@@ -1,5 +1,12 @@
 use super::*;
 
+pub(super) fn credential_watcher_dedupe_window() -> Option<std::time::Duration> {
+    let config = crate::config::runtime_config().mcp;
+    config
+        .watch_credentials
+        .then(|| std::time::Duration::from_secs(config.credential_notify_dedupe_secs))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_bot_framework_setup(
     ctx: &serenity::Context,
@@ -85,10 +92,7 @@ pub(super) async fn run_bot_framework_setup(
     // (~/.claude/.credentials.json) is intentionally not watched (#3554) — its
     // refresh churn is not an MCP change.
     if matches!(provider_for_setup, ProviderKind::Claude) {
-        let mcp_cfg = crate::config::load_graceful().mcp;
-        if mcp_cfg.watch_credentials {
-            let dedupe_window =
-                std::time::Duration::from_secs(mcp_cfg.credential_notify_dedupe_secs);
+        if let Some(dedupe_window) = credential_watcher_dedupe_window() {
             super::mcp_credential_watcher::spawn_watcher(
                 shared_for_tmux.clone(),
                 dedupe_window,
