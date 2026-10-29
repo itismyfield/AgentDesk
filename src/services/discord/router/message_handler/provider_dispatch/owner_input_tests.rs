@@ -342,10 +342,10 @@ fn legacy_guard_value_does_not_block_owner_a() {
     rig.delivered();
 }
 
-/// A swallowed Enter gets main's one finishing Enter and no second paste; seen, it is delivered,
-/// never seen, it is unconfirmed as in main: one alert, head Unknown, nothing re-held or resent.
+/// A swallowed Enter gets main's one finishing Enter and no second paste, and is delivered seen or
+/// not; an unseen receipt is one observation, and nothing is retained past the deadline.
 #[test]
-fn owner_busy_claude_confirms_once_without_requeue() {
+fn owner_busy_claude_enter_delivers_with_or_without_receipt() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig_seen = rig("oc-seen", 7_272_505, "swallow", view("", false), BUSY);
     let result = rig_seen.dispatch(
@@ -361,14 +361,18 @@ fn owner_busy_claude_confirms_once_without_requeue() {
     let elsewhere = rig.f.root.path().join("oc-missing-unwritten.jsonl");
     fs::write(&elsewhere, BUSY).unwrap();
     let result = rig.dispatch(ProviderKind::Claude, target::Phase::Busy, &elsewhere);
-    assert_eq!(result, Err("WriteUncertain(\"not_observed\")".into()));
+    assert_eq!(result, Ok(()));
     assert_eq!(
         rig.events(),
         ["paste", "Enter", "Enter"],
         "one paste, one finishing Enter"
     );
-    rig.uncertain();
-    assert!(matches!(rig.bind(), TurnBind::Armed(turn) if turn.attempt == rig.nonce));
+    rig.delivered();
+    let past_deadline = rig
+        .mailbox
+        .v2_request(|s| s.as_mut().unwrap().tick(10_000 + 31_000));
+    rig.runtime.block_on(past_deadline).unwrap();
+    rig.delivered();
     let alerts: Vec<_> = crate::services::observability::events::recent(usize::MAX)
         .into_iter()
         .filter(|event| {

@@ -17,7 +17,7 @@ pub(crate) struct PreparedPayload {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Completion {
-    /// Content and Enter went, and confirm did not report the transcript missing them.
+    /// Content and Enter went, whether or not the transcript receipt was observed.
     Submitted,
     /// No key reached the pane and the owner holds the proof; the original stays in custody.
     NotSent(String),
@@ -126,10 +126,11 @@ impl BusyClaude {
                     owner_input::vetoed(&reason);
                     Completion::NotSent(reason)
                 }
-                // Neither window held a receipt, even after any finishing Enter: unconfirmed, as
-                // main reports it, and never sent again.
+                // Paste and Enter went: a receipt neither window saw is only observed, and the
+                // attempt is delivered without a deadline or retention.
                 Ok((Outcome::Injected, Some(Receipt::Missing { .. }))) => {
-                    Completion::WriteUncertain(alert("not_observed"))
+                    self.unconfirmed("not_observed");
+                    Completion::Submitted
                 }
                 Ok((Outcome::Injected, _)) => Completion::Submitted,
                 Ok((Outcome::Failed(WriteFailure::Stash), _)) => {

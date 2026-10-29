@@ -51,6 +51,12 @@ impl BusyClaudeHerdr {
                         Completion::NotSent(veto.into())
                     }
                     Ok(InjectAttempt::Injected { .. }) => Completion::Submitted,
+                    // Health reports this only after the paste and Enter were applied; its event
+                    // already observed the missing receipt.
+                    Ok(InjectAttempt::Unconfirmed {
+                        detail: "not_observed",
+                        ..
+                    }) => Completion::Submitted,
                     // Health recorded this failure's one unconfirmed event already.
                     Ok(InjectAttempt::Unconfirmed { detail, .. }) => {
                         Completion::WriteUncertain(detail.into())

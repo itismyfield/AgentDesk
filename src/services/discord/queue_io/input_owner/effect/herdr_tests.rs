@@ -206,18 +206,16 @@ fn owner_herdr_busy_claude_writes_the_bound_pane_once() {
     assert_eq!(alerts(&nonce), 0);
 }
 
-/// A paste Claude never records stays unconfirmed with the one alert health raised; the owner
-/// neither raises another nor sends again, and the head stays Unknown.
+/// An applied paste and Enter that Claude never records is still delivered: the head settles and
+/// nothing is retained, with only health's one observation and no second send.
 #[test]
-fn owner_herdr_unconfirmed_alerts_once_and_never_resends() {
+fn owner_herdr_enter_without_receipt_is_delivered_once() {
     let (rig, completion, snapshot, nonce) = attempt(7_272_532, false, None);
-    assert_eq!(
-        completion,
-        Completion::WriteUncertain("not_observed".into())
-    );
+    assert_eq!(completion, Completion::Submitted, "{snapshot}");
     assert_eq!(rig.sends().len(), 2, "{:?}", rig.sends());
     assert_eq!(alerts(&nonce), 1);
-    assert_eq!(snapshot["head_injection"]["phase"], "unknown", "{snapshot}");
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
 }
 
 /// An owner bound to another pane gets no byte in: health reads the fence's refusal as a failed
