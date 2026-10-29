@@ -204,6 +204,27 @@ it("marks the snapshot stale when a poll stays unanswered for a whole interval",
   expect(list).toHaveBeenCalledTimes(2);
 });
 
+it("marks a server that never answers silent one interval after the page opens", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+  list.mockImplementation(() => new Promise(() => {}));
+  await render();
+  await act(async () => { vi.advanceTimersByTime(15_000); });
+  expect(container.textContent).toContain("The server is not answering");
+  expect(buttonByText("New server campaign")?.disabled).toBe(true);
+});
+
+it("counts poll intervals that pass while the tab is hidden", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+  await render();
+  await openServer();
+  list.mockImplementation(() => new Promise(() => {}));
+  await click(buttonByText("Refresh"));
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+  await act(async () => { vi.advanceTimersByTime(30_000); });
+  Reflect.deleteProperty(document, "visibilityState");
+  expect(container.textContent).toContain("The server is not answering");
+});
+
 it("still marks a hung server silent when the user keeps pressing Refresh", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
   await render();
@@ -333,6 +354,55 @@ it("marks the event list when it could not be read, keeps its count unknown, and
   // A good read is not repeated while nothing moved.
   await click(buttonByText("Refresh"));
   expect(vi.mocked(getServerCampaignEvents)).toHaveBeenCalledTimes(2);
+});
+
+it("shows each campaign's own events when reads for several campaigns overlap or fail", async () => {
+  const events = vi.mocked(getServerCampaignEvents);
+  list.mockResolvedValue([fixtures.prepared, copyOf(fixtures.prepared, "other", "Other")]);
+  await render();
+  await openServer("Release");
+  const summary = () => container.querySelector(".campaign-connections summary")?.textContent;
+  expect(summary()).toBe("Events · 0");
+  let fail: (reason: unknown) => void = () => {};
+  events.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+  await openServer("Other");
+  await openServer("Release");
+  // Other's late failure belongs to a read nobody is waiting for any more.
+  await act(async () => fail(new TypeError("Failed to fetch")));
+  expect(summary()).toBe("Events · 0");
+  events.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+  await openServer("Other");
+  expect(summary()).toBe("Events · — · Could not refresh events");
+  await openServer("Release");
+  expect(summary()).toBe("Events · 0");
+});
+
+it("lets a slow events read or retry finish instead of restarting it on every list read", async () => {
+  const events = vi.mocked(getServerCampaignEvents);
+  let answer: (value: Awaited<ReturnType<typeof getServerCampaignEvents>>) => void = () => {};
+  const slow = () => new Promise<Awaited<ReturnType<typeof getServerCampaignEvents>>>((resolve) => { answer = resolve; });
+  events.mockImplementationOnce(slow);
+  list.mockImplementation(async () => [fixtures.prepared]);
+  await render();
+  await openServer();
+  await click(buttonByText("Refresh"));
+  await click(buttonByText("Refresh"));
+  expect(events).toHaveBeenCalledTimes(1);
+  await act(async () => answer([]));
+  const summary = () => container.querySelector(".campaign-connections summary")?.textContent;
+  expect(summary()).toBe("Events · 0");
+  // The same holds for a retry after a failed read.
+  const moved = structuredClone(fixtures.prepared);
+  moved.view.last_event_sequence += 1;
+  list.mockImplementation(async () => [moved]);
+  events.mockRejectedValueOnce(new TypeError("Failed to fetch")).mockImplementationOnce(slow);
+  await click(buttonByText("Refresh"));
+  expect(summary()).toBe("Events · 0 · Could not refresh events");
+  await click(buttonByText("Refresh"));
+  await click(buttonByText("Refresh"));
+  expect(events).toHaveBeenCalledTimes(3);
+  await act(async () => answer([]));
+  expect(summary()).toBe("Events · 0");
 });
 
 it("moves focus into a form only when it is opened, not each time its campaign is shown again", async () => {
