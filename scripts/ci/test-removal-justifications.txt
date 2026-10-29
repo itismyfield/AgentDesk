@@ -2,3 +2,5 @@
 #   <binary-id> <test> | removed|runnable->ignored | <reason>
 # A row must match a loss the base diff reports for this change, and a loss with no row fails.
 # Rows for tests absent from base and head only warn after landing; clear them in any later PR.
+agentdesk services::tui_input::human_frame::history::append::tests::append_open_file_binder_rejects_an_atomically_replaced_registered_path | removed | Rejecting an atomically replaced transcript path needs Unix device/inode identity; non-Unix file_id is [0, 0], and Windows is a compile-and-test target, not an operating one
+agentdesk services::tui_input::human_frame::history::append::tests::append_replaced_or_truncated_source_and_other_session_cannot_bind | removed | Rejecting an atomically replaced transcript path needs Unix device/inode identity; non-Unix file_id is [0, 0], and Windows is a compile-and-test target, not an operating one

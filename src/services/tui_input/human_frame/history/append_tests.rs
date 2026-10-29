@@ -200,6 +200,8 @@ fn append_accepts_native_image_text_shape_without_relaxing_unknown_blocks() {
     assert_eq!(f.bind(start, &record).row, "image-row");
 }
 
+// Telling a replaced path from the registered file needs Unix device/inode identity.
+#[cfg(unix)]
 #[test]
 fn append_replaced_or_truncated_source_and_other_session_cannot_bind() {
     let f = Fixture::new();
@@ -316,6 +318,8 @@ fn append_open_file_binder_requires_one_current_source_owner() {
     assert!(bind_open_record(&file, start, &record).is_none());
 }
 
+// Telling a replaced path from the registered file needs Unix device/inode identity.
+#[cfg(unix)]
 #[test]
 fn append_open_file_binder_rejects_an_atomically_replaced_registered_path() {
     let f = Fixture::new();
