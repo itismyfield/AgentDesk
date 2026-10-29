@@ -260,6 +260,8 @@ async fn assemble(
         attach_runtime_profile(&mut json, &state.config);
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
+        json["intake_routing"]["input_fallback"] =
+            crate::services::cluster::input_fallback_config::status_json();
 
         let http_status = if status.is_http_ready() {
             StatusCode::OK
@@ -357,6 +359,8 @@ async fn assemble(
         attach_runtime_profile(&mut json, &state.config);
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
+        json["intake_routing"]["input_fallback"] =
+            crate::services::cluster::input_fallback_config::status_json();
         let json = if detailed {
             with_latest_startup_doctor(json, true)
         } else {

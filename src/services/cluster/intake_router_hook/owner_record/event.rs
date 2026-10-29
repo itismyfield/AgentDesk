@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
 
 pub(crate) const SOURCE: &str = "routing_transition";
+/// Notices post as the notify utility bot, which carries non-turn provenance.
+pub(crate) const BOT: &str = "notify";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Event {
@@ -196,6 +198,96 @@ pub(crate) async fn reserve_on_tx(
         post_started_at: None,
         message_id: None,
     }))
+}
+
+/// Discord honours an enforced nonce only briefly; an older Posting attempt is never reposted.
+const NONCE_RETRY_SECONDS: f64 = 120.0;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    Post(Box<Event>),
+    Sent(String),
+    Uncertain,
+    Unowned,
+}
+
+#[derive(sqlx::FromRow)]
+struct Cursor {
+    routing_notice: sqlx::types::Json<Event>,
+    routing_notice_delivery_state: String,
+    routing_notice_message_id: Option<String>,
+    fresh: bool,
+    matches: bool,
+}
+
+/// The claimed outbox row posts only through its owner pointer; Posting is durable before the POST.
+pub(crate) async fn begin_post(pool: &sqlx::PgPool, outbox_id: i64) -> Result<Step, sqlx::Error> {
+    let owner: Option<(String, String)> = sqlx::query_as(
+        "SELECT provider,raw_channel_id FROM intake_session_owners WHERE routing_notice_outbox_id=$1",
+    )
+    .bind(outbox_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((provider, channel)) = owner else {
+        return Ok(Step::Unowned);
+    };
+    let mut tx = pool.begin().await?;
+    custody::lock(&mut tx, &OwnerIdentity::new(&provider, &channel)).await?;
+    let stored: Option<Cursor> = sqlx::query_as("SELECT o.routing_notice,o.routing_notice_delivery_state,o.routing_notice_message_id,COALESCE(o.routing_notice_started_at>NOW()-make_interval(secs=>$2) AND o.routing_notice_started_at<=NOW()+INTERVAL '5 seconds',FALSE) AS fresh,EXISTS(SELECT 1 FROM message_outbox m WHERE m.id=o.routing_notice_outbox_id AND m.source=$3 AND m.target=o.routing_notice->>'target' AND m.session_key=o.routing_notice->>'session_key' AND m.reason_code=o.routing_notice->>'reason_code' AND m.content=o.routing_notice->>'content' AND m.bot=o.routing_notice->>'bot') AS matches FROM intake_session_owners o WHERE o.routing_notice_outbox_id=$1 FOR UPDATE")
+        .bind(outbox_id).bind(NONCE_RETRY_SECONDS).bind(SOURCE).fetch_optional(&mut *tx).await?;
+    let Some(Cursor {
+        routing_notice: event,
+        routing_notice_delivery_state: state,
+        routing_notice_message_id: message_id,
+        fresh,
+        matches,
+    }) = stored
+    else {
+        return Ok(Step::Unowned);
+    };
+    if !matches {
+        return Err(invalid("routing notice outbox row differs from its event"));
+    }
+    let step = match DeliveryState::read(Some(&state))? {
+        DeliveryState::Sent => Step::Sent(message_id.unwrap_or_default()),
+        DeliveryState::Uncertain => Step::Uncertain,
+        DeliveryState::Posting if fresh => Step::Post(Box::new(event.0)),
+        DeliveryState::Posting => {
+            set_state(&mut tx, outbox_id, "posting", "uncertain").await?;
+            Step::Uncertain
+        }
+        DeliveryState::Pending => {
+            set_state(&mut tx, outbox_id, "pending", "posting").await?;
+            Step::Post(Box::new(event.0))
+        }
+    };
+    tx.commit().await?;
+    Ok(step)
+}
+
+async fn set_state(
+    tx: &mut Transaction<'_, Postgres>,
+    outbox_id: i64,
+    from: &str,
+    to: &str,
+) -> Result<(), sqlx::Error> {
+    let changed = sqlx::query("UPDATE intake_session_owners SET routing_notice_delivery_state=$3,routing_notice_started_at=COALESCE(routing_notice_started_at,NOW()) WHERE routing_notice_outbox_id=$1 AND routing_notice_delivery_state=$2")
+        .bind(outbox_id).bind(from).bind(to).execute(&mut **tx).await?.rows_affected();
+    if changed != 1 {
+        return Err(invalid("routing notice cursor changed under its lock"));
+    }
+    Ok(())
+}
+
+/// Only the stored nonce's own POST may settle the cursor, and only with a real receipt.
+pub(crate) async fn record_sent(
+    pool: &sqlx::PgPool,
+    outbox_id: i64,
+    nonce: &str,
+    message_id: &str,
+) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query("UPDATE intake_session_owners SET routing_notice_delivery_state='sent',routing_notice_message_id=$3 WHERE routing_notice_outbox_id=$1 AND routing_notice->>'nonce'=$2 AND routing_notice_delivery_state='posting' AND btrim($3)<>''")
+        .bind(outbox_id).bind(nonce).bind(message_id).execute(pool).await?.rows_affected() == 1)
 }
 
 #[cfg(test)]

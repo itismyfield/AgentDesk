@@ -16,6 +16,10 @@ pub(super) fn spawn(shared: &Arc<SharedData>, provider: &ProviderKind) {
         async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
+                crate::services::cluster::intake_worker_capabilities::publish_routing_owner(
+                    provider.as_str(),
+                    shared.http.cached_bot_token.get().is_some(),
+                );
                 if let Err(error) = cleanup::advance_pending(&pool, provider.as_str()).await {
                     tracing::warn!(%error,"stored owner transition remains pending");
                 }

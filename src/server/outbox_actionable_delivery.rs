@@ -14,6 +14,8 @@ use super::PendingMessageOutboxRow;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::outbound::source_registry::RETIRED_SEND_SOURCES;
 
+#[path = "outbox_actionable_delivery/routing_notice.rs"]
+mod routing_notice;
 #[path = "outbox_actionable_delivery/session_notice.rs"]
 mod session_notice;
 
@@ -114,6 +116,16 @@ pub(super) async fn deliver(
     if RETIRED_SEND_SOURCES.contains(&row.source.as_str()) {
         return ("retired_source".into(), "retired_source".into());
     }
+    let routing =
+        row.source == crate::services::cluster::intake_router_hook::owner_record::event::SOURCE;
+    #[cfg(test)]
+    let routing = routing
+        && !crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
+            "notice-branch",
+        );
+    if routing {
+        return routing_notice::deliver(registry, pg_pool, row).await;
+    }
     if let Some(result) = session_notice::deliver(registry, pg_pool, row).await {
         return result;
     }
@@ -164,6 +176,8 @@ pub(super) fn failure_action(
     if row.attachment.is_err()
         || (row.attachment.as_ref().is_ok_and(Option::is_some) && status == "400 Bad Request")
         || RETIRED_SEND_SOURCES.contains(&row.source.as_str())
+        || (row.source == crate::services::cluster::intake_router_hook::owner_record::event::SOURCE
+            && status == routing_notice::UNRESOLVED)
     {
         super::MessageOutboxFailureAction::Fail {
             retry_count: row.retry_count,

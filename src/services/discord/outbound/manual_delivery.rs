@@ -545,6 +545,39 @@ async fn reserve_manual_delivery(dedup: &OutboundDeduper, key: &str) -> ManualDe
     }
 }
 
+/// A durable caller supplies the nonce of its historical event; an empty receipt is not a send.
+pub(super) async fn post_with_stored_nonce<C: DiscordOutboundClient>(
+    client: &C,
+    channel: ChannelId,
+    content: &str,
+    nonce: &str,
+) -> Result<String, String> {
+    let id = format!("stored-nonce:{nonce}");
+    let message = DiscordOutboundMessage::new(
+        id.clone(),
+        id,
+        content,
+        OutboundTarget::Channel(channel),
+        DiscordOutboundPolicy::preserve_inline_content(),
+    )
+    .with_create_nonce(nonce, true);
+    let dedup = crate::services::discord::outbound::shared_outbound_deduper();
+    match deliver_v3_outbound(client, dedup, message, None).await {
+        DeliveryResult::Sent { messages, .. } | DeliveryResult::Fallback { messages, .. } => {
+            first_raw_message_id(&messages)
+        }
+        DeliveryResult::Duplicate {
+            existing_messages, ..
+        } => first_raw_message_id(&existing_messages),
+        DeliveryResult::Skip { reason }
+        | DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason }
+        | DeliveryResult::ConfirmedMissing { reason } => return Err(reason),
+    }
+    .filter(|id| !id.trim().is_empty())
+    .ok_or_else(|| "Discord accepted the notice without a message receipt".to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
     client: &C,

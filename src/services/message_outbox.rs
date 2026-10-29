@@ -730,14 +730,27 @@ pub(crate) async fn gc_stale_outbox_rows(pool: &PgPool) -> Result<(u64, u64, u64
     .execute(pool)
     .await?
     .rows_affected();
-    let failed = sqlx::query(
-        "DELETE FROM message_outbox
-          WHERE status IN ('failed', 'cancelled')
-            AND created_at < NOW() - INTERVAL '7 days'",
-    )
-    .execute(pool)
-    .await?
-    .rows_affected();
+    // A routing notice row stays the historical identity of its owner generation.
+    let failed = "DELETE FROM message_outbox m
+          WHERE m.status IN ('failed', 'cancelled')
+            AND m.created_at < NOW() - INTERVAL '7 days'
+            AND NOT EXISTS (SELECT 1 FROM intake_session_owners o
+                             WHERE o.routing_notice_outbox_id = m.id)";
+    #[cfg(test)]
+    let failed = sqlx::AssertSqlSafe(
+        if crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
+            "gc-notice",
+        ) {
+            failed
+                .split("AND NOT EXISTS")
+                .next()
+                .unwrap_or(failed)
+                .to_owned()
+        } else {
+            failed.to_owned()
+        },
+    );
+    let failed = sqlx::query(failed).execute(pool).await?.rows_affected();
     let sent = sqlx::query(
         "DELETE FROM message_outbox
           WHERE status = 'sent'

@@ -155,6 +155,26 @@ async fn resolve_manual_bot_http(
     resolve_bot_http(registry, bot).await
 }
 
+/// The durable routing cursor owns retries; this only resolves the bot and posts once.
+pub(crate) async fn post_routing_notice(
+    registry: &HealthRegistry,
+    channel_id: u64,
+    content: &str,
+    bot: &str,
+    nonce: &str,
+) -> Result<String, (&'static str, String)> {
+    let channel = ChannelId::new(channel_id);
+    let http = resolve_manual_bot_http(registry, bot, channel, &Default::default()).await?;
+    super::manual_delivery::post_with_stored_nonce(
+        &production_manual_outbound_client(http),
+        channel,
+        content,
+        nonce,
+    )
+    .await
+    .map_err(|error| ("500 Internal Server Error", error))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_message_with_backends_and_delivery_options(
     registry: &HealthRegistry,

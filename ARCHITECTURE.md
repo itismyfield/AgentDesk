@@ -449,6 +449,7 @@ src/
 │   │   ├── mod.rs
 │   │   └── storage_jobs.rs
 │   ├── outbox_actionable_delivery/
+│   │   ├── routing_notice.rs
 │   │   └── session_notice.rs
 │   ├── outbox_worker/
 │   │   ├── attachment_pg_tests.rs
@@ -916,6 +917,9 @@ src/
 │   │   │   ├── notice.rs
 │   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
+│   │   │   ├── o_input/
+│   │   │   │   ├── fallback_route.rs
+│   │   │   │   └── fallback_route_tests.rs
 │   │   │   ├── owner_record/
 │   │   │   │   ├── cleanup/
 │   │   │   │   │   └── tests/
@@ -988,6 +992,8 @@ src/
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
 │   │   ├── input_fallback.rs
+│   │   ├── input_fallback_config.rs
+│   │   ├── input_fallback_config_tests.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs

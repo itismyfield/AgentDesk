@@ -12,8 +12,6 @@ pub(crate) struct Context {
     pub gateway: Option<String>,
     pub auth_profile: String,
     pub lease_seconds: i64,
-    pub control: [Availability; 2],
-    pub rest: [Availability; 2],
 }
 
 pub(crate) struct Shared {
@@ -48,7 +46,16 @@ fn override_home(value: &Value) -> Option<String> {
         .flatten()
 }
 
-/// Control/REST observations come from the authenticated transport, not gateway ownership.
+/// Each node publishes its own control/REST providers; the gateway never vouches for another Mac.
+fn published(node: &Value, kind: &str, provider: &str) -> Availability {
+    match node["capabilities"]["routing_owner"][kind].as_array() {
+        None => Availability::Unknown,
+        Some(list) if list.iter().any(|p| p.as_str() == Some(provider)) => Availability::Available,
+        Some(_) => Availability::Unavailable,
+    }
+}
+
+/// Control/REST observations come from each node's fresh heartbeat, not gateway ownership.
 pub(crate) async fn read_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: &OwnerIdentity,
@@ -112,13 +119,15 @@ pub(crate) async fn read_on_tx(
             && requirements
                 .as_ref()
                 .is_ok_and(|items| items.iter().all(|r| r.explain(node, now).is_empty()));
+        let owner = [
+            published(node, "control", id.provider()),
+            published(node, "rest", id.provider()),
+        ];
         availability[index] = if !worker || !ready {
             Availability::Unavailable
-        } else if [context.control[index], context.rest[index]].contains(&Availability::Unknown) {
+        } else if owner.contains(&Availability::Unknown) {
             Availability::Unknown
-        } else if context.control[index] == Availability::Unavailable
-            || context.rest[index] == Availability::Unavailable
-        {
+        } else if owner.contains(&Availability::Unavailable) {
             Availability::Unavailable
         } else {
             Availability::Available

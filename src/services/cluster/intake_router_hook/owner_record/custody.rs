@@ -260,6 +260,35 @@ pub(crate) async fn promote(
     if admitted.rows_affected() != 1 {
         return Ok(false);
     }
+    if let Some(plan) = super::plan::read_on_tx(&mut tx, &id, delivery).await? {
+        if plan.target != target {
+            return Ok(false);
+        }
+        // An earlier event's home tells a /node change apart from a home that came back.
+        let previous_home: Option<String> = sqlx::query_scalar("SELECT COALESCE(routing_notice->>'home',owner_instance_id) FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND generation<$3 ORDER BY generation DESC LIMIT 1")
+            .bind(id.provider()).bind(id.raw_channel_id()).bind(generation).fetch_optional(&mut *tx).await?;
+        #[cfg(test)]
+        let skip = super::cleanup::tests::mutant("notice-skip");
+        #[cfg(not(test))]
+        let skip = false;
+        if !skip {
+            super::event::reserve_on_tx(
+                &mut tx,
+                &id,
+                generation,
+                super::event::Description {
+                    home: &plan.home,
+                    home_label: &plan.home,
+                    target_label: target,
+                    new_session: false,
+                    home_changed: target == plan.home
+                        && previous_home.is_some_and(|home| home != plan.home),
+                    bot: super::event::BOT,
+                },
+            )
+            .await?;
+        }
+    }
     tx.commit().await?;
     Ok(true)
 }

@@ -21,7 +21,7 @@ impl Fixture {
             let providers = json!({"claude":{"cli_usable":true,"version":"1","failure":null,"credential_profiles":{"default":true},"authentication_verified":false,"quota_verified":false},
                 "codex":{"cli_usable":true,"version":"1","failure":null,"credential_profiles":{"default":true},"authentication_verified":false,"quota_verified":false}});
             let caps = json!({"intake_worker":{"enabled":true,"providers":["claude","codex"],"features":["execution_requirements_v1","preserve_on_cancel_v1"]},
-                "intake_poller":{"claude":now,"codex":now},"execution_capacity":{"accepting":false,"occupied":999,"capacity":0},
+                "intake_poller":{"claude":now,"codex":now},"routing_owner":{"control":["claude","codex"],"rest":["claude","codex"]},"execution_capacity":{"accepting":false,"occupied":999,"capacity":0},
                 "execution_readiness":{"schema":1,"boot_id":"fixture","observed_at_ms":now,"expires_at_ms":now+120000,"os":"macos","arch":"aarch64","runtime_profile":"worker","release":{},
                 "providers":providers,"tools":{"git":true,"tmux":true},"repositories":{"owner/repo":true},"backends":["tmux","process"],"disk_free_bytes":null}});
             sqlx::query("INSERT INTO worker_nodes(instance_id,status,last_heartbeat_at,capabilities) VALUES($1,'online',NOW(),$2)").bind(instance).bind(caps).execute(&pool).await.unwrap();
@@ -39,8 +39,6 @@ impl Fixture {
             gateway: Some("mac-a".into()),
             auth_profile: "default".into(),
             lease_seconds: 15,
-            control: [Availability::Available; 2],
-            rest: [Availability::Available; 2],
         }
     }
     pub(crate) async fn observe(&self, id: &OwnerIdentity, context: &Context) -> Shared {
@@ -84,9 +82,8 @@ async fn shared_snapshot_symmetric_pg_selection_ignores_capacity_and_gateway() {
                     let mut context = f.context();
                     context.gateway = Some(gateway.into());
                     let h = usize::from(home == "mac-b");
-                    if offline {
-                        context.control[h] = Availability::Unavailable;
-                    }
+                    sqlx::query("UPDATE worker_nodes SET capabilities=jsonb_set(capabilities,'{routing_owner,control}',CASE WHEN instance_id=$1 AND $2 THEN '[]'::jsonb ELSE '[\"claude\",\"codex\"]'::jsonb END)")
+                        .bind(home).bind(offline).execute(&f.pool).await.unwrap();
                     let observed = f.observe(&id, &context).await;
                     let expected = if offline {
                         &context.pair[1 - h]
@@ -121,6 +118,19 @@ async fn shared_snapshot_unknown_conflict_storage_and_stale_heartbeat_pg() {
     let f = Fixture::new("73369102").await;
     let id = OwnerIdentity::new("claude", &f.channel);
     let context = f.context();
+    sqlx::query("UPDATE worker_nodes SET capabilities=capabilities-'routing_owner' WHERE instance_id='mac-a'").execute(&f.pool).await.unwrap();
+    assert_eq!(
+        f.observe(&id, &context).await.target(),
+        Target::Held(fallback::Held::AvailabilityUnknown),
+        "a node that never published routing ownership is unknown, not unavailable"
+    );
+    sqlx::query("UPDATE worker_nodes SET capabilities=jsonb_set(capabilities,'{routing_owner}','{\"control\":[\"claude\"],\"rest\":[\"codex\"]}') WHERE instance_id='mac-a'").execute(&f.pool).await.unwrap();
+    assert_eq!(
+        f.observe(&id, &context).await.target(),
+        Target::Selected("mac-b"),
+        "an explicitly missing REST provider is unavailable"
+    );
+    sqlx::query("UPDATE worker_nodes SET capabilities=jsonb_set(capabilities,'{routing_owner,rest}','[\"claude\"]') WHERE instance_id='mac-a'").execute(&f.pool).await.unwrap();
     sqlx::query("UPDATE worker_nodes SET capabilities=capabilities-'execution_readiness' WHERE instance_id='mac-a'").execute(&f.pool).await.unwrap();
     assert_eq!(
         f.observe(&id, &context).await.target(),
