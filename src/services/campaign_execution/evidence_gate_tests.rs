@@ -136,6 +136,7 @@ pub(crate) fn collected(
         archive_digest: "archive".into(),
         manifest: manifest.clone(),
         plan_digest: "plan".into(),
+        plan_artifact_digest: "plan-file".into(),
         config_digest: "config".into(),
     };
     run.plan.bind(actual_plan).unwrap();
@@ -155,7 +156,9 @@ pub(crate) fn collected(
         skipped: Vec::new(),
         missing: Vec::new(),
         duplicate: Vec::new(),
+        extra: Vec::new(),
         exit_code,
+        audit_exit_code: None,
         complete: true,
         all_passed: true,
     };
@@ -172,7 +175,10 @@ pub(crate) fn collected(
         actual,
         log_refs: vec!["nextest".into()],
     };
-    run.collection = Some(VerificationCollection::Executed { evidence, audit });
+    run.collection = Some(VerificationCollection::Executed {
+        evidence: Box::new(evidence),
+        audit,
+    });
     run
 }
 
@@ -350,4 +356,149 @@ fn stage_gate_owes_every_required_check_and_strictest_part_decides() {
     );
     let all = BTreeMap::from([("c1".to_string(), pass.clone()), ("c2".to_string(), pass)]);
     assert_eq!(evaluate_stage(&required, &all).adopted, vec!["v1", "v1"]);
+}
+
+// Drives A1's own V lifecycle for a sealed H1 of A(H0): fixed phases, plan binding and collect().
+fn a1_collected(
+    outcomes: &[(&str, TestOutcome)],
+    test_exit: i32,
+    audit_exit: i32,
+    checkout_sha: &str,
+) -> (VerificationRun, BTreeMap<String, Action>) {
+    use crate::services::campaign_execution::verification_run::tests as a1;
+    let binding = a1::binding();
+    let claim = claim(&binding, "h1");
+    let seal = CandidateSeal::seal(&binding, &claim, REPO, &workspace("h1"), "pin", a1::at());
+    let (mut run, mut actions) = a1::registered_with(a1::spec_with_audit());
+    run.subject.bind(seal.unwrap().bound_subject()).unwrap();
+    let digest = |run: &VerificationRun, phase: &str| {
+        digest_of(&run.phase(phase).unwrap().result.as_ref().unwrap().output).unwrap()
+    };
+    let tests: Vec<_> = outcomes
+        .iter()
+        .map(|(name, _)| ListedTest {
+            binary_id: "agentdesk".into(),
+            name: (*name).into(),
+            ignored: false,
+        })
+        .collect();
+    let steps = [
+        (
+            "archive",
+            0,
+            PhaseOutput::Archive {
+                digest: "archive-digest".into(),
+            },
+        ),
+        (
+            "list",
+            0,
+            PhaseOutput::Universe {
+                tests: tests.clone(),
+            },
+        ),
+        (
+            "plan",
+            0,
+            PhaseOutput::Plan {
+                plan_digest: "plan-digest".into(),
+                plan_artifact_digest: "plan-file-digest".into(),
+                config_digest: "config-digest".into(),
+                selected: tests,
+            },
+        ),
+        (
+            "test",
+            test_exit,
+            PhaseOutput::Tests {
+                executed: outcomes
+                    .iter()
+                    .map(|(name, outcome)| ExecutedTest {
+                        id: format!("agentdesk {name}"),
+                        check_id: "lib-tests".into(),
+                        outcome: outcome.clone(),
+                        log_refs: vec![],
+                    })
+                    .collect(),
+            },
+        ),
+        ("audit", audit_exit, PhaseOutput::None),
+    ];
+    for (phase, exit, output) in steps {
+        let requires = run.phase(phase).unwrap().requires.clone();
+        let mut input = a1::input(&[]);
+        input.predecessors = requires
+            .iter()
+            .map(|r| (r.clone(), digest(&run, r)))
+            .collect();
+        if phase == "test" {
+            run.bind_plan(&a1::spec_with_audit()).unwrap();
+            for (name, digest) in [
+                ("plan", "plan-file-digest"),
+                ("archive", "archive-digest"),
+                ("config", "config-digest"),
+            ] {
+                input.preflight.push(ArtifactRef {
+                    name: name.into(),
+                    path: format!("/scratch/{name}"),
+                    digest: digest.into(),
+                });
+            }
+        }
+        run.bind_phase_input(phase, input).unwrap();
+        let result = a1::result(phase, exit, output);
+        let action_id = run.phase(phase).unwrap().action_id.clone();
+        let action = actions.get_mut(&action_id).unwrap();
+        action.state = ActionState::Started;
+        action.initiation_receipt = Some(result.receipt.clone());
+        let started = PhaseInitiation::Started {
+            receipt: result.receipt.clone(),
+            process: ProcessIdentity {
+                host: "macbook".into(),
+                pid: 7,
+                process_group: Some(7),
+                started_at: a1::at(),
+                nonce: "nonce".into(),
+            },
+        };
+        run.record_initiation(phase, started).unwrap();
+        run.record_result(phase, &actions[&action_id].clone(), result)
+            .unwrap();
+        actions.get_mut(&action_id).unwrap().state = ActionState::Reconciled;
+    }
+    let mut environment = a1::environment();
+    environment.checkout.observed_sha = checkout_sha.into();
+    let collection = run
+        .collect(|id| actions.get(id), environment, vec!["nextest".into()])
+        .unwrap();
+    run.collection = Some(collection);
+    (run, actions)
+}
+
+#[test]
+fn a1_collected_sealed_output_is_judged_against_the_seal_not_the_input_binding() {
+    let judge = |(run, actions): (VerificationRun, BTreeMap<String, Action>)| {
+        let mut plan = plan(&run.origin.owner_binding);
+        plan.candidate.head_sha = "h1".into();
+        plan.checks[0].id = "lib-tests".into();
+        plan.checks[0].acceptance_ids.clear();
+        plan.acceptance.clear();
+        assess_verification(&run, &actions, &plan)
+    };
+    let passed = [("a", TestOutcome::Passed), ("b", TestOutcome::Passed)];
+    let (run, actions) = a1_collected(&passed, 0, 0, "h1");
+    assert_eq!(run.origin.owner_binding.candidate_sha, "h0");
+    let pass = judge((run, actions));
+    assert_eq!(pass.verdict, Verdict::Pass, "{pass:?}");
+    let failed = [("a", TestOutcome::Passed), ("b", TestOutcome::Failed)];
+    let quality = judge(a1_collected(&failed, 100, 1, "h1"));
+    assert_eq!(quality.verdict, Verdict::QualityFail);
+    // Every test passed but the audit phase disagreed: not a PASS.
+    let audit = judge(a1_collected(&passed, 0, 1, "h1"));
+    assert!(
+        matches!(audit.reasons[..], [GateReason::ExitMismatch(_)]),
+        "{audit:?}"
+    );
+    let moved = judge(a1_collected(&passed, 0, 0, "editing-h2"));
+    assert_eq!(moved.verdict, Verdict::Reject);
 }

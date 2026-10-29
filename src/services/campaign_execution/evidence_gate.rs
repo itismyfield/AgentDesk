@@ -7,7 +7,7 @@ use super::candidate_seal::resolved_subject;
 use super::model::{Action, ActionState};
 use super::profile::{TestOutcome, VerificationPlan};
 use super::verification_run::{
-    NotSentReason, PhaseInitiation, VerificationCollection, VerificationRun,
+    NotSentReason, PhaseInitiation, PhaseKind, VerificationCollection, VerificationRun,
 };
 
 pub const GATE_RULE_VERSION: &str = "e1-gate-v1";
@@ -183,7 +183,9 @@ pub fn assess_verification(
             if !failed.is_empty() {
                 return StageAssessment::new(Verdict::QualityFail, failed, Vec::new());
             }
-            if audit.exit_code != Some(0) {
+            // A fixed audit phase must also have exited cleanly; its disagreement is never a PASS.
+            let audited = run.phases.iter().any(|p| p.kind == PhaseKind::Audit);
+            if audit.exit_code != Some(0) || (audited && audit.audit_exit_code != Some(0)) {
                 return StageAssessment::of(Verdict::Reject, GateReason::ExitMismatch(id));
             }
             StageAssessment::pass(vec![id])
