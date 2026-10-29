@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Background, Controls, MarkerType, Position, ReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { CampaignNode } from "../../api/campaigns";
+import { rawEdgeId } from "./campaignGraphRouting";
 import { dependencyNeighborhood } from "./campaignModel";
 import { COLORS, LABELS, type Tr } from "./campaignPresentation";
 
@@ -23,10 +24,10 @@ export default function CampaignNeighborhood({ nodes: allNodes, selectedId, visi
       style: { width: 176, height: 60, border: `1px solid ${COLORS[node.status]}`, borderRadius: 7, background: "var(--th-card-bg)", color: "var(--th-text-primary)", boxShadow: selected ? "0 0 0 2px var(--th-accent-info)" : undefined },
     };
   });
-  const edges = [
-    ...context.visibleUpstream.map((node) => ({ source: node.id, target: selectedId })),
-    ...context.visibleDownstream.map((node) => ({ source: selectedId, target: node.id })),
-  ].map((edge) => ({ ...edge, id: `${edge.source}:${edge.target}`, type: "smoothstep", markerEnd: { type: MarkerType.ArrowClosed }, style: { stroke: "var(--th-text-muted)", strokeWidth: 1.5 } }));
+  const edges = context.edges.map((edge) => ({
+    id: rawEdgeId(edge), source: edge[0], target: edge[1], data: { edge },
+    type: "smoothstep", markerEnd: { type: MarkerType.ArrowClosed }, style: { stroke: "var(--th-text-muted)", strokeWidth: 1.5 },
+  }));
   return <div className="campaign-neighborhood">
     <div className="campaign-row"><strong>{tr("선행 → 선택 작업 → 후속", "Dependencies → selected → dependents")}</strong><span>{context.visible.length}/{context.upstream.length + context.downstream.length + 1}</span></div>
     <p className="campaign-muted">{tr("선택한 작업과 직접 연결된 작업입니다. 다른 그룹·필터 밖의 연결도 함께 표시합니다.", "Direct connections to the selected task, including other groups and tasks outside your filters.")}</p>

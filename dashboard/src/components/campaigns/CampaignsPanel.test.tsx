@@ -13,6 +13,11 @@ vi.mock("../../api/campaigns", () => ({
   updateCampaignNode: vi.fn(),
   setCampaignAutoQueue: vi.fn(),
 }));
+// Server campaigns have their own tests; here the panel shows legacy campaigns only.
+vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/serverCampaigns")>()),
+  getServerCampaigns: vi.fn().mockResolvedValue([]),
+}));
 vi.mock("@xyflow/react", () => ({
   ReactFlow: ({ nodes, onNodeClick }: { nodes: Array<{ id: string; data: { group?: string } }>; onNodeClick?: (event: unknown, node: unknown) => void }) => (
     <div data-graph-nodes={nodes.length}>
@@ -75,6 +80,7 @@ let container: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  window.history.replaceState(null, "", "/campaigns"); // a selection written to the URL must not leak into the next test
   const storage = new Map<string, string>();
   Object.defineProperty(window, "localStorage", {
     configurable: true,

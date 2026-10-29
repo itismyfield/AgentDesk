@@ -57,38 +57,18 @@ struct Row {
 }
 
 fn row(raw: &str) -> Row {
+    use crate::services::tui_input::ansi::{Piece, pieces};
     let (mut plain, mut solid, mut faint) = (String::new(), String::new(), false);
-    let mut chars = raw.chars();
-    while let Some(c) = chars.next() {
-        if c != '\x1b' {
-            plain.push(c);
-            if !faint {
-                solid.push(c);
-            }
-            continue;
-        }
-        match chars.next() {
-            Some('[') => {
-                let mut params = String::new();
-                for c in chars.by_ref() {
-                    if ('\x40'..='\x7e').contains(&c) {
-                        if c == 'm' {
-                            faint = sgr_faint(&params, faint);
-                        }
-                        break;
-                    }
-                    params.push(c);
+    for piece in pieces(raw) {
+        match piece {
+            Piece::Text(c) => {
+                plain.push(c);
+                if !faint {
+                    solid.push(c);
                 }
             }
-            // OSC runs to BEL or ST.
-            Some(']') => {
-                while let Some(c) = chars.next() {
-                    if c == '\x07' || (c == '\x1b' && chars.next().is_some()) {
-                        break;
-                    }
-                }
-            }
-            _ => {}
+            Piece::Csi { params, end: 'm' } => faint = sgr_faint(params, faint),
+            Piece::Csi { .. } => {}
         }
     }
     let raw = raw.to_string();
