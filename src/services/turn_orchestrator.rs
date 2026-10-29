@@ -398,6 +398,8 @@ impl EnqueueRefusalReason {
             EnqueueRefusalReason::SourceIdPendingOrActive => "source_id_pending_or_active",
             EnqueueRefusalReason::SupersededByClear => "superseded_by_clear",
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
+            #[cfg(all(test, unix))]
+            EnqueueRefusalReason::MigrationCapacity => "migration_capacity",
             EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
             EnqueueRefusalReason::MailboxClosed => "mailbox_closed",
         }

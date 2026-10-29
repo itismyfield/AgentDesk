@@ -17,6 +17,8 @@ pub(in crate::services::discord::router::message_handler) fn claude_tui_busy_fol
         Some(E::ActorUnreachable | E::MailboxClosed) => {
             CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE
         }
+        #[cfg(all(test, unix))]
+        Some(E::MigrationCapacity) => CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE,
         None => CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE,
     }
 }
