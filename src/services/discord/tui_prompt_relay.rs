@@ -850,3 +850,5 @@ mod local_model_queue_wake_e2e;
 pub(in crate::services::discord) mod relay_e2e;
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, unix))]
+mod writer_notice_owner_tests;

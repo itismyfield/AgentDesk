@@ -1,4 +1,4 @@
-//! Native input identity and provenance; production delivery remains disabled until migration.
+//! Native input identity and provenance; the writer owns Claude terminal-input notices.
 
 pub(super) mod admission;
 pub(super) mod evidence;
@@ -23,6 +23,32 @@ pub struct NoticeOrigin {
     pub execution_nonce: String,
 }
 
+/// The writer, not the live hook relay, posts Claude terminal-input notices once this build reads
+/// their ledger format; the live relay consults the same predicate before its own POST.
+pub(crate) fn writer_owns(provider: ShadowProvider) -> bool {
+    crate::services::tui_o::store::input_notice_floor::READER_SUPPORTED
+        && provider == ShadowProvider::Claude
+}
+
+/// A native user row always carries the JSON string `"user"`, so other rows skip the parse.
+fn may_be_user(line: &[u8]) -> bool {
+    line.windows(6).any(|window| window == b"\"user\"")
+}
+
+/// Only a row that may become a notice needs its binding origin, which reads the whole binding log.
+pub(crate) fn needs_origin(record: &CapturedRecord) -> bool {
+    may_be_user(&record.line)
+        && serde_json::from_slice(&record.line)
+            .ok()
+            .and_then(|value| {
+                tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(&value)
+            })
+            .is_some_and(|(prompt, _)| {
+                !tui_prompt_dedupe::is_discord_relayed_user_prompt(&prompt)
+                    && discord::input_notice_content(&prompt).is_some()
+            })
+}
+
 #[derive(Default)]
 pub(crate) struct Projection {
     enabled: bool,
@@ -33,6 +59,13 @@ pub(crate) struct Projection {
 impl Projection {
     pub(crate) fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub(crate) fn for_provider(provider: ShadowProvider) -> Self {
+        Self {
+            enabled: writer_owns(provider),
+            ..Self::default()
+        }
     }
 
     #[cfg(test)]
@@ -50,10 +83,7 @@ impl Projection {
         record: &CapturedRecord,
         origin: Result<NoticeOrigin, String>,
     ) -> Result<Option<PieceWork>, String> {
-        if !self.enabled
-            || provider != ShadowProvider::Claude
-            || record.line.iter().all(u8::is_ascii_whitespace)
-        {
+        if !self.enabled || provider != ShadowProvider::Claude || !may_be_user(&record.line) {
             return Ok(None);
         }
         let value = serde_json::from_slice(&record.line)

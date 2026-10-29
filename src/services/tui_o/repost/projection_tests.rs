@@ -673,10 +673,14 @@ async fn d4d_legacy_ledger_receipt_overlay_is_read_only_pg() {
     let (ledger, approval, rows) = persisted(&harness, &pool).await;
     assert_eq!(fresh, (vec!["fresh".to_owned()], false, 2, Some(None)));
     let appended = ledger.strip_prefix(before.0.as_slice()).unwrap();
-    let entries: Vec<serde_json::Value> = String::from_utf8_lossy(appended)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let (activation, entries): (Vec<serde_json::Value>, Vec<serde_json::Value>) =
+        String::from_utf8_lossy(appended)
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .partition(|line: &serde_json::Value| line["entry"]["type"] == "input_notice");
+    // The first actor start freezes the input notice migration once, beside the output pieces.
+    assert_eq!(activation.len(), 1);
+    assert_eq!(activation[0]["entry"]["entry"]["kind"], "migration_started");
     assert_eq!(entries.len(), 3);
     assert_eq!(
         entries[0]["entry"],

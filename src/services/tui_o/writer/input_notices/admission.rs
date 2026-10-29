@@ -11,6 +11,8 @@ use crate::services::{discord, session_host, tmux_common as tc, tui_prompt_dedup
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum NoticeRefusal {
     Busy,
+    /// A registered injection may still own the row; a receipt or withdrawal decides it later.
+    OwnershipPending,
     Withheld(String),
     Store(String),
     Violation(String),
@@ -82,9 +84,7 @@ pub(crate) fn admit_notice<R>(
         .map_err(withheld)?
         {
             ObservedAttempt::Known(_) => return exclude(piece, store, "input_notice_source"),
-            ObservedAttempt::Pending => {
-                return Err(withheld("input notice injection ownership pending"));
-            }
+            ObservedAttempt::Pending => return Err(NoticeRefusal::OwnershipPending),
             ObservedAttempt::None => {}
         }
         match crate::config::session_hosts::herdr_endpoint(store.init().channel) {

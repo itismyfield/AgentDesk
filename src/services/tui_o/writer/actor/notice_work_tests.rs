@@ -895,3 +895,6 @@ async fn notice_admission_contention_after_preflight_still_lets_the_later_body_p
     assert_eq!(actor.progress().debt, 0);
     assert_eq!(actor.writer.boot.done(), 3);
 }
+
+#[path = "notice_activation_tests.rs"]
+mod activation;

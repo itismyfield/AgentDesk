@@ -31,7 +31,7 @@ fn input(uuid: &str) -> Vec<u8> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn disabled_notice_composition_captures_restarts_and_keeps_body_transport_live() {
+async fn frozen_inputs_without_history_proof_stay_migration_debt_and_keep_body_transport_live() {
     for repost in [false, true] {
         let (harness, path, source) = switched_over(b"");
         harness.gate.acquired();
@@ -47,21 +47,21 @@ async fn disabled_notice_composition_captures_restarts_and_keeps_body_transport_
                 harness.channel().cursor(&source).unwrap().captured_through,
                 std::fs::metadata(&path).unwrap().len()
             );
+            // Inputs from before activation without a provable history stay migration debt, unposted.
             assert!(harness.port.posts().is_empty());
             assert_eq!(harness.channel().ledger().next_serial(), 0);
-            assert_eq!(std::fs::metadata(ledger_path(&harness)).unwrap().len(), 0);
-            assert_eq!(
-                harness.channel().ledger().input_notices(),
-                &Default::default()
-            );
+            let channel = harness.channel();
+            let notices = channel.ledger().input_notices();
+            assert!(notices.migration.is_some());
+            assert_eq!(notices.evidence.len(), 2);
+            assert_eq!(notices.unresolved.len(), 2);
             assert!(
-                !harness
+                harness
                     ._runtime
                     .path()
                     .join("o_store/input_notice.floor")
                     .exists()
             );
-            assert!(harness.channel().ledger().gc_segments(&source).is_empty());
             assert_eq!(admissions.load(std::sync::atomic::Ordering::SeqCst), 0);
             if restart == 1 {
                 append(&path, &row("control", "body transport control"));

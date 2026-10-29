@@ -325,6 +325,7 @@ where
         }
         let mut fresh = Vec::new();
         if !sources_resumed && actor.sources_allowed() {
+            actor.start_notice_migration();
             let phase = actor.writer.boot.phase("resume");
             let (writer, deriver) = (&mut actor.writer, &mut actor.deriver);
             let restored = match &mut actor.verified {

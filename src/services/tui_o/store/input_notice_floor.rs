@@ -7,8 +7,8 @@ use std::path::Path;
 use super::durable;
 use crate::services::discord::runtime_store::fsync_parent_dir;
 
-/// The guarded notice consumer must be complete before a build advertises this capability.
-pub(crate) const READER_SUPPORTED: bool = false;
+/// This build reads and writes the notice ledger format, so it may advertise the capability.
+pub(crate) const READER_SUPPORTED: bool = true;
 const FILE_NAME: &str = "input_notice.floor";
 const CONTENT: &[u8] = b"1\n";
 

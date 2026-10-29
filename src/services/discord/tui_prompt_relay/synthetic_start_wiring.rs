@@ -136,6 +136,16 @@ pub(super) async fn post_passive_prompt_notice(
         .await;
         return None;
     }
+    if writer_posts_input_notice(prompt, decision) {
+        // The tui_o writer derives this notice from the durable native row, so the hook stays silent.
+        record_prompt_id_after_post(prompt, None);
+        tracing::info!(
+            channel_id = channel.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            "[tui_o] terminal input notice left to the writer"
+        );
+        return None;
+    }
     let content = match decision.slash_command_kind.as_deref() {
         Some(kind) => {
             format_slash_command_control_note(&prompt.tmux_session_name, kind, &prompt.prompt)
@@ -154,6 +164,19 @@ pub(super) async fn post_passive_prompt_notice(
     .await;
     record_prompt_id_after_post(prompt, posted.as_ref().err());
     None
+}
+
+/// The same input class `input_notice_content` admits on a transcript-turn channel the writer owns.
+fn writer_posts_input_notice(
+    prompt: &ObservedTuiPrompt,
+    decision: &RelayObservedPromptInjectionDecision,
+) -> bool {
+    prompt.provider == "claude"
+        && decision.injected_class.is_human_active_turn()
+        && !decision.local_only_slash
+        && crate::services::tui_o::writer::input_notices::writer_owns(
+            crate::services::tui_o::shadow::ShadowProvider::Claude,
+        )
 }
 
 /// True only when the POST certainly created no message: rejected before dispatch,

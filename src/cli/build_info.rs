@@ -58,7 +58,7 @@ mod tests {
             info["o_ledger_operator_resume"],
             crate::services::tui_o::store::ledger::OPERATOR_RESUME_SUPPORTED
         );
-        assert_eq!(info["o_ledger_input_notice"], false);
+        assert_eq!(info["o_ledger_input_notice"], true);
     }
 
     #[test]

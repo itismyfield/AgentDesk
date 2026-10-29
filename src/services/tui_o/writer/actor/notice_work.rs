@@ -4,7 +4,9 @@ use super::super::input_notices::admission::{NoticeRefusal, admit_notice};
 use super::super::pieces::PieceWork;
 use super::*;
 use crate::services::tui_o::shadow::{CapturedRecord, UnitKind};
-use crate::services::tui_o::store::ledger::input_notices::{NoticeEntry, NoticeEvidence};
+use crate::services::tui_o::store::ledger::input_notices::{
+    MigrationHistory, MigrationSnapshot, MigrationSource, NoticeEntry, NoticeEvidence,
+};
 use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState};
 
 fn notice(item: &Derived) -> Option<&PieceWork> {
@@ -47,7 +49,73 @@ fn covers(kept: &NoticeEvidence, next: &NoticeEvidence) -> bool {
             .as_ref()
             .is_none_or(|v| kept.origin.as_ref() == Some(v))
 }
+/// The newest Discord ID a message created at `at` can carry, so later notices fall above it.
+fn snowflake_ceiling(at: chrono::DateTime<chrono::Utc>) -> u64 {
+    const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
+    let ms = u64::try_from(at.timestamp_millis() - DISCORD_EPOCH_MS).unwrap_or(0);
+    (ms << 22) | ((1 << 22) - 1)
+}
+/// The old cursors to the current file ends, with the legacy history bounds.
+fn frozen_cohort(
+    store: &crate::services::tui_o::store::ChannelStore,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<MigrationSnapshot, String> {
+    let mut sources = Vec::new();
+    for cursor in store.cursors().filter(|cursor| !cursor.retired) {
+        let upper = match std::fs::metadata(&cursor.source.path) {
+            Ok(meta) => meta.len().max(cursor.captured_through),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => cursor.captured_through,
+            Err(error) => return Err(format!("input notice migration source: {error}")),
+        };
+        sources.push(MigrationSource {
+            source: cursor.source.clone(),
+            lower: cursor.captured_through,
+            upper,
+            prefix_hash: cursor.prefix_hash.clone(),
+        });
+    }
+    let binding_checkpoint = (store.binding_checkpoint())
+        .map_err(|error| format!("input notice migration checkpoint: {error:?}"))?
+        .unwrap_or(0);
+    // Legacy hook notices could precede their native row by a whole queued turn, so only the
+    // era's first anchor bounds them from below.
+    let lower = store.init().initial_anchor;
+    Ok(MigrationSnapshot {
+        sources,
+        binding_checkpoint,
+        history: MigrationHistory::Fixed {
+            lower,
+            upper: snowflake_ceiling(now).max(lower),
+        },
+    })
+}
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
+    /// Freezes the legacy cohort once, before resume can capture past the old cursors.
+    pub(super) fn start_notice_migration(&mut self) {
+        if !self.deriver.input_notices_enabled()
+            || self.writer.is_stopped()
+            || self
+                .writer
+                .store()
+                .ledger()
+                .input_notices()
+                .migration
+                .is_some()
+        {
+            return;
+        }
+        let now = self.utc_now();
+        let snapshot = match frozen_cohort(self.writer.store(), now) {
+            Ok(snapshot) => snapshot,
+            Err(detail) => {
+                self.writer.stop(WriterAlarm::Halted { detail });
+                return;
+            }
+        };
+        let entry = Box::new(NoticeEntry::MigrationStarted { snapshot });
+        let _ = self.writer.record(LedgerEntry::InputNotice { entry });
+    }
+
     pub(super) fn persist_notice_evidence(&mut self) -> Vec<UnitKey> {
         if !self.deriver.input_notices_enabled() || self.writer.is_stopped() {
             return Vec::new();
@@ -121,7 +189,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             })
             .map(|(_, e)| e.clone())
             .collect();
-        let mut eligible = Vec::new();
+        let (mut eligible, mut deferred) = (Vec::new(), Vec::new());
         for mut evidence in evidence {
             let record = CapturedRecord {
                 start: evidence.record.start,
@@ -165,6 +233,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                     self.writer.stop(WriterAlarm::LedgerViolation { detail });
                     return;
                 }
+                Err(NoticeRefusal::OwnershipPending) => deferred.push(piece.unit_key),
                 Err(NoticeRefusal::Busy | NoticeRefusal::Withheld(_)) => {}
             }
         }
@@ -193,7 +262,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let keys: Vec<_> = eligible.iter().map(|p| p.unit_key.clone()).collect();
         let Ok(ready) = self
             .writer
-            .reconcile_notice_migration(complete, &pending, &keys)
+            .reconcile_notice_migration(complete, &pending, &keys, &deferred)
             .await
         else {
             return;

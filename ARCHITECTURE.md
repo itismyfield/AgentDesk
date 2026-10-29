@@ -2507,7 +2507,8 @@ src/
 │   │   │   ├── synthetic_start_wiring.rs
 │   │   │   ├── synthetic_start_wiring_codex_tests.rs
 │   │   │   ├── task_notification_prompt.rs
-│   │   │   └── tests.rs
+│   │   │   ├── tests.rs
+│   │   │   └── writer_notice_owner_tests.rs
 │   │   ├── tui_task_card/
 │   │   │   ├── completion_card.rs
 │   │   │   └── completion_card_tests.rs
@@ -3631,6 +3632,7 @@ src/
 │   │   │   │   ├── codex_retention_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
+│   │   │   │   ├── notice_activation_tests.rs
 │   │   │   │   ├── notice_work.rs
 │   │   │   │   ├── notice_work_tests.rs
 │   │   │   │   ├── scoped_submission_tests.rs

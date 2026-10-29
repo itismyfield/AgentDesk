@@ -226,7 +226,7 @@ async fn legacy_identical_inputs_remain_unresolved_without_receipts_or_posts() {
         .collect();
     assert!(
         writer
-            .reconcile_notice_migration(true, &[], &keys)
+            .reconcile_notice_migration(true, &[], &keys, &[])
             .await
             .unwrap()
             .is_empty()
@@ -241,7 +241,7 @@ async fn legacy_identical_inputs_remain_unresolved_without_receipts_or_posts() {
     let mut writer = fixture.writer();
     assert!(
         writer
-            .reconcile_notice_migration(true, &[], &keys)
+            .reconcile_notice_migration(true, &[], &keys, &[])
             .await
             .unwrap()
             .is_empty()
@@ -261,7 +261,7 @@ async fn legacy_unique_receipt_imports_once_without_moving_body_frontiers() {
     seed(&mut writer, &[input], fixed());
     assert!(
         writer
-            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key))
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
             .await
             .unwrap()
             .is_empty()
@@ -273,7 +273,7 @@ async fn legacy_unique_receipt_imports_once_without_moving_body_frontiers() {
     let reads = fixture.port.reads.load(Ordering::SeqCst);
     assert!(
         writer
-            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key))
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
             .await
             .unwrap()
             .is_empty()
@@ -296,7 +296,7 @@ async fn ineligible_input_still_prevents_a_same_payload_legacy_receipt_import() 
     seed(&mut writer, &inputs, fixed());
     assert!(
         writer
-            .reconcile_notice_migration(true, &[], std::slice::from_ref(&eligible))
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&eligible), &[])
             .await
             .unwrap()
             .is_empty()
@@ -328,7 +328,7 @@ async fn excluded_input_is_not_audited_as_debt_but_still_prevents_a_legacy_colli
         .unwrap();
     assert!(
         writer
-            .reconcile_notice_migration(true, &[], std::slice::from_ref(&eligible))
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&eligible), &[])
             .await
             .unwrap()
             .is_empty()
@@ -364,7 +364,7 @@ async fn posted_legacy_notice_is_never_reclassified_as_debt_on_the_next_poll_or_
     );
     assert_eq!(
         writer
-            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key))
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
             .await
             .unwrap(),
         vec![key.clone()]
@@ -389,7 +389,7 @@ async fn posted_legacy_notice_is_never_reclassified_as_debt_on_the_next_poll_or_
         .unwrap();
     assert!(
         writer
-            .reconcile_notice_migration(true, &[], &[])
+            .reconcile_notice_migration(true, &[], &[], &[])
             .await
             .unwrap()
             .is_empty()
@@ -406,7 +406,7 @@ async fn posted_legacy_notice_is_never_reclassified_as_debt_on_the_next_poll_or_
     let mut writer = fixture.writer();
     assert!(
         writer
-            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key))
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
             .await
             .unwrap()
             .is_empty()
@@ -449,7 +449,7 @@ async fn partial_legacy_history_preserves_discovered_candidate_reservations_afte
     );
     assert!(
         writer
-            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key))
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
             .await
             .unwrap()
             .is_empty()
@@ -469,7 +469,7 @@ async fn partial_legacy_history_preserves_discovered_candidate_reservations_afte
     let mut writer = fixture.writer();
     assert!(
         writer
-            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key))
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
             .await
             .unwrap()
             .is_empty()
@@ -502,7 +502,7 @@ async fn empty_frozen_range_is_ready_and_never_searches_new_owner_inputs() {
     );
     assert_eq!(
         writer
-            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key))
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
             .await
             .unwrap(),
         vec![key]
@@ -555,7 +555,7 @@ async fn records_before_the_migration_lower_stay_nonretroactive_beside_a_new_sou
     }
     assert_eq!(
         writer
-            .reconcile_notice_migration(true, &[], &[old_key.clone(), fresh_key.clone()])
+            .reconcile_notice_migration(true, &[], &[old_key.clone(), fresh_key.clone()], &[])
             .await
             .unwrap(),
         vec![fresh_key]
@@ -582,7 +582,7 @@ async fn incomplete_cohort_and_raw_straddling_membership_never_promote_unique_ma
     seed(&mut writer, &[input, fresh], fixed());
     let frozen = writer.store().ledger().input_notices().migration.clone();
     let ready = writer
-        .reconcile_notice_migration(false, &[], &[key.clone(), fresh_key.clone()])
+        .reconcile_notice_migration(false, &[], &[key.clone(), fresh_key.clone()], &[])
         .await
         .unwrap();
     assert_eq!(ready, vec![fresh_key.clone()]);
@@ -596,7 +596,8 @@ async fn incomplete_cohort_and_raw_straddling_membership_never_promote_unique_ma
             .reconcile_notice_migration(
                 true,
                 std::slice::from_ref(&fresh_key),
-                std::slice::from_ref(&fresh_key)
+                std::slice::from_ref(&fresh_key),
+                &[]
             )
             .await
             .unwrap(),
@@ -625,7 +626,7 @@ async fn refused_or_over_budget_legacy_history_becomes_durable_debt_once() {
         );
         assert!(
             writer
-                .reconcile_notice_migration(true, &[], std::slice::from_ref(&key))
+                .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
                 .await
                 .unwrap()
                 .is_empty()
@@ -637,7 +638,7 @@ async fn refused_or_over_budget_legacy_history_becomes_durable_debt_once() {
         let mut writer = fixture.writer();
         assert!(
             writer
-                .reconcile_notice_migration(true, &[], std::slice::from_ref(&key))
+                .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
                 .await
                 .unwrap()
                 .is_empty()
@@ -664,7 +665,7 @@ async fn failed_migration_record_stops_before_import_or_ready_success() {
     );
     assert_eq!(
         writer
-            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key))
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
             .await,
         Err(Step::Stopped)
     );
@@ -690,7 +691,7 @@ async fn unavailable_frozen_history_never_becomes_a_notice_receipt() {
     );
     assert!(
         writer
-            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key))
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
             .await
             .unwrap()
             .is_empty()
@@ -727,7 +728,7 @@ async fn notice_settlement_rejects_undiscovered_frozen_legacy_receipts_but_accep
     );
     assert!(
         writer
-            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key))
+            .reconcile_notice_migration(true, &[], std::slice::from_ref(&key), &[])
             .await
             .unwrap()
             .is_empty()

@@ -14,7 +14,7 @@ fn run(body: impl std::future::Future<Output = ()>) {
 }
 
 #[test]
-fn n1a_confirmed_direct_prompt_posts_only_its_notice() {
+fn n1a_confirmed_direct_prompt_leaves_its_notice_to_the_writer() {
     run(async {
         let h = RelayE2eHarness::start_with_health_registry().await;
         h.cache_relay_transport();
@@ -50,14 +50,10 @@ fn n1a_confirmed_direct_prompt_posts_only_its_notice() {
             inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL_ID).is_none(),
             "confirmed direct prompt must not create an inflight row"
         );
-        assert_eq!(h.local_note_posts(), 1);
+        // The tui_o writer posts the notice from the durable native row; the hook relay stays silent.
+        assert_eq!(h.local_note_posts(), 0);
         assert_eq!(h.placeholder_posts(), 0);
-        assert_eq!(h.messages().len(), 1);
-        assert!(
-            h.messages()[0]
-                .1
-                .contains("N1a direct prompt remains visible")
-        );
+        assert!(h.messages().is_empty());
         assert!(h.prompt_anchor(tmux).is_none());
         assert!(!h.relay_lease_present(tmux));
         assert!(h.mailbox().await.cancel_token.is_none());
@@ -377,7 +373,7 @@ fn n1a_confirmed_idle_skips_legacy_footer_and_offset_maintenance() {
 }
 
 #[test]
-fn n1c_hook_observed_direct_prompt_in_a_confirmed_channel_posts_its_notice_without_a_lease() {
+fn n1c_hook_observed_direct_prompt_in_a_confirmed_channel_leaves_its_notice_to_the_writer() {
     run(async {
         let h = RelayE2eHarness::start_with_health_registry().await;
         h.cache_relay_transport();
@@ -422,7 +418,7 @@ fn n1c_hook_observed_direct_prompt_in_a_confirmed_channel_posts_its_notice_witho
             !h.relay_lease_present(tmux),
             "a confirmed direct turn must not keep the observation's lease"
         );
-        assert_eq!(h.local_note_posts(), 1);
+        assert_eq!(h.local_note_posts(), 0, "the writer owns the direct notice");
         assert_eq!(h.placeholder_posts(), 0);
         assert!(h.prompt_anchor(tmux).is_none());
         assert!(

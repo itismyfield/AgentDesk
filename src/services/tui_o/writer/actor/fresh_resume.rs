@@ -189,7 +189,9 @@ pub(super) fn configured_deriver(
             .then(|| crate::services::provider::ProviderKind::Claude.resolve_context_window(None)),
     };
     UnitDeriver::new(channel, provider)
-        .with_input_notices(super::super::input_notices::Projection::default())
+        .with_input_notices(super::super::input_notices::Projection::for_provider(
+            provider,
+        ))
         .with_tool_cards(inputs)
         .with_turn_summary(summary)
 }

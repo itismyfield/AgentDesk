@@ -100,8 +100,7 @@ async fn plan<P: DiscordPort>(
     channel: u64,
     state: &NoticeState,
     cohort_complete: bool,
-    pending: &[UnitKey],
-    eligible: &[UnitKey],
+    (pending, eligible, deferred): (&[UnitKey], &[UnitKey], &[UnitKey]),
     proof_ids: &[u64],
 ) -> Plan {
     let Some(snapshot) = state.migration.as_ref() else {
@@ -164,6 +163,11 @@ async fn plan<P: DiscordPort>(
             .unit_key
             .as_ref()
             .is_some_and(|key| pending.contains(key));
+        // Undecided injection ownership is judged once a receipt or withdrawal settles it.
+        let undecided = (input.unit_key.as_ref()).is_some_and(|key| deferred.contains(key));
+        if member(snapshot, &input.record) && undecided && !queued {
+            continue;
+        }
         if !member(snapshot, &input.record) || queued {
             if eligible_input(input)
                 && let Some(key) = input.unit_key.as_ref()
@@ -228,6 +232,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         complete: bool,
         pending: &[UnitKey],
         eligible: &[UnitKey],
+        deferred: &[UnitKey],
     ) -> Result<Vec<UnitKey>, Step> {
         if self.is_stopped() {
             return Err(Step::Stopped);
@@ -272,8 +277,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             self.channel,
             ledger.input_notices(),
             complete,
-            &pending,
-            &eligible,
+            (&pending, &eligible, deferred),
             &proof_ids,
         )
         .await;
