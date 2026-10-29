@@ -169,7 +169,8 @@ export default function CampaignsPanel({ language }: { language: string }) {
     if (eventsPending.current === read) return; // it will answer; request() always settles
     const id = ++eventsRequest.current; // a read for anything else is no longer wanted
     eventsPending.current = null;
-    if (events?.read === read && events.failedAfter === null) return;
+    // A good read stands; a failed one waits for a list read that lands after it.
+    if (events?.read === read && (events.failedAfter === null || events.failedAfter >= serverPollCount.current)) return;
     eventsPending.current = read;
     const campaign = selectedCampaign;
     getServerCampaignEvents(campaign, { after: Math.max(0, lastEvent - 50), limit: 50 }).then(
