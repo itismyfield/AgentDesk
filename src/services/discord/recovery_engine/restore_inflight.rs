@@ -742,10 +742,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     restore_recovered_session_worktree(session, &state);
                 }
 
-                super::recovery_two_message_panel::recover_two_message_panel(
-                    http, shared, provider, &mut state,
-                )
-                .await;
                 let finish_mailbox_on_completion =
                     reregister_active_turn_from_inflight(shared, &state).await;
 
@@ -1776,10 +1772,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             recovery_phase_after_tmux_probe(true, Some(pane_alive)),
             RecoveryPhase::WatcherReattach
         ) {
-            super::recovery_two_message_panel::recover_two_message_panel(
-                http, shared, provider, &mut state,
-            )
-            .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ↻ inflight recovery: pane alive for channel {}, spawning watcher immediately",
@@ -1908,10 +1900,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 restore_recovered_session_worktree(session, &state);
             }
 
-            super::recovery_two_message_panel::recover_two_message_panel(
-                http, shared, provider, &mut state,
-            )
-            .await;
             let finish_mailbox_on_completion =
                 reregister_active_turn_from_inflight(shared, &state).await;
 

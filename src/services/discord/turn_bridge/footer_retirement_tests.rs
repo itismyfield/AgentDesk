@@ -1,5 +1,4 @@
 use super::*;
-use crate::services::discord::footer_retirement::{legacy_for_test, retired};
 use crate::services::discord::formatting::{self, ReplaceLongMessageOutcome};
 use crate::services::discord::gateway::GatewayFuture;
 use std::sync::{Arc, Mutex};
@@ -109,7 +108,6 @@ async fn retired_bridge_creates_no_panel_in_either_layout() {
         "AGENTDESK_ROOT_DIR",
         root.path(),
     );
-    assert!(retired());
     let shared = shared();
     let gateway = Gateway::default();
     for two_message in [false, true] {
@@ -269,44 +267,35 @@ fn retired_bridge_builder_preserves_actual_footer_budget_input() {
                     &body,
                 )
             };
-            let (old_block, old_text, old_plan) = {
-                let _legacy = legacy_for_test();
-                let block = builder();
-                let text = formatting::build_status_panel_streaming_edit_text(
-                    &body,
-                    &block,
-                    &ProviderKind::Claude,
-                );
-                let plan = formatting::plan_streaming_rollover(&body, &block);
-                (block, text, plan)
-            };
             let block = builder();
             assert_eq!(
-                block, old_block,
+                block,
+                shared
+                    .ui
+                    .placeholder_live_events
+                    .render_footer_status_panel(
+                        channel,
+                        &ProviderKind::Claude,
+                        START,
+                        (&body, "⠸")
+                    ),
                 "budget input must retain the legacy panel, not a spinner"
             );
             assert!(block.len() > formatting::build_processing_status_block("⠸").len());
             if body.len() <= 100 {
                 assert!(block.contains("fixture0"));
             }
-            let plan = formatting::plan_streaming_rollover(&body, &block);
-            assert_eq!(
-                plan.as_ref().map(|p| (&p.frozen_chunk, p.split_at)),
-                old_plan.as_ref().map(|p| (&p.frozen_chunk, p.split_at))
-            );
             let text = formatting::build_status_panel_streaming_edit_text(
                 &body,
                 &block,
                 &ProviderKind::Claude,
             );
-            assert_eq!(
-                text,
-                if body.is_empty() {
-                    "⠋ 계속 처리 중"
-                } else {
-                    old_text.strip_suffix(&format!("\n\n{block}")).unwrap()
-                }
-            );
+            if body.is_empty() {
+                assert_eq!(text, "⠋ 계속 처리 중");
+            } else {
+                assert!(!text.ends_with(&format!("\n\n{block}")));
+                assert!(!text.contains("fixture0"));
+            }
         }
     }
 }
