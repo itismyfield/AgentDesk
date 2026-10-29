@@ -28,6 +28,12 @@ fn seal_verifies_the_observed_output_without_rewriting_the_input_binding() {
         evidence.validate_execution(&plan(&binding), &binding),
         Err(ContractError::CandidateMismatch)
     );
+    let mut moved = evidence.clone();
+    moved.environment.checkout.observed_sha = "editing-h2".into();
+    assert_eq!(
+        moved.validate_execution_subject(&plan(&binding), &binding, &subject),
+        Err(ContractError::CandidateMismatch)
+    );
     let mut foreign = run.clone();
     foreign.origin.owner_attempt = "other-work".into();
     assert!(resolved_subject(&foreign).is_none());

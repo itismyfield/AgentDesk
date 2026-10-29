@@ -18,7 +18,7 @@ pub enum StoredEvidence {
         decision: Option<EvidenceDecision>,
     },
     Seal {
-        seal: CandidateSeal,
+        seal: Box<CandidateSeal>,
     },
 }
 

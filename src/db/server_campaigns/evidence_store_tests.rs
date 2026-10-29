@@ -66,18 +66,22 @@ async fn same_evidence_id_keeps_the_first_identity_under_concurrent_submission_p
     );
     let binding = domain::binding(&domain::running());
     let sealed = StoredEvidence::Seal {
-        seal: seal(&binding),
+        seal: Box::new(seal(&binding)),
     };
     record_in(&h.pool, &sealed).await.unwrap();
     let mut later = seal(&binding);
     later.sealed_at += chrono::Duration::minutes(3);
     later.workspace.observed_at = later.sealed_at;
-    let retry = StoredEvidence::Seal { seal: later };
+    let retry = StoredEvidence::Seal {
+        seal: Box::new(later),
+    };
     assert_eq!(record_in(&h.pool, &retry).await.unwrap(), sealed);
     let mut moved = seal(&binding);
     moved.output_sha = "output-h2".into();
     moved.workspace = workspace("output-h2");
-    let replace = StoredEvidence::Seal { seal: moved };
+    let replace = StoredEvidence::Seal {
+        seal: Box::new(moved),
+    };
     assert!(matches!(
         record_in(&h.pool, &replace).await,
         Err(EvidenceStoreError::Conflict)
