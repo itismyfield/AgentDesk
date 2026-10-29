@@ -20,11 +20,13 @@ const tr = (_ko: string, en: string) => en;
 const result = { definition_revision: 1, run_id: null, control_version: null, event_sequence: 1, control: "prepared" as const };
 let container: HTMLDivElement;
 let root: Root;
-let saved: ReturnType<typeof vi.fn<(id: string, result: unknown) => void>>;
+let saved: ReturnType<typeof vi.fn<(id: string, result: unknown, key: string) => void>>;
 let conflicted: ReturnType<typeof vi.fn<() => void>>;
 
+let replaceDraft: (draft: DefinitionDraft) => void = () => {};
 function Harness({ initial }: { initial: DefinitionDraft }) {
   const [draft, setDraft] = useState<DefinitionDraft | null>(initial);
+  replaceDraft = setDraft;
   return draft ? <ServerCampaignForm draft={draft} onDraftChange={(next) => setDraft((current) => current && (typeof next === "function" ? next(current) : next))}
     tr={tr} onSaved={saved} onConflict={conflicted} onCancel={() => setDraft(null)} disabled={false} /> : <p>closed</p>;
 }
@@ -57,7 +59,7 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  saved = vi.fn<(id: string, result: unknown) => void>();
+  saved = vi.fn<(id: string, result: unknown, key: string) => void>();
   conflicted = vi.fn<() => void>();
   create.mockReset();
   edit.mockReset();
@@ -96,7 +98,7 @@ it("creates a two-task definition with acceptance and a dependency from the mini
       { id: "B", title: "Follow-up", issue_url: "https://github.com/itismyfield/AgentDesk/issues/2", acceptance: [], dependencies: ["A"], group: "later" },
     ],
   }, "key-1");
-  expect(saved).toHaveBeenCalledWith("release-2", result);
+  expect(saved).toHaveBeenCalledWith("release-2", result, "key-1");
 });
 
 it("keeps the draft and names the server's cycle and empty acceptance refusals", async () => {
@@ -204,4 +206,15 @@ it("does not pre-validate the definition in the browser", async () => {
   await press("Create");
   expect(create).toHaveBeenCalledOnce();
   expect(container.textContent).toContain("A task has no acceptance condition · task-1");
+});
+
+it("applies a save's answer only to the draft it was sent from", async () => {
+  let fail: (reason: unknown) => void = () => {};
+  edit.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+  await mount(editDraft(fixtures.prepared, () => "key-1"));
+  await press("Save");
+  // The panel replaced the draft (for example, it was discarded and reopened) before the answer came.
+  await act(async () => replaceDraft(editDraft(fixtures.prepared, () => "key-2")));
+  await act(async () => fail(new TypeError("Failed to fetch")));
+  expect(container.textContent).not.toContain("No answer arrived.");
 });

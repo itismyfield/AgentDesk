@@ -14,10 +14,11 @@ const VERIFICATION_LABELS: Record<string, [string, string]> = {
 const time = (value: string | null) => value ? new Date(value).toLocaleString() : "—";
 
 export default function ServerCampaignDetail({
-  document, events, connection, selectedNode, onSelectNode, stopIntent, busy, commandError, onCommand, onEdit, onCopy, link, tr,
+  document, events, eventsFailed, connection, selectedNode, onSelectNode, stopIntent, busy, commandError, onCommand, onEdit, onCopy, link, tr,
 }: {
   document: ServerCampaignDocument;
   events: ServerCampaignEvent[] | null;
+  eventsFailed: boolean;
   connection: Connection;
   selectedNode: string | null;
   onSelectNode: (id: string | null) => void;
@@ -112,7 +113,7 @@ export default function ServerCampaignDetail({
       </aside>}
     </div>
     <details className="campaign-connections">
-      <summary>{tr("이벤트", "Events")} · {events?.length ?? "—"}</summary>
+      <summary>{tr("이벤트", "Events")} · {events?.length ?? "—"}{eventsFailed && ` · ${tr("이벤트를 갱신하지 못했습니다", "Could not refresh events")}`}</summary>
       <ol>{(events ?? []).slice().reverse().map((event) => <li key={event.sequence}>#{event.sequence} · {time(event.observed_at)} · {event.kind.event}{event.run_id && ` · ${event.run_id}`}</li>)}</ol>
     </details>
     <label className="campaign-server-feedback">{tr("피드백용 복사", "Copy for feedback")}
