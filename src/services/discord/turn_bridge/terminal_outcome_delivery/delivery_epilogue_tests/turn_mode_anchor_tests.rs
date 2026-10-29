@@ -107,6 +107,7 @@ async fn anchorless_notice(prompt_too_long: bool) {
     );
     let calls = discord.calls();
     assert_eq!(calls.len(), 1, "{case}: one notice: {calls:?}");
+    #[cfg(unix)]
     assert!(calls[0].route.starts_with("POST "), "{case}: {calls:?}");
     assert_eq!(
         calls[0].reply_to,

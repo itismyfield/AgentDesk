@@ -42,9 +42,9 @@ pub(super) enum Span {
     },
 }
 
-/// The A1–A8 regions. A6 is the success arm's own block and A7 the stale-card `if` block,
+/// The A1–A9 regions. A6 is the success arm's own block and A7 the stale-card `if` block,
 /// so prose or log text near them never bounds the region.
-pub(super) const SITES: [(&str, &str, Span); 8] = [
+pub(super) const SITES: [(&str, &str, Span); 9] = [
     (
         "A1/A2 queue-exit drain",
         MOD_RS,
@@ -89,7 +89,7 @@ pub(super) const SITES: [(&str, &str, Span); 8] = [
         INTAKE_RS,
         Span::Nested(&[
             "pub(super) async fn handle_text_message(",
-            "if let Some(existing) = queued_placeholder_handoff",
+            "} else if let Some(existing) = queued_placeholder_handoff",
             "Ok(fresh_msg_id) =>",
         ]),
     ),
@@ -105,6 +105,14 @@ pub(super) const SITES: [(&str, &str, Span); 8] = [
         "A8 stale-card delete",
         BOOTSTRAP_RS,
         Span::Items(&["async fn delete_stale_queued_placeholder_cards_with("]),
+    ),
+    (
+        "A9 turn-mode dequeue release",
+        INTAKE_RS,
+        Span::Nested(&[
+            "pub(super) async fn handle_text_message(",
+            "} else if placeholderless {",
+        ]),
     ),
 ];
 
