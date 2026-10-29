@@ -97,7 +97,7 @@ fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Resul
     };
     let submitted = pump::submit(&r.mailbox, prepared, r.clock, leaf);
     match tokio::runtime::Handle::current().block_on(submitted)? {
-        Completion::Submitted { .. } => Ok(()),
+        Completion::Submitted => Ok(()),
         other => Err(format!("{other:?}")),
     }
 }

@@ -80,9 +80,7 @@ async fn pump_runs_one_attempt_with_a_multi_source_frame() {
             matches!(&bind, Ok(TurnBind::Armed(turn)) if turn.attempt == "pump-multi"),
             "the effect runs under an armed exact turn: {bind:?}"
         );
-        Ok(Completion::Submitted {
-            enter_resent: false,
-        })
+        Ok(Completion::Submitted)
     });
     let completion = submit(
         &handle,
@@ -91,12 +89,7 @@ async fn pump_runs_one_attempt_with_a_multi_source_frame() {
         leaf,
     )
     .await;
-    assert_eq!(
-        completion,
-        Ok(Completion::Submitted {
-            enter_resent: false
-        })
-    );
+    assert_eq!(completion, Ok(Completion::Submitted));
     assert_eq!(
         *frames.lock().unwrap(),
         [frame],
@@ -138,9 +131,7 @@ async fn same_target_attempts_run_one_at_a_time_and_other_targets_overlap() {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 running.fetch_sub(1, SeqCst);
-                Ok(Completion::Submitted {
-                    enter_resent: false,
-                })
+                Ok(Completion::Submitted)
             })
         };
         let pane_b = if same { "pane-shared" } else { "pane-other" };
@@ -158,9 +149,7 @@ async fn same_target_attempts_run_one_at_a_time_and_other_targets_overlap() {
                 leaf()
             ),
         );
-        let submitted = Ok(Completion::Submitted {
-            enter_resent: false,
-        });
+        let submitted = Ok(Completion::Submitted);
         assert_eq!(
             (first, second),
             (submitted.clone(), submitted),

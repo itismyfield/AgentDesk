@@ -324,27 +324,41 @@ fn legacy_guard_value_does_not_block_owner_a() {
 }
 
 /// A swallowed Enter on the owner's own paste gets main's one finishing Enter and no second
-/// paste; whether or not the transcript then shows it, the attempt ends delivered, never re-held.
+/// paste. Seen in the transcript it is delivered; never seen it is unconfirmed as main reports it:
+/// one alert, the head left Unknown, nothing re-held or sent again.
 #[test]
 fn owner_busy_claude_confirms_once_without_requeue() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    for (name, channel, seen) in [
-        ("oc-seen", 7_272_505, true),
-        ("oc-missing", 7_272_506, false),
-    ] {
-        let rig = rig(name, channel, "swallow", view("", false), BUSY);
-        let transcript = if seen {
-            rig.transcript()
-        } else {
-            let elsewhere = rig.f.root.path().join(format!("{name}-unwritten.jsonl"));
-            fs::write(&elsewhere, BUSY).unwrap();
-            elsewhere
-        };
-        let result = rig.dispatch(ProviderKind::Claude, target::Phase::Busy, &transcript);
-        assert_eq!(result, Ok(()), "{name}");
-        assert_eq!(rig.events(), ["paste", "Enter", "Enter"], "{name}");
-        rig.delivered();
-    }
+    let rig_seen = rig("oc-seen", 7_272_505, "swallow", view("", false), BUSY);
+    let result = rig_seen.dispatch(
+        ProviderKind::Claude,
+        target::Phase::Busy,
+        &rig_seen.transcript(),
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(rig_seen.events(), ["paste", "Enter", "Enter"]);
+    rig_seen.delivered();
+
+    let rig = rig("oc-missing", 7_272_506, "swallow", view("", false), BUSY);
+    let elsewhere = rig.f.root.path().join("oc-missing-unwritten.jsonl");
+    fs::write(&elsewhere, BUSY).unwrap();
+    let result = rig.dispatch(ProviderKind::Claude, target::Phase::Busy, &elsewhere);
+    assert_eq!(result, Err("WriteUncertain(\"not_observed\")".into()));
+    assert_eq!(
+        rig.events(),
+        ["paste", "Enter", "Enter"],
+        "one paste, one finishing Enter"
+    );
+    rig.uncertain();
+    assert!(matches!(rig.bind(), TurnBind::Armed(turn) if turn.attempt == rig.nonce));
+    let alerts: Vec<_> = crate::services::observability::events::recent(usize::MAX)
+        .into_iter()
+        .filter(|event| {
+            event.event_type == "busy_inject_unconfirmed" && event.channel_id == Some(rig.channel)
+        })
+        .map(|event| event.payload["detail"].clone())
+        .collect();
+    assert_eq!(alerts, [json!("not_observed")]);
 }
 
 /// A load that never became a buffer sends nothing and proves it: the original and its ticket

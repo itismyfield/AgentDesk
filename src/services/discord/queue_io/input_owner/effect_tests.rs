@@ -71,12 +71,7 @@ fn cold_claude_first_prompt_is_one_owner_attempt() {
         let leaf = cold_claude(name.into(), transcript.display().to_string(), 0);
         pump::submit(&mailbox, prepared, Arc::new(|| 10_000), leaf).await
     });
-    assert_eq!(
-        completion,
-        Ok(Completion::Submitted {
-            enter_resent: false
-        })
-    );
+    assert_eq!(completion, Ok(Completion::Submitted));
     assert!(
         !transcript.exists(),
         "a cold submit does not wait for a transcript"

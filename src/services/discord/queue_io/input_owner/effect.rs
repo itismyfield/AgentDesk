@@ -17,8 +17,8 @@ pub(crate) struct PreparedPayload {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Completion {
-    /// Content and Enter went; `enter_resent` when confirm sent its one finishing Enter.
-    Submitted { enter_resent: bool },
+    /// Content and Enter went, and confirm did not report the transcript missing them.
+    Submitted,
     /// No key reached the pane and the owner holds the proof; the original stays in custody.
     NotSent(String),
     /// C-s went but no content: a person's draft may be parked.
@@ -53,7 +53,7 @@ pub(crate) async fn run(
             other => Completion::NotSent(format!("{other:?}")),
         });
     }
-    let delivered = matches!(completion, Completion::Submitted { .. });
+    let delivered = matches!(completion, Completion::Submitted);
     let now = clock();
     mailbox
         .v2_request(move |slot| {
@@ -126,16 +126,12 @@ impl BusyClaude {
                     owner_input::vetoed(&reason);
                     Completion::NotSent(reason)
                 }
-                // Neither window held a receipt, even after any finishing Enter; terminal.
-                Ok((Outcome::Injected, Some(Receipt::Missing { resent }))) => {
-                    alert("not_observed");
-                    Completion::Submitted {
-                        enter_resent: resent,
-                    }
+                // Neither window held a receipt, even after any finishing Enter: unconfirmed, as
+                // main reports it, and never sent again.
+                Ok((Outcome::Injected, Some(Receipt::Missing { .. }))) => {
+                    Completion::WriteUncertain(alert("not_observed"))
                 }
-                Ok((Outcome::Injected, _)) => Completion::Submitted {
-                    enter_resent: false,
-                },
+                Ok((Outcome::Injected, _)) => Completion::Submitted,
                 Ok((Outcome::Failed(WriteFailure::Stash), _)) => {
                     Completion::Failed(alert("stash_failed"))
                 }
@@ -173,9 +169,7 @@ pub(crate) fn idle_claude(session: String) -> Leaf {
     use crate::services::claude_tui::guarded_outcome::SubmissionError;
     Box::new(move |frame| {
         match crate::services::claude_tui::input::send_warm_followup_owned(&session, &frame, None) {
-            Ok(()) => Ok(Completion::Submitted {
-                enter_resent: false,
-            }),
+            Ok(()) => Ok(Completion::Submitted),
             Err(SubmissionError::Held(hold)) => Ok(Completion::NotSent(format!("held: {hold:?}"))),
             Err(error) => Ok(Completion::WriteUncertain(format!("{error:?}"))),
         }
@@ -189,9 +183,7 @@ pub(crate) fn cold_claude(session: String, transcript: String, offset: u64) -> L
     Box::new(move |frame| {
         Ok(
             match submit_created(&transcript, offset, &session, &frame) {
-                Ok(()) => Completion::Submitted {
-                    enter_resent: false,
-                },
+                Ok(()) => Completion::Submitted,
                 Err(SubmissionError::Held(hold)) => Completion::NotSent(format!("held: {hold:?}")),
                 Err(error) => Completion::WriteUncertain(format!("{error:?}")),
             },
