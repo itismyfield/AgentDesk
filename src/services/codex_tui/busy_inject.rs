@@ -296,6 +296,15 @@ fn inject_locked(
         Ok(current) if current != before => Some(Veto::ComposerUnread),
         Ok(_) => None,
         Err(veto) => Some(veto),
+    })
+    .or_else(|| {
+        // An owner refusal before the paste is a not-sent veto like the reads above.
+        use crate::services::claude_tui::owner_input::{ReadyRefusal, ready_payload};
+        match ready_payload() {
+            Ok(()) => None,
+            Err(ReadyRefusal::Target(_)) => Some(Veto::PaneUnavailable),
+            Err(ReadyRefusal::Lease(_)) => Some(Veto::LockContended),
+        }
     });
     if let Some(veto) = final_veto {
         drop_buffer();
@@ -314,12 +323,18 @@ fn inject_locked(
         let _ = append::mark(request.nonce, request.rollout, Admission::Uncertain);
         Outcome::Unconfirmed(reason)
     };
-    if crate::services::claude_tui::owner_input::before_payload().is_err() {
-        return unconfirmed(Unconfirmed::PasteFailed);
+    // The owner's payload start comes just before the paste, so its refusal leaves no key.
+    if crate::services::claude_tui::owner_input::start_payload().is_err() {
+        ledger.withdraw();
+        crate::services::tui_input::human_frame::history::withdraw(request.nonce, request.rollout);
+        drop_buffer();
+        return not_sent(Veto::LockContended);
     }
+    crate::services::claude_tui::owner_input::keyed();
     // After a write is attempted, its failure cannot prove that the pane took no input.
-    if pane
-        .ok(&[
+    use crate::services::claude_tui::busy_inject::stash::{Key, key};
+    let paste = |target: &str| {
+        [
             "paste-buffer",
             "-p",
             "-r",
@@ -327,17 +342,16 @@ fn inject_locked(
             "-b",
             &buffer,
             "-t",
-            pane.target(),
-        ])
-        .is_none()
-    {
+            target,
+        ]
+        .map(String::from)
+    };
+    if !matches!(key(pane, paste), Key::Applied) {
         return unconfirmed(Unconfirmed::PasteFailed);
     }
     std::thread::sleep(timing.settle);
-    if pane
-        .ok(&["send-keys", "-t", pane.target(), "Enter"])
-        .is_none()
-    {
+    let enter = |target: &str| ["send-keys", "-t", target, "Enter"].map(String::from);
+    if !matches!(key(pane, enter), Key::Applied) {
         return unconfirmed(Unconfirmed::EnterFailed);
     }
     if append::mark(request.nonce, request.rollout, Admission::Admitted).is_ok() {

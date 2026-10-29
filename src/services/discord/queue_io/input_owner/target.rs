@@ -47,6 +47,8 @@ pub(crate) enum Route {
     ClaudeIdle,
     /// A busy Claude pane hosted on Herdr: health's gated busy transaction.
     ClaudeHerdrBusy,
+    /// A busy Codex tmux pane: main's Codex busy transaction aimed at the open model turn.
+    CodexBusy,
     /// The first prompt of an execution the provider's launch creates.
     Cold,
     /// An idle Herdr pane's next prompt, written by its driver on the bound execution.
@@ -74,8 +76,9 @@ pub(crate) fn route(
         ("claude", "tmux", Phase::Busy) => Route::ClaudeBusy,
         ("claude", "tmux", Phase::Idle) => Route::ClaudeIdle,
         ("claude", "herdr", Phase::Busy) => Route::ClaudeHerdrBusy,
+        ("codex", "tmux", Phase::Busy) => Route::CodexBusy,
         ("claude" | "codex", "herdr", Phase::Idle) => Route::HerdrIdle,
-        // Codex busy waits for its owner primitive.
+        // A busy Codex Herdr pane waits for its owner adapter.
         _ => Route::Held("provider_unsupported"),
     })
 }
@@ -100,9 +103,9 @@ mod tests {
         assert!(TargetKey::of(&json!({"target":{"host":"tmux","owner":"p"}})).is_err());
     }
 
-    /// Codex busy panes are held, never routed to another driver.
+    /// A busy Codex Herdr pane is held, never routed to another driver.
     #[test]
-    fn only_codex_busy_and_unknown_providers_are_held() {
+    fn only_codex_herdr_busy_and_unknown_providers_are_held() {
         let local = |provider, host, phase| {
             route(
                 Execution::LocalTui,
@@ -125,6 +128,7 @@ mod tests {
             local("claude", "herdr", Phase::Busy),
             Some(Route::ClaudeHerdrBusy)
         );
+        assert_eq!(local("codex", "tmux", Phase::Busy), Some(Route::CodexBusy));
         for provider in ["claude", "codex"] {
             assert_eq!(
                 local(provider, "herdr", Phase::Idle),
@@ -132,7 +136,6 @@ mod tests {
             );
         }
         for (provider, host, phase) in [
-            ("codex", "tmux", Phase::Busy),
             ("codex", "herdr", Phase::Busy),
             ("gemini", "tmux", Phase::Absent),
         ] {

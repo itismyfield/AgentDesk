@@ -130,7 +130,7 @@ pub(crate) use turn_deliver::inject_tests::{
     send_meanwhile, start_without_gateway,
 };
 #[cfg(all(test, unix))]
-pub(in crate::services::discord) use turn_deliver::{BusyInput, herdr_busy};
+pub(in crate::services::discord) use turn_deliver::{BusyInput, CodexLedger, herdr_busy};
 pub use turn_deliver::{
     ExternalHold, HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
     external_turn_hold_for_start,

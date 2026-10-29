@@ -1709,6 +1709,7 @@ src/
 │   │   ├── queue_io/
 │   │   │   ├── input_owner/
 │   │   │   │   ├── effect/
+│   │   │   │   │   ├── codex.rs
 │   │   │   │   │   ├── herdr.rs
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs
@@ -2000,6 +2001,7 @@ src/
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   ├── owner_input.rs
+│   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── producer_error_test_support.rs

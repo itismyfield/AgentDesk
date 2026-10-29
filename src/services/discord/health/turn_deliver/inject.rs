@@ -872,11 +872,11 @@ fn run_with(
 }
 
 /// Tells the dedupe observers the nonce is this Discord message, aimed at the target turn.
-struct CodexLedger<'a> {
-    session: &'a str,
-    nonce: &'a str,
-    target_turn: &'a str,
-    message: Option<MessageId>,
+pub(in crate::services::discord) struct CodexLedger<'a> {
+    pub(in crate::services::discord) session: &'a str,
+    pub(in crate::services::discord) nonce: &'a str,
+    pub(in crate::services::discord) target_turn: &'a str,
+    pub(in crate::services::discord) message: Option<MessageId>,
 }
 
 impl codex_inject::Ledger for CodexLedger<'_> {

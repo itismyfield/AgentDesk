@@ -145,6 +145,17 @@ impl HerdrOwner {
     }
 
     fn hook(&self, provider: &str, host: &str, wanted: Lineage) -> scope::LaunchHook {
+        self.hook_with(provider, host, wanted, PROMPT)
+    }
+
+    /// As `hook`, with `prompt` as the turn's text.
+    fn hook_with(
+        &self,
+        provider: &str,
+        host: &str,
+        wanted: Lineage,
+        prompt: &str,
+    ) -> scope::LaunchHook {
         let nonce = format!("{:032x}", self.channel);
         let registration = Registration {
             mailbox: self.mailbox.clone(),
@@ -165,7 +176,7 @@ impl HerdrOwner {
             clock: Arc::new(|| 10_000),
             timing: &crate::services::claude_tui::busy_inject::TIMING,
         };
-        created(registration, PROMPT.into(), wanted)
+        created(registration, prompt.into(), wanted)
     }
 
     /// The owner's head as the pane saw it at each send.
@@ -199,12 +210,16 @@ impl HerdrOwner {
             .unwrap()
     }
 
-    /// Delivered once: the paste carries exactly the reserved prompt and one Enter follows.
-    fn delivered_once(&self) {
+    /// Delivered once: the write types exactly `typed`, outside any bracketed-paste wrapper, and
+    /// one Enter follows.
+    fn delivered_once(&self, typed: &str) {
         let sends = self.rig.sends();
         assert_eq!(sends.len(), 2, "{sends:?}");
-        let pasted = sends[0]["text"].as_str().unwrap_or_default();
-        assert!(pasted.contains(PROMPT), "{sends:?}");
+        let sent = sends[0]["text"].as_str().unwrap_or_default();
+        let unwrapped = sent
+            .strip_prefix("\u{1b}[200~")
+            .and_then(|s| s.strip_suffix("\u{1b}[201~"));
+        assert_eq!(unwrapped.unwrap_or(sent), typed, "{sends:?}");
         assert_eq!(sends[1]["keys"], json!(["enter"]));
         let snapshot = self.snapshot();
         assert!(snapshot["head_injection"].is_null(), "{snapshot}");
@@ -245,13 +260,21 @@ impl HerdrOwner {
         &'a self,
         pool: &'a sqlx::PgPool,
     ) -> crate::services::codex::herdr_turn::CodexHerdrTurn<'a> {
+        self.codex_turn_with(pool, PROMPT)
+    }
+
+    fn codex_turn_with<'a>(
+        &'a self,
+        pool: &'a sqlx::PgPool,
+        prompt: &'a str,
+    ) -> crate::services::codex::herdr_turn::CodexHerdrTurn<'a> {
         crate::services::codex::herdr_turn::CodexHerdrTurn {
             pool,
             owner: self.record("codex", HostedState::Pending).owner,
             channel_id: self.channel,
             endpoint: self.endpoint(),
             row: None,
-            prompt: PROMPT,
+            prompt,
             working_dir: "/tmp",
             system_prompt: None,
             allowed_tools: &[],
@@ -303,7 +326,7 @@ fn owned_herdr_claude_launch_reserves_the_observed_execution_and_its_pane() {
         Lineage::Created,
     );
     assert_eq!(result, Ok(()));
-    owner.delivered_once();
+    owner.delivered_once(PROMPT);
     let heads = heads.lock().unwrap();
     let at_paste = &heads[0]["attempt"];
     assert_eq!(
@@ -393,7 +416,7 @@ fn owned_herdr_claude_idle_writes_the_bound_source_once() {
         Lineage::Existing,
     );
     assert_eq!(result, Ok(()));
-    owner.delivered_once();
+    owner.delivered_once(PROMPT);
     let source = &heads.lock().unwrap()[0]["attempt"]["source"];
     assert_eq!(source["kind"], "existing", "{source}");
     assert_eq!(source["session_id"], "bound-sid", "{source}");
@@ -429,10 +452,117 @@ fn owned_herdr_codex_first_prompt_takes_only_a_fresh_execution() {
         Lineage::Created,
     );
     assert_eq!(result, Ok(()));
-    owner.delivered_once();
+    owner.delivered_once(PROMPT);
     assert_eq!(
         heads.lock().unwrap()[0]["attempt"]["target"]["execution_nonce"],
         owner.execution
+    );
+}
+
+/// A Codex Herdr first prompt is reserved as the text its write types: with LF, CRLF or a bare CR
+/// line ending, the head's frame and digest, the history's frame and the sent text are one string.
+#[test]
+fn owned_herdr_codex_reserves_the_typed_text_for_every_line_ending() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let typed = "first line\nsecond line";
+    let sha = |text: &str| {
+        format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes())
+        )
+    };
+    for (channel, prompt) in [
+        (7_272_611, "first line\nsecond line"),
+        (7_272_612, "first line\r\nsecond line"),
+        (7_272_613, "first line\rsecond line"),
+    ] {
+        let owner = HerdrOwner::start("codex", channel);
+        let _registry = owner.rig.registry_on_this_thread();
+        owner.rig.answer("pane.read", codex_ready());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (at_send, mailbox, handle) = (
+            seen.clone(),
+            owner.mailbox.clone(),
+            owner.runtime.handle().clone(),
+        );
+        owner.rig.on_send(move |_| {
+            let snapshot = handle
+                .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
+                .unwrap();
+            let registry =
+                crate::services::tui_input::human_frame::history::v2::Registry::runtime();
+            let history = registry.and_then(|r| r.json()).unwrap();
+            at_send
+                .lock()
+                .unwrap()
+                .push((snapshot["head_injection"].clone(), history));
+        });
+        let hook = owner.hook_with("codex", "herdr", Lineage::Created, prompt);
+        let _waiting = scope::install_launch(hook);
+        let pool = unused_pool(&owner);
+        let turn = owner.codex_turn_with(&pool, prompt);
+        let record = owner.record("codex", HostedState::Pending);
+        let _entered = owner.runtime.enter();
+        let result = crate::services::codex::herdr_turn::owned_first_prompt_for_tests(
+            &turn,
+            &record,
+            Lineage::Created,
+        );
+        assert_eq!(result, Ok(()), "{prompt:?}");
+        owner.delivered_once(typed);
+        let (head, history) = seen.lock().unwrap()[0].clone();
+        assert_eq!(head["payload"]["frame"], typed, "{head}");
+        assert_eq!(head["payload"]["digest"], sha(typed), "{head}");
+        let frames: Vec<&Value> = ["planned", "live", "passive"]
+            .iter()
+            .filter_map(|state| history[state].as_array())
+            .flatten()
+            .filter(|record| record["key"]["attempt"]["nonce"] == format!("{channel:032x}"))
+            .map(|record| &record["frame"]["hash"])
+            .collect();
+        assert_eq!(frames, [&json!(sha(typed))], "{history}");
+    }
+}
+
+/// The owner's idle Codex Herdr hand-over reserves and hands its submit the typed text of a CRLF
+/// prompt, so the reserved bytes are the ones the driver's plan writes.
+#[test]
+fn owner_idle_codex_herdr_hook_reserves_the_typed_text() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let owner = HerdrOwner::start("codex", 7_272_614);
+    let hook = owner.hook_with("codex", "herdr", Lineage::Existing, "one\r\ntwo\rthree");
+    let submitted = Arc::new(Mutex::new(Vec::new()));
+    let (seen, mailbox, handle) = (
+        submitted.clone(),
+        owner.mailbox.clone(),
+        owner.runtime.handle().clone(),
+    );
+    let submit: scope::CreatedSubmit = Box::new(move |frame| {
+        let snapshot = handle
+            .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
+            .unwrap();
+        seen.lock().unwrap().push((
+            frame,
+            snapshot["head_injection"]["payload"]["frame"].clone(),
+        ));
+        Ok(())
+    });
+    let target = json!({"host":"herdr","owner":owner.logical,
+        "root":owner.rig.socket().display().to_string(),"execution_nonce":owner.execution});
+    let transcript = owner._dir.path().join("bound.jsonl");
+    std::fs::write(&transcript, "{}\n").unwrap();
+    let meta = std::fs::metadata(&transcript).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    let source = json!({"kind":"existing","session_id":"bound-sid",
+        "transcript":transcript.display().to_string(),"file":[meta.dev(), meta.ino()],
+        "offset":meta.len()});
+    let _entered = owner.runtime.enter();
+    let result = hook(Lineage::Existing, target, source, None, submit);
+    assert_eq!(result, Ok(()));
+    let submitted = submitted.lock().unwrap();
+    assert_eq!(
+        *submitted,
+        [("one\ntwo\nthree".to_string(), json!("one\ntwo\nthree"))]
     );
 }
 

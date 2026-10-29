@@ -16,9 +16,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-const PROMPT: &str = "owner busy question";
-const AUTHOR: &str = "7";
-const NAME: &str = "tester";
+pub(super) const PROMPT: &str = "owner busy question";
+pub(super) const AUTHOR: &str = "7";
+pub(super) const NAME: &str = "tester";
 const BUSY: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n\
     {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n";
 const IDLE: &str = "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n";
@@ -30,12 +30,12 @@ static OWNER_TIMING: Timing = Timing {
     confirm_poll: Duration::from_millis(10),
 };
 
-struct Rig {
-    f: Fixture,
-    name: String,
+pub(super) struct Rig {
+    pub(super) f: Fixture,
+    pub(super) name: String,
     channel: u64,
-    nonce: String,
-    renderer: std::path::PathBuf,
+    pub(super) nonce: String,
+    pub(super) renderer: std::path::PathBuf,
     program: std::path::PathBuf,
     runtime: tokio::runtime::Runtime,
     _registry: ChannelMailboxRegistry,
@@ -44,14 +44,27 @@ struct Rig {
     original: PendingQueueItem,
 }
 
-/// A known pane over `transcript` and an owner with one admitted original; its tmux fails a load
-/// on `fail-load` and replaces the pane's process after the step named in `swap-after`.
+/// A known pane over `transcript` and an owner with one admitted original.
 fn rig(name: &str, channel: u64, mode: &str, before: String, transcript: &str) -> Rig {
     let f = Fixture::after_shared_test_env_lock();
     let nonce = format!("{:032x}", channel);
     let shown =
         crate::services::claude_tui::busy_inject::frame("discord", AUTHOR, NAME, &nonce, PROMPT);
     let renderer = renderer_with(&f, name, mode, before, transcript, &shown);
+    owned(f, name, channel, renderer, "claude")
+}
+
+/// An owner with one admitted original over the `provider` pane `renderer` draws in session
+/// `name`; its tmux fails a load on `fail-load`, replaces the pane's process after the step named
+/// in `swap-after`, and runs the script `after-<step>` once after that step.
+pub(super) fn owned(
+    f: Fixture,
+    name: &str,
+    channel: u64,
+    renderer: std::path::PathBuf,
+    provider: &str,
+) -> Rig {
+    let nonce = format!("{:032x}", channel);
     let pane = f.tmux(&[
         "display-message",
         "-p",
@@ -67,7 +80,8 @@ fn rig(name: &str, channel: u64, mode: &str, before: String, transcript: &str) -
          case \"$*\" in *load-buffer*) [ ! -f \"$d/fail-load\" ] || exit 1 ;; esac\n\
          '{shim}' \"$@\"; rc=$?\ncase \"$*\" in *load-buffer*) step=load ;; *paste-buffer*) step=paste ;; *C-s*) step=C-s ;; *) step= ;; esac\n\
          if [ -n \"$step\" ] && [ \"$(cat \"$d/swap-after\" 2>/dev/null)\" = \"$step\" ]; then\n\
-           rm \"$d/swap-after\"; '{real}' -L '{socket}' -f /dev/null respawn-pane -k -t '{pane}'\nfi\nexit $rc\n",
+           rm \"$d/swap-after\"; '{real}' -L '{socket}' -f /dev/null respawn-pane -k -t '{pane}'\nfi\n\
+         if [ -n \"$step\" ] && [ -f \"$d/after-$step\" ]; then sh \"$d/after-$step\"; rm \"$d/after-$step\"; fi\nexit $rc\n",
         dir = dir.display(),
         shim = f.root.path().join("tmux").display(),
         real = f.real.display(),
@@ -77,7 +91,7 @@ fn rig(name: &str, channel: u64, mode: &str, before: String, transcript: &str) -
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
     let root = crate::services::tmux_common::current_tmux_owner_marker();
-    let context = json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),
+    let context = json!({"schema":1,"provider":provider,"created_at":chrono::Utc::now(),
         "execution_nonce":&nonce,"tmux_session":name,"channel_id":channel,
         "owner_runtime_root":root,"host":"owner-dispatch-test",
         "expected_native_session_id":null,"launch_mode":"fresh","provider_root":null});
@@ -132,13 +146,13 @@ fn rig(name: &str, channel: u64, mode: &str, before: String, transcript: &str) -
 }
 
 impl Rig {
-    fn mark(&self, file: &str, value: &str) {
+    pub(super) fn mark(&self, file: &str, value: &str) {
         let dir = self.f.root.path().join(format!("{}-owner", self.name));
         fs::write(dir.join(file), value).unwrap();
     }
 
     /// One turn through `execute` with this rig's owner registered for its channel.
-    fn dispatch(
+    pub(super) fn dispatch(
         &self,
         provider: ProviderKind,
         phase: target::Phase,
@@ -231,29 +245,29 @@ impl Rig {
         execute(turn, start, sender)
     }
 
-    fn transcript(&self) -> std::path::PathBuf {
+    pub(super) fn transcript(&self) -> std::path::PathBuf {
         self.renderer.join("transcript")
     }
 
-    fn snapshot(&self) -> Value {
+    pub(super) fn snapshot(&self) -> Value {
         self.runtime
             .block_on(self.mailbox.v2_request(|s| s.as_ref().unwrap().json()))
             .unwrap()
     }
 
-    fn bind(&self) -> TurnBind {
+    pub(super) fn bind(&self) -> TurnBind {
         self.runtime
             .block_on(exact_turn(&self.mailbox, &self.ticket, &self.original))
             .unwrap()
     }
 
     /// The pane's record once the last key has had time to land.
-    fn events(&self) -> Vec<String> {
+    pub(super) fn events(&self) -> Vec<String> {
         std::thread::sleep(Duration::from_millis(300));
         events(&self.renderer)
     }
 
-    fn delivered(&self) {
+    pub(super) fn delivered(&self) {
         let snapshot = self.snapshot();
         assert!(snapshot["head_injection"].is_null(), "{snapshot}");
         assert_eq!(
@@ -269,7 +283,7 @@ impl Rig {
     }
 
     /// The original back in custody with the owner's not-sent proof, and no key sent.
-    fn held_not_sent(&self, reason: &str) {
+    pub(super) fn held_not_sent(&self, reason: &str) {
         let snapshot = self.snapshot();
         let retained = &snapshot["retained_inputs"];
         assert_eq!(retained.as_array().map(Vec::len), Some(1), "{snapshot}");
@@ -281,7 +295,7 @@ impl Rig {
     }
 
     /// Content may have gone: the head stays, Unknown, and nothing is queued or sent again.
-    fn uncertain(&self) {
+    pub(super) fn uncertain(&self) {
         let snapshot = self.snapshot();
         assert_eq!(snapshot["head_injection"]["phase"], "unknown", "{snapshot}");
         assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
@@ -451,21 +465,6 @@ fn owner_idle_claude_parks_a_listed_draft_under_the_owner_scope() {
     rig.delivered();
 }
 
-/// Codex busy has no owner transaction before 4d-2: the owner keeps the original queued and
-/// nothing, the Codex driver included, sends it.
-#[test]
-fn codex_busy_held_until_4d2() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let rig = rig("ob-codex", 7_272_512, "normal", view("", false), BUSY);
-    let result = rig.dispatch(ProviderKind::Codex, target::Phase::Busy, &rig.transcript());
-    assert_eq!(result, Err("NotSent(\"provider_unsupported\")".into()));
-    let snapshot = rig.snapshot();
-    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
-    assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
-    assert!(rig.events().is_empty());
-    assert_eq!(rig.bind(), TurnBind::NotArmed);
-}
-
 /// A refusal that writes nothing needs no pane: a remote placement and an unsupported provider
 /// each keep the original queued, with no head and no key.
 #[test]
@@ -480,7 +479,7 @@ fn owner_refusals_before_a_pane_need_no_session() {
             "remote_placement",
         ),
         (
-            ProviderKind::Codex,
+            ProviderKind::Gemini,
             target::Phase::Busy,
             Execution::LocalTui,
             "provider_unsupported",

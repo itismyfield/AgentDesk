@@ -30,7 +30,7 @@ pub(in crate::services::claude_tui) mod screen;
 mod screen_identity_tests;
 #[cfg(test)]
 mod screen_tests;
-pub(in crate::services::claude_tui) mod stash;
+pub(crate) mod stash;
 #[cfg(all(test, unix))]
 mod stash_tests;
 #[cfg(all(test, unix))]

@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use super::StreamingTurn;
 use crate::services::claude_tui::{busy_inject, owner_input as scope};
 use crate::services::discord::queue_io::input_owner::effect::{
-    self, BusyClaude, BusyClaudeHerdr, Clock, Completion, PreparedPayload,
+    self, BusyClaude, BusyClaudeHerdr, BusyCodex, Clock, Completion, PreparedPayload,
 };
 use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOrigin};
 use crate::services::discord::queue_io::input_owner::{pump, target};
@@ -93,6 +93,12 @@ fn created(r: Registration, frame: String, wanted: scope::Lineage) -> scope::Lau
         if lineage != wanted {
             return Err(format!("NotSent(\"lineage_refused: {lineage:?}\")"));
         }
+        // A Codex Herdr write types its plan's normalized text, so that text is what is reserved.
+        let frame = match (r.attempt["provider"].as_str(), target["host"].as_str()) {
+            (Some("codex"), Some("herdr")) => codex_herdr_frame(&frame)
+                .map_err(|error| format!("NotSent(\"invalid_prompt: {error}\")"))?,
+            _ => frame,
+        };
         let mut attempt = r.attempt;
         attempt["target"] = target;
         attempt["source"] = source;
@@ -108,6 +114,17 @@ fn created(r: Registration, frame: String, wanted: scope::Lineage) -> scope::Lau
             other => Err(format!("{other:?}")),
         }
     })
+}
+
+/// The bytes a Codex Herdr write types for `prompt`: the text of its submit plan.
+fn codex_herdr_frame(prompt: &str) -> Result<String, String> {
+    use crate::services::codex_tui::input::{TuiInputAction, plan_prompt_submit};
+    let plan = plan_prompt_submit(prompt)?;
+    let typed = plan.iter().filter_map(|action| match action {
+        TuiInputAction::Literal(text) | TuiInputAction::PasteBuffer(text) => Some(text.as_str()),
+        TuiInputAction::Enter | TuiInputAction::Escape => None,
+    });
+    Ok(typed.collect())
 }
 
 fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Result<(), String> {
@@ -151,6 +168,33 @@ fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Resul
                 .leaf(),
             )
         }
+        target::Route::CodexBusy => {
+            // Main's busy preparation: the open model turn the paste is aimed at, read up front.
+            use crate::services::codex_tui::busy_inject::{TIMING, TurnVerdict, read_turn};
+            let target_turn = match read_turn(&r.transcript) {
+                Some(TurnVerdict::KnownModelTurn(turn)) => turn,
+                other => return Err(format!("NotSent(\"busy_turn: {other:?}\")")),
+            };
+            let message = r.sources.first().and_then(|id| id.parse().ok());
+            (
+                busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
+                BusyCodex {
+                    pane: busy_inject::Pane::with_program(session()?, r.program),
+                    session: session()?.into(),
+                    rollout: r.transcript,
+                    target_turn,
+                    channel: turn.channel_id,
+                    message,
+                    source: "discord".into(),
+                    author: r.author,
+                    name: r.name,
+                    nonce,
+                    text: turn.prompt.into(),
+                    timing: &TIMING,
+                }
+                .leaf(),
+            )
+        }
         // Every other create or idle pane belongs to a driver that does not hand it over yet.
         target::Route::Cold => return Err("NotSent(\"cold_launch_unowned\")".into()),
         target::Route::HerdrIdle => return Err("NotSent(\"idle_unowned\")".into()),
@@ -168,6 +212,9 @@ fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Resul
     }
 }
 
+#[cfg(test)]
+#[path = "owner_input_codex_tests.rs"]
+mod codex_tests;
 #[cfg(test)]
 #[path = "owner_input_herdr_tests.rs"]
 mod herdr_tests;

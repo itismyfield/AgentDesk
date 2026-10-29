@@ -26,11 +26,13 @@ use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, SourceMessageQueuedGeneration,
 };
 use inject::InjectMode;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use inject::{
+    CodexLedger, Input as BusyInput, herdr::run as herdr_busy,
+};
 pub(crate) use inject::{
     InjectAttempt, Origin as InjectOrigin, SOURCE_OWNED, attempt as inject_human_input,
 };
-#[cfg(all(test, unix))]
-pub(in crate::services::discord) use inject::{Input as BusyInput, herdr::run as herdr_busy};
 
 pub struct HumanInputRequest {
     pub channel_id: ChannelId,
