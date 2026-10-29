@@ -1,6 +1,5 @@
-//! A Codex turn-mode turn stopped without an anchor, across a restart: the new process's boot
-//! confirmation waits on its row, restore settles the row from the saved turn-mode fact, and the
-//! channel's turn mode is confirmed again. Rows without that fact keep the Legacy hold.
+//! A Codex anchorless turn-mode stop across a restart: boot confirmation waits on its row, restore
+//! settles it from the saved fact and turn mode returns; rows without the fact keep the hold.
 use super::*;
 use crate::services::agent_protocol::{NativeTerminalKind, RuntimeHandoffKind};
 use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
@@ -160,9 +159,8 @@ async fn restart(case: &Case) -> (Vec<Option<String>>, bool, bool) {
     )
 }
 
-/// After a receipt, after the notice ack, or at a native Aborted, the anchorless turn-mode row
-/// settles on restart and turn mode is confirmed again; a real anchor settles as before, and a
-/// row without the saved fact keeps the Legacy hold and boot keeps waiting.
+/// Each stop point settles its anchorless turn-mode row and turn mode returns; a real anchor
+/// settles as before, and a row without the saved fact keeps the Legacy hold.
 #[tokio::test(flavor = "current_thread")]
 async fn a_codex_anchorless_stop_settles_across_restart_and_turn_mode_returns() {
     let cases = [
