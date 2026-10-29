@@ -1898,6 +1898,34 @@ mod first_input;
 mod fresh_lifecycle;
 #[cfg(all(test, unix))]
 pub(crate) use fresh_lifecycle::fresh_hold_for_tests;
+
+/// A tmux Claude TUI turn as dispatch runs it, for tests outside this module.
+#[cfg(all(test, unix))]
+pub(crate) fn tmux_tui_turn_for_tests(
+    working_dir: &str,
+    cancel_token: std::sync::Arc<CancelToken>,
+    tmux_session_name: &str,
+    teardown: &TeardownClearance,
+    report_channel_id: u64,
+) -> Result<(), String> {
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    let endpoint = "http://127.0.0.1:9".to_string();
+    let (channel, cancel) = (Some(report_channel_id), Some(cancel_token));
+    execute_streaming_local_tui_tmux(
+        "hello",
+        None,
+        working_dir,
+        sender,
+        cancel,
+        tmux_session_name,
+        Some(teardown),
+        channel,
+        None,
+        None,
+        None,
+        endpoint,
+    )
+}
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn run_claude_tui_fresh_turn_and_finalize(

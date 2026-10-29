@@ -1491,6 +1491,8 @@ fn coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg() {
 #[path = "provider_dispatch_live_end_tests.rs"]
 pub(super) mod live_end;
 
+#[path = "provider_dispatch_herdr_clear_tests.rs"]
+mod clear_tests;
 #[path = "provider_dispatch_herdr_start_offset_tests.rs"]
 mod start_offset_tests;
 
@@ -1566,6 +1568,12 @@ impl Fixture {
         let ext = crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT;
         let path = crate::services::tmux_common::session_temp_path(self.logical(), ext);
         std::fs::read_to_string(path).unwrap()
+    }
+
+    /// Points launches back at the fixture's Claude, as a fake tmux resolves none.
+    fn own_claude(&self) -> Guard {
+        let claude = self._home.1.path().join("claude");
+        Guard::set_path_after_shared_test_env_lock("AGENTDESK_CLAUDE_PATH", &claude)
     }
 
     /// The session and account the channel's last launch recorded.

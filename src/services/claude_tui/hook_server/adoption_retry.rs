@@ -386,10 +386,20 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
                 return SettleOutcome { http, queue };
             };
             before_artifacts(payload_session_id);
-            match crate::services::claude_tui::session::persist_claude_continuation_session(
+            // The account the pane's session ran under follows it to the session it moved on to,
+            // before the artifacts that stop later hooks from naming the earlier one.
+            let persisted = crate::services::tmux_common::advance_claude_session_auth(
                 &tmux_session_name,
+                command_session_id,
                 payload_session_id,
-            ) {
+            )
+            .and_then(|()| {
+                crate::services::claude_tui::session::persist_claude_continuation_session(
+                    &tmux_session_name,
+                    payload_session_id,
+                )
+            });
+            match persisted {
                 // Only the in-memory binding moved here; the rotation ledger carries the rest,
                 // so the message must not read as end-to-end delivery.
                 Ok(changed) => tracing::warn!(

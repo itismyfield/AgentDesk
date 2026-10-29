@@ -46,8 +46,8 @@ pub(crate) fn write_claude_session_auth(
     .map_err(|error| format!("write claude session auth marker: {error}"))
 }
 
-/// Whether `session_id` last launched under `profile_id`: by its own record, or by the profile
-/// marker while no launch recorded one. A record of another session vouches for nothing.
+/// Whether `session_id` ran under `profile_id`: by its own record, or by the profile marker while
+/// no launch recorded one. A record of another session vouches for nothing.
 pub(crate) fn claude_session_auth_matches(
     session_name: &str,
     session_id: &str,
@@ -59,8 +59,21 @@ pub(crate) fn claude_session_auth_matches(
     Ok(claude_session_auth(session_name, session_id)?.as_deref() == Some(profile_id.trim()))
 }
 
-/// The account `session_id` last launched under, by its own record; `None` when the last launch
-/// recorded is of another session or none recorded one.
+/// Carries the account recorded for `from` over to `to` once the same execution verifiably moved on
+/// from `from` to `to`; a record of any other session stays as it is and vouches for neither.
+pub(crate) fn advance_claude_session_auth(
+    session_name: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
+    match claude_session_auth(session_name, from)? {
+        Some(profile) => write_claude_session_auth(session_name, to, &profile),
+        None => Ok(()),
+    }
+}
+
+/// The account `session_id` ran under, recorded by its launch or by the session it moved on from;
+/// `None` when the record names another session or none exists.
 pub(crate) fn claude_session_auth(
     session_name: &str,
     session_id: &str,
