@@ -148,9 +148,15 @@ async fn streaming_turn(
     (h, row)
 }
 
-/// Force-kills the harness turn on its own task; the pane dies once the stop is recorded, as the
-/// provider exits on its interrupt, so the watcher judges the death within the stop's wait.
-async fn stop_then_die(h: &Harness, start: u64) -> tokio::task::JoinHandle<()> {
+/// Points the session's runtime output, where a stop reads its offset, at the transcript.
+fn link_runtime_output(h: &Harness) {
+    let runtime = crate::services::tmux_common::session_temp_path(&h.tmux, "jsonl");
+    std::fs::hard_link(&h.path, runtime).unwrap();
+}
+
+/// Force-kills the harness turn on its own task and returns the recorded stop's offset; the pane
+/// dies once that stop exists, as the provider exits on its interrupt, within the stop's wait.
+async fn stop_then_die(h: &Harness) -> (tokio::task::JoinHandle<()>, Option<u64>) {
     let registry = crate::services::discord::health::HealthRegistry::new();
     registry
         .register("claude".to_string(), h.shared.clone())
@@ -164,13 +170,12 @@ async fn stop_then_die(h: &Harness, start: u64) -> tokio::task::JoinHandle<()> {
         let kill = crate::services::turn_lifecycle::force_kill_turn;
         kill(Some(&registry), &target, "i7340 stop", "i7340_test").await;
     });
-    let recorded = crate::services::discord::tmux::recent_turn_stop_for_watcher_range;
-    h.until("the stop record", |h| {
-        recorded(h.channel, &h.tmux, start).is_some()
-    })
-    .await;
+    let recorded = crate::services::discord::tmux::recent_turn_stop_for_channel;
+    h.until("the stop record", |h| recorded(h.channel).is_some())
+        .await;
+    let offset = recorded(h.channel).and_then(|stop| stop.stop_output_offset);
     h.pane("dead");
-    stop
+    (stop, offset)
 }
 
 /// A force stop's pane death is judged by the watcher, which consumes the stop record: its exit
@@ -185,8 +190,7 @@ async fn a_stopped_pane_death_ends_cancelled_and_a_rebind_row_ends_nothing_pg() 
     let pool = db.connect_and_migrate().await;
     for (case, rebind) in [(77, false), (78, true)] {
         let (mut h, row) = streaming_turn(case, &pool, rebind).await;
-        let start = row.turn_start_offset.unwrap_or(0);
-        let stop = stop_then_die(&h, start).await;
+        let (stop, _) = stop_then_die(&h).await;
         h.exited("death after the stop").await;
         assert!(
             !stop.is_finished(),
@@ -221,6 +225,7 @@ async fn a_reused_watcher_ends_the_next_stopped_turn_cancelled_pg() {
     let mut h = Harness::on(79, &seed, Some(pool.clone())).await;
     let f = seed.len() as u64;
     h.commit(0, f);
+    link_runtime_output(&h);
     let mut first = h.row_at(f);
     first.turn_source = TurnSource::Managed;
     first.user_msg_id = 7_340_000_179;
@@ -262,7 +267,12 @@ async fn a_reused_watcher_ends_the_next_stopped_turn_cancelled_pg() {
     let user_msg = serenity::MessageId::new(next.user_msg_id);
     let begin = crate::services::discord::mailbox_try_start_turn;
     assert!(begin(&h.shared, h.channel, token, author, user_msg).await);
-    let stop = stop_then_die(&h, start).await;
+    let (stop, stopped_at) = stop_then_die(&h).await;
+    assert_eq!(
+        stopped_at,
+        Some(h.len()),
+        "the stop ends T1's range past its start"
+    );
     h.exited("T1 death after the stop").await;
     let cancelled = Some((vec!["G-watcher-next".to_string()], "cancelled".to_string()));
     assert_eq!(receipt(&pool, next.user_msg_id, h.channel).await, cancelled);
@@ -276,8 +286,62 @@ async fn a_reused_watcher_ends_the_next_stopped_turn_cancelled_pg() {
     db.drop().await;
 }
 
-/// A stop left at the previous turn's end is outside the next execution's range: that
-/// execution's pane death without a stop of its own ends it failed, not cancelled.
+/// A runtime stop of the execution the mailbox runs, before its first byte: the stop's offset is
+/// that execution's start, inside no output range, and its pane death still ends it cancelled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_before_the_first_byte_ends_the_execution_cancelled_pg() {
+    let test = "a_stop_before_the_first_byte_ends_the_execution_cancelled_pg";
+    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+        return;
+    }
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let seed = format!("{}{}{}", user("T0"), said(T0), stop());
+    let mut h = Harness::on(83, &seed, Some(pool.clone())).await;
+    let f = seed.len() as u64;
+    h.commit(0, f);
+    link_runtime_output(&h);
+    let mut row = h.row_at(f);
+    row.turn_source = TurnSource::Managed;
+    row.user_msg_id = 7_340_000_183;
+    row.input_origin_ids = vec![ORIGIN.to_string()];
+    h.save(&row);
+    let restored =
+        crate::services::discord::tmux::restored_watcher_turn_from_inflight(&row, &h.tmux, true);
+    h.spawn_restoring(f, restored);
+    let seen = crate::services::discord::tmux_watcher_now_ms();
+    h.until("watching", |h| h.heartbeat() > seen).await;
+    assert!(row.turn_nonce.is_some(), "the row names its execution");
+    start_live_turn(&h, &row, row.turn_nonce.clone()).await;
+    let (stop, stopped_at) = stop_then_die(&h).await;
+    assert_eq!(stopped_at, row.turn_start_offset, "no byte since the start");
+    h.exited("death after the stop").await;
+    let cancelled = Some((vec![ORIGIN.to_string()], "cancelled".to_string()));
+    assert_eq!(receipt(&pool, row.user_msg_id, h.channel).await, cancelled);
+    assert!(h.row().is_none(), "the dead pane's turn ended");
+    stop.await.unwrap();
+    pool.close().await;
+    db.drop().await;
+}
+
+/// Starts `row`'s mailbox turn on a token of `nonce`.
+async fn start_live_turn(
+    h: &Harness,
+    row: &InflightTurnState,
+    nonce: Option<String>,
+) -> Arc<crate::services::provider::CancelToken> {
+    let token = crate::services::provider::CancelToken::from_persisted_turn_nonce(nonce);
+    let token = Arc::new(token);
+    token.bind_claude_tmux_session(&h.tmux);
+    let author = serenity::UserId::new(7);
+    let user_msg = serenity::MessageId::new(row.user_msg_id);
+    let begin = crate::services::discord::mailbox_try_start_turn;
+    assert!(begin(&h.shared, h.channel, token.clone(), author, user_msg).await);
+    token
+}
+
+/// A stop left at the previous turn's end is outside the next execution's range, and no live
+/// turn shows a stop of that execution: its pane death without a stop of its own ends it failed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_prior_turns_stop_leaves_the_next_turns_pane_death_failed_pg() {
     let test = "a_prior_turns_stop_leaves_the_next_turns_pane_death_failed_pg";
@@ -286,30 +350,55 @@ async fn a_prior_turns_stop_leaves_the_next_turns_pane_death_failed_pg() {
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let seed = format!("{}{}{}", user("T0"), said(T0), stop());
-    let mut h = Harness::on(80, &seed, Some(pool.clone())).await;
-    let f = seed.len() as u64;
-    h.commit(0, f);
-    // The stop takes its offset from the session's runtime output, which here is the transcript.
-    let runtime = crate::services::tmux_common::session_temp_path(&h.tmux, "jsonl");
-    std::fs::hard_link(&h.path, runtime).unwrap();
-    let record = crate::services::discord::tmux::record_recent_turn_stop;
-    record(h.channel, Some(&h.tmux), "i7340 T0 stop").await;
-    let mut next = h.row_at(f);
-    next.turn_source = TurnSource::Managed;
-    next.user_msg_id = 7_340_000_280;
-    next.input_origin_ids = vec![ORIGIN.to_string()];
-    h.save(&next);
-    let restored =
-        crate::services::discord::tmux::restored_watcher_turn_from_inflight(&next, &h.tmux, true);
-    h.spawn_restoring(f, restored);
-    h.append(format!("{}{}", user("T1"), said(BODY)).as_bytes());
-    h.until("streaming preview", |h| h.showing(BODY)).await;
-    h.pane("dead");
-    h.exited("death without a stop of its own").await;
-    let failed = Some((vec![ORIGIN.to_string()], "failed".to_string()));
-    assert_eq!(receipt(&pool, next.user_msg_id, h.channel).await, failed);
-    assert!(h.row().is_none(), "the dead pane's turn ended");
+    // (case, the mailbox turn): none, the execution's own still running, a stopped turn of
+    // another nonce, or the execution's own whose cancel flag is a completion cleanup's.
+    for (case, live) in [
+        (80, "none"),
+        (84, "running"),
+        (85, "other"),
+        (86, "cleanup"),
+    ] {
+        let seed = format!("{}{}{}", user("T0"), said(T0), stop());
+        let mut h = Harness::on(case, &seed, Some(pool.clone())).await;
+        let f = seed.len() as u64;
+        h.commit(0, f);
+        link_runtime_output(&h);
+        let record = crate::services::discord::tmux::record_recent_turn_stop;
+        record(h.channel, Some(&h.tmux), "i7340 T0 stop").await;
+        let mut next = h.row_at(f);
+        next.turn_source = TurnSource::Managed;
+        next.user_msg_id = 7_340_000_200 + case;
+        next.input_origin_ids = vec![ORIGIN.to_string()];
+        h.save(&next);
+        let own = next.turn_nonce.clone();
+        match live {
+            "running" => drop(start_live_turn(&h, &next, own).await),
+            "other" => {
+                let other = Some("i7340-other-nonce".to_string());
+                start_live_turn(&h, &next, other)
+                    .await
+                    .publish_cancel("i7340 stop");
+            }
+            "cleanup" => {
+                let token = start_live_turn(&h, &next, own).await;
+                token.mark_completion_cleanup();
+                token.publish_cancel("tmux_cleanup");
+            }
+            _ => {}
+        }
+        let restored = crate::services::discord::tmux::restored_watcher_turn_from_inflight(
+            &next, &h.tmux, true,
+        );
+        h.spawn_restoring(f, restored);
+        h.append(format!("{}{}", user("T1"), said(BODY)).as_bytes());
+        h.until("streaming preview", |h| h.showing(BODY)).await;
+        h.pane("dead");
+        h.exited("death without a stop of its own").await;
+        let failed = Some((vec![ORIGIN.to_string()], "failed".to_string()));
+        let ended = receipt(&pool, next.user_msg_id, h.channel).await;
+        assert_eq!(ended, failed, "case {case} ({live})");
+        assert!(h.row().is_none(), "case {case}: the dead pane's turn ended");
+    }
     pool.close().await;
     db.drop().await;
 }

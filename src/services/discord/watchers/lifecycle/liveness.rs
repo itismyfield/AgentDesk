@@ -96,8 +96,8 @@ pub(crate) fn tmux_death_should_attempt_restart_handoff(
         && !is_normal_completion
 }
 
-/// Returns whether a stop within the current execution's range caused the death, judged before
-/// the death consumes that stop; a prior turn's completion on this watcher does not erase it.
+/// Returns whether a stop of the current execution caused the death, judged before the death
+/// consumes it; a prior turn's completion on this watcher does not erase it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_tmux_watcher_observed_death(
     channel_id: ChannelId,
@@ -141,21 +141,25 @@ pub(crate) async fn handle_tmux_watcher_observed_death(
     // deliver the Discord response before the watcher finishes its later
     // inflight/mailbox cleanup block.
     let death_output_offset = watcher_output_file_offset(output_path);
-    // The receipt's cause: a stop recorded within the range of the execution the row now names.
-    let execution_start = crate::services::discord::inflight::load_inflight_state_read_only(
+    // The receipt's cause: a stop recorded within the range of the execution the row now names,
+    // or a runtime stop published on its live mailbox turn, which covers a stop before any output.
+    let execution = crate::services::discord::inflight::load_inflight_state_read_only(
         watcher_provider,
         channel_id.get(),
     )
-    .filter(|row| row.tmux_session_name.as_deref() == Some(tmux_session_name))
-    .map(|row| row.turn_start_offset.unwrap_or(0));
-    let stopped_in_range = execution_start.is_some_and(|start| {
+    .filter(|row| row.tmux_session_name.as_deref() == Some(tmux_session_name));
+    let stopped_in_range = execution.as_ref().is_some_and(|row| {
         crate::services::discord::tmux::recent_turn_stop_for_watcher_range(
             channel_id,
             tmux_session_name,
-            start,
+            row.turn_start_offset.unwrap_or(0),
         )
         .is_some()
     });
+    let current_execution_cancel_observed = match execution.as_ref() {
+        Some(row) => live_turn_stopped(&shared.mailbox(channel_id).snapshot().await, row),
+        None => false,
+    };
     let cancel_induced_candidate = cancel_induced_watcher_death_async(
         channel_id,
         tmux_session_name,
@@ -204,7 +208,26 @@ pub(crate) async fn handle_tmux_watcher_observed_death(
             resume_aborted_restart_turn(channel_id, http, shared, tmux_session_name, output_path)
                 .await;
     }
-    stopped_in_range && cancel_induced_candidate
+    cancel_induced_candidate && (stopped_in_range || current_execution_cancel_observed)
+}
+
+/// The mailbox's live turn is `row`'s execution and carries a published runtime stop; a
+/// completion cleanup's cancel flag is not one.
+fn live_turn_stopped(
+    snapshot: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
+    row: &crate::services::discord::InflightTurnState,
+) -> bool {
+    let Some(nonce) = row.turn_nonce.as_deref().filter(|nonce| !nonce.is_empty()) else {
+        return false;
+    };
+    snapshot.cancel_token.as_ref().is_some_and(|token| {
+        snapshot.active_user_message_id.map(|id| id.get()) == Some(row.user_msg_id)
+            && snapshot.active_turn_nonce.as_deref() == Some(nonce)
+            && token.turn_nonce() == Some(nonce)
+            && token.cancelled.load(std::sync::atomic::Ordering::Acquire)
+            && !token.is_completion_cleanup()
+            && token.cancel_source().is_some()
+    })
 }
 
 #[cfg(test)]
