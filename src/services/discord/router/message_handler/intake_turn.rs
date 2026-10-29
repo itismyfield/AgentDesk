@@ -1565,11 +1565,8 @@ pub(super) async fn handle_text_message(
             provider_label,
             session_id.is_some(),
         );
-        // No session carries a remote profile; provider signatures still take the slot.
-        let remote_profile: Option<crate::services::remote::RemoteProfile> = None;
         let prelaunch_runtime_kind = prelaunch_runtime_kind_for_managed_session(
             &provider,
-            remote_profile.is_none(),
             tmux_session_name.is_some(),
             Some(channel_id.get()),
         );
@@ -1623,7 +1620,6 @@ pub(super) async fn handle_text_message(
         let ((inflight_tmux_name, inflight_output_path, inflight_input_fifo, mut inflight_offset), codex_seed) =
             prelaunch_inflight_runtime_seed(
                 &provider,
-                remote_profile.is_none(),
                 tmux_session_name.as_deref(),
                 prelaunch_runtime_kind,
             );
@@ -1643,7 +1639,6 @@ pub(super) async fn handle_text_message(
                 &provider,
                 channel_id,
                 tmux_session_name.as_deref(),
-                remote_profile.is_some(),
                 Some(&current_path),
                 session_id.as_deref(),
             );
@@ -1740,7 +1735,6 @@ pub(super) async fn handle_text_message(
                         &provider,
                         channel_id,
                         tmux_session_name.as_deref(),
-                        remote_profile.is_some(),
                         Some(&current_path),
                         session_id.as_deref(),
                     );
@@ -2029,7 +2023,6 @@ pub(super) async fn handle_text_message(
         let replay_reply_context = prepared_prompt.context.requeue();
         let replay_request = replay_start::StartRequest {
             provider: &provider,
-            remote: remote_profile.is_some(),
             channel_id,
             agent_id: role_binding.as_ref().map(|binding| binding.role_id.as_str()),
             reply_context: replay_reply_context.as_deref(),
@@ -2204,7 +2197,6 @@ pub(super) async fn handle_text_message(
             &provider,
             channel_id.get(),
             tmux_session_name.as_deref(),
-            remote_profile.is_some(),
             &turn_host,
             &cancel_token,
         )
@@ -2236,7 +2228,6 @@ pub(super) async fn handle_text_message(
                                 allowed_tools: &allowed_tools,
                                 cancel: cancel_token_clone,
                                 codex_observation: codex_observation.as_ref(),
-                                remote_profile: remote_profile.as_ref(),
                                 tmux_session_name: tmux_session_name.as_deref(),
                                 teardown: teardown_clearance.as_ref(),
                                 host: &turn_host,

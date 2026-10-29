@@ -741,11 +741,8 @@ async fn start_reserved_headless_turn_admitted(
         session_id.is_some(),
     );
 
-    // No session carries a remote profile; provider signatures still take the slot.
-    let remote_profile: Option<crate::services::remote::RemoteProfile> = None;
     let prelaunch_runtime_kind = prelaunch_runtime_kind_for_managed_session(
         &provider,
-        remote_profile.is_none(),
         tmux_session_name.is_some(),
         Some(channel_id.get()),
     );
@@ -802,7 +799,6 @@ async fn start_reserved_headless_turn_admitted(
     let (inflight_tmux_name, inflight_output_path, inflight_input_fifo, inflight_offset) =
         prelaunch_inflight_runtime_seed_without_codex_raw(
             &provider,
-            remote_profile.is_none(),
             tmux_session_name.as_deref(),
             prelaunch_runtime_kind,
         );
@@ -850,7 +846,6 @@ async fn start_reserved_headless_turn_admitted(
         reply: reply_context.as_deref(),
         uploads: &pending_uploads,
         session_key: adk_session_key.as_deref(),
-        remote: remote_profile.is_some(),
         tmux: tmux_session_name.as_deref(),
     };
     let replay_start = match replay_request
@@ -983,7 +978,6 @@ async fn start_reserved_headless_turn_admitted(
             &provider,
             channel_id.get(),
             tmux_session_name.as_deref(),
-            remote_profile.is_some(),
             &turn_host,
             &cancel_token,
         )
@@ -1014,7 +1008,6 @@ async fn start_reserved_headless_turn_admitted(
                                 allowed_tools: &allowed_tools,
                                 cancel: cancel_token_clone,
                                 codex_observation: codex_observation.as_ref(),
-                                remote_profile: remote_profile.as_ref(),
                                 tmux_session_name: tmux_session_name.as_deref(),
                                 teardown: teardown_clearance.as_ref(),
                                 host: &turn_host,

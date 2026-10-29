@@ -78,12 +78,10 @@ pub(super) fn metadata_delivery_bot(metadata: Option<&serde_json::Value>) -> Opt
 #[cfg(unix)]
 pub(super) fn prelaunch_runtime_kind_for_managed_session(
     provider: &ProviderKind,
-    remote_profile_is_none: bool,
     has_tmux_session_name: bool,
     channel_id: Option<u64>,
 ) -> Option<RuntimeHandoffKind> {
-    if !remote_profile_is_none
-        || !has_tmux_session_name
+    if !has_tmux_session_name
         || !provider.uses_managed_tmux_backend()
         || !claude::is_tmux_available()
     {
@@ -110,7 +108,6 @@ pub(super) fn prelaunch_runtime_kind_for_managed_session(
 #[cfg(not(unix))]
 pub(super) fn prelaunch_runtime_kind_for_managed_session(
     _provider: &ProviderKind,
-    _remote_profile_is_none: bool,
     _has_tmux_session_name: bool,
     _channel_id: Option<u64>,
 ) -> Option<RuntimeHandoffKind> {
@@ -293,17 +290,10 @@ fn fall_back_to_wrapper_end(state: &mut InflightTurnState, seed: &CodexRawSeed) 
 
 pub(super) fn prelaunch_inflight_runtime_seed(
     provider: &ProviderKind,
-    remote_profile_is_none: bool,
     tmux_session_name: Option<&str>,
     prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
 ) -> (RuntimeSeed, Option<CodexRawSeed>) {
-    seed_runtime(
-        provider,
-        remote_profile_is_none,
-        tmux_session_name,
-        prelaunch_runtime_kind,
-        true,
-    )
+    seed_runtime(provider, tmux_session_name, prelaunch_runtime_kind, true)
 }
 
 pub(super) fn prelaunch_watcher_output_path(
@@ -322,31 +312,21 @@ pub(super) fn prelaunch_watcher_output_path(
 
 pub(super) fn prelaunch_inflight_runtime_seed_without_codex_raw(
     provider: &ProviderKind,
-    remote_profile_is_none: bool,
     tmux_session_name: Option<&str>,
     prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
 ) -> (Option<String>, Option<String>, Option<String>, u64) {
-    seed_runtime(
-        provider,
-        remote_profile_is_none,
-        tmux_session_name,
-        prelaunch_runtime_kind,
-        false,
-    )
-    .0
+    seed_runtime(provider, tmux_session_name, prelaunch_runtime_kind, false).0
 }
 
 fn seed_runtime(
     provider: &ProviderKind,
-    remote_profile_is_none: bool,
     tmux_session_name: Option<&str>,
     prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
     allow_codex_raw: bool,
 ) -> (RuntimeSeed, Option<CodexRawSeed>) {
     #[cfg(unix)]
     {
-        if remote_profile_is_none
-            && provider.uses_managed_tmux_backend()
+        if provider.uses_managed_tmux_backend()
             && claude::is_tmux_available()
             && let Some(tmux_name) = tmux_session_name
         {
@@ -375,7 +355,6 @@ fn seed_runtime(
     {
         let _ = (
             provider,
-            remote_profile_is_none,
             tmux_session_name,
             prelaunch_runtime_kind,
             allow_codex_raw,

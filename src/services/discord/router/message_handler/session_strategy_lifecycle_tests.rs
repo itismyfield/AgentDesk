@@ -1642,7 +1642,6 @@ fn verified_codex_followup_rejects_missing_identity_before_legacy_observation_or
             &ProviderKind::Codex,
             channel,
             Some(&tmux),
-            false,
             cwd,
             id,
         )
@@ -1660,7 +1659,6 @@ fn verified_codex_followup_rejects_missing_identity_before_legacy_observation_or
             &ProviderKind::Codex,
             channel,
             Some("legacy-no-pane"),
-            false,
             None,
             None
         )

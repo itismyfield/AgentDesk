@@ -178,10 +178,7 @@ pub mod turn_orchestrator;
 pub(crate) mod turn_summary_line;
 pub(crate) mod voice_conductor;
 
-// Compatibility alias only: code referencing `services::remote::*` still
-// compiles, but the target module is disabled per #1606/#2175/#2193. A real
-// `services::remote` must replace `remote_stub` only when the ADR prerequisites
-// in `docs/codex-remote-ssh-policy.md` are satisfied.
+// The disabled remote types keep their `services::remote` path; no remote runtime exists.
 pub use remote_stub as remote;
 
 #[cfg(test)]

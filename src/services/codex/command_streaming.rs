@@ -9,6 +9,7 @@ pub(crate) struct CommandStreamingRequest<'a> {
     pub system_prompt: Option<&'a str>,
     pub allowed_tools: Option<&'a [String]>,
     pub cancel_token: Option<std::sync::Arc<CancelToken>>,
+    /// Always `None` in production; clear-ticket tests use its refusal as a launch-free dispatch.
     pub remote_profile: Option<&'a RemoteProfile>,
     pub tmux_session_name: Option<&'a str>,
     pub teardown: Option<&'a TeardownClearance>,

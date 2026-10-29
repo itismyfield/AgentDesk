@@ -1171,6 +1171,7 @@ pub fn execute_command_streaming(
     system_prompt: Option<&str>,
     allowed_tools: Option<&[String]>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
+    // Always `None` in production; clear-ticket tests use its refusal as a launch-free dispatch.
     remote_profile: Option<&RemoteProfile>,
     tmux_session_name: Option<&str>,
     teardown: Option<&TeardownClearance>,

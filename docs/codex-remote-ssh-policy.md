@@ -26,10 +26,10 @@ AgentDesk host at all.
 AgentDesk hosts Codex via three local strategies — direct TUI hosting,
 the legacy tmux wrapper, and ProcessBackend — all of which run Codex as a
 child of the AgentDesk process on the same host. `RemoteProfile` exists in
-the codebase (`src/services/remote_stub.rs`) and is plumbed through
-`execute_command_streaming`, but `services::remote` is a stub: SSH is
-unavailable in the AgentDesk build, `ssh_connect_and_auth` returns `Err`,
-and the two remote entry points always error.
+the codebase (`src/services/remote_stub.rs`) only as the Codex
+`execute_command_streaming` parameter, which production always passes as
+`None` and which refuses any profile. SSH is unavailable in the AgentDesk
+build; no other provider takes a remote profile.
 
 The gap remote SSH would fill is operator-driven: running a Codex turn
 *as* a different machine (typically `mac-mini` or `mac-book`) when that
@@ -219,9 +219,8 @@ hold:
    `providers.codex.remote_hosts: [...]` in `agentdesk.yaml`. Each entry
    is a structured record `{ name, host, port, user, default_path }`.
    Wildcards are not accepted. The legacy free-form `remote_profiles`
-   list (currently stubbed to empty in `config::Settings::load`) is
-   **not** the allow-list; it is a separate compatibility shim and MUST
-   NOT be consulted for routing decisions.
+   plumbing has been removed; a legacy profile name MUST NOT be
+   consulted for routing decisions.
 2. The current caller MUST be permitted to target that named host. For
    the initial rollout, the permission rule is: only agents whose
    `AgentDef` declares an explicit `codex.remote_host: <name>` field
@@ -310,7 +309,7 @@ Without **both** integration tests passing, remote execution stays
 unavailable.
 
 This ADR explicitly does **not** introduce a remote tmux session for
-Codex. `execute_streaming_remote_tmux` remains a stub because remote
+Codex. `execute_command_streaming` keeps refusing it because remote
 tmux fragments the cancel story (the SSH session can drop while the
 tmux session — and Codex — keeps running on the remote host with no
 owner). Reviving remote tmux requires a separate ADR.
@@ -359,7 +358,8 @@ owner). Reviving remote tmux requires a separate ADR.
   refusal for the `AGENTDESK_CODEX_REMOTE_TMUX=true` env-var branch;
   introducing remote tmux needs its own ADR.
 - Enabling remote SSH for any provider other than Codex. Claude,
-  Gemini, Qwen, and OpenCode keep their stubs.
+  Gemini, Qwen, OpenCode and the stream-json providers take no remote
+  profile at all.
 - Storing SSH credentials in `agentdesk.yaml`. A future remote
   implementation must reject cleartext password and passphrase-protected
   key paths at config-load time for every remote profile.
