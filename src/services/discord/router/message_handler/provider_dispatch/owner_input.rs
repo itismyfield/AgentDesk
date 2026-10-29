@@ -86,9 +86,8 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
     Some(Taken::Done(run(turn, route, registration)))
 }
 
-/// Reserves the first prompt of the execution its driver observed with `wanted` lineage on that
-/// execution's own target, never the prepared one, and runs the driver's submit as the effect;
-/// another lineage is refused before any reservation.
+/// Reserves the first prompt on the target of the execution its driver observed, runs the driver's
+/// submit as the effect, and refuses any lineage but `wanted` before reserving.
 fn created(r: Registration, frame: String, wanted: scope::Lineage) -> scope::LaunchHook {
     Box::new(move |lineage, target, source, writer, submit| {
         if lineage != wanted {

@@ -657,9 +657,8 @@ impl Rig {
     }
 }
 
-/// An owner that refuses a created first prompt before any key keeps the original with its proof,
-/// and the launch neither observes nor tears the created session or its marker down; a tmux
-/// target binds no Herdr writer.
+/// An owner refusal before any key (a tmux target binds no Herdr writer) keeps the original and
+/// its proof; the launch neither observes nor tears the session or its marker down.
 #[test]
 fn owned_refusal_keeps_the_created_session_and_its_marker() {
     let _root = crate::config::TestRuntimeRootGuard::new();

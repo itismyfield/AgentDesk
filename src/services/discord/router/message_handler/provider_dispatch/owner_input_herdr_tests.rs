@@ -281,9 +281,8 @@ fn unused_pool(owner: &HerdrOwner) -> sqlx::PgPool {
         .unwrap()
 }
 
-/// A launched Claude Herdr execution's first prompt is reserved on the execution the driver
-/// observed, not the prepared one; the owner binds that pane before its first ready, so the
-/// owner's physical pin, the gate's fence and the paste all name the same pane.
+/// A launched Claude Herdr execution's first prompt is reserved on the observed execution, and its
+/// pane is bound before the owner's first ready, so pin, gate fence and paste name one pane.
 #[test]
 fn owned_herdr_claude_launch_reserves_the_observed_execution_and_its_pane() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -489,9 +488,8 @@ fn owned_codex_absence_creates_only_with_the_reserved_prompt() {
     }
 }
 
-/// One owner per physical Herdr pane at a time through the real gate: a second logical owner of
-/// the same pane gets no byte while the first holds it, a pane on another socket writes meanwhile,
-/// and the pane takes the second owner once the first scope ends.
+/// Through the real gate a second logical owner of a held pane gets no byte, another socket's pane
+/// writes meanwhile, and the pane takes the second owner once the first scope ends.
 #[test]
 fn two_herdr_rigs_serialize_one_physical_pane_through_the_gate() {
     use crate::services::session_host::{HerdrMutation as Mutation, HerdrTarget, HostMutation};
