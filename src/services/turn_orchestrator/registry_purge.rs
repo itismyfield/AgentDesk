@@ -125,6 +125,16 @@ pub(super) fn gate_closed_arm(
         | M::AgeValveClearedDispatchForTest { .. } => return Some(msg),
         // Start-like arms would bind work the unlink orphans; callers replay through
         // the `*_with_closed_retry` helpers below.
+        #[cfg(all(test, unix))]
+        M::MigrationPublication { request, reply } => {
+            let _ = reply.send(request.refuse(super::migration_wait::Refusal::Closed));
+            "MigrationPublication"
+        }
+        #[cfg(all(test, unix))]
+        M::EnqueueMigration { reply, .. } => {
+            let _ = reply.send(EnqueueInterventionResult::refused(EnqueueRefusalReason::MailboxClosed, Vec::new()));
+            "EnqueueMigration"
+        }
         M::TryStartTurn { reply, .. } => {
             let _ = reply.send(TryStartTurnResult::default());
             "TryStartTurn"

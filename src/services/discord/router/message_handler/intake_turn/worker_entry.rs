@@ -72,10 +72,29 @@ pub(crate) async fn execute_intake_turn_core(
         if let Some(waiting) =
             crate::services::discord::router::migration_wait::waiting(&shared.provider, &request)
         {
-            crate::services::discord::router::migration_wait::park_worker(
+            use crate::db::intake_outbox::migration_wait::{
+                ParkOutcome, reclassify_before_effects,
+            };
+            let parked = crate::services::discord::router::migration_wait::park_worker(
                 &deps, &request, waiting, proof,
             )
             .await;
+            let parked = match parked {
+                ParkOutcome::NeedsReclassification(original) => match shared.pg_pool.as_ref() {
+                    Some(pool) => reclassify_before_effects(pool, original)
+                        .await
+                        .unwrap_or_else(ParkOutcome::Unknown),
+                    None => {
+                        ParkOutcome::Unknown("migration reclassification has no PG pool".into())
+                    }
+                },
+                parked => parked,
+            };
+            tracing::info!(
+                channel_id = request.channel_id.get(),
+                ?parked,
+                "migration worker keeps its original delivery after typed wait settlement"
+            );
             return Ok(IntakeExecution::Deferred);
         }
     }

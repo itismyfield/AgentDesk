@@ -218,6 +218,7 @@ src/
 │   │   ├── consent_handoff.rs
 │   │   ├── consent_handoff_tests.rs
 │   │   ├── migration_wait.rs
+│   │   ├── migration_wait_o1_tests.rs
 │   │   ├── migration_wait_tests.rs
 │   │   ├── owner_fence_pg_tests.rs
 │   │   ├── postgres_tests.rs
@@ -1999,7 +2000,8 @@ src/
 │   │   │   │   ├── watchdog.rs
 │   │   │   │   └── watchdog_host_tests.rs
 │   │   │   ├── migration_wait/
-│   │   │   │   └── entry_tests.rs
+│   │   │   │   ├── entry_tests.rs
+│   │   │   │   └── o1_custody_tests.rs
 │   │   │   ├── response_format/
 │   │   │   │   ├── retry_prompt_context/
 │   │   │   │   │   ├── store.rs
@@ -3954,6 +3956,8 @@ src/
 │   │   ├── lease_release.rs
 │   │   ├── mailbox_observation.rs
 │   │   ├── mailbox_unreachable_tests.rs
+│   │   ├── migration_wait.rs
+│   │   ├── migration_wait_tests.rs
 │   │   ├── overflow.rs
 │   │   ├── overflow_s2b_tests.rs
 │   │   ├── pending_queue_persistence.rs

@@ -124,7 +124,11 @@ pub(crate) async fn admit_queued_intake(
             let Some(dispatch_lease) = dispatch_lease else { return QueuedAdmissionDisposition::RejectedRestore; };
             let owner = QueuedRestoreOwner { original: intervention.clone(), provider: submission.provider.clone(), channel_id, dispatch_lease };
             tracing::info!(reason=?held.waiting.reason,"migration restores its original queued admission");
-            owner.restore(deps).await;
+            let original=owner.original.clone();
+            let outcome=owner.restore(deps).await;
+            if matches!(outcome,super::super::IntakeExecution::Deferred) {
+                super::super::migration_wait::restored_ack(deps,&held.waiting,&submission.provider,&original).await;
+            }
             return QueuedAdmissionDisposition::Deferred;
         }
         #[cfg(unix)]
@@ -298,7 +302,16 @@ pub(crate) async fn finish_admitted_queued_intake(
                 let error = match error.downcast::<super::super::migration_wait::QueuedWaiting>() {
                     Ok(waiting) => {
                         tracing::info!(reason=?waiting.0.reason,"migration restores its original queued input");
-                        return Ok(owner.restore(deps).await);
+                        let original = owner.original.clone();
+                        let provider = owner.provider.clone();
+                        let outcome = owner.restore(deps).await;
+                        if matches!(outcome, super::super::IntakeExecution::Deferred) {
+                            super::super::migration_wait::restored_ack(
+                                deps, &waiting.0, &provider, &original,
+                            )
+                            .await;
+                        }
+                        return Ok(outcome);
                     }
                     Err(error) => error,
                 };

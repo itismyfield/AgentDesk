@@ -102,6 +102,8 @@ pub(crate) mod restart_report;
 mod role_map;
 mod role_map_enrichment;
 mod router;
+#[cfg(all(test, unix))]
+pub(crate) use router::LocalCustodyWitness;
 mod runtime_bootstrap;
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;

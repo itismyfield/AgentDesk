@@ -708,58 +708,103 @@ async fn actual_live_migration_persistence_retry_retains_the_same_original_owner
     input.preloaded_uploads.push(upload(&f, 8_917_040).await);
     let expected = input.request.clone();
     let cap = Capability::new(expected.clone(), intent(&f, &expected).await);
-    let attempts = cap.custody_attempts.clone();
+    let mut cap = cap;
+    let failures = cap.persistence_failures.clone();
+    let successes = cap.persistence_successes.clone();
     let retained = cap.retained.clone();
     let original = cap.original_observed.clone();
+    let witnesses = cap.witnesses.clone();
+    let retry = Arc::new(tokio::sync::Notify::new());
+    cap.retry_after_failure = Some(retry.clone());
     let calls = Arc::new(AtomicUsize::new(0));
     let _hooks = final_spy(calls.clone());
     let checkpoints = Arc::new(AtomicUsize::new(0));
     let advanced = checkpoints.clone();
-    let directory = crate::services::discord::runtime_store::discord_pending_queue_root()
+    let channel = ChannelId::new(discord_mock::CHANNEL_ID);
+    let persistence =
+        QueuePersistenceContext::new(&ProviderKind::Claude, &f.shared.token_hash, None);
+    let warmed = f
+        .shared
+        .mailbox(channel)
+        .hydrate_pending_queue_from_disk(persistence)
+        .await;
+    assert!(
+        warmed.persistence_error.is_none(),
+        "the real actor reads its queue before the storage fault"
+    );
+    let queue = crate::services::discord::runtime_store::discord_pending_queue_root()
         .unwrap()
-        .join("claude");
-    std::fs::create_dir_all(&directory).unwrap();
-    let obstacle = directory.join(&f.shared.token_hash);
-    std::fs::write(&obstacle, b"queue persistence is blocked").unwrap();
+        .join("claude")
+        .join(&f.shared.token_hash)
+        .join(format!("{}.json", channel.get()));
+    let fault = crate::services::discord::runtime_store::rename_fault::Armed::new(&queue);
     let deps = f.deps();
-    let dispatch = staged::scope(
+    let mut dispatch = Box::pin(staged::scope(
         cap,
         intake::dispatch_live_text_intake(&deps, input, move || {
             advanced.fetch_add(1, Ordering::SeqCst);
         }),
-    );
-    let repair = async {
-        let arrived = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while attempts.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .is_ok();
-        let held = retained.load(Ordering::SeqCst);
-        let before_checkpoint = checkpoints.load(Ordering::SeqCst);
-        std::fs::remove_file(&obstacle).unwrap();
-        (arrived, held, before_checkpoint)
+    ));
+    let arrived = tokio::select! {
+        _ = &mut dispatch => false,
+        result = tokio::time::timeout(std::time::Duration::from_secs(2),async {
+            while failures.load(Ordering::SeqCst)==0 {tokio::task::yield_now().await;}
+        }) => result.is_ok(),
     };
-    let (result, (arrived, held, before_checkpoint)) =
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            tokio::join!(dispatch, repair)
-        })
-        .await
-        .expect("released persistence barrier must finish");
+    let first_evidence = fault.evidence();
+    let held = retained.load(Ordering::SeqCst);
+    let before_checkpoint = checkpoints.load(Ordering::SeqCst);
+    let absent = f.disk().is_empty();
+    let before_witnesses = witnesses.lock().unwrap().len();
+    let result = if arrived {
+        retry.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut dispatch)
+            .await
+            .ok()
+    } else {
+        None
+    };
+    drop(dispatch);
+    let final_evidence = fault.evidence();
+    drop(fault);
+    let disk = f.disk();
+    pool.close().await;
+    db.drop().await;
+    assert_eq!(
+        first_evidence.1.len(),
+        1,
+        "the OS refused the actual first queue rename"
+    );
     assert!(
-        arrived && held,
+        arrived,
+        "first persistence failure must reach its completion barrier"
+    );
+    assert!(
+        held && absent,
         "failed persistence leaves the original migration input in one retained owner"
+    );
+    assert_eq!(
+        before_witnesses, 0,
+        "no local witness exists before a durable ACK"
     );
     assert_eq!(
         before_checkpoint, 0,
         "unverified custody never spends the input checkpoint"
     );
     assert!(
-        result.is_ok(),
-        "same-ID persistence retry succeeds: {result:?}"
+        matches!(result, Some(Ok(_))),
+        "actual second persistence must finish with original custody: {result:?}"
     );
-    let disk = f.disk();
+    assert_eq!(failures.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        successes.load(Ordering::SeqCst),
+        1,
+        "the successful second persistence is observed after ACK"
+    );
+    assert_eq!(
+        final_evidence.0, 2,
+        "retry performs a second real queue rename"
+    );
     assert_eq!(disk.len(), 1, "retry cannot duplicate the original request");
     assert_original(&disk[0], original.lock().unwrap().as_ref().unwrap());
     assert_eq!(checkpoints.load(Ordering::SeqCst), 1);
@@ -768,8 +813,6 @@ async fn actual_live_migration_persistence_retry_retains_the_same_original_owner
         !retained.load(Ordering::SeqCst),
         "verified queue custody replaces the retained owner"
     );
-    pool.close().await;
-    db.drop().await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1365,3 +1408,6 @@ async fn actual_worker_without_migration_capability_keeps_main_refusal_settlemen
     pool.close().await;
     db.drop().await;
 }
+
+#[path = "o1_custody_tests.rs"]
+mod o1_custody_tests;

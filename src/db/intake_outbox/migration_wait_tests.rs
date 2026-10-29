@@ -4,7 +4,7 @@ use crate::db::intake_outbox::owner_fence_pg_tests::snapshot;
 use serde_json::json;
 use std::time::Duration;
 
-fn root() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
+pub(crate) fn root() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
     let dir = tempfile::tempdir().unwrap();
     let guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
@@ -13,7 +13,11 @@ fn root() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
     (dir, guard)
 }
 
-async fn setup(pool: &PgPool, channel: u64, stamped: bool) -> (IntakeOutboxRow, WaitIntent) {
+pub(crate) async fn setup(
+    pool: &PgPool,
+    channel: u64,
+    stamped: bool,
+) -> (IntakeOutboxRow, WaitIntent) {
     setup_sources(
         pool,
         channel,
@@ -82,7 +86,7 @@ async fn setup_sources(
     (row, intent)
 }
 
-async fn pending_row(pool: &PgPool, id: i64) {
+pub(crate) async fn pending_row(pool: &PgPool, id: i64) {
     sqlx::query(
         "UPDATE intake_outbox SET status='pending',claim_owner=NULL,claimed_at=NULL,
         accepted_at=NULL,spawned_at=NULL,dispatched_at=NULL WHERE id=$1",
@@ -351,7 +355,11 @@ async fn migration_wait_selector_readset_and_marked_payload_are_rechecked_after_
         .unwrap();
         let result = park_before_effects(&pool, BeforeEffects::for_test(&row), &intent).await;
         assert!(
-            matches!(result, Ok(ParkOutcome::Blocked(_)) | Err(_)),
+            if index < 3 {
+                matches!(result, Ok(ParkOutcome::NeedsReclassification(_)))
+            } else {
+                matches!(result, Ok(ParkOutcome::Blocked(_)) | Err(_))
+            },
             "a stale selector cannot park input: {change}"
         );
         assert_eq!(snapshot(&pool, row.id).await, before);
@@ -464,7 +472,16 @@ async fn migration_wait_accepts_only_exact_registered_not_started_receipts_pg() 
                 fence.waiting().requests().is_empty(),
                 "registered spelling cannot replace full preserved request identity: variant={variant}"
             );
-            assert_eq!(fence.blockers().len(), 1);
+            let ids: Vec<_> = fence
+                .blockers()
+                .iter()
+                .map(|blocker| blocker.row_id)
+                .collect();
+            assert_eq!(
+                ids,
+                vec![row.id, receipt.id],
+                "both the original and its invalid replay responsibility remain blockers"
+            );
         }
         fence.release().await.unwrap();
         assert_eq!(snapshot(&pool, row.id).await, before);
@@ -786,3 +803,6 @@ async fn migration_wait_persisted_marker_cannot_approve_a_changed_fifo_pg() {
         "the changed FIFO remains with its original row for reconciliation"
     );
 }
+
+#[path = "migration_wait_o1_tests.rs"]
+mod o1;

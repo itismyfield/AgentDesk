@@ -4,11 +4,53 @@ use super::*;
 /// A `reserved_front` head is never the merge target.
 pub(super) fn enqueue_behind(
     queue: &mut Vec<Intervention>,
-    mut intervention: Intervention,
+    intervention: Intervention,
     active_user_message_id: Option<MessageId>,
     settlement: Option<(&ProviderKind, ChannelId)>,
     reserved_front: bool,
 ) -> EnqueueInterventionResult {
+    enqueue_policy(
+        queue,
+        intervention,
+        active_user_message_id,
+        settlement,
+        reserved_front,
+        false,
+    )
+}
+
+fn enqueue_policy(
+    queue: &mut Vec<Intervention>,
+    mut intervention: Intervention,
+    active_user_message_id: Option<MessageId>,
+    settlement: Option<(&ProviderKind, ChannelId)>,
+    reserved_front: bool,
+    preserve_sources: bool,
+) -> EnqueueInterventionResult {
+    if preserve_sources {
+        let sources = if intervention.source_message_ids.is_empty() {
+            vec![intervention.message_id]
+        } else {
+            intervention.source_message_ids.clone()
+        };
+        if queue.iter().any(|item| {
+            sources
+                .iter()
+                .any(|source| item.source_message_ids.contains(source))
+        }) {
+            return EnqueueInterventionResult::refused(
+                EnqueueRefusalReason::SourceIdAlreadyQueued,
+                Vec::new(),
+            );
+        }
+        #[cfg(all(test, unix))]
+        if queue.len() >= MAX_INTERVENTIONS_PER_CHANNEL {
+            return EnqueueInterventionResult::refused(
+                EnqueueRefusalReason::MigrationCapacity,
+                Vec::new(),
+            );
+        }
+    }
     let mut queue_exit_events = overflow::drain_head_overflow_behind(queue, reserved_front);
     ensure_source_message_ids(&mut intervention);
 
@@ -40,7 +82,7 @@ pub(super) fn enqueue_behind(
                 provider, channel, last,
             )
         });
-    if let Some(last) = queue.last().filter(|_| !last_budgeted) {
+    if !preserve_sources && let Some(last) = queue.last().filter(|_| !last_budgeted) {
         if last.author_id == intervention.author_id
             && last.text == intervention.text
             && last.reply_context == intervention.reply_context
@@ -57,7 +99,7 @@ pub(super) fn enqueue_behind(
 
     // A reserved queued head keeps its payload, so later input queues behind it instead.
     let merge_index = (queue.len().checked_sub(1))
-        .filter(|index| !(reserved_front && *index == 0) && !last_budgeted);
+        .filter(|index| !(reserved_front && *index == 0) && !last_budgeted && !preserve_sources);
     if let Some(index) = merge_index
         && queue[index].merges_with(&intervention)
         && let Some((provider, channel_id)) = settlement
@@ -116,6 +158,24 @@ pub(super) fn enqueue_behind(
         queue_exit_events,
         persistence_error: None,
     }
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn enqueue_migration_behind(
+    queue: &mut Vec<Intervention>,
+    intervention: Intervention,
+    active_user_message_id: Option<MessageId>,
+    settlement: Option<(&ProviderKind, ChannelId)>,
+    reserved_front: bool,
+) -> EnqueueInterventionResult {
+    enqueue_policy(
+        queue,
+        intervention,
+        active_user_message_id,
+        settlement,
+        reserved_front,
+        true,
+    )
 }
 
 #[cfg(test)]

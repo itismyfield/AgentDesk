@@ -62,12 +62,115 @@ pub(crate) enum WaitOwner {
     LegacyLocal { instance: String },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ParkOutcome {
     Parked,
     AlreadyParked,
+    Reclassified,
+    NeedsReclassification(Box<Reclassification>),
     Blocked(String),
     Unknown(String),
+}
+
+pub(crate) struct Reclassification {
+    proof: BeforeEffects,
+    intent: WaitIntent,
+    created_at: DateTime<Utc>,
+}
+impl std::fmt::Debug for Reclassification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reclassification")
+            .field("row_id", &self.proof.row().id)
+            .finish_non_exhaustive()
+    }
+}
+impl PartialEq for Reclassification {
+    fn eq(&self, other: &Self) -> bool {
+        self.intent == other.intent
+            && self.proof.row().id == other.proof.row().id
+            && self.proof.row().claim_owner == other.proof.row().claim_owner
+            && self.created_at == other.created_at
+    }
+}
+impl Eq for Reclassification {}
+
+pub(crate) async fn reclassify_before_effects(
+    pool: &PgPool,
+    request: Box<Reclassification>,
+) -> Result<ParkOutcome, String> {
+    let Reclassification {
+        proof,
+        mut intent,
+        created_at,
+    } = *request;
+    let expected = proof.row();
+    let mut tx = owner_gate(pool, &intent.authority).await?;
+    intent.selector = revision(&mut tx, &intent.authority, intent.selector.canonical_row).await?;
+    let s = sqlx::query_as::<_, Snapshot>("SELECT * FROM intake_outbox WHERE id=$1 FOR UPDATE")
+        .bind(expected.id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(s) = s else {
+        return Ok(ParkOutcome::Blocked("original row missing".into()));
+    };
+    let checked = async {
+        owner(&s.row, &intent)?;
+        if s.row.status != super::IntakeOutboxStatus::Spawned
+            || s.row.claim_owner != expected.claim_owner
+            || s.row.owner_instance_id != expected.owner_instance_id
+            || s.row.owner_generation != expected.owner_generation
+        {
+            return Err(BlockReason::Owner);
+        }
+        if super::consent_handoff::payload(&s.row).map_err(|_| BlockReason::Payload)?
+            != super::consent_handoff::payload(expected).map_err(|_| BlockReason::Payload)?
+        {
+            return Err(BlockReason::Payload);
+        }
+        if s.accepted_at.is_none()
+            || s.spawned_at.is_none()
+            || s.dispatched_at.is_some()
+            || s.completed_at.is_some()
+            || s.created_at != created_at
+        {
+            return Err(BlockReason::Clock);
+        }
+        let receipts = safety(&mut tx, &s).await?;
+        if let Some(error) = s.last_error.as_deref() {
+            let encoded = error.strip_prefix(PREFIX).ok_or(BlockReason::Marker)?;
+            let prior: Marker = serde_json::from_str(encoded).map_err(|_| BlockReason::Marker)?;
+            if prior.intent.authority != intent.authority {
+                return Err(BlockReason::Marker);
+            }
+            marker(&s, &prior.intent, &receipts)?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(reason) = checked {
+        return Ok(ParkOutcome::Blocked(format!(
+            "migration reclassification blocked: {reason:?}"
+        )));
+    }
+    let changed = sqlx::query("UPDATE intake_outbox SET status='pending',claim_owner=NULL,claimed_at=NULL,
+        accepted_at=NULL,spawned_at=NULL,last_error=NULL WHERE id=$1 AND status='spawned' AND claim_owner=$2
+        AND last_error IS NOT DISTINCT FROM $3")
+        .bind(s.row.id).bind(&s.row.claim_owner).bind(&s.last_error)
+        .execute(&mut *tx).await.map_err(|e| e.to_string())?.rows_affected();
+    if changed != 1 {
+        return Ok(ParkOutcome::Blocked(
+            "migration reclassification CAS lost".into(),
+        ));
+    }
+    let committed = tx.commit().await;
+    Ok(
+        if committed.is_ok() && !LOSE_COMMIT_ACK.try_with(|lost| *lost).unwrap_or(false) {
+            ParkOutcome::Reclassified
+        } else {
+            ParkOutcome::Unknown("migration reclassification commit was not acknowledged".into())
+        },
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,15 +211,31 @@ impl VerifiedWaitingSet {
 /// This guards only the DB subset; mailbox and output authorities remain separate.
 pub(crate) struct FencedWaiting {
     transaction: Transaction<'static, Postgres>,
+    intent: WaitIntent,
     waiting: VerifiedWaitingSet,
     blockers: Vec<Blocker>,
+    foreign_sessions: i64,
+    queued_bodies: i64,
+    replay_registrations: Vec<i64>,
 }
 impl FencedWaiting {
+    pub(crate) fn intent(&self) -> &WaitIntent {
+        &self.intent
+    }
     pub(crate) fn waiting(&self) -> &VerifiedWaitingSet {
         &self.waiting
     }
     pub(crate) fn blockers(&self) -> &[Blocker] {
         &self.blockers
+    }
+    pub(crate) fn foreign_sessions(&self) -> i64 {
+        self.foreign_sessions
+    }
+    pub(crate) fn queued_bodies(&self) -> i64 {
+        self.queued_bodies
+    }
+    pub(crate) fn replay_registrations(&self) -> &[i64] {
+        &self.replay_registrations
     }
     pub(crate) async fn release(self) -> Result<(), String> {
         self.transaction.rollback().await.map_err(|e| e.to_string())
@@ -499,8 +618,24 @@ pub(crate) async fn fenced_waiting(
     {
         return Err("migration selector revision changed".into());
     }
+    let facts = crate::db::o_channel_activation::read_activation_rows(
+        &mut tx,
+        &intent.authority.channel_id.to_string(),
+        &intent.authority.local_instance,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let queued_bodies = crate::db::o_channel_activation::read_queued_bodies(
+        &mut tx,
+        &intent.authority.channel_id.to_string(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let mut replay_registrations = Vec::new();
     let rows = sqlx::query_as::<_, Snapshot>("SELECT * FROM intake_outbox WHERE channel_id=$1
-        AND status IN ('pending','claimed','accepted','spawned','dispatched','unknown','failed_post_accept') AND NOT replay_only ORDER BY created_at,id")
+        AND (status IN ('pending','claimed','accepted','spawned','dispatched','unknown','failed_post_accept')
+        OR (status='failed_pre_accept' AND (accepted_at IS NOT NULL OR spawned_at IS NOT NULL OR dispatched_at IS NOT NULL)))
+        AND NOT replay_only ORDER BY created_at,id")
         .bind(intent.authority.channel_id.to_string()).fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
     let (mut waiting, mut blockers) = (Vec::new(), Vec::new());
     for s in rows {
@@ -512,29 +647,63 @@ pub(crate) async fn fenced_waiting(
             if s.row.attempt_no <= 0 || (s.row.attempt_no > 1 && s.row.parent_outbox_id.is_none()) {
                 return Err(BlockReason::Family);
             }
-            Ok(WaitingRef {
-                row_id: s.row.id,
-                source_ids: sources(&s.row)?,
-                payload_digest: super::consent_handoff::payload(&s.row)
-                    .map_err(|_| BlockReason::Payload)?,
-                owner: own,
-                created_at: s.created_at,
-                attempt_no: s.row.attempt_no,
-            })
+            let registered = receipts
+                .as_array()
+                .ok_or(BlockReason::Replay)?
+                .iter()
+                .map(|receipt| {
+                    receipt
+                        .get(0)
+                        .and_then(Value::as_i64)
+                        .ok_or(BlockReason::Replay)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((
+                WaitingRef {
+                    row_id: s.row.id,
+                    source_ids: sources(&s.row)?,
+                    payload_digest: super::consent_handoff::payload(&s.row)
+                        .map_err(|_| BlockReason::Payload)?,
+                    owner: own,
+                    created_at: s.created_at,
+                    attempt_no: s.row.attempt_no,
+                },
+                registered,
+            ))
         }
         .await;
         match checked {
-            Ok(r) => waiting.push(r),
+            Ok((r, registered)) => {
+                waiting.push(r);
+                replay_registrations.extend(registered);
+            }
             Err(reason) => blockers.push(Blocker {
                 row_id: s.row.id,
                 reason,
             }),
         }
     }
+    replay_registrations.sort_unstable();
+    replay_registrations.dedup();
+    let replay = sqlx::query_scalar::<_, i64>("SELECT id FROM intake_outbox WHERE channel_id=$1 AND replay_only
+        AND (replay_disposition IS DISTINCT FROM 'classified_normal' OR status IN ('pending','claimed','accepted','spawned','dispatched','failed_post_accept')) ORDER BY created_at,id")
+        .bind(intent.authority.channel_id.to_string()).fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
+    for row_id in replay {
+        if !replay_registrations.contains(&row_id) {
+            blockers.push(Blocker {
+                row_id,
+                reason: BlockReason::Replay,
+            });
+        }
+    }
     Ok(FencedWaiting {
         transaction: tx,
+        intent: intent.clone(),
         waiting: VerifiedWaitingSet(waiting),
         blockers,
+        foreign_sessions: facts.foreign_sessions,
+        queued_bodies,
+        replay_registrations,
     })
 }
 
@@ -565,12 +734,9 @@ pub(crate) async fn park_before_effects(
         ));
     }
     let mut tx = owner_gate(pool, &intent.authority).await?;
-    if revision(&mut tx, &intent.authority, intent.selector.canonical_row).await? != intent.selector
-    {
-        return Ok(ParkOutcome::Blocked(
-            "migration selector revision changed".into(),
-        ));
-    }
+    let stale_selector = revision(&mut tx, &intent.authority, intent.selector.canonical_row)
+        .await?
+        != intent.selector;
     let current =
         sqlx::query_as::<_, Snapshot>("SELECT * FROM intake_outbox WHERE id=$1 FOR UPDATE")
             .bind(expected.id)
@@ -580,6 +746,21 @@ pub(crate) async fn park_before_effects(
     let Some(s) = current else {
         return Ok(ParkOutcome::Blocked("original row missing".into()));
     };
+    let stale_marker = s
+        .last_error
+        .as_deref()
+        .and_then(|value| value.strip_prefix(PREFIX))
+        .and_then(|encoded| serde_json::from_str::<Marker>(encoded).ok())
+        .is_some_and(|prior| prior.intent.authority == intent.authority && prior.intent != *intent);
+    if stale_selector || stale_marker {
+        return Ok(ParkOutcome::NeedsReclassification(Box::new(
+            Reclassification {
+                proof,
+                intent: intent.clone(),
+                created_at: s.created_at,
+            },
+        )));
+    }
     let checked = async {
         let own = owner(&s.row, intent)?;
         if super::consent_handoff::payload(&s.row).map_err(|_| BlockReason::Payload)?
@@ -696,4 +877,4 @@ pub(crate) async fn park_before_effects(
 }
 
 #[path = "migration_wait_tests.rs"]
-mod tests;
+pub(crate) mod tests;

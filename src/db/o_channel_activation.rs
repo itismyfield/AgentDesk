@@ -60,7 +60,7 @@ pub(crate) async fn activation_rows(
     })
 }
 
-async fn read_activation_rows(
+pub(crate) async fn read_activation_rows(
     connection: &mut PgConnection,
     channel_id: &str,
     local_instance: &str,
@@ -89,6 +89,19 @@ async fn read_activation_rows(
     })
 }
 
+pub(crate) async fn read_queued_bodies(
+    connection: &mut PgConnection,
+    channel_id: &str,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_outbox WHERE target=$1
+        AND source='headless_turn' AND status IN ('pending','processing')",
+    )
+    .bind(format!("channel:{channel_id}"))
+    .fetch_one(connection)
+    .await
+}
+
 /// SHARE conflicts with every intake DML path, including writes made by another node.
 pub(crate) async fn fenced_activation_rows(
     pool: &PgPool,
@@ -103,13 +116,7 @@ pub(crate) async fn fenced_activation_rows(
         .execute(&mut *transaction)
         .await?;
     let rows = read_activation_rows(&mut transaction, channel_id, local_instance).await?;
-    let queued_bodies = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM message_outbox
-         WHERE target = $1 AND source = 'headless_turn' AND status IN ('pending', 'processing')",
-    )
-    .bind(format!("channel:{channel_id}"))
-    .fetch_one(&mut *transaction)
-    .await?;
+    let queued_bodies = read_queued_bodies(&mut transaction, channel_id).await?;
     Ok((
         IntakeFence {
             _transaction: Some(transaction),

@@ -28,6 +28,8 @@ mod lease_release;
 mod mailbox_observation;
 #[cfg(test)]
 mod mailbox_unreachable_tests;
+#[cfg(all(test, unix))]
+pub(crate) mod migration_wait;
 pub(crate) use mailbox_observation::MailboxObservationFailure;
 pub(crate) mod checked_purge;
 mod overflow;
@@ -376,6 +378,8 @@ pub(crate) enum EnqueueRefusalReason {
     /// `(author_id, text, reply_context, has_reply_boundary)` within
     /// `INTERVENTION_DEDUP_WINDOW` — rapid-resend dedup.
     LastItemDedup,
+    #[cfg(all(test, unix))]
+    MigrationCapacity,
     /// The `ChannelMailboxHandle` could not reach the mailbox actor (mpsc
     /// closed or oneshot dropped). Surfaced only at the handle layer.
     ActorUnreachable,
@@ -1208,6 +1212,17 @@ impl ChannelMailboxRegistry {
 // Once `CloseIfIdle` sets `state.closed`, the exhaustive `registry_purge::gate_closed_arm` passes
 // reads and refuses every other arm; CommitCapturedReadyDelivery refuses closed actors in its own arm.
 enum ChannelMailboxMsg {
+    #[cfg(all(test, unix))]
+    MigrationPublication {
+        request: Box<migration_wait::PublicationRequest>,
+        reply: oneshot::Sender<migration_wait::PublicationResult>,
+    },
+    #[cfg(all(test, unix))]
+    EnqueueMigration {
+        intervention: Intervention,
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<EnqueueInterventionResult>,
+    },
     CommitCapturedReadyDelivery {
         commit: Box<crate::services::discord::CapturedReadyDeliveryCommit>,
         reply: oneshot::Sender<Option<Box<crate::services::discord::CapturedReadyDeliveryCommit>>>,
@@ -1744,11 +1759,43 @@ fn input_mailbox_step(
     msg: ChannelMailboxMsg,
     own_recovery_done: &Arc<RecoveryDoneSignal>,
 ) -> ChannelMailboxState {
+    #[cfg(all(test, unix))]
+    let (msg, migration_sources) = match msg {
+        ChannelMailboxMsg::EnqueueMigration {
+            intervention,
+            persistence,
+            reply,
+        } => (
+            ChannelMailboxMsg::Enqueue {
+                intervention,
+                persistence,
+                observed: None,
+                reply,
+            },
+            true,
+        ),
+        msg => (msg, false),
+    };
     // A tombstoned actor serves only reads (enum docs).
     let Some(msg) = registry_purge::gate_closed_arm(&state, channel_id, msg) else {
         return state;
     };
     match msg {
+        #[cfg(all(test, unix))]
+        ChannelMailboxMsg::MigrationPublication { request, reply } => {
+            if reply.is_closed() {
+                return state;
+            }
+            let result = request.commit(&mut state, channel_id);
+            let _ = reply.send(result);
+        }
+        #[cfg(all(test, unix))]
+        ChannelMailboxMsg::EnqueueMigration { reply, .. } => {
+            let _ = reply.send(EnqueueInterventionResult::refused(
+                EnqueueRefusalReason::ActorUnreachable,
+                Vec::new(),
+            ));
+        }
         ChannelMailboxMsg::CommitCapturedReadyDelivery { commit, reply } => {
             let committed = (!state.closed)
                 .then(|| commit.commit(state.cancel_token.as_ref()))
@@ -2085,14 +2132,28 @@ fn input_mailbox_step(
             }
             let previous_queue = state.intervention_queue.clone();
             let reserved_front = queued_head::holds_front(&state);
-            let mut enqueue_result = enqueue_behind(
+            #[cfg(all(test, unix))]
+            let enqueue = if migration_sources {
+                queue_enqueue::enqueue_migration_behind
+            } else {
+                enqueue_behind
+            };
+            #[cfg(not(all(test, unix)))]
+            let enqueue = enqueue_behind;
+            let mut enqueue_result = enqueue(
                 &mut state.intervention_queue,
                 intervention,
                 state.active_user_message_id,
                 Some((&persistence.provider, channel_id)),
                 reserved_front,
             );
-            if enqueue_result.enqueued
+            let should_persist = enqueue_result.enqueued;
+            #[cfg(all(test, unix))]
+            let should_persist = should_persist
+                || (migration_sources
+                    && enqueue_result.refusal_reason
+                        == Some(EnqueueRefusalReason::SourceIdAlreadyQueued));
+            if should_persist
                 && let Err(error) = persist_queue_or_restore(
                     &mut state,
                     channel_id,

@@ -859,3 +859,35 @@ mod s2a_tests;
 #[cfg(test)]
 #[path = "queued_head/compat_tests.rs"]
 mod compat_tests;
+
+#[cfg(all(test, unix))]
+pub(super) fn migration_clear(
+    state: &ChannelMailboxState,
+    channel: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> Result<(), String> {
+    let key = (persistence.provider.clone(), persistence.token_hash.clone());
+    let ledger = &state.queued_head;
+    if ledger
+        .adopted
+        .as_ref()
+        .is_some_and(|current| current != &key)
+        || ledger.meta.is_set()
+        || ledger.lease.is_some()
+        || !state.remint_fence.trusts_queue(&key)
+    {
+        return Err("queue head retains a submitted or unresolved source".into());
+    }
+    let path = pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel)
+        .ok_or("queue namespace has no runtime root")?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_file() => {}
+        Ok(_) => return Err("queue snapshot is not a regular file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("queue snapshot metadata: {error}")),
+    }
+    if read_snapshot_meta(&path)?.is_some() {
+        return Err("durable queue head retains a submitted or unresolved source".into());
+    }
+    Ok(())
+}

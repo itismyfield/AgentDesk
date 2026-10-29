@@ -9,6 +9,8 @@ pub(in crate::services::discord) mod message_handler;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord::router) mod migration_wait;
 pub(in crate::services::discord) use message_handler::input_payload;
+#[cfg(all(test, unix))]
+pub(crate) use migration_wait::LocalCustodyWitness;
 mod queue_status_presentation;
 mod response_format;
 #[cfg(test)]
