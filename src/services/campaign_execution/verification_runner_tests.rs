@@ -8,7 +8,7 @@ use crate::services::campaign_execution::profile::{
 };
 use crate::services::campaign_execution::verification_run::tests as run_tests;
 use crate::services::campaign_execution::verification_run::{
-    PhaseInput, VerificationCollection, VerificationRun, digest_of,
+    PhaseInput, SelectionRule, VerificationCollection, VerificationRun, VerificationSpec, digest_of,
 };
 
 fn at() -> DateTime<Utc> {
@@ -338,9 +338,12 @@ fn list_and_test_outputs_are_parsed_from_the_artifacts_the_phase_wrote() {
         "any other failure exit keeps the raw artifact only"
     );
     assert!(
-        parse_plan(r#"{"plan_digest":"x","workers":[{"index":0,"tests":[["only-one"]]}]}"#)
-            .is_err()
+        parse_plan(
+            r#"{"plan_digest":"x","identity":{"scope":"s"},"workers":[{"index":0,"tests":[["only-one"]]}]}"#
+        )
+        .is_err()
     );
+    assert!(parse_plan(r#"{"plan_digest":"x","workers":[]}"#).is_err());
 }
 
 #[test]
@@ -365,7 +368,13 @@ fn adk_phase_commands_run_in_the_verification_checkout_with_a_private_target() {
         PhaseKind::Test,
         PhaseKind::Audit,
     ] {
-        let command = adk_phase_command(kind, &paths, &identity, &policy);
+        let command = adk_phase_command(
+            kind,
+            &paths,
+            &identity,
+            &policy,
+            SelectionRule::NonPgClassifier,
+        );
         assert_eq!(command.cwd, checkout.to_string_lossy(), "{kind:?}");
         assert_eq!(
             command
@@ -392,24 +401,39 @@ fn adk_phase_commands_run_in_the_verification_checkout_with_a_private_target() {
             assert_eq!(remap, Some(checkout.to_str().unwrap()), "{kind:?}");
         }
     }
-    let test = adk_phase_command(PhaseKind::Test, &paths, &identity, &policy);
+    let test = adk_phase_command(
+        PhaseKind::Test,
+        &paths,
+        &identity,
+        &policy,
+        SelectionRule::NonPgClassifier,
+    );
     let argv = test.argv.join(" ");
     assert!(argv.contains("--archive-file /ws/campaigns/c/run/a/s1/scratch/v-1/lib-tests.tar.zst"));
     assert!(argv.contains("--profile ci") && argv.ends_with("--no-tests fail"));
-    let plan = adk_phase_command(PhaseKind::Plan, &paths, &identity, &policy)
-        .argv
-        .join(" ");
+    let plan_for = |selection: SelectionRule| {
+        adk_phase_command(PhaseKind::Plan, &paths, &identity, &policy, selection)
+            .argv
+            .join(" ")
+    };
+    let plan = plan_for(SelectionRule::NonPgClassifier);
     for flag in [
         "--sha h1",
         "--run-id run:v-1",
         "--rust-version 1.94.1",
         "--nextest-version 0.9.100",
         "--target aarch64-apple-darwin",
+        "--scope campaign:non-pg",
+        "--only /ws/campaigns/c/run/a/s1/scratch/v-1/selection.json",
     ] {
         assert!(plan.contains(flag), "{flag}: {plan}");
     }
+    // The whole listed universe is planned without the classifier's selection file.
+    let universe = plan_for(SelectionRule::ListedUniverse);
+    assert!(universe.contains("--scope campaign:universe") && !universe.contains("--only"));
     let handoff = adk_test_handoff(&paths, &identity, &policy, "pd-1", "aa11");
     assert_eq!(handoff.record_dir, scratch.join("results/worker-0"));
+    assert_eq!(handoff.extract_dir, scratch.join("extract"));
     assert!(handoff.junit_sources[0].starts_with(scratch.join("extract")));
     assert!(handoff.junit_sources[1].starts_with(target));
 }
@@ -518,7 +542,13 @@ fn adk_phases_hand_their_files_to_the_real_helper_and_collect_the_planned_check(
         None,
     );
     let universe = scratch.join("universe.json");
-    let list_command = adk_phase_command(PhaseKind::List, &paths, &identity, &policy);
+    let list_command = adk_phase_command(
+        PhaseKind::List,
+        &paths,
+        &identity,
+        &policy,
+        SelectionRule::NonPgClassifier,
+    );
     let listed = sh(
         "printf '%s' '{\"rust-suites\":{\"agentdesk\":{\"binary-id\":\"agentdesk\",\"testcases\":{\"campaign::probe\":{\"ignored\":false},\"campaign::pg_only\":{\"ignored\":false}}}}}'",
         Path::new(&list_command.cwd),
@@ -540,18 +570,42 @@ fn adk_phases_hand_their_files_to_the_real_helper_and_collect_the_planned_check(
         None,
     );
     assert!(matches!(&list.output, PhaseOutput::Universe { tests } if tests.len() == 2));
-    // The classifier is not a registered phase of this spec; its selection narrows the plan.
-    std::fs::write(
-        scratch.join("selection.json"),
-        r#"{"non_pg":["campaign::probe"]}"#,
-    )
-    .unwrap();
+    // The classifier stands in for pg_test_classifier.py and writes the selection the plan reads.
+    let selection = scratch.join("selection.json");
+    let classify_input = phase_input(
+        &run,
+        sh(
+            &format!(
+                "printf '%s' '{{\"non_pg\":[\"campaign::probe\"]}}' > {}",
+                selection.display()
+            ),
+            checkout,
+        ),
+        &["list"],
+        vec![expected("selection", &selection)],
+        vec![],
+    );
+    drive(
+        &mut run,
+        &mut actions,
+        "classify",
+        PhaseKind::Classify,
+        classify_input,
+        &logs,
+        None,
+    );
     let plan_json = scratch.join("plan/plan.json");
     let config = scratch.join("plan/worker-0.toml");
     let plan_input = phase_input(
         &run,
-        adk_phase_command(PhaseKind::Plan, &paths, &identity, &policy),
-        &["list"],
+        adk_phase_command(
+            PhaseKind::Plan,
+            &paths,
+            &identity,
+            &policy,
+            SelectionRule::NonPgClassifier,
+        ),
+        &["list", "classify"],
         vec![expected("plan", &plan_json), expected("config", &config)],
         vec![],
     );
@@ -567,12 +621,14 @@ fn adk_phases_hand_their_files_to_the_real_helper_and_collect_the_planned_check(
     let PhaseOutput::Plan {
         plan_digest,
         plan_artifact_digest,
+        scope,
         selected,
         ..
     } = &plan.output
     else {
         panic!("real plan output: {:?}", plan.output);
     };
+    assert_eq!(scope, "campaign:non-pg");
     assert_eq!(
         selected.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
         ["campaign::probe"]
@@ -601,9 +657,11 @@ fn adk_phases_hand_their_files_to_the_real_helper_and_collect_the_planned_check(
         "<testcase name=\"campaign::probe\" classname=\"agentdesk\" time=\"0.01\"/>",
         "</testsuite></testsuites>"
     );
+    // nextest extracts only into an existing directory: the runner, not the command, prepares it.
     let test_command = sh(
         &format!(
-            "mkdir -p {} && printf '%s' '{junit}' > {}",
+            "test -d {} && mkdir -p {} && printf '%s' '{junit}' > {}",
+            handoff.extract_dir.display(),
             junit_target.parent().unwrap().display(),
             junit_target.display()
         ),
@@ -658,7 +716,13 @@ fn adk_phases_hand_their_files_to_the_real_helper_and_collect_the_planned_check(
     let verdict = scratch.join("verdict.json");
     let audit_input = phase_input(
         &run,
-        adk_phase_command(PhaseKind::Audit, &paths, &identity, &policy),
+        adk_phase_command(
+            PhaseKind::Audit,
+            &paths,
+            &identity,
+            &policy,
+            SelectionRule::NonPgClassifier,
+        ),
         &["test"],
         vec![expected("verdict", &verdict)],
         vec![],
@@ -684,4 +748,137 @@ fn adk_phases_hand_their_files_to_the_real_helper_and_collect_the_planned_check(
     assert!(audit.complete && audit.all_passed, "{audit:?}");
     assert_eq!(audit.audit_exit_code, Some(0));
     assert_eq!(evidence.planned.len(), 1);
+}
+
+#[test]
+fn test_children_do_not_inherit_the_operational_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let logs = temp.path().join("logs");
+    let mut command = sh(
+        "printf '%s|%s' \"${AGENTDESK_ROOT_DIR:-unset}\" \"${CARGO_TARGET_DIR:-unset}\"",
+        temp.path(),
+    );
+    command.env_identity.insert(
+        "AGENTDESK_ROOT_DIR".into(),
+        temp.path().join("release").to_string_lossy().into_owned(),
+    );
+    command
+        .env_identity
+        .insert("CARGO_TARGET_DIR".into(), "/t/v-1".into());
+    let input = bound(command);
+    let result = finished(
+        started(launch(PhaseKind::Test, "test", &input, &[], ctx(&logs, None)).unwrap())
+            .wait(Duration::from_secs(10), at()),
+    );
+    assert_eq!(
+        std::fs::read_to_string(&result.record.stdout_ref).unwrap(),
+        "unset|/t/v-1"
+    );
+}
+
+// The listed-universe selection plans every runnable test without a classifier file.
+#[cfg(unix)]
+#[test]
+fn listed_universe_plans_the_whole_list_with_the_real_helper() {
+    let temp = tempfile::tempdir().unwrap();
+    let scratch = temp.path().join("scratch");
+    let target = temp.path().join("target");
+    let logs = temp.path().join("logs");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let paths = AdkPhasePaths {
+        checkout,
+        target: &target,
+        scratch: &scratch,
+        sha: "h1",
+    };
+    let (identity, policy) = (identity(), policy());
+    let mut spec: VerificationSpec = run_tests::spec();
+    spec.checks[0].selection = SelectionRule::ListedUniverse;
+    let (mut run, mut actions) = run_tests::registered_with(spec.clone());
+    run.bind_subject(run_tests::subject()).unwrap();
+    let archive = scratch.join("lib-tests.tar.zst");
+    let archive_input = phase_input(
+        &run,
+        sh(
+            &format!("printf 'archive-bytes' > {}", archive.display()),
+            checkout,
+        ),
+        &[],
+        vec![expected("archive", &archive)],
+        vec![],
+    );
+    drive(
+        &mut run,
+        &mut actions,
+        "archive",
+        PhaseKind::Archive,
+        archive_input,
+        &logs,
+        None,
+    );
+    let universe = scratch.join("universe.json");
+    let list_input = phase_input(
+        &run,
+        sh(
+            "printf '%s' '{\"rust-suites\":{\"agentdesk\":{\"binary-id\":\"agentdesk\",\"testcases\":{\"campaign::probe\":{\"ignored\":false},\"campaign::pg_only\":{\"ignored\":false}}}}}'",
+            checkout,
+        ),
+        &["archive"],
+        vec![expected("universe", &universe)],
+        vec![],
+    );
+    drive(
+        &mut run,
+        &mut actions,
+        "list",
+        PhaseKind::List,
+        list_input,
+        &logs,
+        None,
+    );
+    let classify_input = phase_input(&run, sh("true", checkout), &["list"], vec![], vec![]);
+    drive(
+        &mut run,
+        &mut actions,
+        "classify",
+        PhaseKind::Classify,
+        classify_input,
+        &logs,
+        None,
+    );
+    let plan_json = scratch.join("plan/plan.json");
+    let config = scratch.join("plan/worker-0.toml");
+    let plan_input = phase_input(
+        &run,
+        adk_phase_command(
+            PhaseKind::Plan,
+            &paths,
+            &identity,
+            &policy,
+            SelectionRule::ListedUniverse,
+        ),
+        &["list", "classify"],
+        vec![expected("plan", &plan_json), expected("config", &config)],
+        vec![],
+    );
+    let plan = drive(
+        &mut run,
+        &mut actions,
+        "plan",
+        PhaseKind::Plan,
+        plan_input,
+        &logs,
+        None,
+    );
+    let PhaseOutput::Plan {
+        scope, selected, ..
+    } = &plan.output
+    else {
+        panic!("real plan output: {:?}", plan.output);
+    };
+    assert_eq!(scope, "campaign:universe");
+    assert_eq!(selected.len(), 2);
+    run.bind_plan(&spec).unwrap();
+    assert_eq!(run.plan.bound().unwrap().manifest.len(), 2);
 }

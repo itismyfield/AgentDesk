@@ -43,6 +43,15 @@ pub enum SelectionRule {
     ListedUniverse,
 }
 
+// The plan identity scope the helper records for each selection, so a bound plan names its policy.
+pub fn plan_scope(selection: SelectionRule) -> &'static str {
+    match selection {
+        SelectionRule::NonPgClassifier => "campaign:non-pg",
+        SelectionRule::PgClassifier => "campaign:pg",
+        SelectionRule::ListedUniverse => "campaign:universe",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandPolicy {
     pub nextest_profile: String,
@@ -277,6 +286,7 @@ pub enum PhaseOutput {
         plan_digest: Digest,
         plan_artifact_digest: Digest,
         config_digest: Digest,
+        scope: String,
         selected: Vec<ListedTest>,
     },
     Tests {
@@ -311,6 +321,27 @@ pub struct InitiationObservation {
     pub action_id: String,
     pub phase_id: String,
     pub outcome: ReconciledInitiation,
+    pub evidence: String,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TreeState {
+    Alive,
+    Gone,
+    Unknown,
+}
+
+// A direct observation of a Started phase child's process tree once no runner handle remains.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminationObservation {
+    pub execution_id: String,
+    pub action_id: String,
+    pub phase_id: String,
+    pub receipt: String,
+    pub process: ProcessIdentity,
+    pub tree: TreeState,
     pub evidence: String,
     pub observed_at: DateTime<Utc>,
 }
@@ -501,9 +532,14 @@ impl VerificationSpec {
         self.checks.iter().find(|c| c.id == id)
     }
 
+    // Only what the runner can execute faithfully registers: one worker, and a classifier-based
+    // selection only when a Classify phase feeds the Plan; the PG classifier has no helper path yet.
     pub fn validate(&self) -> Result<(), VerificationError> {
         if self.version.trim().is_empty() || !self.checks.iter().any(|c| c.required) {
             return Err(VerificationError::InvalidSpec("version or required".into()));
+        }
+        if self.command_policy.workers != 1 {
+            return Err(VerificationError::InvalidSpec("workers".into()));
         }
         let mut ids = BTreeSet::new();
         for check in &self.checks {
@@ -520,6 +556,34 @@ impl VerificationSpec {
                 && !check.phases.iter().any(|p| p.kind == PhaseKind::Test)
             {
                 return Err(VerificationError::InvalidSpec(check.id.clone()));
+            }
+            let kind_of = |id: &str| check.phases.iter().find(|p| p.id == id).map(|p| p.kind);
+            let plan_follows_classify = check
+                .phases
+                .iter()
+                .filter(|p| p.kind == PhaseKind::Plan)
+                .all(|p| {
+                    p.requires
+                        .iter()
+                        .any(|r| kind_of(r) == Some(PhaseKind::Classify))
+                });
+            match check.selection {
+                SelectionRule::PgClassifier => {
+                    return Err(VerificationError::InvalidSpec(format!(
+                        "{}: pg selection has no plan path yet",
+                        check.id
+                    )));
+                }
+                SelectionRule::NonPgClassifier
+                    if !plan_follows_classify
+                        || !check.phases.iter().any(|p| p.kind == PhaseKind::Classify) =>
+                {
+                    return Err(VerificationError::InvalidSpec(format!(
+                        "{}: classifier selection needs a classify phase before plan",
+                        check.id
+                    )));
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -754,11 +818,15 @@ impl VerificationRun {
             plan_digest,
             plan_artifact_digest,
             config_digest,
+            scope,
             selected,
         } = plan
         else {
             return Err(VerificationError::Conflict);
         };
+        if scope != plan_scope(check.selection) {
+            return Err(VerificationError::Conflict);
+        }
         let listed: BTreeSet<(&str, &str)> = tests
             .iter()
             .filter(|t| !t.ignored)
@@ -897,9 +965,6 @@ impl VerificationRun {
         if observation.execution_id != execution_id || observation.action_id != phase.action_id {
             return Err(VerificationError::ActionMismatch(observation.action_id));
         }
-        if !phase.unresolved() {
-            return Err(VerificationError::Conflict);
-        }
         let (entry, state) = match observation.outcome {
             ReconciledInitiation::Started { receipt, process } => {
                 if receipt != format!("{}:{}:{}", phase.id, process.pid, process.nonce) {
@@ -919,8 +984,79 @@ impl VerificationRun {
                 ActionState::Planned,
             ),
         };
+        // Replaying the observation that resolved the latest Indeterminate is idempotent; anything
+        // else after a resolution, including a stale Unstarted once a start followed, conflicts.
+        let last_indeterminate = phase
+            .initiations
+            .iter()
+            .rposition(|i| matches!(i, PhaseInitiation::Indeterminate { .. }));
+        let resolved_since = last_indeterminate.map_or(&[][..], |i| &phase.initiations[i + 1..]);
+        let started_since = resolved_since
+            .iter()
+            .any(|i| matches!(i, PhaseInitiation::Started { .. }));
+        let replayed = resolved_since.contains(&entry)
+            && (matches!(entry, PhaseInitiation::Started { .. }) || !started_since);
+        if replayed {
+            return Ok(state);
+        }
+        if !phase.unresolved() {
+            return Err(VerificationError::Conflict);
+        }
         phase.initiations.push(entry);
         Ok(state)
+    }
+
+    // After a restart no runner handle remains: a Started phase closes only once its tree is seen
+    // Gone, and then as an interruption, because the exit status cannot be recovered.
+    pub fn reconcile_termination(
+        &mut self,
+        action: &Action,
+        observation: TerminationObservation,
+    ) -> Result<(), VerificationError> {
+        let phase = self.phase(&observation.phase_id)?;
+        if observation.execution_id != self.origin.execution_id
+            || observation.action_id != phase.action_id
+        {
+            return Err(VerificationError::ActionMismatch(observation.action_id));
+        }
+        let started = phase.initiations.iter().any(|i| {
+            matches!(i, PhaseInitiation::Started { receipt, process }
+                if *receipt == observation.receipt && *process == observation.process)
+        });
+        if !started {
+            return Err(VerificationError::ActionMismatch(observation.receipt));
+        }
+        if observation.tree != TreeState::Gone {
+            return Err(VerificationError::NotFinished);
+        }
+        let command = &phase
+            .input
+            .bound()
+            .ok_or_else(|| VerificationError::Unbound(phase.id.clone()))?
+            .input
+            .command;
+        let result = PhaseResult {
+            receipt: observation.receipt,
+            record: CommandRecord {
+                executable: command.program.clone(),
+                cwd: command.cwd.clone(),
+                argv: command.argv.clone(),
+                env_identity: command.env_identity.clone(),
+                phase_id: phase.id.clone(),
+                started_at: observation.process.started_at,
+                finished_at: observation.observed_at,
+                exit_code: None,
+                signal: None,
+                stdout_ref: String::new(),
+                stderr_ref: String::new(),
+            },
+            termination: Termination::Interrupted {
+                evidence: observation.evidence,
+            },
+            artifacts: Vec::new(),
+            output: PhaseOutput::None,
+        };
+        self.record_result(&observation.phase_id, action, result)
     }
 
     // A result is accepted once for the phase, action and Started receipt it names.
