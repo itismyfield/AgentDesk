@@ -428,10 +428,13 @@ fn status_panel_message_missing_error(error: &str) -> bool {
     normalized.contains("unknown message") || normalized.contains("10008")
 }
 
+/// A turn-mode turn without an anchor has no card to show a long-running tool on.
 pub(super) fn should_open_long_running_placeholder_controller(
     status_panel_v2_enabled: bool,
+    (channel_id, current_msg_id): (ChannelId, MessageId),
 ) -> bool {
     !status_panel_v2_enabled
+        && !super::current_message_anchor::turn_mode_anchorless(channel_id, current_msg_id)
 }
 
 pub(super) fn status_panel_message_id_for_turn(

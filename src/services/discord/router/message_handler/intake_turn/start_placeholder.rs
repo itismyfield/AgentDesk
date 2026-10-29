@@ -6,11 +6,12 @@ use std::time::Duration;
 /// Bounds the refusal delete so a slow Discord answer cannot hold the caller; the sweeper retries.
 const REFUSED_DELETE_WAIT: Duration = Duration::from_secs(5);
 
-/// The attempt's anchor; `fresh` only when this attempt POSTed it, not when it reused a bound notice.
+/// The attempt's anchor, none on a turn-mode channel; `fresh` only when this attempt POSTed it,
+/// not when it reused a bound notice.
 #[derive(Clone, Copy)]
 pub(super) struct StartPlaceholder {
     pub(super) channel_id: ChannelId,
-    pub(super) message_id: MessageId,
+    pub(super) message_id: Option<MessageId>,
     pub(super) fresh: bool,
 }
 
@@ -24,14 +25,10 @@ impl StartPlaceholder {
         user_msg_id: MessageId,
         refusal: &'static str,
     ) {
-        if !self.fresh {
+        let Some(message_id) = self.message_id.filter(|_| self.fresh) else {
             return;
-        }
-        let Self {
-            channel_id,
-            message_id,
-            ..
-        } = self;
+        };
+        let channel_id = self.channel_id;
         let delete = async {
             rate_limit_wait(shared, channel_id).await;
             channel_id.delete_message(http, message_id).await

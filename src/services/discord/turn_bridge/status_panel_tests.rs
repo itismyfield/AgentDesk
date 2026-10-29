@@ -273,8 +273,34 @@ async fn actual_bridge_children_run_through_cleanup_and_retry_completion() {
 
 #[test]
 fn status_panel_v2_disables_long_running_placeholder_controller() {
-    assert!(!should_open_long_running_placeholder_controller(true));
-    assert!(should_open_long_running_placeholder_controller(false));
+    let anchored = (ChannelId::new(7_507_501), MessageId::new(42));
+    assert!(!should_open_long_running_placeholder_controller(
+        true, anchored
+    ));
+    assert!(should_open_long_running_placeholder_controller(
+        false, anchored
+    ));
+}
+
+/// A turn-mode turn without an anchor opens no long-running card; any other turn still may.
+#[test]
+fn a_turn_mode_turn_without_an_anchor_opens_no_long_running_card() {
+    let channel = ChannelId::new(7_507_502);
+    let sentinel =
+        crate::services::discord::turn_bridge::current_message_anchor::detached_current_msg_id_from_durable(0);
+    assert!(should_open_long_running_placeholder_controller(
+        false,
+        (channel, sentinel)
+    ));
+    let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(channel.get());
+    assert!(!should_open_long_running_placeholder_controller(
+        false,
+        (channel, sentinel)
+    ));
+    assert!(should_open_long_running_placeholder_controller(
+        false,
+        (channel, MessageId::new(42))
+    ));
 }
 
 fn make_status_panel_v2_shared_for_tests() -> Arc<crate::services::discord::SharedData> {

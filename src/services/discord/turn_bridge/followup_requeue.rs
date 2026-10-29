@@ -26,7 +26,7 @@ fn retry_present_or_accepted(outcome: &crate::services::discord::MailboxEnqueueO
 pub(in crate::services::discord) struct FollowupRequeueOutcome {
     pub(super) requeued: bool,
     pub(super) retry_capped: bool,
-    pub(super) notice_message_id: MessageId,
+    pub(super) notice_message_id: Option<MessageId>,
     pub(super) preparation_held: bool,
 }
 
@@ -280,6 +280,60 @@ mod tests {
             None,
             0,
         )
+    }
+
+    /// A turn with no anchor still requeues under a budget that has no card: each attempt is
+    /// charged once and survives a reload, the cap still stops it, and no zero id is ever bound.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_anchorless_busy_requeue_charges_a_cardless_budget_and_requeues() {
+        use super::super::super::busy_followup_retry_store as retries;
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(100_000_007_507_001);
+        let message_id = MessageId::new(100_000_007_507_002);
+        let mut state = inflight(channel_id, message_id);
+        state.current_msg_id = 0;
+        let mut capped = Vec::new();
+        for attempt_index in 1..=retries::MAX_BUSY_RETRY_COUNT {
+            let outcome = requeue_claude_tui_followup_pre_submit_timeout(
+                &shared,
+                &provider,
+                channel_id,
+                &state,
+                None,
+                None,
+                attempt("turn-anchorless"),
+            )
+            .await;
+            assert!(outcome.requeued, "attempt {attempt_index} requeued");
+            assert_eq!(outcome.notice_message_id, None);
+            capped.push(outcome.retry_capped);
+            let budget = retries::load(&provider, channel_id.get(), message_id.get())
+                .expect("the budget reloads");
+            assert_eq!(
+                budget.busy_retry_count, attempt_index,
+                "charged once per attempt"
+            );
+            assert!(
+                !budget.notice_bound && budget.notice_message_id == 0,
+                "no card bound"
+            );
+        }
+        assert_eq!(
+            capped.last(),
+            Some(&true),
+            "the cap still applies: {capped:?}"
+        );
+        assert!(capped[..capped.len() - 1].iter().all(|capped| !capped));
+        let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert!(
+            snapshot
+                .intervention_queue
+                .iter()
+                .any(|item| item.message_id == message_id),
+            "the input stays queued"
+        );
     }
 
     #[test]
@@ -538,7 +592,7 @@ mod tests {
             preparation_held: false,
             requeued: true,
             retry_capped: true,
-            notice_message_id: message_id,
+            notice_message_id: Some(message_id),
         };
         assert!(
             !boundary.release_completion_admission(
@@ -622,7 +676,7 @@ mod tests {
         );
         assert_eq!(
             outcome.notice_message_id,
-            MessageId::new(inflight.current_msg_id)
+            Some(MessageId::new(inflight.current_msg_id))
         );
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
         assert_eq!(snapshot.intervention_queue.len(), 1);

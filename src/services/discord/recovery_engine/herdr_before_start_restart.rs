@@ -136,7 +136,9 @@ impl BeforeStartRestart {
         }
         let mut row = state.clone();
         // A pending or delivered receipt without its message is never settled.
-        if row.current_msg_id == 0 {
+        if row.current_msg_id == 0
+            && !crate::services::tui_o::turn_mode::transcript_turns(row.channel_id)
+        {
             return kept(state, "no message to show the stop on");
         }
         if row
@@ -151,8 +153,10 @@ impl BeforeStartRestart {
                     crate::services::discord::turn_bridge::before_start_stop::reply_and_ack_stop;
                 notice(http, shared, &row).await
             } else {
+                let Some(anchor) = inflight::opt_message_id(row.current_msg_id) else {
+                    return kept(state, "no message to show the stop on");
+                };
                 let gateway = DiscordGateway::new(http.clone(), shared.clone(), provider, None);
-                let anchor = MessageId::new(row.current_msg_id);
                 let sent = gateway
                     .replace_message_with_outcome(channel, anchor, ADMITTED_ABORT_NOTICE)
                     .await;

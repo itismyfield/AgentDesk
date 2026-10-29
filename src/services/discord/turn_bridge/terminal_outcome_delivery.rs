@@ -233,6 +233,21 @@ pub(super) async fn run_terminal_outcome_delivery(
         match outcome {
             RecoveryRetryOutcome::Continue => {}
         }
+        // A turn with no anchor shows a queued retry's continue notice as a reply.
+        if auto_retry.queued()
+            && current_message_anchor::turn_mode_anchorless(channel_id, current_msg_id)
+        {
+            let notice = "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.";
+            let anchorless = current_message_anchor::send_anchorless_notice;
+            let _ = anchorless(
+                &shared_owned,
+                channel_id,
+                &inflight_state,
+                notice,
+                "session_retry",
+            )
+            .await;
+        }
     }
 
     let mut epilogue_response = None;
@@ -426,7 +441,9 @@ pub(super) async fn run_terminal_outcome_delivery(
             preserve_inflight_for_cleanup_retry |= o_body_cut.is_err();
         } else if delivery_response.trim().is_empty() {
             if empty_sink_commits_fully_consumed_response(&full_response, response_sent_offset) {
-                if o_body_cut == Ok(true) {
+                if o_body_cut == Ok(true)
+                    && optional_durable_current_msg_id_from_detached(current_msg_id).is_some()
+                {
                     let _ = gateway.delete_message(channel_id, current_msg_id).await;
                 }
                 (terminal_delivery_committed, terminal_body_visible) = (true, true);
@@ -437,17 +454,29 @@ pub(super) async fn run_terminal_outcome_delivery(
                 channel_id,
             ) {
                 preserve_inflight_for_cleanup_retry = true;
-            } else if TurnGateway::edit_message(
-                gateway.as_ref(),
-                channel_id,
-                current_msg_id,
-                "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
-            )
-            .await
-            .is_ok()
-            {
-                terminal_delivery_committed = true;
-                terminal_body_visible = true;
+            } else {
+                let notice = "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.";
+                let shown =
+                    if current_message_anchor::turn_mode_anchorless(channel_id, current_msg_id) {
+                        let event = "turn_bridge_session_recovery";
+                        let anchorless = current_message_anchor::send_anchorless_notice;
+                        anchorless(&shared_owned, channel_id, &inflight_state, notice, event)
+                            .await
+                            .is_some()
+                    } else {
+                        TurnGateway::edit_message(
+                            gateway.as_ref(),
+                            channel_id,
+                            current_msg_id,
+                            notice,
+                        )
+                        .await
+                        .is_ok()
+                    };
+                if shown {
+                    terminal_delivery_committed = true;
+                    terminal_body_visible = true;
+                }
             }
         } else {
             delivery_response = DiscordTurnSessionBanner::new_with_turn_key(
@@ -460,8 +489,30 @@ pub(super) async fn run_terminal_outcome_delivery(
             )
             .format_and_prefix(response_sent_offset == 0, &delivery_response);
             if o_body_cut == Ok(true) && !o_notice {
-                let _ = gateway.delete_message(channel_id, current_msg_id).await;
+                if optional_durable_current_msg_id_from_detached(current_msg_id).is_some() {
+                    let _ = gateway.delete_message(channel_id, current_msg_id).await;
+                }
                 (terminal_delivery_committed, terminal_body_visible) = (true, true);
+            } else if o_notice
+                && current_message_anchor::turn_mode_anchorless(channel_id, current_msg_id)
+            {
+                // A turn with no anchor shows its notice as a reply; only that reply settles it.
+                let anchorless = current_message_anchor::send_anchorless_notice;
+                let event = "turn_bridge_o_notice";
+                if anchorless(
+                    &shared_owned,
+                    channel_id,
+                    &inflight_state,
+                    &delivery_response,
+                    event,
+                )
+                .await
+                .is_some()
+                {
+                    (terminal_delivery_committed, terminal_body_visible) = (true, true);
+                } else {
+                    preserve_inflight_for_cleanup_retry = true;
+                }
             } else if can_deliver_directly {
                 // #5264 PR-B: the admitted latch narrows the PINNED receipt/frontier end
                 // only. The legacy #3041 exclusion lease keeps the observed tmux end;

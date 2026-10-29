@@ -28,6 +28,7 @@ mod recovery_retry_guard_tests;
 #[cfg(unix)]
 mod rowless_receipt_tests;
 mod settled_delivery_tests;
+mod turn_mode_anchor_tests;
 
 #[tokio::test]
 async fn scheduled_recovery_keeps_dispatch_unsettled_after_notice_delivery() {

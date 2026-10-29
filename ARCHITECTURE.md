@@ -1986,6 +1986,7 @@ src/
 │   │   │   │   │   └── recheck_tests.rs
 │   │   │   │   ├── tui_followup/
 │   │   │   │   │   ├── busy_notice.rs
+│   │   │   │   │   ├── busy_refusal_reply_tests.rs
 │   │   │   │   │   ├── codex_observation.rs
 │   │   │   │   │   └── nameless_gate.rs
 │   │   │   │   ├── attachments.rs
@@ -2536,7 +2537,8 @@ src/
 │   │   ├── turn_bridge/
 │   │   │   ├── bridge_entry_persist/
 │   │   │   │   ├── tests/
-│   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   │   ├── source_guard_tests.rs
+│   │   │   │   │   └── turn_mode_entry_tests.rs
 │   │   │   │   └── identity_and_owner.rs
 │   │   │   ├── completion_guard/
 │   │   │   │   ├── completion_context.rs
@@ -2640,7 +2642,8 @@ src/
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
 │   │   │   │   │   ├── rowless_receipt_tests.rs
-│   │   │   │   │   └── settled_delivery_tests.rs
+│   │   │   │   │   ├── settled_delivery_tests.rs
+│   │   │   │   │   └── turn_mode_anchor_tests.rs
 │   │   │   │   ├── empty_response_recovery/
 │   │   │   │   │   ├── guidance.rs
 │   │   │   │   │   └── handler.rs

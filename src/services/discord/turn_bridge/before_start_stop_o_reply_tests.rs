@@ -110,3 +110,99 @@ async fn coldstop_o_reply_shown_before_a_failed_ack_is_acked_without_a_second_se
     assert_eq!(calls[0].reply_to, shown.reply_to);
     assert!(!polled.load(Ordering::Acquire), "O's body is never edited");
 }
+
+/// A turn-mode turn shows no anchor, so its stop is a reply to the user's own message; the reply
+/// id acks the receipt and the close settles without any edit.
+#[tokio::test(flavor = "current_thread")]
+async fn coldstop_turn_mode_anchorless_turn_replies_to_the_user_message_then_settles() {
+    let close = Close::open(930, |row| {
+        row.runtime_kind = Some(ClaudeTui);
+        row.current_msg_id = 0;
+    })
+    .await;
+    let _o = force_channels(&[(930, ClaudeTui)]);
+    let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(930);
+    let discord = o_cut_recorder::start(930).await;
+    let _rest = test_rest::install(discord.http.clone());
+    let submitted = test_hooks::submitted();
+    let polled = AtomicBool::new(false);
+    assert!(
+        close.consume(recorded(&polled)).await,
+        "{:?}",
+        discord.calls()
+    );
+    assert!(!polled.load(Ordering::Acquire), "no anchor is edited");
+    assert_eq!(test_hooks::submitted(), submitted + 1);
+    assert!(close.durable().is_none(), "the close cleared its row");
+    let calls = discord.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].route.starts_with("POST "), "{calls:?}");
+    assert_eq!(calls[0].content.as_deref(), Some(ADMITTED_ABORT_NOTICE));
+    assert_eq!(
+        calls[0].reply_to,
+        Some(close.row.user_msg_id.to_string()),
+        "a reply to the user's message"
+    );
+}
+
+/// Off turn mode an anchorless row keeps today's hold: nothing is shown and the receipt waits.
+#[tokio::test(flavor = "current_thread")]
+async fn coldstop_legacy_anchorless_turn_shows_nothing_and_stays_held() {
+    let close = Close::open(931, |row| {
+        row.runtime_kind = Some(ClaudeTui);
+        row.current_msg_id = 0;
+    })
+    .await;
+    let _o = force_channels(&[(931, ClaudeTui)]);
+    let discord = o_cut_recorder::start(931).await;
+    let _rest = test_rest::install(discord.http.clone());
+    let submitted = test_hooks::submitted();
+    let polled = AtomicBool::new(false);
+    assert!(!close.consume(recorded(&polled)).await);
+    assert!(!polled.load(Ordering::Acquire));
+    assert!(discord.calls().is_empty(), "{:?}", discord.calls());
+    assert_eq!(test_hooks::submitted(), submitted);
+    assert!(close.held().await);
+}
+
+/// The bridge exit hands over its in-memory absence, the sentinel id; normalized to no message,
+/// a turn-mode stop still replies to the user's message, acks and clears the row.
+#[tokio::test(flavor = "current_thread")]
+async fn coldstop_turn_mode_bridge_exit_normalizes_the_sentinel_and_settles_by_reply() {
+    let close = Close::open(932, |row| {
+        row.runtime_kind = Some(ClaudeTui);
+        row.current_msg_id = 0;
+    })
+    .await;
+    let _o = force_channels(&[(932, ClaudeTui)]);
+    let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(932);
+    let key = TurnKey::new(ChannelId::new(932), close.row.user_msg_id, 17)
+        .with_episode_nonce(close.row.turn_nonce.as_deref());
+    close.shared.turn_finalizer.register_start(
+        key,
+        ProviderKind::Claude,
+        RelayOwnerKind::None,
+        &close.shared,
+    );
+    let discord = o_cut_recorder::start(932).await;
+    let _rest = test_rest::install(discord.http.clone());
+    let sentinel =
+        crate::services::discord::turn_bridge::current_message_anchor::detached_current_msg_id_from_durable(0);
+    exit_held(
+        &close.shared,
+        &crate::services::discord::gateway::HeadlessGateway,
+        &close.actor,
+        &close.row,
+        sentinel,
+        (false, false, false),
+    )
+    .await;
+    let calls = discord.calls();
+    assert!(close.durable().is_none(), "the stop settled: {calls:?}");
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(
+        calls[0].reply_to,
+        Some(close.row.user_msg_id.to_string()),
+        "a reply to the user's message"
+    );
+}
