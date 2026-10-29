@@ -257,7 +257,8 @@ ordinary `/clear` to start a fresh session. The blocked piece stays in the retai
 Do not edit the ledger to bypass a hold.
 
 If `o_store/operator_resume.floor` exists, deployment rejects source or rollback targets
-without `OPERATOR_RESUME_SUPPORTED = true`; the retained approval reader still requires it.
+whose `agentdesk build-info` lacks `o_ledger_operator_resume: true`; the retained approval reader
+still requires it.
 
 Re-post runs automatically for eligible gateway writer channels; it has no configuration switch or
 separate channel allowlist. Old `tui_o.repost` settings are ignored. An uncertain original is only

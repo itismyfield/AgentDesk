@@ -11,8 +11,8 @@ pub(crate) fn build_info_json() -> serde_json::Value {
         // CONSUMED-BY: scripts/deploy-release.sh (`_binary_build_flag … o_tui_writer`).
         "o_tui_writer": crate::services::tui_o::topology::o_tui_writer_build_switch(),
         // CONSUMED-BY: scripts/deploy-release.sh (`_binary_build_flag … o_ledger_operator_resume`).
-        "o_ledger_operator_resume":
-            crate::services::tui_o::store::ledger::OPERATOR_RESUME_SUPPORTED,
+        // Every build includes the ledger reader and the guarded writer consumer.
+        "o_ledger_operator_resume": true,
         // CONSUMED-BY: scripts/deploy-release.sh (`_rollback_would_revert_o_spool`).
         "o_spool_write_version": crate::services::tui_o::shadow::IDENTITY_VERSION,
         "o_spool_readable_versions":
@@ -51,10 +51,7 @@ mod tests {
             info["o_tui_writer"],
             crate::services::tui_o::topology::o_tui_writer_build_switch()
         );
-        assert_eq!(
-            info["o_ledger_operator_resume"],
-            crate::services::tui_o::store::ledger::OPERATOR_RESUME_SUPPORTED
-        );
+        assert_eq!(info["o_ledger_operator_resume"], true);
     }
 
     #[test]
