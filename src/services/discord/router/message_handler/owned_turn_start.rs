@@ -176,10 +176,16 @@ mod tests {
         }).await.unwrap()
     }
 
-    #[tokio::test]
-    async fn load_failure_same_ticket_new_birth_runs_once_and_old_callbacks_cannot_touch_it() {
+    /// The dedupe test lock is a std mutex, so it is held outside the runtime that awaits.
+    #[test]
+    fn load_failure_same_ticket_new_birth_runs_once_and_old_callbacks_cannot_touch_it() {
         let _root = crate::config::TestRuntimeRootGuard::new();
         let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(successor_runs_once());
+    }
+
+    async fn successor_runs_once() {
         let fixture = Fixture::after_shared_test_env_lock();
         fixture.session_with_screen(NAME, &screen());
         let shim = fixture.root.path().join("tmux");
