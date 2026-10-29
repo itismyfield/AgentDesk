@@ -206,3 +206,110 @@ async fn a_stopped_pane_death_ends_cancelled_and_a_rebind_row_ends_nothing_pg() 
     pool.close().await;
     db.drop().await;
 }
+
+/// A watcher that itself delivered T0 stays attached and takes T1 over; a force stop of T1 and
+/// the pane death it brings end T1 cancelled, whatever T0's delivery left on that watcher.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reused_watcher_ends_the_next_stopped_turn_cancelled_pg() {
+    let test = "a_reused_watcher_ends_the_next_stopped_turn_cancelled_pg";
+    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+        return;
+    }
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let seed = format!("{}{}{}", user("T0"), said(T0), stop());
+    let mut h = Harness::on(79, &seed, Some(pool.clone())).await;
+    let f = seed.len() as u64;
+    h.commit(0, f);
+    let mut first = h.row_at(f);
+    first.turn_source = TurnSource::Managed;
+    first.user_msg_id = 7_340_000_179;
+    first.input_origin_ids = vec![ORIGIN.to_string()];
+    h.save(&first);
+    let restored =
+        crate::services::discord::tmux::restored_watcher_turn_from_inflight(&first, &h.tmux, true);
+    h.spawn_restoring(f, restored);
+    h.append(format!("{}{}{}", user("T0b"), said(BODY), stop()).as_bytes());
+    h.drained("T0 terminal frame").await;
+    assert!(h.row().is_none(), "the watcher ended T0 itself");
+    let completed = Some((vec![ORIGIN.to_string()], "completed".to_string()));
+    assert_eq!(
+        receipt(&pool, first.user_msg_id, h.channel).await,
+        completed
+    );
+    let seen = crate::services::discord::tmux_watcher_now_ms();
+    h.until("still attached", |h| h.heartbeat() > seen).await;
+    assert!(!h.watcher_finished(), "a live pane keeps the watcher");
+
+    // T1 is handed to the same watcher, as a reuse resumes it at the new turn's start.
+    let start = h.len();
+    let mut next = h.row_at(start);
+    next.turn_source = TurnSource::Managed;
+    next.user_msg_id = 7_340_000_279;
+    next.input_origin_ids = vec!["G-watcher-next".to_string()];
+    h.save(&next);
+    h.resume(start);
+    let handle = h.shared.tmux_watchers.get(&h.channel).unwrap();
+    handle.turn_delivered.store(false, Ordering::Relaxed);
+    drop(handle);
+    // No assistant text yet: a stop before T1's first output leaves only the death to end it.
+    h.append(user("T1").as_bytes());
+    let seen = crate::services::discord::tmux_watcher_now_ms();
+    h.until("T1 read", |h| h.heartbeat() > seen).await;
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    token.bind_claude_tmux_session(&h.tmux);
+    let author = serenity::UserId::new(7);
+    let user_msg = serenity::MessageId::new(next.user_msg_id);
+    let begin = crate::services::discord::mailbox_try_start_turn;
+    assert!(begin(&h.shared, h.channel, token, author, user_msg).await);
+    let stop = stop_then_die(&h, start).await;
+    h.exited("T1 death after the stop").await;
+    let cancelled = Some((vec!["G-watcher-next".to_string()], "cancelled".to_string()));
+    assert_eq!(receipt(&pool, next.user_msg_id, h.channel).await, cancelled);
+    assert!(h.row().is_none(), "the dead pane's turn ended");
+    assert_eq!(
+        receipt(&pool, first.user_msg_id, h.channel).await,
+        completed
+    );
+    stop.await.unwrap();
+    pool.close().await;
+    db.drop().await;
+}
+
+/// A stop left at the previous turn's end is outside the next execution's range: that
+/// execution's pane death without a stop of its own ends it failed, not cancelled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prior_turns_stop_leaves_the_next_turns_pane_death_failed_pg() {
+    let test = "a_prior_turns_stop_leaves_the_next_turns_pane_death_failed_pg";
+    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+        return;
+    }
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let seed = format!("{}{}{}", user("T0"), said(T0), stop());
+    let mut h = Harness::on(80, &seed, Some(pool.clone())).await;
+    let f = seed.len() as u64;
+    h.commit(0, f);
+    // The stop takes its offset from the session's runtime output, which here is the transcript.
+    let runtime = crate::services::tmux_common::session_temp_path(&h.tmux, "jsonl");
+    std::fs::hard_link(&h.path, runtime).unwrap();
+    let record = crate::services::discord::tmux::record_recent_turn_stop;
+    record(h.channel, Some(&h.tmux), "i7340 T0 stop").await;
+    let mut next = h.row_at(f);
+    next.turn_source = TurnSource::Managed;
+    next.user_msg_id = 7_340_000_280;
+    next.input_origin_ids = vec![ORIGIN.to_string()];
+    h.save(&next);
+    let restored =
+        crate::services::discord::tmux::restored_watcher_turn_from_inflight(&next, &h.tmux, true);
+    h.spawn_restoring(f, restored);
+    h.append(format!("{}{}", user("T1"), said(BODY)).as_bytes());
+    h.until("streaming preview", |h| h.showing(BODY)).await;
+    h.pane("dead");
+    h.exited("death without a stop of its own").await;
+    let failed = Some((vec![ORIGIN.to_string()], "failed".to_string()));
+    assert_eq!(receipt(&pool, next.user_msg_id, h.channel).await, failed);
+    assert!(h.row().is_none(), "the dead pane's turn ended");
+    pool.close().await;
+    db.drop().await;
+}

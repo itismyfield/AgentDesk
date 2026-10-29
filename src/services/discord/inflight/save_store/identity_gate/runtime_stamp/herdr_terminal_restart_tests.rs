@@ -298,9 +298,8 @@ const RESTART_CASES: usize = 16;
 async fn restart_cases(phase: &Phase) {
     use NativeTerminalKind::{Aborted, Completed};
     let stored_body = |n| -> &'static str { Box::leak(stored(n).into_boxed_str()) };
-    // (kind, expectation): 3 Aborted, 4 Completed with a stored body, 7 a recorded delivery,
-    // 8 a completion with no stored body, 9 a drain restart's body, 10 an un-anchored Aborted,
-    // 15 a hot swap's handoff, which keeps its row and writes no receipt.
+    // (kind, expectation): 3/10 Aborted (10 un-anchored), 4 a stored body, 7 a recorded delivery,
+    // 8 no stored body, 9 a drain restart's body, 15 a hot swap's handoff (row kept, no receipt).
     let cases = [
         (None, Expect::Legacy),
         (None, Expect::Legacy),
