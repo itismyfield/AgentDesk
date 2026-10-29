@@ -114,8 +114,8 @@ pub(super) async fn stop_judged_channel_runtime(
         let Some(result) = result else {
             return host_guard_preserved(&shared, channel_id).await;
         };
-        // The cancel just published ends the judged execution. Its receipt commits before the kill
-        // below, and before a bridge can release the token the watcher reads as that evidence.
+        // The cancel just published ends the judged execution; its receipt commits before this
+        // stop's kill, so the pane death that kill causes cannot settle it as failed.
         if !native_published {
             let judged = Some(stop.token().as_ref());
             discord::receipt_settle::stopped(
