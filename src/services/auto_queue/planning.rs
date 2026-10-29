@@ -13,12 +13,10 @@ pub(super) fn effective_max_entry_retries(deps: &AutoQueueActivateDeps) -> i64 {
             }
         }
     });
-    let resolved = crate::services::settings::resolve(
-        &crate::services::settings::MAX_ENTRY_RETRIES,
+    crate::services::settings::max_entry_retries(
         runtime_config.as_ref(),
         Some(deps.config.as_ref()),
-    );
-    clamp_retry_limit(resolved.value)
+    )
 }
 
 /// Record one dispatch-creation failure as an entry retry or terminal

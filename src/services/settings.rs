@@ -12,9 +12,11 @@ use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
 mod resolve;
 mod runtime_config_put;
+#[cfg(test)]
+pub use resolve::clamp_retry_limit;
 pub use resolve::{
-    DISPATCH_GATE_DANGER_PCT, DISPATCH_GATE_ENABLED, MAX_ENTRY_RETRIES, RATE_LIMIT_STALE_SEC,
-    Resolved, RuntimeSetting, SettingSource, resolve, resolve_with_kv,
+    DISPATCH_GATE_DANGER_PCT, DISPATCH_GATE_ENABLED, RATE_LIMIT_STALE_SEC, Resolved,
+    RuntimeSetting, SettingSource, max_entry_retries, resolve_with_kv, runtime_config_field,
 };
 use runtime_config_put::with_explicit_runtime_config_keys;
 

@@ -279,12 +279,10 @@ async fn runtime_max_entry_retries_pg(
     .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
     let yaml = crate::config::runtime_config_strict()
         .map_err(|error| format!("load runtime config: {error}"))?;
-    let resolved = crate::services::settings::resolve(
-        &crate::services::settings::MAX_ENTRY_RETRIES,
+    Ok(crate::services::settings::max_entry_retries(
         persisted.as_ref(),
         Some(&yaml),
-    );
-    Ok(i64::try_from(resolved.value).unwrap_or(i64::MAX).max(1))
+    ))
 }
 
 async fn record_runtime_dispatch_failure_entries_on_pg_tx(

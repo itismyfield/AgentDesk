@@ -41,6 +41,29 @@ We keep per-surface storage, but every settings surface must declare:
 | Policy/config keys | Dashboard policy controls and automation helpers | hardcoded defaults -> YAML sections (`review:`, `runtime:`, `kanban:`) -> individual `kv_meta` rows | YAML-backed keys are re-seeded on restart. Hardcoded-only keys keep their DB override unless the reset flag is on. Read-only entries are surfaced as config metadata only. | `PATCH /api/settings/config` writes editable keys only. `GET` returns effective value plus baseline metadata. |
 | Onboarding / secrets | Onboarding wizard | Dedicated onboarding keys and flows, not general settings | Persist until onboarding updates them. | Managed only through `/api/onboarding/*` and onboarding-specific helpers. |
 
+### Runtime-config keys resolved in Rust
+
+<!-- BEGIN GENERATED: runtime setting precedence -->
+<!-- Generated from the key table in src/services/settings/resolve; regenerate: ADK_WRITE_SETTINGS_PRECEDENCE_DOC=1 cargo test --lib services::settings::resolve:: -->
+
+Rust readers resolve these `runtime-config` keys with `settings::resolve`: the persisted value when it outranks YAML, else the node's YAML snapshot, else the default.
+
+| `runtime-config` field | YAML field | Default | Persisted value outranks YAML when |
+|---|---|---|---|
+| `dispatchRateLimitGateEnabled` | `runtime.dispatch_rate_limit_gate_enabled` | `true` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
+| `dispatchRateLimitGateDangerPct` | `runtime.dispatch_rate_limit_gate_danger_pct` | `100` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
+| `rateLimitStaleSec` | `runtime.rate_limit_stale_sec` | `600` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
+| `maxEntryRetries` | `runtime.max_entry_retries` | `3` | it has the expected JSON type |
+<!-- END GENERATED: runtime setting precedence -->
+
+Policy `agentdesk.config.get` reads only the persisted layer: a legacy scalar `kv_meta` row, else the raw `runtime-config` field, else `null`. It has no YAML or default layer, so each policy applies its own fallback.
+
+## Seeding Ownership
+
+- Only the node that owns shared configuration sync seeds YAML into `kv_meta` at boot: a node with `cluster.enabled: false`, or the `cluster.role: hub` node (`shared_config_sync_enabled`). It writes the config-key seeds, `server_port`, the `runtime-config` blob and the repo and agent rows (`startup_reseed`).
+- Runner and auto nodes never seed. Their `startup_reseed` fails until `server_port` and `runtime-config` exist, so the kv layer every node resolves against is the one the hub seeded.
+- The YAML layer stays per node: each node resolves against its own YAML snapshot. A hub-seeded value that outranks YAML under the key's rule therefore applies on every node, while a seeded gate default defers to each node's own YAML.
+
 ## Representative Contracts
 
 ### `/api/settings`

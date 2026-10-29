@@ -76,7 +76,7 @@ impl<T: Copy + PartialEq> RuntimeSetting<T> {
     /// The persisted override in a parsed `runtime-config` blob; a wrongly typed value is no override.
     pub fn kv_override(&self, runtime_config: Option<&Value>) -> Option<T> {
         let blob = runtime_config?;
-        let value = blob.get(self.kv_key).and_then(self.parse_kv)?;
+        let value = runtime_config_field(blob, self.kv_key).and_then(self.parse_kv)?;
         let authoritative = match self.authority {
             KvAuthority::AnyValue => true,
             KvAuthority::ExplicitOrNonDefault => {
@@ -88,6 +88,21 @@ impl<T: Copy + PartialEq> RuntimeSetting<T> {
         };
         authoritative.then_some(value)
     }
+}
+
+/// A field of a parsed `runtime-config` blob; a non-object blob has none.
+pub fn runtime_config_field<'a>(blob: &'a Value, key: &str) -> Option<&'a Value> {
+    blob.as_object()?.get(key)
+}
+
+/// A retry limit as a positive `i64`: zero becomes one and larger values saturate.
+pub fn clamp_retry_limit(value: u64) -> i64 {
+    value.max(1).min(i64::MAX as u64) as i64
+}
+
+/// The auto-queue entry retry limit: [`MAX_ENTRY_RETRIES`] resolved, then clamped.
+pub fn max_entry_retries(runtime_config: Option<&Value>, yaml: Option<&Config>) -> i64 {
+    clamp_retry_limit(resolve(&MAX_ENTRY_RETRIES, runtime_config, yaml).value)
 }
 
 /// Resolve `key` from a parsed `runtime-config` blob and one YAML snapshot.

@@ -56,7 +56,7 @@ async fn batched(pool: &sqlx::PgPool) -> (Option<[i64; 4]>, [i64; 2], HealthKvMe
         ]
     });
     let cleanup = load_auto_queue_cleanup_backlog_pg(probed()).await.unwrap();
-    let kv = load_health_kv_meta(probed()).await;
+    let kv = load_health_kv_meta(probed()).await.expect("kv read");
     (outbox, [cleanup.pending, cleanup.dead_lettered], kv)
 }
 

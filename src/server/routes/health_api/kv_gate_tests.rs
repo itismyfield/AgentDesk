@@ -24,8 +24,8 @@ async fn detail_body(app: &axum::Router) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-/// A persisted danger override of 77 behind a stalled kv read: the body shows no fallback
-/// setting or source as effective, keeps the counters, and shows 77 from `kv_override` once read.
+/// A persisted danger override of 77: a stalled or failed kv read shows no fallback setting or
+/// source as effective and keeps the counters; a successful read shows its value and layer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn health_gate_kv_timeout_does_not_report_fallback_as_effective() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -79,6 +79,37 @@ async fn health_gate_kv_timeout_does_not_report_fallback_as_effective() {
         read["rate_limit_dispatch_gate"]["danger_pct_source"], "kv_override",
         "{read}"
     );
+
+    // A successful read without the row is no override: the fallback is shown with its layer.
+    sqlx::query("DELETE FROM kv_meta WHERE key = 'runtime-config'")
+        .execute(&seed)
+        .await
+        .unwrap();
+    let absent = detail_body(&app).await;
+    let gate = &absent["rate_limit_dispatch_gate"];
+    for source in ["enabled_source", "danger_pct_source"] {
+        assert!(
+            gate[source] == "yaml" || gate[source] == "default",
+            "{source} after a read without the row: {gate}"
+        );
+    }
+
+    // A read that fails at once leaves the override unknown, exactly like a cut read.
+    pool.close().await;
+    let failed = detail_body(&app).await;
+    let gate = &failed["rate_limit_dispatch_gate"];
+    for setting in [
+        "enabled",
+        "enabled_source",
+        "danger_pct",
+        "danger_pct_source",
+    ] {
+        assert!(
+            gate.get(setting).is_none(),
+            "fallback {setting} shown after a failed read: {gate}"
+        );
+    }
+    assert!(gate["evaluations"].is_u64(), "{gate}");
 
     pool.close().await;
     seed.close().await;
