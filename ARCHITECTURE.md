@@ -31,7 +31,8 @@ src/
 │   │   ├── startup.rs
 │   │   └── startup_audit_tests.rs
 │   ├── direct/
-│   │   └── auto_queue_add.rs
+│   │   ├── auto_queue_add.rs
+│   │   └── create_from_issue_pg_tests.rs
 │   ├── doctor/
 │   │   ├── health/
 │   │   │   └── measurement.rs
@@ -231,6 +232,7 @@ src/
 │   │   └── tests.rs
 │   ├── kanban_cards/
 │   │   ├── crud.rs
+│   │   ├── labels.rs
 │   │   ├── listing.rs
 │   │   ├── metadata.rs
 │   │   ├── mod.rs
@@ -2887,6 +2889,7 @@ src/
 │   │   │   │   ├── n4d2_boundary_tests.rs
 │   │   │   │   ├── output_policy.rs
 │   │   │   │   ├── ready_failure.rs
+│   │   │   │   ├── ready_failure_pg_tests.rs
 │   │   │   │   ├── recovery_markers.rs
 │   │   │   │   ├── restore.rs
 │   │   │   │   ├── restore_core.rs
