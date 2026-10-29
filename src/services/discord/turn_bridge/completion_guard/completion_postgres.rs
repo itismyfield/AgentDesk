@@ -276,20 +276,15 @@ async fn runtime_max_entry_retries_pg(
     .await
     .map_err(|error| format!("load runtime maxEntryRetries: {error}"))?
     .flatten()
-    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-    .and_then(|value| {
-        value
-            .get("maxEntryRetries")
-            .and_then(serde_json::Value::as_u64)
-    });
-    let fallback = crate::config::runtime_config_strict()
-        .map_err(|error| format!("load runtime config: {error}"))?
-        .runtime
-        .max_entry_retries
-        .unwrap_or(3);
-    Ok(i64::try_from(persisted.unwrap_or(fallback))
-        .unwrap_or(i64::MAX)
-        .max(1))
+    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let yaml = crate::config::runtime_config_strict()
+        .map_err(|error| format!("load runtime config: {error}"))?;
+    let resolved = crate::services::settings::resolve(
+        &crate::services::settings::MAX_ENTRY_RETRIES,
+        persisted.as_ref(),
+        Some(&yaml),
+    );
+    Ok(i64::try_from(resolved.value).unwrap_or(i64::MAX).max(1))
 }
 
 async fn record_runtime_dispatch_failure_entries_on_pg_tx(

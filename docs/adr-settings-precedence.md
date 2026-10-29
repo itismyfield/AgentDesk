@@ -59,6 +59,7 @@ We keep per-surface storage, but every settings surface must declare:
 - `PUT` fully replaces the stored override object. When `__runtimeConfigExplicitKeys` is present, the server honors that exact known-key list, including an intentionally empty list from the dashboard. When metadata is absent (for example, CLI or plain REST), every known config key present in the body is recorded as an explicit override; unknown JSON fields never gain override authority.
 - `agentdesk config get` includes the reserved metadata in its current-value object so piping that JSON back to `agentdesk config set` preserves the existing `explicit_keys` list.
 - This is a live-tuning surface, not a durable YAML editor
+- Rust readers resolve a key through `settings::resolve`, which returns the value with its `source` (`kv_override`, `yaml` or `default`); `/api/health/detail` shows `enabled_source` and `danger_pct_source` in `rate_limit_dispatch_gate`.
 
 ### `/api/settings/config`
 

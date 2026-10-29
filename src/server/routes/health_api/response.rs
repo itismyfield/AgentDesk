@@ -249,8 +249,14 @@ async fn assemble(
             .unwrap_or_else(|_| serde_json::json!({}));
         // A cut kv read leaves the persisted overrides unknown, so no fallback is shown as effective.
         if let (None, Some(gate)) = (&kv, gate.as_object_mut()) {
-            gate.remove("enabled");
-            gate.remove("danger_pct");
+            for field in [
+                "enabled",
+                "enabled_source",
+                "danger_pct",
+                "danger_pct_source",
+            ] {
+                gate.remove(field);
+            }
         }
         json["rate_limit_dispatch_gate"] = gate;
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();

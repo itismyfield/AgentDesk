@@ -1,11 +1,9 @@
 use super::*;
 
 pub(super) fn effective_max_entry_retries(deps: &AutoQueueActivateDeps) -> i64 {
-    let from_pg = deps.pg_pool.as_ref().and_then(|pool| {
+    let runtime_config = deps.pg_pool.as_ref().and_then(|pool| {
         match load_kv_meta_value_pg(pool, "runtime-config") {
-            Ok(raw) => raw
-                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-                .and_then(|value| value.get("maxEntryRetries").and_then(Value::as_u64)),
+            Ok(raw) => raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok()),
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -15,11 +13,12 @@ pub(super) fn effective_max_entry_retries(deps: &AutoQueueActivateDeps) -> i64 {
             }
         }
     });
-    let fallback = crate::services::settings::runtime_config_defaults(deps.config.as_ref())
-        .get("maxEntryRetries")
-        .and_then(Value::as_u64)
-        .unwrap_or(3);
-    clamp_retry_limit(from_pg.unwrap_or(fallback))
+    let resolved = crate::services::settings::resolve(
+        &crate::services::settings::MAX_ENTRY_RETRIES,
+        runtime_config.as_ref(),
+        Some(deps.config.as_ref()),
+    );
+    clamp_retry_limit(resolved.value)
 }
 
 /// Record one dispatch-creation failure as an entry retry or terminal

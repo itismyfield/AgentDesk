@@ -25,7 +25,7 @@ async fn detail_body(app: &axum::Router) -> Value {
 }
 
 /// A persisted danger override of 77 behind a stalled kv read: the body shows no fallback
-/// `enabled`/`danger_pct` as the effective setting, keeps the counters, and shows 77 once read.
+/// setting or source as effective, keeps the counters, and shows 77 from `kv_override` once read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn health_gate_kv_timeout_does_not_report_fallback_as_effective() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -59,7 +59,12 @@ async fn health_gate_kv_timeout_does_not_report_fallback_as_effective() {
         "{cut}"
     );
     let gate = &cut["rate_limit_dispatch_gate"];
-    for setting in ["enabled", "danger_pct"] {
+    for setting in [
+        "enabled",
+        "enabled_source",
+        "danger_pct",
+        "danger_pct_source",
+    ] {
         assert!(
             gate.get(setting).is_none(),
             "fallback {setting} shown as effective: {gate}"
@@ -70,6 +75,10 @@ async fn health_gate_kv_timeout_does_not_report_fallback_as_effective() {
     proxy.release();
     let read = detail_body(&app).await;
     assert_eq!(read["rate_limit_dispatch_gate"]["danger_pct"], 77, "{read}");
+    assert_eq!(
+        read["rate_limit_dispatch_gate"]["danger_pct_source"], "kv_override",
+        "{read}"
+    );
 
     pool.close().await;
     seed.close().await;
