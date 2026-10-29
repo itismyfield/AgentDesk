@@ -1,6 +1,9 @@
 //! Issue auto-triage: create kanban backlog cards for new GitHub issues.
 
-use crate::db::kanban::{IssueCardUpsert, upsert_card_from_issue_pg};
+use crate::db::kanban::{
+    CardLabelsUpdate, IssueCardUpsert, card_labels_csv, set_card_labels_pg,
+    upsert_card_from_issue_with_labels_pg,
+};
 use sqlx::PgPool;
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -182,9 +185,9 @@ pub async fn triage_new_issues_pg(
             AgentRoutingResolution::Explicit(_) => validated.assigned_agent_id.clone(),
             _ => None,
         };
-        let metadata = labels_metadata_json(issue, None);
+        let labels = issue_labels(issue, None);
         let github_url = format!("https://github.com/{repo}/issues/{}", issue.number);
-        let upserted = upsert_card_from_issue_pg(
+        let upserted = upsert_card_from_issue_with_labels_pg(
             pool,
             IssueCardUpsert {
                 repo_id: repo.to_string(),
@@ -194,9 +197,10 @@ pub async fn triage_new_issues_pg(
                 description: issue.body.clone(),
                 priority: Some(infer_priority(&issue.labels).to_string()),
                 assigned_agent_id,
-                metadata_json: metadata,
+                metadata_json: None,
                 status_on_create: Some("backlog".to_string()),
             },
+            &labels,
         )
         .await?;
 
@@ -226,23 +230,22 @@ pub async fn triage_new_issues_pg(
     Ok(created)
 }
 
-fn labels_metadata_json(issue: &GhIssue, inferred_agent_id: Option<&str>) -> Option<String> {
-    let mut labels = issue
-        .labels
-        .iter()
-        .map(|label| label.name.trim())
-        .filter(|label| !label.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-
-    if let Some(agent_id) = inferred_agent_id {
-        let inferred_label = format!("{AGENT_LABEL_PREFIX}{agent_id}");
-        if !labels.iter().any(|label| label == &inferred_label) {
-            labels.push(inferred_label);
-        }
-    }
-
-    Some(serde_json::json!({ "labels": labels.join(",") }).to_string())
+fn issue_labels(issue: &GhIssue, inferred_agent_id: Option<&str>) -> String {
+    let inferred_label =
+        inferred_agent_id.map(|agent_id| format!("{AGENT_LABEL_PREFIX}{agent_id}"));
+    let missing_inferred = inferred_label.as_deref().filter(|inferred| {
+        !issue
+            .labels
+            .iter()
+            .any(|label| label.name.trim() == *inferred)
+    });
+    card_labels_csv(
+        issue
+            .labels
+            .iter()
+            .map(|label| label.name.as_str())
+            .chain(missing_inferred),
+    )
 }
 
 async fn existing_issue_card_assignment_pg(
@@ -450,18 +453,13 @@ async fn update_card_metadata_with_inferred_agent_label_pg(
     issue: &GhIssue,
     agent_id: &str,
 ) -> Result<(), String> {
-    let metadata = labels_metadata_json(issue, Some(agent_id));
-    sqlx::query(
-        "UPDATE kanban_cards
-         SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST($2 AS jsonb),
-             updated_at = NOW()
-         WHERE id = $1",
+    set_card_labels_pg(
+        pool,
+        card_id,
+        CardLabelsUpdate::Replace(&issue_labels(issue, Some(agent_id))),
     )
-    .bind(card_id)
-    .bind(metadata.as_deref())
-    .execute(pool)
     .await
-    .map_err(|error| format!("update inferred routing metadata for card {card_id}: {error}"))?;
+    .map_err(|error| format!("update inferred routing metadata: {error}"))?;
 
     Ok(())
 }
@@ -854,15 +852,21 @@ mod tests {
 
     #[test]
     fn inferred_agent_label_is_added_to_local_metadata_after_assignment() {
-        let issue = issue("Discord relay watcher", None, &["bug"]);
+        let unrouted = issue("Discord relay watcher", None, &["bug"]);
 
         assert_eq!(
-            labels_metadata_json(&issue, Some("project-agentdesk")),
-            Some(r#"{"labels":"bug,agent:project-agentdesk"}"#.to_string())
+            issue_labels(&unrouted, Some("project-agentdesk")),
+            "bug,agent:project-agentdesk"
+        );
+        assert_eq!(issue_labels(&unrouted, None), "bug");
+        let routed = issue(
+            "Discord relay watcher",
+            None,
+            &[" agent:project-agentdesk "],
         );
         assert_eq!(
-            labels_metadata_json(&issue, None),
-            Some(r#"{"labels":"bug"}"#.to_string())
+            issue_labels(&routed, Some("project-agentdesk")),
+            "agent:project-agentdesk"
         );
     }
 }

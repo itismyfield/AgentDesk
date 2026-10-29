@@ -82,23 +82,21 @@ fn normalize_block_on_issue_numbers(body: &CreateIssueBody) -> Result<Vec<i64>, 
     Ok(numbers.into_iter().collect())
 }
 
-fn issue_metadata_json(labels: &[String], block_on_issue_numbers: &[i64]) -> Option<String> {
-    let labels = labels
-        .iter()
-        .filter_map(|label| trim_non_empty(label))
-        .collect::<Vec<_>>();
+fn issue_metadata_json(block_on_issue_numbers: &[i64]) -> Option<String> {
+    (!block_on_issue_numbers.is_empty())
+        .then(|| json!({ "depends_on": block_on_issue_numbers }).to_string())
+}
 
-    if labels.is_empty() && block_on_issue_numbers.is_empty() {
-        None
-    } else {
-        let mut metadata = serde_json::Map::new();
-        if !labels.is_empty() {
-            metadata.insert("labels".to_string(), json!(labels.join(",")));
-        }
-        if !block_on_issue_numbers.is_empty() {
-            metadata.insert("depends_on".to_string(), json!(block_on_issue_numbers));
-        }
-        Some(serde_json::Value::Object(metadata).to_string())
+fn issue_kanban_sync_options(
+    agent_id: Option<String>,
+    applied_labels: &[String],
+    block_on_issue_numbers: &[i64],
+) -> KanbanCardSyncOptions {
+    KanbanCardSyncOptions {
+        agent_id,
+        labels: Some(applied_labels.to_vec()),
+        metadata_json: issue_metadata_json(block_on_issue_numbers),
+        status_on_create: Some("backlog".to_string()),
     }
 }
 
@@ -440,11 +438,11 @@ pub async fn create_issue(
         issue_body.clone(),
     )
     .with_labels(applied_labels.clone())
-    .with_kanban(KanbanCardSync::enabled(KanbanCardSyncOptions {
-        agent_id: body.agent_id.as_deref().and_then(trim_non_empty),
-        metadata_json: issue_metadata_json(&applied_labels, &block_on_issue_numbers),
-        status_on_create: Some("backlog".to_string()),
-    }))
+    .with_kanban(KanbanCardSync::enabled(issue_kanban_sync_options(
+        body.agent_id.as_deref().and_then(trim_non_empty),
+        &applied_labels,
+        &block_on_issue_numbers,
+    )))
     .with_announcement(IssueAnnouncementSync::enabled(
         IssueAnnouncementSyncOptions {
             agent_id: body.agent_id.as_deref().and_then(trim_non_empty),
@@ -662,12 +660,21 @@ Write-Error "unexpected gh args: $Rest"; exit 2
         let dependencies =
             normalize_block_on_issue_numbers(&body).expect("block_on should normalize");
         assert_eq!(dependencies, vec![7, 42]);
-        let metadata = issue_metadata_json(&["agent:project-agentdesk".to_string()], &dependencies)
-            .expect("metadata should exist");
+        let options = issue_kanban_sync_options(
+            Some("project-agentdesk".to_string()),
+            &["agent:project-agentdesk".to_string()],
+            &dependencies,
+        );
+        assert_eq!(
+            options.labels,
+            Some(vec!["agent:project-agentdesk".to_string()])
+        );
         let metadata: serde_json::Value =
-            serde_json::from_str(&metadata).expect("metadata should be JSON");
-        assert_eq!(metadata["labels"], "agent:project-agentdesk");
-        assert_eq!(metadata["depends_on"], json!([7, 42]));
+            serde_json::from_str(options.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata, json!({"depends_on": [7, 42]}));
+        let unrouted = issue_kanban_sync_options(None, &[], &[]);
+        assert_eq!(unrouted.labels, Some(Vec::new()));
+        assert_eq!(unrouted.metadata_json, None);
     }
 
     #[test]

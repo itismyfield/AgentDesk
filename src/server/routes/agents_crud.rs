@@ -357,7 +357,16 @@ async fn write_prompt_if_changed(
 ) -> Result<Value, String> {
     let prompt_path = resolve_agent_prompt_path(agent_id, provider)
         .ok_or_else(|| "AGENTDESK runtime root could not be resolved".to_string())?;
-    let existing = std::fs::read_to_string(&prompt_path).ok();
+    write_prompt_at_path_if_changed(&prompt_path, content, auto_commit, commit_message).await
+}
+
+async fn write_prompt_at_path_if_changed(
+    prompt_path: &FsPath,
+    content: &str,
+    auto_commit: bool,
+    commit_message: Option<&str>,
+) -> Result<Value, String> {
+    let existing = std::fs::read_to_string(prompt_path).ok();
     if existing.as_deref() == Some(content) {
         return Ok(json!({
             "changed": false,
@@ -369,10 +378,10 @@ async fn write_prompt_if_changed(
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create prompt dir '{}': {error}", parent.display()))?;
     }
-    std::fs::write(&prompt_path, content)
+    std::fs::write(prompt_path, content)
         .map_err(|error| format!("write prompt '{}': {error}", prompt_path.display()))?;
     let auto_commit_result = if auto_commit {
-        match run_prompt_auto_commit(&prompt_path, commit_message).await {
+        match run_prompt_auto_commit(prompt_path, commit_message).await {
             Ok(value) => value,
             Err(error) => json!({ "error": error }),
         }
@@ -1176,15 +1185,22 @@ mod prompt_auto_commit_tests {
                 repo.join("missing-signing-program").to_str().unwrap(),
             ],
         );
-        let error = super::run_prompt_auto_commit(&repo.join("prompt.md"), None)
-            .await
-            .expect_err("missing signing program must reject commit");
+        let response = super::write_prompt_at_path_if_changed(
+            &repo.join("prompt.md"),
+            "api prompt\n",
+            true,
+            None,
+        )
+        .await
+        .expect("a commit failure is reported in the response, not as an error");
+        assert_eq!(response["changed"], true);
+        let error = response["auto_commit"]["error"].as_str().unwrap();
         assert!(error.starts_with("git commit prompt failed:"), "{error}");
         assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
         assert_eq!(unrelated_state(repo), before);
         assert_eq!(
             std::fs::read(repo.join("prompt.md")).unwrap(),
-            b"new prompt\n"
+            b"api prompt\n"
         );
     }
 }
