@@ -44,13 +44,17 @@ fn osc_strings_are_dropped_and_the_text_they_wrap_is_kept() {
 }
 
 #[test]
-fn an_osc_left_open_ends_at_its_row_or_the_next_escape() {
-    assert_eq!(
-        strip("› \x1b]8;;https://x hidden\n  next row"),
-        "› \n  next row"
-    );
-    assert_eq!(strip("› \x1b]8;;https://x"), "› ");
-    let interrupted: Vec<_> = pieces("\x1b]8;;u\x1b[1mb").collect();
+fn an_osc_left_open_stays_as_text_and_the_rows_below_are_read() {
+    for open in [
+        "› \x1b]8;;https://x hidden",
+        "› \x1b]8;;https://x",
+        "› \x1b]8;;u\x1bxy",
+    ] {
+        assert_eq!(strip(open), open);
+    }
+    let rows = "› own\x1b]8;;u foreign\n  \x1b]8;;v\x07next\x1b]8;;\x07 row";
+    assert_eq!(strip(rows), "› own\x1b]8;;u foreign\n  next row");
+    let interrupted: Vec<_> = pieces("\x1b]8;;u\x1b[1mb").skip(6).collect();
     assert_eq!(
         interrupted,
         [
@@ -61,5 +65,4 @@ fn an_osc_left_open_ends_at_its_row_or_the_next_escape() {
             Piece::Text('b')
         ]
     );
-    assert_eq!(strip("\x1b]8;;u\x1bxy"), "\x1bxy");
 }

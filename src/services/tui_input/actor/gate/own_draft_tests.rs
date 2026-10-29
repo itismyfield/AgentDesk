@@ -199,7 +199,16 @@ fn a_codex_draft_with_a_wrapped_osc8_link_is_owned_by_its_shown_text() {
     assert!(owns(&pane(&bel("https://discord.com/"), &bel(tail))));
     // The link target never stands in for text the composer does not show.
     assert!(!owns(&pane(&link(""), &link(""))));
-    // A link left open hides the rest of its row, so the draft reads short, not as the frame.
+    // A link left open stays as text, so it neither reads as the frame nor hides foreign text.
     let open = format!("\x1b]8;;{url}https://discord.com/");
     assert!(!owns(&pane(&open, &link(tail))));
+    let status = "\n\n  gpt-5.4 · Fast off · Context 100% left";
+    assert!(own_draft(
+        ShadowProvider::Codex,
+        &format!("› own{status}"),
+        "own",
+        true
+    ));
+    let hidden = format!("› own\x1b]8;;u foreign{status}");
+    assert!(!own_draft(ShadowProvider::Codex, &hidden, "own", true));
 }

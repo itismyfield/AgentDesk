@@ -9,7 +9,7 @@ pub(crate) enum Piece<'a> {
 }
 
 /// OSC strings such as a hyperlink target are dropped up to BEL or ST, keeping the text they
-/// wrap. One left open ends at its row, so the rows below are still read.
+/// wrap. One left open stays as text, so it can neither hide shown text nor match a prompt.
 pub(crate) fn pieces(capture: &str) -> Pieces<'_> {
     Pieces { rest: capture }
 }
@@ -40,13 +40,20 @@ impl<'a> Iterator for Pieces<'a> {
                         end,
                     });
                 }
-                if let Some(body) = after.strip_prefix(']') {
+                if let Some(rest) = after.strip_prefix(']').and_then(after_osc) {
                     #[cfg(test)]
                     if super::mutant("osc_as_text") {
                         self.rest = after;
                         return Some(Piece::Text(c));
                     }
-                    self.rest = after_osc(body);
+                    self.rest = rest;
+                    continue;
+                }
+                #[cfg(test)]
+                if let Some(body) = after.strip_prefix(']')
+                    && super::mutant("open_osc_dropped")
+                {
+                    self.rest = body.find(['\x1b', '\n']).map_or("", |at| &body[at..]);
                     continue;
                 }
             }
@@ -57,15 +64,12 @@ impl<'a> Iterator for Pieces<'a> {
     }
 }
 
-/// Past BEL or ST; at a newline or another escape, which an OSC never contains, it stops short.
-fn after_osc(body: &str) -> &str {
-    let Some(at) = body.find(['\x07', '\x1b', '\n']) else {
-        return "";
-    };
-    let rest = &body[at..];
+/// The input past an OSC closed by BEL or ST; `None` when a newline, another escape or the end
+/// comes first, none of which an OSC contains.
+fn after_osc(body: &str) -> Option<&str> {
+    let rest = &body[body.find(['\x07', '\x1b', '\n'])?..];
     rest.strip_prefix('\x07')
         .or_else(|| rest.strip_prefix("\x1b\\"))
-        .unwrap_or(rest)
 }
 
 /// The text a capture shows, carriage returns removed.
