@@ -2,6 +2,9 @@
 //! in-process server that, like Herdr, answers the one request a connection carries and closes.
 #![cfg(unix)]
 
+#[path = "herdr_gate/notice_fence_tests.rs"]
+mod notice_fence_tests;
+
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;

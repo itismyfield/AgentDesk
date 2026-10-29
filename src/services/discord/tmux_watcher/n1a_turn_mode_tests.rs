@@ -125,6 +125,7 @@ async fn n1a_post_terminal_prologue_cannot_recreate_confirmed_row() {
         utf8_decoder: &mut decoder,
         completion_footer_idle: &mut footer,
         last_activity_heartbeat_at: &mut activity,
+        tmux_death: &mut None,
     };
     let mut continuation_logged = false;
     let mut suppressed_range = None;

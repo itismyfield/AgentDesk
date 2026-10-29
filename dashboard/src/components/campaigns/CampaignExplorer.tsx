@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { Campaign, CampaignNodeLive, CampaignNodeStatus } from "../../api/campaigns";
 import { WidgetState } from "../common/WidgetState";
 import CampaignNodeDetails, { type CampaignDraft } from "./CampaignNodeDetails";
@@ -8,16 +8,19 @@ import CampaignGlance from "./CampaignGlance";
 import { EMPTY_FILTERS, NODE_STATUSES, campaignIssueLabel, filterCampaignNodes, groupCampaignNodes, type CampaignFilters } from "./campaignModel";
 import { Badge, HoldBadge, LABELS, LiveChip, type Tr } from "./campaignPresentation";
 
-export default function CampaignExplorer({ campaign, live, tr, onSaved, drafts, onDraftChange }: {
+export default function CampaignExplorer({ campaign, live, tr, onSaved, drafts, onDraftChange, initialSelectedId = null, onSelectedChange }: {
   campaign: Campaign; live: Record<string, CampaignNodeLive>; tr: Tr; onSaved: (campaign: Campaign) => void;
   drafts: Record<string, CampaignDraft>; onDraftChange: (key: string, draft: CampaignDraft | null, expected?: CampaignDraft) => void;
+  /** A task named by a deep link, and where to report the selected task for the URL. */
+  initialSelectedId?: string | null; onSelectedChange?: (id: string | null) => void;
 }) {
   const [filters, setFilters] = useState<CampaignFilters>(EMPTY_FILTERS);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
     const initialGroups = groupCampaignNodes(campaign.nodes);
     return new Set(campaign.nodes.length > 40 && initialGroups.length > 1 ? initialGroups.map((group) => group.key) : []);
   });
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId);
+  useEffect(() => onSelectedChange?.(selectedId), [selectedId, onSelectedChange]);
   const [view, setView] = useState<"list" | "graph">("list");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());

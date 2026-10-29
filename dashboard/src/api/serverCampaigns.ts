@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { request, type RequestOptions } from "./httpClient";
+import { ApiRequestError, request, type RequestOptions } from "./httpClient";
 
 // Mirror campaign_execution::{definition,model,view} serde and the GET envelope.
 const repositorySchema = z.enum(["adk", "cooking_heart"]);
@@ -20,6 +20,8 @@ const rejectionSchema = z.enum([
   "execution_unavailable", "sessions_not_gone", "unreconciled_actions", "fence_incomplete",
   "stale_fence", "idempotency_conflict", "missing_change_reason", "completed_node_changed", "already_exists",
 ]);
+
+const controlSchema = z.enum(["prepared", "running", "stopping", "stopped", "succeeded"]);
 
 export const serverCampaignDefinitionSchema = z.strictObject({
   repository: repositorySchema,
@@ -114,7 +116,7 @@ export const serverCampaignViewSchema = z.looseObject({
   control_version: unsignedSchema.nullable(),
   last_event_sequence: unsignedSchema,
   last_event_at: timestampSchema.nullable(),
-  control: z.enum(["prepared", "running", "stopping", "stopped", "succeeded"]),
+  control: controlSchema,
   stop_mode: z.enum(["immediate", "finish_stage"]).nullable(),
   stop_confirmed: z.boolean(),
   display: z.enum(["stopping", "stopped", "prepared", "succeeded", "running", "waiting", "unable_to_progress", "needs_inspection"]),
@@ -142,6 +144,24 @@ export const serverCampaignDetailResponseSchema = z.looseObject({
   campaign: serverCampaignDocumentSchema,
 });
 
+// Mirrors campaign_execution::profile::RepositoryProfile. The view does not carry it yet, so it is
+// read apart from the document schema: an absent or different shape hides the start check only.
+const profileSchema = z.looseObject({
+  repository: repositorySchema,
+  version: z.string(),
+  models: z.array(z.looseObject({
+    role: z.enum(["implementation", "review"]),
+    selection: z.discriminatedUnion("state", [
+      z.looseObject({ state: z.literal("pinned"), model: z.string(), effort: z.string() }),
+      z.looseObject({ state: z.literal("unspecified"), reason: z.string() }),
+    ]),
+  })),
+  limits: z.looseObject({ concurrent_tasks: u32Schema, quality_repairs: u32Schema, design_review_rounds: u32Schema }),
+  readiness: z.literal("unavailable"),
+  unavailable_reason: z.string(),
+});
+export type ServerCampaignProfile = z.infer<typeof profileSchema>;
+
 export type ServerCampaignDefinition = z.infer<typeof serverCampaignDefinitionSchema>;
 export type ServerCampaignView = z.infer<typeof serverCampaignViewSchema>;
 export type ServerCampaignDocument = z.infer<typeof serverCampaignDocumentSchema>;
@@ -149,11 +169,20 @@ export type ServerCampaignListResponse = z.infer<typeof serverCampaignListRespon
 export type ServerCampaignDetailResponse = z.infer<typeof serverCampaignDetailResponseSchema>;
 export type ServerCampaignReadOptions = Pick<RequestOptions, "signal" | "suppressErrorToast">;
 
+const LIST_PAGE = 100; // the server's largest page
+
+/** Every campaign, page by page. The first page uses the server's defaults (100 from offset 0);
+ * a campaign pushed onto the next page by a concurrent create is listed once. */
 export async function getServerCampaigns(options: ServerCampaignReadOptions = {}): Promise<ServerCampaignDocument[]> {
-  const result = await request("/api/server-campaigns", {
-    method: "GET", signal: options.signal, suppressErrorToast: options.suppressErrorToast ?? true, shareInflight: false,
-  }, serverCampaignListResponseSchema);
-  return result.campaigns;
+  const campaigns: ServerCampaignDocument[] = [];
+  for (let offset = 0; ; offset += LIST_PAGE) {
+    const page = await request(offset ? `/api/server-campaigns?limit=${LIST_PAGE}&offset=${offset}` : "/api/server-campaigns", {
+      method: "GET", signal: options.signal, suppressErrorToast: options.suppressErrorToast ?? true, shareInflight: false,
+    }, serverCampaignListResponseSchema);
+    const seen = new Set(campaigns.map((document) => document.view.campaign_id));
+    campaigns.push(...page.campaigns.filter((document) => !seen.has(document.view.campaign_id)));
+    if (page.campaigns.length < LIST_PAGE) return campaigns;
+  }
 }
 
 export async function getServerCampaign(id: string, options: ServerCampaignReadOptions = {}): Promise<ServerCampaignDocument> {
@@ -161,4 +190,110 @@ export async function getServerCampaign(id: string, options: ServerCampaignReadO
     method: "GET", signal: options.signal, suppressErrorToast: options.suppressErrorToast ?? true, shareInflight: false,
   }, serverCampaignDetailResponseSchema);
   return result.campaign;
+}
+
+const commandResultSchema = z.looseObject({
+  result: z.looseObject({
+    definition_revision: unsignedSchema,
+    run_id: z.string().nullable(),
+    control_version: unsignedSchema.nullable(),
+    event_sequence: unsignedSchema,
+    control: controlSchema,
+  }),
+});
+const eventSchema = z.looseObject({
+  sequence: unsignedSchema,
+  run_id: z.string().nullable(),
+  command_id: z.string(),
+  observed_at: timestampSchema,
+  kind: z.looseObject({ event: z.string() }),
+});
+const eventsResponseSchema = z.looseObject({ events: z.array(eventSchema) });
+
+export type ServerCampaignCommandResult = z.infer<typeof commandResultSchema>["result"];
+export type ServerCampaignEvent = z.infer<typeof eventSchema>;
+export type ServerCampaignChange = { reference: string; explanation: string };
+export type ServerCampaignCommand =
+  | { command: "start"; expected_definition_revision: number }
+  | { command: "stop"; expected_definition_revision: number; expected_run: string; mode: "immediate" | "finish_stage" }
+  | { command: "resume"; expected_definition_revision: number; expected_run: string }
+  | { command: "retry"; expected_definition_revision: number; expected_run: string; node_id: string };
+
+const campaignUrl = (id: string) => `/api/server-campaigns/${encodeURIComponent(id)}`;
+async function write(url: string, method: "POST" | "PUT", body: unknown) {
+  const result = await request(url, {
+    method, body: JSON.stringify(body), suppressErrorToast: true,
+  }, commandResultSchema);
+  return result.result;
+}
+
+export function createServerCampaign(id: string, definition: ServerCampaignDefinition, idempotencyKey: string) {
+  return write("/api/server-campaigns", "POST", { id, idempotency_key: idempotencyKey, definition });
+}
+
+export function editServerCampaignDefinition(
+  id: string, expectedRevision: number, definition: ServerCampaignDefinition,
+  change: ServerCampaignChange | null, idempotencyKey: string,
+) {
+  return write(`${campaignUrl(id)}/definition`, "PUT", {
+    idempotency_key: idempotencyKey, expected_definition_revision: expectedRevision, definition, change,
+  });
+}
+
+export function sendServerCampaignCommand(id: string, command: ServerCampaignCommand, idempotencyKey: string) {
+  return write(`${campaignUrl(id)}/commands`, "POST", { idempotency_key: idempotencyKey, command });
+}
+
+export async function getServerCampaignEvents(
+  id: string,
+  { after = 0, limit = 50, runId, signal }: { after?: number; limit?: number; runId?: string | null; signal?: AbortSignal } = {},
+): Promise<ServerCampaignEvent[]> {
+  const query = new URLSearchParams({ after: String(after), limit: String(limit) });
+  if (runId) query.set("run_id", runId);
+  const result = await request(`${campaignUrl(id)}/events?${query}`, {
+    method: "GET", signal, suppressErrorToast: true, shareInflight: false,
+  }, eventsResponseSchema);
+  return result.events;
+}
+
+export interface ServerCampaignRejection {
+  status: number;
+  /** Null for refusals outside the command validator: format errors, a reused key, an unavailable database. */
+  rejection: string | null;
+  target: string | null;
+  definitionError: { code: string; target: string | null; path: string[] } | null;
+  /** The server's own text, the only explanation a format refusal carries. */
+  message: string;
+}
+
+const rejectionContextSchema = z.looseObject({
+  rejection: z.string().optional(),
+  target: z.string().nullable().optional(),
+  definition_error: z.looseObject({
+    code: z.string(), target: z.string().nullable(), path: z.array(z.string()),
+  }).optional(),
+});
+
+export function serverCampaignProfile(view: ServerCampaignView): ServerCampaignProfile | null {
+  return profileSchema.safeParse((view as Record<string, unknown>).profile).data ?? null;
+}
+
+/** The server's answer to a refused write, or null when no answer arrived. */
+export function serverCampaignRejection(error: unknown): ServerCampaignRejection | null {
+  if (!(error instanceof ApiRequestError)) return null;
+  const body = error.body as { context?: unknown } | undefined;
+  const context = rejectionContextSchema.safeParse(body?.context ?? {}).data;
+  const detail = context?.definition_error;
+  return {
+    status: error.status,
+    rejection: context?.rejection ?? null,
+    target: context?.target ?? null,
+    definitionError: detail ? { code: detail.code, target: detail.target, path: detail.path } : null,
+    message: error.message,
+  };
+}
+
+/** A 4xx is the server's decision; only a lost answer or a 5xx may be resent under the same key. */
+export function isDefinitiveAnswer(refusal: ServerCampaignRejection | null): boolean {
+  return refusal !== null && refusal.status < 500;
 }

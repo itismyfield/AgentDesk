@@ -8,6 +8,7 @@ fn seed_approval(harness: &Harness, provider: ShadowProvider) {
     key.provider = provider;
     channel
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             local_retry: None,
             serial: 0,
             unit_key: key,
@@ -216,6 +217,7 @@ async fn operator_resume_open_consumed_retry_without_raw_work_settles_before_fol
     let original = channel.ledger().piece(0).unwrap().clone();
     channel
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             local_retry: None,
             serial: 1,
             unit_key: original.unit_key,

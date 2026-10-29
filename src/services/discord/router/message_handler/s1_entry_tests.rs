@@ -436,9 +436,10 @@ async fn s1_real_missing_namespace_reaches_selected_tmux_start_pg() {
     let _injection = injection_off();
     let root = tempfile::tempdir().unwrap();
     let _binding = activity::BindingRoot::enter(root.path());
+    // tmux reports the realpath of TMUX_TMPDIR (macOS /var -> /private/var); match it.
     let _namespace = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "TMUX_TMPDIR",
-        root.path(),
+        &root.path().canonicalize().unwrap(),
     );
     let api = discord::admin_host_guard::tests::Recorder::start().await;
     discord::internal_api::init(api.port, None);

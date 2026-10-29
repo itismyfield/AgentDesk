@@ -168,6 +168,7 @@ async fn restart_with_binding(
     let mut channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
     let anchor_id = channel.ledger().anchor();
     let prepared = |serial, local_retry| LedgerEntry::Prepared {
+        notice_origin: None,
         serial,
         unit_key: key.clone(),
         piece_index: 0,

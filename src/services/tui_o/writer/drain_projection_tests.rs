@@ -31,6 +31,7 @@ fn crashed_mid_post(harness: &Harness) {
     let mut channel = harness.channel();
     let anchor_id = channel.ledger().anchor();
     let prepared = LedgerEntry::Prepared {
+        notice_origin: None,
         local_retry: None,
         serial: 0,
         unit_key: unit("c0"),
@@ -235,6 +236,7 @@ async fn local_retry_pending_budget_is_owed_even_with_no_ordinary_work_or_open_p
     let store = writer.store();
     store
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             serial: 0,
             unit_key: unit("root"),
             piece_index: 0,

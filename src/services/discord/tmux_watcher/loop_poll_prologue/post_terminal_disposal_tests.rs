@@ -164,6 +164,7 @@ async fn suppressed_poll_keeps_shared_delivery_frontier() {
                     utf8_decoder: &mut decoder,
                     completion_footer_idle: &mut WatcherCompletionFooterIdleState::default(),
                     last_activity_heartbeat_at: &mut None,
+                    tmux_death: &mut None,
                 },
                 &mut PostTerminalState {
                     turn_result_relayed: true,
@@ -366,6 +367,7 @@ async fn poll_resume_branch_scopes_the_delivery_marker_to_the_current_turn_5943(
                     utf8_decoder: &mut Utf8ChunkDecoder::default(),
                     completion_footer_idle: &mut WatcherCompletionFooterIdleState::default(),
                     last_activity_heartbeat_at: &mut None,
+                    tmux_death: &mut None,
                 },
                 &mut PostTerminalState {
                     turn_result_relayed: false,

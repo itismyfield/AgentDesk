@@ -104,6 +104,7 @@ async fn commit(
             lifecycle_stage_paused: false,
             relay_suppressed: false,
             has_assistant_response: true,
+            receipt_kept: false,
             completion_is_stale_for_newer_turn,
             anchor_cleanup_is_stale_for_newer_turn,
             inflight_state,

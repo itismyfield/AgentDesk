@@ -215,7 +215,8 @@ async fn upsert_turn_owned_pg(pool: &PgPool, entry: &PersistTurnOwned) -> Result
 }
 
 /// How an execution actually ended; a hand-off or retry that keeps the execution is not one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TerminalOutcome {
     Completed,
     Cancelled,

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { onCredentialChange } from "../../api/authState";
-import { request, TOKEN_ANALYTICS_TIMEOUT_MS } from "../../api/httpClient";
+import { request, SLOW_AGGREGATE_GET } from "../../api/httpClient";
 import type { TFunction } from "./model";
 import {
   SurfaceActionButton,
@@ -62,8 +62,14 @@ interface CachedReceiptEntry {
 }
 
 const receiptCache = new Map<Period, CachedReceiptEntry>();
+// A failed load may leave the server still aggregating; polls wait out its longest run first.
+const receiptFailedAt = new Map<Period, number>();
+const RECEIPT_RETRY_AFTER_FAILURE_MS = 3 * 60_000;
 // Receipts fetched under a previous credential must not render after re-login.
-onCredentialChange(() => receiptCache.clear());
+onCredentialChange(() => {
+  receiptCache.clear();
+  receiptFailedAt.clear();
+});
 const RECEIPT_CACHE_TTL: Record<Period, number> = {
   today: 30 * 60_000,
   week: 210 * 60_000,
@@ -133,12 +139,26 @@ function deriveReceiptView(data: ReceiptData | null, selectedProvider: string): 
   };
 }
 
+// Seconds since the load named by `key` started (null: none), so a minute-long aggregation reads as progress.
+function useElapsedSeconds(key: string | null): number {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    setElapsed(0);
+    if (key === null) return;
+    const startedAt = Date.now();
+    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [key]);
+  return elapsed;
+}
+
 export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
   const [data, setData] = useState<ReceiptData | null>(null);
   const [period, setPeriod] = useState<Period>("month");
   const [selectedProvider, setSelectedProvider] = useState("all");
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
+  const loadingSeconds = useElapsedSeconds(loading ? period : null);
 
   useEffect(() => {
     let mounted = true;
@@ -151,7 +171,8 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
       if (cached && mounted) {
         setData(cached.data);
       }
-      if (fresh) {
+      const failedAt = receiptFailedAt.get(period);
+      if (fresh || (failedAt !== undefined && Date.now() - failedAt < RECEIPT_RETRY_AFTER_FAILURE_MS)) {
         if (mounted) setLoading(false);
         return;
       }
@@ -159,13 +180,16 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
       if (mounted) setLoading(true);
       try {
         const json = await request<ReceiptData>(`/api/receipt?period=${period}`, {
+          ...SLOW_AGGREGATE_GET,
           suppressErrorToast: true,
-          timeoutMs: TOKEN_ANALYTICS_TIMEOUT_MS,
         });
         receiptCache.set(period, { data: json, fetchedAt: Date.now() });
+        receiptFailedAt.delete(period);
         if (mounted) setData(json);
-      } catch {
-        // request() hands 401 to the shared re-login flow; keep cached data on other failures
+      } catch (error) {
+        // request() hands 401 to the shared re-login flow; keep cached data on other failures.
+        // A credential change aborts the request; that is no server failure to wait out.
+        if (!(error instanceof Error && error.name === "AbortError")) receiptFailedAt.set(period, Date.now());
       } finally {
         if (mounted) setLoading(false);
       }
@@ -215,7 +239,12 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
       >
         <div className="mt-4 py-6 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
           {loading
-            ? t({ ko: "영수증 데이터를 불러오는 중...", en: "Loading receipt data...", ja: "レシートデータ読み込み中...", zh: "加载收据数据中..." })
+            ? `${t({
+              ko: "서버가 영수증을 집계하는 중입니다. 1분 넘게 걸릴 수 있습니다",
+              en: "The server is aggregating the receipt; this can take over a minute",
+              ja: "サーバーがレシートを集計中です。1分以上かかる場合があります",
+              zh: "服务器正在汇总收据，可能需要一分钟以上",
+            })} · ${loadingSeconds}s`
             : t({ ko: "영수증 데이터를 불러올 수 없습니다.", en: "Could not load receipt data.", ja: "レシートデータを読み込めません。", zh: "无法加载收据数据。" })}
         </div>
       </SurfaceSection>
@@ -237,7 +266,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
                 borderColor: "color-mix(in srgb, var(--th-accent-warn) 28%, var(--th-border) 72%)",
               }}
             >
-              {t({ ko: "갱신 중", en: "SYNCING", ja: "更新中", zh: "更新中" })}
+              {t({ ko: "갱신 중", en: "SYNCING", ja: "更新中", zh: "更新中" })} · {loadingSeconds}s
             </span>
           )}
           <SurfaceActionButton
