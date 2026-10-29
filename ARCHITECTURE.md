@@ -1536,6 +1536,8 @@ src/
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
+│   │   │   ├── terminal_receipt_stamp.rs
+│   │   │   ├── terminal_receipt_stamp_tests.rs
 │   │   │   └── watcher_state.rs
 │   │   ├── inject_disposition/
 │   │   │   └── dispatched.rs
@@ -2327,6 +2329,7 @@ src/
 │   │   │   ├── provider_session_persistence.rs
 │   │   │   ├── provider_session_persistence_tests.rs
 │   │   │   ├── read_source_switch_tests.rs
+│   │   │   ├── receipt_watcher_harness_tests.rs
 │   │   │   ├── rowless_delivery_authority.rs
 │   │   │   ├── scheduled_watcher_harness_tests.rs
 │   │   │   ├── session_bound_ack.rs
@@ -2987,6 +2990,8 @@ src/
 │   │   ├── reaction_cleanup.rs
 │   │   ├── reaction_lifecycle.rs
 │   │   ├── readopted_mailbox_ledger.rs
+│   │   ├── receipt_settle.rs
+│   │   ├── receipt_settle_tests.rs
 │   │   ├── recovery_engine.rs
 │   │   ├── recovery_known_ids.rs
 │   │   ├── relay_coord.rs

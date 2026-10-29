@@ -66,3 +66,50 @@ fn the_row_refusal_returns_before_any_provider_or_bridge_spawn() {
     };
     assert_eq!(row_refusal_gaps(HEADLESS_TURN), Vec::<String>::new());
 }
+
+/// A row kept marked because its receipt did not commit no longer blocks the channel: the next
+/// start records that receipt, removes the row and starts; an unmarked foreign row still refuses.
+#[tokio::test]
+async fn a_marked_row_is_settled_by_the_next_start_which_then_starts() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let provider = shared.provider.clone();
+    let channel = ChannelId::new(6_245_211);
+    let mut marked = row(&provider, channel, 9);
+    marked.turn_nonce = Some("ended-turn".into());
+    marked.input_origin_ids = vec!["G-marked".into()];
+    marked.terminal_receipt = Some(inflight::TerminalReceiptStamp {
+        outcome: crate::db::turns::TerminalOutcome::Completed,
+        confirmed_at: chrono::Utc::now(),
+    });
+    inflight::save_inflight_state_create_new(&marked).expect("marked row");
+
+    let token = Arc::new(CancelToken::new());
+    assert!(
+        mailbox_try_start_turn(
+            &shared,
+            channel,
+            token.clone(),
+            UserId::new(7),
+            MessageId::new(11)
+        )
+        .await
+    );
+    let mut mine = row(&provider, channel, 11);
+    mine.turn_nonce = token.turn_nonce().map(str::to_owned);
+    let created = inflight::save_inflight_state_create_new(&mine);
+    assert!(
+        created.is_err(),
+        "the marked row holds the channel at create"
+    );
+    let result =
+        super::super::foreign_row::admit_headless(&shared, &provider, &mine, &token, created).await;
+    assert!(result.is_ok(), "{result:?}");
+    let on_disk = inflight::load_inflight_state_read_only(&provider, channel.get()).unwrap();
+    assert_eq!(
+        on_disk.user_msg_id, 11,
+        "this turn's row replaced the settled one"
+    );
+    assert!(!token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+    shared.mailboxes.remove_fixture_for_test(channel);
+}

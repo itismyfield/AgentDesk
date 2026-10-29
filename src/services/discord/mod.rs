@@ -97,6 +97,8 @@ mod recovery_paths;
 mod restart_mode;
 // Scheduled-delivery isolation mark and outcome settlement for inflight turns.
 mod scheduled_turn;
+// Execution receipts of every row-removing ending, and settlement of rows kept marked.
+mod receipt_settle;
 // #1074: session identity parsing SSoT (legacy + namespaced session_key forms).
 pub(crate) mod restart_report;
 mod role_map;
