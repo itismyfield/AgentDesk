@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use super::model::Role;
-use super::profile::{EnvironmentComponent, ProfileLimits};
-use super::verification_run::{Digest, digest_of};
+use super::definition::PROFILE_VERSION;
+use super::model::{Repository, Role};
+use super::profile::{EnvironmentComponent, ProfileLimits, RepositoryProfile};
+use super::verification_run::{Digest, VerificationSpec, digest_of};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -77,6 +78,91 @@ impl ResolvedAdkProfile {
             &self.tool_policy_digest,
             &self.verification_spec_hash,
         ))
+    }
+}
+
+fn unsupported(role: Option<Role>, reason: impl Into<String>) -> ProfileResolution {
+    ProfileResolution::Unsupported {
+        role,
+        reason: reason.into(),
+    }
+}
+
+// Provider-default or missing models are unsupported, not resolved; U02/U43-U48 close the real values.
+pub fn resolve_adk_profile(
+    settings: &AdkSettingsObservation,
+    spec: &VerificationSpec,
+) -> ProfileResolution {
+    let base = match RepositoryProfile::for_repository(Repository::Adk) {
+        Ok(profile) => profile,
+        Err(error) => return unsupported(None, error.to_string()),
+    };
+    let spec_hash = match spec.hash() {
+        Ok(hash) if spec.repository == Repository::Adk => hash,
+        _ => return unsupported(None, "verification spec is not an ADK spec"),
+    };
+    let mut roles = Vec::new();
+    for role in [Role::Implementation, Role::Review] {
+        let Some(setting) = settings.roles.iter().find(|s| s.role == role) else {
+            return unsupported(Some(role), "no role setting observed");
+        };
+        let model = match &setting.model {
+            ObservedModel::Concrete { model } if !model.trim().is_empty() => model.clone(),
+            ObservedModel::Concrete { .. } | ObservedModel::Missing => {
+                return unsupported(Some(role), "no concrete model observed");
+            }
+            ObservedModel::ProviderDefault => {
+                return unsupported(Some(role), "provider default is not a confirmed model");
+            }
+        };
+        let Some(effort) = setting.effort.clone().filter(|e| !e.trim().is_empty()) else {
+            return unsupported(Some(role), "no effort observed");
+        };
+        let Some(capability) = settings
+            .capabilities
+            .iter()
+            .find(|c| c.provider == setting.provider)
+        else {
+            return unsupported(Some(role), "provider capability unobserved");
+        };
+        if role == Role::Review && !capability.independent_review_conversation {
+            return unsupported(
+                Some(role),
+                "provider lacks an independent review conversation",
+            );
+        }
+        if !capability.server_owned_external_effects {
+            return unsupported(
+                Some(role),
+                "provider cannot keep external effects server-owned",
+            );
+        }
+        roles.push(ResolvedRole {
+            role,
+            agent_id: setting.agent_id.clone(),
+            provider: setting.provider.clone(),
+            model,
+            effort,
+            account_ref: setting.account_ref.clone(),
+            source: setting.source.clone(),
+        });
+    }
+    if roles[0].agent_id == roles[1].agent_id {
+        return unsupported(
+            Some(Role::Review),
+            "review must use a different agent than work",
+        );
+    }
+    ProfileResolution::Resolved {
+        profile: ResolvedAdkProfile {
+            profile_version: PROFILE_VERSION.into(),
+            profile_hash: base.hash,
+            roles,
+            limits: base.limits,
+            tool_policy_digest: settings.tool_policy_digest.clone(),
+            verification_spec_hash: spec_hash,
+            environment_requirements: base.environment_requirements,
+        },
     }
 }
 

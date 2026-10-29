@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 137
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 138
 - Platform and third-party variables: 30
 
 ## AgentDesk variables
@@ -25,6 +25,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_BUSY_INJECT` | `src/services/discord/health/turn_deliver/inject.rs` | `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read once per process: `external` or `all` opens it for any turn holder… |
 | `ADK_BUSY_INJECT_DISCORD_CHANNELS` | `src/services/discord/router/intake_gate/busy_inject.rs` | `ADK_BUSY_INJECT_DISCORD_CHANNELS` opens busy-turn injection of admitted Discord text, read once per process: `*` or channel ids split by commas or spaces, thr… |
 | `ADK_BUSY_INJECT_STASH_CHANNELS` | `src/services/claude_tui/busy_inject.rs` | Channel ids whose panes may take the stash path, comma-separated and read once; unset is none. |
+| `ADK_CAMPAIGN_PHASE_NONCE` | `src/services/campaign_execution/verification_runner.rs` | Set on every phase child so a later observation can match the exact process, not just its PID. |
 | `ADK_CLEAR_END_MUTANT` | `src/services/tui_o/store/clear_end.rs` | Test-only switch arming one named mutant of the clear-end contract. |
 | `ADK_CODEX_END_MUTANT` | `src/services/codex_tui/execution_end/mod.rs` | Test-only fault injection; release builds never consult the environment. |
 | `ADK_CODEX_OBSERVATION_MUTANT` | `src/services/session_host/herdr_registry.rs`, `src/services/tui_prompt_dedupe/binding_context/inventory.rs`, `src/services/tui_prompt_dedupe/binding_events/codex/observation.rs` | Reads whole registered endpoints. |

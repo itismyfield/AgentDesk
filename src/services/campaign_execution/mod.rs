@@ -7,4 +7,5 @@ pub mod execution_pin;
 pub mod model;
 pub mod profile;
 pub mod verification_run;
+pub mod verification_runner;
 pub mod view;
