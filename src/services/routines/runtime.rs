@@ -452,7 +452,7 @@ fn compact_json_val(value: &Value) -> String {
         other => {
             let s = other.to_string();
             if s.len() > 80 {
-                format!("{}…", &s[..80])
+                format!("{}…", crate::utils::format::safe_prefix(&s, 80))
             } else {
                 s
             }
@@ -913,6 +913,38 @@ mod tests {
         validate_claimed_migrated_launchd_run,
     };
     use crate::services::routines::{RoutineAction, RoutineScriptLoader, store::ClaimedRoutineRun};
+
+    #[test]
+    fn compact_json_objects_respect_utf8_byte_budget() {
+        for text in [
+            "a".repeat(69),
+            "a".repeat(70),
+            "한".repeat(30),
+            "🙂".repeat(30),
+        ] {
+            let value = json!({"text": text});
+            let serialized = value.to_string();
+            let compact = super::compact_json_val(&value);
+            if serialized.len() <= 80 {
+                assert_eq!(compact, serialized);
+            } else {
+                let prefix = compact.strip_suffix('…').expect("truncation marker");
+                assert!(compact.len() <= 83);
+                assert!(prefix.len() <= 80);
+                assert!(serialized.starts_with(prefix));
+                let next = serialized[prefix.len()..].chars().next().unwrap();
+                assert!(prefix.len() + next.len_utf8() > 80);
+            }
+        }
+        for value in [json!("한🙂"), json!(12), json!(true), json!(null)] {
+            let expected = value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string());
+            assert_eq!(super::compact_json_val(&value), expected);
+        }
+        assert_eq!(super::compact_json_val(&json!(["한", "🙂"])), "[2개]");
+    }
 
     #[test]
     fn tick_failure_public_projection_never_contains_diagnostic() {
