@@ -687,7 +687,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                         }
                     }
                 }).unwrap_or_else(|reason| Err(match reason {
-                    super::input_notices::admission::NoticeRefusal::Busy => Refusal::Later,
+                    // Notice-only contention rotates the notice; the delivery lease was not the cause.
+                    super::input_notices::admission::NoticeRefusal::Busy => {
+                        Refusal::Withheld("input notice admission busy")
+                    }
                     super::input_notices::admission::NoticeRefusal::Withheld(reason) => {
                         tracing::info!(channel, reason, unit_key = ?piece.unit_key,
                             "[tui_o] input notice withheld before Prepared");

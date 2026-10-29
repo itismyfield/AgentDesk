@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::tui_input::human_frame::history;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::store::ledger::{
     LedgerEntry,
@@ -13,11 +14,15 @@ use crate::services::tui_o::writer::{
 use sha2::{Digest, Sha256};
 use std::{future::Future, io::Write, sync::Mutex};
 const CHANNEL: u64 = 7332099;
+type Holder = (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>);
 #[derive(Default)]
 struct Port {
     unreadable: std::sync::atomic::AtomicBool,
     messages: Mutex<Vec<SeenMessage>>,
     posts: Mutex<Vec<String>>,
+    /// While the POST with this payload is in flight, another thread takes this session's authority.
+    contend: Mutex<Option<(String, String)>>,
+    holder: Arc<Mutex<Option<Holder>>>,
 }
 impl DiscordPort for Port {
     fn bot_id(&self) -> u64 {
@@ -33,7 +38,24 @@ impl DiscordPort for Port {
         };
         h.push(m.clone());
         let uncertain = self.unreadable.load(std::sync::atomic::Ordering::SeqCst);
+        let contend = (self.contend.lock().unwrap())
+            .take_if(|(payload, _)| *payload == m.content)
+            .map(|(_, logical)| logical);
+        let holder = self.holder.clone();
         async move {
+            if let Some(logical) = contend {
+                tokio::task::yield_now().await;
+                let (held, taken) = std::sync::mpsc::channel();
+                let (release, released) = std::sync::mpsc::channel::<()>();
+                let thread = std::thread::spawn(move || {
+                    crate::services::tmux_common::with_tmux_source_authority(&logical, |_| {
+                        held.send(()).unwrap();
+                        let _ = released.recv();
+                    })
+                });
+                taken.recv().unwrap();
+                *holder.lock().unwrap() = Some((release, thread));
+            }
             if uncertain {
                 PostOutcome::Uncertain("response lost".into())
             } else {
@@ -625,4 +647,251 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
     assert_eq!(*port.posts.lock().unwrap(), ["later answer"]);
     assert_eq!(actor.writer.boot.done(), 1);
     assert_eq!(actor.progress().debt, 1);
+}
+
+fn era(o: &OStore, source: &crate::services::tui_o::shadow::SourceId) {
+    o.begin_era(&[CHANNEL], chrono::Utc::now(), |channel| {
+        Ok(Initialized {
+            channel,
+            sources: vec![InitSource {
+                source_id: source.clone(),
+                delivery_start: 0,
+                prefix_hash: hex::encode(Sha256::digest(b"")),
+            }],
+            initial_anchor: 10,
+            build_digest: "fixture".into(),
+            at: chrono::Utc::now(),
+        })
+    })
+    .unwrap();
+}
+fn start_migration(actor: &mut Host) {
+    actor
+        .writer
+        .record(LedgerEntry::InputNotice {
+            entry: Box::new(NoticeEntry::MigrationStarted {
+                snapshot: MigrationSnapshot {
+                    sources: Vec::new(),
+                    binding_checkpoint: 1,
+                    history: MigrationHistory::Fixed {
+                        lower: 10,
+                        upper: 10,
+                    },
+                },
+            }),
+        })
+        .unwrap();
+}
+fn input_key(id: &str) -> UnitKey {
+    UnitKey {
+        channel_id: CHANNEL,
+        provider: ShadowProvider::Claude,
+        native_key: id.into(),
+        kind: crate::services::tui_o::shadow::UnitKind::InputNotice,
+    }
+}
+fn notice_evidence(actor: &mut Host, key: &UnitKey) -> usize {
+    let ledger = actor.writer.store().ledger();
+    let evidence = ledger.input_notices().evidence.values();
+    evidence
+        .filter(|e| e.unit_key.as_ref() == Some(key))
+        .count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_injection_ownership_keeps_notice_debt_through_raw_release_until_receipt() {
+    let _guard = crate::config::TestRuntimeRootGuard::new();
+    let runtime = tempfile::tempdir().unwrap();
+    let path = runtime.path().join("native.jsonl");
+    let prompt = "pending terminal input".repeat(20);
+    let original = [
+        row("pending", &prompt),
+        body("pending-body", "pending answer"),
+    ]
+    .concat();
+    std::fs::write(&path, &original).unwrap();
+    let source =
+        crate::services::tui_o::shadow::binding_reader::source_id_for("native", &path).unwrap();
+    let logical = "pending-notice-pane";
+    let _binding = bind(
+        runtime.path(),
+        CHANNEL,
+        &source,
+        logical,
+        "73320000000000000000000000000097",
+    );
+    history::register(("claude", logical, "attempt", "733201"), &path, 0, &prompt).unwrap();
+    assert!(matches!(
+        history::observed_attempt_checked(
+            "claude",
+            logical,
+            std::slice::from_ref(&prompt),
+            Some("pending"),
+        ),
+        Ok(history::ObservedAttempt::Pending)
+    ));
+    let o = OStore::open_if_enabled(&StoreConfig { enabled: true }, runtime.path())
+        .unwrap()
+        .unwrap();
+    era(&o, &source);
+    let port = Arc::new(Port::default());
+    let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
+    start_migration(&mut actor);
+    resume(&mut actor);
+    let fresh = actor.read_sources();
+    actor.prepare_notices(&fresh).await;
+    let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
+    actor.deliver_owed(&progress).await;
+    let key = input_key("pending");
+    assert_eq!(*port.posts.lock().unwrap(), ["pending answer"]);
+    assert!(
+        actor
+            .writer
+            .store()
+            .ledger()
+            .latest_piece(&key, 0)
+            .is_none()
+    );
+    assert!(actor.writer.store().ledger().excluded(&key).is_none());
+    assert_eq!(
+        notice_evidence(&mut actor, &key),
+        1,
+        "unconfirmed ownership must keep its native row as evidence"
+    );
+    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.progress().debt, 1);
+    assert_eq!(actor.writer.boot.done(), 1);
+
+    let cap = actor.writer.store().spool_bytes();
+    actor.writer.store().set_limits_for_test(1, cap);
+    append(&path, &body("later-body", &"later answer".repeat(40)));
+    actor.read_sources();
+    assert_eq!(
+        actor
+            .writer
+            .store()
+            .cursor(&source)
+            .unwrap()
+            .captured_through,
+        original.len() as u64,
+        "small cap must really hold the next batch"
+    );
+    assert!(actor.notice_raw_independent());
+    actor.collect_settled();
+    assert_eq!(actor.writer.store().retained_segments(&source), 0);
+    drop(actor);
+    let mut actor = host(&o, port.clone(), Alarms::default(), cap);
+    resume(&mut actor);
+    let fresh = actor.read_sources();
+    actor.prepare_notices(&fresh).await;
+    actor.deliver_owed(&progress).await;
+    assert_eq!(
+        notice_evidence(&mut actor, &key),
+        1,
+        "evidence must outlive its raw segment and the reopened actor"
+    );
+    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.obligations().unwrap().owed, 1);
+
+    assert_eq!(
+        history::receipt("attempt", &path, 0, "user", Some("pending"), &prompt),
+        Some(true)
+    );
+    actor.prepare_notices(&[]).await;
+    actor.deliver_owed(&progress).await;
+    assert_eq!(
+        actor.writer.store().ledger().excluded(&key),
+        Some("input_notice_source")
+    );
+    assert!(
+        actor
+            .writer
+            .store()
+            .ledger()
+            .latest_piece(&key, 0)
+            .is_none()
+    );
+    assert_eq!(actor.notice_debt_extra(), 0);
+    let posts = port.posts.lock().unwrap();
+    assert_eq!(posts.len(), 2);
+    assert!(posts.iter().all(|p| !p.starts_with("-# ⌨️")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn notice_admission_contention_after_preflight_still_lets_the_later_body_post() {
+    let _guard = crate::config::TestRuntimeRootGuard::new();
+    let runtime = tempfile::tempdir().unwrap();
+    let path = runtime.path().join("native.jsonl");
+    let rows = [
+        body("b0", "first answer"),
+        row("busy", "busy terminal input"),
+        body("b1", "second answer"),
+    ];
+    std::fs::write(&path, rows.concat()).unwrap();
+    let source =
+        crate::services::tui_o::shadow::binding_reader::source_id_for("native", &path).unwrap();
+    let logical = "busy-notice-pane";
+    let _binding = bind(
+        runtime.path(),
+        CHANNEL,
+        &source,
+        logical,
+        "73320000000000000000000000000096",
+    );
+    let o = OStore::open_if_enabled(&StoreConfig { enabled: true }, runtime.path())
+        .unwrap()
+        .unwrap();
+    era(&o, &source);
+    let port = Arc::new(Port::default());
+    *port.contend.lock().unwrap() = Some(("first answer".into(), logical.into()));
+    let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
+    start_migration(&mut actor);
+    resume(&mut actor);
+    let fresh = actor.read_sources();
+    actor.prepare_notices(&fresh).await;
+    let key = input_key("busy");
+    let order: Vec<_> = (actor.owed.iter())
+        .map(|item| match item {
+            Derived::Piece(piece) => Some(piece.unit_key.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order.len(), 3);
+    assert_eq!(
+        order[1].as_ref(),
+        Some(&key),
+        "the notice passed preflight between the Bodies"
+    );
+    let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
+    actor.deliver_owed(&progress).await;
+    assert!(
+        crate::services::tmux_common::try_with_tmux_source_authority(logical, |_| ()).is_none(),
+        "the notice's source authority is held by another task"
+    );
+    assert_eq!(
+        *port.posts.lock().unwrap(),
+        ["first answer", "second answer"]
+    );
+    assert!(
+        actor
+            .writer
+            .store()
+            .ledger()
+            .latest_piece(&key, 0)
+            .is_none()
+    );
+    assert_eq!(actor.owed.len(), 1);
+    assert_eq!(actor.progress().debt, 1);
+    assert_eq!(actor.writer.boot.done(), 2, "only the two Bodies drained");
+
+    let (release, thread) = port.holder.lock().unwrap().take().unwrap();
+    release.send(()).unwrap();
+    thread.join().unwrap();
+    actor.deliver_owed(&progress).await;
+    let posts = port.posts.lock().unwrap();
+    assert_eq!(posts.len(), 3);
+    assert!(posts[2].starts_with("-# ⌨️"));
+    assert!(actor.owed.is_empty());
+    assert_eq!(actor.progress().debt, 0);
+    assert_eq!(actor.writer.boot.done(), 3);
 }

@@ -85,7 +85,11 @@ impl Projection {
             std::slice::from_ref(&prompt),
             Some(&native_key),
         )? {
-            ObservedAttempt::Known(_) | ObservedAttempt::Pending => return Ok(None),
+            ObservedAttempt::Known(_) => return Ok(None),
+            // Unconfirmed ownership is kept as evidence and debt until a receipt decides it.
+            ObservedAttempt::Pending => {
+                return Err("input notice injection ownership pending".into());
+            }
             ObservedAttempt::None => {}
         }
         let unit_key = UnitKey {

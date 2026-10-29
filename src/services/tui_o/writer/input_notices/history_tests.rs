@@ -44,12 +44,20 @@ fn projection_excludes_plain_injection_by_original_logical_session() {
         ));
         for text in [&frame, &wrapped] {
             let native = record("injected-native", text);
-            assert!(
-                project(&mut Projection::for_tests(), &native)
-                    .unwrap()
-                    .is_none(),
-                "registered injection must not create a notice: received={received}"
-            );
+            let projected = project(&mut Projection::for_tests(), &native);
+            // Pending ownership is held as evidence; only a receipt settles it as an injection.
+            if received {
+                assert!(
+                    projected.unwrap().is_none(),
+                    "a received injection creates no notice"
+                );
+            } else {
+                assert_eq!(
+                    projected.unwrap_err(),
+                    "input notice injection ownership pending",
+                    "an unreceived injection is held, never turned into a notice"
+                );
+            }
         }
     }
 }
