@@ -7,4 +7,5 @@ pub(crate) mod notice;
 pub(crate) mod origin;
 pub(crate) mod pump;
 pub(crate) mod recovery;
+pub(crate) mod routine;
 pub(crate) mod target;

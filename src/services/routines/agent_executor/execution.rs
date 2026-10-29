@@ -70,16 +70,24 @@ pub(super) fn with_mode(mut result: Value, mode: AgentExecutionMode) -> Value {
     result
 }
 
-/// A terminal script result may replace result_json; the latest started attempt still owns its route.
+/// A terminal script result may replace result_json; the latest intent still names its route.
 fn close_routing_result(result: Option<Value>, attempts: &Value) -> Value {
     let mut result = result.filter(Value::is_object).unwrap_or_else(|| json!({}));
     if let Some(started) = attempts.as_array().and_then(|attempts| {
-        attempts
-            .iter()
-            .rev()
-            .find(|attempt| attempt.get("event").and_then(Value::as_str) == Some("started"))
+        attempts.iter().rev().find(|attempt| {
+            matches!(
+                attempt.get("event").and_then(Value::as_str),
+                Some("started" | "input_pending")
+            )
+        })
     }) {
-        for key in ["execution_mode", "provider", "channel_id", "turn_id"] {
+        for key in [
+            "execution_mode",
+            "provider",
+            "channel_id",
+            "turn_id",
+            "owner_input",
+        ] {
             if let Some(value) = started.get(key).filter(|value| !value.is_null()) {
                 result[key] = value.clone();
             }
@@ -171,6 +179,24 @@ mod tests {
         assert_eq!(result["turn_id"], "new");
         assert_eq!(result["channel_id"], "123");
         assert_eq!(result["status"], "completed");
+    }
+
+    #[test]
+    fn terminal_script_keeps_the_owner_intent_even_before_a_started_event() {
+        let owner = json!({"ticket":"held-ticket","context":{"run_id":"run"}});
+        let result = close_routing_result(
+            Some(json!({"status":"completed"})),
+            &json!([
+                {"event":"started","execution_mode":"process","turn_id":"old"},
+                {"event":"input_pending","execution_mode":"tmux","turn_id":"held","owner_input":owner}
+            ]),
+        );
+        assert_eq!(result["owner_input"], owner);
+        assert_eq!(result["turn_id"], "held");
+        assert_eq!(
+            AgentExecutionMode::from_result(Some(&result)),
+            AgentExecutionMode::Tmux
+        );
     }
 
     #[test]
