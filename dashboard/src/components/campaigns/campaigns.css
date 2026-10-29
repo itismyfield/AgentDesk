@@ -120,6 +120,29 @@
 .campaign-connections button { display: flex; align-items: center; gap: 8px; text-align: left; }
 .campaign-connections button strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .campaign-connections button :is(span, small) { flex-shrink: 0; font-size: 10px; color: var(--th-text-muted); }
+.campaign-status-succeeded, .campaign-status-complete { background: #16a34a20; color: #22c55e; }
+.campaign-status-waiting, .campaign-status-stopping, .campaign-status-unable_to_progress, .campaign-status-needs_inspection, .campaign-status-interrupted { background: #f59e0b20; color: #d97706; }
+.campaign-status-assigned, .campaign-status-verifying { background: #3b82f620; color: #60a5fa; }
+.campaign-server-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.campaigns-panel .campaign-server-list button { display: grid; gap: 4px; width: 100%; text-align: left; background: var(--th-card-bg); }
+.campaigns-panel .campaign-server-list button[aria-pressed="true"] { border-color: var(--th-accent-info); box-shadow: inset 3px 0 var(--th-accent-info); }
+.campaign-server-list small { color: var(--th-text-muted); font-size: 11px; overflow-wrap: anywhere; }
+.campaign-server-detail, .campaign-server-controls, .campaign-server-check, .campaign-server-form, .campaign-server-task { display: grid; gap: 10px; min-width: 0; }
+.campaign-server-title { min-width: 0; margin-right: auto; }
+.campaign-server-reasons, .campaign-server-check ul, .campaign-inspector ul, .campaign-connections ol { padding-left: 16px; list-style: disc; font-size: 11px; overflow-wrap: anywhere; }
+.campaign-server-command { display: inline-grid; gap: 3px; }
+.campaign-server-command small { color: var(--th-text-muted); font-size: 10px; max-width: 220px; }
+.campaign-server-stop { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--th-border); border-radius: 9px; }
+.campaign-server-tasks { display: grid; gap: 4px; min-width: 0; }
+.campaigns-panel .campaign-server-task-row { display: grid; gap: 4px; width: 100%; text-align: left; background: transparent; }
+.campaigns-panel .campaign-server-task-row[aria-pressed="true"] { background: color-mix(in srgb, var(--th-accent-info) 12%, var(--th-card-bg)); box-shadow: inset 3px 0 var(--th-accent-info); }
+.campaign-server-task-row small { color: var(--th-text-muted); font-size: 10px; }
+.campaign-server-task { padding: 10px; border: 1px solid var(--th-border); border-radius: 9px; }
+.campaign-server-task legend { font-size: 11px; color: var(--th-text-muted); padding: 0 4px; }
+.campaign-server-dependencies { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 11px; color: var(--th-text-muted); }
+.campaign-server-ac { display: grid; grid-template-columns: minmax(80px, 140px) minmax(0, 1fr) minmax(110px, 150px) auto; gap: 6px; align-items: center; }
+.campaign-server-feedback textarea { font-family: inherit; resize: vertical; }
+.campaign-server-form [aria-invalid="true"] { border-color: #d97706; }
 @media (max-width: 1200px) { .campaign-workbench.has-inspector .campaign-task-columns, .campaign-workbench.has-inspector .campaign-task-row { grid-template-columns: minmax(130px, 1fr) 96px 42px; } .campaign-workbench.has-inspector .campaign-task-stage, .campaign-workbench.has-inspector .campaign-task-owner, .campaign-workbench.has-inspector .campaign-task-columns > :nth-child(3), .campaign-workbench.has-inspector .campaign-task-columns > :nth-child(5) { display: none; } }
 @media (max-width: 900px) { .campaign-workbench.has-inspector { grid-template-columns: minmax(0, 1fr); } .campaign-inspector { max-height: none; } .campaign-toolbar { grid-template-columns: 1fr 1fr; } .campaign-search { grid-column: 1 / -1; } .campaign-group-list { max-height: 60vh; } .campaign-main { padding: 12px; } .campaign-selector { width: 100%; } .campaigns-panel .campaign-check { min-height: 44px; } .campaigns-panel button { min-height: 36px; } .campaigns-panel .campaign-task-row { min-height: 48px; } .campaign-graph .react-flow__controls-button { min-height: 26px; } }
 @media (max-width: 600px) {
@@ -153,4 +176,7 @@
   .campaign-mini-progress { display: none; }
   .campaign-toolbar label > :is(input, select) { min-height: 40px; }
   .campaigns-panel .campaign-view-toggle button, .campaigns-panel .campaign-list-tools button, .campaign-inspector-header button { min-height: 44px; }
+  .campaign-server-ac { grid-template-columns: minmax(0, 1fr); }
+  .campaigns-panel :is(.campaign-server-detail, .campaign-server-form, .campaign-server-list) button { min-height: 44px; }
+  .campaigns-panel :is(.campaign-server-form, .campaign-server-feedback) :is(input, select, textarea) { font-size: 16px; min-height: 44px; }
 }
