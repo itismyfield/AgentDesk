@@ -14,6 +14,9 @@ use super::rotation::BoundaryEvidence;
 use super::{StoreError, damage};
 use crate::services::discord::runtime_store::fsync_parent_dir;
 use crate::services::tui_o::shadow::{SourceId, UnitKey};
+use crate::services::tui_o::writer::input_notices::NoticeOrigin;
+
+pub mod input_notices;
 
 /// This build includes both the ledger reader and the guarded writer consumer.
 // CONSUMED-BY: scripts/deploy-release.sh via `agentdesk build-info` (src/cli/build_info.rs).
@@ -32,6 +35,9 @@ pub enum LocalRetryMark {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LedgerEntry {
+    InputNotice {
+        entry: Box<input_notices::NoticeEntry>,
+    },
     ExactEvidence {
         metadata: Box<crate::services::tui_o::exact_episode::EpisodeMetadata>,
     },
@@ -52,6 +58,8 @@ pub enum LedgerEntry {
         epoch: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         local_retry: Option<LocalRetryMark>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notice_origin: Option<Box<NoticeOrigin>>,
     },
     Posted {
         serial: u64,
@@ -125,6 +133,7 @@ pub struct PieceRecord {
     pub prepared_at: DateTime<Utc>,
     pub outcome: Option<PieceOutcome>,
     pub local_retry: Option<LocalRetryMark>,
+    pub notice_origin: Option<Box<NoticeOrigin>>,
     pub outcome_at: Option<DateTime<Utc>>,
 }
 
@@ -165,6 +174,7 @@ pub struct LedgerState {
     violation: Option<String>,
     exact_evidence: Vec<crate::services::tui_o::exact_episode::EpisodeMetadata>,
     approvals: BTreeMap<u64, ResumeApproval>,
+    input_notices: input_notices::NoticeState,
 }
 
 impl LedgerState {
@@ -182,6 +192,10 @@ impl LedgerState {
 
     pub fn next_serial(&self) -> u64 {
         self.next_serial
+    }
+
+    pub fn input_notices(&self) -> &input_notices::NoticeState {
+        &self.input_notices
     }
 
     /// The piece prepared without a recorded result; at most one exists while the invariant holds.
@@ -364,6 +378,14 @@ impl LedgerState {
 
     pub(super) fn apply(&mut self, at: DateTime<Utc>, entry: LedgerEntry) {
         match entry {
+            LedgerEntry::InputNotice { entry } => match self.input_notices.apply(*entry) {
+                Ok(Some(key)) => {
+                    self.excluded
+                        .insert(key, "input_notice_legacy_imported".into());
+                }
+                Ok(None) => {}
+                Err(reason) => self.violate(reason),
+            },
             LedgerEntry::OperatorResume {
                 rejected_serial,
                 approval_id,
@@ -413,6 +435,7 @@ impl LedgerState {
                 anchor_id,
                 epoch,
                 local_retry,
+                notice_origin,
             } => {
                 if serial != self.next_serial || self.open_serial.is_some() {
                     self.violate(format!("prepared serial {serial} out of order"));
@@ -429,6 +452,7 @@ impl LedgerState {
                                 && root.unit_key == unit_key
                                 && root.piece_index == piece_index
                                 && root.payload == payload
+                                && root.notice_origin == notice_origin
                         })
                         && self.latest_piece(&unit_key, piece_index).map(|(s, _)| s)
                             == Some(*root_serial)
@@ -465,6 +489,7 @@ impl LedgerState {
                     prepared_at: at,
                     outcome: None,
                     local_retry,
+                    notice_origin,
                     outcome_at: None,
                 };
                 self.pieces.insert(serial, piece);
@@ -770,6 +795,7 @@ mod tests {
         };
         LedgerEntry::Prepared {
             local_retry: None,
+            notice_origin: None,
             serial,
             unit_key,
             piece_index: 0,

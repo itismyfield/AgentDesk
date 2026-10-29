@@ -127,6 +127,7 @@ fn deadline_crossing(late_response: bool, blocked_dump: bool) {
     let recorded = decisions.clone();
     let mut state = WatchdogState::new(started);
     state.last_response_at = Some(started);
+    let (probe_tx, probe_rx) = mpsc::channel();
     threads.0.push(std::thread::spawn(move || {
         driver::run(
             &policy,
@@ -134,7 +135,10 @@ fn deadline_crossing(late_response: bool, blocked_dump: bool) {
             state,
             deadline - Duration::from_millis(150),
             driver::Hooks {
-                probe: |probe_deadline| driver::tcp_probe(&addr, "127.0.0.1", probe_deadline),
+                probe: move |probe_deadline| {
+                    let _ = probe_tx.send(Instant::now());
+                    driver::tcp_probe(&addr, "127.0.0.1", probe_deadline)
+                },
                 snapshot: scheduling,
                 dump: move || {
                     if blocked_dump { dump() } else { Ok(()) }
@@ -152,12 +156,15 @@ fn deadline_crossing(late_response: bool, blocked_dump: bool) {
             },
         );
     }));
+    // The probe never connects or writes past its D-capped deadline, so a received request was
+    // started by the driver's clock; the server thread's own wake to read it may land after D.
     let requested_at = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let probe_started_at = probe_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(
-        requested_at < deadline,
+        probe_started_at < deadline,
         "TCP request must actually start before D"
     );
-    assert!(requested_at >= deadline - Duration::from_millis(170));
+    assert!(probe_started_at >= deadline - Duration::from_millis(170));
     let (reason, exited_at) = exit_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("OS observer must see exit sink");
@@ -167,7 +174,8 @@ fn deadline_crossing(late_response: bool, blocked_dump: bool) {
         .find(|(decision, _, _)| matches!(decision, Decision::Exit(_)))
         .unwrap();
     eprintln!(
-        "deadline crossing late={late_response} blocked_dump={blocked_dump}: request_ms={} decision_ms={} exit_sink_ms={} D_ms=600 OS_allowance_ms=120",
+        "deadline crossing late={late_response} blocked_dump={blocked_dump}: probe_ms={} request_ms={} decision_ms={} exit_sink_ms={} D_ms=600 OS_allowance_ms=120",
+        probe_started_at.duration_since(started).as_millis(),
         requested_at.duration_since(started).as_millis(),
         decided_at.duration_since(started).as_millis(),
         exited_at.duration_since(started).as_millis()

@@ -1,15 +1,52 @@
-use sqlx::{PgPool, Row as SqlxRow};
+use sqlx::{PgConnection, PgPool, Row as SqlxRow};
 
 use super::{
-    CardPipelineContext, GithubIssueRef, IssueCardUpsert, IssueCardUpsertResult, UpdateCardFields,
-    normalize_optional_description, normalize_optional_text,
+    CardLabelsUpdate, CardPipelineContext, GithubIssueRef, IssueCardUpsert, IssueCardUpsertResult,
+    UpdateCardFields, normalize_optional_description, normalize_optional_text, set_card_labels_pg,
 };
 use crate::utils::github_links::{
     normalize_optional_github_issue_url, normalize_optional_github_repo_id,
 };
 
+/// Inserts the issue card or updates the existing one. On update `metadata_json` is merged
+/// key by key into the stored object, so callers cannot remove a metadata key through it.
 pub async fn upsert_card_from_issue_pg(
     pool: &PgPool,
+    params: IssueCardUpsert,
+) -> Result<IssueCardUpsertResult, String> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|error| format!("acquire postgres connection for issue card upsert: {error}"))?;
+    upsert_card_from_issue_on(&mut conn, params).await
+}
+
+/// [`upsert_card_from_issue_pg`] followed by a labels replace in one transaction, so a new
+/// card is never visible without its labels and the labels land before any later label write.
+pub async fn upsert_card_from_issue_with_labels_pg(
+    pool: &PgPool,
+    params: IssueCardUpsert,
+    labels: &str,
+) -> Result<IssueCardUpsertResult, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin issue card upsert transaction: {error}"))?;
+    let upserted = upsert_card_from_issue_on(&mut tx, params).await?;
+    set_card_labels_pg(
+        &mut *tx,
+        &upserted.card_id,
+        CardLabelsUpdate::Replace(labels),
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit issue card upsert transaction: {error}"))?;
+    Ok(upserted)
+}
+
+async fn upsert_card_from_issue_on(
+    conn: &mut PgConnection,
     params: IssueCardUpsert,
 ) -> Result<IssueCardUpsertResult, String> {
     let repo_id = normalize_optional_github_repo_id(Some(params.repo_id));
@@ -77,7 +114,7 @@ pub async fn upsert_card_from_issue_pg(
     .bind(params.issue_number)
     .bind(description.as_deref())
     .bind(metadata_json.as_deref())
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|error| {
         format!(
@@ -100,7 +137,7 @@ pub async fn upsert_card_from_issue_pg(
              assigned_agent_id = COALESCE($3, kanban_cards.assigned_agent_id),
              github_issue_url = COALESCE($4, kanban_cards.github_issue_url),
              description = COALESCE($5, kanban_cards.description),
-             metadata = COALESCE(COALESCE(kanban_cards.metadata, '{}'::jsonb) || CAST($6 AS jsonb), kanban_cards.metadata),
+             metadata = COALESCE(CASE WHEN jsonb_typeof(kanban_cards.metadata) = 'object' THEN kanban_cards.metadata ELSE '{}'::jsonb END || CAST($6 AS jsonb), kanban_cards.metadata),
              updated_at = NOW()
          WHERE repo_id = $7
            AND github_issue_number = $8
@@ -114,7 +151,7 @@ pub async fn upsert_card_from_issue_pg(
     .bind(metadata_json.as_deref())
     .bind(&repo_id)
     .bind(params.issue_number)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await
     .map_err(|error| {
         format!(

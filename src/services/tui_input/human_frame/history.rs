@@ -4,6 +4,8 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 pub(crate) mod append;
+#[cfg(test)]
+mod checked_tests;
 mod compat;
 #[cfg(test)]
 mod compat_tests;
@@ -372,6 +374,16 @@ pub(crate) fn observed_attempt(
     observed_at(path(), provider, session, prompts, row)
 }
 
+/// Preserves unreadable evidence as an error; `logical_session` names the recorded input owner.
+pub(crate) fn observed_attempt_checked(
+    provider: &str,
+    logical_session: &str,
+    prompts: &[String],
+    row: Option<&str>,
+) -> Result<ObservedAttempt, String> {
+    observed_at_checked(path(), provider, logical_session, prompts, row)
+}
+
 fn observed_at(
     path: Result<PathBuf, String>,
     provider: &str,
@@ -379,11 +391,7 @@ fn observed_at(
     prompts: &[String],
     row: Option<&str>,
 ) -> ObservedAttempt {
-    #[cfg(test)]
-    if let Some(observed) = v2::scoped_observed(provider, session, prompts, row) {
-        return observed;
-    }
-    let Ok(store) = path.and_then(|path| read(&path)) else {
+    observed_at_checked(path, provider, session, prompts, row).unwrap_or_else(|_| {
         let plain = prompts
             .iter()
             .flat_map(|prompt| std::iter::once(prompt.trim()).chain(class_inner(prompt)))
@@ -400,12 +408,26 @@ fn observed_at(
                             && author.bytes().all(|byte| byte.is_ascii_digit())
                     })
             });
-        return if plain {
+        if plain {
             ObservedAttempt::Pending
         } else {
             ObservedAttempt::None
-        };
-    };
+        }
+    })
+}
+
+fn observed_at_checked(
+    path: Result<PathBuf, String>,
+    provider: &str,
+    session: &str,
+    prompts: &[String],
+    row: Option<&str>,
+) -> Result<ObservedAttempt, String> {
+    #[cfg(test)]
+    if let Some(observed) = v2::scoped_observed(provider, session, prompts, row) {
+        return Ok(observed);
+    }
+    let store = path.and_then(|path| read(&path))?;
     let hashes: Vec<_> = prompts
         .iter()
         .flat_map(|prompt| class_hashes(prompt))
@@ -425,16 +447,16 @@ fn observed_at(
                     .any(|event| event.row.as_deref() == Some(row))
         })
     {
-        return ObservedAttempt::Known(entry.id.clone());
+        return Ok(ObservedAttempt::Known(entry.id.clone()));
     }
     if let Some(observed) = append::observed(&store, provider, session, prompts, row) {
-        return observed;
+        return Ok(observed);
     }
-    if store.entries.iter().any(matching) {
+    Ok(if store.entries.iter().any(matching) {
         ObservedAttempt::Pending
     } else {
         ObservedAttempt::None
-    }
+    })
 }
 
 pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {

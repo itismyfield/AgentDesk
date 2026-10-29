@@ -186,6 +186,16 @@ impl AdmittedRestartTerminal {
         {
             return kept(state, "an actor arrived before cleanup");
         }
+        // The admitted terminal ends the execution; its receipt commits before the row goes.
+        let ended = match self.kind() {
+            NativeTerminalKind::Completed => {
+                super::receipt_settle::body_outcome(&row.full_response)
+            }
+            NativeTerminalKind::Aborted => crate::db::turns::TerminalOutcome::Cancelled,
+        };
+        if !super::receipt_settle::record_or_stamp(shared.pg_pool.as_ref(), &row, ended).await {
+            return kept(state, "its receipt is kept marked until it commits");
+        }
         let current = super::runtime_store::process_generation();
         let wildcard = mutant("restart_admitted_clear_wildcard_nonce")
             || mutant("restart_admitted_row_dropped")

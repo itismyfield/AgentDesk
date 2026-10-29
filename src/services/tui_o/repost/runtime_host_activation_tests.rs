@@ -918,6 +918,7 @@ async fn d4act2_gateway_repost_host_stop_and_rollback_quiescence_pg() {
         let mut ledger = store.open_channel(&era, channel).unwrap().unwrap();
         for entry in [
             LedgerEntry::Prepared {
+                notice_origin: None,
                 local_retry: None,
                 serial: 0,
                 unit_key: key.unit().clone(),
@@ -928,6 +929,7 @@ async fn d4act2_gateway_repost_host_stop_and_rollback_quiescence_pg() {
             },
             LedgerEntry::NotFound { serial: 0 },
             LedgerEntry::Prepared {
+                notice_origin: None,
                 local_retry: None,
                 serial: 1,
                 unit_key: unit("permission-proof"),
