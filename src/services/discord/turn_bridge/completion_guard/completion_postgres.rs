@@ -23,7 +23,8 @@ where
         + Send
         + 'static,
 {
-    let config = crate::config::load().map_err(|error| format!("load runtime config: {error}"))?;
+    let config = crate::config::runtime_config_strict()
+        .map_err(|error| format!("load runtime config: {error}"))?;
     crate::utils::async_bridge::block_on_result(
         async move {
             let Some(pool) = crate::db::postgres::connect(&config).await? else {
@@ -281,7 +282,7 @@ async fn runtime_max_entry_retries_pg(
             .get("maxEntryRetries")
             .and_then(serde_json::Value::as_u64)
     });
-    let fallback = crate::config::load()
+    let fallback = crate::config::runtime_config_strict()
         .map_err(|error| format!("load runtime config: {error}"))?
         .runtime
         .max_entry_retries
@@ -1420,3 +1421,7 @@ mod runtime_completion_policy_tests {
 #[cfg(test)]
 #[path = "replay_hold_tests.rs"]
 mod replay_hold_tests;
+
+#[cfg(test)]
+#[path = "completion_postgres_snapshot_tests.rs"]
+mod snapshot_tests;

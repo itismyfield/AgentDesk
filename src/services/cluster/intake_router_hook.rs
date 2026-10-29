@@ -55,7 +55,25 @@ pub(crate) use model::{
 use placement::route_by_preference;
 
 fn worker_heartbeat_lease_secs() -> u64 {
-    crate::config::load_graceful().cluster.lease_ttl_secs.max(1)
+    crate::config::snapshot()
+        .map(|config| config.cluster.lease_ttl_secs)
+        .unwrap_or_else(|| crate::config::ClusterConfig::default().lease_ttl_secs)
+        .max(1)
+}
+
+#[test]
+fn worker_heartbeat_lease_reads_snapshot_and_preserves_minimum() {
+    use super::snapshot_tests::{isolated, write_disk_config};
+
+    let Some(root) = isolated() else { return };
+    let mut config = crate::config::Config::default();
+    config.cluster.lease_ttl_secs = 99;
+    write_disk_config(&root, &config);
+    for (ttl, expected) in [(7, 7), (0, 1)] {
+        config.cluster.lease_ttl_secs = ttl;
+        crate::config_live_reload::install(config.clone());
+        assert_eq!(worker_heartbeat_lease_secs(), expected);
+    }
 }
 
 fn required_block(detail: String) -> IntakeRouterDecision {

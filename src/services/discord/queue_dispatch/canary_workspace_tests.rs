@@ -27,7 +27,7 @@ fn original(message: u64) -> Intervention {
     }
 }
 
-// Breaks the file the process resolves, which is the fixture's `$AGENTDESK_CONFIG`.
+// Publish a validated workspace edit after proving disk writes alone keep the old snapshot.
 fn break_workspace(fixture: &CanaryFixture) {
     let config = crate::config::config_path::config_path_in(fixture.root.path());
     assert_eq!(config, fixture.root.path().join("config.yaml"));
@@ -36,6 +36,15 @@ fn break_workspace(fixture: &CanaryFixture) {
     let missing = serde_json::to_string(&fixture.root.path().join("missing-workspace")).unwrap();
     assert!(yaml.contains(&workspace));
     std::fs::write(&config, yaml.replace(&workspace, &missing)).unwrap();
+    assert_eq!(
+        crate::services::discord::settings::resolve_workspace(ChannelId::new(CANARY_CHANNEL), None,),
+        Some(fixture.root.path().display().to_string()),
+        "an unvalidated disk edit keeps the last published workspace"
+    );
+    assert!(matches!(
+        crate::config_live_reload::reload_from_path(&config),
+        crate::config_live_reload::ReloadOutcome::Applied { .. }
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]

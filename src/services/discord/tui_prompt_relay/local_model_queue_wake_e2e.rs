@@ -251,7 +251,7 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         .spawn_turn_held_at_placeholder(
             A_MESSAGE_ID,
             "A holds the active mailbox",
-            Duration::from_secs(2),
+            super::relay_e2e::PLACEHOLDER_HOLD_LIMIT,
         )
         .await;
 

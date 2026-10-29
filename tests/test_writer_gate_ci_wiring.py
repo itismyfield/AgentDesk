@@ -26,6 +26,8 @@ EXPECTED_COMMANDS = (
     '"$PYTHON" scripts/check_destructive_call_site_ratchet.py --check',
     "git diff --exit-code HEAD -- scripts/destructive_call_site_baseline.json",
     '"$PYTHON" -m unittest tests.test_destructive_call_site_ratchet',
+    '"$PYTHON" scripts/check_config_snapshot_readers.py',
+    '"$PYTHON" -m unittest tests.test_config_snapshot_readers',
     "./scripts/check-ci-runner-hardening.sh",
     '"$PYTHON" -m unittest tests.test_fast_check_ci_wiring',
 )
@@ -173,7 +175,7 @@ class WriterGateCiWiringTests(unittest.TestCase):
                 self.assertTrue(any("must not contain" in error for error in errors), errors)
 
     def test_each_tested_gate_must_precede_its_unittest(self) -> None:
-        pairs = ((1, 2), (3, 4), (5, 7))
+        pairs = ((1, 2), (3, 4), (5, 7), (8, 9))
         for gate_index, test_index in pairs:
             with self.subTest(gate=EXPECTED_COMMANDS[gate_index]):
                 commands = list(EXPECTED_COMMANDS)
@@ -199,7 +201,7 @@ class WriterGateCiWiringTests(unittest.TestCase):
         passing = self.run_process(self.fixture_text())
         self.assertEqual(passing.returncode, 0, passing.stderr)
         self.assertIn(
-            "10 exact aggregate invocations and 2 effective-execution assertions protected",
+            "12 exact aggregate invocations and 2 effective-execution assertions protected",
             passing.stdout,
         )
 

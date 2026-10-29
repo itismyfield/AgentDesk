@@ -184,6 +184,11 @@ async fn changed_publication(kind: Changed, id: u64) {
                 serde_yaml::to_string(&config).unwrap(),
             )
             .unwrap();
+            assert!(
+                publish(&stamp, &watch).await.is_some(),
+                "disk-only edit replaced the last validated fallback"
+            );
+            crate::config_live_reload::install(config);
         }
         Changed::Exact | Changed::Canonical => {
             let name = if matches!(kind, Changed::Exact) {

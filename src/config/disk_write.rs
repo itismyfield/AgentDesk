@@ -2,6 +2,10 @@
 //! `discord.bots.*.token`, so writes to the YAML file that holds them put them back.
 
 use super::{Config, McpServerConfig};
+
+#[cfg(test)]
+#[path = "disk_write_snapshot_tests.rs"]
+mod snapshot_tests;
 use anyhow::{Context, Result, bail};
 use serde_yaml::Value;
 use std::path::{Path, PathBuf};
@@ -93,7 +97,8 @@ pub(crate) fn check_round_trip(expected: &Config, rendered: &str) -> Result<()> 
 /// Refuse a render that would not read back as exactly `expected`, including values
 /// a `skip_serializing_if` omits. The error names the top-level field only.
 fn check_reads_back(expected: &Config, rendered: &str) -> Result<()> {
-    let actual: Config = serde_yaml::from_str(rendered)?;
+    let mut actual: Config = serde_yaml::from_str(rendered)?;
+    actual.runtime_source = expected.runtime_source.clone();
     if actual == *expected {
         return Ok(());
     }
@@ -113,6 +118,7 @@ fn differing_section(expected: &Config, actual: &Config) -> &'static str {
         }};
     }
     first_difference!(
+        runtime_source,
         server,
         discord,
         providers,
