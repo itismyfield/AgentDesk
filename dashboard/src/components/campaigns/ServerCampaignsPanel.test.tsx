@@ -273,6 +273,18 @@ it("marks the snapshot stale when a poll stays unanswered for a whole interval",
   expect(list).toHaveBeenCalledTimes(2);
 });
 
+it("still marks a hung server silent when the user keeps pressing Refresh", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+  await render();
+  await openServer();
+  list.mockImplementation(() => new Promise(() => {}));
+  await act(async () => { vi.advanceTimersByTime(15_000); });
+  await act(async () => { vi.advanceTimersByTime(12_000); });
+  await click(buttonByText("Refresh"));
+  await act(async () => { vi.advanceTimersByTime(3_000); });
+  expect(container.textContent).toContain("The server is not answering");
+});
+
 it("does not call a refresh the user just started an unanswered server", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
   await render();
@@ -356,6 +368,15 @@ it("puts the selection back into the URL after a navigation drops the query, but
   expect(`${window.location.pathname}${window.location.search}`).toBe("/kanban");
 });
 
+it("keeps the URL in step on the same page spelled with a trailing slash", async () => {
+  window.history.replaceState(null, "", "/campaigns/");
+  await render();
+  await openServer();
+  window.history.pushState(null, "", "/campaigns");
+  await click(buttonByText("Refresh"));
+  expect(window.location.search).toBe("?mode=server&campaign=release");
+});
+
 it("keeps a save locked while its answer is outstanding, even after leaving and reopening the campaign", async () => {
   list.mockResolvedValue([fixtures.prepared, copyOf(fixtures.prepared, "other", "Other")]);
   let answer: (value: Awaited<ReturnType<typeof editServerCampaignDefinition>>) => void = () => {};
@@ -372,11 +393,18 @@ it("keeps a save locked while its answer is outstanding, even after leaving and 
   expect(container.querySelector("form.campaign-server-form")).toBeNull();
 });
 
-it("marks the event list when it could not be refreshed", async () => {
-  vi.mocked(getServerCampaignEvents).mockRejectedValue(new TypeError("Failed to fetch"));
+it("marks the event list when it could not be read, keeps its count unknown, and retries on the next list read", async () => {
+  vi.mocked(getServerCampaignEvents).mockRejectedValueOnce(new TypeError("Failed to fetch"));
   await render();
   await openServer();
-  expect(container.querySelector(".campaign-connections summary")?.textContent).toContain("Could not refresh events");
+  const summary = () => container.querySelector(".campaign-connections summary")?.textContent;
+  expect(summary()).toBe("Events · — · Could not refresh events");
+  list.mockImplementation(async () => [fixtures.prepared]);
+  await click(buttonByText("Refresh"));
+  expect(summary()).toBe("Events · 0");
+  // A good read is not repeated while nothing moved.
+  await click(buttonByText("Refresh"));
+  expect(vi.mocked(getServerCampaignEvents)).toHaveBeenCalledTimes(2);
 });
 
 it("moves focus into a form only when it is opened, not each time its campaign is shown again", async () => {
