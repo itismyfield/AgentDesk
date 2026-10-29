@@ -350,11 +350,15 @@ pub(in crate::services::discord) async fn pane_dead(
     if !pinned_row || row.restart_mode.is_some() || row.rebind_origin {
         return true;
     }
+    #[cfg(unix)]
     let stopped = stopped.unwrap_or_else(|| {
         let start = row.turn_start_offset.unwrap_or(0);
         super::tmux::recent_turn_stop_for_watcher_range(channel_id, tmux_session_name, start)
             .is_some()
     });
+    // No tmux stop record exists off unix, so a death without the watcher's judgment failed.
+    #[cfg(not(unix))]
+    let stopped = stopped.unwrap_or(false);
     let outcome = if stopped {
         TerminalOutcome::Cancelled
     } else {
