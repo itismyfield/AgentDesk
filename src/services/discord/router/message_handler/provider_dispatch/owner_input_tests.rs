@@ -54,9 +54,8 @@ fn rig(name: &str, channel: u64, mode: &str, before: String, transcript: &str) -
     owned(f, name, channel, renderer, "claude")
 }
 
-/// An owner with one admitted original over the `provider` pane `renderer` draws in session
-/// `name`; its tmux fails a load on `fail-load`, replaces the pane's process after the step named
-/// in `swap-after`, and runs the script `after-<step>` once after that step.
+/// An owner with one admitted original over the `provider` pane in session `name`. Its tmux fails a
+/// load on `fail-load`, respawns after the step in `swap-after`, and runs `after-<step>` once.
 pub(super) fn owned(
     f: Fixture,
     name: &str,
