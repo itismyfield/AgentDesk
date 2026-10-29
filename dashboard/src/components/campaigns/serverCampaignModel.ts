@@ -131,7 +131,6 @@ export interface StopIntent {
   key: string;
   campaignId: string;
   command: Extract<ServerCampaignCommand, { command: "stop" }>;
-  controlVersionAtSend: number | null;
   /** sending: in flight; unconfirmed: no answer arrived, so the outcome is being checked. */
   status: "sending" | "unconfirmed";
 }
@@ -144,20 +143,15 @@ export function stopRequest(previous: StopIntent | null, view: View, mode: "imme
   };
   const resend = previous?.status === "unconfirmed" && previous.campaignId === view.campaign_id
     && JSON.stringify(previous.command) === JSON.stringify(command);
-  return {
-    key: resend ? previous.key : newKey(), campaignId: view.campaign_id, command,
-    controlVersionAtSend: resend ? previous.controlVersionAtSend : view.control_version, status: "sending",
-  };
+  return { key: resend ? previous.key : newKey(), campaignId: view.campaign_id, command, status: "sending" };
 }
 
-/** Null once the server shows the outcome: an event from this key, a newer control version of the
- * same run, or a different run. Otherwise the unanswered stop stays to be checked or resent. */
+/** Null once the server shows this request's outcome: an event under its key, or a different run.
+ * Any other change (another client's stop too) proves nothing, so the stop stays to be checked or resent. */
 export function reconcileStop(intent: StopIntent | null, view: View, events: ServerCampaignEvent[] = []): StopIntent | null {
   if (!intent || intent.status !== "unconfirmed" || view.campaign_id !== intent.campaignId) return intent;
   if (events.some((event) => event.command_id === intent.key)) return null;
-  if (view.run_id !== intent.command.expected_run) return null;
-  const advanced = view.control_version !== null && intent.controlVersionAtSend !== null && view.control_version > intent.controlVersionAtSend;
-  return advanced ? null : intent;
+  return view.run_id !== intent.command.expected_run ? null : intent;
 }
 
 export interface CampaignLocation {
@@ -192,24 +186,31 @@ export function feedbackText(link: string, view: View, tr: Tr): string {
 }
 
 /** Fields a newer definition changed against the draft's base, by task and acceptance ID. */
-export function changedDefinitionFields(base: ServerCampaignDefinition, latest: ServerCampaignDefinition): string[] {
-  const changed: string[] = (["repository", "title", "goal", "profile_version"] as const).filter((key) => base[key] !== latest[key]);
+/** Each field the latest definition changed, with its latest value (null when removed). */
+export function changedDefinitionFields(base: ServerCampaignDefinition, latest: ServerCampaignDefinition): Array<{ field: string; value: string | null }> {
+  const changed: Array<{ field: string; value: string | null }> = (["repository", "title", "goal", "profile_version"] as const)
+    .filter((key) => base[key] !== latest[key]).map((key) => ({ field: key, value: latest[key] }));
+  const acText = (ac: ServerCampaignDefinition["nodes"][number]["acceptance"][number]) => `${ac.description} · ${ac.verification}`;
   const after = new Map(latest.nodes.map((node) => [node.id, node]));
   for (const node of base.nodes) {
     const next = after.get(node.id);
-    if (!next) { changed.push(`${node.id} (removed)`); continue; }
+    if (!next) { changed.push({ field: `${node.id} (removed)`, value: null }); continue; }
     for (const key of ["title", "issue_url", "dependencies", "group"] as const) {
-      if (JSON.stringify(node[key]) !== JSON.stringify(next[key])) changed.push(`${node.id}.${key}`);
+      if (JSON.stringify(node[key]) !== JSON.stringify(next[key])) {
+        changed.push({ field: `${node.id}.${key}`, value: key === "dependencies" ? next.dependencies.join(", ") : next[key] ?? "" });
+      }
     }
     const acceptance = new Map(next.acceptance.map((ac) => [ac.id, ac]));
     for (const ac of node.acceptance) {
       const nextAc = acceptance.get(ac.id);
-      if (!nextAc) changed.push(`${node.id}.acceptance.${ac.id} (removed)`);
-      else if (JSON.stringify(ac) !== JSON.stringify(nextAc)) changed.push(`${node.id}.acceptance.${ac.id}`);
+      if (!nextAc) changed.push({ field: `${node.id}.acceptance.${ac.id} (removed)`, value: null });
+      else if (JSON.stringify(ac) !== JSON.stringify(nextAc)) changed.push({ field: `${node.id}.acceptance.${ac.id}`, value: acText(nextAc) });
     }
-    for (const ac of next.acceptance) if (!node.acceptance.some((candidate) => candidate.id === ac.id)) changed.push(`${node.id}.acceptance.${ac.id} (added)`);
+    for (const ac of next.acceptance) {
+      if (!node.acceptance.some((candidate) => candidate.id === ac.id)) changed.push({ field: `${node.id}.acceptance.${ac.id} (added)`, value: acText(ac) });
+    }
   }
-  for (const id of after.keys()) if (!base.nodes.some((node) => node.id === id)) changed.push(`${id} (added)`);
+  for (const [id, node] of after) if (!base.nodes.some((candidate) => candidate.id === id)) changed.push({ field: `${id} (added)`, value: node.title });
   return changed;
 }
 

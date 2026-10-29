@@ -21,10 +21,12 @@ const result = { definition_revision: 1, run_id: null, control_version: null, ev
 let container: HTMLDivElement;
 let root: Root;
 let saved: ReturnType<typeof vi.fn<(id: string, result: unknown) => void>>;
+let conflicted: ReturnType<typeof vi.fn<() => void>>;
 
 function Harness({ initial }: { initial: DefinitionDraft }) {
   const [draft, setDraft] = useState<DefinitionDraft | null>(initial);
-  return draft ? <ServerCampaignForm draft={draft} onDraftChange={setDraft} tr={tr} onSaved={saved} onCancel={() => setDraft(null)} disabled={false} /> : <p>closed</p>;
+  return draft ? <ServerCampaignForm draft={draft} onDraftChange={(next) => setDraft((current) => current && (typeof next === "function" ? next(current) : next))}
+    tr={tr} onSaved={saved} onConflict={conflicted} onCancel={() => setDraft(null)} disabled={false} /> : <p>closed</p>;
 }
 async function mount(initial: DefinitionDraft) {
   await act(async () => root.render(<Harness initial={initial} />));
@@ -56,6 +58,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   saved = vi.fn<(id: string, result: unknown) => void>();
+  conflicted = vi.fn<() => void>();
   create.mockReset();
   edit.mockReset();
   read.mockReset();
@@ -114,23 +117,54 @@ it("keeps the draft and names the server's cycle and empty acceptance refusals",
   expect(create.mock.calls.map((call) => call[2])).toEqual(["key-1", "key-2"]);
 });
 
-it("keeps the draft on a 409 and lists what the newer definition changed", async () => {
-  edit.mockRejectedValueOnce(rejection(409, { rejection: "stale_definition", target: "release" })).mockResolvedValueOnce(result);
-  const latest = structuredClone(fixtures.prepared);
-  latest.view.definition_revision = 8;
-  latest.definition.goal = "Changed elsewhere";
-  read.mockResolvedValueOnce(latest);
+it("keeps the draft on a 409, shows the newer values and rebases only when saving over them", async () => {
+  const stale = rejection(409, { rejection: "stale_definition", target: "release" });
+  edit.mockRejectedValueOnce(stale).mockRejectedValueOnce(stale);
+  const r8 = structuredClone(fixtures.prepared);
+  r8.view.definition_revision = 8;
+  r8.definition.goal = "Goal from elsewhere";
+  const r9 = structuredClone(r8);
+  r9.view.definition_revision = 9;
+  r9.definition.title = "Renamed in r9";
+  read.mockResolvedValueOnce(r8).mockResolvedValueOnce(r9);
   let next = 0;
   await mount(editDraft(fixtures.prepared, () => `key-${++next}`));
   await type(field("Name"), "My new name");
   await press("Save");
   expect(container.textContent).toContain("This definition changed (revision 8). Your draft is kept.");
-  expect(container.textContent).toContain("Changed elsewhere: goal");
+  expect(container.textContent).toContain("goal: Goal from elsewhere");
+  expect(conflicted).toHaveBeenCalledOnce();
   expect(field("Name").value).toBe("My new name");
   expect(field("Goal").value).toBe("Integrate and verify the release");
   // Saving over the newer revision is an explicit choice; the draft is still the user's.
   await press("Save over revision 8");
   expect(edit.mock.calls[1].slice(1, 3)).toEqual([8, { ...fixtures.prepared.definition, title: "My new name" }]);
+  // The next conflict is measured from revision 8, which the user already saw.
+  expect(container.textContent).toContain("title: Renamed in r9");
+  expect(container.textContent).not.toContain("goal: Goal from elsewhere");
+});
+
+it("locks the fields while a save is in flight so its outcome cannot overwrite later typing", async () => {
+  let fail: (reason: unknown) => void = () => {};
+  edit.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+  await mount(editDraft(fixtures.prepared, () => "key-1"));
+  await type(field("Goal"), "Typed before saving");
+  await press("Save");
+  const fields = container.querySelector<HTMLFieldSetElement>("fieldset.campaign-server-fields")!;
+  expect(fields.disabled).toBe(true);
+  expect(fields.contains(field("Goal"))).toBe(true);
+  await act(async () => fail(new TypeError("Failed to fetch")));
+  expect(fields.disabled).toBe(false);
+  expect(field("Goal").value).toBe("Typed before saving");
+  expect(container.textContent).toContain("No answer arrived.");
+});
+
+it("shows the server's own text for a refusal that carries no decision code", async () => {
+  create.mockRejectedValueOnce(new ApiRequestError("invalid campaign ID", { status: 400, body: { error: "invalid campaign ID", code: "validation", context: {} } }));
+  await mount(createDraft(fixtures.prepared.definition, () => "k"));
+  await press("Create");
+  expect(container.textContent).toContain("invalid campaign ID");
+  expect(container.textContent).not.toContain("HTTP 400");
 });
 
 it("resends an unanswered save with the same key and a changed draft with a new one", async () => {

@@ -64,7 +64,6 @@ describe("controls", () => {
   it("targets a stop at the run and definition only and resends only an unanswered one under its key", () => {
     const first = stopRequest(null, view(fixtures.stoppingUnknown), "finish_stage", () => "key-1");
     expect(first.command).toEqual({ command: "stop", expected_definition_revision: 7, expected_run: "run-1", mode: "finish_stage" });
-    expect(first.controlVersionAtSend).toBe(2);
     const unanswered: StopIntent = { ...first, status: "unconfirmed" };
     // Events moved on, the run and revision did not: still the same request.
     expect(stopRequest(unanswered, view(fixtures.eventAdvanced), "finish_stage", () => "key-2").key).toBe("key-1");
@@ -72,13 +71,14 @@ describe("controls", () => {
     expect(stopRequest(first, view(fixtures.eventAdvanced), "finish_stage", () => "key-4").key).toBe("key-4");
   });
 
-  it("settles an unanswered stop by its event, a newer control version or another run", () => {
+  it("settles an unanswered stop only by its own event or another run", () => {
     const sent = stopRequest(null, view(fixtures.failedRunning), "finish_stage", () => "k");
     const pending: StopIntent = { ...sent, status: "unconfirmed" };
     expect(reconcileStop(pending, view(fixtures.failedRunning))).toBe(pending);
-    // Already stopping before the stop was sent is no proof it arrived.
-    expect(reconcileStop(pending, { ...view(fixtures.stoppingUnknown), control_version: 1 })).toBe(pending);
-    expect(reconcileStop(pending, view(fixtures.stoppingUnknown))).toBeNull();
+    // Another client's stop also moves the control version; that is no proof this one arrived.
+    expect(reconcileStop(pending, view(fixtures.stoppingUnknown))).toBe(pending);
+    const other = { sequence: 29, run_id: "run-1", command_id: "someone-else", observed_at: "2026-10-28T05:00:01Z", kind: { event: "stop_requested" } };
+    expect(reconcileStop(pending, view(fixtures.stoppingUnknown), [other])).toBe(pending);
     expect(reconcileStop(pending, { ...view(fixtures.failedRunning), run_id: "run-2" })).toBeNull();
     const event = { sequence: 30, run_id: "run-1", command_id: "k", observed_at: "2026-10-28T05:00:02Z", kind: { event: "stop_requested" } };
     expect(reconcileStop(pending, view(fixtures.failedRunning), [event])).toBeNull();
@@ -113,8 +113,11 @@ describe("links and feedback", () => {
     latest.nodes[0].acceptance[0].description = "Merged";
     latest.nodes.splice(2, 1);
     latest.nodes.push({ ...base.nodes[2], id: "D" });
-    expect(changedDefinitionFields(base, latest)).toEqual([
+    const changed = changedDefinitionFields(base, latest);
+    expect(changed.map((entry) => entry.field)).toEqual([
       "goal", "A.acceptance.main", "B.acceptance.extra (added)", "C (removed)", "D (added)",
     ]);
+    expect(changed.find((entry) => entry.field === "goal")?.value).toBe(latest.goal);
+    expect(changed.find((entry) => entry.field === "C (removed)")?.value).toBeNull();
   });
 });

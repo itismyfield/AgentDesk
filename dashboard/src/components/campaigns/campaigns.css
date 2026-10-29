@@ -138,6 +138,7 @@
 .campaigns-panel .campaign-server-task-row[aria-pressed="true"] { background: color-mix(in srgb, var(--th-accent-info) 12%, var(--th-card-bg)); box-shadow: inset 3px 0 var(--th-accent-info); }
 .campaign-server-task-row small { color: var(--th-text-muted); font-size: 10px; }
 .campaign-server-task { padding: 10px; border: 1px solid var(--th-border); border-radius: 9px; }
+.campaign-server-fields { display: grid; gap: 10px; min-width: 0; margin: 0; padding: 0; border: 0; }
 .campaign-server-task legend { font-size: 11px; color: var(--th-text-muted); padding: 0 4px; }
 .campaign-server-dependencies { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 11px; color: var(--th-text-muted); }
 .campaign-server-ac { display: grid; grid-template-columns: minmax(80px, 140px) minmax(0, 1fr) minmax(110px, 150px) auto; gap: 6px; align-items: center; }

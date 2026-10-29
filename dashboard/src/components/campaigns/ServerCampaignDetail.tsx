@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { serverCampaignProfile, type ServerCampaignDocument, type ServerCampaignEvent } from "../../api/serverCampaigns";
 import type { Tr } from "./campaignPresentation";
 import { safeCampaignLink } from "./campaignModel";
@@ -37,6 +38,11 @@ export default function ServerCampaignDetail({
   const selectedView = selected ? runtimes.get(selected.id) : undefined;
   const edit = commandAvailability(view, "edit_definition", connection);
   const feedback = feedbackText(link, view, tr);
+  const inspectorRef = useRef<HTMLElement>(null);
+  // A narrow screen stacks the details under every task; bring the selected one into view.
+  useEffect(() => {
+    if (selectedNode && window.matchMedia?.("(max-width: 900px)").matches) inspectorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [selectedNode]);
   return <div className="campaign-server-detail">
     <div className="campaign-row campaign-summary-header">
       <div className="campaign-server-title"><h3>{definition.title}</h3><p className="campaign-muted">{definition.repository === "adk" ? "AgentDesk" : "CookingHeart"} · {definition.goal}</p></div>
@@ -83,7 +89,7 @@ export default function ServerCampaignDetail({
           </button></li>;
         })}
       </ul>
-      {selected && <aside className="campaign-inspector" aria-label={tr("선택 작업", "Selected task")}>
+      {selected && <aside ref={inspectorRef} className="campaign-inspector" aria-label={tr("선택 작업", "Selected task")}>
         <div className="campaign-row campaign-inspector-header"><span>{selected.id}</span><button type="button" onClick={() => onSelectNode(null)} aria-label={tr("상세 닫기", "Close details")}>×</button></div>
         <h4>{selected.title}</h4>
         {safeCampaignLink(selected.issue_url) && <p><a href={safeCampaignLink(selected.issue_url)} target="_blank" rel="noreferrer">{selected.issue_url}</a></p>}
