@@ -1682,8 +1682,13 @@ src/
 │   │   │   ├── input_owner/
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── effect.rs
+│   │   │   │   ├── effect_tests.rs
 │   │   │   │   ├── mod.rs
-│   │   │   │   └── origin.rs
+│   │   │   │   ├── origin.rs
+│   │   │   │   ├── pump.rs
+│   │   │   │   ├── pump_tests.rs
+│   │   │   │   └── target.rs
 │   │   │   ├── transport/
 │   │   │   │   └── tests.rs
 │   │   │   ├── auto_queue_eligibility.rs
@@ -1960,6 +1965,8 @@ src/
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   ├── owner_input.rs
+│   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── producer_error_test_support.rs
 │   │   │   │   │   └── replay_scope.rs
 │   │   │   │   ├── provider_isolation/

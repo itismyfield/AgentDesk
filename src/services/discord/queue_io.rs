@@ -1,7 +1,7 @@
 use super::*;
 mod backstop;
 #[cfg(test)]
-mod input_owner;
+pub(in crate::services::discord) mod input_owner;
 #[cfg(test)]
 pub(crate) mod retained_notice;
 pub(in crate::services) use backstop::BackstopSlot;

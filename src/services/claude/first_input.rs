@@ -30,6 +30,25 @@ pub(super) fn submit(
     )
 }
 
+/// The first prompt of an execution the caller just created, for the input owner's effect; the
+/// response stays with the provider's observer.
+#[cfg(all(test, unix))]
+pub(crate) fn submit_created(
+    transcript_path_string: &str,
+    fresh_turn_start_offset: u64,
+    tmux_session_name: &str,
+    prompt: &str,
+) -> Result<(), SubmissionError> {
+    submit(
+        transcript_path_string,
+        fresh_turn_start_offset,
+        None,
+        tmux_session_name,
+        prompt,
+    )
+    .map(drop)
+}
+
 fn submit_using(
     transcript_path_string: &str,
     fresh_turn_start_offset: u64,
