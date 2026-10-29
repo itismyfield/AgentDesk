@@ -14,6 +14,8 @@ use crate::server::routes::AppState;
 use crate::services::git::GitCommand;
 
 pub(crate) mod auto_queue_add;
+#[cfg(test)]
+mod create_from_issue_pg_tests;
 
 pub(crate) fn run_async<F>(future: F) -> Result<(), String>
 where
@@ -899,67 +901,64 @@ async fn upsert_backlog_card_from_issue_pg(
     repo: &str,
     issue: &crate::github::IssueView,
 ) -> Result<String, String> {
-    let metadata = {
-        let labels: Vec<&str> = issue
-            .labels
-            .iter()
-            .map(|label| label.name.as_str())
-            .collect();
-        if labels.is_empty() {
-            None
-        } else {
-            Some(json!({"labels": labels.join(",")}).to_string())
+    let labels =
+        crate::db::kanban::card_labels_csv(issue.labels.iter().map(|label| label.name.as_str()));
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("begin postgres card upsert: {e}"))?;
+
+    let existing_id = sqlx::query_scalar::<_, String>(
+        "UPDATE kanban_cards
+         SET title = $1,
+             github_issue_url = $2,
+             description = $3,
+             updated_at = NOW()
+         WHERE github_issue_number = $4 AND repo_id = $5
+         RETURNING id",
+    )
+    .bind(&issue.title)
+    .bind(&issue.url)
+    .bind(&issue.body)
+    .bind(issue.number)
+    .bind(repo)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("update existing postgres card: {e}"))?;
+
+    let card_id = match existing_id {
+        Some(existing_id) => existing_id,
+        None => {
+            let card_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO kanban_cards (
+                     id, repo_id, title, status, priority, github_issue_url, github_issue_number,
+                     description, created_at, updated_at
+                 )
+                 VALUES ($1, $2, $3, 'backlog', $4, $5, $6, $7, NOW(), NOW())",
+            )
+            .bind(&card_id)
+            .bind(repo)
+            .bind(&issue.title)
+            .bind(infer_issue_priority(&issue.labels))
+            .bind(&issue.url)
+            .bind(issue.number)
+            .bind(&issue.body)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("insert postgres backlog card: {e}"))?;
+            card_id
         }
     };
-
-    if let Some(existing_id) = sqlx::query_scalar::<_, String>(
-        "SELECT id FROM kanban_cards WHERE github_issue_number = $1 AND repo_id = $2",
+    crate::db::kanban::set_card_labels_pg(
+        &mut *tx,
+        &card_id,
+        crate::db::kanban::CardLabelsUpdate::Replace(&labels),
     )
-    .bind(issue.number)
-    .bind(repo)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("query existing postgres card: {e}"))?
-    {
-        sqlx::query(
-            "UPDATE kanban_cards
-             SET title = $1,
-                 github_issue_url = $2,
-                 description = $3,
-                 metadata = COALESCE($4, metadata),
-                 updated_at = NOW()
-             WHERE id = $5",
-        )
-        .bind(&issue.title)
-        .bind(&issue.url)
-        .bind(&issue.body)
-        .bind(&metadata)
-        .bind(&existing_id)
-        .execute(pool)
+    .await?;
+    tx.commit()
         .await
-        .map_err(|e| format!("update existing postgres card: {e}"))?;
-        return Ok(existing_id);
-    }
-
-    let card_id = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO kanban_cards (
-             id, repo_id, title, status, priority, github_issue_url, github_issue_number,
-             description, metadata, created_at, updated_at
-         )
-         VALUES ($1, $2, $3, 'backlog', $4, $5, $6, $7, $8, NOW(), NOW())",
-    )
-    .bind(&card_id)
-    .bind(repo)
-    .bind(&issue.title)
-    .bind(infer_issue_priority(&issue.labels))
-    .bind(&issue.url)
-    .bind(issue.number)
-    .bind(&issue.body)
-    .bind(&metadata)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("insert postgres backlog card: {e}"))?;
+        .map_err(|e| format!("commit postgres card upsert: {e}"))?;
     Ok(card_id)
 }
 

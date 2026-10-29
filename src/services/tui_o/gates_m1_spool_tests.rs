@@ -212,6 +212,7 @@ impl Fixture {
                     unit_key: piece.unit_key.clone(),
                     index: piece.index,
                     payload: piece.payload.clone(),
+                    notice_origin: None,
                 })
             })
             .collect();

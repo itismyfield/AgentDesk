@@ -756,6 +756,7 @@ mod settle_over_http {
             let anchor_id = recorded.ledger().anchor();
             let (unit_key, payload) = (unit(channel, serial), format!("earlier {serial}"));
             let prepared = LedgerEntry::Prepared {
+                notice_origin: None,
                 local_retry: None,
                 serial,
                 unit_key,
@@ -787,6 +788,7 @@ mod settle_over_http {
             unit_key: unit_key.clone(),
             index: 0,
             payload,
+            notice_origin: None,
         });
         let started = Instant::now();
         assert_eq!(writer.deliver(&piece).await, Step::Done);

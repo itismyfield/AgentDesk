@@ -25,12 +25,14 @@ mod invariant_test_capture;
 mod model;
 pub(crate) mod read_only_owner_snapshot;
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
+mod terminal_receipt_stamp;
+pub(in crate::services::discord) use terminal_receipt_stamp::stamp_terminal_receipt_if_matches_identity;
 // Re-export the domain model at its existing visibility for root and sibling callers.
 #[cfg(test)]
 pub(in crate::services::discord) use model::{COORDINATE_HOLD_PREFIX, RawTurnWitness};
 pub(in crate::services::discord) use model::{
-    InflightTurnIdentity, InflightTurnState, RelayOwnerKind, TurnSource, opt_channel_id,
-    opt_message_id, optional_message_id, transfer_end,
+    InflightTurnIdentity, InflightTurnState, RelayOwnerKind, TerminalReceiptStamp, TurnSource,
+    opt_channel_id, opt_message_id, optional_message_id, transfer_end,
 };
 
 impl InflightTurnState {

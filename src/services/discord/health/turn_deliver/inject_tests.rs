@@ -607,6 +607,200 @@ async fn mixed_human_input_is_submitted_without_an_alert_or_later_hold_pg() {
     assert_eq!(notices, 0);
 }
 
+/// Injects `text` as Discord message `message` from author 200 through the live owner.
+async fn discord_attempt(
+    shared: &Arc<SharedData>,
+    ch: u64,
+    message: MessageId,
+    text: &str,
+) -> inject::InjectAttempt {
+    let provider = ProviderKind::Claude;
+    let claim_source = crate::services::discord::inject_disposition::claim_source;
+    let guard = claim_source(&provider, message, std::time::Instant::now()).unwrap();
+    let request = HumanInputRequest {
+        channel_id: ChannelId::new(ch),
+        provider,
+        text: text.into(),
+        author_id: 200,
+        source: "discord".into(),
+        metadata: None,
+        channel_name_hint: None,
+    };
+    let mut entry = queued(message.get());
+    entry.author_id = UserId::new(200);
+    entry.text = request.text.clone();
+    let origin = inject::Origin::Discord {
+        message,
+        handback: Box::new((entry, format!("discord:{ch}:{message}"))),
+        guard,
+        name: "Ann".into(),
+    };
+    inject::attempt(shared, &request, origin).await
+}
+
+/// `(result, keys, received, disposition, alerts, queued)` after one paste of `text` whose first
+/// `ignored` Enters the TUI ignores.
+async fn ignored_enter_case(
+    shared: &Arc<SharedData>,
+    pane: &InjectPane,
+    message: MessageId,
+    text: &str,
+    ignored: &str,
+) -> (
+    inject::InjectAttempt,
+    String,
+    bool,
+    Option<crate::services::discord::inject_disposition::InjectionOutcome>,
+    usize,
+    usize,
+) {
+    let provider = ProviderKind::Claude;
+    let disposition = crate::services::discord::inject_disposition::terminal;
+    pane.set("drop.Enter", ignored);
+    let before = submissions(pane).len();
+    let result = discord_attempt(shared, pane.channel, message, text).await;
+    let buffer = pane.read("buffer").unwrap();
+    // Only rows written during this attempt count, so an earlier equal body cannot pass for it.
+    let received = submissions(pane)[before..].contains(&buffer);
+    (
+        result,
+        pane.applied().join("+"),
+        received,
+        disposition(Some(&provider), message, std::time::Instant::now()),
+        pane.alarm_count("busy_inject_unconfirmed"),
+        queue_texts(shared, pane.channel).await.len(),
+    )
+}
+
+/// Bodies of the enqueue rows in the pane's transcript, in order.
+fn submissions(pane: &InjectPane) -> Vec<String> {
+    let transcript = fs::read_to_string(pane.path(InjectPane::TRANSCRIPT)).unwrap();
+    transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|record| record["type"] == "queue-operation")
+        .filter_map(|record| record["content"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// A TUI that ignores the first Enter of a folded paste takes it on one more Enter; one that
+/// ignores both leaves the Discord message Unconfirmed with an alert, never Observed or resent.
+#[tokio::test(flavor = "current_thread")]
+async fn an_ignored_enter_is_finished_once_and_an_unreceived_paste_stays_unconfirmed_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let (once, always) = (7_510_001, 7_510_002);
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &[once, always], Some(pool)).await;
+    let mut observed = Vec::new();
+    for (ch, ignored) in [(once, "1"), (always, "2")] {
+        let mut pane = InjectPane::new(ch, "external");
+        pane.stash("", false);
+        pane.set("fold", "");
+        let message = MessageId::new(ch + 100);
+        let text = "첫 줄\n둘째 줄\n셋째 줄";
+        observed.push(ignored_enter_case(&shared, &pane, message, text, ignored).await);
+    }
+    assert_eq!(observed, expected_ignored_enters("paste+Enter+Enter"));
+}
+
+/// The two outcomes an ignored-Enter pair must end in, with `keys` applied for the second input.
+fn expected_ignored_enters(
+    keys: &str,
+) -> [(
+    inject::InjectAttempt,
+    String,
+    bool,
+    Option<crate::services::discord::inject_disposition::InjectionOutcome>,
+    usize,
+    usize,
+); 2] {
+    use crate::services::discord::inject_disposition::InjectionOutcome;
+    let unconfirmed = inject::InjectAttempt::Unconfirmed {
+        turn_id: None,
+        detail: "not_observed",
+    };
+    [
+        (
+            inject::InjectAttempt::Injected { turn_id: None },
+            keys.to_string(),
+            true,
+            Some(InjectionOutcome::Observed),
+            0,
+            0,
+        ),
+        (
+            unconfirmed,
+            keys.to_string(),
+            false,
+            Some(InjectionOutcome::Unconfirmed),
+            1,
+            0,
+        ),
+    ]
+}
+
+/// No earlier input's row (a frame extending B's, alone or behind a draft, or B's own body) is B's
+/// receipt: B takes its finishing Enter, or stays Unconfirmed without one.
+#[tokio::test(flavor = "current_thread")]
+async fn an_earlier_drain_containing_the_frame_is_not_its_receipt_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let body = "첫 줄\n둘째 줄\n셋째 줄";
+    let longer = format!("{body}\n추가 지시");
+    let cases = [
+        ("frame", longer.as_str(), "", true),
+        ("behind a draft", longer.as_str(), "사람 초안\n", true),
+        ("repeated", body, "", false),
+    ];
+    let channels: Vec<u64> = (0..cases.len() as u64 * 2).map(|i| 7_510_011 + i).collect();
+    let registry = HealthRegistry::new();
+    let shared = register_inject_runtime(&registry, &channels, Some(pool)).await;
+    let mut observed = Vec::new();
+    let mut expected = Vec::new();
+    let mut channel = channels.iter();
+    for (case, earlier, draft, drains) in cases {
+        for ignored in ["1", "2"] {
+            let ch = *channel.next().unwrap();
+            let mut pane = InjectPane::new(ch, "external");
+            pane.stash(draft, false);
+            pane.set("fold", "");
+            let first = discord_attempt(&shared, ch, MessageId::new(ch * 10), earlier).await;
+            assert_eq!(
+                first,
+                inject::InjectAttempt::Injected { turn_id: None },
+                "{case}"
+            );
+            if drains {
+                // A's drain carries what A's Enter actually submitted, draft included.
+                let submitted = submissions(&pane).pop().unwrap();
+                assert!(
+                    submitted.starts_with(draft) && submitted.contains(body),
+                    "{case}"
+                );
+                let drain = serde_json::json!({"type": "attachment", "attachment": {
+                    "type": "queued_command", "commandMode": "prompt",
+                    "source_uuid": "command-a", "prompt": submitted}});
+                pane.set("drain.rec", &format!("{drain}\n"));
+                // It lands with B's first Enter, inside B's first confirm window.
+                let transcript = pane.path(InjectPane::TRANSCRIPT).display().to_string();
+                let land = format!(
+                    r#"cat "$d/drain.rec" >> '{transcript}'; rm -f "$d/human.before-Enter""#
+                );
+                pane.set("human.before-Enter", &land);
+            }
+            let message = MessageId::new(ch * 10 + 1);
+            let result = ignored_enter_case(&shared, &pane, message, body, ignored).await;
+            observed.push((case, result));
+        }
+        let keys = "paste+Enter+paste+Enter+Enter";
+        expected.extend(expected_ignored_enters(keys).map(|outcome| (case, outcome)));
+    }
+    assert_eq!(observed, expected);
+}
+
 #[test]
 fn the_switch_opens_only_on_external_or_all() {
     assert_eq!(inject::INJECT_ENV, "ADK_BUSY_INJECT");
@@ -1776,7 +1970,7 @@ async fn an_injection_without_a_discord_message_records_no_disposition_pg() {
 }
 
 #[derive(Clone, Default)]
-struct LogSink(Arc<Mutex<Vec<u8>>>);
+pub(super) struct LogSink(pub(super) Arc<Mutex<Vec<u8>>>);
 
 impl std::io::Write for LogSink {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

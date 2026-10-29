@@ -25,6 +25,7 @@ pub struct PieceWork {
     pub payload: String,
     pub output_origin:
         Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    pub notice_origin: Option<Box<super::input_notices::NoticeOrigin>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +59,7 @@ pub struct UnitDeriver {
     summary: Option<TurnSummaryRun>,
     output_origin:
         Option<crate::services::cluster::intake_router_hook::owner_record::output::Origin>,
+    notices: super::input_notices::Projection,
 }
 
 impl UnitDeriver {
@@ -70,6 +72,7 @@ impl UnitDeriver {
             cards: None,
             summary: None,
             output_origin: None,
+            notices: super::input_notices::Projection::default(),
         }
     }
 
@@ -90,6 +93,48 @@ impl UnitDeriver {
     pub fn with_turn_summary(mut self, inputs: SummaryInputs) -> Self {
         self.summary = Some(TurnSummaryRun::new(self.provider, inputs));
         self
+    }
+
+    pub(crate) fn with_input_notices(mut self, notices: super::input_notices::Projection) -> Self {
+        self.notices = notices;
+        self
+    }
+
+    pub(crate) fn input_notices_enabled(&self) -> bool {
+        self.notices.enabled()
+    }
+
+    pub(crate) fn take_notice_evidence(
+        &mut self,
+    ) -> Vec<crate::services::tui_o::store::ledger::input_notices::NoticeEvidence> {
+        self.notices.take_evidence()
+    }
+
+    pub(crate) fn derive_scoped(
+        &mut self,
+        record: &CapturedRecord,
+        source: &crate::services::tui_o::shadow::SourceId,
+        version: u32,
+        origin: Result<super::input_notices::NoticeOrigin, String>,
+    ) -> Vec<Derived> {
+        let mut derived = self.derive_with_version(record, version);
+        if self.notices.enabled() {
+            match self
+                .notices
+                .project_record(self.channel, self.provider, source, record, origin)
+            {
+                Ok(Some(mut piece)) => {
+                    // A notice is fenced by the same owner generation as the outputs it precedes.
+                    if let Some(origin) = &self.output_origin {
+                        piece.output_origin = Some(origin.seal(&piece.payload));
+                    }
+                    derived.insert(0, Derived::Piece(piece))
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+        }
+        derived
     }
 
     /// Units in record order; a repeated key with the same plan (a fork copy) yields nothing.
@@ -297,6 +342,7 @@ impl UnitDeriver {
                         unit_key: unit_key.clone(),
                         index,
                         payload,
+                        notice_origin: None,
                     })
                 };
                 pieces.map(piece).collect()
@@ -323,3 +369,7 @@ fn code_mode_exec_failed(value: &serde_json::Value) -> Option<bool> {
         && output.lines().next()? == "Script failed")
         .then_some(true)
 }
+
+#[cfg(all(test, unix))]
+#[path = "input_notices/evidence_tests.rs"]
+mod notice_evidence_tests;

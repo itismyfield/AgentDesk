@@ -95,6 +95,7 @@ use super::host_input;
 use super::host_input::{TuiActionExecutor, run_actions_with_executor};
 use crate::services::provider::{CancelToken, cancel_requested};
 use crate::services::session_host::HostKey;
+pub(crate) use crate::services::tui_input::ansi::strip_ansi_escape_sequences;
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Notify;
 
@@ -1514,26 +1515,6 @@ fn line_is_codex_active_turn_marker(line: &str) -> bool {
     let trimmed = line.trim_start();
     (trimmed.starts_with('•') || trimmed.starts_with('◦'))
         && (trimmed.contains("esc to interrupt") || trimmed.contains("Esc to interrupt"))
-}
-
-pub(crate) fn strip_ansi_escape_sequences(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && matches!(chars.peek(), Some(&'[')) {
-            chars.next();
-            for code_ch in chars.by_ref() {
-                if ('@'..='~').contains(&code_ch) {
-                    break;
-                }
-            }
-            continue;
-        }
-        if ch != '\r' {
-            output.push(ch);
-        }
-    }
-    output
 }
 
 fn recent_has_codex_compact_prompt(recent: &[&str]) -> bool {

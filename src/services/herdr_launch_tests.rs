@@ -860,7 +860,8 @@ fn herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_
     );
 }
 
-// A late reservation keeps Legacy output ownership even when its writer is ready.
+// The O store fixture for late ownership requires confirmed parent directory fsync.
+#[cfg(unix)]
 #[test]
 fn a_late_reserved_channel_is_not_o_owned_for_a_herdr_turn() {
     use crate::services::tui_o::channel_policy::{self, BootChannels};

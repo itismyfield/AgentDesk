@@ -416,6 +416,7 @@ async fn output_origin_o_request_keeps_guard_after_writer_waiter_aborts_pg() {
     gate.reacquired().unwrap();
     let mut writer = ChannelWriter::new(channel_store, gate, port, Lease, Alarms);
     let piece = Derived::Piece(PieceWork {
+        notice_origin: None,
         unit_key: UnitKey {
             channel_id: channel,
             provider: ShadowProvider::Claude,

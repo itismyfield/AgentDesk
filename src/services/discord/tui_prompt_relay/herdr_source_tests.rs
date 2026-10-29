@@ -454,6 +454,40 @@ fn herdr_launch_attach_logs_before_it_publishes_and_binds_only_on_its_own_source
     }
 }
 
+// A restart forgets every in-memory execution fence; the reconnect that restores the source restores
+// its fence too, so the notice admission of that source does not wait for a later hook.
+#[test]
+fn herdr_restart_attach_restores_the_execution_fence_notice_admission_reads_pg() {
+    use crate::services::session_host::{HerdrGateRefusal, try_notice_fence};
+    let herdr = &mut Herdr::new("fence");
+    let a = uuid();
+    let nonce = herdr.launch(&a);
+    herdr.ingress.transcript(&a);
+    let reader = herdr.pane(&nonce, |_| {});
+    assert!(matches!(
+        herdr.launched(&nonce, &a, &reader),
+        HerdrSourceAttach::Published { bound: true, .. }
+    ));
+    let location = herdr.location.clone().unwrap();
+    let configured = crate::config::session_hosts::ChannelEndpoint {
+        key: location.endpoint_config_key,
+        execution_node: location.execution_node,
+        socket_path: location.socket_addr.into(),
+        herdr_home: "/unused/test-home".into(),
+        herdr_session: location.named_session,
+    };
+    herdr.restart();
+    assert_eq!(
+        try_notice_fence(&configured, &nonce, || ()),
+        Err(HerdrGateRefusal::NoStoredExecution)
+    );
+    assert!(matches!(
+        herdr.restarted(&reader),
+        HerdrSourceAttach::Published { bound: true, .. }
+    ));
+    assert!(try_notice_fence(&configured, &nonce, || ()).is_ok());
+}
+
 // After a restart only a matched Bound execution gets its logged source back, and only while the
 // path still names that file; every other verdict leaves the row, the log and memory as they are.
 #[test]

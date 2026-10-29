@@ -160,7 +160,7 @@ pub(super) async fn poll_watcher_output_or_continue(
                 return PollOutcome::BreakWatcherLoop;
             }
             TmuxLivenessDecision::TmuxDied => {
-                handle_tmux_watcher_observed_death(
+                let stopped = handle_tmux_watcher_observed_death(
                     channel_id,
                     http,
                     shared,
@@ -174,6 +174,7 @@ pub(super) async fn poll_watcher_output_or_continue(
                     ),
                 )
                 .await;
+                *loop_poll_state.tmux_death = Some(stopped);
                 commit_poll_state!();
                 return PollOutcome::BreakWatcherLoop;
             }
@@ -270,7 +271,7 @@ pub(super) async fn poll_watcher_output_or_continue(
                     return PollOutcome::BreakWatcherLoop;
                 }
                 TmuxLivenessDecision::TmuxDied => {
-                    handle_tmux_watcher_observed_death(
+                    let stopped = handle_tmux_watcher_observed_death(
                         channel_id,
                         http,
                         shared,
@@ -284,6 +285,7 @@ pub(super) async fn poll_watcher_output_or_continue(
                         ),
                     )
                     .await;
+                    *loop_poll_state.tmux_death = Some(stopped);
                     commit_poll_state!();
                     return PollOutcome::BreakWatcherLoop;
                 }
@@ -356,7 +358,7 @@ pub(super) async fn poll_watcher_output_or_continue(
             return PollOutcome::BreakWatcherLoop;
         }
         WatcherOutputPollDecision::TmuxDied => {
-            handle_tmux_watcher_observed_death(
+            let stopped = handle_tmux_watcher_observed_death(
                 channel_id,
                 http,
                 shared,
@@ -370,6 +372,7 @@ pub(super) async fn poll_watcher_output_or_continue(
                 ),
             )
             .await;
+            *loop_poll_state.tmux_death = Some(stopped);
             commit_poll_state!();
             return PollOutcome::BreakWatcherLoop;
         }

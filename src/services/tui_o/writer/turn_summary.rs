@@ -228,6 +228,7 @@ impl TurnSummaryRun {
             unit_key: key,
             index: 0,
             payload: render(outcome, elapsed, percent, quota),
+            notice_origin: None,
         })]
     }
 }

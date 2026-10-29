@@ -152,6 +152,7 @@ async fn legacy_tool_result_retries_and_refusals_are_excluded_across_restart() {
         let mut store = harness.channel();
         store
             .append_ledger(LedgerEntry::Prepared {
+                notice_origin: None,
                 serial: 0,
                 unit_key: key("legacy"),
                 piece_index: 0,
@@ -188,6 +189,7 @@ async fn legacy_tool_result_retries_and_refusals_are_excluded_across_restart() {
             unit_key: key("legacy"),
             index: 0,
             payload: "legacy private traceback".into(),
+            notice_origin: None,
         });
         for _ in 0..2 {
             let mut writer = harness.writer();

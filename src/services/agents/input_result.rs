@@ -80,10 +80,12 @@ pub async fn lookup(
         .iter()
         .map(|channel| channel.channel_id.to_string())
         .collect();
-    let receipt = find_origin_receipt(pool, origin_id, agent_id, &channel_ids)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(receipt.map(InputResult::Terminal).or(running))
+    match find_origin_receipt(pool, origin_id, agent_id, &channel_ids).await {
+        Ok(receipt) => Ok(receipt.map(InputResult::Terminal).or(running)),
+        // A row kept marked already confirmed its terminal while the database could not take it.
+        Err(_) if matches!(running, Some(InputResult::Terminal(_))) => Ok(running),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn running_execution(
@@ -111,9 +113,23 @@ fn running_execution(
     if !names_origin || message == 0 {
         return Ok(None);
     }
-    Ok(Some(InputResult::Running {
-        channel_id: channel.channel_id,
-        execution_id: format!("discord:{}:{message}", channel.channel_id),
+    let execution_id = format!("discord:{}:{message}", channel.channel_id);
+    let marked = row.get("terminal_receipt").and_then(|mark| {
+        let outcome = mark.get("outcome")?.as_str()?;
+        let confirmed_at = mark.get("confirmed_at")?.as_str()?;
+        Some((outcome.to_string(), confirmed_at.parse().ok()?))
+    });
+    Ok(Some(match marked {
+        Some((terminal_outcome, terminal_confirmed_at)) => InputResult::Terminal(OriginReceipt {
+            turn_id: execution_id,
+            channel_id: channel.channel_id.to_string(),
+            terminal_outcome,
+            terminal_confirmed_at,
+        }),
+        None => InputResult::Running {
+            channel_id: channel.channel_id,
+            execution_id,
+        },
     }))
 }
 

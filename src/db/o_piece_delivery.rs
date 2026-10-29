@@ -64,7 +64,8 @@ impl PieceKey {
     pub(crate) fn new(unit: UnitKey, piece_index: u32) -> Option<Self> {
         let postable = match (unit.provider, unit.kind) {
             (_, UnitKind::Body) | (ShadowProvider::Claude, UnitKind::ToolResult) => true,
-            (_, UnitKind::Tool) | (ShadowProvider::Codex, UnitKind::ToolResult) => false,
+            (_, UnitKind::Tool | UnitKind::InputNotice)
+            | (ShadowProvider::Codex, UnitKind::ToolResult) => false,
         };
         let named = unit.channel_id > 0 && !unit.native_key.trim().is_empty();
         (postable && named).then_some(Self { unit, piece_index })
@@ -123,8 +124,13 @@ pub(crate) fn kind_name(kind: UnitKind) -> &'static str {
         UnitKind::Body => "body",
         UnitKind::Tool => "tool",
         UnitKind::ToolResult => "tool_result",
+        UnitKind::InputNotice => "input_notice",
     }
 }
+
+#[cfg(test)]
+#[path = "o_piece_delivery/input_notice_tests.rs"]
+mod input_notice_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdmittedBy {

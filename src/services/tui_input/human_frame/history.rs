@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+pub(crate) mod append;
+#[cfg(test)]
+mod checked_tests;
 mod compat;
 #[cfg(test)]
 mod compat_tests;
@@ -37,6 +40,8 @@ struct Entry {
     #[serde(default)]
     screen_prefix: String,
     events: Vec<Event>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    append: Option<append::State>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -154,6 +159,22 @@ pub(crate) fn register(
     {
         return result;
     }
+    register_inner(
+        (provider, session, id, author),
+        transcript,
+        offset,
+        frame,
+        None,
+    )
+}
+
+fn register_inner(
+    (provider, session, id, author): (&str, &str, &str, &str),
+    transcript: &Path,
+    offset: u64,
+    frame: &str,
+    append: Option<append::State>,
+) -> Result<(), String> {
     let file = file_id(&std::fs::metadata(transcript).map_err(|error| error.to_string())?);
     let digest = hash(frame);
     update(|store| {
@@ -173,7 +194,7 @@ pub(crate) fn register(
                 && entry.hash == digest
                 && entry.path == transcript
                 && entry.file == file
-                && entry.events.is_empty()
+                && append::unbound(entry)
         }) {
             return Err("identical frame still unconfirmed".into());
         }
@@ -199,6 +220,7 @@ pub(crate) fn register(
                 + "]",
             screen_prefix: screen::prefix(frame),
             events: Vec::new(),
+            append,
         });
         Ok(())
     })
@@ -210,9 +232,15 @@ pub(crate) fn withdraw(id: &str, transcript: &Path) {
         return;
     }
     if let Err(error) = update(|store| {
-        store
-            .entries
-            .retain(|entry| entry.id != id || entry.path != transcript || !entry.events.is_empty());
+        store.entries.retain(|entry| {
+            entry.id != id
+                || entry.path != transcript
+                || !entry.events.is_empty()
+                || entry
+                    .append
+                    .as_ref()
+                    .is_some_and(|a| a.admission != append::Admission::Reserved)
+        });
         Ok(())
     }) {
         tracing::warn!(%error, "unwritten frame ledger reservation retained");
@@ -294,6 +322,7 @@ pub(crate) fn receipt(
                 && entry.file == file
                 && entry.hash == hash(frame)
                 && entry.offset <= offset
+                && entry.append.is_none()
         }) else {
             return Ok(None);
         };
@@ -343,6 +372,16 @@ pub(crate) fn observed_attempt(
     observed_at(path(), provider, session, prompts, row)
 }
 
+/// Preserves unreadable evidence as an error; `logical_session` names the recorded input owner.
+pub(crate) fn observed_attempt_checked(
+    provider: &str,
+    logical_session: &str,
+    prompts: &[String],
+    row: Option<&str>,
+) -> Result<ObservedAttempt, String> {
+    observed_at_checked(path(), provider, logical_session, prompts, row)
+}
+
 fn observed_at(
     path: Result<PathBuf, String>,
     provider: &str,
@@ -350,11 +389,7 @@ fn observed_at(
     prompts: &[String],
     row: Option<&str>,
 ) -> ObservedAttempt {
-    #[cfg(test)]
-    if let Some(observed) = v2::scoped_observed(provider, session, prompts, row) {
-        return observed;
-    }
-    let Ok(store) = path.and_then(|path| read(&path)) else {
+    observed_at_checked(path, provider, session, prompts, row).unwrap_or_else(|_| {
         let plain = prompts
             .iter()
             .flat_map(|prompt| std::iter::once(prompt.trim()).chain(class_inner(prompt)))
@@ -371,18 +406,35 @@ fn observed_at(
                             && author.bytes().all(|byte| byte.is_ascii_digit())
                     })
             });
-        return if plain {
+        if plain {
             ObservedAttempt::Pending
         } else {
             ObservedAttempt::None
-        };
-    };
+        }
+    })
+}
+
+fn observed_at_checked(
+    path: Result<PathBuf, String>,
+    provider: &str,
+    session: &str,
+    prompts: &[String],
+    row: Option<&str>,
+) -> Result<ObservedAttempt, String> {
+    #[cfg(test)]
+    if let Some(observed) = v2::scoped_observed(provider, session, prompts, row) {
+        return Ok(observed);
+    }
+    let store = path.and_then(|path| read(&path))?;
     let hashes: Vec<_> = prompts
         .iter()
         .flat_map(|prompt| class_hashes(prompt))
         .collect();
     let matching = |entry: &Entry| {
-        entry.provider == provider && entry.session == session && hashes.contains(&entry.class_hash)
+        entry.append.is_none()
+            && entry.provider == provider
+            && entry.session == session
+            && hashes.contains(&entry.class_hash)
     };
     if let Some(row) = row
         && let Some(entry) = store.entries.iter().find(|entry| {
@@ -393,13 +445,16 @@ fn observed_at(
                     .any(|event| event.row.as_deref() == Some(row))
         })
     {
-        return ObservedAttempt::Known(entry.id.clone());
+        return Ok(ObservedAttempt::Known(entry.id.clone()));
     }
-    if store.entries.iter().any(matching) {
+    if let Some(observed) = append::observed(&store, provider, session, prompts, row) {
+        return Ok(observed);
+    }
+    Ok(if store.entries.iter().any(matching) {
         ObservedAttempt::Pending
     } else {
         ObservedAttempt::None
-    }
+    })
 }
 
 pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {

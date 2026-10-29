@@ -8,6 +8,7 @@ import {
   type OnboardingResumeState,
   type ProviderStatus,
 } from "../onboardingDraft";
+import { requestWithErrorBody } from "../../api/httpClient";
 import { TEMPLATES } from "./templates";
 import type { CompletionChecklistItem } from "./OnboardingWizardSections";
 
@@ -19,6 +20,25 @@ interface Guild {
 
 type Tr = (ko: string, en: string) => string;
 type Setter<T> = Dispatch<SetStateAction<T>>;
+
+type OnboardingCompleteResponse = {
+  ok?: boolean;
+  checklist?: CompletionChecklistItem[];
+  error?: string;
+  partial_apply?: boolean;
+  completion_state?: { partial_apply?: boolean };
+};
+
+// Provider probes, prompt generation and Discord setup run server-side for a long time.
+const ONBOARDING_ACTION_TIMEOUT_MS = 5 * 60_000;
+
+function postOnboarding<T>(path: string, body: unknown): Promise<T> {
+  return requestWithErrorBody<T>(path, {
+    method: "POST",
+    body: JSON.stringify(body),
+    timeoutMs: ONBOARDING_ACTION_TIMEOUT_MS,
+  });
+}
 
 export const ONBOARDING_INVITE_PERMISSIONS = {
   command: (2048 + 65536 + 8192 + 17179869184 + 274877906944).toString(),
@@ -115,13 +135,7 @@ export function useOnboardingWizardActions({
   tr,
 }: UseOnboardingWizardActionsArgs) {
   const validateBotToken = useCallback(async (token: string): Promise<BotInfo> => {
-    const response = await fetch("/api/onboarding/validate-token", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token }),
-    });
-    return response.json();
+    return postOnboarding<BotInfo>("/api/onboarding/validate-token", { token });
   }, []);
 
   const validateStep1 = useCallback(async () => {
@@ -200,13 +214,7 @@ export function useOnboardingWizardActions({
     const statuses: Record<string, ProviderStatus> = {};
     for (const provider of providers) {
       try {
-        const response = await fetch("/api/onboarding/check-provider", {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider }),
-        });
-        statuses[provider] = await response.json();
+        statuses[provider] = await postOnboarding<ProviderStatus>("/api/onboarding/check-provider", { provider });
       } catch {
         statuses[provider] = { installed: false, logged_in: false };
       }
@@ -219,13 +227,7 @@ export function useOnboardingWizardActions({
     const token = announceToken.trim() || commandBots[0]?.token.trim();
     if (!token) return;
     try {
-      const response = await fetch("/api/onboarding/channels", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token }),
-      });
-      const data = (await response.json()) as { guilds?: Guild[] };
+      const data = await postOnboarding<{ guilds?: Guild[] }>("/api/onboarding/channels", { token });
       setGuilds(data.guilds || []);
       if (data.guilds?.length === 1) setSelectedGuild(data.guilds[0].id);
     } catch {
@@ -294,17 +296,11 @@ export function useOnboardingWizardActions({
       if (!agent) return;
       setGeneratingPrompt(true);
       try {
-        const response = await fetch("/api/onboarding/generate-prompt", {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: agent.name,
-            description: agent.description,
-            provider: primaryProvider,
-          }),
+        const data = await postOnboarding<{ prompt?: string }>("/api/onboarding/generate-prompt", {
+          name: agent.name,
+          description: agent.description,
+          provider: primaryProvider,
         });
-        const data = (await response.json()) as { prompt?: string };
         if (data.prompt) {
           setAgents((prev) =>
             prev.map((item) => (item.id === agentId ? { ...item, prompt: data.prompt ?? item.prompt } : item)),
@@ -333,31 +329,25 @@ export function useOnboardingWizardActions({
     setCompletionChecklist(null);
     setError("");
     try {
-      const response = await fetch("/api/onboarding/complete", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          token: commandBots[0]?.token.trim() || "",
-          announce_token: announceToken.trim() || null,
-          notify_token: notifyToken.trim() || null,
-          command_token_2: commandBots.length > 1 ? commandBots[1].token.trim() || null : null,
-          command_provider_2: commandBots.length > 1 ? commandBots[1].provider : null,
-          guild_id: selectedGuild,
-          owner_id: ownerId || null,
-          provider: primaryProvider,
-          template: selectedTemplate || null,
-          rerun_policy: hasExistingSetup && confirmRerunOverwrite ? "replace_existing" : "reuse_existing",
-          channels: channelAssignments.map((assignment) => ({
-            channel_id: assignment.channelId || assignment.channelName,
-            channel_name: assignment.channelName,
-            role_id: assignment.agentId,
-            description: agents.find((agent) => agent.id === assignment.agentId)?.description || null,
-            system_prompt: agents.find((agent) => agent.id === assignment.agentId)?.prompt || null,
-          })),
-        }),
+      const data = await postOnboarding<OnboardingCompleteResponse>("/api/onboarding/complete", {
+        token: commandBots[0]?.token.trim() || "",
+        announce_token: announceToken.trim() || null,
+        notify_token: notifyToken.trim() || null,
+        command_token_2: commandBots.length > 1 ? commandBots[1].token.trim() || null : null,
+        command_provider_2: commandBots.length > 1 ? commandBots[1].provider : null,
+        guild_id: selectedGuild,
+        owner_id: ownerId || null,
+        provider: primaryProvider,
+        template: selectedTemplate || null,
+        rerun_policy: hasExistingSetup && confirmRerunOverwrite ? "replace_existing" : "reuse_existing",
+        channels: channelAssignments.map((assignment) => ({
+          channel_id: assignment.channelId || assignment.channelName,
+          channel_name: assignment.channelName,
+          role_id: assignment.agentId,
+          description: agents.find((agent) => agent.id === assignment.agentId)?.description || null,
+          system_prompt: agents.find((agent) => agent.id === assignment.agentId)?.prompt || null,
+        })),
       });
-      const data = await response.json();
       if (data.ok) {
         setResumeState("none");
         clearOnboardingDraft();

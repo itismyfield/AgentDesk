@@ -99,6 +99,7 @@ impl Frame {
             header: self.header.clone(),
             screen_prefix: self.screen_prefix.clone(),
             events: vec![],
+            append: None,
         }
     }
 }
@@ -732,6 +733,8 @@ pub(super) fn scoped() -> bool {
     context().is_some()
 }
 
+// Writer fixtures require Unix file identity and confirmed parent directory fsync.
+#[cfg(unix)]
 #[path = "v2_tests.rs"]
 mod tests;
 

@@ -814,6 +814,7 @@ mod postgres_tests {
             },
             index: 0,
             payload: "body must remain unposted".into(),
+            notice_origin: None,
         });
         // Keep PG I/O from auto-advancing the paused clock; only the test advances retry time.
         tokio::time::pause();

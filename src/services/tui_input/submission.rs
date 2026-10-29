@@ -384,6 +384,34 @@ mod tests {
     }
 
     #[test]
+    fn an_unterminated_osc_never_hides_foreign_codex_text_from_enter() {
+        let before = include_str!("../../../tests/fixtures/tui_input/codex-idle-dim.ansi");
+        let status = "\n\n  gpt-5.4 · Fast off · Context 100% left";
+        for (after, entered) in [
+            (format!("› own{status}"), 1),
+            (format!("› own\x1b]8;;u foreign{status}"), 0),
+        ] {
+            let enters = RefCell::new(0);
+            run_prompt_submission_using(
+                Submission {
+                    provider: ShadowProvider::Codex,
+                    frame: "own",
+                    before: Some(before),
+                    mutations: 1,
+                },
+                None,
+                || InputRun::Applied,
+                || Some(after.clone()),
+                || {
+                    *enters.borrow_mut() += 1;
+                    InputRun::Applied
+                },
+            );
+            assert_eq!(*enters.borrow(), entered, "{after:?}");
+        }
+    }
+
+    #[test]
     fn byte_bound_and_terminal_controls_are_checked_before_payload() {
         for frame in [
             "".into(),

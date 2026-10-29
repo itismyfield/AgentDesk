@@ -1,6 +1,6 @@
 //! Durable, revision-fenced campaign DAGs on the canonical PostgreSQL pool.
 //! Callers write node state; github-sync also makes linked nodes follow their issue (`issue_sync`).
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -197,11 +197,9 @@ pub fn validate(input: &CampaignInput) -> Result<(), CampaignError> {
         ));
     }
     let mut ids = HashMap::new();
-    for (index, node) in input.nodes.iter().enumerate() {
+    for node in &input.nodes {
         validate_id(&node.id)?;
-        if ids.insert(node.id.as_str(), index).is_some() {
-            return Err(invalid(format!("duplicate node id: {}", node.id)));
-        }
+        crate::utils::dag::insert_node(&mut ids, &node.id).map_err(dag_error)?;
         if node
             .post_merge_hold
             .as_ref()
@@ -224,45 +222,14 @@ pub fn validate(input: &CampaignInput) -> Result<(), CampaignError> {
             )));
         }
     }
-    let mut incoming = vec![0usize; input.nodes.len()];
-    let mut dependents = vec![Vec::new(); input.nodes.len()];
-    for (index, node) in input.nodes.iter().enumerate() {
-        let mut seen = HashSet::new();
-        for dependency in &node.dependencies {
-            let Some(&dependency_index) = ids.get(dependency.as_str()) else {
-                return Err(invalid(format!(
-                    "node {} has missing dependency {dependency}",
-                    node.id
-                )));
-            };
-            if !seen.insert(dependency) {
-                return Err(invalid(format!(
-                    "node {} repeats dependency {dependency}",
-                    node.id
-                )));
-            }
-            incoming[index] += 1;
-            dependents[dependency_index].push(index);
-        }
-    }
-    let mut ready: VecDeque<_> = incoming
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &count)| (count == 0).then_some(i))
-        .collect();
-    let mut visited = 0;
-    while let Some(index) = ready.pop_front() {
-        visited += 1;
-        for &next in &dependents[index] {
-            incoming[next] -= 1;
-            if incoming[next] == 0 {
-                ready.push_back(next);
-            }
-        }
-    }
-    if visited != input.nodes.len() {
-        return Err(invalid("campaign dependencies contain a cycle"));
-    }
+    crate::utils::dag::validate_dependencies(
+        &ids,
+        input
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.dependencies.as_slice())),
+    )
+    .map_err(dag_error)?;
     if input.status == CampaignStatus::Completed
         && (input.nodes.is_empty()
             || input
@@ -275,6 +242,20 @@ pub fn validate(input: &CampaignInput) -> Result<(), CampaignError> {
         ));
     }
     Ok(())
+}
+
+fn dag_error(error: crate::utils::dag::DagError) -> CampaignError {
+    use crate::utils::dag::DagError;
+    invalid(match error {
+        DagError::DuplicateNode(id) => format!("duplicate node id: {id}"),
+        DagError::MissingDependency { node, dependency } => {
+            format!("node {node} has missing dependency {dependency}")
+        }
+        DagError::RepeatedDependency { node, dependency } => {
+            format!("node {node} repeats dependency {dependency}")
+        }
+        DagError::Cycle(_) => "campaign dependencies contain a cycle".into(),
+    })
 }
 
 fn trimmed(value: Option<&str>) -> Option<String> {

@@ -807,6 +807,11 @@
       "version": 160
     },
     {
+      "path": "migrations/postgres/0161_server_campaigns.sql",
+      "sha256": "ce84944787b4b464f184c8a8e5a272845c4a1057026d824e36bc153bedde3fa8",
+      "version": 161
+    },
+    {
       "path": "migrations/postgres/0162_input_fallback_plan.sql",
       "sha256": "44777c95d6244770298d7ca9d7efbef721ebe7b4b389e2069b39a31ed8d026e6",
       "version": 162

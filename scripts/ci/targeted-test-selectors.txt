@@ -71,6 +71,14 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::codex_end_proof_t
 services::tui_o::store::codex_end::tests::
 services::discord::commands::control::clear_teardown::codex_end_tests::successor_tests::
 
+[High-risk recovery: Scheduled binding presence regressions]
+=services::discord::turn_presence::activity::unbound::live::owner_tests::completed_scheduled_binding_opens_turn_start_pg
+=services::discord::turn_presence::activity::unbound::live::owner_tests::completed_scheduled_inventory_with_primary_binding_opens_turn_start_pg
+=services::discord::turn_presence::activity::unbound::live::owner_tests::completed_scheduled_inventory_resolves_other_channels_and_pins_foreign_binding_pg
+=services::discord::turn_presence::activity::unbound::live::owner_tests::live_primary_without_watcher_stays_unknown_pg
+=services::discord::turn_presence::activity::unbound::live::owner_tests::scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
+=services::discord::turn_presence::activity::unbound::live::owner_tests::scheduled_binding_with_inflight_stays_held_pg
+
 [Fast targeted tests: Footer-only marker regressions]
 task_notification
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests

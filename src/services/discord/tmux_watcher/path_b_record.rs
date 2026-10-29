@@ -166,6 +166,27 @@ pub(super) async fn settle_committed_range(
     crate::services::discord::scheduled_turn::settle(pool, state, outcome).await;
 }
 
+/// Commits the receipt of the turn that owns this committed range before any release can drop
+/// its row. True when the commit failed and the row stays marked instead.
+pub(super) async fn record_receipt(
+    pool: Option<&sqlx::PgPool>,
+    state: Option<&InflightTurnState>,
+    (tmux_session_name, current_offset): (&str, u64),
+    outcome: crate::db::turns::TerminalOutcome,
+) -> bool {
+    let Some(state) = state.filter(|state| {
+        state.user_msg_id != 0
+            && super::turn_identity::pinned_finalize_user_msg_id(
+                Some(state),
+                tmux_session_name,
+                current_offset,
+            ) == state.user_msg_id
+    }) else {
+        return false;
+    };
+    !crate::services::discord::receipt_settle::record_or_stamp(pool, state, outcome).await
+}
+
 #[cfg(test)]
 #[path = "path_b_record_tests.rs"]
 mod tests;

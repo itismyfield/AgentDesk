@@ -13,6 +13,11 @@ vi.mock("../../api/campaigns", async (importOriginal) => ({
   setCampaignAutoQueue: vi.fn(),
   getCampaign: vi.fn(),
 }));
+// The panel also lists server campaigns; these tests count only legacy requests.
+vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/serverCampaigns")>()),
+  getServerCampaigns: vi.fn().mockResolvedValue([]),
+}));
 
 let container: HTMLDivElement;
 let root: Root;

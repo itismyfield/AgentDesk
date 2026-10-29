@@ -24,6 +24,10 @@ except ImportError:
 
 MAX_RESPONSE = 1024 * 1024
 MAX_ANCHORS = 64 * 1024
+ANCHOR_HEADER = "[ANCHOR MEMORY]\n"
+# Same line grammar as memento_anchor.rs: optional principal label and annotation suffix.
+ANCHOR_PRINCIPAL = re.compile(r"\[[a-z0-9:]+\] ")
+ANCHOR_SUFFIX = re.compile(r" \((?:[0-9]{4}-[0-9]{2}-[0-9]{2}(?:, [a-z_]+){0,2}|[a-z_]+(?:, [a-z_]+)?)\)")
 NOTICE = (
     "Memento에서 세션 시작 시 조회한 과거 기억입니다. 출처는 Memento anchor이며 "
     "현재 작업의 참고 자료로 사용하세요. 최신 사용자 지시와 현재 확인한 사실을 우선하고, "
@@ -190,7 +194,7 @@ def fetch_anchors(endpoint, token, workspace, provider):
         global_fragments = [item for item in fragments if item["workspace"] is None]
         if not global_fragments:
             return ""
-        anchor = "[ANCHOR MEMORY]\n" + "\n".join("- " + item["content"] for item in global_fragments)
+        anchor = ANCHOR_HEADER + "\n".join("- " + item["content"] for item in global_fragments)
         if len(anchor.encode()) > MAX_ANCHORS:
             raise ValueError("oversize anchors")
         return anchor
@@ -227,13 +231,37 @@ def extract_anchors(payload):
     if len(records) != count or any(not isinstance(item.get("content"), str) or not item["content"].strip()
                                      for item in records):
         raise ValueError("anchor records absent or incomplete")
-    expected = "[ANCHOR MEMORY]\n" + "\n".join("- " + item["content"] for item in records)
-    if not injection.startswith(expected):
-        raise ValueError("anchor injection mismatch")
-    anchor = injection[:len(expected)]
+    anchor = injection[:anchor_injection_end(injection, [item["content"] for item in records])]
     if len(anchor.encode()) > MAX_ANCHORS:
         raise ValueError("invalid anchor section")
     return anchor
+
+
+def anchor_injection_end(injection, contents):
+    if not injection.startswith(ANCHOR_HEADER):
+        raise ValueError("anchor injection mismatch")
+    cursor = len(ANCHOR_HEADER)
+    for index, content in enumerate(contents):
+        if not injection.startswith("- ", cursor):
+            raise ValueError("anchor injection mismatch")
+        cursor += 2
+        # Prefer literal content so records that start with a label-like prefix still match.
+        label = None if injection.startswith(content, cursor) else ANCHOR_PRINCIPAL.match(injection, cursor)
+        if label:
+            cursor = label.end()
+        if not injection.startswith(content, cursor):
+            raise ValueError("anchor injection mismatch")
+        cursor += len(content)
+        if injection.startswith(" (", cursor):
+            suffix = ANCHOR_SUFFIX.match(injection, cursor)
+            if not suffix:
+                raise ValueError("anchor injection mismatch")
+            cursor = suffix.end()
+        if index + 1 < len(contents):
+            if not injection.startswith("\n", cursor):
+                raise ValueError("anchor injection mismatch")
+            cursor += 1
+    return cursor
 
 
 def merge_claude(args, anchor):

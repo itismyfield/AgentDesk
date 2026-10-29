@@ -354,14 +354,14 @@ pub(crate) use session_rotation::*;
 pub(crate) use shadow_peek::hold_binding_peek_lock_for_tests;
 pub(crate) use shadow_peek::peek_tmux_runtime_binding;
 
+pub(crate) use extract::is_discord_relayed_user_prompt;
 #[cfg(test)]
 use extract::native_turn_is_open;
 pub use extract::*;
 use extract::{
-    is_discord_relayed_user_prompt, is_user_prefixed_subagent_notification_machine_event,
-    normalize_line_endings, normalize_provider, open_native_turn, record_relayed_entry_id,
-    relayed_entry_id_already_seen, take_matching_pending_prompt,
-    take_or_record_recent_observed_prompt,
+    is_user_prefixed_subagent_notification_machine_event, normalize_line_endings,
+    normalize_provider, open_native_turn, record_relayed_entry_id, relayed_entry_id_already_seen,
+    take_matching_pending_prompt, take_or_record_recent_observed_prompt,
 };
 pub use handoff::RecordEvidence;
 #[cfg(test)]

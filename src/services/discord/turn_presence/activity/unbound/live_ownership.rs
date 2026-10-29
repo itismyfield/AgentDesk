@@ -75,6 +75,8 @@ pub(super) struct OwnerInputs {
     membership: Membership,
     epoch: u64,
     evidence: OwnerEvidence,
+    completed_scheduled: Result<Vec<completed_scheduled::Proof>, String>,
+    ports: Arc<LivePorts>,
     nonces: BTreeMap<String, Result<Option<Vec<u8>>, String>>,
 }
 
@@ -109,6 +111,7 @@ impl OwnerInputs {
         membership: Membership,
         epoch: u64,
         names: &[String],
+        ports: Arc<LivePorts>,
     ) -> Result<Self, String> {
         let watchers = membership
             .with_current(|| {
@@ -120,6 +123,8 @@ impl OwnerInputs {
             .map_err(rejected)?;
         let pool = shared.pg_pool.as_ref().ok_or("database unavailable")?;
         let evidence = OwnerEvidence::collect(watchers, pool, &membership.snapshot.entries).await?;
+        let completed_scheduled =
+            completed_scheduled::collect(pool, &evidence.routines, ports.clone()).await;
         let nonces = names
             .iter()
             .map(|name| (name.clone(), nonce(name)))
@@ -129,6 +134,8 @@ impl OwnerInputs {
             membership,
             epoch,
             evidence,
+            completed_scheduled,
+            ports,
             nonces,
         };
         result.with_current(|| ()).map_err(rejected)?;
@@ -139,6 +146,7 @@ impl OwnerInputs {
         self.membership.same(&other.membership)
             && self.epoch == other.epoch
             && self.evidence == other.evidence
+            && self.completed_scheduled == other.completed_scheduled
             && self.nonces == other.nonces
     }
 
@@ -152,7 +160,30 @@ impl OwnerInputs {
                 *owner = None;
             }
         }
+        if let Ok(proofs) = &self.completed_scheduled {
+            for proof in proofs {
+                if self.completed_scheduled_admitted(proof)
+                    && owners.get(&proof.name).is_some_and(Option::is_none)
+                {
+                    owners.insert(proof.name.clone(), Some(proof.channel));
+                }
+            }
+        }
         owners
+    }
+
+    fn completed_scheduled_admitted(&self, proof: &completed_scheduled::Proof) -> bool {
+        self.nonce_matches(&proof.name, &proof.binding.execution_nonce)
+            && self.admits(&proof.name, proof.channel)
+    }
+
+    pub(super) fn completed_scheduled_names(&self, channel: u64) -> Vec<&str> {
+        self.completed_scheduled
+            .iter()
+            .flatten()
+            .filter(|proof| proof.channel == channel && self.completed_scheduled_admitted(proof))
+            .map(|proof| proof.name.as_str())
+            .collect()
     }
 
     /// Whether every runtime's watcher owner and routine receipt for `name` was read and names no
@@ -181,6 +212,10 @@ impl OwnerInputs {
         self.evidence.local_conflict(name)
     }
 
+    fn nonce_matches(&self, name: &str, nonce: &str) -> bool {
+        matches!(self.nonces.get(name), Some(Ok(Some(bytes))) if bytes == nonce.as_bytes())
+    }
+
     pub(super) fn with_current<R>(&self, publish: impl FnOnce() -> R) -> Result<R, &'static str> {
         let shared = self.shared.upgrade().ok_or("membership")?;
         if !self.membership.current_registry(&shared) {
@@ -199,6 +234,13 @@ impl OwnerInputs {
                     if fresh != self.evidence.watchers {
                         return Err("owner_epoch");
                     }
+                    if self
+                        .completed_scheduled
+                        .as_ref()
+                        .is_ok_and(|proofs| proofs.iter().any(|proof| !proof.sequence_current()))
+                    {
+                        return Err("owner_epoch");
+                    }
                     Ok(publish())
                 })
             })
@@ -211,9 +253,17 @@ impl OwnerInputs {
     }
 
     pub(super) fn files_current(&self) -> bool {
-        self.nonces
-            .iter()
-            .all(|(name, observed)| nonce(name) == *observed)
+        let scheduled_current = match &self.completed_scheduled {
+            Ok(proofs) => self
+                .ports
+                .scoped(|| proofs.iter().all(completed_scheduled::Proof::current)),
+            Err(_) => true,
+        };
+        scheduled_current
+            && self
+                .nonces
+                .iter()
+                .all(|(name, observed)| nonce(name) == *observed)
     }
 
     pub(super) fn nonces_valid<'a>(&self, mut names: impl Iterator<Item = &'a str>) -> bool {

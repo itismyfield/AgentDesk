@@ -129,25 +129,56 @@ impl Drop for MutationPermit {
     }
 }
 
+type FenceKey = (String, String, String, String, String, String);
+
+fn execution_fences() -> &'static Mutex<HashMap<FenceKey, Arc<ExecutionFence>>> {
+    static FENCES: OnceLock<Mutex<HashMap<FenceKey, Arc<ExecutionFence>>>> = OnceLock::new();
+    FENCES.get_or_init(Default::default)
+}
+
 fn execution_fence(endpoint: &HerdrEndpoint, pane: &str, nonce: &str) -> Arc<ExecutionFence> {
-    type Key = (String, String, String, String, String, String);
-    static FENCES: OnceLock<Mutex<HashMap<Key, Arc<ExecutionFence>>>> = OnceLock::new();
-    let key = (
+    fence_at((
         endpoint.execution_node().to_string(),
         endpoint.config_key().to_string(),
         endpoint.socket_path().to_string_lossy().into_owned(),
         endpoint.herdr_session().to_string(),
         pane.to_string(),
         nonce.to_string(),
-    );
+    ))
+}
+
+fn fence_at(key: FenceKey) -> Arc<ExecutionFence> {
     // Closing tombstones must outlive targets so a fresh target cannot reuse an uncertain nonce.
-    FENCES
-        .get_or_init(Default::default)
+    execution_fences()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .entry(key)
         .or_default()
         .clone()
+}
+
+/// Restores the fence a restart lost for a Bound execution a reconnect matched exactly, so a
+/// notice admission finds it; an existing entry keeps its closing tombstone.
+pub(crate) fn restore_execution_fence(stored: &HostedExecution) -> bool {
+    let (Some(location), Some(expected)) = (&stored.location, &stored.expected) else {
+        return false;
+    };
+    if !matches!(stored.state, HostedState::Bound)
+        || expected.binding_nonce != stored.execution_nonce
+    {
+        return false;
+    }
+    fence_at((
+        location.execution_node.clone(),
+        location.endpoint_config_key.clone(),
+        std::path::Path::new(&location.socket_addr)
+            .to_string_lossy()
+            .into_owned(),
+        location.named_session.clone(),
+        location.pane_id.clone(),
+        stored.execution_nonce.clone(),
+    ));
+    true
 }
 
 impl ExecutionFence {
@@ -172,6 +203,46 @@ impl ExecutionFence {
         state.1 = true;
         Ok(TerminationFence(permit, was_closing))
     }
+}
+
+pub(crate) fn try_notice_fence<R>(
+    endpoint: &crate::config::session_hosts::ChannelEndpoint,
+    nonce: &str,
+    start: impl FnOnce() -> R,
+) -> Result<R, HerdrGateRefusal> {
+    let fences = execution_fences()
+        .try_lock()
+        .map_err(|_| HerdrGateRefusal::NoStoredExecution)?;
+    let mut candidates = fences
+        .iter()
+        .filter(|((node, key, socket, session, _, execution), _)| {
+            node == &endpoint.execution_node
+                && key == &endpoint.key
+                && std::path::Path::new(socket) == endpoint.socket_path
+                && session == &endpoint.herdr_session
+                && execution == nonce
+        });
+    let fence = candidates
+        .next()
+        .map(|(_, fence)| fence.clone())
+        .ok_or(HerdrGateRefusal::NoStoredExecution)?;
+    if candidates.next().is_some() {
+        return Err(HerdrGateRefusal::NoStoredExecution);
+    }
+    drop(fences);
+    let state = fence.state.try_lock().map_err(|error| match error {
+        std::sync::TryLockError::WouldBlock => HerdrGateRefusal::MutationBusy,
+        std::sync::TryLockError::Poisoned(_) => HerdrGateRefusal::NoStoredExecution,
+    })?;
+    if state.1 {
+        return Err(HerdrGateRefusal::ExecutionClosing);
+    }
+    if state.0 {
+        return Err(HerdrGateRefusal::MutationBusy);
+    }
+    let result = start();
+    drop(state);
+    Ok(result)
 }
 
 pub(crate) struct TerminationFence(MutationPermit, bool);

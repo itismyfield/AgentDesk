@@ -337,6 +337,8 @@ jobs:
               - 'src/services/discord/queue_dispatch/**'
               - 'src/services/discord/queue_io.rs'
               - 'src/services/discord/queue_io/**'
+              - 'src/services/discord/receipt_settle.rs'
+              - 'src/services/discord/receipt_settle_tests.rs'
               - 'src/services/discord/recovery_engine.rs'
               - 'src/services/discord/recovery_engine/**'
               - 'src/services/discord/recovery_paths/**'

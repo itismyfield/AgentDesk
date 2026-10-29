@@ -30,6 +30,7 @@ pub(super) struct TerminalCommitEpilogueLocals<'a> {
     pub(super) lifecycle_stage_paused: bool,
     pub(super) relay_suppressed: bool,
     pub(super) has_assistant_response: bool,
+    pub(super) receipt_kept: bool,
     pub(super) completion_is_stale_for_newer_turn: bool,
     pub(super) anchor_cleanup_is_stale_for_newer_turn: bool,
     pub(super) inflight_state: &'a Option<InflightTurnState>,
@@ -146,6 +147,7 @@ pub(super) async fn run_terminal_commit_epilogue(
         lifecycle_stage_paused,
         relay_suppressed,
         has_assistant_response,
+        receipt_kept,
         completion_is_stale_for_newer_turn,
         anchor_cleanup_is_stale_for_newer_turn,
         inflight_state,
@@ -300,7 +302,8 @@ pub(super) async fn run_terminal_commit_epilogue(
         // #5704: the row this pass atomically cleared. Its mailbox episode must be
         // released by the same pass (see `committed_finalize_target` below).
         let mut committed_cleared_row: Option<&InflightTurnState> = None;
-        if committed_row_cleanup_allowed {
+        // A row kept marked because its receipt did not commit stays for boot or admission.
+        if committed_row_cleanup_allowed && !receipt_kept {
             if let Some(pinned_clear_identity) = pinned_committed_clear_identity.as_ref() {
                 let clear_outcome =
                         crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(

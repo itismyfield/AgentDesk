@@ -191,7 +191,7 @@ pub fn extract_qwen_jsonl_user_prompt(json: &Value) -> Option<String> {
 /// collapsed ones (codex #3527). Scan the WHOLE string: find `[User: `, then any
 /// following `(ID: <digits>)]` (author may itself contain parens). A v1 header counts only as a
 /// new turn's; input pasted into a running turn is settled by the injected-input ledger.
-pub(super) fn is_discord_relayed_user_prompt(prompt: &str) -> bool {
+pub(crate) fn is_discord_relayed_user_prompt(prompt: &str) -> bool {
     let Some(user_at) = prompt.find("[User: ") else {
         return false;
     };
@@ -564,6 +564,8 @@ pub(super) struct Observation<'a> {
     pub(super) candidates: &'a [String],
     pub(super) entry_id: Option<&'a str>,
     pub(super) native_turn: Option<&'a str>,
+    /// A verified append row's first handoff has its own identity, even when its body repeats.
+    pub(super) first_handed_row: bool,
     pub(super) local_only: bool,
     /// Not read in file order: an unbound handoff holds it.
     pub(super) may_park: bool,
@@ -594,6 +596,7 @@ pub(super) fn decide_observation(
         candidates,
         entry_id,
         native_turn,
+        first_handed_row,
         local_only,
         ..
     } = *observation;
@@ -627,21 +630,23 @@ pub(super) fn decide_observation(
         {
             return Decision::Parked;
         }
-        for prompt in candidates {
-            if state.take_matching_pending(provider, tmux, prompt) {
-                // The Discord turn owns this native turn's answer.
-                if let Some(turn) = native_turn {
-                    let owner = (
-                        SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
-                        NativeTurnOwner::Answer,
-                    );
-                    state.open_native_turn_slot(provider, tmux, turn, owner);
+        if !first_handed_row {
+            for prompt in candidates {
+                if state.take_matching_pending(provider, tmux, prompt) {
+                    // The Discord turn owns this native turn's answer.
+                    if let Some(turn) = native_turn {
+                        let owner = (
+                            SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+                            NativeTurnOwner::Answer,
+                        );
+                        state.open_native_turn_slot(provider, tmux, turn, owner);
+                    }
+                    return Decision::SuppressedDiscord;
                 }
-                return Decision::SuppressedDiscord;
             }
         }
         for prompt in candidates {
-            if state.take_or_record_recent(provider, tmux, prompt) {
+            if state.take_or_record_recent(provider, tmux, prompt) && !first_handed_row {
                 return Decision::SuppressedRecent;
             }
         }
