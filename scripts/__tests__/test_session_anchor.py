@@ -269,6 +269,17 @@ class AnchorTests(unittest.TestCase):
                          "anchors": {"permanent": [{"content": content}]},
                          "injectionText": expected + "\n\n[CORE MEMORY]\nnot an anchor"}), expected)
 
+    def test_annotated_anchor_lines_are_accepted(self):
+        records = [{"content": "first"}, {"content": "second"}, {"content": "[ops] literal label"}]
+        expected = ("[ANCHOR MEMORY]\n- first (2026-09-10, verified)\n- [team:a1] second (observed)"
+                    "\n- [ops] literal label (2026-10-01)")
+        self.assertEqual(anchor.extract_anchors({"anchorCount": 3, "anchors": {"permanent": records},
+                         "injectionText": expected + "\n\n[CORE MEMORY]\nnot an anchor"}), expected)
+        for bad in (" (Verified)", " (2026-09-10, verified, inferred, extra)", " (note"):
+            with self.assertRaises(ValueError):
+                anchor.extract_anchors({"anchorCount": 1, "anchors": {"permanent": [{"content": "first"}]},
+                                        "injectionText": "[ANCHOR MEMORY]\n- first" + bad})
+
 
 class MacMiniAnchorTests(AnchorTests):
     compact_default = "1000000"
