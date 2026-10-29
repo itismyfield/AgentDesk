@@ -807,9 +807,9 @@
       "version": 160
     },
     {
-      "path": "migrations/postgres/0161_input_fallback_plan.sql",
+      "path": "migrations/postgres/0162_input_fallback_plan.sql",
       "sha256": "44777c95d6244770298d7ca9d7efbef721ebe7b4b389e2069b39a31ed8d026e6",
-      "version": 161
+      "version": 162
     }
   ],
   "version": 1
