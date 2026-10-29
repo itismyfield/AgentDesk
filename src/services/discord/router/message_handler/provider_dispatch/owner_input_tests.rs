@@ -44,9 +44,8 @@ struct Rig {
     original: PendingQueueItem,
 }
 
-/// A pane drawing `before` over a `transcript`, its spawn nonce known, and an owner holding one
-/// admitted original. Its tmux fails a load when `fail-load` exists and replaces the pane's
-/// process right after the step named in `swap-after`.
+/// A known pane over `transcript` and an owner with one admitted original; its tmux fails a load
+/// on `fail-load` and replaces the pane's process after the step named in `swap-after`.
 fn rig(name: &str, channel: u64, mode: &str, before: String, transcript: &str) -> Rig {
     let f = Fixture::after_shared_test_env_lock();
     let nonce = format!("{:032x}", channel);
