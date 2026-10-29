@@ -1075,6 +1075,7 @@ pub(super) async fn admitted_losses_under_root(
     let locals = TerminalRelayPlanLocals {
         current_offset: FRAME_END + UNPROCESSED_TAIL.len() as u64,
         data_start_offset: FRAME_START,
+        turn_data_start_offset: FRAME_START,
         all_data: &all_data,
         full_response: &full_response,
         current_response: LOST_BODY,

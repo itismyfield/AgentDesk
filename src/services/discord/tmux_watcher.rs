@@ -851,6 +851,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let terminal_relay_plan_locals = TerminalRelayPlanLocals {
                 current_offset,
                 data_start_offset,
+                turn_data_start_offset,
                 all_data: &all_data,
                 full_response: &full_response,
                 current_response,
