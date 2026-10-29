@@ -562,3 +562,36 @@ it("brings a selected task's details into view on a narrow screen", async () => 
   Reflect.deleteProperty(window, "matchMedia");
   Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
 });
+
+it("keeps both the create's later edits and an edit draft opened meanwhile for the new campaign", async () => {
+  let answer: (value: ServerCampaignCommandResult) => void = () => {};
+  vi.mocked(createServerCampaign).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+  await render();
+  await click(buttonByText("New server campaign"));
+  const forms = () => [...container.querySelectorAll("form.campaign-server-form")];
+  const name = (form: Element) => form.querySelector<HTMLInputElement>('input[aria-label="Name"]')!;
+  const typeName = async (form: Element, value: string) => {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name(form), value);
+      name(form).dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+  await act(async () => {
+    const id = forms()[0].querySelector<HTMLInputElement>('input[aria-label="Campaign ID"]')!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(id, "fresh");
+    id.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await typeName(forms()[0], "Fresh");
+  await click(buttonByText("Create"));
+  await typeName(forms()[0], "A typed after sending");
+  // The server committed the create before its answer came: the list already shows it, and it is opened for editing.
+  list.mockResolvedValue([fixtures.prepared, copyOf(fixtures.prepared, "fresh", "Fresh")]);
+  await click(buttonByText("Refresh"));
+  await openServer("Fresh");
+  await click(buttonByText("Edit definition"));
+  await typeName(forms()[1], "B typed in the edit form");
+  await act(async () => answer({ ...accepted, definition_revision: 1, control: "prepared" }));
+  expect(forms().map((form) => name(form).value)).toEqual(["A typed after sending", "B typed in the edit form"]);
+  expect(vi.mocked(createServerCampaign)).toHaveBeenCalledOnce();
+  expect(vi.mocked(editServerCampaignDefinition)).not.toHaveBeenCalled();
+});

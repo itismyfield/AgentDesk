@@ -279,8 +279,10 @@ export default function CampaignsPanel({ language }: { language: string }) {
         setServerDrafts((current) => {
           // Only the draft the create came from moves; one opened after it stays a create.
           if (current[NEW_DRAFT]?.mode !== "edit" || current[NEW_DRAFT].id !== id) return current;
+          // An edit draft already open for the campaign keeps its key; both drafts stay to be saved or cancelled.
+          if (current[editKey(id)]) return current;
           const { [NEW_DRAFT]: kept, ...rest } = current;
-          return { ...rest, [editKey(id)]: rest[editKey(id)] ?? kept };
+          return { ...rest, [editKey(id)]: kept };
         });
         selectServer(id);
       }
