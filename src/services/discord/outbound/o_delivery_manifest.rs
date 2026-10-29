@@ -128,7 +128,7 @@ pub(super) fn build_terminal(root: &Path, query: Query<'_>, deadline: Instant) -
         return None;
     }
     let prefix = format!("terminal-frame-v1:{}", hex::encode(digest.finalize()));
-    let plan = derive(query, source, prefix, bytes.get(at..)?, deadline)?;
+    let plan = derive(query, source, prefix, bytes.get(at..)?, deadline, true)?;
     (Instant::now() < deadline).then_some(plan)
 }
 
@@ -210,7 +210,14 @@ fn build_with_prefix_limit(
     if selected.last() != Some(&b'\n') {
         return None;
     }
-    derive(query, cursor.source, cursor.prefix_hash, selected, deadline)
+    derive(
+        query,
+        cursor.source,
+        cursor.prefix_hash,
+        selected,
+        deadline,
+        false,
+    )
 }
 
 fn derive(
@@ -219,7 +226,15 @@ fn derive(
     prefix: String,
     bytes: &[u8],
     deadline: Instant,
+    through_frame_end: bool,
 ) -> Option<Manifest> {
+    let interrupted = |value: &serde_json::Value| {
+        value["type"] == "user"
+            || value["is_error"] == true
+            || value["subtype"]
+                .as_str()
+                .is_some_and(|kind| kind.starts_with("error"))
+    };
     let mut deriver = UnitDeriver::new(query.channel, provider(query.provider)?);
     let mut manifest = Manifest {
         version: shadow::IDENTITY_VERSION,
@@ -244,6 +259,15 @@ fn derive(
             return None;
         }
         let facts = identity::classify(provider(query.provider)?, &value);
+        if manifest.completed {
+            // A terminal frame may run past the turn end (turn_duration, attachments, session
+            // metadata); it stays provable only while those records carry nothing to deliver.
+            if interrupted(&value) || !facts.iter().all(|f| matches!(f, RecordFact::Idle(_))) {
+                return None;
+            }
+            offset += line.len() as u64;
+            continue;
+        }
         for fact in &facts {
             match fact {
                 RecordFact::TurnStart(_) if saw_body || manifest.input.is_some() => return None,
@@ -310,12 +334,7 @@ fn derive(
                 &value,
             );
         if completed {
-            let interrupted = value["type"] == "user"
-                || value["is_error"] == true
-                || value["subtype"]
-                    .as_str()
-                    .is_some_and(|kind| kind.starts_with("error"));
-            manifest.completed = !interrupted && saw_body;
+            manifest.completed = !interrupted(&value) && saw_body;
             if !manifest.completed {
                 return None;
             }
@@ -324,7 +343,7 @@ fn derive(
             return None;
         }
         offset = record.end;
-        if manifest.completed {
+        if manifest.completed && !through_frame_end {
             manifest.range.1 = offset;
             break;
         }

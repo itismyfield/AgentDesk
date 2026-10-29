@@ -55,7 +55,8 @@ fn local_retry_managed_verified_host_drains_budget_before_following_exact_work()
             let mut key = unit("missing root");
             key.channel_id = CANARY_CHANNEL;
             key.provider = ShadowProvider::Codex;
-            store.append_ledger(LedgerEntry::Prepared { serial: 0, unit_key: key, piece_index: 0,
+            store.append_ledger(LedgerEntry::Prepared {
+                notice_origin: None, serial: 0, unit_key: key, piece_index: 0,
                 payload: "local saved payload".into(), anchor_id: 100, epoch: 1,
                 local_retry: Some(crate::services::tui_o::store::ledger::LocalRetryMark::Budget) }).unwrap();
             store.append_ledger(LedgerEntry::NotFound { serial: 0 }).unwrap();
@@ -157,6 +158,7 @@ fn local_retry_retired_source_stays_held_when_only_the_new_source_is_allowed() {
     key.provider = ShadowProvider::Codex;
     store
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             serial: 0,
             unit_key: key,
             piece_index: 0,
@@ -255,6 +257,7 @@ fn operator_resume_verified_source_hold_preserves_approval_cursor_and_post_count
     key.provider = ShadowProvider::Codex;
     channel
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             local_retry: None,
             serial: 0,
             unit_key: key,

@@ -359,6 +359,12 @@ pub(super) fn invalidate_stale_generation_in_root(
             Some(row_generation) if row_generation == current_generation => continue,
             Some(_) => {}
         }
+        // An execution that consumed an origin ends here as failed; boot records that receipt.
+        if state.terminal_receipt.is_some()
+            || super::terminal_receipt_stamp::keep_owed_row_marked(&path, &state).is_some()
+        {
+            continue;
+        }
         log_inflight_remove(
             provider,
             state.channel_id,
@@ -437,6 +443,10 @@ pub(super) fn stale_removal_reason(
     current_generation: u64,
 ) -> Option<String> {
     if state.herdr_before_start_stop.is_some() && !receipt_mutant("age") {
+        return None;
+    }
+    // A marked row is removed only after boot or the next admission records its receipt.
+    if state.terminal_receipt.is_some() {
         return None;
     }
     match state.restart_mode {
@@ -669,7 +679,12 @@ fn classify_inflight_row_for_restore(
                 {
                     RowVerdict::KeepGateRefused(locked, lock)
                 }
-                Some(reason) => RowVerdict::HideStale(reason, state, locked, lock),
+                Some(reason) => {
+                    match super::terminal_receipt_stamp::keep_owed_row_marked(path, &locked) {
+                        Some(marked) => RowVerdict::Keep(marked, false),
+                        None => RowVerdict::HideStale(reason, state, locked, lock),
+                    }
+                }
                 None => RowVerdict::Keep(locked, false),
             },
         )

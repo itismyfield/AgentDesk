@@ -99,7 +99,17 @@ struct Ran {
 }
 
 async fn run(pool: &sqlx::PgPool, channel: u64, ending: Ending) -> Ran {
-    let mut shared = discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    run_with(pool, pool, channel, ending).await
+}
+
+/// `run` whose bridge writes through `storage` while the checks read `pool`.
+async fn run_with(
+    storage: &sqlx::PgPool,
+    pool: &sqlx::PgPool,
+    channel: u64,
+    ending: Ending,
+) -> Ran {
+    let mut shared = discord::make_shared_data_for_tests_with_storage(Some(storage.clone()));
     let writable = Arc::get_mut(&mut shared).unwrap();
     writable.provider = ProviderKind::Codex;
     writable.restart.current_generation = 17;
@@ -349,5 +359,146 @@ fn hand_off_labels_name_no_terminal() {
         "delivery_unresolved",
     ] {
         assert_eq!(super::terminal_receipt_outcome(label), None, "{label}");
+    }
+}
+
+/// A pool whose every acquire fails at once, as when the database is unreachable.
+fn blocked_pool() -> sqlx::PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(50))
+        .connect_lazy("postgres://agentdesk@127.0.0.1:1/blocked")
+        .unwrap()
+}
+
+/// While the receipt cannot commit the bridge keeps the ended row marked, which already reads
+/// terminal; the next admission records exactly that receipt and removes the row.
+#[tokio::test(flavor = "current_thread")]
+async fn a_blocked_commit_keeps_the_row_marked_until_admission_records_it_pg() {
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = 7_340_530;
+    let execution = format!("discord:{channel}:{}", 7_340_000_000 + channel % 1_000);
+
+    let ran = run_with(&blocked_pool(), &pool, channel, Ending::Answer).await;
+    assert_eq!(ran.receipt, None, "nothing reached the database");
+    assert!(ran.row_left, "the row stays while its receipt is owed");
+    let row = inflight::load_inflight_state(&ProviderKind::Codex, channel).unwrap();
+    let mark = row.terminal_receipt.expect("the kept row carries the mark");
+    assert_eq!(mark.outcome, crate::db::turns::TerminalOutcome::Completed);
+    let Some(InputResult::Terminal(found)) = ran.after else {
+        panic!("the marked row reads terminal: {:?}", ran.after);
+    };
+    assert_eq!(
+        (found.turn_id.as_str(), found.terminal_outcome.as_str()),
+        (execution.as_str(), "completed")
+    );
+
+    let healthy = discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let settled = crate::services::discord::receipt_settle::settle_marked_row(
+        &healthy,
+        &ProviderKind::Codex,
+        channel,
+    )
+    .await;
+    assert!(settled, "admission records the mark");
+    assert!(inflight::load_inflight_state(&ProviderKind::Codex, channel).is_none());
+    let recorded: (Vec<String>, String, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        "SELECT consumed_origin_ids, terminal_outcome, terminal_confirmed_at FROM turns
+         WHERE turn_id = $1",
+    )
+    .bind(&execution)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(recorded.0, vec![ORIGIN.to_string()]);
+    assert_eq!(recorded.1, "completed");
+    assert_eq!(
+        recorded.2.timestamp_micros(),
+        mark.confirmed_at.timestamp_micros()
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+/// An entry abort ends the execution as failed only when the unwind released this turn's own
+/// claim and the row is still solely its own; any hand-over records nothing here.
+#[tokio::test(flavor = "current_thread")]
+async fn an_entry_abort_fails_only_its_own_released_row() {
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Abort {
+        OwnRow,
+        SuccessorRow,
+        RestartMarked,
+        WatcherRelay,
+        NoClaim,
+    }
+    for (n, abort) in [
+        Abort::OwnRow,
+        Abort::SuccessorRow,
+        Abort::RestartMarked,
+        Abort::WatcherRelay,
+        Abort::NoClaim,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut shared = discord::make_shared_data_for_tests_with_storage(Some(blocked_pool()));
+        Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Codex;
+        let channel = 7_340_540 + n as u64;
+        let cancel = Arc::new(CancelToken::new());
+        let message = 7_340_100_000 + n as u64;
+        let mut row = InflightTurnState::new(
+            ProviderKind::Codex,
+            channel,
+            None,
+            1,
+            message,
+            18,
+            "entry prompt".into(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        row.turn_nonce = cancel.turn_nonce().map(str::to_owned);
+        row.input_origin_ids = vec![ORIGIN.to_string()];
+        match abort {
+            Abort::SuccessorRow => row.turn_nonce = Some("successor-turn".into()),
+            Abort::RestartMarked => row.restart_mode = Some(InflightRestartMode::DrainRestart),
+            Abort::WatcherRelay => {
+                row.relay_owner_kind = inflight::RelayOwnerKind::Watcher;
+                row.watcher_owner_channel_id = Some(channel);
+            }
+            _ => {}
+        }
+        inflight::save_inflight_state(&row).unwrap();
+        let channel_id = ChannelId::new(channel);
+        if abort != Abort::NoClaim {
+            let start = discord::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                cancel.clone(),
+                UserId::new(1),
+                MessageId::new(message),
+            );
+            assert!(start.await);
+        }
+
+        super::super::bridge_entry_persist::unwind_and_notify(&shared, channel_id, &cancel, None)
+            .await;
+
+        let mark = inflight::load_inflight_state_read_only(&ProviderKind::Codex, channel)
+            .and_then(|row| row.terminal_receipt)
+            .map(|mark| mark.outcome);
+        let expected =
+            (abort == Abort::OwnRow).then_some(crate::db::turns::TerminalOutcome::Failed);
+        assert_eq!(mark, expected, "{abort:?}");
+        shared.mailboxes.remove_fixture_for_test(channel_id);
     }
 }
