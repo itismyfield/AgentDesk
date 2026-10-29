@@ -81,10 +81,12 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const [serverSilent, setServerSilent] = useState(false);
   // Campaigns the list does not hold, each with its own last read so a failed read marks only it stale.
   const [details, setDetails] = useState<Record<string, { doc: ServerCampaignDocument | null; loading: boolean; error: string | null }>>({});
-  // A list is null until one read succeeds; a failed read keeps the last list and is marked.
-  const [events, setEvents] = useState<{ campaign: string; events: ServerCampaignEvent[] | null; failed: boolean } | null>(null);
+  // `read` names the campaign and last event a list answers. A list is null until one read succeeds;
+  // a failed read keeps the last list and records the list read it failed after.
+  const [events, setEvents] = useState<{ campaign: string; read: string; events: ServerCampaignEvent[] | null; failedAfter: number | null } | null>(null);
   const [serverPolls, setServerPolls] = useState(0);
-  const eventsRead = useRef<string | null>(null);
+  const serverPollCount = useRef(0);
+  const eventsPending = useRef<string | null>(null);
   const [serverDrafts, setServerDrafts] = useState<Record<string, DefinitionDraft>>({});
   // The form the user just opened or filled takes focus once; showing it again later does not.
   const focusRequest = useRef<{ key: string; n: number } | null>(null);
@@ -94,24 +96,19 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [commandError, setCommandError] = useState<{ campaign: string; text: string } | null>(null);
   const serverRequest = useRef(0);
-  // `ticks`: scheduled polls that found this read (or the ones it replaced) unanswered.
+  // `ticks`: poll slots this read (or the ones it replaced) has waited through unanswered.
   const serverPending = useRef<{ id: number; ticks: number } | null>(null);
   const detailRequest = useRef<Record<string, number>>({});
   const eventsRequest = useRef(0);
   const refreshServer = useCallback(async (onSchedule = false) => {
-    // A scheduled poll waits out an unanswered read instead of superseding it, so its failure still lands.
-    // Still unanswered at a second tick means a whole interval without an answer: the snapshot is stale.
-    if (onSchedule && serverPending.current) {
-      if (++serverPending.current.ticks >= 2) setServerSilent(true);
-      return;
-    }
     const id = ++serverRequest.current;
-    // A read the user starts takes over the count of the one it replaces, so refreshing never hides a hung server.
+    // A read on the poll schedule starts a slot; a read the user starts takes over the count of the one it
+    // replaces, so refreshing never hides a hung server.
     serverPending.current = { id, ticks: onSchedule ? 1 : serverPending.current?.ticks ?? 0 };
     try {
       const documents = await getServerCampaigns();
       if (!mounted.current || id !== serverRequest.current) return;
-      setServerDocs(documents); setServerError(null); setServerPolls((count) => count + 1);
+      setServerDocs(documents); setServerError(null); setServerPolls(++serverPollCount.current);
     } catch (cause) {
       if (mounted.current && id === serverRequest.current) setServerError(cause instanceof Error ? cause.message : "Unable to load server campaigns");
     } finally {
@@ -119,13 +116,21 @@ export default function CampaignsPanel({ language }: { language: string }) {
       if (mounted.current && id === serverRequest.current) { setServerLoaded(true); setServerSilent(false); }
     }
   }, []);
-  const refreshAll = useCallback((onSchedule = false) => { void refresh(); void refreshServer(onSchedule); }, [refresh, refreshServer]);
+  const refreshAll = useCallback(() => { void refresh(); void refreshServer(); }, [refresh, refreshServer]);
   useEffect(() => {
     mounted.current = true;
-    refreshAll();
-    const interval = window.setInterval(() => { if (document.visibilityState === "visible") refreshAll(true); }, POLL_MS);
+    void refresh(); void refreshServer(true);
+    const interval = window.setInterval(() => {
+      // Slots count while the tab is hidden too: a read unanswered past a whole slot marks the snapshot stale.
+      const pending = serverPending.current;
+      if (pending && ++pending.ticks >= 2) setServerSilent(true);
+      if (document.visibilityState !== "visible") return;
+      void refresh();
+      // An unanswered read is waited out rather than superseded, so its failure still lands.
+      if (!pending) void refreshServer(true);
+    }, POLL_MS);
     return () => { mounted.current = false; requestId.current++; serverRequest.current++; window.clearInterval(interval); };
-  }, [refreshAll]);
+  }, [refresh, refreshServer]);
   useEffect(() => { writeLocalStorageValue(STORAGE_KEYS.dashboardActiveCampaign, selectedId); }, [selectedId]);
 
   const inList = serverDocs.find((doc) => doc.view.campaign_id === serverSelected);
@@ -156,25 +161,31 @@ export default function CampaignsPanel({ language }: { language: string }) {
   }, [mode, serverSelected, serverLoaded, serverDocs]);
   const selectedCampaign = serverDoc?.view.campaign_id;
   const lastEvent = serverDoc?.view.last_event_sequence;
-  // Events are read when the campaign or its last event moves; until a read succeeds, each list read retries it.
+  // Events are read when the campaign or its last event moves; after a failed read, each later list read retries it.
+  const eventsRetry = events !== null && events.campaign === selectedCampaign && events.failedAfter !== null ? serverPolls - events.failedAfter : 0;
   useEffect(() => {
     if (!selectedCampaign || lastEvent === undefined) return;
     const read = `${selectedCampaign}\n${lastEvent}`;
-    if (eventsRead.current === read) return;
-    const id = ++eventsRequest.current;
-    getServerCampaignEvents(selectedCampaign, { after: Math.max(0, lastEvent - 50), limit: 50 })
-      .then((list) => {
+    if (eventsPending.current === read) return; // it will answer; request() always settles
+    const id = ++eventsRequest.current; // a read for anything else is no longer wanted
+    eventsPending.current = null;
+    if (events?.read === read && events.failedAfter === null) return;
+    eventsPending.current = read;
+    const campaign = selectedCampaign;
+    getServerCampaignEvents(campaign, { after: Math.max(0, lastEvent - 50), limit: 50 }).then(
+      (list) => {
         if (!mounted.current || id !== eventsRequest.current) return;
-        eventsRead.current = read;
-        setEvents({ campaign: selectedCampaign, events: list, failed: false });
-      })
-      .catch(() => {
+        eventsPending.current = null;
+        setEvents({ campaign, read, events: list, failedAfter: null });
+      },
+      () => {
+        if (!mounted.current || id !== eventsRequest.current) return;
+        eventsPending.current = null;
         // Keep the last list, marked, rather than an old timeline that looks current.
-        if (mounted.current && id === eventsRequest.current) {
-          setEvents((current) => ({ campaign: selectedCampaign, events: current?.campaign === selectedCampaign ? current.events : null, failed: true }));
-        }
-      });
-  }, [selectedCampaign, lastEvent, serverPolls]);
+        setEvents((current) => ({ campaign, read, events: current?.campaign === campaign ? current.events : null, failedAfter: serverPollCount.current }));
+      },
+    );
+  }, [selectedCampaign, lastEvent, eventsRetry]); // eslint-disable-line react-hooks/exhaustive-deps -- `events` is read, not watched
   useEffect(() => setStops((current) => {
     let changed = false;
     const next: Record<string, StopIntent> = {};
@@ -322,7 +333,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       {serverDoc ? <>
         {renderForm(editKey(serverDoc.view.campaign_id), !commandAvailability(serverDoc.view, "edit_definition", connection).enabled)}
         <ServerCampaignDetail document={serverDoc} events={events?.campaign === serverDoc.view.campaign_id ? events.events : null}
-          eventsFailed={events?.campaign === serverDoc.view.campaign_id && events.failed}
+          eventsFailed={events?.campaign === serverDoc.view.campaign_id && events.failedAfter !== null}
           connection={connection} selectedNode={node} onSelectNode={setNode} stopIntent={stops[serverDoc.view.campaign_id] ?? null}
           busy={busy.has(serverDoc.view.campaign_id)} commandError={commandError?.campaign === serverDoc.view.campaign_id ? commandError.text : null}
           onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)}
