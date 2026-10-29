@@ -1,5 +1,6 @@
 //! A person's draft and every unreadable or busy composer stay untouched.
-use crate::services::claude_tui::busy_inject::{ComposerOwner, composer_owner};
+use crate::services::claude_tui::busy_inject::{ComposerOwner, composer_owner, draft_sighting};
+use crate::services::claude_tui::composer_lock::DraftSighting;
 use crate::services::claude_tui::host_input::{InputRefusal, InputRun, run_herdr};
 use crate::services::claude_tui::input::{
     PromptReadinessSnapshot, TuiInputAction, final_prompt_ready,
@@ -46,7 +47,7 @@ pub(crate) fn wait_for<T>(
     }
 }
 
-fn observation(capture: Option<&str>) -> ControlFlow<bool> {
+fn observation(capture: Option<&str>, exit: bool) -> ControlFlow<bool> {
     let Some(pane) = capture else {
         return ControlFlow::Continue(());
     };
@@ -70,7 +71,8 @@ fn observation(capture: Option<&str>) -> ControlFlow<bool> {
         pane_tail: plain.clone(),
     };
     if final_prompt_ready(&snapshot) {
-        ControlFlow::Break(true)
+        // An `/exit` also leaves a draft stashed under an empty composer behind.
+        ControlFlow::Break(!exit || draft_sighting(pane) == DraftSighting::Settled)
     } else {
         ControlFlow::Continue(())
     }
@@ -92,12 +94,30 @@ pub(crate) fn run(
 /// Runs `send` once an ANSI `capture` shows an empty ready Claude composer; a person's draft, a
 /// dialog or a busy screen sends nothing, on any host.
 pub(crate) fn when_ready(
-    mut capture: impl FnMut() -> Option<String>,
+    capture: impl FnMut() -> Option<String>,
     cancel: Option<&CancelToken>,
     send: impl FnOnce() -> InputRun,
 ) -> InputRun {
+    ready_then(capture, cancel, false, send)
+}
+
+/// [`when_ready`] for an `/exit`, which also sends nothing while a draft is stashed.
+pub(crate) fn when_ready_to_exit(
+    capture: impl FnMut() -> Option<String>,
+    cancel: Option<&CancelToken>,
+    send: impl FnOnce() -> InputRun,
+) -> InputRun {
+    ready_then(capture, cancel, true, send)
+}
+
+fn ready_then(
+    mut capture: impl FnMut() -> Option<String>,
+    cancel: Option<&CancelToken>,
+    exit: bool,
+    send: impl FnOnce() -> InputRun,
+) -> InputRun {
     match wait_for(cancel, COMPOSER_READY_WAIT, || {
-        observation(capture().as_deref())
+        observation(capture().as_deref(), exit)
     }) {
         Ok(true) => send(),
         Err(WaitStop::Cancelled) => InputRun::Cancelled { confirmed: 0 },

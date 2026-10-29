@@ -1847,6 +1847,11 @@ fn execute_streaming_local_tui_tmux(
         tmux_session_name,
         &auth_overlay.profile_id,
     )?;
+    crate::services::tmux_common::write_claude_session_auth(
+        tmux_session_name,
+        &resolved_session_id,
+        &auth_overlay.profile_id,
+    )?;
     if let Some(channel_id) = report_channel_id {
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
     }

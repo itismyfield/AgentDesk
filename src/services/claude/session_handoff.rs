@@ -95,8 +95,14 @@ pub(crate) fn exit_sent(run: InputRun) -> ExitSend {
 pub(crate) struct LegacyTmux<'a>(pub(crate) &'a str);
 
 impl EarlierExecution for LegacyTmux<'_> {
+    /// A tmux with no server socket runs nothing; a socket that cannot be read stays unobserved.
     fn liveness(&mut self) -> Liveness {
         use crate::services::platform::tmux::{PaneLiveness, pane_liveness};
+        match super::host_gate::session_exists(self.0) {
+            Ok(true) => {}
+            Ok(false) => return Liveness::Ended,
+            Err(why) => return Liveness::Unknown(why),
+        }
         match pane_liveness(self.0) {
             PaneLiveness::Live => Liveness::Running,
             PaneLiveness::DeadOrAbsent => Liveness::Ended,
@@ -109,23 +115,24 @@ impl EarlierExecution for LegacyTmux<'_> {
         let session = self.0;
         let capture = || capture_draft_with("tmux", session, Duration::from_secs(5));
         let plan = exit_plan();
-        let run = super::herdr_turn::composer::when_ready(capture, None, || {
+        let run = super::herdr_turn::composer::when_ready_to_exit(capture, None, || {
             run_legacy(session, &plan, None)
         });
         exit_sent(run)
     }
 }
 
-/// The transcript source a resume of `session_id` continues; `None` only when the file is
-/// certainly absent, never for a read that failed.
+/// The transcript source a resume of `session_id` continues under Claude home `home` (the
+/// daemon's when `None`); `None` only when the file is certainly absent, never for a failed read.
 pub(crate) fn transcript_file(
     working_dir: &Path,
     session_id: &str,
+    home: Option<&Path>,
 ) -> Result<Option<SourceId>, String> {
     let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
         working_dir,
         session_id,
-        None,
+        home,
     )?;
     match std::fs::metadata(&path) {
         Ok(meta) => Ok(Some(SourceId {

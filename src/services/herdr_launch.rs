@@ -659,7 +659,7 @@ fn herdr_incarnation(
         expected_native_session_id: expected_native_session_id.map(str::to_owned),
         launch_mode: if resume { "resume" } else { "fresh" }.to_owned(),
         provider_root: match owner.provider.as_str() {
-            "claude" => configured_claude_projects_root(),
+            "claude" => provider_root.or_else(configured_claude_projects_root),
             _ => provider_root,
         },
         first_prompt_digest: None,

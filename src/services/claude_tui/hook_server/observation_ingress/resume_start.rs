@@ -4,7 +4,7 @@
 use super::NotDurableReason;
 use crate::services::tui_prompt_dedupe::binding_context::{CapturedContext, HookBindingEnvelope};
 use crate::services::tui_prompt_dedupe::binding_events::{
-    CauseSource, HookSignal, Proposal, herdr_resume_launch, record_source,
+    CauseSource, Committed, HookSignal, Proposal, herdr_resume_launch, logged_by, record_source,
 };
 
 /// Only the resumed start its own launch context names is logged; every other hook passes as is.
@@ -43,10 +43,19 @@ pub(super) fn record(
         cause: CauseSource::Launch,
         hook: Some(hook),
     };
-    crate::services::tmux_common::with_tmux_source_authority(tmux, |_| record_source(&proposal))
-        .map(|_| ())
-        .map_err(|error| {
-            tracing::warn!(tmux, %error, "resumed start not logged; the hook retries");
-            NotDurableReason::Append
-        })
+    let nonce = context.execution_nonce.as_str();
+    let committed = crate::services::tmux_common::with_tmux_source_authority(tmux, |_| {
+        record_source(&proposal)
+    });
+    // Only a record of this execution's start answers the hook; anything else is retried.
+    let logged = match committed {
+        Ok(Committed::Appended) => Ok(()),
+        Ok(Committed::Unchanged) if logged_by(channel_id, tmux, nonce, payload_session) => Ok(()),
+        Ok(other) => Err(format!("{other:?}")),
+        Err(error) => Err(error.to_string()),
+    };
+    logged.map_err(|error| {
+        tracing::warn!(tmux, %error, "resumed start not logged; the hook retries");
+        NotDurableReason::Append
+    })
 }

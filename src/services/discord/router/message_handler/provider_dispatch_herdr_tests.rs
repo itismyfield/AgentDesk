@@ -28,6 +28,7 @@ use crate::services::herdr_admission::{Admission, ForcedAdmission, force_for_tes
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunchEndpoint, HerdrLaunchHost,
 };
+use crate::services::provider_auth_profile::ProviderAuthOverlay;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
 use crate::services::session_host::{
     EvidenceGap, HerdrMutation, HostMutation, HostRefusal, PaneProvider, PaneReading,
@@ -166,11 +167,22 @@ struct Ports<'a> {
     cancel_after_attach: bool,
     cancel: &'a Mutex<Arc<CancelToken>>,
     old_tmux: Arc<OldTmux>,
+    overlay: Option<ProviderAuthOverlay>,
 }
 
 impl HerdrTurnPorts for Ports<'_> {
     fn earlier_tmux<'a>(&self, _logical: &'a str) -> Box<dyn EarlierExecution + 'a> {
         Box::new(OldTmuxView(self.old_tmux.clone()))
+    }
+
+    fn auth_overlay(&self, logical: &str) -> Result<ProviderAuthOverlay, String> {
+        match &self.overlay {
+            Some(overlay) => Ok(overlay.clone()),
+            None => crate::services::discord::org_schema::overlay_from_tmux_session(
+                crate::services::provider::ProviderKind::Claude,
+                logical,
+            ),
+        }
     }
 
     fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>> {
@@ -221,6 +233,8 @@ struct Fixture {
     dispatched: AtomicBool,
     /// The provider session the channel's turns carry, as dispatch passes it.
     session: Mutex<Option<String>>,
+    /// The account the channel's launches run under; the configured one when `None`.
+    overlay: Mutex<Option<ProviderAuthOverlay>>,
     _home: (Guard, tempfile::TempDir, Guard),
     _root: TestRuntimeRootGuard,
 }
@@ -298,6 +312,7 @@ impl Fixture {
             attempts: Mutex::default(),
             dispatched: AtomicBool::new(false),
             session: Mutex::default(),
+            overlay: Mutex::default(),
             _home: (env, home, bin),
             _root: root,
         }
@@ -381,7 +396,14 @@ impl Fixture {
             cancel_after_attach: false,
             cancel: &self.cancel,
             old_tmux: Arc::default(),
+            overlay: self.overlay.lock().unwrap().clone(),
         }
+    }
+
+    /// The Claude home of the channel's account; the daemon's when `None`.
+    fn home(&self) -> Option<PathBuf> {
+        let overlay = self.overlay.lock().unwrap();
+        overlay.as_ref().and_then(|overlay| overlay.home.clone())
     }
 
     /// Cancels the turn now running.
@@ -446,7 +468,7 @@ impl Fixture {
         let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
             self.cwd.path(),
             &session,
-            None,
+            self.home().as_deref(),
         )
         .unwrap();
         // The pane's hook relay names the launch context its environment carries.
@@ -1482,7 +1504,7 @@ impl Fixture {
         let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
             self.cwd.path(),
             &session,
-            None,
+            self.home().as_deref(),
         )
         .unwrap();
         let said = json!({"type": "user", "sessionId": session, "timestamp": "2026-10-01T00:00:00Z",
@@ -1546,9 +1568,9 @@ impl Fixture {
         std::fs::read_to_string(path).unwrap()
     }
 
-    /// The account marker of the channel's provider session, as both hosts read it.
-    fn auth_profile(&self) -> Option<String> {
-        let path = crate::services::tmux_common::session_temp_path(self.logical(), "auth_profile");
+    /// The session and account the channel's last launch recorded.
+    fn session_auth(&self) -> Option<String> {
+        let path = crate::services::tmux_common::session_temp_path(self.logical(), "auth_session");
         std::fs::read_to_string(path).ok()
     }
 }
@@ -1597,7 +1619,7 @@ fn f1_a_tmux_session_resumes_on_herdr_under_its_own_id_after_its_claude_exits_pg
     assert!(matches!(&logged[0].new, BindingTarget::Source(source) if source.path == path));
     assert!(std::fs::read(&path).unwrap().starts_with(&before));
     let account = crate::services::provider_auth_profile::DEFAULT_PROFILE_ID;
-    assert_eq!(fx.auth_profile().as_deref(), Some(account));
+    assert_eq!(fx.session_auth(), Some(format!("{session}\n{account}")));
 }
 
 // A session whose last execution ran under another account is not continued under this one: the
@@ -1622,7 +1644,99 @@ fn f6_a_session_of_another_account_starts_fresh_and_ends_nothing_pg() {
     assert!(!script.contains(&session), "{script}");
     assert!(script.contains("'--session-id'"), "{script}");
     let account = crate::services::provider_auth_profile::DEFAULT_PROFILE_ID;
-    assert_eq!(fx.auth_profile().as_deref(), Some(account));
+    let recorded = fx.session_auth().unwrap();
+    assert!(
+        !recorded.starts_with(&session) && recorded.ends_with(&format!("\n{account}")),
+        "{recorded}"
+    );
+}
+
+// A fresh launch under another account that never ran vouches for no earlier session: the next
+// turn starts fresh again and the old Claude is never typed to.
+#[test]
+fn f6b_a_fresh_launch_that_never_ran_does_not_vouch_for_the_earlier_session_pg() {
+    let fx = Fixture::new("resume-f6b", None);
+    let (session, _) = fx.seed_resumable(true);
+    let account = crate::services::provider_auth_profile::DEFAULT_PROFILE_ID;
+    crate::services::tmux_common::write_claude_session_auth(fx.logical(), &session, account)
+        .unwrap();
+    // Another account on the daemon's Claude home, where the earlier transcript is.
+    let mut work =
+        ProviderAuthOverlay::default_for(crate::services::provider::ProviderKind::Claude);
+    work.profile_id = "work".into();
+    *fx.overlay.lock().unwrap() = Some(work);
+    let launcher = Arc::new(Launcher::default());
+    *launcher.create_fails.lock().unwrap() =
+        Some(HerdrCreateOutcome::NotSent("connect refused".into()));
+    let ports = fx.ports(&launcher);
+    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &ports, || {});
+    assert!(first.unwrap_err().contains("NotSent"));
+    assert!(ports.old_tmux.alive.load(Ordering::SeqCst));
+    assert_eq!(fx.row(), Some(HostedState::Retired));
+    assert_eq!(
+        fx.session.lock().unwrap().as_deref(),
+        Some(session.as_str())
+    );
+    let mut again = fx.ports(&launcher);
+    again.old_tmux = ports.old_tmux.clone();
+    let (second, _) = fx.turn(&fx.record(), &again, || {
+        if let Some(started) = fx.start_provider(&launcher, true) {
+            fx.answer(&started);
+        }
+    });
+    assert_eq!(second, Ok(()));
+    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 0);
+    let script = fx.launch_script();
+    assert!(!script.contains(&session), "{script}");
+    assert!(script.contains("'--session-id'"), "{script}");
+}
+
+// A session of a named account resumes from that account's own Claude home, which its selection,
+// start check and attach all read; the daemon's home holds no copy of it.
+#[test]
+fn f8_a_named_account_session_resumes_from_its_own_home_pg() {
+    let fx = Fixture::new("resume-f8", None);
+    let home = tempfile::tempdir().unwrap();
+    let mut work =
+        ProviderAuthOverlay::default_for(crate::services::provider::ProviderKind::Claude);
+    work.profile_id = "work".into();
+    work.home = Some(home.path().to_path_buf());
+    let config = home.path().display().to_string();
+    work.env.insert("CLAUDE_CONFIG_DIR".into(), config);
+    *fx.overlay.lock().unwrap() = Some(work);
+    let (session, path) = fx.seed_resumable(true);
+    assert!(path.starts_with(home.path()), "{}", path.display());
+    crate::services::tmux_common::write_claude_session_auth(fx.logical(), &session, "work")
+        .unwrap();
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        if let Some(started) = fx.start_provider_as(&launcher, true, "resume") {
+            assert_eq!((&started.session, &started.path), (&session, &path));
+            fx.answer(&started);
+        }
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 1);
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(fx.row(), Some(HostedState::Bound));
+    let script = fx.launch_script();
+    assert!(
+        script.contains(&format!("'--resume' '{session}'")),
+        "{script}"
+    );
+    assert!(!script.contains("'--session-id'"), "{script}");
+    let nonce = launcher.nonces.lock().unwrap()[0].clone();
+    let logged = fx.logged_by(&nonce);
+    use crate::services::tui_prompt_dedupe::binding_events::BindingTarget;
+    assert!(
+        matches!(&logged[..], [event] if matches!(&event.new,
+        BindingTarget::Source(source) if source.path == path)),
+        "{logged:#?}"
+    );
 }
 
 // A selector whose transcript is certainly gone starts fresh as before; no tmux exit.
@@ -1739,6 +1853,60 @@ fn f5a_a_resumed_start_logged_before_the_attach_lets_the_next_turn_attach_pg() {
         ports.old_tmux.exits.load(Ordering::SeqCst),
         0,
         "a Pending ends nothing"
+    );
+}
+
+// A resumed start whose transcript cannot be looked at is not answered as logged; once it can, the
+// retried hook logs it exactly once.
+#[test]
+fn f5c_a_resumed_start_not_logged_is_answered_only_once_its_record_lands_pg() {
+    let fx = Fixture::new("resume-f5c", None);
+    let (session, path) = fx.seed_resumable(true);
+    // The tmux execution verified its source, so the pane's pin holds the file the resume stats.
+    use crate::services::tui_prompt_dedupe::binding_events::{CauseSource, Proposal};
+    let named = path.display().to_string();
+    let proposal = Proposal {
+        channel_id: CHANNEL,
+        provider: "claude",
+        tmux_session: fx.logical(),
+        session_id: Some(&session),
+        path: &named,
+        replaced: None,
+        cause: CauseSource::Observed,
+        hook: None,
+    };
+    let source =
+        crate::services::claude::session_handoff::transcript_file(fx.cwd.path(), &session, None);
+    let source = source.unwrap().unwrap();
+    crate::services::tui_prompt_dedupe::binding_events::record_verified(&proposal, &source)
+        .unwrap();
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        let Some(started) = fx.start_provider_as(&launcher, false, "resume") else {
+            return;
+        };
+        let payload = json!({"session_id": session, "source": "resume", "transcript_path": path});
+        // The project dir closed, so its pinned file can be stat'ed by nobody.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = path.parent().unwrap();
+        let mode = |bits| std::fs::set_permissions(dir, std::fs::Permissions::from_mode(bits));
+        mode(0o000).unwrap();
+        let refused = started.hook(&fx, "SessionStart", &payload);
+        mode(0o755).unwrap();
+        assert_ne!(refused, 202);
+        fx.started.store(true, Ordering::SeqCst);
+        assert_eq!(started.hook(&fx, "SessionStart", &payload), 202);
+        fx.answer(&started);
+    });
+    assert_eq!(result, Ok(()));
+    let nonce = launcher.nonces.lock().unwrap()[0].clone();
+    let logged = fx.logged_by(&nonce);
+    use crate::services::tui_prompt_dedupe::binding_events::BindingCause;
+    assert!(
+        matches!(&logged[..], [event] if event.cause == BindingCause::Resume),
+        "{logged:#?}"
     );
 }
 

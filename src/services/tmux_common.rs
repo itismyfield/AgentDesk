@@ -1,8 +1,9 @@
 pub(crate) mod host_marker;
 mod session_markers;
 pub(crate) use session_markers::{
-    resolve_tmux_runtime_kind_marker, tmux_session_auth_profile_matches,
-    write_tmux_runtime_kind_marker, write_tmux_session_auth_profile,
+    claude_session_auth_matches, resolve_tmux_runtime_kind_marker,
+    tmux_session_auth_profile_matches, write_claude_session_auth, write_tmux_runtime_kind_marker,
+    write_tmux_session_auth_profile,
 };
 
 use sha2::{Digest, Sha256};
@@ -1147,6 +1148,7 @@ pub fn resolve_session_temp_path(session_name: &str, extension: &str) -> Option<
 }
 
 const TMUX_AUTH_PROFILE_TEMP_EXT: &str = "auth_profile";
+const CLAUDE_SESSION_AUTH_TEMP_EXT: &str = "auth_session";
 
 /// Delete all known session temp files for the given tmux session.
 /// Idempotent — missing files are not errors. Hits both the new persistent
@@ -1178,6 +1180,7 @@ pub(crate) fn cleanup_session_temp_files_under_source_authority(
         "sh",
         "generation",
         TMUX_AUTH_PROFILE_TEMP_EXT,
+        CLAUDE_SESSION_AUTH_TEMP_EXT,
         // Remove the old spawn nonce so a failed respawn cannot inherit its instance key.
         "spawn_nonce",
         "exit_reason",

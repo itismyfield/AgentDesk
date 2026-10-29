@@ -23,8 +23,8 @@ use crate::services::claude_tui::source_verify::{
 use crate::services::discord::runtime_store::fsync_parent_dir;
 pub(crate) use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
-pub(crate) use herdr_resume::herdr_resume_launch;
 use herdr_resume::resumes_under_new_execution;
+pub(crate) use herdr_resume::{herdr_resume_launch, logged_by};
 pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
 mod claude_fold;
 use claude_fold::Waiting;

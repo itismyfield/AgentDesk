@@ -42,6 +42,7 @@ use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, cancel_requested, herdr_provider_terminal_only,
     poll_output_file_until_result,
 };
+use crate::services::provider_auth_profile::ProviderAuthOverlay;
 use crate::services::session_backend::{
     StreamLineState, process_claude_transcript_line,
     read_claude_tui_output_file_until_result_with_harvest as read_output_file_until_result_with_harvest,
@@ -150,6 +151,13 @@ pub(crate) trait HerdrTurnPorts {
     /// The legacy tmux execution a resume ends before its launch.
     fn earlier_tmux<'a>(&self, logical: &'a str) -> Box<dyn EarlierExecution + 'a> {
         Box::new(LegacyTmux(logical))
+    }
+    /// The account and home a launch on `logical` runs under.
+    fn auth_overlay(&self, logical: &str) -> Result<ProviderAuthOverlay, String> {
+        crate::services::discord::org_schema::overlay_from_tmux_session(
+            ProviderKind::Claude,
+            logical,
+        )
     }
 }
 
@@ -294,7 +302,9 @@ fn cleared_source(
     awaited: AwaitedClear,
 ) -> Result<Attached, String> {
     let session_id = awaited.session_id;
-    let transcript = claude_transcript_path(Path::new(turn.working_dir), &session_id, None)?;
+    let home = launch_home(&record.execution_nonce)?;
+    let working_dir = Path::new(turn.working_dir);
+    let transcript = claude_transcript_path(working_dir, &session_id, home.as_deref())?;
     if awaited.transcript.as_deref().map(Path::new) != Some(transcript.as_path()) {
         return Err(format!(
             "herdr turn: the clear Pending of {session_id} names another transcript than {}",
@@ -480,19 +490,24 @@ fn composer_settled(run: &InputRun) -> bool {
     )
 }
 
-/// The session a launch resumes: the turn's own one while its transcript exists, its last
-/// execution ran under `profile` and O already reads that file. Otherwise it starts a new one.
-fn resumed_session(turn: &HerdrTurn<'_>, profile: &str) -> Result<Option<String>, String> {
+/// The session a launch resumes: the turn's own one while it last ran under the overlay's account,
+/// its transcript exists under the overlay's home and O reads that file; otherwise a new one.
+fn resumed_session(
+    turn: &HerdrTurn<'_>,
+    overlay: &ProviderAuthOverlay,
+) -> Result<Option<String>, String> {
     let Some(session) = turn.session_id.filter(|_| !turn.force_fresh) else {
         return Ok(None);
     };
     // As on tmux, a session of another account is never continued under this one.
     let logical = &turn.owner.logical_key;
-    if !crate::services::tmux_common::tmux_session_auth_profile_matches(logical, profile) {
+    let profile = &overlay.profile_id;
+    if !crate::services::tmux_common::claude_session_auth_matches(logical, session, profile)? {
         return Ok(None);
     }
     let working_dir = Path::new(turn.working_dir);
-    let Some(source) = session_handoff::transcript_file(working_dir, session)? else {
+    let home = overlay.home.as_deref();
+    let Some(source) = session_handoff::transcript_file(working_dir, session, home)? else {
         return Ok(None);
     };
     if !session_handoff::o_reads(turn.channel_id, &source)? {
@@ -518,15 +533,13 @@ fn launched_source(
         .clone()
         .ok_or("herdr turn: no hook endpoint")?;
     let logical = &turn.owner.logical_key;
-    let overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
-        ProviderKind::Claude,
-        logical,
-    )?;
+    let overlay = ports.auth_overlay(logical)?;
     let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay);
-    let resumed = resumed_session(turn, &overlay.profile_id)?;
+    let resumed = resumed_session(turn, &overlay)?;
+    let home = overlay.home.as_deref();
     let session_id = match &resumed {
         Some(session) => session.clone(),
-        None => super::fresh_claude_tui_session_resolution(working_dir, None)?.session_id,
+        None => super::fresh_claude_tui_session_resolution(working_dir, home)?.session_id,
     };
     if resumed.is_some() {
         session_handoff::end_by_exit(
@@ -546,14 +559,15 @@ fn launched_source(
             hooks,
             &auth,
         )?;
-        // The account this execution runs under, which a later resume of its session checks.
+        // The account this session runs under, which a later resume of it checks.
         let profile = &overlay.profile_id;
-        crate::services::tmux_common::write_tmux_session_auth_profile(logical, profile)?;
+        crate::services::tmux_common::write_claude_session_auth(logical, session, profile)?;
         Ok(command)
     };
     // Subscribed before the create, so the launch's SessionStart cannot pass unseen.
     let mut hooks = ports.hook_events();
-    let launch = launch(turn, Some(session_id.clone()), resumed.is_some());
+    let mut launch = launch(turn, Some(session_id.clone()), resumed.is_some());
+    launch.provider_root = home.map(|home| home.join("projects"));
     let outcome = runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host));
     let nonce = launched(outcome)?;
     let resume = resumed.is_some().then_some(nonce.as_str());
@@ -652,7 +666,9 @@ fn attach(
         other => return Err(format!("herdr turn: row unreadable: {other:?}")),
     };
     let target = gate(&record)?;
-    let transcript = claude_transcript_path(Path::new(turn.working_dir), session_id, None)?;
+    let home = launch_home(nonce)?;
+    let transcript =
+        claude_transcript_path(Path::new(turn.working_dir), session_id, home.as_deref())?;
     let request = AttachRequest {
         owner: &turn.owner,
         record: &record,
@@ -668,6 +684,12 @@ fn attach(
         target,
         bound,
     })
+}
+
+/// The Claude home execution `nonce`'s launch wrote its transcripts under.
+fn launch_home(nonce: &str) -> Result<Option<PathBuf>, String> {
+    let root = execution_context("claude", nonce)?.provider_root;
+    Ok(root.and_then(|root| root.parent().map(Path::to_path_buf)))
 }
 
 /// One gated paste and Enter, then the transcript until the turn ends, then the watcher handoff.

@@ -125,8 +125,8 @@ fn a_resume_transcript_is_absent_only_when_certainly_gone() {
     let _home = TestEnvVarGuard::set_path("CLAUDE_CONFIG_DIR", home.path());
     let cwd = tempfile::tempdir().unwrap();
     let id = "11111111-1111-4111-8111-111111111111";
-    assert_eq!(transcript_file(cwd.path(), id), Ok(None));
-    let bad = transcript_file(cwd.path(), "not-a-session").unwrap_err();
+    assert_eq!(transcript_file(cwd.path(), id, None), Ok(None));
+    let bad = transcript_file(cwd.path(), "not-a-session", None).unwrap_err();
     assert!(bad.contains("session_id"), "{bad}");
     let path =
         crate::services::claude_tui::transcript_tail::claude_transcript_path(cwd.path(), id, None)
@@ -141,10 +141,10 @@ fn a_resume_transcript_is_absent_only_when_certainly_gone() {
         dev: meta.dev(),
         ino: meta.ino(),
     };
-    assert_eq!(transcript_file(cwd.path(), id), Ok(Some(source)));
+    assert_eq!(transcript_file(cwd.path(), id, None), Ok(Some(source)));
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let unreadable = transcript_file(cwd.path(), id);
+    let unreadable = transcript_file(cwd.path(), id, None);
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(unreadable.is_err(), "{unreadable:?}");
 }
@@ -238,4 +238,43 @@ fn only_the_own_resumed_start_of_an_execution_counts() {
     assert!(!resumed_start(&event("startup", own.clone()), id, &nonce));
     assert!(!resumed_start(&event("resume", None), id, &nonce));
     assert!(!resumed_start(&event("resume", own), id, "another"));
+}
+
+// A tmux with no server socket ran nothing, so its session ended without a keystroke; a socket that
+// is there or cannot be read leaves a failed probe unobserved, and nothing is typed either way.
+#[test]
+fn a_tmux_without_a_server_socket_has_ended_and_an_unread_one_stays_unobserved() {
+    use crate::services::session_host::test_support::InjectedPresenceGuard;
+    use crate::services::session_host::{HostPresence, HostSessionRef};
+    const NAME: &str = "adk-handoff-no-server";
+    let _root = TestRuntimeRootGuard::new();
+    let tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install(NAME);
+    let sockets = tempfile::tempdir().unwrap();
+    let set = TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _tmpdir = set("TMUX_TMPDIR", sockets.path());
+    let _attached = TestEnvVarGuard::capture_after_shared_test_env_lock("TMUX");
+    unsafe { std::env::remove_var("TMUX") };
+    let uid = unsafe { libc::getuid() };
+    let socket_dir = sockets.path().join(format!("tmux-{uid}"));
+    let session = HostSessionRef::tmux(NAME);
+    let _presence = InjectedPresenceGuard::set(session, HostPresence::ProbeFailed);
+    // A file in place of the socket directory makes the socket lookup itself fail.
+    for state in ["absent", "present", "unreadable"] {
+        let _ = std::fs::remove_dir_all(&socket_dir);
+        let _ = std::fs::remove_file(&socket_dir);
+        match state {
+            "present" => {
+                std::fs::create_dir_all(&socket_dir).unwrap();
+                std::fs::write(socket_dir.join("default"), "").unwrap();
+            }
+            "unreadable" => std::fs::write(&socket_dir, "").unwrap(),
+            _ => {}
+        }
+        let ended = end_by_exit(&mut LegacyTmux(NAME), WAIT);
+        match state {
+            "absent" => assert_eq!(ended, Ok(Ended::Already)),
+            _ => assert!(ended.unwrap_err().contains("unobserved"), "{state}"),
+        }
+        assert_eq!(tmux.take_calls(), Vec::<String>::new(), "{state}");
+    }
 }
