@@ -1,6 +1,44 @@
 use super::*;
 
 impl Owner {
+    /// Positive no-content ends this attempt; the original keeps its queue slot and receipt.
+    /// Only the distinct successor may acquire a new effect permit.
+    pub(crate) fn successor_not_sent(
+        &mut self,
+        key: &AttemptRef,
+        proof: crate::services::claude_tui::owner_input::NotSentProof,
+        nonce: String,
+    ) -> Result<AttemptRef, String> {
+        proof.into_reason(&serde_json::to_value(key).map_err(|e| e.to_string())?)?;
+        if nonce.is_empty() || nonce == key.attempt.nonce {
+            return Err("successor needs a distinct nonce".into());
+        }
+        let mut next = self.snapshot.clone();
+        let head = next.head_injection.as_mut().ok_or("no live head")?;
+        if !key.matches(head) || !super::front_holds(&next.items, head) {
+            return Err("stale no-content successor".into());
+        }
+        let mut successor = key.clone();
+        successor.attempt.nonce = nonce;
+        head.attempt = Some(successor.attempt.clone());
+        head.phase = HeadPhase::Reserved;
+        head.confirmation_deadline_ms = None;
+        head.payload_window = None;
+        head.resolved_source = None;
+        head.resolved_target = None;
+        head.preparation_hold = None;
+        // Every member keeps its ticket and moves to the successor together.
+        for bind in &mut next.admission_binds {
+            if let BindAt::Attempt { attempt, .. } = &mut bind.at
+                && *attempt == key.attempt
+            {
+                *attempt = successor.attempt.clone();
+            }
+        }
+        self.commit(next)?;
+        Ok(successor)
+    }
+
     pub(crate) fn tick(&mut self, now: u64) -> Result<(), String> {
         let mut next = self.snapshot.clone();
         if next.head_injection.as_ref().is_some_and(|head| {
@@ -15,7 +53,7 @@ impl Owner {
                 .head_injection
                 .take()
                 .ok_or("active head disappeared")?;
-            remove_first(&mut next, &input.identity)?;
+            remove_members(&mut next, &input)?;
             next.retained_inputs.push(RetainedInput {
                 input,
                 reason: RetainedReason::Unconfirmed,
@@ -63,17 +101,22 @@ impl Owner {
         }
         if delivered {
             super::source_admission::settle_binds(&mut next, key, now);
-            if active {
-                next.head_injection = None;
-                remove_first(&mut next, &key.identity)?;
+            let mut members = Vec::new();
+            if active && let Some(input) = next.head_injection.take() {
+                remove_members(&mut next, &input)?;
+                members.extend(input.members().map(sources::identity));
             }
             if let Some(at) = retained {
-                next.retained_inputs.remove(at);
+                let entry = next.retained_inputs.remove(at);
+                members.extend(entry.input.members().map(sources::identity));
             }
-            next.terminal_identities.push(TerminalIdentity {
-                identity: key.identity.clone(),
-                settled_at_ms: now,
-            });
+            // A local submit settles the whole unit in this one transition.
+            for identity in members {
+                next.terminal_identities.push(TerminalIdentity {
+                    identity,
+                    settled_at_ms: now,
+                });
+            }
         } else if active {
             next.head_injection
                 .as_mut()
@@ -96,7 +139,7 @@ impl Owner {
             return Err("stale NotSent attempt".into());
         }
         let mut input = next.head_injection.take().ok_or("missing NotSent input")?;
-        remove_first(&mut next, &key.identity)?;
+        remove_members(&mut next, &input)?;
         input.phase = HeadPhase::Reserved;
         next.retained_inputs.push(RetainedInput {
             input,
@@ -151,15 +194,15 @@ impl Owner {
     }
 }
 
-fn remove_first(snapshot: &mut SnapshotV2, identity: &QueueIdentity) -> Result<(), String> {
-    if !snapshot
-        .items
-        .first()
-        .is_some_and(|item| sources::identity(item) == *identity)
-    {
+/// Removes every member of `input` from the queue front in one snapshot; the tail keeps its
+/// originals and tickets and only moves up.
+fn remove_members(snapshot: &mut SnapshotV2, input: &InputAttempt) -> Result<(), String> {
+    if !super::front_holds(&snapshot.items, input) {
         return Err("queue first item differs from selected head".into());
     }
-    snapshot.items.remove(0);
-    snapshot.unbind_item(0);
+    for _ in input.members() {
+        snapshot.items.remove(0);
+        snapshot.unbind_item(0);
+    }
     Ok(())
 }

@@ -341,8 +341,10 @@ impl Owner {
         };
         for bind in &binds {
             if let BindAt::Attempt { identity, attempt } = &bind.at
-                && let Some(input) =
-                    live().find(|i| i.identity == *identity && i.attempt.as_ref() == Some(attempt))
+                && let Some(input) = live().find(|i| {
+                    i.attempt.as_ref() == Some(attempt)
+                        && i.members().any(|m| sources::identity(m) == *identity)
+                })
             {
                 return Ok(match input.phase {
                     HeadPhase::MayHaveSent | HeadPhase::Unknown => TurnBind::Armed {
@@ -426,21 +428,34 @@ impl SnapshotV2 {
         }
     }
 
-    /// Carries the reserved head's queued bind to its attempt; attempts no input holds are dropped.
+    /// Carries every reserved member's queued bind to the one attempt in this same transition;
+    /// attempts no input holds are dropped.
     pub(super) fn bind_reserved(&mut self) {
-        let (Some(head), Some(first)) = (&self.head_injection, self.queued_digest(0)) else {
+        let Some(head) = &self.head_injection else {
             return;
         };
         let Some(attempt) = head.attempt.clone() else {
             return;
         };
-        let identity = head.identity.clone();
-        let receipt = (self.admission_binds.iter()).find_map(|b| match &b.at {
-            BindAt::Queued { index: 0, item } if *item == first => Some(b.receipt.clone()),
-            _ => None,
-        });
+        let members: Vec<QueueIdentity> = head.members().map(sources::identity).collect();
+        let mut moved = Vec::new();
+        for (at, identity) in members.into_iter().enumerate() {
+            let Some(item) = self.queued_digest(at) else {
+                break;
+            };
+            let receipt = (self.admission_binds.iter()).find_map(|b| match &b.at {
+                BindAt::Queued { index, item: bound } if *index == at && *bound == item => {
+                    Some(b.receipt.clone())
+                }
+                _ => None,
+            });
+            moved.extend(receipt.map(|receipt| (receipt, identity)));
+        }
         let live: Vec<(QueueIdentity, AttemptIdentity)> = (self.retained_inputs.iter())
-            .filter_map(|r| Some((r.input.identity.clone(), r.input.attempt.clone()?)))
+            .flat_map(|r| {
+                let attempt = r.input.attempt.clone();
+                r.input.members().filter_map(move |m| Some((sources::identity(m), attempt.clone()?)))
+            })
             .collect();
         self.admission_binds.retain(|b| match &b.at {
             BindAt::Attempt { identity, attempt } => {
@@ -448,22 +463,24 @@ impl SnapshotV2 {
             }
             _ => true,
         });
-        if let Some(receipt) = receipt {
-            let at = BindAt::Attempt { identity, attempt };
+        for (receipt, identity) in moved {
+            let at = BindAt::Attempt { identity, attempt: attempt.clone() };
             self.admission_binds.push(AdmissionBind { receipt, at });
         }
     }
 }
 
-/// The delivered attempt's binds become settled ones, keeping its nonce and bound source.
+/// Every member bind of the delivered attempt becomes a settled one at once, keeping its nonce
+/// and bound source.
 pub(super) fn settle_binds(snapshot: &mut SnapshotV2, key: &AttemptRef, now: u64) {
     let retained = snapshot.retained_inputs.iter().map(|r| &r.input);
-    let source = (snapshot.head_injection.iter().chain(retained))
-        .find(|input| key.matches(input))
-        .and_then(|input| input.resolved_source.clone());
+    let input = (snapshot.head_injection.iter().chain(retained)).find(|input| key.matches(input));
+    let source = input.and_then(|input| input.resolved_source.clone());
+    let members: Vec<QueueIdentity> =
+        input.map(|input| input.members().map(sources::identity).collect()).unwrap_or_default();
     for bind in &mut snapshot.admission_binds {
         if let BindAt::Attempt { identity, attempt } = &bind.at
-            && *identity == key.identity
+            && members.contains(identity)
             && *attempt == key.attempt
         {
             bind.at = BindAt::Settled {
@@ -698,6 +715,7 @@ impl super::super::super::ChannelMailboxHandle {
                 frame: "frame".into(),
                 digest: "digest".into(),
                 attribution: serde_json::json!({}),
+                followers: Vec::new(),
             };
             let key = match owner.active_attempt() {
                 Ok(key) => key,

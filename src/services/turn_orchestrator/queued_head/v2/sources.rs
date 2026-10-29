@@ -18,10 +18,9 @@ impl Owner {
             .iter()
             .map(identity)
             .chain(
-                self.snapshot
-                    .retained_inputs
-                    .iter()
-                    .map(|e| e.input.identity.clone()),
+                (self.snapshot.retained_inputs.iter())
+                    .flat_map(|e| e.input.members().skip(1).map(identity))
+                    .chain(self.snapshot.retained_inputs.iter().map(|e| e.input.identity.clone())),
             )
             .chain(
                 self.snapshot
@@ -63,22 +62,15 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
             return Err("original source identity mismatch".into());
         }
     }
-    if let Some(head) = &snapshot.head_injection {
-        let first = snapshot.items.first().ok_or("active original missing")?;
-        if serde_json::to_value(first).map_err(|error| error.to_string())?
-            != serde_json::to_value(&head.original).map_err(|error| error.to_string())?
-        {
-            return Err("active original differs from queue head".into());
-        }
+    // Every member of the head, not only the first, must be the queue front in order.
+    if let Some(head) = &snapshot.head_injection
+        && !super::front_holds(&snapshot.items, head)
+    {
+        return Err("active original differs from queue head".into());
     }
     snapshot.namespace = Some(namespace.into());
-    if snapshot
-        .head_injection
-        .as_ref()
-        .is_some_and(|head| head.phase == HeadPhase::Reserved)
-    {
-        snapshot.head_injection = None;
-    }
+    // Released unarmed, every member still holds the queued bind its reserve kept.
+    snapshot.head_injection.take_if(|head| head.phase == HeadPhase::Reserved);
     Ok(snapshot)
 }
 

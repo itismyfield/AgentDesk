@@ -91,4 +91,36 @@ pub(in crate::services::discord) fn fresh_source(
 }
 
 #[cfg(test)]
+pub(in crate::services::discord) fn owned_original(
+    request: &crate::services::discord::IntakeRequest,
+    author_is_bot: bool,
+    uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+    voice: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    durable_context: bool,
+) -> crate::services::turn_orchestrator::Intervention {
+    let reply = if durable_context {
+        RetryPromptContext::restore(request.reply_context.clone())
+    } else {
+        RetryPromptContext::raw(request.reply_context.clone())
+    };
+    let mut original = build_race_requeued_intervention(
+        request.request_owner, request.user_msg_id, &request.user_text,
+        request.preserve_on_cancel, reply.encode(), request.has_reply_boundary,
+        request.merge_consecutive, uploads, voice,
+    );
+    original.author_is_bot = author_is_bot;
+    for source in request.source_message_ids.iter().filter(|id| **id != request.user_msg_id) {
+        original.source_message_ids.push(*source);
+        let generation = original.queued_generation;
+        let source = if request.preserve_on_cancel {
+            crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(*source, generation)
+        } else {
+            crate::services::turn_orchestrator::SourceMessageQueuedGeneration::new(*source, generation)
+        };
+        original.source_message_queued_generations.push(source);
+    }
+    original
+}
+
+#[cfg(test)]
 mod tests;

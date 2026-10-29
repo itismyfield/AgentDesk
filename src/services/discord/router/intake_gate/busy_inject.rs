@@ -77,7 +77,8 @@ fn listed_target(channel: ChannelId, parent: Option<ChannelId>) -> bool {
     !cfg!(windows) && (listed(channel.get()) || parent.is_some_and(|id| listed(id.get())))
 }
 
-/// Whether live intake may offer a message on `channel`: a listed target that no Herdr host runs.
+/// Whether the legacy live offer may take a message on `channel`: a listed target that no Herdr
+/// host runs. A channel an input owner holds never reaches this check; see [`owner_takes`].
 pub(in crate::services::discord) fn covers(channel: ChannelId, parent: Option<ChannelId>) -> bool {
     if !listed_target(channel, parent) {
         return false;
@@ -196,6 +197,9 @@ fn declined(live: &LiveText<'_>, veto: &'static str) {
 
 /// True when the message reached the pane, its handback, or another owner.
 pub(super) async fn offered(ctx: &serenity::Context, data: &Data, live: &LiveText<'_>) -> bool {
+    if owner_takes(&data.shared, live.channel_id).await {
+        return false;
+    }
     if !covers(live.channel_id, live.parent) {
         return false;
     }
@@ -207,6 +211,19 @@ pub(super) async fn offered(ctx: &serenity::Context, data: &Data, live: &LiveTex
     #[cfg(test)]
     test_support::note_outcome(live.message.id.get(), &attempt);
     settle(ctx, data, live, attempt).await
+}
+
+/// An input owner takes every arrival on its channel, Herdr-hosted ones included, through intake,
+/// so the legacy offer never registers the same original beside it. Production joins at 4f.
+pub(in crate::services::discord) async fn owner_takes(shared: &SharedData, channel: ChannelId) -> bool {
+    #[cfg(test)]
+    return crate::services::discord::queue_io::input_ingress::installed(&shared.mailbox(channel)).await
+        != Ok(false);
+    #[cfg(not(test))]
+    {
+        let _ = (shared, channel);
+        false
+    }
 }
 
 async fn attempt(

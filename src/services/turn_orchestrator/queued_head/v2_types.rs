@@ -110,6 +110,9 @@ pub(crate) struct PreparedPayload {
     pub(crate) frame: String,
     pub(crate) digest: String,
     pub(crate) attribution: serde_json::Value,
+    /// Queue items after the head original that this one frame carries, in arrival order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) followers: Vec<PendingQueueItem>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

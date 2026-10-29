@@ -147,6 +147,7 @@ async fn attempt_head(handle: &ChannelMailboxHandle) {
                 frame: "frame".into(),
                 digest: "digest".into(),
                 attribution: json!({}),
+                followers: Vec::new(),
             };
             let key = owner.reserve(attempt, payload)?;
             drop(owner.arm(&key, 0)?);
@@ -673,4 +674,33 @@ fn v1_recovery_entry_removes_only_stale_temp_files_that_the_plan_left() {
             .collect::<Vec<_>>()
     });
     assert_eq!(restored, Some(vec![100]), "the queue is restored");
+}
+
+/// A checked purge keeps every original a reserved unit carries, not only its first.
+#[cfg(unix)]
+#[test]
+fn a_v2_checked_purge_keeps_every_member_of_a_reserved_unit() {
+    let _root = TestRuntimeRootGuard::new();
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        let (handle, _) = owned(&registry, 7_272_642, &[100, 200, 300], false).await;
+        handle
+            .v2_request(|slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                let attempt = serde_json::from_value(json!({"nonce":"unit","provider":"claude",
+                    "target":{"host":"tmux","owner":"projection-unit","root":"/test","execution_nonce":"e"},
+                    "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}))
+                    .map_err(|e| e.to_string())?;
+                let unit = |item: &PendingQueueItem| (item.message_id != 300).then(|| ("name".to_string(), Vec::new()));
+                owner.reserve_unit(attempt, unit).map(drop)
+            })
+            .await
+            .unwrap();
+        let current = (handle.v2_request(|slot| slot.as_ref().ok_or("no owner")?.fingerprint()).await).unwrap();
+        let expected = ExpectedQueue::of(&handle.snapshot().await).with_v2(current);
+        let purged = handle.try_purge_queue_if_unchanged(ctx(), expected).await.unwrap();
+        let receipt: Vec<u64> = purged.receipt.iter().map(|i| i.message_id.get()).collect();
+        assert_eq!(receipt, [300], "only what no unit holds is purged");
+        assert_eq!(queued(&handle).await, (vec![100, 200], true));
+    });
 }

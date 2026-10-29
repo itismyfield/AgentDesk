@@ -24,6 +24,9 @@ mod stale_dispatch_guard;
 mod start_placeholder;
 mod voice_intake;
 mod worker_entry;
+#[cfg(test)]
+#[path = "owned_turn_start.rs"]
+pub(in crate::services::discord) mod owned_turn_start;
 
 #[cfg(all(test, unix))]
 mod replay_start_tests;

@@ -162,7 +162,7 @@ impl ChannelMailboxState {
             ));
         }
         let mut next = owner.snapshot.clone();
-        let first = usize::from(next.head_injection.is_some());
+        let first = (next.head_injection.as_ref()).map_or(0, |head| head.members().count());
         let drained: Vec<PendingQueueItem> =
             next.items.drain(first.min(next.items.len())..).collect();
         match owner.commit(next) {

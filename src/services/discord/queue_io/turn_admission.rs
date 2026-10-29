@@ -280,6 +280,10 @@ pub(in crate::services::discord) async fn mailbox_enqueue_observed_intervention(
     intervention: Intervention,
     observed: Option<ClaimObservation>,
 ) -> MailboxEnqueueOutcome {
+    #[cfg(test)]
+    if let Some(outcome) = super::input_owner::ingress::enqueue(shared, provider, channel_id, &intervention).await {
+        return outcome;
+    }
     // Tombstone refusal ⇒ retry on a fresh registered actor
     // instead of orphaning the queue on a purged one.
     let result = shared

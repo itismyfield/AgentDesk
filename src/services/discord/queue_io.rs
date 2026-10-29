@@ -3,6 +3,8 @@ mod backstop;
 #[cfg(test)]
 mod input_owner;
 #[cfg(test)]
+pub(in crate::services::discord) use input_owner::{admission as input_admission, ingress as input_ingress};
+#[cfg(test)]
 pub(crate) mod retained_notice;
 pub(in crate::services) use backstop::BackstopSlot;
 pub(in crate::services::discord) use backstop::spawn_turn_completion_idle_queue_listener;

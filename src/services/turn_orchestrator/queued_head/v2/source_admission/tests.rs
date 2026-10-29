@@ -1003,6 +1003,7 @@ async fn a_ticket_bind_keeps_its_attempt_and_source_through_retention_and_restar
                 frame: "frame".into(),
                 digest: "digest".into(),
                 attribution: json!({}),
+                followers: Vec::new(),
             };
             let key = owner.reserve(attempt, payload)?;
             drop(owner.arm(&key, 0)?);
