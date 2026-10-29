@@ -443,6 +443,14 @@ fn test_only_paths(files: &[(PathBuf, String)]) -> Vec<PathBuf> {
     }
 }
 
+// Render native path components as owner names without reinterpreting Unix backslashes.
+fn source_name(path: &Path) -> String {
+    path.components()
+        .map(|part| part.as_os_str().to_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn source_files(root: &Path) -> Vec<(PathBuf, String)> {
     let mut pending = vec![root.join("src")];
     let mut files = Vec::new();
@@ -471,8 +479,8 @@ fn config_file_paths_are_built_only_by_the_resolver() {
         if test_only.iter().any(|prefix| path.starts_with(prefix)) {
             continue;
         }
-        let name = path.to_str().unwrap();
-        let scan = scan(name, text, PATH_OWNERS).unwrap();
+        let name = source_name(path);
+        let scan = scan(&name, text, PATH_OWNERS).unwrap();
         bypasses.extend(scan.lines.iter().map(|line| format!("{name}:{line}")));
         used.extend(
             scan.owners_used
@@ -517,11 +525,27 @@ fn bypass_scan_skips_test_items_and_follows_test_modules() {
     let owners = [("src/x.rs", "fn migrate(", "migration input")];
     let owned = "fn migrate(root: &Path) { legacy_config_file_path(root); }\n\
         fn load(root: &Path) { legacy_config_file_path(root); }\n";
-    let found = scan("src/x.rs", owned, &owners).unwrap();
-    assert_eq!(
-        (found.lines, found.owners_used),
-        (vec![2], vec!["fn migrate("])
-    );
+    for path in [
+        PathBuf::from("src").join("x.rs"),
+        PathBuf::from("src/x.rs"),
+        PathBuf::from("src//x.rs"),
+        PathBuf::from("src/./x.rs"),
+    ] {
+        let name = source_name(&path);
+        let found = scan(&name, owned, &owners).unwrap();
+        assert_eq!(
+            (found.lines, found.owners_used),
+            (vec![2], vec!["fn migrate("]),
+            "source path {}",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        let owners = [("src/nested/x.rs", "fn migrate(", "migration input")];
+        let name = source_name(Path::new(r"src/nested\x.rs"));
+        assert_eq!(scan(&name, owned, &owners).unwrap().lines, vec![1, 2]);
+    }
     assert!(scan("src/x.rs", "fn other() {}\n", &owners).is_err());
     assert!(scan("src/x.rs", "fn a() { let _ = \"unterminated; }\n", &[]).is_err());
 

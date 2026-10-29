@@ -96,9 +96,109 @@ class ConfigSnapshotReadersTests(unittest.TestCase):
 
     def test_aliased_yaml_parser_and_deserializer_constructor_are_red(self):
         for parser in ('use serde_yaml::from_str as decode; fn consumer() { let c: Config = decode(text); }',
-                       'fn consumer() -> Config { serde_yaml::Deserializer::from_str(text); Config::deserialize(value) }'):
+                       'fn consumer() { serde_yaml::Deserializer::from_str(text); Config::deserialize(value) }',
+                       self.production('fn reader(path: &std::path::Path) {\n    use serde::Deserialize;\n'
+                                       '    let bytes = std::fs::read_to_string(path).unwrap();\n'
+                                       '    let config = crate::config::Config::deserialize(\n'
+                                       '        serde_yaml::Deserializer::from_str(&bytes),\n    )\n'
+                                       '    .unwrap();\n    drop(config);\n}\n')):
             with self.subTest(parser=parser):
                 self.assertTrue(any('raw-config-yaml' in error for error in self.errors(parser)))
+
+    def test_range_operator_before_loader_is_not_member_access(self):
+        for expression in ('0..crate::config::load_graceful().server.port',
+                           '..crate::config::load_graceful().server.port',
+                           '0..=crate::config::load_graceful().server.port'):
+            with self.subTest(expression=expression):
+                code = self.production('fn accidental_reader() { let _range = ' + expression + '; }')
+                self.assertTrue(any('accidental_reader: unapproved' in error for error in self.errors(code)))
+        errors = guard.audit({'src/config.rs': 'fn f(cache: &Cache) { cache.load(); }'}, [], required=())[0]
+        self.assertFalse(any('unapproved' in error for error in errors), errors)
+
+    def approved_reader(self, kind='boot'):
+        path = 'src/services/discord_config_audit.rs'
+        code = 'pub fn load_runtime_config(root: &Path) -> Loaded { crate::config::config_path::load_config_file(root) }\n'
+        entry = self.entry(path, code, 'load_runtime_config')
+        entry.update(kind=kind, callers={'src/bootstrap.rs::initialize': 1})
+        sources = {path: code, 'src/bootstrap.rs':
+                   'fn initialize() { crate::services::discord_config_audit::load_runtime_config(root); }'}
+        return sources, entry
+
+    def test_new_caller_of_approved_fresh_reader_is_red(self):
+        sources, entry = self.approved_reader()
+        self.assertEqual(guard.audit(sources, [entry], required=())[0], [])
+        reader = 'crate::services::discord_config_audit::load_runtime_config'
+        cases = (
+            ('', 'fn auth_token() -> Option<String> { ' + reader
+             + '(&crate::config::runtime_root()?).ok()?.config.server.auth_token }'),
+            ('', 'use ' + reader + ' as fresh; fn auth_token() { fresh(root); }'),
+            ('', 'fn auth_token() { roots.map(' + reader + '); }'),
+            ('', 'use crate::services::discord_config_audit as audit; fn auth_token() { audit::load_runtime_config(root); }'),
+            ('', 'use crate::services::discord_config_audit::*; fn auth_token() { load_runtime_config(root); }'),
+            ('pub use discord_config_audit::load_runtime_config as fresh;',
+             'fn auth_token() { crate::services::fresh(root); }'),
+        )
+        for kind in ('boot', 'editor'):
+            for reexport, client in cases:
+                with self.subTest(kind=kind, client=client):
+                    sources, entry = self.approved_reader(kind)
+                    sources.update({'src/services/mod.rs': reexport, 'src/cli/client.rs': client})
+                    errors = guard.audit(sources, [entry], required=())[0]
+                    self.assertTrue(any('src/cli/client.rs::auth_token: unapproved caller' in error
+                                        for error in errors), errors)
+        sources, entry = self.approved_reader()
+        path = 'src/services/discord_config_audit.rs'
+        sources[path] += 'fn runtime_token() { load_runtime_config(root); }'
+        self.assertTrue(any('runtime_token: unapproved caller' in error
+                            for error in guard.audit(sources, [entry], required=())[0]))
+        sources, entry = self.approved_reader()
+        sources['src/bootstrap.rs'] = 'fn initialize() {}'
+        self.assertTrue(any('caller count mismatch' in error
+                            for error in guard.audit(sources, [entry], required=())[0]))
+        del entry['callers']
+        self.assertTrue(any('invalid function exception' in error
+                            for error in guard.audit(sources, [entry], required=())[0]))
+
+    def test_child_module_reader_path_and_associated_reader_fail_closed(self):
+        path = 'src/cli/herdr.rs'
+        code = ('mod node { pub(super) fn run() { crate::config::load(); } }\n'
+                'pub fn entry() { node::run(); }\n')
+        entry = self.entry(path, code, 'run')
+        entry.update(kind='standalone', callers={'src/cli/herdr.rs::entry': 1})
+        self.assertEqual(guard.audit({path: code}, [entry], required=())[0], [])
+        errors = guard.audit({path: code + 'fn status() { node::run(); }'}, [entry], required=())[0]
+        self.assertTrue(any('herdr.rs::status: unapproved caller' in error for error in errors), errors)
+        code = 'impl Reader { fn run() { crate::config::load(); } }\n'
+        entry = self.entry(path, code, 'run')
+        entry.update(kind='standalone', callers={})
+        self.assertTrue(any('must be a module-level function' in error
+                            for error in guard.audit({path: code}, [entry], required=())[0]))
+
+    def mount_errors(self, lib, entries=()):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'src').mkdir()
+            (root / 'src/lib.rs').write_text(lib)
+            (root / 'src/extra_tests.rs').write_text('pub fn hidden() { crate::config::load(); }\n')
+            (root / 'src/reader.rs').write_text('pub fn allowed() { crate::config::load(); }\n')
+            files, skipped = guard.skip_pin.validated_scan_files(
+                root, Path('src'), guard.skip_pin.is_basename_test_file, pinned_paths=())
+            self.assertIn(root / 'src/extra_tests.rs', skipped)
+            return guard.production_sources(root, files, skipped, list(entries))[1]
+
+    def test_production_include_cannot_reuse_a_skipped_test_file(self):
+        for lib in ('include!("extra_tests.rs");', 'include!(concat!(env!("OUT_DIR"), "/x.rs"));',
+                    'include!("../outside.rs");'):
+            with self.subTest(lib=lib):
+                self.assertTrue(any('production include!' in error for error in self.mount_errors(lib)))
+        for lib in ('#[cfg(test)]\ninclude!("extra_tests.rs");',
+                    '#[cfg(test)]\nmod t { include!("extra_tests.rs"); }', 'include!("reader.rs");'):
+            with self.subTest(lib=lib):
+                self.assertEqual(self.mount_errors(lib), [])
+        remount = '#[path = "reader.rs"]\nmod other;'
+        self.assertEqual(self.mount_errors(remount), [])
+        self.assertTrue(any('remounts approved reader' in error for error in
+                            self.mount_errors(remount, [{'kind': 'boot', 'file': 'src/reader.rs'}])))
 
     def test_tracked_file_missing_and_empty_tracked_census_fail_closed(self):
         root = Path('/checkout')

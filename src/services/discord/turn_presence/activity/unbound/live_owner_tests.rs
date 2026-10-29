@@ -333,28 +333,37 @@ async fn completed_scheduled_binding_opens_turn_start_pg() {
 }
 
 fn scheduled_source(rig: &Rig, channel: u64, name: &str, native: &str, nonce: &str) {
+    bind_source(rig, channel, name, native, nonce, true);
+}
+
+/// An unnamed source is the launch binding Claude logs before its session id is known.
+fn bind_source(rig: &Rig, channel: u64, name: &str, native: &str, nonce: &str, named: bool) {
     use crate::services::tui_prompt_dedupe::binding_events as p5;
     let marker = marker_path(name, "spawn_nonce");
     std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
     std::fs::write(marker, nonce).unwrap();
-    let path = rig.root.path().join(format!("{channel}-{native}.jsonl"));
+    let dir = rig.root.path().join(format!("transcripts-{channel}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{native}.jsonl"));
     std::fs::write(&path, "{}\n").unwrap();
-    let source =
-        crate::services::tui_o::shadow::binding_reader::source_id_for(native, &path).unwrap();
     let proposal = p5::Proposal {
         channel_id: channel,
         provider: "claude",
         tmux_session: name,
-        session_id: Some(native),
+        session_id: named.then_some(native),
         path: path.to_str().unwrap(),
         replaced: None,
         cause: p5::CauseSource::Hook(p5::BindingCause::Startup),
         hook: None,
     };
-    assert_eq!(
-        p5::record_verified(&proposal, &source).unwrap(),
-        p5::Committed::Appended
-    );
+    let committed = if named {
+        let source =
+            crate::services::tui_o::shadow::binding_reader::source_id_for(native, &path).unwrap();
+        p5::record_verified(&proposal, &source).unwrap()
+    } else {
+        p5::record_source(&proposal).unwrap()
+    };
+    assert_eq!(committed, p5::Committed::Appended);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -362,10 +371,10 @@ async fn completed_scheduled_inventory_with_primary_binding_opens_turn_start_pg(
     route_starts_once(2).await;
 }
 
-async fn completed_scheduled(rig: &Rig, id: &str) -> String {
+async fn completed_scheduled(rig: &Rig, id: &str, named: bool) -> String {
     let provider = ProviderKind::Claude;
     let name = provider.build_tmux_session_name(&format!("scheduled:{id}"));
-    scheduled_source(rig, rig.channel.get(), &name, "parent", "old");
+    bind_source(rig, rig.channel.get(), &name, "parent", "old", named);
     let channel = rig.channel.to_string();
     let pool = rig.shared.pg_pool.as_ref().unwrap();
     let launch = chrono::Utc::now() - chrono::Duration::minutes(1);
@@ -390,7 +399,7 @@ async fn scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
     let _turn_mode = TestConfirmation::new(rig.channel.get());
     let host = HostSessions::new(&rig).await;
     host.start(MANUAL);
-    let name = completed_scheduled(&rig, "smsg_7513-evidence").await;
+    let name = completed_scheduled(&rig, "smsg_7513-evidence", false).await;
     host.start(&name);
     let registry = HealthRegistry::new();
     registry.register("claude".into(), rig.shared.clone()).await;
@@ -456,6 +465,20 @@ async fn scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
     .execute(pool)
     .await
     .unwrap();
+    sqlx::query("UPDATE turns SET session_id = 'other-native' WHERE turn_id = 'scheduled-turn'")
+        .execute(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        hold().await,
+        Some(crate::services::discord::health::ExternalHold::Unknown),
+        "an unnamed launch binding of another transcript"
+    );
+    sqlx::query("UPDATE turns SET session_id = 'parent' WHERE turn_id = 'scheduled-turn'")
+        .execute(pool)
+        .await
+        .unwrap();
+    assert_eq!(hold().await, None, "completed control restored");
     std::fs::write(marker_path(&name, "spawn_nonce"), "successor").unwrap();
     assert_eq!(
         hold().await,
@@ -479,7 +502,7 @@ async fn scheduled_binding_with_inflight_stays_held_pg() {
     let _turn_mode = TestConfirmation::new(rig.channel.get());
     let host = HostSessions::new(&rig).await;
     host.start(MANUAL);
-    let name = completed_scheduled(&rig, "smsg_7513-inflight").await;
+    let name = completed_scheduled(&rig, "smsg_7513-inflight", false).await;
     host.start(&name);
     let row = InflightTurnState::new(
         ProviderKind::Claude,
@@ -527,7 +550,7 @@ async fn live_primary_without_watcher_stays_unknown_pg() {
     let _turn_mode = TestConfirmation::new(rig.channel.get());
     let host = HostSessions::new(&rig).await;
     host.start(MANUAL);
-    let name = completed_scheduled(&rig, "smsg_7513-primary").await;
+    let name = completed_scheduled(&rig, "smsg_7513-primary", true).await;
     host.start(&name);
     host.start(&ProviderKind::Claude.build_tmux_session_name(&format!("s1e-{}", rig.channel)));
     assert_eq!(
@@ -556,7 +579,7 @@ async fn completed_scheduled_inventory_resolves_other_channels_and_pins_foreign_
             other.get(),
             host.socket.clone(),
         );
-    let name = completed_scheduled(&rig, "smsg_7513-foreign").await;
+    let name = completed_scheduled(&rig, "smsg_7513-foreign", false).await;
     host.start(&name);
     let primary = ProviderKind::Claude.build_tmux_session_name(&format!("s1e-{}", rig.channel));
     scheduled_source(
@@ -671,7 +694,8 @@ async fn route_starts_once(case: u8) {
     let host = HostSessions::new(&rig).await;
     host.start(MANUAL);
     if case != 0 {
-        let name = completed_scheduled(&rig, "smsg_8324cbeb-a266-49f6-b6fa-92d7c7513000").await;
+        let name =
+            completed_scheduled(&rig, "smsg_8324cbeb-a266-49f6-b6fa-92d7c7513000", case == 1).await;
         host.start(&name);
         if case == 2 {
             let primary =
