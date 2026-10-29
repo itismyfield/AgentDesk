@@ -1130,6 +1130,7 @@ src/
 │   │   │   ├── i7441_tests.rs
 │   │   │   ├── injected_catch_up_tests.rs
 │   │   │   ├── merged_alias_tests.rs
+│   │   │   ├── owner_pending_recovery_tests.rs
 │   │   │   ├── phase1_sweep.rs
 │   │   │   ├── phase2.rs
 │   │   │   ├── phase2_age_tests.rs
@@ -1713,10 +1714,15 @@ src/
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── effect.rs
 │   │   │   │   ├── effect_tests.rs
+│   │   │   │   ├── ingress.rs
+│   │   │   │   ├── ingress_tests.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── notice.rs
+│   │   │   │   ├── notice_tests.rs
 │   │   │   │   ├── origin.rs
 │   │   │   │   ├── pump.rs
 │   │   │   │   ├── pump_tests.rs
+│   │   │   │   ├── recovery.rs
 │   │   │   │   └── target.rs
 │   │   │   ├── transport/
 │   │   │   │   └── tests.rs
@@ -1899,6 +1905,7 @@ src/
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── codex_turn_hold.rs
 │   │   │   │   │   ├── final_guards.rs
+│   │   │   │   │   ├── owner_ingress_tests.rs
 │   │   │   │   │   ├── replay_hold.rs
 │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── attachment.rs
@@ -2018,6 +2025,8 @@ src/
 │   │   │   │   ├── input_payload.rs
 │   │   │   │   ├── intake_turn.rs
 │   │   │   │   ├── latency_spans.rs
+│   │   │   │   ├── owned_turn_start.rs
+│   │   │   │   ├── owned_turn_start_tests.rs
 │   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_dispatch.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_activation_tests.rs
@@ -3989,7 +3998,8 @@ src/
 │   │   │   │   ├── projection_tests.rs
 │   │   │   │   ├── retained.rs
 │   │   │   │   ├── source_admission.rs
-│   │   │   │   └── sources.rs
+│   │   │   │   ├── sources.rs
+│   │   │   │   └── unit_tests.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs
 │   │   │   ├── mend.rs
