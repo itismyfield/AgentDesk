@@ -383,6 +383,13 @@ pub(super) fn scan_codex_records(
         }
         offset = offset.saturating_add(bytes_read as u64);
         let json = serde_json::from_str::<serde_json::Value>(line.trim()).ok();
+        if let Some(json) = &json {
+            let _ = crate::services::codex_tui::busy_inject::observe_native_file(
+                reader.get_ref().get_ref(),
+                line_start_offset,
+                json,
+            );
+        }
         if find_prompt
             && let Some((prompt, entry_id, evidence)) = json.as_ref().and_then(|json| {
                 crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_evidence(

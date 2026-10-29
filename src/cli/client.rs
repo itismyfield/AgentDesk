@@ -17,7 +17,7 @@ pub fn api_base() -> String {
     if let Ok(url) = std::env::var("AGENTDESK_API_URL") {
         return url.trim_end_matches('/').to_string();
     }
-    let cfg = config::load_graceful();
+    let cfg = config::runtime_config();
     cfg.server.local_base_url()
 }
 
@@ -28,7 +28,7 @@ fn agent() -> ureq::Agent {
 
 /// Get the auth token from config.
 fn auth_token() -> Option<String> {
-    let cfg = config::load_graceful();
+    let cfg = config::runtime_config();
     cfg.server.auth_token.clone()
 }
 
@@ -2695,3 +2695,6 @@ mod health_compare_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod snapshot_reader_tests;

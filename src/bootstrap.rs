@@ -104,6 +104,7 @@ pub(crate) fn install_boot_snapshots(
     crate::config::session_hosts::install_selected(selection);
     #[cfg(unix)]
     crate::services::session_host::managed_config::maintenance::boot();
+    crate::config_live_reload::install(config.clone());
     Ok(())
 }
 
@@ -134,12 +135,19 @@ pub(crate) async fn prepare_and_install_boot_snapshots(
 }
 
 /// The dcserver preserves its static-validation failure contract before starting HTTP or intake.
-pub(crate) async fn prepare_dcserver_boot(config: &crate::config::Config, pool: &sqlx::PgPool) {
+pub(crate) async fn prepare_dcserver_boot(
+    config: &crate::config::Config,
+    pool: &sqlx::PgPool,
+) -> Option<crate::config_live_reload::ConfigHotReloadGuard> {
     if let Err(error) = prepare_and_install_boot_snapshots(config, Some(pool)).await {
         eprintln!("  ✖ Failed to install boot snapshots: {error:#}");
         std::process::exit(1);
     }
     crate::cli::dcserver::startup::spawn_skill_manifest_audit(config, pool);
+    crate::config_live_reload::start(
+        crate::config::resolved_config_path(),
+        config.config_hot_reload,
+    )
 }
 
 #[cfg(all(test, unix))]

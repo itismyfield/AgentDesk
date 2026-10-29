@@ -21,11 +21,11 @@ pub fn credential_token_path(root: &Path, bot_name: &str) -> PathBuf {
 }
 
 pub fn config_file_path(root: &Path) -> PathBuf {
-    config_dir(root).join("agentdesk.yaml")
+    crate::config::config_path::selection::config_file_path(root)
 }
 
 pub fn legacy_config_file_path(root: &Path) -> PathBuf {
-    root.join("agentdesk.yaml")
+    crate::config::config_path::selection::legacy_config_file_path(root)
 }
 
 pub fn role_map_path(root: &Path) -> PathBuf {

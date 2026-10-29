@@ -5,7 +5,7 @@ use sqlx::Connection;
 use super::gateway_lease_recovery::{
     GatewayLeaseHolder, PromotionHandoffOutcome, STANDBY_PROMOTION_IN_PROGRESS, TerminalProof,
     attempt_clean_standby_promotion, follow_promotion_handoff_chain, gateway_holder_is_reapable,
-    gateway_lease_application_name_for, reap_orphaned_gateway_lease_for_instance_with_min_age,
+    gateway_lease_application_name_for, reap_orphaned_gateway_lease_with_min_age,
     recover_cancelled_promotion, restart_artifact_proof, restart_file_nonce,
     restart_request_artifact_path, terminal_proof, try_create_restart_marker,
     wait_for_promotion_handoff,
@@ -931,6 +931,18 @@ fn orphan_reap_requires_named_stale_matching_worker() {
 
 #[tokio::test]
 async fn gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_pg() {
+    let _live = crate::config_live_reload::test_live_guard(
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &root.path().join("config.yaml"),
+    );
     let _lifecycle = crate::db::postgres::lock_test_lifecycle();
     let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
         return;
@@ -960,6 +972,13 @@ async fn gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_
     .expect("connect isolated gateway reap database");
 
     let instance_id = &format!("node:east:{}", "x".repeat(120));
+    let mut disk = crate::config::Config::default();
+    disk.data.dir = root.path().join("data");
+    disk.cluster.instance_id = Some("unpublished-disk-node".into());
+    crate::config::save_to_path(&root.path().join("config.yaml"), &disk).unwrap();
+    let mut live = disk;
+    live.cluster.instance_id = Some(instance_id.clone());
+    crate::config_live_reload::install(live);
     let dcserver_pid = std::process::id() as i32;
     sqlx::query(
         "INSERT INTO worker_nodes (
@@ -1013,26 +1032,30 @@ async fn gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_
         "bounded identity must survive PostgreSQL storage"
     );
 
-    let reaped = reap_orphaned_gateway_lease_for_instance_with_min_age(
-        &pool,
-        lock_id,
-        &ProviderKind::Claude,
-        0,
-        instance_id,
-    )
-    .await
-    .expect("run production orphan reap query");
-    assert!(
-        reaped,
-        "production query must reap delimiter-bearing stale instance"
-    );
-    let still_alive: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)")
-            .bind(backend_pid)
-            .fetch_one(&pool)
-            .await
-            .expect("check holder termination");
-    assert!(!still_alive);
+    let reaped = reap_orphaned_gateway_lease_with_min_age(&pool, lock_id, &ProviderKind::Claude, 0)
+        .await
+        .expect("run production orphan reap query");
+    let still_alive = if reaped {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let alive: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
+                )
+                .bind(backend_pid)
+                .fetch_one(&pool)
+                .await
+                .expect("check holder termination");
+                if !alive {
+                    break false;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or(true)
+    } else {
+        true
+    };
 
     drop(holder);
     crate::db::postgres::close_test_pool(pool, "gateway orphan holder pg")
@@ -1041,6 +1064,11 @@ async fn gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_
     crate::db::postgres::drop_test_database(&admin_url, &database_name, "gateway orphan holder pg")
         .await
         .expect("drop gateway reap database");
+    assert!(
+        reaped,
+        "production wrapper must use the installed delimiter-bearing instance"
+    );
+    assert!(!still_alive);
 }
 
 const O_WRITER_CHILD: &str = "ADK_TEST_O_WRITER_SELF_ID";

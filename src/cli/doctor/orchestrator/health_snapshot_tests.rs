@@ -30,3 +30,44 @@ fn legacy_doctor_fetches_no_checker_evidence_and_user_default_uses_only_doctor_r
         "doctor_evidence_failure_does_not_erase_health_contract"
     );
 }
+
+#[test]
+fn startup_health_snapshot_uses_published_port_and_boot_fallback() {
+    use crate::config::snapshot_reader_tests::{Fixture, isolated};
+    isolated(|| {
+        let fixture = Fixture::new();
+        let first = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let second = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let first_port = first.local_addr().unwrap().port();
+        let second_port = second.local_addr().unwrap().port();
+        let initial = format!("server: {{host: 127.0.0.1, port: {first_port}}}");
+        let disk = format!("server: {{host: 127.0.0.1, port: {second_port}}}");
+        drop((first, second));
+        unsafe { std::env::set_var("AGENTDESK_API_URL", "http://remote-target.invalid") };
+        let options = DoctorOptions {
+            fix: false,
+            json: true,
+            allow_restart: false,
+            repair_sqlite_cache: false,
+            allow_remote: false,
+            profile: None,
+            run_context: RunContext::StartupOnce,
+            artifact_path: None,
+        };
+        fixture.write(&initial);
+        assert_eq!(
+            fetch_health_snapshot(&options).base,
+            format!("http://127.0.0.1:{first_port}")
+        );
+        fixture.install(&initial, &disk);
+        assert_eq!(
+            fetch_health_snapshot(&options).base,
+            format!("http://127.0.0.1:{first_port}")
+        );
+        fixture.reload();
+        assert_eq!(
+            fetch_health_snapshot(&options).base,
+            format!("http://127.0.0.1:{second_port}")
+        );
+    });
+}

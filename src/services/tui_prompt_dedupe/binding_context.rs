@@ -56,7 +56,7 @@ pub(crate) enum SpawnNonceMarker {
 }
 
 pub(crate) fn stable_host_identity() -> Option<String> {
-    crate::config::load_graceful()
+    crate::config::runtime_config()
         .cluster
         .instance_id
         .into_iter()
@@ -1148,3 +1148,7 @@ pub(crate) mod tests {
         assert!(calls.contains(&format!("kill-session -t ={tmux}:")));
     }
 }
+
+#[cfg(test)]
+#[path = "binding_context_snapshot_tests.rs"]
+mod snapshot_tests;

@@ -63,10 +63,10 @@ recall로 자기 스코프 파편을 조회하고 아래 기준에 해당하면 
 
 ## 3단계: 저장소 건강 모니터 (읽기 전용)
 - memory_stats 호출 → 총 파편수, type별 분포(특히 episode 비중), avg_importance 확인.
-- context(structured=true) 호출 → 자기 스코프 anchorCount 확인.
+- context(structured=true)를 workspace 없이 호출 → 응답 _meta.anchorSelection에서 candidates.unscoped(전역 앵커 수)와 excluded.total(상한에 걸려 빠진 앵커 수) 확인. 앵커는 토큰 예산으로 잘리지 않으므로 앵커 토큰량은 경보 근거가 아니다.
 - 경보 판단:
   · episode 비중이 과도(예: 전체의 절반 이상)하거나 총 파편수가 급증 → "deprecation-audit 심화 권장" 경보
-  · anchorCount가 주입 한도(약 10)를 크게 초과 → "앵커 인플레 — de-anchor 필요" 경보
+  · 앵커 상한은 30이고 그룹 앵커가 먼저 최대 10칸을 쓴다. excluded.total > 0 → "앵커 잘림 — de-anchor 필요" 경보. 전역 앵커 > 20 → "전역 앵커 여유 부족 — 그룹 앵커가 10개인 그룹에서 전역이 잘림" 경보
 
 ## 심화 패스 결과 (래퍼가 수행, 일요일만 — cross-workspace 결정론적 SQL)
 아래는 이번 실행의 심화 패스 원시 출력이다. DEEP_CANDIDATES/DEEP_BYTYPE/DEEP_DELETED 값을 그대로 해석해 보고에 반영한다(네가 삭제한 게 아니라 래퍼가 SQL로 삭제한 것이다):
@@ -77,7 +77,7 @@ ${DEEP_REPORT}
 ## 결과 보고 (한국어, Discord)
 - Consolidation: 요약(또는 권한오류)
 - in-scope 위생: error N / episode N / decision N / fact N 삭제
-- 저장소 건강: 총 파편 X · episode 비중 Y% · anchorCount Z (+경보 여부)
+- 저장소 건강: 총 파편 X · episode 비중 Y% · 전역 앵커 Z/20 (+경보 여부)
 - 심화 패스(일요일): 삭제 N건(type별) / 또는 "스킵"
 정리·경보 내용이 하나도 없으면 NO_REPLY를 반환.
 PROMPT

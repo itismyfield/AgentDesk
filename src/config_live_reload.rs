@@ -1,8 +1,7 @@
 //! Live config file hot-reload.
 //!
-//! Mirrors the policies watcher (`engine::loader::start_hot_reload`) for the
-//! on-disk AgentDesk config file (`agentdesk.yaml`): a `notify` filesystem
-//! watcher debounces change events, the candidate file is **pre-validated**
+//! Polls the on-disk AgentDesk config file (`agentdesk.yaml`) without relying
+//! on native filesystem notifications. Change events are debounced, the candidate is **pre-validated**
 //! (parsed + runtime defaults applied via [`crate::config::load_from_path`]),
 //! and only on success is the new config **atomically swapped** into a shared
 //! process-global snapshot. A parse/validation failure keeps the currently
@@ -23,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{EventKind, PollWatcher, RecursiveMode, Watcher};
 
 use crate::config::Config;
 use crate::config::reload_classes::ReloadClass;
@@ -32,8 +31,16 @@ use crate::config::reload_classes::ReloadClass;
 #[path = "config/readers_live_reload_tests.rs"]
 mod readers_tests;
 
+#[cfg(all(test, unix))]
+#[path = "config/daemon_snapshot_pg_tests.rs"]
+mod daemon_snapshot_pg_tests;
+
+#[cfg(test)]
+#[path = "config/poll_watcher_tests.rs"]
+mod poll_watcher_tests;
+
 /// Process-global live config snapshot. `None` until [`install`] runs at boot.
-static LIVE: OnceLock<RwLock<Arc<Config>>> = OnceLock::new();
+static LIVE: OnceLock<RwLock<Option<Arc<Config>>>> = OnceLock::new();
 
 /// Every successfully installed snapshot, including a same-value reload.
 /// Consumers that must redo external validation subscribe here instead of
@@ -43,6 +50,9 @@ static LIVE_UPDATES: OnceLock<tokio::sync::watch::Sender<Option<Arc<Config>>>> =
 /// Debounce window for collapsing bursts of filesystem events (editors emit
 /// several per save). Matches the policies watcher.
 const DEBOUNCE: Duration = Duration::from_millis(500);
+
+// Keep edits responsive while scanning only the immediate config directory.
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Outcome of a single reload attempt. Returned by [`reload_from_path`] so the
 /// watcher, an on-demand trigger, and tests can all share the same core path.
@@ -64,7 +74,7 @@ pub fn install(config: Config) {
 /// The current live config snapshot, or `None` if [`install`] has not run yet
 /// (callers should fall back to their boot-captured config in that case).
 pub fn current() -> Option<Arc<Config>> {
-    LIVE.get().map(|lock| {
+    LIVE.get().and_then(|lock| {
         lock.read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -91,10 +101,10 @@ pub(crate) fn subscribe() -> tokio::sync::watch::Receiver<Option<Arc<Config>>> {
 }
 
 fn store(config: Arc<Config>) {
-    let lock = LIVE.get_or_init(|| RwLock::new(config.clone()));
+    let lock = LIVE.get_or_init(|| RwLock::new(Some(config.clone())));
     *lock
         .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = config.clone();
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(config.clone());
     LIVE_UPDATES
         .get_or_init(|| tokio::sync::watch::channel(None).0)
         .send_replace(Some(config));
@@ -151,7 +161,7 @@ pub fn reload_from_path(path: &Path) -> ReloadOutcome {
 /// Guard returned by [`start`]; keeps the watcher and worker thread alive and
 /// joins the worker on drop. Mirrors `engine::loader::HotReloadGuard`.
 pub struct ConfigHotReloadGuard {
-    _watcher: Option<RecommendedWatcher>,
+    _watcher: Option<PollWatcher>,
     join: Option<std::thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
 }
@@ -176,14 +186,14 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
     let Some(dir) = path.parent().map(Path::to_path_buf) else {
         tracing::warn!(
             path = %path.display(),
-            "config hot-reload: config path has no parent dir; disabled"
+            "config hot-reload: config path has no parent dir; retaining the last validated config until restart"
         );
         return None;
     };
     if !dir.exists() {
         tracing::warn!(
             dir = %dir.display(),
-            "config hot-reload: config directory does not exist; disabled"
+            "config hot-reload: config directory does not exist; retaining the last validated config until restart"
         );
         return None;
     }
@@ -192,25 +202,35 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
     // Watch the parent directory (not the file) so atomic rename-on-save —
     // write `agentdesk.yaml.tmp`, then rename over `agentdesk.yaml` — is still
     // observed; watching the inode directly misses the swap.
-    let mut watcher =
-        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(event) = res
-                && matches!(
-                    event.kind,
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                )
-            {
+    let mut watcher = match PollWatcher::new(
+        move |res: notify::Result<notify::Event>| {
+            let event = match res {
+                Ok(event) => event,
+                Err(error) => {
+                    tracing::warn!(%error, "config hot-reload: file scan failed; keeping the last validated config");
+                    return;
+                }
+            };
+            if matches!(
+                event.kind,
+                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+            ) {
                 let _ = tx.send(event);
             }
-        }) {
-            Ok(watcher) => watcher,
-            Err(error) => {
-                tracing::warn!(%error, "config hot-reload: failed to create watcher; disabled");
-                return None;
-            }
-        };
+        },
+        // Content comparison also catches saves that preserve the file mtime.
+        notify::Config::default()
+            .with_poll_interval(POLL_INTERVAL)
+            .with_compare_contents(true),
+    ) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            tracing::warn!(%error, "config hot-reload: failed to create watcher; retaining the last validated config until restart");
+            return None;
+        }
+    };
     if let Err(error) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
-        tracing::warn!(%error, dir = %dir.display(), "config hot-reload: watch failed; disabled");
+        tracing::warn!(%error, dir = %dir.display(), "config hot-reload: watch failed; retaining the last validated config until restart");
         return None;
     }
 
@@ -269,7 +289,9 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
         .ok();
 
     if join.is_none() {
-        tracing::warn!("config hot-reload: failed to spawn worker thread; disabled");
+        tracing::warn!(
+            "config hot-reload: failed to spawn worker thread; retaining the last validated config until restart"
+        );
         return None;
     }
 
@@ -283,14 +305,20 @@ pub fn start(path: PathBuf, enabled: bool) -> Option<ConfigHotReloadGuard> {
 
 #[cfg(test)]
 pub(crate) struct TestLiveGuard {
-    previous: Config,
+    previous: Option<Arc<Config>>,
     _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
 }
 
 #[cfg(test)]
 impl Drop for TestLiveGuard {
     fn drop(&mut self) {
-        install(self.previous.clone());
+        let lock = LIVE.get_or_init(|| RwLock::new(None));
+        *lock
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.previous.clone();
+        LIVE_UPDATES
+            .get_or_init(|| tokio::sync::watch::channel(None).0)
+            .send_replace(self.previous.clone());
     }
 }
 
@@ -298,9 +326,7 @@ impl Drop for TestLiveGuard {
 pub(crate) fn test_live_guard(
     lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
 ) -> TestLiveGuard {
-    let previous = current()
-        .map(|config| (*config).clone())
-        .unwrap_or_default();
+    let previous = current();
     TestLiveGuard {
         previous,
         _lock: lock,
@@ -319,6 +345,66 @@ mod tests {
     /// they do not race each other under the parallel test runner.
     fn global_test_guard() -> TestLiveGuard {
         test_live_guard(crate::config::test_env_lock::acquire_shared_test_env_lock())
+    }
+
+    fn isolated_live_guard(body: impl FnOnce()) {
+        const CHILD: &str = "ADK_TEST_LIVE_GUARD_RESTORATION_CHILD";
+        let thread = std::thread::current();
+        let name = thread.name().expect("named libtest worker");
+        if std::env::var(CHILD).ok().as_deref() == Some(name) {
+            assert!(current().is_none(), "child starts without a snapshot");
+            body();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(CHILD, name)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{name}: {stdout}\n{stderr}");
+        assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
+    }
+
+    #[test]
+    fn live_guard_restores_an_absent_snapshot_and_watch() {
+        isolated_live_guard(|| {
+            let updates = subscribe();
+            assert!(updates.borrow().is_none());
+            {
+                let _guard = global_test_guard();
+                install(Config::default());
+                let installed = current().unwrap();
+                assert!(Arc::ptr_eq(updates.borrow().as_ref().unwrap(), &installed));
+            }
+            assert!(current().is_none());
+            assert!(updates.borrow().is_none());
+        });
+    }
+
+    #[test]
+    fn live_guard_restores_the_same_snapshot_arc_and_watch() {
+        isolated_live_guard(|| {
+            install(Config::default());
+            let previous = current().unwrap();
+            let updates = subscribe();
+            assert!(Arc::ptr_eq(updates.borrow().as_ref().unwrap(), &previous));
+            {
+                let _guard = global_test_guard();
+                install(Config::default());
+                let replacement = current().unwrap();
+                assert!(!Arc::ptr_eq(&replacement, &previous));
+                assert!(Arc::ptr_eq(
+                    updates.borrow().as_ref().unwrap(),
+                    &replacement
+                ));
+            }
+            assert!(Arc::ptr_eq(&current().unwrap(), &previous));
+            assert!(Arc::ptr_eq(updates.borrow().as_ref().unwrap(), &previous));
+        });
     }
 
     fn write(path: &Path, body: &str) {

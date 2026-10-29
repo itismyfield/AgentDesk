@@ -91,8 +91,16 @@ fn roots_are_searched_runtime_root_then_cwd_then_release() {
     assert_eq!(resolve(), legacy_config_file_path(&release));
     write_config(&config_file_path(&cwd), 2);
     assert_eq!(resolve(), config_file_path(&cwd));
+    assert_eq!(
+        resolve_with(None, None, Some(cwd.clone()), Some(home.clone())),
+        config_file_path(&cwd)
+    );
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    assert_eq!(resolve(), config_file_path(&cwd));
     write_config(&legacy_config_file_path(&root), 1);
     assert_eq!(resolve(), legacy_config_file_path(&root));
+    write_config(&config_file_path(&root), 4);
+    assert_eq!(resolve(), config_file_path(&root));
     assert_eq!(
         resolve_with(None, None, None, None),
         PathBuf::from("config").join("agentdesk.yaml")
@@ -155,6 +163,11 @@ fn set_env(key: &'static str, value: Option<&std::ffi::OsStr>) -> crate::config:
 const PATH_OWNERS: &[(&str, &str, &str)] = &[
     ("src/config/config_path.rs", "", "the resolver"),
     (
+        "src/config/config_path/selection.rs",
+        "",
+        "shared path selection",
+    ),
+    (
         "src/runtime_layout/paths.rs",
         "pub fn config_file_path(",
         "defines the canonical path",
@@ -199,11 +212,6 @@ const PATH_OWNERS: &[(&str, &str, &str)] = &[
         "fn apply_import_plan(",
         "writes the migrated file",
     ),
-    (
-        "src/cli/dcserver.rs",
-        "pub fn handle_dcserver(",
-        "body pinned by check_legacy_supervision_census",
-    ),
 ];
 
 const BYPASS: &str = r#"var(?:_os)?\(\s*"AGENTDESK_CONFIG"|config_file_path\(|\.join\(\s*"agentdesk\.yaml"\s*\)|"config/agentdesk\.yaml""#;
@@ -211,8 +219,6 @@ const BYPASS: &str = r#"var(?:_os)?\(\s*"AGENTDESK_CONFIG"|config_file_path\(|\.
 static BYPASS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(BYPASS).unwrap());
 static TEST_CFG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"#\[cfg\((?:test|all\([^\]]*\btest\b[^\]]*)\)\]").unwrap());
-static TEST_FILE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)^\s*#!\[cfg\(test\)\]").unwrap());
 static MOD_DECL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;").unwrap());
 static PATH_ATTR_RE: LazyLock<Regex> =
@@ -232,7 +238,7 @@ fn scan<'a>(file: &str, text: &str, owners: &[(&str, &'a str, &str)]) -> Result<
     let code = crate::test_support::rust_code_mask(text).map_err(|e| format!("{file}: {e:?}"))?;
     let literals =
         crate::test_support::strip_rust_comments(text).map_err(|e| format!("{file}: {e:?}"))?;
-    if TEST_FILE_RE.is_match(&code) {
+    if is_test_file(&code) {
         return Ok(Scan::default());
     }
     let tests = test_item_spans(&code);
@@ -263,6 +269,33 @@ fn scan<'a>(file: &str, text: &str, owners: &[(&str, &'a str, &str)]) -> Result<
         }
     }
     Ok(scan)
+}
+
+/// Only inner attributes before the first item can gate the whole file.
+fn is_test_file(code: &str) -> bool {
+    let mut rest = code.trim_start();
+    while let Some(attr) = rest.strip_prefix("#![") {
+        let (mut depth, mut end) = (1_usize, 0);
+        for (index, byte) in attr.bytes().enumerate() {
+            match byte {
+                b'[' => depth += 1,
+                b']' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                end = index;
+                break;
+            }
+        }
+        if depth != 0 {
+            return false;
+        }
+        if attr[..end].trim() == "cfg(test)" {
+            return true;
+        }
+        rest = attr[end + 1..].trim_start();
+    }
+    false
 }
 
 /// Byte ranges of items gated by a test-only `#[cfg(..)]` in a code mask.
@@ -475,6 +508,10 @@ fn bypass_scan_skips_test_items_and_follows_test_modules() {
     let brace = "#[cfg(test)]\nfn t() { let _ = Some(\"{\"); }\nfn prod(root: &Path) { config_file_path(root); }\n";
     assert_eq!(lines(brace), vec![3]);
     assert!(lines("#![cfg(test)]\nfn t() { config_file_path(x); }\n").is_empty());
+    let nested = "mod t {\n    #![cfg(test)]\n}\nfn prod(root: &std::path::Path) { let _ = root.join(\"agentdesk.yaml\"); }\n";
+    assert_eq!(lines(nested), vec![4]);
+    let inner_attrs = "// file comment\n#![cfg_attr(test, doc = \"[test]\")]\n#![cfg(test)]\nfn t() { config_file_path(x); }\n";
+    assert!(lines(inner_attrs).is_empty());
 
     // An owner covers its own function only, and a missing owner fails the scan.
     let owners = [("src/x.rs", "fn migrate(", "migration input")];

@@ -784,3 +784,200 @@ fn codex_6903_truncate_and_conflicting_custody_source_stay_pending() {
         assert!(dedupe::durable_handoff_present_for_tests("codex", SESSION));
     });
 }
+
+fn append_cold_boot_completion(path: &Path, row: &str, turn: &str, prompt: &str) -> u64 {
+    use std::io::Write;
+    let start = std::fs::metadata(path).unwrap().len();
+    let record = serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "type": "event_msg",
+        "payload": {
+            "type": "item_completed",
+            "turn_id": turn,
+            "item": {
+                "type": "UserMessage",
+                "id": row,
+                "content": [{"type": "text", "text": prompt, "text_elements": []}]
+            }
+        }
+    });
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+        "{record}"
+    )
+    .unwrap();
+    start
+}
+
+#[test]
+fn codex_append_cold_boot_without_parked_custody_joins_and_releases_same_frame() {
+    use crate::services::tui_input::human_frame::{self, history};
+    use history::append::{self, Admission, Decision};
+
+    fixture(|root| {
+        let path = rollout(root, "append-cold-boot");
+        let frame = human_frame::plain_inject("discord", "7504", "ann", "cold-a", "same body");
+        append_cold_boot_completion(
+            &path,
+            "historical-human",
+            "old-human",
+            "earlier human input",
+        );
+        append_cold_boot_completion(&path, "historical-frame", "old-frame", &frame);
+        let registration = std::fs::metadata(&path).unwrap().len();
+        append::register(
+            (SESSION, "cold-a", "7504"),
+            &path,
+            registration,
+            &frame,
+            "target-a",
+            Some(750401),
+            false,
+        )
+        .unwrap();
+        assert!(dedupe::register_injected_steer(
+            "codex",
+            SESSION,
+            "cold-a",
+            "target-a",
+            Some(750401)
+        ));
+        append::mark("cold-a", &path, Admission::Admitted).unwrap();
+
+        dedupe::reset_state_for_tests();
+        assert!(!dedupe::codex_restore_has_custody(SESSION).unwrap());
+        let mut rx = dedupe::subscribe_observed_prompts();
+        assert_eq!(
+            append_cold_boot_completion(&path, "row-a", "target-a", &frame),
+            registration
+        );
+        let source = std::fs::read(&path).unwrap();
+        assert_eq!(
+            super::codex_marker::bootstrap(SESSION, &path, Some("append-cold-boot".into())),
+            Some(registration),
+            "the append's own offset is a limited restore admission floor"
+        );
+
+        let a = append::projection("codex", SESSION, "cold-a").expect("original durable attempt");
+        assert_eq!(a.id, "cold-a");
+        assert_eq!(a.target_turn, "target-a");
+        assert_eq!(a.message_id, Some(750401));
+        assert!(a.admitted && a.bound);
+        assert_eq!(a.row.as_deref(), Some("row-a"));
+        assert_eq!(a.decision, Some(Decision::Joined));
+        assert_eq!(
+            history::receipt_row("cold-a", &path).as_deref(),
+            Some("row-a")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+        assert_eq!(
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|event| event.tmux_session_name == SESSION)
+                .count(),
+            0,
+            "bootstrap must not echo the injected or historical inputs"
+        );
+        assert!(!dedupe::codex_restore_has_custody(SESSION).unwrap());
+
+        let b_offset = std::fs::metadata(&path).unwrap().len();
+        append::register(
+            (SESSION, "cold-b", "7504"),
+            &path,
+            b_offset,
+            &frame,
+            "target-b",
+            Some(750402),
+            false,
+        )
+        .expect("bound A no longer blocks an identical frame B");
+        append::mark("cold-b", &path, Admission::Admitted).unwrap();
+        dedupe::reset_state_for_tests();
+        let mut rx = dedupe::subscribe_observed_prompts();
+        assert!(
+            super::codex_marker::bootstrap(SESSION, &path, Some("append-cold-boot".into()))
+                .is_some()
+        );
+        let a = append::projection("codex", SESSION, "cold-a").unwrap();
+        let b = append::projection("codex", SESSION, "cold-b").unwrap();
+        assert_eq!(a.row.as_deref(), Some("row-a"));
+        assert_eq!(a.decision, Some(Decision::Joined));
+        assert_eq!(b.target_turn, "target-b");
+        assert_eq!(b.message_id, Some(750402));
+        assert!(b.admitted && !b.bound);
+        assert_eq!(b.row, None);
+        assert_eq!(b.decision, None);
+        assert_eq!(history::receipt_row("cold-b", &path), None);
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+        assert_eq!(
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|event| event.tmux_session_name == SESSION)
+                .count(),
+            0,
+            "replaying row-a must not publish or move it to B"
+        );
+    });
+}
+
+#[test]
+fn codex_append_cold_boot_keeps_external_and_obligation_message_ids_optional() {
+    use crate::services::tui_input::human_frame::{self, history::append};
+    use append::{Admission, Decision};
+
+    for source_kind in ["external", "reply-obligation"] {
+        fixture(|root| {
+            let path = rollout(root, source_kind);
+            let target = format!("{source_kind}-target");
+            let row = format!("{source_kind}-row");
+            let frame =
+                human_frame::plain_inject(source_kind, "7504", "ann", "cold-optional", "input");
+            let registration = std::fs::metadata(&path).unwrap().len();
+            append::register(
+                (SESSION, "cold-optional", "7504"),
+                &path,
+                registration,
+                &frame,
+                &target,
+                None,
+                false,
+            )
+            .unwrap();
+            assert!(dedupe::register_injected_steer(
+                "codex",
+                SESSION,
+                "cold-optional",
+                &target,
+                None
+            ));
+            append::mark("cold-optional", &path, Admission::Admitted).unwrap();
+            dedupe::reset_state_for_tests();
+            assert!(!dedupe::codex_restore_has_custody(SESSION).unwrap());
+            let mut rx = dedupe::subscribe_observed_prompts();
+            assert_eq!(
+                append_cold_boot_completion(&path, &row, &target, &frame),
+                registration
+            );
+
+            assert!(
+                super::codex_marker::bootstrap(SESSION, &path, Some(source_kind.into())).is_some()
+            );
+            let restored = append::projection("codex", SESSION, "cold-optional").unwrap();
+            assert_eq!(restored.id, "cold-optional");
+            assert_eq!(restored.target_turn, target);
+            assert_eq!(
+                restored.message_id, None,
+                "{source_kind} has no Discord message id"
+            );
+            assert!(restored.admitted && restored.bound);
+            assert_eq!(restored.row.as_deref(), Some(row.as_str()));
+            assert_eq!(restored.decision, Some(Decision::Joined));
+            assert_eq!(
+                std::iter::from_fn(|| rx.try_recv().ok())
+                    .filter(|event| event.tmux_session_name == SESSION)
+                    .count(),
+                0,
+                "{source_kind} restoration must not publish a new input"
+            );
+            assert!(!dedupe::codex_restore_has_custody(SESSION).unwrap());
+        });
+    }
+}

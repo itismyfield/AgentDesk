@@ -183,7 +183,7 @@ pub(crate) fn require_explicit_bearer_token(
     headers: &HeaderMap,
     operation: &str,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let config = crate::config::load_graceful();
+    let config = crate::config::runtime_config();
     if let Some(expected_token) = config.server.auth_token.as_deref() {
         if !expected_token.is_empty() {
             let provided = trimmed_header_value(headers, "authorization")
@@ -249,3 +249,7 @@ pub(crate) async fn resolve_requesting_agent_id_with_pg(
         None => None,
     }
 }
+
+#[cfg(test)]
+#[path = "kanban_cards_snapshot_tests.rs"]
+mod snapshot_tests;
