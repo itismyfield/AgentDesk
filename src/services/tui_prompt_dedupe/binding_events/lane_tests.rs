@@ -1046,3 +1046,68 @@ fn a_new_source_after_recovery_waits_until_the_retried_b_rotation_settles() {
     let rotation = claude_session_rotation_for_tmux(tmux).unwrap();
     assert_eq!(rotation.old_output_path, b_path.display().to_string());
 }
+
+// A Herdr launch resuming the source its pane already names is logged once, under the new
+// execution with a resume cause; a tmux respawn of the same source stays unchanged as before.
+#[cfg(unix)]
+#[test]
+fn a_herdr_resume_of_the_pane_source_is_logged_once_under_its_new_execution() {
+    use crate::services::tmux_common as tc;
+    use crate::services::tui_prompt_dedupe::binding_context::{
+        BindingContext, PreparedIncarnation, tests::fixture_after_shared_test_env_lock,
+    };
+    let lane = Lane::new();
+    let (context_root, _env) = fixture_after_shared_test_env_lock();
+    let (channel, tmux) = (7_053, "p5-herdr-resume");
+    let a = uuid();
+    let launch = |mode: &str| {
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let context = BindingContext {
+            schema: 1,
+            provider: "claude".into(),
+            created_at: Utc::now(),
+            execution_nonce: nonce.clone(),
+            tmux_session: tmux.into(),
+            channel_id: Some(channel),
+            owner_runtime_root: context_root.path().display().to_string(),
+            host: None,
+            expected_native_session_id: Some(a.clone()),
+            launch_mode: mode.into(),
+            provider_root: None,
+            first_prompt_digest: None,
+            source_policy: None,
+        };
+        PreparedIncarnation::create(context).unwrap();
+        fs::write(tc::session_temp_path(tmux, "spawn_nonce"), &nonce).unwrap();
+        nonce
+    };
+    let host = |kind: &str| fs::write(tc::session_temp_path(tmux, "host_kind"), kind).unwrap();
+    register_tmux_channel(tmux, channel);
+    let path = lane.transcript(&a);
+    host("tmux");
+    launch("fresh");
+    register_launched_tmux_runtime_binding(tmux, claude(&path, &a));
+    launch("resume");
+    register_launched_tmux_runtime_binding(tmux, claude(&path, &a));
+    assert_eq!(
+        events(channel).len(),
+        1,
+        "a tmux respawn of the same source"
+    );
+
+    host("herdr");
+    let resumed = launch("resume");
+    for _ in 0..2 {
+        register_launched_tmux_runtime_binding(tmux, claude(&path, &a));
+    }
+    let log = events(channel);
+    assert_eq!(log.len(), 2, "{log:#?}");
+    let start = &log[1];
+    assert_eq!(start.execution_nonce.as_deref(), Some(resumed.as_str()));
+    assert_eq!(start.cause, BindingCause::Resume);
+    assert_eq!(start.new, BindingTarget::Source(src(&path, &a)));
+    assert_eq!(start.old, Some(src(&path, &a)));
+    for ext in ["spawn_nonce", "host_kind"] {
+        let _ = fs::remove_file(tc::session_temp_path(tmux, ext));
+    }
+}

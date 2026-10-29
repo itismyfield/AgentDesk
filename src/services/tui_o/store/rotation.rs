@@ -401,6 +401,35 @@ impl OStore {
             read => Ok(read.map(|checkpoint| checkpoint.seq)),
         }
     }
+
+    /// Whether the channel already reads the file at `path` with this `(dev, ino)`, read without
+    /// opening the channel; an unreadable cursor is an error, never an absent one.
+    pub fn peek_cursor_of_file(
+        &self,
+        channel: u64,
+        path: &std::path::Path,
+        (dev, ino): (u64, u64),
+    ) -> Result<bool, StoreError> {
+        let dir = self.channel_dir(channel).join(super::CURSOR_DIR);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?.path();
+            if entry.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let cursor = durable::read_json::<super::spool::Cursor>(&entry)?;
+            if cursor.is_some_and(|cursor| {
+                cursor.source.path == path && (cursor.source.dev, cursor.source.ino) == (dev, ino)
+            }) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 #[cfg(test)]

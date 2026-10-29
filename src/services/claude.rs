@@ -59,6 +59,8 @@ mod c1_teardown_tests;
 #[cfg(unix)]
 pub(crate) mod herdr_turn;
 pub(crate) mod host_gate;
+#[cfg(unix)]
+pub(crate) mod session_handoff;
 mod stream_result;
 use self::active_usage::{AssistantUsageState, observe_assistant_usage};
 #[cfg(unix)]

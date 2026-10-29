@@ -22,6 +22,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::agent_protocol::{
     NativeTerminalKind, RuntimeHandoff, RuntimeHandoffKind, StreamMessage,
 };
+use crate::services::claude::session_handoff::{self, EarlierExecution, LegacyTmux};
 use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
 use crate::services::claude_tui::host_input::InputRun;
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
@@ -114,6 +115,9 @@ pub(crate) struct HerdrTurn<'a> {
     pub row: Option<&'a HostedRecord>,
     pub prompt: &'a str,
     pub working_dir: &'a str,
+    /// The channel's provider session a launch resumes; `force_fresh` or none starts a new one.
+    pub session_id: Option<&'a str>,
+    pub force_fresh: bool,
     pub system_prompt: Option<&'a str>,
     pub model: Option<&'a str>,
     /// The hook receiver a launch reports to; only a launch needs it.
@@ -143,6 +147,10 @@ pub(crate) trait HerdrTurnPorts {
         record: &HostedExecution,
         target: &HerdrTarget,
     ) -> Result<(), String>;
+    /// The legacy tmux execution a resume ends before its launch.
+    fn earlier_tmux<'a>(&self, logical: &'a str) -> Box<dyn EarlierExecution + 'a> {
+        Box::new(LegacyTmux(logical))
+    }
 }
 
 /// The source a prompt goes to.
@@ -472,7 +480,28 @@ fn composer_settled(run: &InputRun) -> bool {
     )
 }
 
+/// The session a launch resumes: the turn's own one while its transcript exists and O already
+/// reads that file. A fresh or cleared turn, or a transcript certainly gone, starts a new session.
+fn resumed_session(turn: &HerdrTurn<'_>) -> Result<Option<String>, String> {
+    let Some(session) = turn.session_id.filter(|_| !turn.force_fresh) else {
+        return Ok(None);
+    };
+    let Some((path, file)) =
+        session_handoff::transcript_file(Path::new(turn.working_dir), session)?
+    else {
+        return Ok(None);
+    };
+    if !session_handoff::o_reads(turn.channel_id, &path, file)? {
+        return Err(format!(
+            "herdr turn: O reads no cursor on {}, so a resume would post it again",
+            path.display()
+        ));
+    }
+    Ok(Some(session.to_owned()))
+}
+
 /// A new execution: create, evidence, SessionStart, then attach; no prompt before the attach.
+/// A resume first ends the legacy tmux execution of the same session by its own `/exit`.
 fn launched_source(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
@@ -480,7 +509,11 @@ fn launched_source(
 ) -> Result<Attached, String> {
     let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
     let working_dir = Path::new(turn.working_dir);
-    let fresh = super::fresh_claude_tui_session_resolution(working_dir, None)?;
+    let resumed = resumed_session(turn)?;
+    let session_id = match &resumed {
+        Some(session) => session.clone(),
+        None => super::fresh_claude_tui_session_resolution(working_dir, None)?.session_id,
+    };
     let hook_endpoint = turn
         .hook_endpoint
         .clone()
@@ -491,9 +524,15 @@ fn launched_source(
         logical,
     )?;
     let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay);
+    if resumed.is_some() {
+        session_handoff::end_by_exit(
+            &mut *ports.earlier_tmux(logical),
+            session_handoff::EXIT_WAIT,
+        )?;
+    }
     let prepare = |prepared: &PreparedIncarnation| {
         let (system, model) = (turn.system_prompt, turn.model);
-        let (session, hooks) = (fresh.session_id.as_str(), hook_endpoint.clone());
+        let (session, hooks) = (session_id.as_str(), hook_endpoint.clone());
         super::tui_session_launch::prepare_claude_herdr_launch(
             prepared,
             working_dir,
@@ -506,25 +545,22 @@ fn launched_source(
     };
     // Subscribed before the create, so the launch's SessionStart cannot pass unseen.
     let mut hooks = ports.hook_events();
-    let launch = launch(turn, Some(fresh.session_id.clone()));
+    let launch = launch(turn, Some(session_id.clone()), resumed.is_some());
     let outcome = runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host));
     let nonce = launched(outcome)?;
-    session_started(
-        runtime,
-        &mut hooks,
-        &fresh.session_id,
-        turn.cancel.as_deref(),
-    )?;
-    attach(turn, runtime, ports, &nonce, &fresh.session_id)
+    let resume = resumed.is_some().then_some(nonce.as_str());
+    let cancel = turn.cancel.as_deref();
+    session_started(runtime, &mut hooks, (&session_id, resume), cancel)?;
+    attach(turn, runtime, ports, &nonce, &session_id)
 }
 
-fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>) -> HerdrLaunch {
+fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>, resume: bool) -> HerdrLaunch {
     HerdrLaunch {
         endpoint: Some(turn.endpoint.clone()),
         owner: turn.owner.clone(),
         channel_id: Some(turn.channel_id),
         expected_native_session_id: session_id,
-        resume: false,
+        resume,
         provider_root: None,
     }
 }
@@ -543,11 +579,12 @@ pub(crate) fn launched(
     }
 }
 
-/// Waits for the launched session's SessionStart: its provider and hooks are up.
+/// Waits for the launched session's SessionStart: its provider and hooks are up. A resume waits
+/// for its own execution's `source=resume` start, never for another start of the same session.
 fn session_started(
     runtime: &Handle,
     hooks: &mut broadcast::Receiver<HookEvent>,
-    session_id: &str,
+    (session_id, resume): (&str, Option<&str>),
     cancel: Option<&CancelToken>,
 ) -> Result<(), String> {
     let deadline = Instant::now() + SESSION_START_WAIT;
@@ -561,7 +598,10 @@ fn session_started(
             Ok(Ok(event))
                 if event.provider == "claude"
                     && event.kind == HookEventKind::SessionStart
-                    && event.session_id == session_id =>
+                    && event.session_id == session_id
+                    && resume.is_none_or(|nonce| {
+                        session_handoff::resumed_start(&event, session_id, nonce)
+                    }) =>
             {
                 return Ok(());
             }

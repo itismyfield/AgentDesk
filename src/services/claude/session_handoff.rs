@@ -1,0 +1,167 @@
+//! A Claude session moving between tmux and Herdr keeps its id: the earlier execution ends by its
+//! own `/exit` before the other host resumes; nothing here kills, and anything unobserved stops.
+
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use crate::services::claude_tui::host_input::InputRun;
+use crate::services::claude_tui::input::TuiInputAction;
+
+/// How long an `/exit` sent to an empty composer may take to end its provider.
+pub(crate) const EXIT_WAIT: Duration = Duration::from_secs(20);
+const EXIT_POLL: Duration = Duration::from_millis(250);
+
+/// Whether the earlier execution's provider still runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Liveness {
+    Running,
+    Ended,
+    Unknown(String),
+}
+
+/// What one `/exit` attempt did to the earlier execution's composer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExitSend {
+    Sent,
+    /// Nothing was typed: a draft, a dialog, a busy screen or a refused gate.
+    Untouched(String),
+    /// Part of it may have been typed.
+    Unclear(String),
+}
+
+/// The earlier execution, on the host the session leaves.
+pub(crate) trait EarlierExecution {
+    fn liveness(&mut self) -> Liveness;
+    /// Types `/exit` and Enter once, only into an empty ready composer.
+    fn send_exit(&mut self) -> ExitSend;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ended {
+    /// Nothing ran any more, so nothing was typed.
+    Already,
+    ByExit,
+}
+
+/// The `/exit` the composer receives: typed, then submitted.
+pub(crate) fn exit_plan() -> [TuiInputAction; 2] {
+    [
+        TuiInputAction::Literal("/exit".into()),
+        TuiInputAction::Enter,
+    ]
+}
+
+/// Ends `earlier` before its session runs elsewhere. A provider already gone is never typed to,
+/// so a retry after a lost reply sends nothing; one that outlives `wait` stays and stops the turn.
+pub(crate) fn end_by_exit(
+    earlier: &mut dyn EarlierExecution,
+    wait: Duration,
+) -> Result<Ended, String> {
+    match earlier.liveness() {
+        Liveness::Ended => return Ok(Ended::Already),
+        Liveness::Unknown(why) => return Err(format!("earlier claude unobserved: {why}")),
+        Liveness::Running => {}
+    }
+    match earlier.send_exit() {
+        ExitSend::Sent => {}
+        ExitSend::Untouched(why) => return Err(format!("earlier claude kept running: {why}")),
+        ExitSend::Unclear(why) => return Err(format!("earlier claude exit unclear: {why}")),
+    }
+    let deadline = Instant::now() + wait;
+    loop {
+        if earlier.liveness() == Liveness::Ended {
+            return Ok(Ended::ByExit);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("earlier claude did not exit within {wait:?}"));
+        }
+        std::thread::sleep(EXIT_POLL.min(wait));
+    }
+}
+
+/// How an input run on the earlier composer maps onto an exit attempt.
+pub(crate) fn exit_sent(run: InputRun) -> ExitSend {
+    match run {
+        InputRun::Applied => ExitSend::Sent,
+        InputRun::Refused(refusal) => ExitSend::Untouched(format!("{refusal:?}")),
+        InputRun::Cancelled { confirmed: 0 } => ExitSend::Untouched("cancelled".into()),
+        other => ExitSend::Unclear(format!("{other:?}")),
+    }
+}
+
+/// The legacy tmux session of a logical key; its pane ends with the provider it execs.
+pub(crate) struct LegacyTmux<'a>(pub(crate) &'a str);
+
+impl EarlierExecution for LegacyTmux<'_> {
+    fn liveness(&mut self) -> Liveness {
+        use crate::services::platform::tmux::{PaneLiveness, pane_liveness};
+        match pane_liveness(self.0) {
+            PaneLiveness::Live => Liveness::Running,
+            PaneLiveness::DeadOrAbsent => Liveness::Ended,
+            PaneLiveness::ProbeError => Liveness::Unknown("tmux probe failed".into()),
+        }
+    }
+
+    fn send_exit(&mut self) -> ExitSend {
+        use crate::services::claude_tui::host_input::{capture_draft_with, run_legacy};
+        let session = self.0;
+        let capture = || capture_draft_with("tmux", session, Duration::from_secs(5));
+        let plan = exit_plan();
+        let run = super::herdr_turn::composer::when_ready(capture, None, || {
+            run_legacy(session, &plan, None)
+        });
+        exit_sent(run)
+    }
+}
+
+/// The transcript a resume of `session_id` continues and its `(dev, ino)`; `None` only when the
+/// file is certainly absent, never for a read that failed.
+pub(crate) fn transcript_file(
+    working_dir: &Path,
+    session_id: &str,
+) -> Result<Option<(PathBuf, (u64, u64))>, String> {
+    let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        working_dir,
+        session_id,
+        None,
+    )?;
+    match std::fs::metadata(&path) {
+        Ok(meta) => Ok(Some((path, (meta.dev(), meta.ino())))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("resume transcript {}: {error}", path.display())),
+    }
+}
+
+/// Whether the channel's O writer already holds a cursor on this exact file, so the resumed
+/// transcript continues from it; a store that cannot be read answers nothing.
+pub(crate) fn o_reads(channel: u64, path: &Path, file: (u64, u64)) -> Result<bool, String> {
+    let root = crate::config::runtime_root().ok_or("no runtime root")?;
+    let Some(store) = crate::services::tui_o::store::OStore::existing(&root) else {
+        return Ok(false);
+    };
+    store
+        .peek_cursor_of_file(channel, path, file)
+        .map_err(|error| format!("O cursor of {}: {error:?}", path.display()))
+}
+
+/// The SessionStart of execution `nonce` resuming `session_id`, by its own launch context.
+pub(crate) fn resumed_start(
+    event: &crate::services::claude_tui::hook_server::HookEvent,
+    session_id: &str,
+    nonce: &str,
+) -> bool {
+    event.provider == "claude"
+        && event.kind == crate::services::claude_tui::hook_server::HookEventKind::SessionStart
+        && event.session_id == session_id
+        && event.payload["source"] == "resume"
+        && event.original_context.as_ref().is_some_and(|context| {
+            context.execution_nonce == nonce
+                && context.launch_mode == "resume"
+                && context.expected_native_session_id.as_deref() == Some(session_id)
+        })
+}
+
+#[cfg(test)]
+#[path = "session_handoff_tests.rs"]
+mod tests;

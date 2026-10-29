@@ -77,15 +77,29 @@ fn observation(capture: Option<&str>) -> ControlFlow<bool> {
 }
 
 /// The capture precedes the gated paste; it never clears a draft or confirms a dialog.
-pub(super) fn run(
+pub(crate) fn run(
     target: &HerdrTarget,
     plan: &[TuiInputAction],
     cancel: Option<&CancelToken>,
 ) -> InputRun {
+    when_ready(
+        || target.capture_ansi(-80),
+        cancel,
+        || run_herdr(target, plan, cancel),
+    )
+}
+
+/// Runs `send` once an ANSI `capture` shows an empty ready Claude composer; a person's draft, a
+/// dialog or a busy screen sends nothing, on any host.
+pub(crate) fn when_ready(
+    mut capture: impl FnMut() -> Option<String>,
+    cancel: Option<&CancelToken>,
+    send: impl FnOnce() -> InputRun,
+) -> InputRun {
     match wait_for(cancel, COMPOSER_READY_WAIT, || {
-        observation(target.capture_ansi(-80).as_deref())
+        observation(capture().as_deref())
     }) {
-        Ok(true) => run_herdr(target, plan, cancel),
+        Ok(true) => send(),
         Err(WaitStop::Cancelled) => InputRun::Cancelled { confirmed: 0 },
         Ok(false) | Err(WaitStop::TimedOut) => InputRun::Refused(InputRefusal::Unknown),
     }
