@@ -220,6 +220,8 @@ fn review_outcome_waits_for_its_exact_prerequisite_and_takes_late_pass_or_fail()
     );
 }
 
+type Change = (&'static str, fn(&mut VerificationRun));
+
 #[test]
 fn prerequisite_refuses_prior_cycle_same_sha_and_any_changed_identity() {
     let work = domain::binding(&domain::running());
@@ -241,7 +243,7 @@ fn prerequisite_refuses_prior_cycle_same_sha_and_any_changed_identity() {
         Err(PrerequisiteError::OriginMismatch("seal".into()))
     );
     let exact = ExecutionRef::of(&v, Some(&sealed)).unwrap();
-    let changed: [(&str, fn(&mut VerificationRun)); 6] = [
+    let changed: [Change; 6] = [
         ("execution_id", |v| v.origin.execution_id = "v-new".into()),
         ("cycle", |v| v.origin.repair_cycle = 1),
         ("epoch", |v| v.origin.registered_node_epoch = 3),

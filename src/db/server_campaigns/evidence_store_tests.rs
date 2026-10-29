@@ -113,6 +113,26 @@ async fn legacy_rows_are_kept_and_decisions_move_one_way_pg() {
         Err(EvidenceStoreError::Conflict)
     ));
     assert_eq!(rows(&h.pool, "tui:attempt:output").await, vec![legacy]);
+    let mut forged = envelope(OUTPUT);
+    forged.evidence_id = "tui:attempt:forged".into();
+    forged.payload_digest = envelope("output-h2").payload_digest;
+    assert!(matches!(
+        record_in(&h.pool, &StoredEvidence::recorded(forged)).await,
+        Err(EvidenceStoreError::Conflict)
+    ));
+    assert!(rows(&h.pool, "tui:attempt:forged").await.is_empty());
+    let mut request = envelope(OUTPUT);
+    request.evidence_id = "tui:attempt:request".into();
+    record_in(&h.pool, &StoredEvidence::recorded(request))
+        .await
+        .unwrap();
+    decide_in(&h.pool, "tui:attempt:request", EvidenceStatus::Recorded)
+        .await
+        .unwrap();
+    assert!(matches!(
+        decide_in(&h.pool, "tui:attempt:request", EvidenceStatus::Accepted).await,
+        Err(EvidenceStoreError::Transition)
+    ));
     let mut fresh = envelope(OUTPUT);
     fresh.evidence_id = "tui:attempt:fresh".into();
     let id = fresh.evidence_id.clone();
@@ -138,6 +158,6 @@ async fn legacy_rows_are_kept_and_decisions_move_one_way_pg() {
     else {
         unreachable!()
     };
-    assert_eq!((envelope, status), (fresh, Superseded));
+    assert_eq!((*envelope, status), (fresh, Superseded));
     h.close().await;
 }

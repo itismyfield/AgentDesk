@@ -76,7 +76,7 @@ pub enum EvidencePayload {
     Submitted(TuiPayload),
     Verification {
         execution_id: String,
-        collection: VerificationCollection,
+        collection: Box<VerificationCollection>,
     },
     External {
         requested: ObservationTarget,
@@ -151,7 +151,7 @@ impl EvidenceEnvelope {
 
     // Runner evidence keeps the V's original owner even after a Review attempt consumes it.
     pub fn from_runner(run: &VerificationRun, at: DateTime<Utc>) -> Result<Self, EvidenceError> {
-        let collection = run.collection.clone().ok_or(EvidenceError::NotCollected)?;
+        let collection = Box::new(run.collection.clone().ok_or(EvidenceError::NotCollected)?);
         let origin = &run.origin;
         let payload = EvidencePayload::Verification {
             execution_id: origin.execution_id.clone(),
@@ -261,7 +261,7 @@ pub fn admit(
             {
                 return reject(GateReason::OriginMismatch(execution_id.clone()));
             }
-            if v.collection.as_ref() != Some(collection) {
+            if v.collection.as_ref() != Some(collection.as_ref()) {
                 return reject(GateReason::ResultMismatch(execution_id.clone()));
             }
             let consumed = prerequisites

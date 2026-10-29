@@ -5,6 +5,7 @@ use crate::services::campaign_execution::{
     candidate_seal::CandidateSeal,
     evidence::{EvidenceDecision, EvidenceEnvelope, EvidenceStatus},
     model::AttemptBinding,
+    verification_run::digest_of,
 };
 
 // Rows in the existing evidence table; documents of any other shape are preserved, never adopted.
@@ -12,7 +13,7 @@ use crate::services::campaign_execution::{
 #[serde(tag = "record", rename_all = "snake_case")]
 pub enum StoredEvidence {
     Evidence {
-        envelope: EvidenceEnvelope,
+        envelope: Box<EvidenceEnvelope>,
         status: EvidenceStatus,
         decision: Option<EvidenceDecision>,
     },
@@ -38,7 +39,7 @@ type Result<T> = std::result::Result<T, EvidenceStoreError>;
 impl StoredEvidence {
     pub fn recorded(envelope: EvidenceEnvelope) -> Self {
         Self::Evidence {
-            envelope,
+            envelope: Box::new(envelope),
             status: EvidenceStatus::Recorded,
             decision: None,
         }
@@ -92,7 +93,16 @@ pub async fn record(
     record: &StoredEvidence,
 ) -> Result<StoredEvidence> {
     let (binding, attempt, id) = record.key();
-    if binding.is_some_and(|b| (b.campaign_id.as_str(), b.run_id.as_str()) != (campaign_id, run_id))
+    // A digest that does not cover its own payload could squat a later honest retry.
+    let honest = match record {
+        StoredEvidence::Evidence { envelope: e, .. } => {
+            digest_of(&e.payload).ok().as_ref() == Some(&e.payload_digest)
+        }
+        StoredEvidence::Seal { .. } => true,
+    };
+    if !honest
+        || binding
+            .is_some_and(|b| (b.campaign_id.as_str(), b.run_id.as_str()) != (campaign_id, run_id))
     {
         return Err(EvidenceStoreError::Conflict);
     }
@@ -145,7 +155,10 @@ pub async fn decide(
             decision: previous,
         });
     }
-    if !status.can_become(decision.status) {
+    // A Recorded decision is final too; only Accepted may later become Superseded.
+    if (previous.is_some() && status != EvidenceStatus::Accepted)
+        || !status.can_become(decision.status)
+    {
         return Err(EvidenceStoreError::Transition);
     }
     let next = StoredEvidence::Evidence {
