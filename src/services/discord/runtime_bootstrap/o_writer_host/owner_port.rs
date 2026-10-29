@@ -1,6 +1,48 @@
 //! REST and first-init facts derive from the pinned channel execution permit.
 use super::*;
 use crate::services::cluster::intake_router_hook::owner_record::output::Scope;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
+
+/// Bot identity each local REST client proved, keyed by provider and token fingerprint.
+type Prepared = HashMap<(String, String), (u64, Instant)>;
+static PREPARED: LazyLock<Mutex<Prepared>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const PREPARED_FOR: Duration = Duration::from_secs(60);
+
+fn key(provider: &str, http: &serenity::Http) -> (String, String) {
+    let token = blake3::hash(http.token().as_bytes()).to_hex().to_string();
+    (provider.to_owned(), token)
+}
+
+/// A REST client is ready only once it names its bot; a failure clears the earlier proof.
+async fn identity(provider: &str, http: &serenity::Http) -> Result<u64, String> {
+    let key = key(provider, http);
+    if let Some((bot, at)) = PREPARED.lock().unwrap_or_else(|e| e.into_inner()).get(&key)
+        && at.elapsed() < PREPARED_FOR
+    {
+        return Ok(*bot);
+    }
+    let result = match tokio::time::timeout(Duration::from_secs(3), http.get_current_user()).await {
+        Ok(Ok(user)) => Ok(user.id.get()),
+        Ok(Err(error)) => Err(format!("owner REST identity: {error}")),
+        Err(_) => Err("owner REST identity timed out".to_string()),
+    };
+    let mut prepared = PREPARED.lock().unwrap_or_else(|e| e.into_inner());
+    match &result {
+        Ok(bot) => prepared.insert(key, (*bot, Instant::now())),
+        Err(_) => prepared.remove(&key),
+    };
+    result
+}
+
+/// The routing capability publishes this provider-level result; channel ports reuse it.
+pub(in crate::services::discord::runtime_bootstrap) async fn prepare(shared: &SharedData) -> bool {
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
+        return false;
+    };
+    identity(shared.provider.as_str(), &http).await.is_ok()
+}
 
 pub(super) async fn open(
     host: &GatewayHost,
@@ -25,15 +67,12 @@ pub(super) async fn open(
         let http = runtime.http;
         #[cfg(test)]
         let http = host.rest.clone().unwrap_or(http);
-        let user = http
-            .get_current_user()
-            .await
-            .map_err(|error| format!("owner REST identity: {error}"))?;
+        let bot = identity(permit.identity.provider(), &http).await?;
         #[cfg(test)]
         if crate::services::tui_o::ownership::execution::tests::mutant("scope") {
-            return Ok(Arc::new(GatewayPort::new(http, user.id.get())));
+            return Ok(Arc::new(GatewayPort::new(http, bot)));
         }
-        let port = GatewayPort::new(http, user.id.get()).with_owner_scope(Scope {
+        let port = GatewayPort::new(http, bot).with_owner_scope(Scope {
             pool: permit.pool.clone(),
             provider: permit.identity.provider().into(),
         });

@@ -5,6 +5,7 @@ use super::*;
 use crate::services::tui_o::ownership::execution::OwnerPermit;
 use std::collections::BTreeMap;
 mod owner_port;
+pub(super) use owner_port::prepare as prepare_owner_rest;
 type ExecutionPermits = BTreeMap<u64, Result<Arc<OwnerPermit>, String>>;
 use std::future::Future;
 use std::time::Duration;

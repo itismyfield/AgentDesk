@@ -202,6 +202,9 @@ pub(crate) async fn reserve_on_tx(
 
 /// Discord honours an enforced nonce only briefly; an older Posting attempt is never reposted.
 const NONCE_RETRY_SECONDS: f64 = 120.0;
+/// A dead worker's routing claim and a failed POST both come back inside that window.
+pub(crate) const RECLAIM_SECONDS: i64 = 45;
+pub(crate) const RETRY_SECONDS: i64 = 15;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Step {

@@ -435,3 +435,117 @@ async fn routing_notice_gc_keeps_referenced_failed_rows_pg() {
     assert_eq!(left, vec![failed.outbox_id, cancelled.outbox_id]);
     f.finish().await;
 }
+
+async fn retry_delay(f: &Fixture, outbox: i64) -> f64 {
+    sqlx::query_scalar("SELECT EXTRACT(EPOCH FROM next_attempt_at-NOW())::FLOAT8 FROM message_outbox WHERE id=$1 AND status='pending'")
+        .bind(outbox).fetch_one(&f.pool).await.unwrap()
+}
+/// Moves both clocks back as if `seconds` had elapsed since the interrupted attempt.
+async fn elapse(f: &Fixture, outbox: i64, seconds: i32) {
+    sqlx::query("UPDATE message_outbox SET next_attempt_at=LEAST(next_attempt_at,NOW()),claimed_at=claimed_at-make_interval(secs=>$2::DOUBLE PRECISION) WHERE id=$1")
+        .bind(outbox).bind(seconds).execute(&f.pool).await.unwrap();
+    sqlx::query("UPDATE intake_session_owners SET routing_notice_started_at=routing_notice_started_at-make_interval(secs=>$2::DOUBLE PRECISION) WHERE routing_notice_outbox_id=$1")
+        .bind(outbox).bind(seconds).execute(&f.pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn routing_notice_failed_post_retries_inside_nonce_window_after_real_claim_pg() {
+    let _isolation = isolation();
+    let f = Fixture::new(DRAIN_CHANNEL).await;
+    let id = OwnerIdentity::new("opencode", &f.channel);
+    acquire(&f, &id, "mac-a").await;
+    let notice = switched(&f, &id, "mac-a", 0, "mac-b").await;
+    let unreachable = std::sync::Arc::new(crate::services::discord::health::HealthRegistry::new());
+    assert_eq!(drain(&f, &unreachable).await, 1);
+    assert_eq!(cursor(&f, notice.outbox_id).await.0, "posting");
+    let delay = retry_delay(&f, notice.outbox_id).await;
+    assert!(
+        delay <= 30.0,
+        "a routing notice retry must land inside its nonce window, waited {delay}s"
+    );
+    elapse(&f, notice.outbox_id, delay.ceil() as i32).await;
+    let discord = crate::server::outbox_worker::origin_fixture::Discord::new().await;
+    assert_eq!(drain(&f, &discord.registry().await).await, 1);
+    let posts = discord.posts();
+    assert_eq!(posts.len(), 1);
+    assert_eq!(
+        posts[0].1["nonce"].as_str(),
+        Some(notice.event.nonce.as_str())
+    );
+    assert_eq!(cursor(&f, notice.outbox_id).await.0, "sent");
+    f.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routing_notice_claim_interrupted_mid_post_resumes_inside_nonce_window_pg() {
+    let _isolation = isolation();
+    let f = Fixture::new(DRAIN_CHANNEL).await;
+    let id = OwnerIdentity::new("grok", &f.channel);
+    acquire(&f, &id, "mac-a").await;
+    let notice = switched(&f, &id, "mac-a", 0, "mac-b").await;
+    // Accepts the POST and never answers, so the worker dies holding a real processing claim.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let held = tokio::spawn(async move {
+        let mut sockets = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            sockets.push(socket);
+        }
+    });
+    let hanging = std::sync::Arc::new(
+        poise::serenity_prelude::HttpBuilder::new("hanging-notify-token")
+            .proxy(format!("http://{address}"))
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let registry = std::sync::Arc::new(crate::services::discord::health::HealthRegistry::new());
+    registry
+        .set_utility_bot_http_for_tests(
+            crate::services::discord::bot_role::UtilityBotRole::Notify,
+            hanging,
+        )
+        .await;
+    let worker = {
+        let pool = std::sync::Arc::new(f.pool.clone());
+        tokio::spawn(async move {
+            crate::server::outbox_worker::drain_message_outbox_once(&pool, &registry, "dies").await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while cursor(&f, notice.outbox_id).await.0 != "posting" {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    worker.abort();
+    held.abort();
+    let status: String = sqlx::query_scalar("SELECT status FROM message_outbox WHERE id=$1")
+        .bind(notice.outbox_id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        status, "processing",
+        "the interrupted worker keeps its real claim"
+    );
+    elapse(&f, notice.outbox_id, 60).await;
+    let discord = crate::server::outbox_worker::origin_fixture::Discord::new().await;
+    assert_eq!(
+        drain(&f, &discord.registry().await).await,
+        1,
+        "a routing claim must be reclaimable inside the nonce window"
+    );
+    let posts = discord.posts();
+    assert_eq!(posts.len(), 1);
+    assert_eq!(
+        posts[0].1["nonce"].as_str(),
+        Some(notice.event.nonce.as_str())
+    );
+    assert_eq!(
+        cursor(&f, notice.outbox_id).await,
+        ("sent".into(), Some("72280799".into()), true)
+    );
+    f.finish().await;
+}

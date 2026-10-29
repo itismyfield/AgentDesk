@@ -565,3 +565,58 @@ async fn owner_cleanup_legacy_port_open_before_management_keeps_scope_pg() {
 
 #[path = "owner_execution/refresh_tests.rs"]
 mod refresh_tests;
+
+/// A REST client whose bot-identity lookup either succeeds or fails.
+async fn identity_rest(ready: bool) -> (Arc<serenity::Http>, tokio::task::AbortHandle) {
+    let app = axum::Router::new().fallback(axum::routing::any(move |uri: axum::http::Uri| async move {
+        use axum::response::IntoResponse;
+        if ready && uri.path().ends_with("/users/@me") {
+            axum::Json(json!({"id":"7336","username":"owner","discriminator":"0001","avatar":null,"bot":true})).into_response()
+        } else {
+            axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = serenity::HttpBuilder::new("token-present")
+        .proxy(proxy)
+        .ratelimiter_disabled(true)
+        .build();
+    (Arc::new(http), server.abort_handle())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn routing_owner_rest_publishes_only_a_prepared_local_client_pg() {
+    use crate::services::cluster::intake_router_hook::owner_record::{
+        OwnerIdentity, fallback::Target, snapshot::tests::Fixture,
+    };
+    let f = Fixture::new("73369408").await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(f.pool.clone()));
+    shared
+        .http
+        .cached_bot_token
+        .set("token-present".into())
+        .unwrap();
+    let id = OwnerIdentity::new("codex", &f.channel);
+    let context = f.context();
+    for (ready, expected) in [(false, "mac-b"), (true, "mac-a")] {
+        let (http, server) = identity_rest(ready).await;
+        let _rest = crate::services::discord::shared_state::test_rest::install(http);
+        super::super::owner_cleanup::publish_routing_owner(&shared, &ProviderKind::Codex).await;
+        let published =
+            crate::services::cluster::intake_worker_capabilities::capabilities_with_runtime_state(
+                &json!({}),
+            );
+        sqlx::query("UPDATE worker_nodes SET capabilities=jsonb_set(capabilities,'{routing_owner}',$1) WHERE instance_id='mac-a'")
+            .bind(published["routing_owner"].clone()).execute(&f.pool).await.unwrap();
+        assert_eq!(
+            f.observe(&id, &context).await.target(),
+            Target::Selected(expected),
+            "rest must follow the local identity probe, not token presence (ready={ready})"
+        );
+        server.abort();
+    }
+    f.finish().await;
+}

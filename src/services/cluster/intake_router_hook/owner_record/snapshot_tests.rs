@@ -63,6 +63,35 @@ impl Fixture {
         .unwrap();
         tx.commit().await.unwrap();
     }
+    /// A stored bundle for one source message; routing must carry this exact reference.
+    pub(crate) async fn bundle_ref(
+        &self,
+        channel: &str,
+        message: &str,
+    ) -> crate::services::cluster::attachment_transfer::uploads::BundleRef {
+        use crate::services::cluster::attachment_transfer::{self as attachments, store};
+        let identity = attachments::AttachmentMessageIdentity {
+            provider: "claude".into(),
+            channel_id: channel.into(),
+            user_msg_id: message.into(),
+        };
+        let bytes = format!("bundle for {message}").into_bytes();
+        let bundle = attachments::validate_attachment_bundle_v1(
+            attachments::AttachmentBundleV1 {
+                version: attachments::ATTACHMENT_BUNDLE_V1,
+                identity: identity.clone(),
+                source_attachment_count: 1,
+                entries: vec![attachments::AttachmentEntryV1 {
+                    filename: "routed.txt".into(),
+                    sha256: attachments::attachment_sha256_hex(&bytes),
+                    bytes,
+                }],
+            },
+            &identity,
+        )
+        .unwrap();
+        store::put(&self.pool, &bundle).await.unwrap()
+    }
     pub(crate) async fn finish(self) {
         self.pool.close().await;
         self.db.drop().await;

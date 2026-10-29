@@ -16,10 +16,7 @@ pub(super) fn spawn(shared: &Arc<SharedData>, provider: &ProviderKind) {
         async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
-                crate::services::cluster::intake_worker_capabilities::publish_routing_owner(
-                    provider.as_str(),
-                    shared.http.cached_bot_token.get().is_some(),
-                );
+                publish_routing_owner(&shared, &provider).await;
                 if let Err(error) = cleanup::advance_pending(&pool, provider.as_str()).await {
                     tracing::warn!(%error,"stored owner transition remains pending");
                 }
@@ -81,6 +78,22 @@ pub(super) fn spawn(shared: &Arc<SharedData>, provider: &ProviderKind) {
                 }
             }
         },
+    );
+}
+
+/// This runtime vouches only for itself: control is this loop, REST is its own prepared client.
+pub(super) async fn publish_routing_owner(shared: &SharedData, provider: &ProviderKind) {
+    #[cfg(test)]
+    let rest = if cleanup::tests::mutant("rest-token") {
+        shared.http.cached_bot_token.get().is_some()
+    } else {
+        super::o_writer_host::prepare_owner_rest(shared).await
+    };
+    #[cfg(not(test))]
+    let rest = super::o_writer_host::prepare_owner_rest(shared).await;
+    crate::services::cluster::intake_worker_capabilities::publish_routing_owner(
+        provider.as_str(),
+        rest,
     );
 }
 

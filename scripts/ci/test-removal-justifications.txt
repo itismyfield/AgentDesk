@@ -3,3 +3,4 @@
 # A row must match a loss the base diff reports for this change, and a loss with no row fails.
 # Rows for tests absent from base and head only warn after landing; clear them in any later PR.
 agentdesk server::task_dispatch_claims::config_read::config_read_tests::claim_config_read_yields_runtime_without_changing_snapshot | removed | Claims now read the boot/reload-validated config snapshot instead of parsing YAML from disk, so there is no blocking disk read left to keep off the runtime; the rewritten config_read_tests cover the snapshot path
+agentdesk services::discord::turn_bridge::headless_delivery::production_seam_tests::outbox_enqueue_error_reaches_cancel_check_then_direct_fallback | removed | An unknown original admission no longer authorizes the direct fallback; the same fixture now lives in source_lookup_error_preserves_for_retry_and_cancellation_precedes_lookup, which pins the preserved retry and the cancellation-first order

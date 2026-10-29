@@ -257,6 +257,23 @@ pub(crate) async fn advance_pending(pool: &PgPool, provider: &str) -> Result<(),
         )
         .await?;
     }
+    #[cfg(test)]
+    if tests::mutant("plan-head-history") {
+        return Ok(());
+    }
+    // A first switch has no cleanup history; its saved plan still owns the held head.
+    let planned:Vec<(i64,String,Option<String>,Option<i64>)>=sqlx::query_as("SELECT d.id,d.target_instance_id,o.owner_instance_id,o.generation FROM intake_outbox d LEFT JOIN LATERAL (SELECT owner_instance_id,generation,status FROM intake_session_owners x WHERE x.provider=d.provider AND x.raw_channel_id=d.channel_id ORDER BY generation DESC LIMIT 1) o ON TRUE WHERE d.provider=$1 AND d.routing_state='held' AND d.routing_plan->>'target'=d.target_instance_id AND (o.status IS DISTINCT FROM 'active' OR o.owner_instance_id=d.target_instance_id) AND NOT EXISTS(SELECT 1 FROM intake_outbox h WHERE h.provider=d.provider AND h.channel_id=d.channel_id AND h.routing_state='held' AND h.id<d.id) AND NOT EXISTS(SELECT 1 FROM intake_session_owners history WHERE history.provider=d.provider AND history.raw_channel_id=d.channel_id AND history.routing_cleanup IS NOT NULL) ORDER BY d.id LIMIT 32")
+        .bind(provider).fetch_all(pool).await?;
+    for (id, target, owner, generation) in planned {
+        custody::promote(
+            pool,
+            id,
+            &target,
+            owner.as_deref().zip(generation),
+            custody::SwitchReadiness::Wait,
+        )
+        .await?;
+    }
     Ok(())
 }
 

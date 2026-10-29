@@ -183,7 +183,28 @@ pub(super) fn failure_action(
             retry_count: row.retry_count,
         }
     } else {
-        super::message_outbox_failure_action(row.retry_count)
+        let action = super::message_outbox_failure_action(row.retry_count);
+        #[cfg(test)]
+        let action_stays =
+            crate::services::cluster::intake_router_hook::owner_record::cleanup::tests::mutant(
+                "notice-retry",
+            );
+        #[cfg(not(test))]
+        let action_stays = false;
+        match action {
+            // A failed routing POST must resume while its stored nonce still deduplicates.
+            super::MessageOutboxFailureAction::Retry { retry_count, .. }
+                if !action_stays
+                    && row.source
+                        == crate::services::cluster::intake_router_hook::owner_record::event::SOURCE =>
+            {
+                super::MessageOutboxFailureAction::Retry {
+                    retry_count,
+                    backoff_secs: crate::services::cluster::intake_router_hook::owner_record::event::RETRY_SECONDS,
+                }
+            }
+            action => action,
+        }
     }
 }
 

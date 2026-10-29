@@ -46,6 +46,37 @@ fn override_home(value: &Value) -> Option<String> {
         .flatten()
 }
 
+/// Raw override, parent override and agent defaults: the evidence a stored plan keeps.
+async fn home_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &OwnerIdentity,
+    policy_channel: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+         'raw',(SELECT to_jsonb(h)-'updated_at' FROM channel_home_preferences h WHERE provider=$1 AND raw_channel_id=$2),
+         'parent',(SELECT to_jsonb(h)-'updated_at' FROM channel_home_preferences h WHERE provider=$1 AND raw_channel_id=$3 AND $2<>$3),
+         'agents',(SELECT COALESCE(jsonb_agg(jsonb_build_object('id',id,'home',default_execution_node_id,'requirements',execution_requirements) ORDER BY id),'[]'::jsonb) FROM agents WHERE discord_channel_id=$3 OR discord_channel_alt=$3 OR discord_channel_cc=$3 OR discord_channel_cdx=$3))",
+    )
+    .bind(id.provider()).bind(id.raw_channel_id()).bind(policy_channel)
+    .fetch_one(&mut **tx).await
+}
+
+/// Promotion rechecks only the stored home evidence, so stored custody still drains while off.
+pub(crate) async fn proof_holds_on_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &OwnerIdentity,
+    proof: &Value,
+) -> Result<bool, sqlx::Error> {
+    let Some(policy_channel) = proof["policy_channel"].as_str() else {
+        return Ok(false);
+    };
+    let home = home_rows(tx, id, policy_channel).await?;
+    Ok(["raw", "parent", "agents"]
+        .iter()
+        .all(|part| home[*part] == proof[*part]))
+}
+
 /// Each node publishes its own control/REST providers; the gateway never vouches for another Mac.
 fn published(node: &Value, kind: &str, provider: &str) -> Availability {
     match node["capabilities"]["routing_owner"][kind].as_array() {
@@ -62,16 +93,15 @@ pub(crate) async fn read_on_tx(
     context: &Context,
 ) -> Result<Shared, sqlx::Error> {
     custody::lock(tx, id).await?;
-    let (now, data): (i64, Value) = sqlx::query_as(
-        "SELECT (EXTRACT(EPOCH FROM NOW())*1000)::BIGINT, jsonb_build_object(
-         'raw',(SELECT to_jsonb(h)-'updated_at' FROM channel_home_preferences h WHERE provider=$1 AND raw_channel_id=$2),
-         'parent',(SELECT to_jsonb(h)-'updated_at' FROM channel_home_preferences h WHERE provider=$1 AND raw_channel_id=$3 AND $2<>$3),
-         'agents',(SELECT COALESCE(jsonb_agg(jsonb_build_object('id',id,'home',default_execution_node_id,'requirements',execution_requirements) ORDER BY id),'[]'::jsonb) FROM agents WHERE discord_channel_id=$3 OR discord_channel_alt=$3 OR discord_channel_cc=$3 OR discord_channel_cdx=$3),
-         'nodes',(SELECT COALESCE(jsonb_agg(jsonb_build_object('instance_id',instance_id,'status',CASE WHEN last_heartbeat_at IS NULL THEN NULL WHEN last_heartbeat_at<NOW()-make_interval(secs=>$4::DOUBLE PRECISION) THEN 'offline' ELSE status END,'capabilities',capabilities)),'[]'::jsonb) FROM worker_nodes WHERE instance_id=ANY($5)))",
+    let home = home_rows(tx, id, &context.policy_channel).await?;
+    let (now, nodes): (i64, Value) = sqlx::query_as(
+        "SELECT (EXTRACT(EPOCH FROM NOW())*1000)::BIGINT,
+         (SELECT COALESCE(jsonb_agg(jsonb_build_object('instance_id',instance_id,'status',CASE WHEN last_heartbeat_at IS NULL THEN NULL WHEN last_heartbeat_at<NOW()-make_interval(secs=>$1::DOUBLE PRECISION) THEN 'offline' ELSE status END,'capabilities',capabilities)),'[]'::jsonb) FROM worker_nodes WHERE instance_id=ANY($2))",
     )
-    .bind(id.provider()).bind(id.raw_channel_id()).bind(&context.policy_channel)
     .bind(context.lease_seconds.max(1) as f64).bind(context.pair.to_vec())
     .fetch_one(&mut **tx).await?;
+    let mut data = home;
+    data["nodes"] = nodes;
     let agents = data["agents"].as_array().cloned().unwrap_or_default();
     let defaults: std::collections::BTreeSet<Option<String>> = agents
         .iter()

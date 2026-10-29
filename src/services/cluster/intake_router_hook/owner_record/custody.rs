@@ -261,7 +261,14 @@ pub(crate) async fn promote(
         return Ok(false);
     }
     if let Some(plan) = super::plan::read_on_tx(&mut tx, &id, delivery).await? {
-        if plan.target != target {
+        #[cfg(test)]
+        let unchecked = super::cleanup::tests::mutant("plan-proof");
+        #[cfg(not(test))]
+        let unchecked = false;
+        if plan.target != target
+            || (!unchecked
+                && !super::snapshot::proof_holds_on_tx(&mut tx, &id, &plan.home_proof).await?)
+        {
             return Ok(false);
         }
         // An earlier event's home tells a /node change apart from a home that came back.
