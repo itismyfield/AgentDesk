@@ -67,6 +67,12 @@ pub struct InputFacts {
     /// A resumed reader's carried state; only the carried turn's own closer may end it.
     carried: TurnState,
     awaiting_boundary: bool,
+    /// Whether the last close was an interrupt, kept only when this reader read an opener first, so
+    /// every receipt of that turn lies in what it read.
+    last_close_aborted: Option<bool>,
+    opened: bool,
+    /// A queued input's receipt read outside a running turn, not yet followed by an opener.
+    pending_receipt: bool,
 }
 
 impl InputFacts {
@@ -123,6 +129,9 @@ impl InputFacts {
             resume: None,
             carried: TurnState::Unknown,
             awaiting_boundary: false,
+            last_close_aborted: None,
+            opened: false,
+            pending_receipt: false,
         })
     }
 
@@ -192,6 +201,18 @@ impl InputFacts {
     /// A resumed reader that has not yet seen the carried turn's closer or a new opener.
     pub fn awaiting_boundary(&self) -> bool {
         self.awaiting_boundary
+    }
+
+    /// Whether the last close read was an interrupt; `None` before a close whose turn this reader
+    /// read from an opener.
+    pub fn last_close_aborted(&self) -> Option<bool> {
+        self.last_close_aborted
+    }
+
+    /// A queued input was received (`enqueue` / `queued_command`) and no turn has opened since,
+    /// so a native run it starts is still to come.
+    pub fn pending_receipt(&self) -> bool {
+        self.pending_receipt
     }
 
     pub fn binding(&self) -> &SourceBinding {
@@ -333,6 +354,11 @@ impl InputFacts {
                     self.mark(next, range, closed, &value);
                 }
             }
+            if let Some(attachment) = queued_input_receipt(self.binding.provider, &value) {
+                // An attachment read inside a running turn is that turn consuming the input.
+                let open = matches!(self.state, TurnState::Open { .. });
+                self.pending_receipt = !(attachment && open);
+            }
             if record.line.windows(9).any(|bytes| bytes == b"[adk:tok=") {
                 self.events.push(Ordered::Input {
                     range,
@@ -357,20 +383,42 @@ impl InputFacts {
 
     fn mark(&mut self, next: TurnState, range: (u64, u64), closed: Option<String>, value: &Value) {
         match &next {
-            TurnState::Open { native_turn_id } => self.events.push(Ordered::Opened {
-                range,
-                native_turn_id: native_turn_id.clone(),
-            }),
-            _ if self.state != TurnState::Idle => self.events.push(Ordered::Closed {
-                range,
-                native_turn_id: closed,
-                aborted: aborted(self.binding.provider, value),
-            }),
+            TurnState::Open { native_turn_id } => {
+                (self.pending_receipt, self.opened) = (false, true);
+                self.events.push(Ordered::Opened {
+                    range,
+                    native_turn_id: native_turn_id.clone(),
+                })
+            }
+            _ if self.state != TurnState::Idle => {
+                let aborted = aborted(self.binding.provider, value);
+                let opened = self.opened
+                    || crate::services::tui_o::turn_mode::carried_close_mutant("opener");
+                self.last_close_aborted = opened.then_some(aborted);
+                self.events.push(Ordered::Closed {
+                    range,
+                    native_turn_id: closed,
+                    aborted,
+                })
+            }
             _ => {}
         }
         self.state = next;
         self.awaiting_boundary = false;
         self.carried = TurnState::Unknown;
+    }
+}
+
+/// Claude's receipt of a queued input, which opens no turn: `Some(true)` for a `queued_command`
+/// attachment, `Some(false)` for an `enqueue` queue operation.
+fn queued_input_receipt(provider: ShadowProvider, value: &Value) -> Option<bool> {
+    if provider != ShadowProvider::Claude {
+        return None;
+    }
+    match value["type"].as_str()? {
+        "queue-operation" => (value["operation"] == "enqueue").then_some(false),
+        "attachment" => (value["attachment"]["type"] == "queued_command").then_some(true),
+        _ => None,
     }
 }
 
@@ -384,6 +432,8 @@ fn aborted(provider: ShadowProvider, value: &Value) -> bool {
     }
 }
 
+#[cfg(test)]
+mod receipt_tests;
 #[cfg(test)]
 mod resume_tests;
 #[cfg(test)]

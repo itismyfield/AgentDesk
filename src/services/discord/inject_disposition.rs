@@ -133,6 +133,28 @@ pub(crate) fn note_terminal(
     table.prune(now);
 }
 
+/// When each channel's latest injection reached its pane or may have, whatever its message.
+type Deliveries = HashMap<(String, u64), Instant>;
+static DELIVERIES: OnceLock<Mutex<Deliveries>> = OnceLock::new();
+
+/// Records that an injection into `channel` was delivered (observed or unconfirmed) `now`.
+pub(crate) fn note_channel_delivery(provider: &ProviderKind, channel: ChannelId, now: Instant) {
+    let deliveries = DELIVERIES.get_or_init(Default::default);
+    let mut deliveries = deliveries.lock().unwrap_or_else(|e| e.into_inner());
+    deliveries.insert((provider.as_str().to_string(), channel.get()), now);
+}
+
+/// When `channel`'s latest delivered injection settled in this process.
+pub(crate) fn last_channel_delivery(
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Option<Instant> {
+    let deliveries = DELIVERIES.get()?.lock().unwrap_or_else(|e| e.into_inner());
+    deliveries
+        .get(&(provider.as_str().to_string(), channel.get()))
+        .copied()
+}
+
 /// `message`'s live terminal. With no provider (an actor that has not seen its persistence yet)
 /// any provider's terminal counts: Discord ids are unique, so this only blocks more.
 pub(crate) fn terminal(

@@ -53,8 +53,9 @@ where
 /// sources it has not retired yet; `None` while its store cannot be read, or for other channels.
 pub type Unsettled = watch::Sender<Option<usize>>;
 
-/// What a Herdr-configured channel's actor still owes Discord, as its last poll read it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What a Herdr-configured or turn-mode channel's actor still owes Discord, as its last poll
+/// read it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Undelivered {
     /// Derived items and pending local retries not delivered yet.
     pub owed: usize,
@@ -68,6 +69,12 @@ pub struct Undelivered {
     pub binding_pending: usize,
     /// The last read that had asked when this poll began; a read takes only a poll begun after it.
     pub asked: u64,
+    /// Verified work not delivered yet, counted apart from `owed` as the stall position counts it.
+    pub verified_work: usize,
+    /// The channel's POSTs started and not ended.
+    pub posting: usize,
+    /// Each unretired source's path and how far its bytes are captured.
+    pub captured: Vec<(std::path::PathBuf, u64)>,
 }
 
 #[derive(Debug, Default)]
@@ -400,9 +407,14 @@ where
             break;
         }
         // Only a Herdr-configured channel's clear reads it, so other channels skip the store read.
-        if crate::config::session_hosts::herdr_endpoint(actor.writer.channel()).is_some() {
+        let channel = actor.writer.channel();
+        let herdr = crate::config::session_hosts::herdr_endpoint(channel).is_some();
+        if herdr {
             unsettled.send_replace(actor.unsettled());
-            // Read only while a drain waits on it, so a channel nobody drains adds no reads.
+        }
+        // A turn-mode carried turn closes on this read too. Read only while a reader waits on it,
+        // so a channel nobody asks about adds no reads.
+        if herdr || crate::services::tui_o::turn_mode::transcript_turns(channel) {
             let asked = owing.demand.asked();
             if owing.demand.wanted() {
                 owing.published.send_replace(actor.undelivered(asked));
@@ -747,8 +759,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         super::progress::position(self.owed.len() + verified, retry, ledger, unsealed)
     }
 
-    /// Pieces, an open `Prepared`, unsealed units, sources read short of their end and binds not
-    /// applied, stamped `asked`; `None` when the store, checkpoint or a source length is unreadable.
+    /// Pieces, an open `Prepared`, unsealed units, sources read short of their end, binds not
+    /// applied, verified work, POSTs in flight and each source's capture, stamped `asked`; `None` when the store, checkpoint or a source length is unreadable.
     fn undelivered(&mut self, asked: u64) -> Option<Undelivered> {
         #[cfg(test)]
         UNDELIVERED_READS.with(|reads| reads.set(reads.get() + 1));
@@ -764,9 +776,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let rotation = store.rotation().ok()?;
         let checkpoint = store.binding_checkpoint().ok()?;
         let mut uncaptured = 0;
+        let mut captured = Vec::new();
         for cursor in store.cursors().filter(|cursor| !cursor.retired) {
             let len = std::fs::metadata(&cursor.source.path).ok()?.len();
             uncaptured += usize::from(cursor.captured_through < len);
+            let through = match crate::services::tui_o::turn_mode::carried_close_mutant("producer")
+            {
+                true => len,
+                false => cursor.captured_through,
+            };
+            captured.push((cursor.source.path.clone(), through));
         }
         let unapplied = latest.saturating_sub(checkpoint.unwrap_or(0));
         let unapplied = usize::try_from(unapplied).unwrap_or(usize::MAX);
@@ -779,6 +798,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             uncaptured,
             binding_pending: unapplied.saturating_add(waiting.count()),
             asked,
+            verified_work: self.verified.as_ref().map_or(0, |log| log.work.len()),
+            // A channel no writer counted yet has started no POST in this process.
+            posting: super::deliver::posts_in_flight(channel).unwrap_or(0),
+            captured,
         })
     }
 

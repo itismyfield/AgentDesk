@@ -314,7 +314,7 @@ async fn d4d_receipted_approval_is_never_owed_pg() {
     let provider = ShadowProvider::Claude;
     let task = spawn_projecting(&config, None, writer, provider, bindings, watches).unwrap();
     until(|| projection.borrow().is_some()).await;
-    let owed = projection.borrow().map(|pending| pending.owed);
+    let owed = projection.borrow().as_ref().map(|pending| pending.owed);
     harness.lease.busy.store(false, Ordering::SeqCst);
     until(|| !harness.port.posts().is_empty()).await;
     stop.send(true).unwrap();

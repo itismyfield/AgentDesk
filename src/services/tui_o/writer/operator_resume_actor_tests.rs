@@ -189,7 +189,7 @@ async fn operator_resume_lease_wait_preserves_readiness_and_drain_owing() {
         *readiness.borrow(),
         "source recovery still makes the actor ready while approval waits"
     );
-    let pending = projection.borrow().unwrap();
+    let pending = projection.borrow().clone().unwrap();
     assert_eq!((pending.owed, pending.prepared), (1, 0));
     assert!(
         harness
@@ -203,7 +203,7 @@ async fn operator_resume_lease_wait_preserves_readiness_and_drain_owing() {
     harness.lease.busy.store(false, Ordering::SeqCst);
     polls(2).await;
     assert_eq!(harness.port.posts(), ["ledger-only payload"]);
-    assert_eq!(projection.borrow().unwrap().owed, 0);
+    assert_eq!(projection.borrow().clone().unwrap().owed, 0);
     halt(stop, task).await;
 }
 
