@@ -106,16 +106,6 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
     setDefinition({ nodes: definition.nodes.map((node, at) => at === index ? { ...node, ...changes } : node) });
   const setAcceptance = (index: number, acIndex: number, changes: Partial<Acceptance>) =>
     setNode(index, { acceptance: definition.nodes[index].acceptance.map((ac, at) => at === acIndex ? { ...ac, ...changes } : ac) });
-  // Dependents follow a renamed task only while neither name is another task's; otherwise they stay put and
-  // show as naming no task, rather than silently pointing at the other one.
-  const renameNode = (index: number, id: string) => {
-    const old = definition.nodes[index].id;
-    const shared = definition.nodes.some((node, at) => at !== index && (node.id === old || node.id === id));
-    setDefinition({
-      nodes: definition.nodes.map((node, at) => at === index ? { ...node, id }
-        : shared ? node : { ...node, dependencies: node.dependencies.map((dependency) => dependency === old ? id : dependency) }),
-    });
-  };
   const removeNode = (index: number) => {
     const removed = definition.nodes[index].id;
     setDefinition({
@@ -190,12 +180,13 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
     <label>{tr("목표", "Goal")}<textarea aria-label={tr("목표", "Goal")} rows={2} value={definition.goal} onChange={(event) => setDefinition({ goal: event.target.value })} /></label>
     {definition.nodes.map((node, index) => {
       const existing = draft.baseDefinition?.nodes.some((candidate) => candidate.id === node.id) ?? false;
-      // A dependency naming no task (e.g. from a copied definition) stays visible so it can be removed.
+      // A dependency naming no task (left by a rename, or copied) stays visible to re-point or remove;
+      // renames never rewrite dependencies, so a link cannot move to another task unseen.
       const missing = node.dependencies.filter((id) => !definition.nodes.some((other) => other.id === id));
       return <fieldset key={index} className="campaign-server-task">
         <legend>{tr(`작업 ${index + 1}`, `Task ${index + 1}`)}</legend>
         <div className="campaign-edit-grid">
-          <label>{tr("작업 ID", "Task ID")}<input aria-label={tr("작업 ID", "Task ID")} readOnly={existing} value={node.id} onChange={(event) => renameNode(index, event.target.value)} /></label>
+          <label>{tr("작업 ID", "Task ID")}<input aria-label={tr("작업 ID", "Task ID")} readOnly={existing} value={node.id} onChange={(event) => setNode(index, { id: event.target.value })} /></label>
           <label>{tr("작업 제목", "Task title")}<input aria-label={tr("작업 제목", "Task title")} value={node.title} onChange={(event) => setNode(index, { title: event.target.value })} /></label>
           <label>{tr("이슈 링크", "Issue link")}<input aria-label={tr("이슈 링크", "Issue link")} inputMode="url" value={node.issue_url} onChange={(event) => setNode(index, { issue_url: event.target.value })} /></label>
           <label>{tr("그룹", "Group")}<input aria-label={tr("그룹", "Group")} value={node.group ?? ""} placeholder={tr("미분류", "Ungrouped")} onChange={(event) => setNode(index, { group: event.target.value || null })} /></label>

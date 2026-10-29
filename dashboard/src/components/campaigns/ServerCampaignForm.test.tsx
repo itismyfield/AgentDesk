@@ -267,7 +267,7 @@ it("applies a save's answer only to the draft it was sent from", async () => {
   expect(container.textContent).not.toContain("No answer arrived.");
 });
 
-it("keeps dependencies attached when a task is renamed and shows any that name no task", async () => {
+it("shows a dependency a rename left behind so the user can point it at the renamed task", async () => {
   create.mockResolvedValue(result);
   await mount(createDraft(null, () => "k"));
   await type(field("Campaign ID"), "release-4");
@@ -275,7 +275,12 @@ it("keeps dependencies attached when a task is renamed and shows any that name n
   await press("Add task");
   await check("task-2 depends on task-1");
   await type(field("Task ID"), "build");
-  expect(container.querySelector<HTMLInputElement>('input[aria-label="task-2 depends on build"]')?.checked).toBe(true);
+  const box = (label: string) => container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
+  expect(box("task-2 depends on task-1")?.checked).toBe(true);
+  expect(container.textContent).toContain("task-1 (no such task)");
+  expect(box("task-2 depends on build")?.checked).toBe(false);
+  await check("task-2 depends on task-1");
+  await check("task-2 depends on build");
   await press("Create");
   expect(create.mock.calls[0][1].nodes.map((node) => [node.id, node.dependencies])).toEqual([["build", []], ["task-2", ["build"]]]);
 });
@@ -290,14 +295,15 @@ it("lists a dependency on a task that no longer exists so it can be removed", as
   expect(container.querySelector(`input[aria-label="${copied.nodes[1].id} depends on gone"]`)).toBeNull();
 });
 
-it("never moves a dependency onto another task when a rename passes through that task's ID", async () => {
+it("never moves a dependency onto another task while task IDs are retyped", async () => {
   await mount(createDraft(null, () => "k"));
   for (let added = 0; added < 3; added++) await press("Add task");
   await check("task-3 depends on task-1");
-  // Typing "task-20" over "task-1" passes through "task-2", the other task's ID.
+  // Typing "task-20" over "task-1" passes through "task-2", the other task's ID;
+  // then the other task is backspaced through the same prefixes to "task-5".
   for (const step of ["task-", "task-2", "task-20"]) await type(field("Task ID"), step);
+  for (const step of ["task-", "task-5"]) await type(field("Task ID", 1), step);
   const box = (label: string) => container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
-  expect(box("task-3 depends on task-2")?.checked).toBe(false);
-  expect(box("task-3 depends on task-20")?.checked).toBe(false);
-  expect(box("task-3 depends on task-")?.checked).toBe(true);
+  for (const other of ["task-2", "task-20", "task-5", "task-"]) expect(box(`task-3 depends on ${other}`)?.checked ?? false, other).toBe(false);
+  expect(box("task-3 depends on task-1")?.checked).toBe(true);
 });
