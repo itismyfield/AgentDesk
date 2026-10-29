@@ -1,4 +1,5 @@
 import type { CampaignNode, CampaignNodeLive, CampaignNodeStatus } from "../../api/campaigns";
+import type { RawEdgeKey } from "./campaignGraphRouting";
 
 export const NODE_STATUSES: CampaignNodeStatus[] = ["pending", "running", "blocked", "completed", "failed", "skipped"];
 
@@ -35,7 +36,8 @@ export function groupCampaignNodes(nodes: CampaignNode[]) {
     .sort((a, b) => a.key === "" ? 1 : b.key === "" ? -1 : a.key.localeCompare(b.key));
 }
 
-/** Limit each side independently so high fan-in never hides every successor. */
+/** Limit each side independently so high fan-in never hides every successor.
+ * Edges past the limit are hidden, not deleted; a dependency on a missing task is no edge at all. */
 export function dependencyNeighborhood(nodes: CampaignNode[], selectedId: string, perSide = 8) {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const selected = byId.get(selectedId);
@@ -45,11 +47,16 @@ export function dependencyNeighborhood(nodes: CampaignNode[], selectedId: string
   const visibleDownstream = downstream.slice(0, perSide);
   const visible = selected ? [...visibleUpstream, selected, ...visibleDownstream] : [];
   const visibleIds = new Set(visible.map((node) => node.id));
+  const edgesOf = (before: CampaignNode[], after: CampaignNode[]): RawEdgeKey[] => [
+    ...before.map((node): RawEdgeKey => [node.id, selectedId]), ...after.map((node): RawEdgeKey => [selectedId, node.id]),
+  ];
   return {
     selected, upstream, downstream, visibleUpstream, visibleDownstream, visible,
+    edges: edgesOf(visibleUpstream, visibleDownstream),
+    hiddenEdges: edgesOf(upstream.slice(perSide), downstream.slice(perSide)),
     omittedUpstream: upstream.length - visibleUpstream.length,
     omittedDownstream: downstream.length - visibleDownstream.length,
-    externalDependencies: new Map(visible.map((node) => [node.id, node.dependencies.filter((id) => !visibleIds.has(id))])),
+    externalDependencies: new Map(visible.map((node) => [node.id, node.dependencies.filter((id) => byId.has(id) && !visibleIds.has(id))])),
   };
 }
 

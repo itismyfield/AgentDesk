@@ -242,11 +242,7 @@ fn labels_metadata_json(issue: &GhIssue, inferred_agent_id: Option<&str>) -> Opt
         }
     }
 
-    if labels.is_empty() {
-        None
-    } else {
-        Some(serde_json::json!({ "labels": labels.join(",") }).to_string())
-    }
+    Some(serde_json::json!({ "labels": labels.join(",") }).to_string())
 }
 
 async fn existing_issue_card_assignment_pg(
@@ -457,7 +453,7 @@ async fn update_card_metadata_with_inferred_agent_label_pg(
     let metadata = labels_metadata_json(issue, Some(agent_id));
     sqlx::query(
         "UPDATE kanban_cards
-         SET metadata = CAST($2 AS jsonb),
+         SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST($2 AS jsonb),
              updated_at = NOW()
          WHERE id = $1",
     )
@@ -680,6 +676,9 @@ fn infer_priority(labels: &[super::sync::GhLabel]) -> &'static str {
     }
     "medium"
 }
+
+#[cfg(test)]
+mod metadata_pg_tests;
 
 #[cfg(test)]
 mod warning_tests;

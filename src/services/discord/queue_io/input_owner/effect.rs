@@ -177,10 +177,15 @@ pub(crate) fn idle_claude(session: String) -> Leaf {
     })
 }
 
-/// The first prompt a created execution's driver handed over, mapped as the cold submit ends.
-pub(crate) fn created(submit: owner_input::CreatedSubmit) -> Leaf {
+/// The first prompt a driver handed over, mapped as the cold submit ends; a Herdr pane's physical
+/// writer is bound before the owner's first ready, so no fallback key is ever pinned.
+pub(crate) fn created(submit: owner_input::CreatedSubmit, writer: Option<String>) -> Leaf {
     use crate::services::claude_tui::guarded_outcome::SubmissionError;
     Box::new(move |frame| {
+        if let Some(Err(refused)) = writer.as_deref().map(owner_input::bind_writer) {
+            owner_input::vetoed(&refused);
+            return Ok(Completion::NotSent(refused));
+        }
         Ok(match submit(frame) {
             Ok(()) => Completion::Submitted,
             Err(SubmissionError::Held(hold)) => Completion::NotSent(format!("held: {hold:?}")),
@@ -198,11 +203,14 @@ pub(crate) fn cold_claude(
     ticket: Arc<std::sync::Mutex<Option<crate::services::claude::first_input::Submitted>>>,
 ) -> Leaf {
     use crate::services::claude::first_input::submit_created;
-    created(Box::new(move |frame| {
-        let submitted = submit_created(&transcript, offset, &session, &frame)?;
-        *ticket.lock().unwrap_or_else(|e| e.into_inner()) = Some(submitted);
-        Ok(())
-    }))
+    created(
+        Box::new(move |frame| {
+            let submitted = submit_created(&transcript, offset, &session, &frame)?;
+            *ticket.lock().unwrap_or_else(|e| e.into_inner()) = Some(submitted);
+            Ok(())
+        }),
+        None,
+    )
 }
 
 mod herdr;

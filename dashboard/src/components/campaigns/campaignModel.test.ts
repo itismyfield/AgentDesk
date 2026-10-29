@@ -46,6 +46,14 @@ describe("large campaign exploration", () => {
     expect(context.externalDependencies.get("selected")).toHaveLength(92);
     expect(context.visible.map((value) => value.id)).toEqual(dependencyNeighborhood([...upstream, selected, ...downstream], "selected").visible.map((value) => value.id));
   });
+  it("keeps drawn connections as directed raw edges and tells edges hidden by the limit from deleted tasks", () => {
+    const context = dependencyNeighborhood([node("u1"), node("u2"), node("s", ["u1", "u2", "deleted"]), node("d1", ["s"])], "s", 1);
+    expect(context.edges).toEqual([["u1", "s"], ["s", "d1"]]);
+    expect(context.hiddenEdges).toEqual([["u2", "s"]]);
+    expect(context.omittedUpstream).toBe(1);
+    // A dependency on a task that no longer exists is not a hidden connection.
+    expect(context.externalDependencies.get("s")).toEqual(["u2"]);
+  });
   it("never turns an unsafe issue URL into a displayed issue number", () => {
     expect(campaignIssueLabel(makeCampaignNode("safe-id", { issue_url: "javascript:/issues/5701" }))).toBe("safe-id");
   });

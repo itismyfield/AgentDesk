@@ -73,18 +73,26 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
         host,
         registration.phase,
     )?;
-    // Only a Claude tmux launch hands its created execution's first prompt over so far.
-    if route == target::Route::Cold && (turn.provider.as_str(), host) == ("claude", "tmux") {
-        let hook = created(registration, turn.prompt.into());
+    // A driver that hands its observed execution over writes the prompt as the owner's effect.
+    let wanted = match (route, turn.provider.as_str()) {
+        (target::Route::Cold, "claude" | "codex") => Some(scope::Lineage::Created),
+        (target::Route::HerdrIdle, "claude" | "codex") => Some(scope::Lineage::Existing),
+        _ => None,
+    };
+    if let Some(wanted) = wanted {
+        let hook = created(registration, turn.prompt.into(), wanted);
         return Some(Taken::Launch(scope::install_launch(hook)));
     }
     Some(Taken::Done(run(turn, route, registration)))
 }
 
-/// Reserves the created execution's first prompt on the target its driver read from the created
-/// pane, never on the prepared one, and runs the driver's own submit as the owner's effect.
-fn created(r: Registration, frame: String) -> scope::LaunchHook {
-    Box::new(move |target, source, submit| {
+/// Reserves the first prompt on the target of the execution its driver observed, runs the driver's
+/// submit as the effect, and refuses any lineage but `wanted` before reserving.
+fn created(r: Registration, frame: String, wanted: scope::Lineage) -> scope::LaunchHook {
+    Box::new(move |lineage, target, source, writer, submit| {
+        if lineage != wanted {
+            return Err(format!("NotSent(\"lineage_refused: {lineage:?}\")"));
+        }
         let mut attempt = r.attempt;
         attempt["target"] = target;
         attempt["source"] = source;
@@ -93,7 +101,7 @@ fn created(r: Registration, frame: String) -> scope::LaunchHook {
             sources: r.sources,
             attempt,
         };
-        let leaf = effect::created(submit);
+        let leaf = effect::created(submit, writer);
         let submitted = pump::submit(&r.mailbox, prepared, r.clock, leaf);
         match tokio::runtime::Handle::current().block_on(submitted)? {
             Completion::Submitted => Ok(()),
@@ -143,8 +151,9 @@ fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Resul
                 .leaf(),
             )
         }
-        // Every other create belongs to a launch that does not hand its first prompt over yet.
+        // Every other create or idle pane belongs to a driver that does not hand it over yet.
         target::Route::Cold => return Err("NotSent(\"cold_launch_unowned\")".into()),
+        target::Route::HerdrIdle => return Err("NotSent(\"idle_unowned\")".into()),
         target::Route::Held(reason) => return Err(format!("NotSent({reason:?})")),
     };
     let prepared = PreparedPayload {
@@ -159,6 +168,9 @@ fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Resul
     }
 }
 
+#[cfg(test)]
+#[path = "owner_input_herdr_tests.rs"]
+mod herdr_tests;
 #[cfg(test)]
 #[path = "owner_input_tests.rs"]
 mod tests;

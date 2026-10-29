@@ -57,8 +57,8 @@ pub(super) fn submit_owned(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     tmux_session_name: &str,
     resolved_session_id: &str,
-) -> Result<Submitted, SubmissionError> {
-    use crate::services::claude_tui::owner_input;
+) -> Result<Submitted, crate::services::claude_tui::owner_input::OwnedLaunch> {
+    use crate::services::claude_tui::owner_input::{self, Lineage, OwnedLaunch};
     let target = owner_input::created_tmux_target("claude", tmux_session_name)?;
     let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
     let (ticket, transcript, session) = (
@@ -80,12 +80,10 @@ pub(super) fn submit_owned(
     let source = serde_json::json!({"kind":"pre_source",
         "expected_session_id":resolved_session_id,
         "expected_transcript":transcript_path_string,"binding_watermark":null});
-    hook(target, source, submit)?;
+    hook(Lineage::Created, target, source, None, submit).map_err(OwnedLaunch::Settled)?;
     let submitted = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
     submitted.ok_or_else(|| {
-        "owner submitted without the first prompt's ticket"
-            .to_string()
-            .into()
+        OwnedLaunch::Settled("owner submitted without the first prompt's ticket".into())
     })
 }
 
