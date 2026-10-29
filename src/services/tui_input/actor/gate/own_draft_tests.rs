@@ -175,3 +175,31 @@ fn folded_own_draft_requires_exact_k_empty_attestation_and_no_other_text() {
         true
     ));
 }
+
+// A Codex composer holding a pasted Discord URL that Codex 0.160 draws as an OSC 8 hyperlink,
+// wrapped across two rows; each row opens and closes its own link.
+#[test]
+fn a_codex_draft_with_a_wrapped_osc8_link_is_owned_by_its_shown_text() {
+    let url =
+        "https://discord.com/channels/1469870512812462284/1479430397975728169/1565218453684486198";
+    let frame = format!(
+        "[User: 0hbujang (ID: 343742347365974026)] {url} 이 메시지에 대한 답변이 게시가 안된거같은데 확인좀해봐"
+    );
+    let link = |shown: &str| format!("\x1b]8;;{url}\x1b\\{shown}\x1b]8;;\x1b\\");
+    let pane = |first: &str, second: &str| {
+        include_str!("../../../../../tests/fixtures/tui_input/codex-0.160.0-draft.ansi").replace(
+            "pending fixture draft",
+            &format!("[User: 0hbujang (ID: 343742347365974026)] {first}\n  {second} 이 메시지에 대한 답변이 게시가 안된거같은데 확인좀해봐"),
+        )
+    };
+    let tail = &url["https://discord.com/".len()..];
+    let owns = |capture: &str| own_draft(ShadowProvider::Codex, capture, &frame, true);
+    assert!(owns(&pane(&link("https://discord.com/"), &link(tail))));
+    let bel = |shown: &str| format!("\x1b]8;;{url}\x07{shown}\x1b]8;;\x07");
+    assert!(owns(&pane(&bel("https://discord.com/"), &bel(tail))));
+    // The link target never stands in for text the composer does not show.
+    assert!(!owns(&pane(&link(""), &link(""))));
+    // A link left open hides the rest of its row, so the draft reads short, not as the frame.
+    let open = format!("\x1b]8;;{url}https://discord.com/");
+    assert!(!owns(&pane(&open, &link(tail))));
+}
