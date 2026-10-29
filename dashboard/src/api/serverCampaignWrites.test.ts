@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { beginAuthentication } from "./authState";
 import { onApiError } from "./httpClient";
 import {
-  createServerCampaign, editServerCampaignDefinition, getServerCampaignEvents, isDefinitiveAnswer,
+  createServerCampaign, editServerCampaignDefinition, getServerCampaignEvents, getServerCampaigns, isDefinitiveAnswer,
   sendServerCampaignCommand, serverCampaignRejection, type ServerCampaignRejection,
 } from "./serverCampaigns";
 import { serverCampaignFixtures as fixtures } from "./serverCampaignsFixtures";
@@ -66,19 +66,22 @@ it("reads the server's refusals in the shapes the server sends", async () => {
     .mockResolvedValueOnce(refused(400, { rejection: "invalid_definition", target: null, definition_error: { code: "cycle", target: null, path: ["a", "a"] } }))
     .mockResolvedValueOnce(refused(409, { rejection: "stale_definition", target: null }))
     .mockResolvedValueOnce(response({ error: "idempotency_key already used for a different request", code: "conflict" }, 409))
-    .mockResolvedValueOnce(refused(503, {}));
+    .mockResolvedValueOnce(refused(503, {}))
+    .mockResolvedValueOnce(response({ error: "invalid campaign ID", code: "validation", context: {} }, 400));
   const settle = (call: Promise<unknown>) => call.catch(serverCampaignRejection);
   expect(await settle(createServerCampaign("x", fixtures.prepared.definition, "k"))).toEqual({
-    status: 400, rejection: "invalid_definition", target: null,
+    status: 400, rejection: "invalid_definition", target: null, message: "server campaign command rejected",
     definitionError: { code: "cycle", target: null, path: ["a", "a"] },
   });
   expect(await settle(editServerCampaignDefinition("release", 6, fixtures.prepared.definition, null, "k2")))
-    .toEqual({ status: 409, rejection: "stale_definition", target: null, definitionError: null });
+    .toEqual({ status: 409, rejection: "stale_definition", target: null, definitionError: null, message: "server campaign command rejected" });
   const reused = await settle(sendServerCampaignCommand("release", { command: "start", expected_definition_revision: 7 }, "k3"));
-  expect(reused).toEqual({ status: 409, rejection: null, target: null, definitionError: null });
+  expect(reused).toEqual({ status: 409, rejection: null, target: null, definitionError: null, message: "idempotency_key already used for a different request" });
   const unavailable = await settle(sendServerCampaignCommand("release", { command: "start", expected_definition_revision: 7 }, "k4"));
   expect(isDefinitiveAnswer(reused as ServerCampaignRejection)).toBe(true);
   expect(isDefinitiveAnswer(unavailable as ServerCampaignRejection)).toBe(false);
+  // A format refusal carries no context; its server text is what the user can act on.
+  expect(await settle(createServerCampaign("", fixtures.prepared.definition, "k5"))).toMatchObject({ status: 400, rejection: null, message: "invalid campaign ID" });
   expect(serverCampaignRejection(new TypeError("Failed to fetch"))).toBeNull();
   expect(isDefinitiveAnswer(null)).toBe(false);
 });
@@ -91,4 +94,17 @@ it("reads the latest events after a sequence", async () => {
   fetchMock.mockResolvedValueOnce(response({ events: [event] }));
   await expect(getServerCampaignEvents("release", { after: 2, runId: "run-1", limit: 20 })).resolves.toEqual([event]);
   expect(fetchMock.mock.calls[0][0]).toBe("/api/server-campaigns/release/events?after=2&limit=20&run_id=run-1");
+});
+
+it("reads every page of the campaign list, not only the first hundred", async () => {
+  const page = (from: number, count: number) => Array.from({ length: count }, (_, index) => {
+    const document = structuredClone(fixtures.prepared);
+    document.view.campaign_id = `c-${String(from + index).padStart(3, "0")}`;
+    return document;
+  });
+  // A campaign created between reads shifts the second page by one; it is listed once.
+  fetchMock.mockResolvedValueOnce(response({ campaigns: page(0, 100) })).mockResolvedValueOnce(response({ campaigns: page(99, 3) }));
+  const campaigns = await getServerCampaigns();
+  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/server-campaigns", "/api/server-campaigns?limit=100&offset=100"]);
+  expect(campaigns.map((document) => document.view.campaign_id)).toEqual(page(0, 102).map((document) => document.view.campaign_id));
 });

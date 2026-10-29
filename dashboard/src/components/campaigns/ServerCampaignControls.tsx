@@ -10,7 +10,8 @@ export type ControlCommand = Exclude<CommandName, "edit_definition">;
 const PHASES = {
   accepted: ["중단 요청 접수 · 확정 대기", "Stop accepted · waiting for confirmation"],
   confirmed: ["중단 확정 · 세션 종료와 외부 동작 대사 대기", "Stop confirmed · waiting for sessions to end and actions to reconcile"],
-  stopped: ["중단됨 · 편집·재시도 준비·재개 가능", "Stopped · edit, prepare retry or resume"],
+  // What may follow a stop is for the server's command list to say, not this label.
+  stopped: ["중단됨", "Stopped"],
 } satisfies Record<NonNullable<ReturnType<typeof stopPhase>>, [string, string]>;
 
 /** One server command as a button; a refused or unavailable command says why. */

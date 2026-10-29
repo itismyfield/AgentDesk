@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef } from "react";
 import {
   createServerCampaign, editServerCampaignDefinition, getServerCampaign, isDefinitiveAnswer, serverCampaignRejection,
   type ServerCampaignCommandResult, type ServerCampaignDefinition, type ServerCampaignDocument,
@@ -25,6 +25,12 @@ export interface DefinitionDraft {
   change: { reference: string; explanation: string };
   /** The last body sent without a definitive answer: resending that same body reuses its key. */
   sent: { key: string; body: string } | null;
+  /** A save's answer is outstanding. Kept here so the lock outlives the form leaving the screen. */
+  pending: boolean;
+  /** What a create form was filled from, to tell an untouched form from one being written. */
+  seed: Definition;
+  /** Per task: true when it came from the saved definition, whose task IDs stay fixed. */
+  saved: boolean[];
   status: Status | null;
   newKey: () => string;
 }
@@ -51,32 +57,64 @@ function submittedChange(draft: DefinitionDraft): DefinitionDraft["change"] | nu
   return draft.mode === "edit" && (draft.change.reference || draft.change.explanation) ? draft.change : null;
 }
 
+/** Task IDs fixed once `sent` is saved: each sent ID fixes the first task still holding it, so a task typed
+ * to that ID while the save was out stays editable. */
+function savedTasks(draft: DefinitionDraft, sent: Definition): boolean[] {
+  const fixed = new Set(draft.definition.nodes.filter((_, at) => draft.saved[at]).map((node) => node.id));
+  return draft.definition.nodes.map((node, at) => {
+    if (draft.saved[at]) return true;
+    if (fixed.has(node.id) || !sent.nodes.some((candidate) => candidate.id === node.id)) return false;
+    fixed.add(node.id);
+    return true;
+  });
+}
+
 export function createDraft(copyOf: Definition | null, newKey = newIdempotencyKey): DefinitionDraft {
   return {
-    mode: "create", id: "", baseRevision: null, baseDefinition: null,
-    definition: structuredClone(copyOf ?? EMPTY), change: { reference: "", explanation: "" }, sent: null, status: null, newKey,
+    mode: "create", id: "", baseRevision: null, baseDefinition: null, definition: structuredClone(copyOf ?? EMPTY), seed: copyOf ?? EMPTY,
+    saved: (copyOf ?? EMPTY).nodes.map(() => false),
+    change: { reference: "", explanation: "" }, sent: null, pending: false, status: null, newKey,
   };
 }
 
 export function editDraft(document: ServerCampaignDocument, newKey = newIdempotencyKey): DefinitionDraft {
   return {
     mode: "edit", id: document.view.campaign_id, baseRevision: document.view.definition_revision,
-    baseDefinition: document.definition, definition: structuredClone(document.definition),
-    change: { reference: "", explanation: "" }, sent: null, status: null, newKey,
+    baseDefinition: document.definition, definition: structuredClone(document.definition), seed: document.definition,
+    saved: document.definition.nodes.map(() => true),
+    change: { reference: "", explanation: "" }, sent: null, pending: false, status: null, newKey,
   };
 }
 
-export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCancel, disabled, tr }: {
+/** A create form nobody has typed into since it was opened or filled by a copy. */
+export function isUntouchedCreate(draft: DefinitionDraft): boolean {
+  return draft.mode === "create" && !draft.id && draft.sent === null && !draft.pending
+    && JSON.stringify(draft.definition) === JSON.stringify(draft.seed);
+}
+
+export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onConflict, onCancel, focus = 0, onFocused, disabled, tr }: {
   draft: DefinitionDraft;
   /** Updates apply to the latest draft; returning null closes it. */
   onDraftChange: (update: (current: DefinitionDraft) => DefinitionDraft | null) => void;
   onSaved: (id: string, result: ServerCampaignCommandResult) => void;
+  /** The server holds a newer definition; the caller refreshes what it shows. */
+  onConflict?: () => void;
   onCancel: () => void;
+  /** A new nonzero value moves focus to the first field; a form shown again keeps focus where it is. */
+  focus?: number;
+  onFocused?: () => void;
   /** The snapshot is stale or the server refuses edits: nothing may be sent. */
   disabled: boolean;
   tr: Tr;
 }) {
-  const [saving, setSaving] = useState(false);
+  const saving = draft.pending;
+  const sending = useRef(false);
+  const form = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    if (!focus) return;
+    form.current?.querySelector<HTMLElement>("input, select, textarea")?.focus();
+    onFocused?.();
+  }, [focus]); // eslint-disable-line react-hooks/exhaustive-deps -- runs once per focus request
   const { definition } = draft;
   const update = (changes: Partial<DefinitionDraft>) => onDraftChange((current) => ({ ...current, ...changes }));
   const setDefinition = (changes: Partial<Definition>) => update({ definition: { ...definition, ...changes } });
@@ -84,39 +122,48 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCa
     setDefinition({ nodes: definition.nodes.map((node, at) => at === index ? { ...node, ...changes } : node) });
   const setAcceptance = (index: number, acIndex: number, changes: Partial<Acceptance>) =>
     setNode(index, { acceptance: definition.nodes[index].acceptance.map((ac, at) => at === acIndex ? { ...ac, ...changes } : ac) });
+  // A dependency goes with its task only when no remaining task still has that ID.
   const removeNode = (index: number) => {
     const removed = definition.nodes[index].id;
-    setDefinition({
-      nodes: definition.nodes.filter((_, at) => at !== index)
-        .map((node) => ({ ...node, dependencies: node.dependencies.filter((id) => id !== removed) })),
+    const remaining = definition.nodes.filter((_, at) => at !== index);
+    const gone = !remaining.some((node) => node.id === removed);
+    update({
+      saved: draft.saved.filter((_, at) => at !== index),
+      definition: { ...definition, nodes: gone ? remaining.map((node) => ({ ...node, dependencies: node.dependencies.filter((id) => id !== removed) })) : remaining },
     });
   };
+  // A new ID names no task and no leftover dependency, so nothing silently attaches to the new task.
   const addNode = () => {
+    const taken = (id: string) => definition.nodes.some((node) => node.id === id || node.dependencies.includes(id));
     let next = definition.nodes.length + 1;
-    while (definition.nodes.some((node) => node.id === `task-${next}`)) next++;
-    setDefinition({ nodes: [...definition.nodes, { id: `task-${next}`, title: "", issue_url: "", acceptance: [], dependencies: [], group: null }] });
+    while (taken(`task-${next}`)) next++;
+    update({
+      saved: [...draft.saved, false],
+      definition: { ...definition, nodes: [...definition.nodes, { id: `task-${next}`, title: "", issue_url: "", acceptance: [], dependencies: [], group: null }] },
+    });
   };
   const reasonMissing = draft.status?.kind === "error" && draft.status.reasonMissing === true;
 
   const save = async (expectedRevision = draft.baseRevision, baseDefinition = draft.baseDefinition) => {
-    if (saving || disabled) return;
+    if (sending.current || saving || disabled) return;
     const change = submittedChange(draft);
     const body = JSON.stringify([draft.mode, draft.id, expectedRevision, definition, change]);
     const key = draft.sent?.body === body ? draft.sent.key : draft.newKey();
-    // Answers merge only their own state into the latest draft, so edits made while waiting survive.
-    const settle = (status: Status, decided: boolean) => onDraftChange((current) => ({
-      ...current, status, sent: decided && current.sent?.key === key ? null : current.sent,
-    }));
-    onDraftChange((current) => ({ ...current, baseRevision: expectedRevision, baseDefinition, sent: { key, body }, status: null }));
-    setSaving(true);
+    // Answers merge only their own state into the latest draft, so edits made while waiting survive,
+    // and only into the draft they were sent from, so a draft reopened meanwhile is left alone.
+    const answer = (apply: (current: DefinitionDraft) => DefinitionDraft | null) =>
+      onDraftChange((current) => current.sent?.key === key ? apply({ ...current, pending: false }) : current);
+    const settle = (status: Status, decided: boolean) => answer((current) => ({ ...current, status, sent: decided ? null : current.sent }));
+    onDraftChange((current) => ({ ...current, baseRevision: expectedRevision, baseDefinition, sent: { key, body }, pending: true, status: null }));
+    sending.current = true;
     try {
       const result = draft.mode === "create"
         ? await createServerCampaign(draft.id, definition, key)
         : await editServerCampaignDefinition(draft.id, expectedRevision ?? 0, definition, change, key);
       // Edits made after sending stay open as a draft on top of the saved revision.
-      onDraftChange((current) => JSON.stringify([current.definition, submittedChange(current)]) === JSON.stringify([definition, change]) ? null : {
+      answer((current) => JSON.stringify([current.definition, submittedChange(current)]) === JSON.stringify([definition, change]) ? null : {
         ...current, mode: "edit", id: draft.id, baseRevision: result.definition_revision, baseDefinition: definition,
-        sent: null, status: { kind: "saved", revision: result.definition_revision },
+        saved: savedTasks(current, definition), sent: null, status: { kind: "saved", revision: result.definition_revision },
       });
       onSaved(draft.id, result);
     } catch (error) {
@@ -129,6 +176,7 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCa
       if (!refusal) return;
       if (refusal.status === 409 && refusal.rejection === "stale_definition" && draft.mode === "edit") {
         // Show the newer values next to the draft; the draft itself is never overwritten.
+        onConflict?.();
         const latest = await getServerCampaign(draft.id).catch(() => null);
         settle(latest && baseDefinition
           ? { kind: "conflict", revision: latest.view.definition_revision, latest: latest.definition, changed: changedDefinitionValues(baseDefinition, latest.definition) }
@@ -138,16 +186,16 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCa
         const text = detail
           ? [tr(...(DEFINITION_ERRORS[detail.code] ?? [detail.code, detail.code])), detail.path.length ? detail.path.join(" → ") : detail.target].filter(Boolean).join(" · ")
           : refusal.rejection ? rejectionText(refusal.rejection, tr)
-            : refusal.status === 409 ? rejectionText("idempotency_conflict", tr) : `HTTP ${refusal.status}`;
+            : refusal.status === 409 ? rejectionText("idempotency_conflict", tr) : refusal.message;
         settle({ kind: "error", text, reasonMissing: refusal.rejection === "missing_change_reason" }, true);
       }
     } finally {
-      setSaving(false);
+      sending.current = false;
     }
   };
 
   const status = draft.status;
-  return <form className="campaign-server-form" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
+  return <form ref={form} className="campaign-server-form" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
     <div className="campaign-edit-grid">
       {draft.mode === "create" && <label>{tr("캠페인 ID", "Campaign ID")}<input aria-label={tr("캠페인 ID", "Campaign ID")} disabled={saving} value={draft.id} onChange={(event) => update({ id: event.target.value })} /></label>}
       <label>{tr("이름", "Name")}<input aria-label={tr("이름", "Name")} value={definition.title} onChange={(event) => setDefinition({ title: event.target.value })} /></label>
@@ -155,21 +203,32 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCa
     </div>
     <label>{tr("목표", "Goal")}<textarea aria-label={tr("목표", "Goal")} rows={2} value={definition.goal} onChange={(event) => setDefinition({ goal: event.target.value })} /></label>
     {definition.nodes.map((node, index) => {
-      const existing = draft.baseDefinition?.nodes.some((candidate) => candidate.id === node.id) ?? false;
+      const others = definition.nodes.map((other, at) => ({ other, at })).filter(({ at }) => at !== index);
+      // A dependency naming no other task (left by a rename, copied, or this task's own ID) stays visible to
+      // re-point or remove; renames never rewrite dependencies, so a link cannot move to another task unseen.
+      const missing = node.dependencies.filter((id) => !others.some(({ other }) => other.id === id));
       return <fieldset key={index} className="campaign-server-task">
         <legend>{tr(`작업 ${index + 1}`, `Task ${index + 1}`)}</legend>
         <div className="campaign-edit-grid">
-          <label>{tr("작업 ID", "Task ID")}<input aria-label={tr("작업 ID", "Task ID")} readOnly={existing} value={node.id} onChange={(event) => setNode(index, { id: event.target.value })} /></label>
+          <label>{tr("작업 ID", "Task ID")}<input aria-label={tr("작업 ID", "Task ID")} readOnly={draft.saved[index] === true} value={node.id} onChange={(event) => setNode(index, { id: event.target.value })} /></label>
           <label>{tr("작업 제목", "Task title")}<input aria-label={tr("작업 제목", "Task title")} value={node.title} onChange={(event) => setNode(index, { title: event.target.value })} /></label>
           <label>{tr("이슈 링크", "Issue link")}<input aria-label={tr("이슈 링크", "Issue link")} inputMode="url" value={node.issue_url} onChange={(event) => setNode(index, { issue_url: event.target.value })} /></label>
           <label>{tr("그룹", "Group")}<input aria-label={tr("그룹", "Group")} value={node.group ?? ""} placeholder={tr("미분류", "Ungrouped")} onChange={(event) => setNode(index, { group: event.target.value || null })} /></label>
         </div>
-        {definition.nodes.length > 1 && <div className="campaign-server-dependencies" role="group" aria-label={tr("선행 작업", "Dependencies")}>
+        {(definition.nodes.length > 1 || missing.length > 0) && <div className="campaign-server-dependencies" role="group" aria-label={tr("선행 작업", "Dependencies")}>
           <span>{tr("선행 작업", "Dependencies")}</span>
-          {definition.nodes.filter((other) => other !== node).map((other) => <label key={other.id} className="campaign-check">
+          {/* Rows are keyed by position: IDs are free text and may repeat while being typed. */}
+          {others.map(({ other, at }) => <label key={`task:${at}`} className="campaign-check">
             <input type="checkbox" aria-label={tr(`${node.id}의 선행: ${other.id}`, `${node.id} depends on ${other.id}`)} checked={node.dependencies.includes(other.id)}
               onChange={(event) => setNode(index, { dependencies: event.target.checked ? [...node.dependencies, other.id] : node.dependencies.filter((id) => id !== other.id) })} />{other.id}
           </label>)}
+          {missing.map((id, at) => {
+            const marker = id === node.id ? tr("(이 작업)", "(this task)") : tr("(없는 작업)", "(no such task)");
+            return <label key={`missing:${at}`} className="campaign-check">
+              <input type="checkbox" aria-label={tr(`${node.id}의 선행: ${id} ${marker}`, `${node.id} depends on ${id} ${marker}`)} checked
+                onChange={() => setNode(index, { dependencies: node.dependencies.filter((dependency) => dependency !== id) })} />{id} {marker}
+            </label>;
+          })}
         </div>}
         {node.acceptance.map((ac, acIndex) => <div key={acIndex} className="campaign-server-ac">
           <input aria-label={tr("수용조건 ID", "Acceptance ID")} value={ac.id} onChange={(event) => setAcceptance(index, acIndex, { id: event.target.value })} />

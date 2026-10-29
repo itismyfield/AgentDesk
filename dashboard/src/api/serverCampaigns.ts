@@ -169,11 +169,20 @@ export type ServerCampaignListResponse = z.infer<typeof serverCampaignListRespon
 export type ServerCampaignDetailResponse = z.infer<typeof serverCampaignDetailResponseSchema>;
 export type ServerCampaignReadOptions = Pick<RequestOptions, "signal" | "suppressErrorToast">;
 
+const LIST_PAGE = 100; // the server's largest page
+
+/** Every campaign, page by page. The first page uses the server's defaults (100 from offset 0);
+ * a campaign pushed onto the next page by a concurrent create is listed once. */
 export async function getServerCampaigns(options: ServerCampaignReadOptions = {}): Promise<ServerCampaignDocument[]> {
-  const result = await request("/api/server-campaigns", {
-    method: "GET", signal: options.signal, suppressErrorToast: options.suppressErrorToast ?? true, shareInflight: false,
-  }, serverCampaignListResponseSchema);
-  return result.campaigns;
+  const campaigns: ServerCampaignDocument[] = [];
+  for (let offset = 0; ; offset += LIST_PAGE) {
+    const page = await request(offset ? `/api/server-campaigns?limit=${LIST_PAGE}&offset=${offset}` : "/api/server-campaigns", {
+      method: "GET", signal: options.signal, suppressErrorToast: options.suppressErrorToast ?? true, shareInflight: false,
+    }, serverCampaignListResponseSchema);
+    const seen = new Set(campaigns.map((document) => document.view.campaign_id));
+    campaigns.push(...page.campaigns.filter((document) => !seen.has(document.view.campaign_id)));
+    if (page.campaigns.length < LIST_PAGE) return campaigns;
+  }
 }
 
 export async function getServerCampaign(id: string, options: ServerCampaignReadOptions = {}): Promise<ServerCampaignDocument> {
@@ -253,6 +262,8 @@ export interface ServerCampaignRejection {
   rejection: string | null;
   target: string | null;
   definitionError: { code: string; target: string | null; path: string[] } | null;
+  /** The server's own text, the only explanation a format refusal carries. */
+  message: string;
 }
 
 const rejectionContextSchema = z.looseObject({
@@ -278,6 +289,7 @@ export function serverCampaignRejection(error: unknown): ServerCampaignRejection
     rejection: context?.rejection ?? null,
     target: context?.target ?? null,
     definitionError: detail ? { code: detail.code, target: detail.target, path: detail.path } : null,
+    message: error.message,
   };
 }
 
