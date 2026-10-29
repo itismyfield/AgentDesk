@@ -159,7 +159,7 @@ async fn admission_failure_keeps_consumed_voice_assets_and_ack_custody_pg() {
             "nonce":"known-A", "provider":"claude", "target":{"host":"tmux","owner":"mixed-pg","root":"/test","execution_nonce":"execution"},
             "source":{"kind":"existing","session_id":"session","transcript":"/test/transcript","file":[1,2],"offset":0}
         })).unwrap();
-        let key = owner.reserve(attempt, PreparedPayload { frame:"known A".into(), digest:"A".into(), attribution:json!({}) })?;
+        let key = owner.reserve(attempt, PreparedPayload { frame:"known A".into(), digest:"A".into(), attribution:json!({}), followers:Vec::new() })?;
         drop(owner.arm(&key, 1000)?.consume(&key)?);
         owner.settle(&key, true, 1001)
     }).await.unwrap();
@@ -189,7 +189,7 @@ async fn admission_failure_keeps_consumed_voice_assets_and_ack_custody_pg() {
             "nonce":"fresh-B", "provider":"claude", "target":{"host":"tmux","owner":"mixed-pg","root":"/test","execution_nonce":"execution"},
             "source":{"kind":"existing","session_id":"session","transcript":"/test/transcript","file":[1,2],"offset":0}
         })).unwrap();
-        owner.reserve(attempt, PreparedPayload { frame:owner.snapshot.items[0].text.clone(), digest:"B".into(), attribution:json!({}) })?;
+        owner.reserve(attempt, PreparedPayload { frame:owner.snapshot.items[0].text.clone(), digest:"B".into(), attribution:json!({}), followers:Vec::new() })?;
         Ok(())
     }).await.unwrap();
     let effects = Arc::new(std::sync::atomic::AtomicUsize::new(0));

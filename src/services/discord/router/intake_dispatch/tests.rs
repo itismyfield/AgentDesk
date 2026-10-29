@@ -46,6 +46,8 @@ use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
 mod codex_turn_hold;
 mod final_guards;
+#[cfg(unix)]
+mod owner_ingress_tests;
 mod replay_hold;
 
 struct ScopedIntakeTestEnv {

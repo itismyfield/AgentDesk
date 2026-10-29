@@ -186,9 +186,9 @@ fn enqueue(
     }
 }
 
-/// Items behind an attempted head are untried; the head itself stays in custody.
+/// Items behind an attempted head are untried; every original the head carries stays in custody.
 fn untried(owner: &Owner) -> usize {
-    usize::from(owner.snapshot.head_injection.is_some())
+    (owner.snapshot.head_injection.as_ref()).map_or(0, |head| head.members().count())
 }
 
 fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult {

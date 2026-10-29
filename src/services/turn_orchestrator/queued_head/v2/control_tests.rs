@@ -74,6 +74,7 @@ async fn seeded(
                 frame: "frame".into(),
                 digest: "digest".into(),
                 attribution: json!({}),
+                followers: Vec::new(),
             };
             let key = owner.reserve(attempt(100), payload)?;
             drop(owner.arm(&key, 0)?);
@@ -467,6 +468,7 @@ fn synthetic_inputs_sharing_an_id_are_separate_admissions() {
                     frame: "frame".into(),
                     digest: "digest".into(),
                     attribution: json!({}),
+                    followers: Vec::new(),
                 };
                 let key = owner.reserve(attempt(7272), payload)?;
                 drop(owner.arm(&key, 0)?);
