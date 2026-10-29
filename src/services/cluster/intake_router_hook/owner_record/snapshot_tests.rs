@@ -159,6 +159,18 @@ async fn shared_snapshot_unknown_conflict_storage_and_stale_heartbeat_pg() {
         f.observe(&id, &absent).await.target(),
         Target::Held(fallback::Held::NoGateway)
     );
+    let mut broken = f.pool.begin().await.unwrap();
+    sqlx::query("ALTER TABLE worker_nodes RENAME TO unavailable_worker_nodes")
+        .execute(&mut *broken)
+        .await
+        .unwrap();
+    let error = read_on_tx(&mut broken, &id, &context).await.err().unwrap();
+    assert_eq!(
+        error.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("42P01"),
+        "a failed shared snapshot query must return storage failure, never a target"
+    );
+    broken.rollback().await.unwrap();
     f.pool.close().await;
     assert!(
         f.pool.begin().await.is_err(),
