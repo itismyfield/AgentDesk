@@ -1,10 +1,14 @@
 pub mod adk_profile;
 pub mod adk_resources;
 pub mod adk_workspace;
+pub mod candidate_seal;
 pub mod control;
 pub mod definition;
+pub mod evidence;
+pub mod evidence_gate;
 pub mod execution_pin;
 pub mod model;
 pub mod profile;
+pub mod review_gate;
 pub mod verification_run;
 pub mod view;

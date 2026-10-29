@@ -8,6 +8,7 @@ use crate::services::campaign_execution::{
     model::*,
 };
 
+pub mod evidence_store;
 mod read;
 mod write;
 pub use read::*;
