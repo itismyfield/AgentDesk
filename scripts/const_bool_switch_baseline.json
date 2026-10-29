@@ -1,7 +1,6 @@
 [
   ["src/config/session_hosts/migration.rs", "INTRODUCED"],
   ["src/config/session_hosts/migration/consent_holds.rs", "INTRODUCED"],
-  ["src/services/codex_remote_policy.rs", "PREREQUISITES_SATISFIED"],
   ["src/services/discord/delivery_lease_cell/exact_lease.rs", "RELEASE_ON_DROP"],
   ["src/services/discord/delivery_lease_cell/exact_lease.rs", "RELEASE_ON_DROP"],
   ["src/services/discord/delivery_lease_cell/exact_lease.rs", "RELEASE_ON_DROP"],

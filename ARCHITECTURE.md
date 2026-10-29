@@ -4008,7 +4008,6 @@ src/
 │   ├── claude_compact_context.rs
 │   ├── claude_compact_trigger.rs
 │   ├── codex.rs
-│   ├── codex_remote_policy.rs
 │   ├── codex_tmux_wrapper.rs
 │   ├── cswap.rs
 │   ├── discord_config_audit.rs

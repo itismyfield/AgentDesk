@@ -15,7 +15,6 @@ pub mod claude_compact_trigger;
 pub mod claude_tui;
 pub mod cluster;
 pub mod codex;
-pub mod codex_remote_policy;
 pub mod codex_tmux_wrapper;
 pub mod codex_tui;
 // Storage primitives remain dormant until the input actor is wired.

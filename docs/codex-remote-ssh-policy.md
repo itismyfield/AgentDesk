@@ -1,11 +1,17 @@
 # Codex Remote SSH Runtime Policy
 
 Issue: #2193
-Status: Proposed
+Status: Retired gate (#7349)
+
+The `providers.codex.remote_ssh_enabled` gate and its compile-time prerequisites constant were
+removed. AgentDesk has no remote SSH runtime, the dispatcher refuses every remote profile, and an
+old `remote_ssh_enabled` key in `agentdesk.yaml` loads as an ignored key. The clauses below stay
+as the contract any future remote implementation must meet; that work needs a new ADR and its own
+opt-in, not a revived boolean.
 
 This ADR fixes the policy gap that #2193 opened: AgentDesk's
-`execute_streaming_remote_direct` and `execute_streaming_remote_tmux` are
-currently disabled stubs that return errors, and #2175 classified them as
+`execute_streaming_remote_direct` and `execute_streaming_remote_tmux` were
+disabled stubs that returned errors, and #2175 classified them as
 "not allowed now" without saying what would have to be true before they
 flip on. This document is that contract. Until every prerequisite below is
 satisfied, remote Codex over SSH stays off, and the codepath stays a stub.
@@ -39,18 +45,10 @@ ambiguity this ADR closes.
 
 Remote Codex execution over SSH is a **single-policy** feature, not a
 configurable matrix. When it is eventually enabled, it MUST conform to
-every clause below. Until it does, both `execute_streaming_remote_direct`
-and `execute_streaming_remote_tmux` remain stubs that return
-`Err("Remote SSH execution is not available in AgentDesk")`, and the
-top-level dispatcher MUST refuse to route a turn to them when the gate is
-off.
-
-The gate is a single boolean: `providers.codex.remote_ssh_enabled` in
-`agentdesk.yaml`, default `false`. Setting it to `true` is a declaration
-by the operator that every prerequisite in this ADR is in place. The gate
-is intentionally codex-scoped and not a top-level toggle; other providers
-(Claude, Gemini, Qwen, OpenCode) have their own remote stubs and will get
-their own ADRs if and when they need them.
+every clause below. Until it does, the top-level dispatcher refuses every
+remote profile before any SSH attempt. Other providers (Claude, Gemini,
+Qwen, OpenCode) will get their own ADRs if and when they need remote
+execution.
 
 This policy intentionally picks one model rather than enumerating
 options. The model is: **AgentDesk SSHes to a small, operator-curated
@@ -308,10 +306,8 @@ The contract — process-group based, not PTY-foreground based:
   assert the same "no descendants" property holds after the wrapper's
   SIGHUP handler runs.
 
-Without **both** integration tests passing, the gate stays off
-regardless of `remote_ssh_enabled` — this is what
-`PREREQUISITES_SATISFIED` in `src/services/codex_remote_policy.rs`
-gates.
+Without **both** integration tests passing, remote execution stays
+unavailable.
 
 This ADR explicitly does **not** introduce a remote tmux session for
 Codex. `execute_streaming_remote_tmux` remains a stub because remote
@@ -397,19 +393,8 @@ explicit follow-ups gated behind this document:
    known_hosts, no password/passphrase). Tracked separately.
 2. Add `providers.codex.remote_hosts: [...]` deserialization plus the
    per-`AgentDef` `codex.remote_host` field. Tracked separately.
-3. Implement `execute_streaming_remote_direct` end-to-end with the
-   PTY-bound cancel path and the integration test described in
-   "Cancel semantics". Tracked separately.
+3. Implement a remote direct runtime end-to-end with the PTY-bound
+   cancel path and the integration test described in "Cancel
+   semantics". Tracked separately.
 4. Reject `RemoteAuth::Password` and `RemoteAuth::KeyFile` at
-   config-load time when `remote_ssh_enabled` is `true`. Tracked
-   separately.
-
-Per this ADR, the gate `providers.codex.remote_ssh_enabled` lands now
-and defaults `false`. Flipping it to `true` while the follow-ups above
-are not in place is a **hard bootstrap error**, not a warning — see
-`src/services/codex_remote_policy.rs::PREREQUISITES_SATISFIED`. A
-warn-only gate would become a persisted "enabled" signal that a
-partial future implementation could silently honor; the hard-fail
-removes that risk and forces the implementation PR to flip
-`PREREQUISITES_SATISFIED` to `true` in the same change that wires
-everything up.
+   config-load time for any remote profile. Tracked separately.

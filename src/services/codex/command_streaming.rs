@@ -95,36 +95,16 @@ pub(crate) fn execute_command_streaming_observed(
                     .to_string());
             }
         }
-        // Remote SSH requires both the runtime opt-in and the compiled prerequisites.
-        if !(crate::services::provider_hosting::codex_remote_ssh_enabled()
-            && crate::services::codex_remote_policy::PREREQUISITES_SATISFIED)
-        {
-            tracing::warn!(
-                provider = "codex",
-                profile = %profile.name,
-                doc = "docs/codex-remote-ssh-policy.md",
-                "refusing Codex remote SSH dispatch: gate disabled or \
-                 prerequisites not satisfied (#2193)"
-            );
-            return Err("Remote SSH execution is disabled by policy (#2193). \
-                 See docs/codex-remote-ssh-policy.md."
-                .to_string());
-        }
-        log_codex_runtime_kind(
-            "codex.execute_command_streaming",
-            CodexRuntimeKind::RemoteDirect,
+        // AgentDesk has no remote SSH runtime; no setting opens this path.
+        tracing::warn!(
+            provider = "codex",
+            profile = %profile.name,
+            doc = "docs/codex-remote-ssh-policy.md",
+            "refusing Codex remote SSH dispatch: remote SSH execution is not available (#2193)"
         );
-        return execute_streaming_remote_direct(
-            profile,
-            session_id,
-            &prompt,
-            model,
-            fast_mode_enabled,
-            goals_enabled,
-            working_dir,
-            sender,
-            cancel_token,
-        );
+        return Err("Remote SSH execution is disabled by policy (#2193). \
+             See docs/codex-remote-ssh-policy.md."
+            .to_string());
     }
 
     if let Some(tmux_name) = tmux_session_name {

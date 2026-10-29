@@ -223,24 +223,6 @@ pub struct ProviderConfig {
     /// `pipe` or `tui` overrides `tui_hosting`; unknown values use legacy derivation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
-    /// Issue #2193 — Codex remote SSH runtime gate.
-    ///
-    /// Defaults to `false`. When `true`, the operator asserts that every
-    /// prerequisite in `docs/codex-remote-ssh-policy.md` is in place.
-    /// At time of writing, the ADR's follow-ups are NOT in place
-    /// (`services::remote_stub` still returns errors, the allow-list
-    /// schema is not wired, the integration test does not exist).
-    /// Bootstrap therefore **hard-fails** when this flag is `true` and
-    /// `crate::services::codex_remote_policy::PREREQUISITES_SATISFIED`
-    /// is `false`, so a warn-only gate cannot become a persisted
-    /// "enabled" signal that a partial future implementation silently
-    /// honors.
-    #[serde(
-        default,
-        alias = "remoteSshEnabled",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub remote_ssh_enabled: Option<bool>,
 }
 
 pub fn default_provider_tui_hosting(provider: &str) -> bool {
@@ -254,18 +236,6 @@ impl Config {
             .get(&key)
             .and_then(|config| config.tui_hosting)
             .unwrap_or_else(|| default_provider_tui_hosting(&key))
-    }
-
-    /// Issue #2193 — Codex remote SSH gate accessor.
-    ///
-    /// Returns `true` only when the operator has explicitly set
-    /// `providers.codex.remote_ssh_enabled: true` in `agentdesk.yaml`.
-    /// Defaults to `false` per `docs/codex-remote-ssh-policy.md`.
-    pub fn codex_remote_ssh_enabled(&self) -> bool {
-        self.providers
-            .get("codex")
-            .and_then(|cfg| cfg.remote_ssh_enabled)
-            .unwrap_or(false)
     }
 }
 
@@ -1473,14 +1443,14 @@ fn is_legacy_execution_identity_mode(mode: &ExecutionIdentityMode) -> bool {
 pub enum PublicationPermitMode {
     #[default]
     Legacy,
+    /// The retired `enforce` name only ever recorded telemetry, so it still loads as Observe.
+    #[serde(alias = "enforce")]
     Observe,
-    /// Reserved rollout name; currently records and carries telemetry only.
-    Enforce,
 }
 
 impl PublicationPermitMode {
     pub const fn records_publication_observations(self) -> bool {
-        matches!(self, Self::Observe | Self::Enforce)
+        matches!(self, Self::Observe)
     }
 }
 
@@ -1687,7 +1657,7 @@ mod runtime_hook_registry_config_tests {
         let default = RuntimeSettingsConfig::default();
         assert_eq!(default.publication_permit_mode, PublicationPermitMode::Legacy);
         assert!(!serde_yaml::to_string(&default).unwrap().contains("publication_permit_mode"));
-        for (name, mode) in [("legacy", PublicationPermitMode::Legacy), ("observe", PublicationPermitMode::Observe), ("enforce", PublicationPermitMode::Enforce)] {
+        for (name, mode) in [("legacy", PublicationPermitMode::Legacy), ("observe", PublicationPermitMode::Observe), ("enforce", PublicationPermitMode::Observe)] {
             let parsed: RuntimeSettingsConfig = serde_yaml::from_str(&format!("publication_permit_mode: {name}")).unwrap();
             assert_eq!(parsed.publication_permit_mode, mode);
             assert_eq!(mode.records_publication_observations(), mode != PublicationPermitMode::Legacy);
@@ -1758,6 +1728,26 @@ mod runtime_hook_registry_config_tests {
         std::fs::write(&path, yaml).unwrap();
         let loaded = load_from_path(&path).expect("retired dial keys must not fail config load");
         assert!(loaded.runtime.is_empty());
+    }
+
+    // Deployed yaml may still carry the removed remote SSH gate and the `enforce` permit name.
+    #[test]
+    fn retired_remote_ssh_gate_and_enforce_keys_load_on_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        save_to_path(&path, &Config::default()).unwrap();
+        let mut yaml = std::fs::read_to_string(&path).unwrap();
+        yaml.push_str(
+            "\nproviders:\n  codex:\n    remote_ssh_enabled: true\n    remoteSshEnabled: true\nruntime:\n  publication_permit_mode: enforce\n",
+        );
+        std::fs::write(&path, yaml).unwrap();
+        let loaded =
+            load_from_path(&path).expect("retired remote SSH keys must not fail config load");
+        assert_eq!(loaded.providers["codex"], ProviderConfig::default());
+        assert_eq!(
+            loaded.runtime.publication_permit_mode,
+            PublicationPermitMode::Observe
+        );
     }
 
     #[test]
