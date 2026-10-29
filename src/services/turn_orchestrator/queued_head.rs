@@ -103,6 +103,11 @@ fn read_snapshot_meta(path: &Path) -> Result<Option<SnapshotMeta>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(queue_unread(format!("read {}: {error}", path.display()))),
     };
+    // A V2 file holds the channel for a V2-capable binary: every claim and legacy mutation waits.
+    if let Ok(compat::SnapshotRead::ReadOnlyV2(_)) = compat::inspect(&content) {
+        let held = format!("{} is a read-only V2 queue", path.display());
+        return Err(queue_unread(held));
+    }
     let (_, meta) = parse_snapshot(&content)
         .map_err(|e| queue_unread(format!("parse {}: {e}", path.display())))?;
     Ok(meta.filter(SnapshotMeta::is_set))

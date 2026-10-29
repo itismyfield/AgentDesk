@@ -127,3 +127,59 @@ async fn a_plain_live_pending_arrival_is_recovered_by_catch_up_as_its_stored_ori
 async fn a_live_pending_reply_with_an_upload_keeps_both_through_catch_up() {
     recover(7_272_502, Some("quoted line"), vec!["local asset ref"]).await;
 }
+
+/// A V2 queue file as a forward binary leaves it, holding `held` queued for a V2-capable binary.
+fn write_v2_queue(fx: &Fixture, channel_id: ChannelId, held: MessageId) -> std::path::PathBuf {
+    let path = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("claude")
+        .join(&fx.shared.token_hash)
+        .join(format!("{channel_id}.json"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let item = serde_json::json!({"author_id":HUMAN_ID,"message_id":held.get(),"channel_id":channel_id.get(),
+        "source_message_ids":[held.get()],"queued_generation":7,"text":format!("request {}", held.get())});
+    let snapshot = serde_json::json!({"version":2,"items":[item],"head_injection":null,
+        "retained_inputs":[],"terminal_identities":[],"namespace":fx.shared.token_hash});
+    std::fs::write(&path, snapshot.to_string()).unwrap();
+    path
+}
+
+/// On a binary that cannot write V2, the production claim never starts a legacy turn on a V2
+/// channel, and the file stays byte for byte.
+#[tokio::test(flavor = "current_thread")]
+async fn a_v2_queue_channel_refuses_every_legacy_claim_and_keeps_its_file() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(7_272_503);
+    let path = write_v2_queue(&fx, channel_id, id(2, 150));
+    let before = std::fs::read(&path).unwrap();
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    let owner = serenity::UserId::new(HUMAN_ID);
+    let start = crate::services::discord::queue_io::mailbox_try_start_turn_behind_queue;
+    assert!(!start(&fx.shared, channel_id, token, owner, id(3, 100)).await);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// A message a V2 queue holds is known to the real catch-up sweep: it is not taken again, and the
+/// frontier stays before it, as for any queued input this binary did not run.
+#[tokio::test(flavor = "current_thread")]
+async fn catch_up_never_retakes_a_message_a_v2_queue_holds() {
+    let fx = Fixture::new().await;
+    let channel_id = ChannelId::new(7_272_504);
+    let (checkpoint, q) = (id(1, 600), id(2, 150));
+    fx.seed_checkpoint(channel_id, checkpoint);
+    let path = write_v2_queue(&fx, channel_id, q);
+    let before = std::fs::read(&path).unwrap();
+    let history = vec![own_reply(channel_id, checkpoint), human(channel_id, q)];
+    let api = StrictApi::new(&fx.shared).with_history(channel_id, history);
+    fx.sweep(&api).await;
+    assert_eq!(
+        api.enqueue_log(),
+        Vec::<EnqueueRecord>::new(),
+        "the V2 file keeps it"
+    );
+    assert_eq!(
+        fx.surfaces(channel_id),
+        (Some(checkpoint.get()), Some(checkpoint.get()))
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

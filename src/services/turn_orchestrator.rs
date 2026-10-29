@@ -91,7 +91,7 @@ pub(crate) use pending_queue_persistence::{
     load_channel_pending_dispatch_marker, load_channel_pending_dispatch_marker_checked,
     load_channel_pending_queue_checked, load_pending_dispatch_markers, load_pending_queues,
     remove_channel_pending_queue_files_all_tokens, save_channel_pending_dispatch_marker,
-    warn_legacy_pending_queue_files,
+    v2_held_sources, warn_legacy_pending_queue_files,
 };
 #[cfg(test)]
 use pending_queue_persistence::{

@@ -280,7 +280,7 @@ pub(crate) fn allows_legacy(id: &str, transcript: &Path) -> bool {
 }
 
 pub(crate) fn known(frame: &str) -> bool {
-    #[cfg(test)]
+    // A rolled-back binary still recognizes frames a V2 history records; it never rewrites them.
     if let Some(known) = path()
         .ok()
         .and_then(|p| compat::known_v2(&p, &class_hashes(frame)))

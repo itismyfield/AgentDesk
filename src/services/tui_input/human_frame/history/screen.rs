@@ -60,7 +60,6 @@ pub(super) fn pending(session: &str, text: &str) -> bool {
 }
 
 fn frames_for(path: &std::path::Path) -> Option<Vec<(String, String)>> {
-    #[cfg(test)]
     if let Some(frames) = super::compat::screen_frames_v2(path) {
         return Some(frames);
     }

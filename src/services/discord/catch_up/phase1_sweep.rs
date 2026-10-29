@@ -124,6 +124,8 @@ pub(super) async fn run<A: CatchUpDiscordApi + ?Sized>(
         // Collect existing message IDs in queue for dedup
         let known_snapshot = mailbox_snapshot(shared, channel_id).await;
         let (mut known_arms, mut existing_ids) = recovery_known_arms_and_ids(&known_snapshot);
+        let fence = crate::services::discord::recovery_known_ids::merge_v2_held_sources;
+        fence(shared, channel_id, &mut known_arms, &mut existing_ids).await;
         // The completed-turn ledger prevents DLQ for delivered ids and restores absorbed arms.
         #[cfg(unix)]
         super::super::outbound::completed_turn_ledger::o_pending::project(
