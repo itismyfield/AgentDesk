@@ -285,6 +285,8 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
 │   ├── server_campaigns/
+│   │   ├── evidence_store.rs
+│   │   ├── evidence_store_tests.rs
 │   │   ├── mod.rs
 │   │   ├── read.rs
 │   │   ├── recovery_tests.rs
@@ -783,15 +785,33 @@ src/
 │   │   ├── recovery.rs
 │   │   └── worker.rs
 │   ├── campaign_execution/
+│   │   ├── adk_profile.rs
+│   │   ├── adk_profile_tests.rs
+│   │   ├── adk_resources.rs
+│   │   ├── adk_resources_tests.rs
+│   │   ├── adk_workspace.rs
+│   │   ├── adk_workspace_tests.rs
+│   │   ├── candidate_seal.rs
+│   │   ├── candidate_seal_tests.rs
 │   │   ├── control.rs
 │   │   ├── control_tests.rs
 │   │   ├── definition.rs
 │   │   ├── definition_tests.rs
+│   │   ├── evidence.rs
+│   │   ├── evidence_gate.rs
+│   │   ├── evidence_gate_tests.rs
+│   │   ├── evidence_tests.rs
+│   │   ├── execution_pin.rs
+│   │   ├── execution_pin_tests.rs
 │   │   ├── mod.rs
 │   │   ├── model.rs
 │   │   ├── model_tests.rs
 │   │   ├── profile.rs
 │   │   ├── profile_tests.rs
+│   │   ├── review_gate.rs
+│   │   ├── review_gate_tests.rs
+│   │   ├── verification_run.rs
+│   │   ├── verification_run_tests.rs
 │   │   ├── view.rs
 │   │   └── view_tests.rs
 │   ├── claude/

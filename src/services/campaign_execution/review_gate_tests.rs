@@ -122,7 +122,11 @@ fn clean_text_alone_never_passes_without_full_chain_and_resolved_findings() {
     fix.review
         .findings
         .push(finding(false, Some("commit mid..out fixes it")));
-    assert_eq!(gate(&[first, fix]).verdict, Verdict::Pass);
+    assert_eq!(gate(&[first.clone(), fix]).verdict, Verdict::Pass);
+    // A later full review that simply omits the open finding does not clear it.
+    let mut dropped = full();
+    dropped.evidence_id = "full-2".into();
+    assert_eq!(gate(&[first, dropped]).verdict, Verdict::QualityFail);
     let unverified = with(&|r| r.unverified = vec!["pg".into(), "docs".into()]);
     assert_eq!(
         unverified.reasons,

@@ -116,10 +116,13 @@ pub fn evaluate_review(
         reasons.push(GateReason::RangeMismatch(last.evidence_id.clone()));
         return StageAssessment::new(Verdict::Reject, reasons, Vec::new());
     }
-    let mut findings = BTreeMap::new();
+    // Findings keep their latest state across every independent review, so a fresh full review cannot drop one.
+    let findings: BTreeMap<_, _> = independent
+        .iter()
+        .flat_map(|r| r.review.findings.iter().map(|f| (&f.id, f)))
+        .collect();
     for record in &chain {
         let review = &record.review;
-        findings.extend(review.findings.iter().map(|f| (f.id.clone(), f)));
         reasons.extend(
             review
                 .unverified
