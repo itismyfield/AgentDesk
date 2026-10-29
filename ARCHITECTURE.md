@@ -1812,8 +1812,7 @@ src/
 │   │   │   ├── terminal_text_idempotency.rs
 │   │   │   ├── terminal_watcher.rs
 │   │   │   ├── tmux_probe.rs
-│   │   │   ├── turn_summary_recovery_tests.rs
-│   │   │   └── two_message_panel.rs
+│   │   │   └── turn_summary_recovery_tests.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── controller_cutover.rs
 │   │   │   ├── mod.rs
@@ -2581,7 +2580,6 @@ src/
 │   │   │   │   ├── tests.rs
 │   │   │   │   └── watcher_handoff.rs
 │   │   │   ├── status_panel/
-│   │   │   │   ├── fallback.rs
 │   │   │   │   ├── provider_failure.rs
 │   │   │   │   ├── purge.rs
 │   │   │   │   └── singleton.rs
