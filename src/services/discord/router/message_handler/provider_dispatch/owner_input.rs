@@ -6,7 +6,8 @@ use std::sync::Mutex;
 use super::StreamingTurn;
 use crate::services::claude_tui::{busy_inject, owner_input as scope};
 use crate::services::discord::queue_io::input_owner::effect::{
-    self, BusyClaude, BusyClaudeHerdr, BusyCodex, Clock, Completion, PreparedPayload,
+    self, BusyClaude, BusyClaudeHerdr, BusyCodex, BusyCodexHerdr, Clock, CodexInput, Completion,
+    PreparedPayload,
 };
 use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOrigin};
 use crate::services::discord::queue_io::input_owner::{pump, target};
@@ -168,32 +169,42 @@ fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Resul
                 .leaf(),
             )
         }
-        target::Route::CodexBusy => {
+        target::Route::CodexBusy | target::Route::CodexHerdrBusy => {
             // Main's busy preparation: the open model turn the paste is aimed at, read up front.
             use crate::services::codex_tui::busy_inject::{TIMING, TurnVerdict, read_turn};
             let target_turn = match read_turn(&r.transcript) {
                 Some(TurnVerdict::KnownModelTurn(turn)) => turn,
                 other => return Err(format!("NotSent(\"busy_turn: {other:?}\")")),
             };
-            let message = r.sources.first().and_then(|id| id.parse().ok());
-            (
-                busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
-                BusyCodex {
+            let frame = busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt);
+            let input = CodexInput {
+                session: session()?.into(),
+                rollout: r.transcript,
+                target_turn,
+                channel: turn.channel_id,
+                message: r.sources.first().and_then(|id| id.parse().ok()),
+                source: "discord".into(),
+                author: r.author,
+                name: r.name,
+                nonce,
+                text: turn.prompt.into(),
+            };
+            let leaf = match (route, r.herdr) {
+                (target::Route::CodexBusy, _) => BusyCodex {
                     pane: busy_inject::Pane::with_program(session()?, r.program),
-                    session: session()?.into(),
-                    rollout: r.transcript,
-                    target_turn,
-                    channel: turn.channel_id,
-                    message,
-                    source: "discord".into(),
-                    author: r.author,
-                    name: r.name,
-                    nonce,
-                    text: turn.prompt.into(),
                     timing: &TIMING,
+                    input,
                 }
                 .leaf(),
-            )
+                (_, Some((target, writer))) => BusyCodexHerdr {
+                    target,
+                    writer,
+                    input,
+                }
+                .leaf(),
+                (_, None) => return Err("owner Herdr input without a pane".into()),
+            };
+            (frame, leaf)
         }
         // Every other create or idle pane belongs to a driver that does not hand it over yet.
         target::Route::Cold => return Err("NotSent(\"cold_launch_unowned\")".into()),

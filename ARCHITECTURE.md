@@ -1009,6 +1009,7 @@ src/
 │   │   ├── herdr_turn/
 │   │   │   ├── first_input/
 │   │   │   │   └── pg_tests.rs
+│   │   │   ├── busy.rs
 │   │   │   ├── composer_tests.rs
 │   │   │   └── first_input.rs
 │   │   ├── tui_session_launch/
@@ -1710,6 +1711,7 @@ src/
 │   │   │   ├── input_owner/
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── codex.rs
+│   │   │   │   │   ├── codex_herdr_tests.rs
 │   │   │   │   │   ├── herdr.rs
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── admission.rs

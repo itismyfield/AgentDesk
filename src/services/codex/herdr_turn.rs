@@ -2,6 +2,8 @@
 //! one prompt to a launch's ready composer, its hold ending only once the hook Source is bound;
 //! a Bound pane takes each later prompt once, never over a draft or changed launch options.
 
+#[cfg(all(test, unix))]
+pub(crate) mod busy;
 mod first_input;
 
 use std::path::Path;
