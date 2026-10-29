@@ -74,17 +74,25 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
         registration.phase,
     )?;
     // Only a Claude tmux launch hands its created execution's first prompt over so far.
-    if route == target::Route::Cold && (turn.provider.as_str(), host) == ("claude", "tmux") {
-        let hook = created(registration, turn.prompt.into());
+    let wanted = match (route, turn.provider.as_str(), host) {
+        (target::Route::Cold, "claude", "tmux") => Some(scope::Lineage::Created),
+        _ => None,
+    };
+    if let Some(wanted) = wanted {
+        let hook = created(registration, turn.prompt.into(), wanted);
         return Some(Taken::Launch(scope::install_launch(hook)));
     }
     Some(Taken::Done(run(turn, route, registration)))
 }
 
-/// Reserves the created execution's first prompt on the target its driver read from the created
-/// pane, never on the prepared one, and runs the driver's own submit as the owner's effect.
-fn created(r: Registration, frame: String) -> scope::LaunchHook {
-    Box::new(move |target, source, submit| {
+/// Reserves the first prompt of the execution its driver observed with `wanted` lineage on that
+/// execution's own target, never the prepared one, and runs the driver's submit as the effect;
+/// another lineage is refused before any reservation.
+fn created(r: Registration, frame: String, wanted: scope::Lineage) -> scope::LaunchHook {
+    Box::new(move |lineage, target, source, writer, submit| {
+        if lineage != wanted {
+            return Err(format!("NotSent(\"lineage_refused: {lineage:?}\")"));
+        }
         let mut attempt = r.attempt;
         attempt["target"] = target;
         attempt["source"] = source;
@@ -93,7 +101,7 @@ fn created(r: Registration, frame: String) -> scope::LaunchHook {
             sources: r.sources,
             attempt,
         };
-        let leaf = effect::created(submit);
+        let leaf = effect::created(submit, writer);
         let submitted = pump::submit(&r.mailbox, prepared, r.clock, leaf);
         match tokio::runtime::Handle::current().block_on(submitted)? {
             Completion::Submitted => Ok(()),

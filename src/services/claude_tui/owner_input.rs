@@ -283,11 +283,47 @@ impl guarded_outcome::Owner for Scope {
 #[cfg(unix)]
 pub(crate) type CreatedSubmit =
     Box<dyn FnOnce(String) -> Result<(), guarded_outcome::SubmissionError> + Send>;
-/// The first prompt of an execution this thread's launch just created: the execution's own
-/// target and source, read from the created pane after the create, and the driver's submit.
+/// What the driver observed of the execution it hands over: created now, pending from an earlier
+/// launch, or already bound.
 #[cfg(unix)]
-pub(crate) type LaunchHook =
-    Box<dyn FnOnce(serde_json::Value, serde_json::Value, CreatedSubmit) -> Result<(), String>>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lineage {
+    Created,
+    Pending,
+    Existing,
+}
+/// The first prompt of an execution this thread's driver observed: its lineage, its own target
+/// and source read after the create or attach, its physical writer, and the driver's submit.
+#[cfg(unix)]
+pub(crate) type LaunchHook = Box<
+    dyn FnOnce(
+        Lineage,
+        serde_json::Value,
+        serde_json::Value,
+        Option<String>,
+        CreatedSubmit,
+    ) -> Result<(), String>,
+>;
+/// A driver's first prompt either failed before the owner took it, as any launch failure, or was
+/// settled by the owner, which leaves no observer, resend or teardown to the driver.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) enum OwnedLaunch {
+    Before(guarded_outcome::SubmissionError),
+    Settled(String),
+}
+#[cfg(unix)]
+impl From<guarded_outcome::SubmissionError> for OwnedLaunch {
+    fn from(error: guarded_outcome::SubmissionError) -> Self {
+        Self::Before(error)
+    }
+}
+#[cfg(unix)]
+impl From<String> for OwnedLaunch {
+    fn from(error: String) -> Self {
+        Self::Before(error.into())
+    }
+}
 #[cfg(unix)]
 thread_local! { static LAUNCH: RefCell<Option<LaunchHook>> = const { RefCell::new(None) }; }
 
@@ -335,6 +371,18 @@ pub(crate) fn install_launch(hook: LaunchHook) -> LaunchGuard {
 }
 #[cfg(all(test, unix))]
 pub(crate) struct LaunchGuard;
+#[cfg(all(test, unix))]
+impl LaunchGuard {
+    /// A driver that ended well without handing its first prompt over wrote nothing owned.
+    pub(crate) fn finish(self, driven: Result<(), String>) -> Result<(), String> {
+        match driven {
+            Ok(()) if LAUNCH.with(|hook| hook.borrow().is_some()) => {
+                Err("NotSent(\"launch_not_owned\")".into())
+            }
+            other => other,
+        }
+    }
+}
 #[cfg(all(test, unix))]
 impl Drop for LaunchGuard {
     fn drop(&mut self) {

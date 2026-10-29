@@ -537,9 +537,13 @@ fn created_first_prompt(rig: &Rig) -> Result<(), String> {
         crate::services::claude::first_input::submit_created(&transcript, 0, &name, &frame)
             .map(drop)
     });
-    let hook = created(prepared_before_launch(rig), PROMPT.into());
+    let hook = created(
+        prepared_before_launch(rig),
+        PROMPT.into(),
+        scope::Lineage::Created,
+    );
     let _entered = rig.runtime.enter();
-    hook(target, source, submit)
+    hook(scope::Lineage::Created, target, source, None, submit)
 }
 
 /// The owner reserves a created execution's first prompt on the identity read from the created
@@ -603,10 +607,12 @@ fn fresh_launch_hands_its_first_prompt_to_the_waiting_owner() {
     let rig = rig("oc-wired", 7_272_516, "normal", view("", false), IDLE);
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let record = seen.clone();
-    let _hook = scope::install_launch(Box::new(move |target, source, _submit| {
-        record.lock().unwrap().push((target, source));
-        Err("refused by the test".into())
-    }));
+    let _hook = scope::install_launch(Box::new(
+        move |_lineage, target, source, _writer, _submit| {
+            record.lock().unwrap().push((target, source));
+            Err("refused by the test".into())
+        },
+    ));
     let owner = rig.f.root.path().join("oc-wired-marker");
     fs::write(&owner, "owner").unwrap();
     let result =
@@ -625,5 +631,100 @@ fn fresh_launch_hands_its_first_prompt_to_the_waiting_owner() {
         json!({"host":"tmux","owner":rig.name,"root":root,"execution_nonce":rig.nonce})
     );
     assert_eq!(seen[0].1["expected_session_id"], "held-sid");
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+    rig.kept(&owner);
+}
+
+impl Rig {
+    /// A fresh launch of this rig's pane whose first prompt the dispatch owner takes; `writer`
+    /// replaces the physical writer the launch handed over.
+    fn fresh_owned(&self, owner: &Path, writer: Option<&str>) -> Result<(), String> {
+        let hook = created(
+            prepared_before_launch(self),
+            PROMPT.into(),
+            scope::Lineage::Created,
+        );
+        let writer = writer.map(str::to_owned);
+        let _hook = scope::install_launch(match writer {
+            Some(writer) => Box::new(move |lineage, target, source, _, submit| {
+                hook(lineage, target, source, Some(writer), submit)
+            }),
+            None => hook,
+        });
+        let _entered = self.runtime.enter();
+        crate::services::claude::fresh_hold_for_tests(&self.transcript(), &self.name, owner, PROMPT)
+    }
+
+    /// The created session and its owner marker outlive an owner's settlement.
+    fn kept(&self, owner: &Path) {
+        self.f
+            .tmux(&["has-session", "-t", &format!("={}", self.name)]);
+        assert!(owner.exists(), "the owner marker stays");
+    }
+}
+
+/// An owner that refuses a created first prompt before any key keeps the original with its proof,
+/// and the launch neither observes nor tears the created session or its marker down; a tmux
+/// target binds no Herdr writer.
+#[test]
+fn owned_refusal_keeps_the_created_session_and_its_marker() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oc-refused", 7_272_517, "normal", view("", false), IDLE);
+    let owner = rig.f.root.path().join("oc-refused-marker");
+    fs::write(&owner, "owner").unwrap();
+    let result = rig.fresh_owned(&owner, Some("/elsewhere.sock#w1:p1"));
+    assert!(
+        result.as_ref().is_err_and(|e| e.contains("NotSent")),
+        "{result:?}"
+    );
+    rig.held_not_sent("only a Herdr owner binds a physical writer");
+    assert_eq!(rig.bind(), TurnBind::NotArmed);
+    rig.kept(&owner);
+}
+
+/// A created first prompt that fails after its first key stays Unknown and is never sent again;
+/// the created session and its marker stay with the owner.
+#[test]
+fn owned_failure_after_a_key_keeps_the_created_session() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dialog = "Resume from summary\n❯ 1. Resume from summary\n  2. Resume full session\n\
+        Enter to confirm · Esc to cancel\n";
+    let rig = rig("oc-keyed", 7_272_518, "normal", dialog.into(), IDLE);
+    fs::write(rig.renderer.join("body"), "").unwrap();
+    let owner = rig.f.root.path().join("oc-keyed-marker");
+    fs::write(&owner, "owner").unwrap();
+    let result = rig.fresh_owned(&owner, None);
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(rig.events(), ["Enter"]);
+    rig.uncertain();
+    assert!(matches!(rig.bind(), TurnBind::Armed(_)));
+    rig.kept(&owner);
+}
+
+/// A driver that ends well without handing its launch's first prompt over wrote nothing owned:
+/// the turn is refused unsent and the hook does not outlive it; a driver's own error stays.
+#[test]
+fn unconsumed_launch_hook_is_not_owned() {
+    use super::super::CLAUDE_LEGACY_PROBE;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oc-unowned", 7_272_519, "normal", view("", false), IDLE);
+    for (driver, expected) in [
+        (Ok(()), "NotSent(\"launch_not_owned\")"),
+        (Err("driver failed".to_string()), "driver failed"),
+    ] {
+        *CLAUDE_LEGACY_PROBE.lock().unwrap() = Some((rig.channel, Box::new(move || driver)));
+        let result = rig.dispatch(
+            ProviderKind::Claude,
+            target::Phase::Absent,
+            &rig.transcript(),
+        );
+        assert_eq!(result, Err(expected.to_string()));
+        assert_eq!(scope::launch_refuses_live(), Ok(()), "hook slot cleared");
+        let snapshot = rig.snapshot();
+        assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+        assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
+        assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+        assert_eq!(rig.bind(), TurnBind::NotArmed);
+    }
     assert!(rig.events().is_empty(), "{:?}", rig.events());
 }

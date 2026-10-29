@@ -185,7 +185,7 @@ fn owned_first_prompt_keeps_its_ticket_for_the_observer() {
     std::fs::write(marker, nonce).unwrap();
     let transcript = f.root.path().join("owned.jsonl");
     let hook: crate::services::claude_tui::owner_input::LaunchHook =
-        Box::new(move |target, source, submit| {
+        Box::new(move |_lineage, target, source, _writer, submit| {
             assert_eq!(target["execution_nonce"], nonce);
             assert_eq!(source["expected_session_id"], "owned-sid");
             submit(prompt.into()).map_err(|error| format!("{error:?}"))
