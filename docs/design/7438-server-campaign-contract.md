@@ -228,6 +228,7 @@ Monolith/에디터/PIE 조건을 증거에 담는다. `~/CookingHeart`의 조사
 `LOCAL_SETUP.md:19`, `Scripts/lib/resolve_ue.sh:50,90`이 해당 경계다.
 문서의 UE 5.8.0과 관측된 로컬 5.8.1이 다르므로 버전을 문서 상수로 추정하지 않는다.
 CH 환경이 없는 fake 성공을 실제 지원으로 표시하지 않는다.
+<!-- doc-path-refs: external AGENTS.md LOCAL_SETUP.md Scripts/lib/resolve_ue.sh -->
 ADK 자기 배포는 action 의도→실행→재시작→부팅 시 실제 배포 SHA 관측으로 확정한다. 무응답 재배포는 없다.
 
 ## 8. legacy 권위와 릴레이 경계
