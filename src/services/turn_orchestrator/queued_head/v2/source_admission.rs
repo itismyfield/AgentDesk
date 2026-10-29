@@ -728,9 +728,8 @@ impl super::super::super::ChannelMailboxHandle {
             .await
     }
 
-    /// Admits under `ticket` in one actor turn: a ticket the owner already holds, committed or still
-    /// unconfirmed, resumes its stored original when `same_input` accepts the caller's copy as the
-    /// same input; an unknown ticket admits the caller's original. Returns the original admitted.
+    /// Admits under `ticket` in one actor turn; a ticket the owner already holds resumes its stored
+    /// original when `same_input` accepts the caller's copy. Returns the original admitted.
     pub(crate) async fn v2_resume_ticket(
         &self,
         original: PendingQueueItem,

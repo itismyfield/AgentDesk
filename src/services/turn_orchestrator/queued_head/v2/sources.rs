@@ -85,9 +85,8 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
     Ok(snapshot)
 }
 
-/// Puts each member of an unmatched reserved unit back as a single queued original, in member order
-/// ahead of the rest: the queue's copy is kept when only recomputed fields differ, a lost member
-/// comes back from the unit, and a body conflict refuses rather than guess.
+/// Puts an unmatched reserved unit back as single queued originals in member order, lost members
+/// included; a member whose body differs from its queue copy refuses rather than guess.
 fn ungroup(snapshot: &mut SnapshotV2, head: &InputAttempt) -> Result<(), String> {
     let mut front = Vec::new();
     for member in head.members() {
