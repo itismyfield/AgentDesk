@@ -3,11 +3,12 @@
 use super::super::input_notices::admission::{NoticeRefusal, admit_notice};
 use super::super::pieces::PieceWork;
 use super::*;
-use crate::services::tui_o::shadow::{CapturedRecord, UnitKind};
+use crate::services::tui_o::shadow::{CapturedRecord, SourceId, UnitKind};
 use crate::services::tui_o::store::ledger::input_notices::{
     MigrationHistory, MigrationSnapshot, MigrationSource, NoticeEntry, NoticeEvidence,
 };
 use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState};
+use sha2::Digest;
 
 fn notice(item: &Derived) -> Option<&PieceWork> {
     match item {
@@ -55,34 +56,63 @@ fn snowflake_ceiling(at: chrono::DateTime<chrono::Utc>) -> u64 {
     let ms = u64::try_from(at.timestamp_millis() - DISCORD_EPOCH_MS).unwrap_or(0);
     (ms << 22) | ((1 << 22) - 1)
 }
-/// The old cursors to the current file ends, with the legacy history bounds.
+/// The live cursors and every source the durable binding log bound past the checkpoint, each to
+/// its current file end, with the legacy history bounds.
 fn frozen_cohort(
     store: &crate::services::tui_o::store::ChannelStore,
+    bound: &[super::super::binding::BindingEvent],
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<MigrationSnapshot, String> {
+    use super::super::binding::{BindingRecord, BindingTarget};
+    let checkpoint = (store.binding_checkpoint())
+        .map_err(|error| format!("input notice migration checkpoint: {error:?}"))?
+        .unwrap_or(0);
+    let mut frozen: Vec<(SourceId, u64, String)> = (store.cursors())
+        .filter(|cursor| !cursor.retired)
+        .map(|cursor| {
+            let at = (cursor.captured_through, cursor.prefix_hash.clone());
+            (cursor.source.clone(), at.0, at.1)
+        })
+        .collect();
+    // A source bound before the freeze but not attached yet starts where its attach will start.
+    for event in bound {
+        let source = match &event.record {
+            BindingRecord::Bound {
+                new: BindingTarget::Source(source),
+                ..
+            }
+            | BindingRecord::Resolved { source, .. } => source,
+            _ => continue,
+        };
+        if frozen.iter().any(|(known, ..)| known == source) {
+            continue;
+        }
+        let at = match store.cursor(source) {
+            Some(cursor) => (cursor.captured_through, cursor.prefix_hash.clone()),
+            None => (0, hex::encode(sha2::Sha256::digest(b""))),
+        };
+        frozen.push((source.clone(), at.0, at.1));
+    }
     let mut sources = Vec::new();
-    for cursor in store.cursors().filter(|cursor| !cursor.retired) {
-        let upper = match std::fs::metadata(&cursor.source.path) {
-            Ok(meta) => meta.len().max(cursor.captured_through),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => cursor.captured_through,
+    for (source, lower, prefix_hash) in frozen {
+        let upper = match std::fs::metadata(&source.path) {
+            Ok(meta) => meta.len().max(lower),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => lower,
             Err(error) => return Err(format!("input notice migration source: {error}")),
         };
         sources.push(MigrationSource {
-            source: cursor.source.clone(),
-            lower: cursor.captured_through,
+            source,
+            lower,
             upper,
-            prefix_hash: cursor.prefix_hash.clone(),
+            prefix_hash,
         });
     }
-    let binding_checkpoint = (store.binding_checkpoint())
-        .map_err(|error| format!("input notice migration checkpoint: {error:?}"))?
-        .unwrap_or(0);
     // Legacy hook notices could precede their native row by a whole queued turn, so only the
     // era's first anchor bounds them from below.
     let lower = store.init().initial_anchor;
     Ok(MigrationSnapshot {
         sources,
-        binding_checkpoint,
+        binding_checkpoint: bound.last().map_or(checkpoint, |event| event.seq),
         history: MigrationHistory::Fixed {
             lower,
             upper: snowflake_ceiling(now).max(lower),
@@ -90,8 +120,9 @@ fn frozen_cohort(
     })
 }
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
-    /// Freezes the legacy cohort once, before resume can capture past the old cursors.
-    pub(super) fn start_notice_migration(&mut self) {
+    /// Freezes the legacy cohort once, before resume can capture past the old cursors; `false`
+    /// holds resume, until a later poll reads the binding log or for good once the writer stopped.
+    pub(super) fn start_notice_migration(&mut self) -> bool {
         if !self.deriver.input_notices_enabled()
             || self.writer.is_stopped()
             || self
@@ -102,18 +133,33 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 .migration
                 .is_some()
         {
-            return;
+            return !self.writer.is_stopped();
         }
         let now = self.utc_now();
-        let snapshot = match frozen_cohort(self.writer.store(), now) {
+        let checkpoint = self.writer.store().binding_checkpoint().ok().flatten();
+        let channel = self.writer.channel();
+        let bound = match self
+            .bindings
+            .binding_events_since(channel, checkpoint.unwrap_or(0))
+        {
+            Ok(bound) => bound,
+            Err(detail) => {
+                let alarm = WriterAlarm::BindingLogUnavailable { checkpoint, detail };
+                self.writer.alarm(alarm);
+                return false;
+            }
+        };
+        let snapshot = match frozen_cohort(self.writer.store(), &bound, now) {
             Ok(snapshot) => snapshot,
             Err(detail) => {
                 self.writer.stop(WriterAlarm::Halted { detail });
-                return;
+                return false;
             }
         };
         let entry = Box::new(NoticeEntry::MigrationStarted { snapshot });
-        let _ = self.writer.record(LedgerEntry::InputNotice { entry });
+        self.writer
+            .record(LedgerEntry::InputNotice { entry })
+            .is_ok()
     }
 
     pub(super) fn persist_notice_evidence(&mut self) -> Vec<UnitKey> {
@@ -289,6 +335,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     pub(super) fn notice_debt_extra(&mut self) -> usize {
+        self.notice_debt(true)
+    }
+
+    /// The debt a delivery can still settle; a migration verdict stays audited in the ledger only,
+    /// so it neither reads as a delivery stall nor holds a source the verdict no longer needs.
+    pub(super) fn notice_debt_open(&mut self) -> usize {
+        self.notice_debt(false)
+    }
+
+    fn notice_debt(&mut self, migration: bool) -> usize {
         if !self.deriver.input_notices_enabled() {
             return 0;
         }
@@ -300,10 +356,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .collect();
         let ledger = self.writer.store().ledger();
         let mut counted = queued;
-        ledger
-            .input_notices()
-            .evidence
-            .values()
+        let state = ledger.input_notices();
+        (state.evidence.iter())
+            .filter(|(id, _)| migration || !state.unresolved.contains_key(*id))
+            .map(|(_, e)| e)
             .filter(|e| match &e.unit_key {
                 Some(key) => !settled(ledger, key) && counted.insert(key.clone()),
                 None => true,

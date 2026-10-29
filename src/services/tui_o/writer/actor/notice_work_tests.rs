@@ -300,9 +300,10 @@ async fn same_source_over_cap_reclaims_raw_and_keeps_debt_after_actor_recreation
             std::fs::metadata(&path).unwrap().len()
         );
         assert_eq!(actor.notice_debt_extra(), 2);
-        assert_eq!(actor.progress().debt, 2);
         assert_eq!(actor.undelivered(9).unwrap().owed, 2);
-        assert_eq!(actor.obligations().unwrap().owed, 2);
+        // Migration debt stays audited but is no delivery work that stalls a turn or holds a source.
+        assert_eq!(actor.progress().debt, 0);
+        assert_eq!(actor.obligations().unwrap().owed, 0);
         assert_eq!(
             actor
                 .writer

@@ -1,4 +1,4 @@
-//! Reconcile only the frozen legacy cohort; receipt imports never prepare a POST.
+//! Reconcile only the frozen legacy cohort: a proven absence posts, any matching message is debt.
 
 use super::{ChannelWriter, Step};
 use crate::services::tui_o::shadow::{SourceRange, UnitKey};
@@ -10,7 +10,7 @@ use crate::services::tui_o::writer::input_notices::evidence::before_migration_fl
 use crate::services::tui_o::writer::{
     AlarmSink, DeliveryLease, DiscordPort, SeenMessage, WriterAlarm, confirm,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 #[derive(Default)]
 struct Plan {
@@ -118,12 +118,6 @@ async fn plan<P: DiscordPort>(
         .values()
         .filter(|input| member(snapshot, &input.record))
         .collect();
-    let mut groups: HashMap<&str, BTreeSet<&UnitKey>> = HashMap::new();
-    for input in &cohort {
-        if let (Some(payload), Some(key)) = (input.payload.as_deref(), input.unit_key.as_ref()) {
-            groups.entry(payload).or_default().insert(key);
-        }
-    }
     let blocked: BTreeSet<_> = state
         .unresolved
         .keys()
@@ -157,7 +151,6 @@ async fn plan<P: DiscordPort>(
     let all_complete = cohort_complete && cohort.iter().all(|input| complete(input));
     let mut entries = Vec::new();
     let mut ready = BTreeSet::new();
-    let mut imported = BTreeSet::new();
     for input in work {
         let queued = input
             .unit_key
@@ -189,34 +182,18 @@ async fn plan<P: DiscordPort>(
         } else {
             history.error.clone()
         };
+        // A matching message may announce an input before the frozen lower, which the cohort cannot
+        // see, so only a proven absence settles a frozen input.
         if reason.is_none()
+            && candidates.is_empty()
             && let Some(key) = input.unit_key.as_ref()
         {
-            if candidates.is_empty() {
-                ready.insert(key.clone());
-                continue;
-            }
-            if let [id] = candidates.as_slice()
-                && input
-                    .payload
-                    .as_deref()
-                    .and_then(|payload| groups.get(payload))
-                    .is_some_and(|keys| keys.len() == 1)
-                && !state.reserved_ids.contains(id)
-                && !state.imported.values().any(|reserved| reserved == id)
-            {
-                if imported.insert(key.clone()) {
-                    entries.push(NoticeEntry::LegacyImported {
-                        input_key: key.clone(),
-                        msg_id: *id,
-                    });
-                }
-                continue;
-            }
+            ready.insert(key.clone());
+            continue;
         }
         entries.push(NoticeEntry::MigrationUnresolved {
             record: input.record.clone(),
-            reason: reason.unwrap_or_else(|| "legacy receipt is not uniquely attributable".into()),
+            reason: reason.unwrap_or_else(|| "legacy receipt origin is not provable".into()),
             candidates,
         });
     }

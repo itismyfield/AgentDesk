@@ -252,7 +252,7 @@ async fn legacy_identical_inputs_remain_unresolved_without_receipts_or_posts() {
 }
 
 #[tokio::test]
-async fn legacy_unique_receipt_imports_once_without_moving_body_frontiers() {
+async fn a_unique_legacy_match_stays_debt_once_without_moving_body_frontiers() {
     let fixture = Fixture::new();
     let input = evidence("p", "unique", 0);
     let key = input.unit_key.clone().unwrap();
@@ -267,8 +267,13 @@ async fn legacy_unique_receipt_imports_once_without_moving_body_frontiers() {
             .is_empty()
     );
     let ledger = writer.store().ledger();
-    assert_eq!(ledger.input_notices().imported.get(&key), Some(&40));
-    assert_eq!(ledger.excluded(&key), Some("input_notice_legacy_imported"));
+    // The message may announce an input before the frozen lower, so it settles nothing.
+    let unresolved: Vec<_> = ledger.input_notices().unresolved.values().collect();
+    assert_eq!(unresolved.len(), 1);
+    assert_eq!(unresolved[0].candidates, [40]);
+    assert!(ledger.input_notices().imported.is_empty());
+    assert!(ledger.excluded(&key).is_none());
+    assert!(ledger.input_notices().reserved_ids.contains(&40));
     assert_eq!((ledger.anchor(), ledger.next_serial()), (10, 0));
     let reads = fixture.port.reads.load(Ordering::SeqCst);
     assert!(

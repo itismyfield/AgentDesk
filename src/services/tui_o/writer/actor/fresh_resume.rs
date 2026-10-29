@@ -190,7 +190,7 @@ pub(super) fn configured_deriver(
     };
     UnitDeriver::new(channel, provider)
         .with_input_notices(super::super::input_notices::Projection::for_provider(
-            provider,
+            channel, provider,
         ))
         .with_tool_cards(inputs)
         .with_turn_summary(summary)

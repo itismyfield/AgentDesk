@@ -324,8 +324,7 @@ where
             break;
         }
         let mut fresh = Vec::new();
-        if !sources_resumed && actor.sources_allowed() {
-            actor.start_notice_migration();
+        if !sources_resumed && actor.sources_allowed() && actor.start_notice_migration() {
             let phase = actor.writer.boot.phase("resume");
             let (writer, deriver) = (&mut actor.writer, &mut actor.deriver);
             let restored = match &mut actor.verified {
@@ -762,7 +761,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     fn progress(&mut self) -> super::progress::ChannelProgress {
         let verified = self.verified.as_ref().map_or(0, |log| log.work.len());
         let (retry, unsealed) = (self.writer.has_local_retry(), self.deriver.has_unsealed());
-        let owed = self.owed.len() + verified + self.notice_debt_extra();
+        let owed = self.owed.len() + verified + self.notice_debt_open();
         let ledger = self.writer.store().ledger();
         super::progress::position(owed, retry, ledger, unsealed)
     }

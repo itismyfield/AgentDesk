@@ -131,14 +131,17 @@ fn execution_fences() -> &'static Mutex<HashMap<FenceKey, Arc<ExecutionFence>>> 
 }
 
 fn execution_fence(endpoint: &HerdrEndpoint, pane: &str, nonce: &str) -> Arc<ExecutionFence> {
-    let key = (
+    fence_at((
         endpoint.execution_node().to_string(),
         endpoint.config_key().to_string(),
         endpoint.socket_path().to_string_lossy().into_owned(),
         endpoint.herdr_session().to_string(),
         pane.to_string(),
         nonce.to_string(),
-    );
+    ))
+}
+
+fn fence_at(key: FenceKey) -> Arc<ExecutionFence> {
     // Closing tombstones must outlive targets so a fresh target cannot reuse an uncertain nonce.
     execution_fences()
         .lock()
@@ -146,6 +149,30 @@ fn execution_fence(endpoint: &HerdrEndpoint, pane: &str, nonce: &str) -> Arc<Exe
         .entry(key)
         .or_default()
         .clone()
+}
+
+/// Restores the fence a restart lost for a Bound execution a reconnect matched exactly, so a
+/// notice admission finds it; an existing entry keeps its closing tombstone.
+pub(crate) fn restore_execution_fence(stored: &HostedExecution) -> bool {
+    let (Some(location), Some(expected)) = (&stored.location, &stored.expected) else {
+        return false;
+    };
+    if !matches!(stored.state, HostedState::Bound)
+        || expected.binding_nonce != stored.execution_nonce
+    {
+        return false;
+    }
+    fence_at((
+        location.execution_node.clone(),
+        location.endpoint_config_key.clone(),
+        std::path::Path::new(&location.socket_addr)
+            .to_string_lossy()
+            .into_owned(),
+        location.named_session.clone(),
+        location.pane_id.clone(),
+        stored.execution_nonce.clone(),
+    ));
+    true
 }
 
 impl ExecutionFence {

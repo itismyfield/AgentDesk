@@ -23,11 +23,38 @@ pub struct NoticeOrigin {
     pub execution_nonce: String,
 }
 
-/// The writer, not the live hook relay, posts Claude terminal-input notices once this build reads
-/// their ledger format; the live relay consults the same predicate before its own POST.
-pub(crate) fn writer_owns(provider: ShadowProvider) -> bool {
+/// The writer derives Claude terminal-input notices only where this build reads their ledger format
+/// and the channel's transcript turns were confirmed; other channels keep their live owner.
+pub(crate) fn writer_owns(channel: u64, provider: ShadowProvider) -> bool {
     crate::services::tui_o::store::input_notice_floor::READER_SUPPORTED
         && provider == ShadowProvider::Claude
+        && crate::services::tui_o::turn_mode::transcript_turns(channel)
+}
+
+/// The live relay leaves a notice to the writer only once the writer's frozen legacy cohort is
+/// durable, so every input it still announced before that stays inside the cohort.
+pub(crate) fn writer_posts(channel: u64, provider: ShadowProvider) -> bool {
+    writer_owns(channel, provider) && handed_over(channel)
+}
+
+fn handed_over(channel: u64) -> bool {
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    static RECORDED: OnceLock<Mutex<std::collections::HashSet<(std::path::PathBuf, u64)>>> =
+        OnceLock::new();
+    let Some(root) = crate::config::runtime_root() else {
+        return false;
+    };
+    let recorded = RECORDED.get_or_init(Default::default);
+    let key = (root, channel);
+    if (recorded.lock().unwrap_or_else(PoisonError::into_inner)).contains(&key) {
+        return true;
+    }
+    let found =
+        crate::services::tui_o::store::input_notice_floor::migration_recorded(&key.0, channel);
+    if found {
+        (recorded.lock().unwrap_or_else(PoisonError::into_inner)).insert(key);
+    }
+    found
 }
 
 /// A native user row always carries the JSON string `"user"`, so other rows skip the parse.
@@ -61,9 +88,9 @@ impl Projection {
         self.enabled
     }
 
-    pub(crate) fn for_provider(provider: ShadowProvider) -> Self {
+    pub(crate) fn for_provider(channel: u64, provider: ShadowProvider) -> Self {
         Self {
-            enabled: writer_owns(provider),
+            enabled: writer_owns(channel, provider),
             ..Self::default()
         }
     }

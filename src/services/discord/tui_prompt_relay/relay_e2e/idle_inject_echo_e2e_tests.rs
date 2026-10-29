@@ -79,8 +79,8 @@ async fn r1_idle_inject_has_no_direct_terminal_notice_pg() {
         1
     );
     submit_hook(&tx, &busy.pane.session(), &frame);
-    // A later slash note is a FIFO relay barrier, not a sleep-based zero assertion.
-    submit_hook(&tx, &busy.pane.session(), "/loop external terminal canary");
+    // The later external notice is a FIFO relay barrier, not a sleep-based zero assertion.
+    submit_hook(&tx, &busy.pane.session(), "external terminal canary");
     assert!(
         wait_until(WAIT, || {
             let found = rt
@@ -90,7 +90,7 @@ async fn r1_idle_inject_has_no_direct_terminal_notice_pg() {
             Box::pin(async move { found })
         })
         .await,
-        "the barrier note must pass the same observer and relay"
+        "external notice must pass the same observer and relay"
     );
     let notices = rt.notices();
     rt.finish().await;
@@ -112,7 +112,7 @@ async fn r1_idle_inject_has_no_direct_terminal_notice_pg() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn r1_unsent_full_frame_is_left_to_the_writer_notice_pg() {
+async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
     let busy = idle().await;
     let rt = &busy.rt;
     let _confirmed = TestConfirmation::new(CHANNEL_ID);
@@ -143,29 +143,32 @@ async fn r1_unsent_full_frame_is_left_to_the_writer_notice_pg() {
         request.nonce,
         request.text,
     );
+    let expected =
+        super::super::super::format_ssh_direct_prompt_notification("claude", &session, &frame);
     submit_hook(&tx, &session, &frame);
-    // The external frame is human input whose notice the tui_o writer derives from its native row.
-    submit_hook(&tx, &session, "/loop unsent frame barrier");
     assert!(
         wait_until(WAIT, || {
-            let found = rt
-                .notices()
-                .iter()
-                .any(|text| text.contains("unsent frame barrier"));
+            let found = rt.notices().contains(&expected);
             Box::pin(async move { found })
         })
         .await,
-        "the barrier note must pass the same observer and relay: {:?}",
+        "the external frame must be announced: {:?}",
         rt.notices()
     );
     let notices = rt.notices();
     rt.finish().await;
-    assert_eq!(
-        notices
-            .iter()
-            .filter(|text| text.contains(request.nonce))
-            .count(),
-        0,
-        "the hook relay must not post the frame beside the writer: {notices:?}"
+    let matching: Vec<_> = notices
+        .iter()
+        .filter(|text| text.contains(request.nonce))
+        .collect();
+    assert_eq!(matching.len(), 1, "one external frame notice: {notices:?}");
+    let notice = matching[0];
+    assert_eq!(notice, &expected);
+    assert!(notice.starts_with("-# ⌨️ "), "{notice}");
+    assert_eq!(notice.lines().count(), 2, "{notice}");
+    assert!(
+        notice.lines().all(|line| line.starts_with("-# ")),
+        "{notice}"
     );
+    assert!(notice.ends_with(request.text), "{notice}");
 }

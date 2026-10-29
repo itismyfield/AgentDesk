@@ -40,6 +40,32 @@ pub(super) fn before_append(store_root: &Path, enabled: bool) -> io::Result<()> 
     fsync_parent_dir(&path)
 }
 
+/// Whether `channel`'s ledger under `runtime_root` already holds its frozen notice cohort, read
+/// without recovering it; a missing or unreadable ledger proves nothing.
+pub(crate) fn migration_recorded(runtime_root: &Path, channel: u64) -> bool {
+    use super::ledger::{LedgerEntry, LedgerLine, input_notices::NoticeEntry};
+    let channel_dir = runtime_root
+        .join(super::STORE_DIR_NAME)
+        .join(channel.to_string());
+    let Ok(bytes) = fs::read(channel_dir.join(super::LEDGER_FILE)) else {
+        return false;
+    };
+    let started = |line: &&[u8]| {
+        line.windows(17)
+            .any(|window| window == b"migration_started")
+    };
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(started)
+        .any(|line| {
+            matches!(
+                serde_json::from_slice::<LedgerLine>(line),
+                Ok(LedgerLine { entry: LedgerEntry::InputNotice { entry }, .. })
+                    if matches!(*entry, NoticeEntry::MigrationStarted { .. })
+            )
+        })
+}
+
 #[cfg(test)]
 #[path = "input_notice_floor/tests.rs"]
 mod tests;

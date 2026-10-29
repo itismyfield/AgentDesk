@@ -95,3 +95,43 @@ fn notice_fence_missing_duplicate_active_and_nested_reads_never_start() {
     assert_eq!(called.get(), 1);
     assert!(rig.server.mutations().is_empty());
 }
+
+#[test]
+fn a_restored_bound_execution_admits_notices_but_never_reopens_a_closing_or_retired_one() {
+    let rig = rig();
+    let endpoint = endpoint(&rig.server);
+    let configured = configured(&endpoint);
+    let stored = stored(&rig.server, HostedState::Bound);
+    let nonce = stored.execution_nonce.clone();
+    assert_eq!(
+        try_notice_fence(&configured, &nonce, || ()),
+        Err(HerdrGateRefusal::NoStoredExecution),
+        "a new process holds no fence"
+    );
+    assert!(restore_execution_fence(&stored));
+    assert!(try_notice_fence(&configured, &nonce, || ()).is_ok());
+    // A target built later shares the restored entry instead of adding a second candidate.
+    let target = HerdrTarget::new(
+        endpoint.clone(),
+        transport(&rig.server, Vec::new()),
+        &stored,
+    )
+    .unwrap();
+    assert!(try_notice_fence(&configured, &nonce, || ()).is_ok());
+    let closing = target.termination_fence().unwrap();
+    drop((closing, target));
+    assert!(restore_execution_fence(&stored));
+    assert_eq!(
+        try_notice_fence(&configured, &nonce, || ()),
+        Err(HerdrGateRefusal::ExecutionClosing)
+    );
+    for state in [HostedState::Pending, HostedState::Retired] {
+        let mut other = stored.clone();
+        other.state = state;
+        other.execution_nonce = format!("{nonce}-{state:?}");
+        other.expected.as_mut().unwrap().binding_nonce = other.execution_nonce.clone();
+        assert!(!restore_execution_fence(&other));
+        assert!(try_notice_fence(&configured, &other.execution_nonce, || ()).is_err());
+    }
+    assert!(rig.server.mutations().is_empty());
+}
