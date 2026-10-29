@@ -23,8 +23,10 @@ let root: Root;
 let saved: ReturnType<typeof vi.fn<(id: string, result: unknown) => void>>;
 let conflicted: ReturnType<typeof vi.fn<() => void>>;
 
+let replaceDraft: (draft: DefinitionDraft) => void = () => {};
 function Harness({ initial }: { initial: DefinitionDraft }) {
   const [draft, setDraft] = useState<DefinitionDraft | null>(initial);
+  replaceDraft = setDraft;
   return draft ? <ServerCampaignForm draft={draft} onDraftChange={(update) => setDraft((current) => current && update(current))}
     tr={tr} onSaved={saved} onConflict={conflicted} onCancel={() => setDraft(null)} disabled={false} /> : <p>closed</p>;
 }
@@ -252,4 +254,15 @@ it("does not pre-validate the definition in the browser", async () => {
   await press("Create");
   expect(create).toHaveBeenCalledOnce();
   expect(container.textContent).toContain("A task has no acceptance condition · task-1");
+});
+
+it("applies a save's answer only to the draft it was sent from", async () => {
+  let fail: (reason: unknown) => void = () => {};
+  edit.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+  await mount(editDraft(fixtures.prepared, () => "key-1"));
+  await press("Save");
+  // The panel replaced the draft (for example, it was discarded and reopened) before the answer came.
+  await act(async () => replaceDraft(editDraft(fixtures.prepared, () => "key-2")));
+  await act(async () => fail(new TypeError("Failed to fetch")));
+  expect(container.textContent).not.toContain("No answer arrived.");
 });

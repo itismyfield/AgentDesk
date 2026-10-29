@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef } from "react";
 import {
   createServerCampaign, editServerCampaignDefinition, getServerCampaign, isDefinitiveAnswer, serverCampaignRejection,
   type ServerCampaignCommandResult, type ServerCampaignDefinition, type ServerCampaignDocument,
@@ -25,6 +25,10 @@ export interface DefinitionDraft {
   change: { reference: string; explanation: string };
   /** The last body sent without a definitive answer: resending that same body reuses its key. */
   sent: { key: string; body: string } | null;
+  /** A save's answer is outstanding. Kept here so the lock outlives the form leaving the screen. */
+  pending: boolean;
+  /** What a create form was filled from, to tell an untouched form from one being written. */
+  seed: Definition;
   status: Status | null;
   newKey: () => string;
 }
@@ -53,25 +57,26 @@ function submittedChange(draft: DefinitionDraft): DefinitionDraft["change"] | nu
 
 export function createDraft(copyOf: Definition | null, newKey = newIdempotencyKey): DefinitionDraft {
   return {
-    mode: "create", id: "", baseRevision: null, baseDefinition: null,
-    definition: structuredClone(copyOf ?? EMPTY), change: { reference: "", explanation: "" }, sent: null, status: null, newKey,
+    mode: "create", id: "", baseRevision: null, baseDefinition: null, definition: structuredClone(copyOf ?? EMPTY), seed: copyOf ?? EMPTY,
+    change: { reference: "", explanation: "" }, sent: null, pending: false, status: null, newKey,
   };
 }
 
 export function editDraft(document: ServerCampaignDocument, newKey = newIdempotencyKey): DefinitionDraft {
   return {
     mode: "edit", id: document.view.campaign_id, baseRevision: document.view.definition_revision,
-    baseDefinition: document.definition, definition: structuredClone(document.definition),
-    change: { reference: "", explanation: "" }, sent: null, status: null, newKey,
+    baseDefinition: document.definition, definition: structuredClone(document.definition), seed: document.definition,
+    change: { reference: "", explanation: "" }, sent: null, pending: false, status: null, newKey,
   };
 }
 
-/** A create form nobody has typed into yet. */
+/** A create form nobody has typed into since it was opened or filled by a copy. */
 export function isUntouchedCreate(draft: DefinitionDraft): boolean {
-  return draft.mode === "create" && !draft.id && draft.sent === null && JSON.stringify(draft.definition) === JSON.stringify(EMPTY);
+  return draft.mode === "create" && !draft.id && draft.sent === null && !draft.pending
+    && JSON.stringify(draft.definition) === JSON.stringify(draft.seed);
 }
 
-export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onConflict, onCancel, disabled, tr }: {
+export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onConflict, onCancel, focus = 0, onFocused, disabled, tr }: {
   draft: DefinitionDraft;
   /** Updates apply to the latest draft; returning null closes it. */
   onDraftChange: (update: (current: DefinitionDraft) => DefinitionDraft | null) => void;
@@ -79,11 +84,21 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
   /** The server holds a newer definition; the caller refreshes what it shows. */
   onConflict?: () => void;
   onCancel: () => void;
+  /** A new nonzero value moves focus to the first field; a form shown again keeps focus where it is. */
+  focus?: number;
+  onFocused?: () => void;
   /** The snapshot is stale or the server refuses edits: nothing may be sent. */
   disabled: boolean;
   tr: Tr;
 }) {
-  const [saving, setSaving] = useState(false);
+  const saving = draft.pending;
+  const sending = useRef(false);
+  const form = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    if (!focus) return;
+    form.current?.querySelector<HTMLElement>("input, select, textarea")?.focus();
+    onFocused?.();
+  }, [focus]); // eslint-disable-line react-hooks/exhaustive-deps -- runs once per focus request
   const { definition } = draft;
   const update = (changes: Partial<DefinitionDraft>) => onDraftChange((current) => ({ ...current, ...changes }));
   const setDefinition = (changes: Partial<Definition>) => update({ definition: { ...definition, ...changes } });
@@ -106,22 +121,23 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
   const reasonMissing = draft.status?.kind === "error" && draft.status.reasonMissing === true;
 
   const save = async (expectedRevision = draft.baseRevision, baseDefinition = draft.baseDefinition) => {
-    if (saving || disabled) return;
+    if (sending.current || saving || disabled) return;
     const change = submittedChange(draft);
     const body = JSON.stringify([draft.mode, draft.id, expectedRevision, definition, change]);
     const key = draft.sent?.body === body ? draft.sent.key : draft.newKey();
-    // Answers merge only their own state into the latest draft, so edits made while waiting survive.
-    const settle = (status: Status, decided: boolean) => onDraftChange((current) => ({
-      ...current, status, sent: decided && current.sent?.key === key ? null : current.sent,
-    }));
-    onDraftChange((current) => ({ ...current, baseRevision: expectedRevision, baseDefinition, sent: { key, body }, status: null }));
-    setSaving(true);
+    // Answers merge only their own state into the latest draft, so edits made while waiting survive,
+    // and only into the draft they were sent from, so a draft reopened meanwhile is left alone.
+    const answer = (apply: (current: DefinitionDraft) => DefinitionDraft | null) =>
+      onDraftChange((current) => current.sent?.key === key ? apply({ ...current, pending: false }) : current);
+    const settle = (status: Status, decided: boolean) => answer((current) => ({ ...current, status, sent: decided ? null : current.sent }));
+    onDraftChange((current) => ({ ...current, baseRevision: expectedRevision, baseDefinition, sent: { key, body }, pending: true, status: null }));
+    sending.current = true;
     try {
       const result = draft.mode === "create"
         ? await createServerCampaign(draft.id, definition, key)
         : await editServerCampaignDefinition(draft.id, expectedRevision ?? 0, definition, change, key);
       // Edits made after sending stay open as a draft on top of the saved revision.
-      onDraftChange((current) => JSON.stringify([current.definition, submittedChange(current)]) === JSON.stringify([definition, change]) ? null : {
+      answer((current) => JSON.stringify([current.definition, submittedChange(current)]) === JSON.stringify([definition, change]) ? null : {
         ...current, mode: "edit", id: draft.id, baseRevision: result.definition_revision, baseDefinition: definition,
         sent: null, status: { kind: "saved", revision: result.definition_revision },
       });
@@ -150,15 +166,15 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
         settle({ kind: "error", text, reasonMissing: refusal.rejection === "missing_change_reason" }, true);
       }
     } finally {
-      setSaving(false);
+      sending.current = false;
     }
   };
 
   const status = draft.status;
-  return <form className="campaign-server-form" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
+  return <form ref={form} className="campaign-server-form" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
     <div className="campaign-edit-grid">
-      {draft.mode === "create" && <label>{tr("캠페인 ID", "Campaign ID")}<input aria-label={tr("캠페인 ID", "Campaign ID")} autoFocus disabled={saving} value={draft.id} onChange={(event) => update({ id: event.target.value })} /></label>}
-      <label>{tr("이름", "Name")}<input aria-label={tr("이름", "Name")} autoFocus={draft.mode === "edit"} value={definition.title} onChange={(event) => setDefinition({ title: event.target.value })} /></label>
+      {draft.mode === "create" && <label>{tr("캠페인 ID", "Campaign ID")}<input aria-label={tr("캠페인 ID", "Campaign ID")} disabled={saving} value={draft.id} onChange={(event) => update({ id: event.target.value })} /></label>}
+      <label>{tr("이름", "Name")}<input aria-label={tr("이름", "Name")} value={definition.title} onChange={(event) => setDefinition({ title: event.target.value })} /></label>
       <label>{tr("저장소", "Repository")}<select aria-label={tr("저장소", "Repository")} value={definition.repository} onChange={(event) => setDefinition({ repository: event.target.value as Definition["repository"] })}><option value="adk">AgentDesk</option><option value="cooking_heart">CookingHeart</option></select></label>
     </div>
     <label>{tr("목표", "Goal")}<textarea aria-label={tr("목표", "Goal")} rows={2} value={definition.goal} onChange={(event) => setDefinition({ goal: event.target.value })} /></label>

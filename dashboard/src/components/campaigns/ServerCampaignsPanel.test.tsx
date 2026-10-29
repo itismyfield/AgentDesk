@@ -260,7 +260,7 @@ function copyOf(document: ServerCampaignDocument, id: string, title: string) {
 }
 
 it("marks the snapshot stale when a poll stays unanswered for a whole interval", async () => {
-  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
   await render();
   await openServer();
   list.mockImplementation(() => new Promise(() => {}));
@@ -271,6 +271,20 @@ it("marks the snapshot stale when a poll stays unanswered for a whole interval",
   expect(buttonByText("Edit definition")?.disabled).toBe(true);
   // The unanswered poll is waited out, not stacked on.
   expect(list).toHaveBeenCalledTimes(2);
+});
+
+it("does not call a refresh the user just started an unanswered server", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+  await render();
+  await openServer();
+  await act(async () => { vi.advanceTimersByTime(14_990); });
+  list.mockImplementation(() => new Promise(() => {}));
+  await click(buttonByText("Refresh"));
+  await act(async () => { vi.advanceTimersByTime(10); });
+  expect(container.textContent).not.toContain("The server is not answering");
+  expect(buttonByText("Edit definition")?.disabled).toBe(false);
+  await act(async () => { vi.advanceTimersByTime(15_000); });
+  expect(container.textContent).toContain("The server is not answering");
 });
 
 it("keeps a command's progress and refusal with the campaign it was sent for", async () => {
@@ -331,18 +345,57 @@ it("selects a missing linked campaign in the selector so every listed campaign s
   expect(container.textContent).toContain("Legacy mode");
 });
 
-it("puts the selection back into the URL after a navigation drops the query", async () => {
+it("puts the selection back into the URL after a navigation drops the query, but never onto another page", async () => {
   await render();
   await openServer();
   window.history.pushState(null, "", "/campaigns");
   await click(buttonByText("Refresh"));
   expect(window.location.search).toBe("?mode=server&campaign=release");
+  window.history.pushState(null, "", "/kanban");
+  await click(buttonByText("Refresh"));
+  expect(`${window.location.pathname}${window.location.search}`).toBe("/kanban");
+});
+
+it("keeps a save locked while its answer is outstanding, even after leaving and reopening the campaign", async () => {
+  list.mockResolvedValue([fixtures.prepared, copyOf(fixtures.prepared, "other", "Other")]);
+  let answer: (value: Awaited<ReturnType<typeof editServerCampaignDefinition>>) => void = () => {};
+  vi.mocked(editServerCampaignDefinition).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+  await render();
+  await openServer("Release");
+  await click(buttonByText("Edit definition"));
+  await click(buttonByText("Save"));
+  await openServer("Other");
+  await openServer("Release");
+  expect(buttonByText("Saving…")?.disabled).toBe(true);
+  expect(container.querySelector<HTMLInputElement>('input[aria-label="Name"]')?.disabled).toBe(false);
+  await act(async () => answer({ definition_revision: 8, run_id: null, control_version: null, event_sequence: 3, control: "prepared" }));
+  expect(container.querySelector("form.campaign-server-form")).toBeNull();
+});
+
+it("marks the event list when it could not be refreshed", async () => {
+  vi.mocked(getServerCampaignEvents).mockRejectedValue(new TypeError("Failed to fetch"));
+  await render();
+  await openServer();
+  expect(container.querySelector(".campaign-connections summary")?.textContent).toContain("Could not refresh events");
+});
+
+it("moves focus into a form only when it is opened, not each time its campaign is shown again", async () => {
+  list.mockResolvedValue([fixtures.prepared, copyOf(fixtures.prepared, "other", "Other")]);
+  await render();
+  await openServer("Release");
+  await click(buttonByText("Edit definition"));
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Name");
+  (document.activeElement as HTMLElement).blur();
+  await openServer("Other");
+  await openServer("Release");
+  expect(document.activeElement?.getAttribute("aria-label")).not.toBe("Name");
 });
 
 it("copies a definition into an untouched create form but never over a draft being written", async () => {
   const done = structuredClone(fixtures.prepared);
   done.view.control = "succeeded";
-  list.mockResolvedValue([done]);
+  const other = copyOf(done, "other", "Other");
+  list.mockResolvedValue([done, other]);
   await render();
   await openServer();
   await click(buttonByText("New server campaign"));
@@ -351,12 +404,18 @@ it("copies a definition into an untouched create form but never over a draft bei
   const createName = () => container.querySelector("form.campaign-server-form")!.querySelector<HTMLInputElement>('input[aria-label="Name"]')!;
   expect(createName().value).toBe("Release");
   expect(document.activeElement?.getAttribute("aria-label")).toBe("Campaign ID");
+  // A form holding an earlier copy that nobody edited takes the next copy.
+  await openServer("Other");
+  await click(buttonByText("Copy definition to a new campaign"));
+  expect(createName().value).toBe("Other");
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(createName(), "Mine");
     createName().dispatchEvent(new Event("input", { bubbles: true }));
   });
+  await openServer("Release");
   await click(buttonByText("Copy definition to a new campaign"));
   expect(createName().value).toBe("Mine");
+  expect(container.textContent).toContain("A new campaign is already being written, so nothing was copied.");
 });
 
 it("brings a selected task's details into view on a narrow screen", async () => {

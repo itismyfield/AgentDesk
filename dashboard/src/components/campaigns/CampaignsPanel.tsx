@@ -28,6 +28,7 @@ const SERVER_OPTION = "server:";
 // Disjoint from edit keys, so a campaign named "new" never shares the create draft.
 const NEW_DRAFT = "create";
 const editKey = (id: string) => `edit:${id}`;
+const POLL_MS = 15_000;
 
 export default function CampaignsPanel({ language }: { language: string }) {
   const tr: Tr = useCallback((ko, en) => language === "ko" ? ko : en, [language]);
@@ -78,22 +79,28 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const [serverSilent, setServerSilent] = useState(false);
   // Campaigns the list does not hold, each with its own last read so a failed read marks only it stale.
   const [details, setDetails] = useState<Record<string, { doc: ServerCampaignDocument | null; loading: boolean; error: string | null }>>({});
-  const [events, setEvents] = useState<{ campaign: string; events: ServerCampaignEvent[] } | null>(null);
+  const [events, setEvents] = useState<{ campaign: string; events: ServerCampaignEvent[]; failed: boolean } | null>(null);
   const [serverDrafts, setServerDrafts] = useState<Record<string, DefinitionDraft>>({});
-  const [createVersion, setCreateVersion] = useState(0);
+  // The form the user just opened or filled takes focus once; showing it again later does not.
+  const focusRequest = useRef<{ key: string; n: number } | null>(null);
+  const focusCount = useRef(0);
   const [stops, setStops] = useState<Record<string, StopIntent>>({});
   // A command's progress and refusal belong to the campaign it was sent for.
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [commandError, setCommandError] = useState<{ campaign: string; text: string } | null>(null);
   const serverRequest = useRef(0);
-  const serverPending = useRef<number | null>(null);
+  const serverPending = useRef<{ id: number; startedAt: number } | null>(null);
   const detailRequest = useRef<Record<string, number>>({});
   const eventsRequest = useRef(0);
   const refreshServer = useCallback(async (onSchedule = false) => {
-    // A scheduled poll waits out an unanswered one instead of superseding it, so its failure still lands.
-    if (onSchedule && serverPending.current !== null) { setServerSilent(true); return; }
+    // A scheduled poll waits out an unanswered one instead of superseding it, so its failure still lands;
+    // a read left unanswered for a whole interval marks the snapshot stale.
+    if (onSchedule && serverPending.current) {
+      if (Date.now() - serverPending.current.startedAt >= POLL_MS) setServerSilent(true);
+      return;
+    }
     const id = ++serverRequest.current;
-    serverPending.current = id;
+    serverPending.current = { id, startedAt: Date.now() };
     try {
       const documents = await getServerCampaigns();
       if (!mounted.current || id !== serverRequest.current) return;
@@ -101,7 +108,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
     } catch (cause) {
       if (mounted.current && id === serverRequest.current) setServerError(cause instanceof Error ? cause.message : "Unable to load server campaigns");
     } finally {
-      if (serverPending.current === id) serverPending.current = null;
+      if (serverPending.current?.id === id) serverPending.current = null;
       if (mounted.current && id === serverRequest.current) { setServerLoaded(true); setServerSilent(false); }
     }
   }, []);
@@ -109,7 +116,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   useEffect(() => {
     mounted.current = true;
     refreshAll();
-    const interval = window.setInterval(() => { if (document.visibilityState === "visible") refreshAll(true); }, 15_000);
+    const interval = window.setInterval(() => { if (document.visibilityState === "visible") refreshAll(true); }, POLL_MS);
     return () => { mounted.current = false; requestId.current++; serverRequest.current++; window.clearInterval(interval); };
   }, [refreshAll]);
   useEffect(() => { writeLocalStorageValue(STORAGE_KEYS.dashboardActiveCampaign, selectedId); }, [selectedId]);
@@ -146,8 +153,13 @@ export default function CampaignsPanel({ language }: { language: string }) {
     if (!selectedCampaign || lastEvent === undefined) return;
     const id = ++eventsRequest.current;
     getServerCampaignEvents(selectedCampaign, { after: Math.max(0, lastEvent - 50), limit: 50 })
-      .then((list) => { if (mounted.current && id === eventsRequest.current) setEvents({ campaign: selectedCampaign, events: list }); })
-      .catch(() => undefined);
+      .then((list) => { if (mounted.current && id === eventsRequest.current) setEvents({ campaign: selectedCampaign, events: list, failed: false }); })
+      .catch(() => {
+        // Keep the last list, marked, rather than an old timeline that looks current.
+        if (mounted.current && id === eventsRequest.current) {
+          setEvents((current) => ({ campaign: selectedCampaign, events: current?.campaign === selectedCampaign ? current.events : [], failed: true }));
+        }
+      });
   }, [selectedCampaign, lastEvent]);
   useEffect(() => setStops((current) => {
     let changed = false;
@@ -164,9 +176,11 @@ export default function CampaignsPanel({ language }: { language: string }) {
     ? serverSelected ? { mode, campaign: serverSelected, node } : null
     : selectedId ? { mode, campaign: selectedId, node } : null;
   const query = location ? campaignLocationQuery(location) : null;
-  // Runs after every render, so a navigation that dropped the query while this panel stayed mounted is undone.
+  // Runs after every render, so a navigation that dropped the query while this panel stayed mounted is undone;
+  // once the address shows another page, the query is not this panel's to write.
+  const [home] = useState(() => window.location.pathname);
   useEffect(() => {
-    if (query && window.location.search !== query) window.history.replaceState(window.history.state, "", `${window.location.pathname}${query}${window.location.hash}`);
+    if (query && window.location.pathname === home && window.location.search !== query) window.history.replaceState(window.history.state, "", `${home}${query}${window.location.hash}`);
   });
 
   const selectServer = (id: string) => { setMode("server"); setServerSelected(id); setNode(null); };
@@ -214,20 +228,32 @@ export default function CampaignsPanel({ language }: { language: string }) {
     if (draft) next[key] = draft; else delete next[key];
     return next;
   });
-  const openDraft = (key: string, draft: () => DefinitionDraft) => setServerDrafts((current) => current[key] ? current : { ...current, [key]: draft() });
-  // A copy fills an untouched create form but never replaces one being written; either way the form takes focus.
-  const copyToCreate = (definition: ServerCampaignDocument["definition"]) => {
-    setServerDrafts((current) => current[NEW_DRAFT] && !isUntouchedCreate(current[NEW_DRAFT]) ? current : { ...current, [NEW_DRAFT]: createDraft(definition) });
-    setCreateVersion((value) => value + 1);
+  const requestFocus = (key: string) => { focusRequest.current = { key, n: ++focusCount.current }; };
+  const openDraft = (key: string, draft: () => DefinitionDraft) => {
+    requestFocus(key);
+    setServerDrafts((current) => current[key] ? { ...current } : { ...current, [key]: draft() });
   };
-  const renderForm = (key: string, disabled: boolean) => serverDrafts[key] && <ServerCampaignForm key={key === NEW_DRAFT ? createVersion : key}
+  // A copy fills an untouched create form; one being written is kept and says the copy was not applied.
+  const copyToCreate = (definition: ServerCampaignDocument["definition"]) => {
+    requestFocus(NEW_DRAFT);
+    setServerDrafts((current) => {
+      const existing = current[NEW_DRAFT];
+      if (!existing || isUntouchedCreate(existing)) return { ...current, [NEW_DRAFT]: createDraft(definition) };
+      if (existing.pending) return { ...current };
+      const text = tr("작성 중인 새 캠페인이 있어 복사하지 않았습니다. 생성하거나 취소한 뒤 다시 복사하세요.", "A new campaign is already being written, so nothing was copied. Create or cancel it, then copy again.");
+      return { ...current, [NEW_DRAFT]: { ...existing, status: { kind: "error", text } } };
+    });
+  };
+  const renderForm = (key: string, disabled: boolean) => serverDrafts[key] && <ServerCampaignForm key={key}
     draft={serverDrafts[key]} disabled={disabled} tr={tr}
+    focus={focusRequest.current?.key === key ? focusRequest.current.n : 0} onFocused={() => { focusRequest.current = null; }}
     onDraftChange={(update) => setServerDraft(key, update)} onCancel={() => setServerDraft(key, () => null)} onConflict={() => void refreshServer()}
     onSaved={(id) => {
       // The form keeps edits made while a create was in flight; they continue as an edit of the new campaign.
       if (key === NEW_DRAFT) {
         setServerDrafts((current) => {
-          if (!current[NEW_DRAFT]) return current;
+          // Only the draft the create came from moves; one opened after it stays a create.
+          if (current[NEW_DRAFT]?.mode !== "edit" || current[NEW_DRAFT].id !== id) return current;
           const { [NEW_DRAFT]: kept, ...rest } = current;
           return { ...rest, [editKey(id)]: rest[editKey(id)] ?? kept };
         });
@@ -281,6 +307,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       {serverDoc ? <>
         {renderForm(editKey(serverDoc.view.campaign_id), !commandAvailability(serverDoc.view, "edit_definition", connection).enabled)}
         <ServerCampaignDetail document={serverDoc} events={events?.campaign === serverDoc.view.campaign_id ? events.events : null}
+          eventsFailed={events?.campaign === serverDoc.view.campaign_id && events.failed}
           connection={connection} selectedNode={node} onSelectNode={setNode} stopIntent={stops[serverDoc.view.campaign_id] ?? null}
           busy={busy.has(serverDoc.view.campaign_id)} commandError={commandError?.campaign === serverDoc.view.campaign_id ? commandError.text : null}
           onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)}
