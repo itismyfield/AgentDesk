@@ -45,6 +45,7 @@ fn unit(native_key: &str, kind: UnitKind) -> UnitKey {
 
 fn record(native_key: &str, payload: &str, outcome: Option<PieceOutcome>) -> PieceRecord {
     PieceRecord {
+        notice_origin: None,
         local_retry: None,
         outcome_at: None,
         unit_key: unit(native_key, UnitKind::Body),
@@ -188,6 +189,7 @@ fn d4act_not_sent_replays_as_settled_without_reclassifying_legacy_records() {
         let serial = serial as u64;
         channel
             .append_ledger(LedgerEntry::Prepared {
+                notice_origin: None,
                 local_retry: None,
                 serial,
                 unit_key: piece.unit_key.clone(),

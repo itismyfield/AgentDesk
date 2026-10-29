@@ -106,6 +106,7 @@ fn operator_resume_prepared_child() {
     let original = channel.ledger().piece(0).unwrap().clone();
     channel
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             local_retry: None,
             serial: 1,
             unit_key: original.unit_key,
@@ -127,6 +128,7 @@ fn approved() -> (Harness, ResumeApproval) {
     let mut channel = harness.channel();
     channel
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             local_retry: None,
             serial: 0,
             unit_key: unit("original"),

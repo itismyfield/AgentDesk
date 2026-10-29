@@ -227,6 +227,7 @@ async fn production_readiness_fallback_withholds_real_writer_effects() {
         },
         index: 0,
         payload: "출처 활성화 전에는 보내지 않는다".into(),
+        notice_origin: None,
     });
     let step = writer
         .deliver_admitted(&piece, Some((&record, &origin)))

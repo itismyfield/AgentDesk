@@ -108,6 +108,7 @@ async fn boot_wait(ending: Ending) {
     channel.set_binding_checkpoint(proof.seq).unwrap();
     channel
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             serial: channel.ledger().next_serial(),
             unit_key: UnitKey {
                 channel_id: CANARY_CHANNEL,

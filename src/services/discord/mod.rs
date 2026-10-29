@@ -188,6 +188,7 @@ mod tui_prompt_relay;
 pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
+pub(crate) use tui_prompt_relay::input_notice_content;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
 pub(crate) mod replay_policy;
