@@ -10,6 +10,17 @@ async fn attach_pool(
     crate::db::auto_queue::test_support::TestPostgresDb,
     sqlx::PgPool,
 ) {
+    crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+    let generation = crate::services::discord::runtime_store::allocate_process_generation();
+    assert!(
+        generation > 0,
+        "the real boot allocator initializes the fixture epoch"
+    );
+    assert_eq!(
+        crate::services::discord::runtime_store::load_generation(),
+        generation,
+        "the fixture uses its own durably allocated boot epoch"
+    );
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate_with_max_connections(1).await;
     f.shared =

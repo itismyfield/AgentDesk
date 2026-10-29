@@ -169,6 +169,87 @@ async fn migration_local_witness_is_issued_only_after_real_durable_ack_pg() {
     let persistence =
         QueuePersistenceContext::new(&ProviderKind::Claude, &f.shared.token_hash, None);
     let actor = f.shared.mailbox(ChannelId::new(discord_mock::CHANNEL_ID));
+    let queue = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("claude")
+        .join(&f.shared.token_hash)
+        .join(format!("{}.json", discord_mock::CHANNEL_ID));
+    let original_bytes = std::fs::read(&queue).unwrap();
+    let original_json: serde_json::Value = serde_json::from_slice(&original_bytes).unwrap();
+    for variant in [
+        "payload",
+        "item-generation",
+        "source-generation",
+        "source-epoch",
+    ] {
+        let mut changed = original_json.clone();
+        let items = if changed.is_array() {
+            changed.as_array_mut().unwrap()
+        } else {
+            changed.get_mut("items").unwrap().as_array_mut().unwrap()
+        };
+        assert_eq!(
+            items.len(),
+            1,
+            "the negative disk observation retains the actual producer's one original"
+        );
+        let item = &mut items[0];
+        assert_eq!(
+            item["message_id"].as_u64(),
+            Some(original_item.message_id.get())
+        );
+        match variant {
+            "payload" => item["text"] = serde_json::json!(format!("{}!", original_item.text)),
+            "item-generation" => item["queued_generation"] = serde_json::json!(0),
+            "source-generation" => {
+                item["source_message_queued_generations"][0]["queued_generation"] =
+                    serde_json::json!(0)
+            }
+            "source-epoch" => {
+                item["source_message_queued_generations"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("enqueued_at_epoch_us");
+            }
+            _ => unreachable!(),
+        }
+        std::fs::write(&queue, serde_json::to_vec(&changed).unwrap()).unwrap();
+        let count = committed.clone();
+        let fence = custody::fenced_waiting(&pool, &wait).await.unwrap();
+        let request = crate::services::turn_orchestrator::migration_wait::PublicationRequest::new(
+            fence,
+            witnessed.clone(),
+            persistence.clone(),
+            move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        let published = actor.publish_migration(request).await.unwrap();
+        let disk_outcome = published.release().await.unwrap();
+        std::fs::write(&queue, &original_bytes).unwrap();
+        if variant == "payload" {
+            assert!(
+                disk_outcome.is_err(),
+                "the actual actor rejects an unobserved durable payload change"
+            );
+        } else {
+            assert!(
+                disk_outcome.is_err(),
+                "raw missing queue metadata is never promoted into publication authority: {variant}"
+            );
+        }
+        assert_eq!(
+            committed.load(Ordering::SeqCst),
+            1,
+            "altered durable input never disappears from the composite publication: {variant}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&queue).unwrap(),
+        original_bytes,
+        "the raw disk negative controls restore every original byte before the real head control"
+    );
     let claim = actor
         .claim_queued_head(
             crate::services::turn_orchestrator::QueueIdentity::of(&original_item),

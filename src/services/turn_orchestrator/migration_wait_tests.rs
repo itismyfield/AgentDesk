@@ -1,7 +1,7 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::intake_outbox::migration_wait::tests::{pending_row, root, setup};
-use crate::db::intake_outbox::migration_wait::{WaitIntent, fenced_waiting};
+use crate::db::intake_outbox::migration_wait::{fenced_waiting, WaitIntent};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -93,7 +93,13 @@ async fn migration_publication_rechecks_actual_unverified_queue_before_callback_
     let (db, pool, intent, _) = fixture(channel.get()).await;
     let registry = ChannelMailboxRegistry::default();
     let handle = registry.handle(channel);
-    let original = item(750330103);
+    let mut original = item(750330103);
+    original.source_message_queued_generations =
+        vec![SourceMessageQueuedGeneration::user_instruction(
+            original.message_id,
+            original.queued_generation,
+        )];
+    original.source_message_queued_generations[0].origin = Some("LiveMessage".into());
     assert!(
         handle
             .enqueue(original.clone(), persistence())
@@ -484,12 +490,10 @@ async fn migration_publication_dangling_queue_snapshot_is_not_empty_pg() {
         .unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink("absent-queue-target", &path).unwrap();
-    assert!(
-        std::fs::symlink_metadata(&path)
-            .unwrap()
-            .file_type()
-            .is_symlink()
-    );
+    assert!(std::fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
     let count = Arc::new(AtomicUsize::new(0));
     let fence = fenced_waiting(&pool, &intent).await.unwrap();
     let result = handle
@@ -511,85 +515,95 @@ async fn migration_publication_dangling_queue_snapshot_is_not_empty_pg() {
 async fn migration_publication_cold_actor_cannot_ignore_previous_durable_queue_pg() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (_dir, _root) = root();
-    let channel = ChannelId::new(750330115);
-    let (db, pool, intent, _) = fixture(channel.get()).await;
-    let previous = ChannelMailboxRegistry::default();
-    let previous_handle = previous.handle(channel);
-    let original = item(750330117);
-    assert!(
-        previous_handle
-            .enqueue(original.clone(), persistence())
-            .await
-            .enqueued
-    );
-    let disk = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
-        &ProviderKind::Claude,
-        "migration-token",
-        channel,
-    )
-    .unwrap();
-    assert_eq!(
-        disk.0.len(),
-        1,
-        "the previous real producer owns a durable queue item"
-    );
-    let path =
-        crate::services::turn_orchestrator::pending_queue_persistence::pending_queue_file_path(
+    for (known, id) in [(false, 750330115), (true, 750330118)] {
+        let channel = ChannelId::new(id);
+        let (db, pool, intent, _) = fixture(channel.get()).await;
+        let previous = ChannelMailboxRegistry::default();
+        let previous_handle = previous.handle(channel);
+        let mut original = item(id + 2);
+        if known {
+            original.source_message_queued_generations =
+                vec![SourceMessageQueuedGeneration::user_instruction(
+                    original.message_id,
+                    original.queued_generation,
+                )];
+            original.source_message_queued_generations[0].origin = Some("LiveMessage".into());
+        }
+        assert!(
+            previous_handle
+                .enqueue(original.clone(), persistence())
+                .await
+                .enqueued
+        );
+        let disk = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
             &ProviderKind::Claude,
             "migration-token",
             channel,
         )
         .unwrap();
-    let content = std::fs::read_to_string(&path).unwrap();
-    let (_, meta) = queued_head::parse_snapshot(&content).unwrap();
-    assert!(
-        meta.is_none_or(|meta| !meta.is_set()),
-        "the regression is ordinary queue custody with no head metadata"
-    );
-    assert_eq!(disk.0[0].message_id, original.message_id);
-    drop(previous_handle);
-    drop(previous);
-    let restarted = ChannelMailboxRegistry::default();
-    let handle = restarted.handle(channel);
-    let fresh = handle.try_snapshot().await.unwrap();
-    assert!(
-        fresh.intervention_queue.is_empty(),
-        "the new actual actor has not hydrated prior custody"
-    );
-    assert!(fresh.cancel_token.is_none() && fresh.pending_user_dispatch.is_none());
-    let count = Arc::new(AtomicUsize::new(0));
-    let fence = fenced_waiting(&pool, &intent).await.unwrap();
-    assert_eq!(fence.waiting().requests().len(), 1);
-    assert!(fence.blockers().is_empty());
-    let result = handle
-        .publish_migration(request(fence, &count))
-        .await
-        .unwrap();
-    let outcome = result.release().await.unwrap();
-    let after = handle.try_snapshot().await.unwrap();
-    let disk_after = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
-        &ProviderKind::Claude,
-        "migration-token",
-        channel,
-    )
-    .unwrap()
-    .0;
-    pool.close().await;
-    db.drop().await;
-    assert_eq!(
-        count.load(Ordering::SeqCst),
-        0,
-        "a fresh actor cannot publish while prior durable queue custody is unobserved"
-    );
-    assert!(
-        outcome.is_err(),
-        "unhydrated durable custody stays a typed refusal"
-    );
-    assert!(
-        after.intervention_queue.is_empty(),
-        "publication cannot implicitly hydrate or take prior queue custody"
-    );
-    assert_eq!(disk_after.len(), 1);
-    assert_eq!(disk_after[0].message_id, original.message_id);
-    assert_eq!(disk_after[0].queued_generation, original.queued_generation);
+        assert_eq!(
+            disk.0.len(),
+            1,
+            "the previous real producer owns a durable queue item"
+        );
+        let path =
+            crate::services::turn_orchestrator::pending_queue_persistence::pending_queue_file_path(
+                &ProviderKind::Claude,
+                "migration-token",
+                channel,
+            )
+            .unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let (_, meta) = queued_head::parse_snapshot(&content).unwrap();
+        assert!(
+            meta.is_none_or(|meta| !meta.is_set()),
+            "the regression is ordinary queue custody with no head metadata"
+        );
+        assert_eq!(disk.0[0].message_id, original.message_id);
+        drop(previous_handle);
+        drop(previous);
+        let restarted = ChannelMailboxRegistry::default();
+        let handle = restarted.handle(channel);
+        let fresh = handle.try_snapshot().await.unwrap();
+        assert!(
+            fresh.intervention_queue.is_empty(),
+            "the new actual actor has not hydrated prior custody"
+        );
+        assert!(fresh.cancel_token.is_none() && fresh.pending_user_dispatch.is_none());
+        let count = Arc::new(AtomicUsize::new(0));
+        let fence = fenced_waiting(&pool, &intent).await.unwrap();
+        assert_eq!(fence.waiting().requests().len(), 1);
+        assert!(fence.blockers().is_empty());
+        let result = handle
+            .publish_migration(request(fence, &count))
+            .await
+            .unwrap();
+        let outcome = result.release().await.unwrap();
+        let after = handle.try_snapshot().await.unwrap();
+        let disk_after = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+            &ProviderKind::Claude,
+            "migration-token",
+            channel,
+        )
+        .unwrap()
+        .0;
+        pool.close().await;
+        db.drop().await;
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "a fresh actor cannot publish while prior durable queue custody is unobserved"
+        );
+        assert!(
+            outcome.is_err(),
+            "unhydrated durable custody stays a typed refusal"
+        );
+        assert!(
+            after.intervention_queue.is_empty(),
+            "publication cannot implicitly hydrate or take prior queue custody"
+        );
+        assert_eq!(disk_after.len(), 1);
+        assert_eq!(disk_after[0].message_id, original.message_id);
+        assert_eq!(disk_after[0].queued_generation, original.queued_generation);
+    }
 }

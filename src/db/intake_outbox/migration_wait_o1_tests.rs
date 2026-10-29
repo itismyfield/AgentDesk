@@ -105,7 +105,7 @@ async fn fenced_composite_reads_foreign_and_queued_facts_on_its_single_connectio
 }
 
 async fn register(pool: &PgPool, row: &IntakeOutboxRow, user: u64, sources: Vec<u64>) -> i64 {
-    use crate::db::replay_disposition::write::{CanonicalInput, register_or_reuse};
+    use crate::db::replay_disposition::write::{register_or_reuse, CanonicalInput};
     let mut input = CanonicalInput::discord(
         "claude",
         row.channel_id.parse().unwrap(),
@@ -245,7 +245,7 @@ async fn failed_preaccept_spelling_cannot_hide_an_unsettled_provider_clock_pg() 
     let (row, intent) = setup(&pool, 75030730, false).await;
     pending_row(&pool, row.id).await;
     let older: i64 = sqlx::query_scalar("INSERT INTO intake_outbox(target_instance_id,forwarded_by_instance_id,channel_id,user_msg_id,request_owner_id,user_text,turn_kind,agent_id,provider,status,accepted_at)
-        VALUES('fence-worker','leader',$1,'75030731','100','prior accepted request','standard','fence-agent','claude','failed_pre_accept',NOW()) RETURNING id")
+        VALUES('fence-worker','leader',$1,'75030750','100','prior accepted request','standard','fence-agent','claude','failed_pre_accept',NOW()) RETURNING id")
         .bind(&row.channel_id).fetch_one(&pool).await.unwrap();
     let before = snapshot(&pool, older).await;
     let fence = fenced_waiting(&pool, &intent).await.unwrap();

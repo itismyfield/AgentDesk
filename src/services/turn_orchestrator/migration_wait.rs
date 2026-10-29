@@ -86,18 +86,20 @@ impl PublicationRequest {
         if state.recovery_started_at.is_some() {
             return Err(Refusal::Recovery);
         }
-        if state.injection_reserved.is_some()
-            || queued_head::migration_clear(state, channel, &self.persistence).is_err()
-        {
+        if state.injection_reserved.is_some() {
             return Err(Refusal::Head);
         }
+        let durable = queued_head::migration_clear(state, channel, &self.persistence)
+            .map_err(|_| Refusal::Head)?;
         if !self.fence.blockers().is_empty()
             || self.fence.foreign_sessions() != 0
             || self.fence.queued_bodies() != 0
         {
             return Err(Refusal::Database);
         }
-        if state.intervention_queue.len() != self.witnesses.len() {
+        if state.intervention_queue.len() != self.witnesses.len()
+            || durable.len() != self.witnesses.len()
+        {
             return Err(Refusal::QueueChanged);
         }
         let mut sources = std::collections::BTreeSet::new();
@@ -108,10 +110,16 @@ impl PublicationRequest {
                 }
             }
         }
-        for (item, witness) in state.intervention_queue.iter().zip(&self.witnesses) {
+        for ((item, persisted), witness) in state
+            .intervention_queue
+            .iter()
+            .zip(&durable)
+            .zip(&self.witnesses)
+        {
             if !witness.intent_matches(intent)
                 || !witness.namespace_matches(&self.persistence, channel)
                 || !witness.matches_exact(item)
+                || !witness.matches_durable(persisted)
             {
                 return Err(Refusal::QueueChanged);
             }

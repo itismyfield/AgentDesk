@@ -6,8 +6,8 @@ use crate::services::turn_orchestrator::{Intervention, QueuePersistenceContext};
 use poise::serenity_prelude as serenity;
 use sha2::{Digest, Sha256};
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -225,6 +225,9 @@ impl LocalCustodyWitness {
     }
     pub(crate) fn matches_exact(&self, item: &Intervention) -> bool {
         self.created_at == item.created_at && original_digest(item) == Some(self.digest)
+    }
+    pub(crate) fn matches_durable(&self, item: &Intervention) -> bool {
+        original_digest(item) == Some(self.digest)
     }
     pub(crate) fn sources(&self) -> &[serenity::MessageId] {
         &self.sources

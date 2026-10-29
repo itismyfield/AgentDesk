@@ -5,8 +5,8 @@ use super::dispatch_reservation::queue_unread;
 use std::path::Path;
 
 use super::pending_queue_persistence::{
-    PendingQueueItem, PendingQueueSourceTextSegment, pending_queue_file_path,
-    pending_queue_item_from_intervention,
+    pending_queue_file_path, pending_queue_item_from_intervention, PendingQueueItem,
+    PendingQueueSourceTextSegment,
 };
 use super::*;
 
@@ -427,9 +427,9 @@ pub(crate) mod mend;
 pub(crate) mod prefix;
 
 pub(super) use claim::step;
-pub(crate) use claim::{HeadMsg, HeadOutcome, HeadSettle, QueuedHeadClaim};
 #[cfg(test)]
-pub(crate) use claim::{HeadTicket, downgrade_channel_snapshot};
+pub(crate) use claim::{downgrade_channel_snapshot, HeadTicket};
+pub(crate) use claim::{HeadMsg, HeadOutcome, HeadSettle, QueuedHeadClaim};
 
 /// The claim and settlement driven by the busy-TUI executor.
 mod claim {
@@ -865,7 +865,7 @@ pub(super) fn migration_clear(
     state: &ChannelMailboxState,
     channel: ChannelId,
     persistence: &QueuePersistenceContext,
-) -> Result<(), String> {
+) -> Result<Vec<Intervention>, String> {
     let key = (persistence.provider.clone(), persistence.token_hash.clone());
     let ledger = &state.queued_head;
     if ledger
@@ -883,11 +883,57 @@ pub(super) fn migration_clear(
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_file() => {}
         Ok(_) => return Err("queue snapshot is not a regular file".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(format!("queue snapshot metadata: {error}")),
     }
-    if read_snapshot_meta(&path)?.is_some() {
+    let content =
+        std::fs::read_to_string(&path).map_err(|error| format!("queue snapshot: {error}"))?;
+    let (items, meta) = parse_snapshot(&content)?;
+    if meta.is_some_and(|meta| meta.is_set()) {
         return Err("durable queue head retains a submitted or unresolved source".into());
     }
-    Ok(())
+    let known = |item: &PendingQueueItem| {
+        let ids: std::collections::BTreeSet<_> = item.source_message_ids.iter().copied().collect();
+        let owners: std::collections::BTreeSet<_> = item
+            .source_message_queued_generations
+            .iter()
+            .map(|owner| owner.message_id)
+            .collect();
+        item.author_id != 0
+            && item.message_id != 0
+            && item.queued_generation != 0
+            && !ids.is_empty()
+            && !ids.contains(&0)
+            && ids.contains(&item.message_id)
+            && ids.len() == item.source_message_ids.len()
+            && owners == ids
+            && owners.len() == item.source_message_queued_generations.len()
+            && item.source_message_queued_generations.iter().all(|owner| {
+                owner.queued_generation != 0
+                    && owner.enqueued_at_epoch_us.is_some_and(|stamp| stamp != 0)
+                    && owner
+                        .origin
+                        .as_deref()
+                        .is_some_and(|origin| !origin.is_empty())
+                    && (owner.message_id != item.message_id
+                        || owner.queued_generation == item.queued_generation)
+            })
+            && item
+                .source_text_segments
+                .iter()
+                .all(|segment| segment.message_id != 0 && ids.contains(&segment.message_id))
+    };
+    if !items.iter().all(known) {
+        return Err("queue snapshot has unknown source custody".into());
+    }
+    let wall = std::time::SystemTime::now();
+    let monotonic = Instant::now();
+    Ok(items
+        .into_iter()
+        .map(|item| {
+            super::pending_queue_persistence::pending_queue_item_to_intervention(
+                item, wall, monotonic,
+            )
+        })
+        .collect())
 }
