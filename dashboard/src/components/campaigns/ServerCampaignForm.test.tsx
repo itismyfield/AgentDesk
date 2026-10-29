@@ -276,10 +276,9 @@ it("shows a dependency a rename left behind so the user can point it at the rena
   await check("task-2 depends on task-1");
   await type(field("Task ID"), "build");
   const box = (label: string) => container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
-  expect(box("task-2 depends on task-1")?.checked).toBe(true);
-  expect(container.textContent).toContain("task-1 (no such task)");
+  expect(box("task-2 depends on task-1 (no such task)")?.checked).toBe(true);
   expect(box("task-2 depends on build")?.checked).toBe(false);
-  await check("task-2 depends on task-1");
+  await check("task-2 depends on task-1 (no such task)");
   await check("task-2 depends on build");
   await press("Create");
   expect(create.mock.calls[0][1].nodes.map((node) => [node.id, node.dependencies])).toEqual([["build", []], ["task-2", ["build"]]]);
@@ -289,10 +288,10 @@ it("lists a dependency on a task that no longer exists so it can be removed", as
   const copied = structuredClone(fixtures.prepared.definition);
   copied.nodes[1].dependencies = [...copied.nodes[1].dependencies, "gone"];
   await mount(createDraft(copied, () => "k"));
-  const orphan = container.querySelector<HTMLInputElement>(`input[aria-label="${copied.nodes[1].id} depends on gone"]`)!;
+  const orphan = container.querySelector<HTMLInputElement>(`input[aria-label="${copied.nodes[1].id} depends on gone (no such task)"]`)!;
   expect(orphan.checked).toBe(true);
   await act(async () => { orphan.click(); });
-  expect(container.querySelector(`input[aria-label="${copied.nodes[1].id} depends on gone"]`)).toBeNull();
+  expect(container.querySelector(`input[aria-label="${copied.nodes[1].id} depends on gone (no such task)"]`)).toBeNull();
 });
 
 it("never moves a dependency onto another task while task IDs are retyped", async () => {
@@ -305,5 +304,70 @@ it("never moves a dependency onto another task while task IDs are retyped", asyn
   for (const step of ["task-", "task-5"]) await type(field("Task ID", 1), step);
   const box = (label: string) => container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
   for (const other of ["task-2", "task-20", "task-5", "task-"]) expect(box(`task-3 depends on ${other}`)?.checked ?? false, other).toBe(false);
-  expect(box("task-3 depends on task-1")?.checked).toBe(true);
+  expect(box("task-3 depends on task-1 (no such task)")?.checked).toBe(true);
+  // Each task and each leftover dependency is listed exactly once, whatever IDs passed through.
+  const rows = [...container.querySelectorAll("fieldset.campaign-server-task")[2].querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].map((input) => input.getAttribute("aria-label"));
+  expect(rows).toEqual(["task-3 depends on task-20", "task-3 depends on task-5", "task-3 depends on task-1 (no such task)"]);
+});
+
+it("lists a dependency on the task's own ID so it can be removed", async () => {
+  create.mockResolvedValue(result);
+  await mount(createDraft(null, () => "k"));
+  await type(field("Campaign ID"), "self");
+  await press("Add task");
+  await press("Add task");
+  await check("task-2 depends on task-1");
+  await type(field("Task ID"), "build");
+  await type(field("Task ID", 1), "task-1");
+  await check("task-1 depends on task-1 (this task)");
+  await press("Create");
+  expect(create.mock.calls[0][1].nodes.map((node) => [node.id, node.dependencies])).toEqual([["build", []], ["task-1", []]]);
+});
+
+it("keeps a dependency another task still satisfies when a task with the same ID is removed", async () => {
+  await mount(createDraft(null, () => "k"));
+  for (let added = 0; added < 3; added++) await press("Add task");
+  await type(field("Task ID", 1), "task-1");
+  await check("task-3 depends on task-1");
+  const removeSecond = [...container.querySelectorAll("fieldset.campaign-server-task")[1].querySelectorAll("button")].find((button) => button.textContent === "Remove task")!;
+  await act(async () => { removeSecond.click(); });
+  expect(container.querySelector<HTMLInputElement>('input[aria-label="task-3 depends on task-1"]')?.checked).toBe(true);
+});
+
+it("fixes only the IDs of tasks from the saved definition, not a new task typed to one of them", async () => {
+  await mount(editDraft(fixtures.prepared, () => "k"));
+  await press("Add task");
+  const added = () => field("Task ID", fixtures.prepared.definition.nodes.length) as HTMLInputElement;
+  await type(added(), "A");
+  expect(added().readOnly).toBe(false);
+  await type(added(), "AB");
+  expect(added().value).toBe("AB");
+  expect((field("Task ID", 0) as HTMLInputElement).readOnly).toBe(true);
+});
+
+it("never gives a new task an ID that a leftover dependency still names", async () => {
+  await mount(createDraft(null, () => "k"));
+  for (let added = 0; added < 4; added++) await press("Add task");
+  await check("task-1 depends on task-4");
+  await type(field("Task ID", 3), "z");
+  const removeSecond = [...container.querySelectorAll("fieldset.campaign-server-task")[1].querySelectorAll("button")].find((button) => button.textContent === "Remove task")!;
+  await act(async () => { removeSecond.click(); });
+  await press("Add task");
+  expect((field("Task ID", 3) as HTMLInputElement).value).not.toBe("task-4");
+  expect(container.querySelector<HTMLInputElement>('input[aria-label="task-1 depends on task-4 (no such task)"]')?.checked).toBe(true);
+});
+
+it("fixes the task IDs a save sent once it succeeds, but not a task typed to one of them meanwhile", async () => {
+  let answer: (value: typeof result) => void = () => {};
+  create.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+  await mount(createDraft(null, () => "k"));
+  await type(field("Campaign ID"), "c");
+  await press("Add task");
+  await press("Create");
+  await press("Add task");
+  await type(field("Task ID", 1), "task-1");
+  await act(async () => answer(result));
+  expect(container.textContent).toContain("Saved as revision 1.");
+  expect((field("Task ID", 0) as HTMLInputElement).readOnly).toBe(true);
+  expect((field("Task ID", 1) as HTMLInputElement).readOnly).toBe(false);
 });
