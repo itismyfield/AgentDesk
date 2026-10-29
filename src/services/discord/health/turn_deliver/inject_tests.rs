@@ -1970,7 +1970,7 @@ async fn an_injection_without_a_discord_message_records_no_disposition_pg() {
 }
 
 #[derive(Clone, Default)]
-struct LogSink(Arc<Mutex<Vec<u8>>>);
+pub(super) struct LogSink(pub(super) Arc<Mutex<Vec<u8>>>);
 
 impl std::io::Write for LogSink {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {

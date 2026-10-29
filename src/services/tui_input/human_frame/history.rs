@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+pub(crate) mod append;
 mod compat;
 #[cfg(test)]
 mod compat_tests;
@@ -37,6 +38,8 @@ struct Entry {
     #[serde(default)]
     screen_prefix: String,
     events: Vec<Event>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    append: Option<append::State>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -154,6 +157,22 @@ pub(crate) fn register(
     {
         return result;
     }
+    register_inner(
+        (provider, session, id, author),
+        transcript,
+        offset,
+        frame,
+        None,
+    )
+}
+
+fn register_inner(
+    (provider, session, id, author): (&str, &str, &str, &str),
+    transcript: &Path,
+    offset: u64,
+    frame: &str,
+    append: Option<append::State>,
+) -> Result<(), String> {
     let file = file_id(&std::fs::metadata(transcript).map_err(|error| error.to_string())?);
     let digest = hash(frame);
     update(|store| {
@@ -173,7 +192,7 @@ pub(crate) fn register(
                 && entry.hash == digest
                 && entry.path == transcript
                 && entry.file == file
-                && entry.events.is_empty()
+                && append::unbound(entry)
         }) {
             return Err("identical frame still unconfirmed".into());
         }
@@ -199,6 +218,7 @@ pub(crate) fn register(
                 + "]",
             screen_prefix: screen::prefix(frame),
             events: Vec::new(),
+            append,
         });
         Ok(())
     })
@@ -212,9 +232,15 @@ pub(crate) fn withdraw(id: &str, transcript: &Path) {
         return;
     }
     if let Err(error) = update(|store| {
-        store
-            .entries
-            .retain(|entry| entry.id != id || entry.path != transcript || !entry.events.is_empty());
+        store.entries.retain(|entry| {
+            entry.id != id
+                || entry.path != transcript
+                || !entry.events.is_empty()
+                || entry
+                    .append
+                    .as_ref()
+                    .is_some_and(|a| a.admission != append::Admission::Reserved)
+        });
         Ok(())
     }) {
         tracing::warn!(%error, "unwritten frame ledger reservation retained");
@@ -296,6 +322,7 @@ pub(crate) fn receipt(
                 && entry.file == file
                 && entry.hash == hash(frame)
                 && entry.offset <= offset
+                && entry.append.is_none()
         }) else {
             return Ok(None);
         };
@@ -384,7 +411,10 @@ fn observed_at(
         .flat_map(|prompt| class_hashes(prompt))
         .collect();
     let matching = |entry: &Entry| {
-        entry.provider == provider && entry.session == session && hashes.contains(&entry.class_hash)
+        entry.append.is_none()
+            && entry.provider == provider
+            && entry.session == session
+            && hashes.contains(&entry.class_hash)
     };
     if let Some(row) = row
         && let Some(entry) = store.entries.iter().find(|entry| {
@@ -396,6 +426,9 @@ fn observed_at(
         })
     {
         return ObservedAttempt::Known(entry.id.clone());
+    }
+    if let Some(observed) = append::observed(&store, provider, session, prompts, row) {
+        return observed;
     }
     if store.entries.iter().any(matching) {
         ObservedAttempt::Pending

@@ -2,4 +2,6 @@
 #   <binary-id> <test> | removed|runnable->ignored | <reason>
 # A row must match a loss the base diff reports for this change, and a loss with no row fails.
 # Rows for tests absent from base and head only warn after landing; clear them in any later PR.
+agentdesk services::codex_tui::busy_inject::inject_tests::a_plan_narrow_and_clipped_screens_reach_enter | removed | Replaced by a_plan_unread_composers_fall_back_and_known_empty_composers_submit: unread/clipped composers now fall back before effects; readable empty composers still submit once.
+agentdesk services::codex_tui::busy_inject::inject_tests::a_plan_post_paste_read_failure_does_not_block_next_input | removed | Replaced by a_plan_unread_next_snapshot_falls_back_and_recovers_without_retyping: post-paste diagnostics do not withhold Enter; a later unread composer falls back and readable recovery proves lock release.
 agentdesk server::task_dispatch_claims::config_read::config_read_tests::claim_config_read_yields_runtime_without_changing_snapshot | removed | Claims now read the boot/reload-validated config snapshot instead of parsing YAML from disk, so there is no blocking disk read left to keep off the runtime; the rewritten config_read_tests cover the snapshot path

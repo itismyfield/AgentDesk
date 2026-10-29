@@ -1,0 +1,12 @@
+{
+  "frontend": "0.164.0",
+  "daemon": "0.164.0",
+  "pane": {
+    "x": 2,
+    "y": 19,
+    "width": 120,
+    "height": 40,
+    "pid": 39450
+  },
+  "capture": "\n  >_ \u001b[1mOpenAI Codex\u001b[0;2m (v0.164.0)\u001b[0m\n     \u001b[2m~/.adk/release/lane-runs/hl-20260925/i7504/logs/native-edit-probe-run7/empty-cwd\u001b[0m\n\n  \u001b[1mTip:\u001b[0m Use the \u001b[1mdesktop app\u001b[0m. Run codex app to open it. It installs automatically if needed.\n\n\n\u001b[1;2m› \u001b[0mINITIAL_BUSY_PROBE_TRIAL2\n\n\n\u001b[2m◦\u001b[0m \u001b[2mWorking\u001b[0m \u001b[2m(1s • \u001b[0;1mesc\u001b[0;2m to interrupt)\u001b[0m\n\n\u001b[2m• \u001b[0mMessages to be submitted after next tool call\u001b[2m (press \u001b[0;1mesc\u001b[0;2m to interrupt and send immediately)\u001b[0m\n\u001b[2m  ↳ [User: probe (ID:7504)] FRAME_QUEUE_ONCE\u001b[0m\n\n\u001b[2m• \u001b[0mQueued follow-up inputs\n\u001b[2m  ↳ \u001b[3mQUEUE_Q_FOR_NEXT_TRIAL2\u001b[0m\n    \u001b[1m⇧←\u001b[0;2m edit last queued message\u001b[0m\n\n\u001b[1m›\u001b[0m \u001b[2mAsk Codex to do anything\u001b[0m\n\n  GPT-6.1-Sol default · ~/.adk/release/lane-runs/hl-20260925/i7504/logs/native-edit-probe-run7/empty-cwd · \u001b[1m←\u001b[0m for agents\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+}
