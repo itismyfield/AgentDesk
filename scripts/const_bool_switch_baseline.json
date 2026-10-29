@@ -4,7 +4,6 @@
   ["src/services/discord/delivery_lease_cell/exact_lease.rs", "RELEASE_ON_DROP"],
   ["src/services/discord/delivery_lease_cell/exact_lease.rs", "RELEASE_ON_DROP"],
   ["src/services/discord/delivery_lease_cell/exact_lease.rs", "RELEASE_ON_DROP"],
-  ["src/services/discord/footer_retirement.rs", "RETIRED"],
   ["src/services/observability/turn_lifecycle.rs", "CONTEXT_COMPACTED_NOTIFY_USER"],
   ["src/services/observability/turn_lifecycle.rs", "CONTEXT_COMPACTED_PERSIST"],
   ["src/services/observability/turn_lifecycle.rs", "SESSION_FRESH_NOTIFY_USER"],
