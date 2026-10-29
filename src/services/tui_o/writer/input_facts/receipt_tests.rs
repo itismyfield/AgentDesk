@@ -45,7 +45,8 @@ fn enqueue(text: &str) -> Value {
 }
 
 fn queued_command(text: &str) -> Value {
-    json!({"type":"attachment", "attachment":{"type":"queued_command", "prompt":text}})
+    json!({"type":"attachment", "attachment":{"type":"queued_command", "prompt":text,
+        "commandMode":"prompt", "origin":{"kind":"human"}, "humanTurn":true}})
 }
 
 fn assistant(text: &str) -> Value {
@@ -142,4 +143,126 @@ fn an_interrupted_close_is_aborted() {
     append(&path, &[user("a", "first"), stop]);
     assert_eq!(facts.poll(u64::MAX).unwrap().state, TurnState::Idle);
     assert_eq!(facts.last_close_aborted(), Some(true));
+}
+
+fn queue(operation: &str, content: Option<&str>, reason: Option<&str>) -> Value {
+    let mut record = json!({"type":"queue-operation", "operation":operation});
+    if let Some(content) = content {
+        record["content"] = json!(content);
+    }
+    if let Some(reason) = reason {
+        record["reason"] = json!(reason);
+    }
+    record
+}
+
+fn closed_with(rows: &[Value]) -> InputFacts {
+    let root = tempfile::tempdir().unwrap();
+    let (path, mut facts) = reader(&root);
+    append(&path, rows);
+    facts.poll(u64::MAX).unwrap();
+    facts
+}
+
+/// A background notification command is no human input: it consumes none.
+#[test]
+fn a_task_notification_command_consumes_no_human_input() {
+    let notification = json!({"type":"attachment", "attachment":{"type":"queued_command",
+        "prompt":"<task-notification>done</task-notification>", "commandMode":"task-notification",
+        "origin":{"kind":"task-notification"}}});
+    let facts = closed_with(&[user("a", "first"), enqueue("b"), notification, idle()]);
+    assert!(facts.pending_receipt());
+}
+
+/// Two inputs of the same body are two inputs: running one leaves the other owed.
+#[test]
+fn equal_bodies_are_separate_inputs() {
+    let rows = [
+        user("a", "first"),
+        enqueue("same"),
+        enqueue("same"),
+        queued_command("same"),
+        idle(),
+    ];
+    assert!(closed_with(&rows).pending_receipt());
+}
+
+/// A human command for another body does not settle this input.
+#[test]
+fn a_command_for_another_input_leaves_this_one_owed() {
+    let rows = [
+        user("a", "first"),
+        enqueue("b"),
+        queued_command("c"),
+        idle(),
+    ];
+    assert!(closed_with(&rows).pending_receipt());
+}
+
+/// Claude's FIFO dequeue ties the next opener to the input it took, whatever that opener says.
+#[test]
+fn a_dequeued_input_runs_in_the_turn_it_opens() {
+    let rows = [
+        user("a", "first"),
+        enqueue("b"),
+        idle(),
+        queue("dequeue", None, None),
+        assistant("b's answer"),
+        idle(),
+    ];
+    assert!(!closed_with(&rows).pending_receipt());
+}
+
+/// Inputs withdrawn before running owe nothing: a cancel-cleared removal and a pull-back.
+#[test]
+fn withdrawn_inputs_owe_no_run() {
+    let cleared = [
+        user("a", "first"),
+        enqueue("b"),
+        queue("remove", Some("b"), Some("cleared_on_cancel")),
+        idle(),
+    ];
+    assert!(!closed_with(&cleared).pending_receipt());
+    let pulled = [
+        user("a", "first"),
+        enqueue("b"),
+        enqueue("c"),
+        queue("popAll", Some("b\nc"), None),
+        idle(),
+    ];
+    assert!(!closed_with(&pulled).pending_receipt());
+    let absorbed = [
+        user("a", "first"),
+        enqueue("b"),
+        queue("remove", Some("b"), Some("absorbed_mid_turn")),
+        idle(),
+    ];
+    assert!(
+        closed_with(&absorbed).pending_receipt(),
+        "absorption alone is not the run: its command must follow"
+    );
+}
+
+/// A reader rebuilt from the file start replays the same owed inputs.
+#[test]
+fn a_rebuilt_reader_replays_owed_inputs() {
+    let root = tempfile::tempdir().unwrap();
+    let (path, mut facts) = reader(&root);
+    append(&path, &[user("a", "first"), enqueue("b"), idle()]);
+    facts.poll(u64::MAX).unwrap();
+    let (dev, ino) = file_identity(&std::fs::metadata(&path).unwrap());
+    let binding = SourceBinding {
+        channel_id: 7_533_003,
+        provider: ShadowProvider::Claude,
+        source: SourceId {
+            session_id: "parent".into(),
+            path: path.clone(),
+            dev,
+            ino,
+        },
+    };
+    let mut rebuilt = InputFacts::open(binding).unwrap();
+    rebuilt.poll(u64::MAX).unwrap();
+    assert_eq!(rebuilt.pending_receipt(), facts.pending_receipt());
+    assert!(rebuilt.pending_receipt());
 }

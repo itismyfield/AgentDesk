@@ -195,7 +195,11 @@ async fn close_channel(
         }
         Carried::Archived(target) => *target,
     };
-    if target_episode {
+    #[cfg(test)]
+    let withheld = tests::withhold_finalize(channel.get());
+    #[cfg(not(test))]
+    let withheld = false;
+    if target_episode && !withheld {
         #[cfg(test)]
         tests::note_event(
             channel.get(),
@@ -284,14 +288,14 @@ async fn still_closed(
         .is_some_and(|now| now.source == end.source && now.through == end.through)
 }
 
-/// An injection settled at or after the transcript last grew has reached the pane, or may have,
-/// with no record of the run it starts read yet.
+/// An unconfirmed injection settled at or after the transcript last grew may have reached the pane
+/// with no record yet; an observed one left a receipt the reader tracks per input.
 fn input_delivered_since(
     provider: &ProviderKind,
     channel: ChannelId,
     end: &ClosedBoundary,
 ) -> bool {
-    discord::inject_disposition::last_channel_delivery(provider, channel)
+    discord::inject_disposition::last_unconfirmed_delivery(provider, channel)
         .is_some_and(|delivered| delivered >= end.grew_at)
 }
 

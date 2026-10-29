@@ -25,6 +25,16 @@ thread_local! {
     static NATIVE: RefCell<HashMap<u64, Option<ClosedBoundary>>> = RefCell::default();
     static HOOKS: RefCell<Hooks> = RefCell::default();
     static EVENTS: RefCell<Vec<(u64, &'static str)>> = const { RefCell::new(Vec::new()) };
+    static WITHHOLD: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Whether this pass's finalize for `channel` is withheld once, as a finalizer that never ran.
+pub(super) fn withhold_finalize(channel: u64) -> bool {
+    WITHHOLD.with(|withhold| {
+        let mut withhold = withhold.borrow_mut();
+        let at = withhold.iter().position(|c| *c == channel);
+        at.map(|at| withhold.remove(at)).is_some()
+    })
 }
 
 /// A scripted native end, for a channel the activity reader cannot bind (no watcher).
@@ -65,9 +75,49 @@ fn user(id: &str) -> String {
 const END: &str = r#"{"type":"system","subtype":"turn_duration"}"#;
 const INTERRUPT: &str = r#"{"type":"user","message":{"content":"[Request interrupted by user]"}}"#;
 const ENQUEUE: &str = r#"{"type":"queue-operation","operation":"enqueue","content":"next"}"#;
-const QUEUED_COMMAND: &str =
-    r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"next"}}"#;
-const ASSISTANT: &str = r#"{"type":"assistant","uuid":"u-answer","apiBlockIndex":0,"message":{"id":"answer","content":[{"type":"text","text":"answer"}]}}"#;
+const QUEUED_COMMAND: &str = r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"next","commandMode":"prompt","origin":{"kind":"human"},"humanTurn":true}}"#;
+const TASK_NOTIFICATION: &str = r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>done</task-notification>","commandMode":"task-notification","origin":{"kind":"task-notification"}}}"#;
+const DEQUEUE: &str = r#"{"type":"queue-operation","operation":"dequeue"}"#;
+
+fn enqueue(text: &str) -> String {
+    format!(r#"{{"type":"queue-operation","operation":"enqueue","content":"{text}"}}"#)
+}
+
+fn prompt(text: &str) -> String {
+    format!(r#"{{"type":"user","uuid":"u-{text}","message":{{"content":"{text}"}}}}"#)
+}
+
+/// A paste settled through the holder's real mailbox reservation, as the injection owner does.
+async fn settle_injection(fx: &Fixture, outcome: discord::inject_disposition::InjectionOutcome) {
+    use crate::services::turn_orchestrator::{InjectionSettlement, ReserveOutcome};
+    let snapshot = discord::mailbox_snapshot(&fx.shared, fx.channel).await;
+    let claim = (snapshot.cancel_token.clone()).map(|token| {
+        (
+            token,
+            snapshot.active_turn_kind,
+            snapshot.active_user_message_id,
+        )
+    });
+    let context = discord::queue_persistence_context(&fx.shared, &PROVIDER, fx.channel);
+    let mailbox = fx.shared.mailbox(fx.channel);
+    let ReserveOutcome::Reserved(ticket) = mailbox
+        .reserve_injection(None, claim, context.clone())
+        .await
+    else {
+        panic!("the carried holder takes the paste");
+    };
+    let settle = InjectionSettlement::Delivered(outcome);
+    let _ = mailbox.settle_injected_input(ticket, settle, context).await;
+}
+/// One assistant reply row, named apart from every other so each is its own unit.
+fn answer() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    format!(
+        r#"{{"type":"assistant","uuid":"u-answer-{id}","apiBlockIndex":0,"message":{{"id":"answer-{id}","content":[{{"type":"text","text":"answer"}}]}}}}"#
+    )
+}
 
 fn append(path: &std::path::Path, rows: &[&str]) {
     let mut file = std::fs::OpenOptions::new()
@@ -331,7 +381,7 @@ async fn observed_enqueue_before_native_open_keeps_carried_episode() {
 
         // The run opens: the episode stays the stall verdict's open turn, aged past the page
         // threshold, exactly as the verdict reads it (`TurnFacts::new`).
-        append(&fx.path, &[&user("next"), ASSISTANT]);
+        append(&fx.path, &[&prompt("next"), &answer()]);
         fx.pass().await;
         fx.assert_kept("its run is open").await;
         let mailbox = fx.shared.mailbox_peek(fx.channel).unwrap();
@@ -357,23 +407,86 @@ async fn observed_enqueue_before_native_open_keeps_carried_episode() {
     }
 }
 
-/// An injection settled after the transcript last grew may have reached the pane unrecorded.
+/// An unconfirmed paste settled after the transcript last grew may have reached the pane unrecorded.
 #[tokio::test(flavor = "current_thread")]
 async fn injection_delivered_after_last_growth_keeps_carried_episode() {
+    use discord::inject_disposition::InjectionOutcome;
     let fx = Fixture::new(7_533_332, 9_100_095_491_915_388_012, Options::default()).await;
-    // The reader has read the close; the injection settles after it.
+    // The reader has read the close; the paste settles after it with no receipt.
     let _ = discord::turn_presence::activity::reading_now(&fx.shared, &PROVIDER, fx.channel).await;
     tokio::time::sleep(Duration::from_millis(5)).await;
-    discord::inject_disposition::note_channel_delivery(
-        &PROVIDER,
-        fx.channel,
-        std::time::Instant::now(),
-    );
+    settle_injection(&fx, InjectionOutcome::Unconfirmed).await;
     fx.pass().await;
-    fx.assert_kept("injected after the last growth").await;
-    append(&fx.path, &[&user("injected"), ASSISTANT, END]);
+    fx.assert_kept("unconfirmed after the last growth").await;
+    append(&fx.path, &[&user("injected"), &answer(), END]);
     fx.pass().await;
     fx.assert_closed("the injected run ended").await;
+}
+
+/// An observed paste's input already ran and closed when its settlement lands late: the closed
+/// input is not held for the next transcript growth.
+#[tokio::test(flavor = "current_thread")]
+async fn late_observed_settlement_does_not_hold_closed_input() {
+    use discord::inject_disposition::InjectionOutcome;
+    let fx = Fixture::new(7_533_333, 9_100_095_491_915_388_013, Options::default()).await;
+    append(
+        &fx.path,
+        &[
+            &enqueue("pasted"),
+            DEQUEUE,
+            &prompt("pasted"),
+            &answer(),
+            END,
+        ],
+    );
+    let _ = discord::turn_presence::activity::reading_now(&fx.shared, &PROVIDER, fx.channel).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    settle_injection(&fx, InjectionOutcome::Observed).await;
+    fx.pass().await;
+    fx.assert_closed("its run closed before the settlement")
+        .await;
+    assert_eq!(events(fx.channel.get()), ["complete"]);
+}
+
+/// A background task's notification command consumes no human input: B, received while A ran,
+/// keeps the carried episode open after A closes, until B's own run closes.
+#[tokio::test(flavor = "current_thread")]
+async fn unrelated_task_notification_cannot_consume_pending_human_input() {
+    use discord::inject_disposition::InjectionOutcome;
+    let options = Options {
+        transcript: vec![user("a")],
+        ..Options::default()
+    };
+    let fx = Fixture::new(7_533_334, 9_100_095_491_915_388_014, options).await;
+    append(&fx.path, &[&enqueue("human b")]);
+    settle_injection(&fx, InjectionOutcome::Observed).await;
+    append(&fx.path, &[TASK_NOTIFICATION, &answer(), END]);
+    fx.pass().await;
+    fx.assert_kept("B received, not run").await;
+    append(&fx.path, &[DEQUEUE, &prompt("human b"), &answer()]);
+    fx.pass().await;
+    fx.assert_kept("B running").await;
+    append(&fx.path, &[END]);
+    fx.pass().await;
+    fx.assert_closed("B ran and closed").await;
+}
+
+/// Of two queued inputs, the one consumed and closed does not settle the other.
+#[tokio::test(flavor = "current_thread")]
+async fn one_consumed_receipt_does_not_clear_other_queued_input() {
+    let options = Options {
+        transcript: vec![user("a"), enqueue("b"), enqueue("c"), END.to_string()],
+        ..Options::default()
+    };
+    let fx = Fixture::new(7_533_335, 9_100_095_491_915_388_015, options).await;
+    fx.pass().await;
+    fx.assert_kept("b and c queued").await;
+    append(&fx.path, &[DEQUEUE, &prompt("b"), &answer(), END]);
+    fx.pass().await;
+    fx.assert_kept("c still queued").await;
+    append(&fx.path, &[DEQUEUE, &prompt("c"), &answer(), END]);
+    fx.pass().await;
+    fx.assert_closed("both ran").await;
 }
 
 /// Injection holds the session transition lock through its paste and settlement.
@@ -594,40 +707,61 @@ async fn watcherless_confirmed_channel_is_closed() {
     fx.assert_closed("watcherless").await;
 }
 
-/// An archived row whose episode the finalizer did not release is retried from memory, once.
+/// The first finalize never runs: the archived row's episode is released from memory on the next
+/// pass, once, and a successor under another nonce is never released by that memory.
 #[tokio::test(flavor = "current_thread")]
 async fn archived_target_retry_is_idempotent() {
     let fx = Fixture::new(7_533_393, 9_100_095_491_915_388_073, Options::default()).await;
     let channel = fx.channel.get();
-    let snapshot = discord::turn_finalizer::SyntheticClaimSnapshot::from_row(&fx.row().unwrap());
-    let row = fx.row().unwrap();
-    let file = inflight::inflight_state_path(
-        &inflight::inflight_runtime_root().unwrap(),
-        &PROVIDER,
-        channel,
+    WITHHOLD.with(|withhold| withhold.borrow_mut().push(channel));
+    fx.pass().await;
+    assert!(fx.row().is_none() && fx.archived(), "archived first");
+    assert!(
+        fx.episode_open().await,
+        "the withheld finalize left the episode"
     );
-    let archive = inflight::inflight_runtime_root().unwrap().join("archive");
-    std::fs::create_dir_all(&archive).unwrap();
-    std::fs::rename(
-        &file,
-        archive.join(format!("{channel}.json.turn-mode-carried-turn-retry")),
-    )
-    .unwrap();
-    super::archived().insert(
-        channel,
-        super::Target {
-            finalizer_turn_id: row.effective_finalizer_turn_id(),
-            nonce: row.turn_nonce.clone(),
-            snapshot,
-            born_generation: row.born_generation,
-        },
+    assert!(events(channel).is_empty());
+    assert!(
+        super::archived().contains_key(&channel),
+        "remembered for retry"
     );
     fx.pass().await;
-    fx.assert_closed("retried").await;
+    assert!(!fx.episode_open().await, "released by the retry");
     assert_eq!(events(channel), ["complete"]);
     assert!(!super::archived().contains_key(&channel));
     fx.pass().await;
     assert_eq!(events(channel), ["complete"], "retry is not repeated");
+}
+
+/// A successor that took the slot before the retry is not the remembered episode.
+#[tokio::test(flavor = "current_thread")]
+async fn archived_target_retry_spares_a_successor() {
+    let fx = Fixture::new(7_533_395, 9_100_095_491_915_388_075, Options::default()).await;
+    let channel = fx.channel.get();
+    WITHHOLD.with(|withhold| withhold.borrow_mut().push(channel));
+    fx.pass().await;
+    discord::mailbox_finish_turn(&fx.shared, &PROVIDER, fx.channel).await;
+    let token = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+        "successor".into(),
+    )));
+    let owner = poise::serenity_prelude::UserId::new(7);
+    let message = MessageId::new(fx.user_msg_id);
+    assert!(discord::mailbox_try_start_turn(&fx.shared, fx.channel, token, owner, message).await);
+    fx.pass().await;
+    let snapshot = discord::mailbox_snapshot(&fx.shared, fx.channel).await;
+    assert_eq!(
+        snapshot.active_turn_nonce.as_deref(),
+        Some("successor"),
+        "successor kept"
+    );
+    assert!(
+        events(channel).is_empty(),
+        "nothing submitted against the successor"
+    );
+    assert!(
+        !super::archived().contains_key(&channel),
+        "the stale memory is dropped"
+    );
 }
 
 /// Once closed, the restored episode no longer holds the channel against queued input.

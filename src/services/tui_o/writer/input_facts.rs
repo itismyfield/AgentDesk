@@ -10,6 +10,7 @@ use crate::services::tui_o::shadow::{
     CaptureOutcome, CaptureSource, ShadowProvider, SourceBinding,
 };
 
+mod queued;
 pub mod reactions;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,8 +72,8 @@ pub struct InputFacts {
     /// every receipt of that turn lies in what it read.
     last_close_aborted: Option<bool>,
     opened: bool,
-    /// A queued input's receipt read outside a running turn, not yet followed by an opener.
-    pending_receipt: bool,
+    /// Queued inputs received and not yet run to a close.
+    queued: queued::QueuedInputs,
 }
 
 impl InputFacts {
@@ -131,7 +132,7 @@ impl InputFacts {
             awaiting_boundary: false,
             last_close_aborted: None,
             opened: false,
-            pending_receipt: false,
+            queued: queued::QueuedInputs::default(),
         })
     }
 
@@ -209,10 +210,9 @@ impl InputFacts {
         self.last_close_aborted
     }
 
-    /// A queued input was received (`enqueue` / `queued_command`) and no turn has opened since,
-    /// so a native run it starts is still to come.
+    /// A queued input was received whose native run has not started, so a run is still owed.
     pub fn pending_receipt(&self) -> bool {
-        self.pending_receipt
+        self.queued.owed()
     }
 
     pub fn binding(&self) -> &SourceBinding {
@@ -287,6 +287,7 @@ impl InputFacts {
                 return Err("sidechain record in parent transcript".into());
             }
             let row = row_key(&value);
+            let was_open = matches!(self.state, TurnState::Open { .. });
             let range = (record.start, record.end);
             for fact in classify(self.binding.provider, &value) {
                 self.saw_turn_evidence |= !matches!(fact, RecordFact::Prompt(false, _));
@@ -354,11 +355,9 @@ impl InputFacts {
                     self.mark(next, range, closed, &value);
                 }
             }
-            if let Some(attachment) = queued_input_receipt(self.binding.provider, &value) {
-                // An attachment read inside a running turn is that turn consuming the input.
-                let open = matches!(self.state, TurnState::Open { .. });
-                self.pending_receipt = !(attachment && open);
-            }
+            let open = matches!(self.state, TurnState::Open { .. });
+            let provider = self.binding.provider;
+            self.queued.read(provider, &value, open, open && !was_open);
             if record.line.windows(9).any(|bytes| bytes == b"[adk:tok=") {
                 self.events.push(Ordered::Input {
                     range,
@@ -384,7 +383,7 @@ impl InputFacts {
     fn mark(&mut self, next: TurnState, range: (u64, u64), closed: Option<String>, value: &Value) {
         match &next {
             TurnState::Open { native_turn_id } => {
-                (self.pending_receipt, self.opened) = (false, true);
+                self.opened = true;
                 self.events.push(Ordered::Opened {
                     range,
                     native_turn_id: native_turn_id.clone(),
@@ -395,6 +394,7 @@ impl InputFacts {
                 let opened = self.opened
                     || crate::services::tui_o::turn_mode::carried_close_mutant("opener");
                 self.last_close_aborted = opened.then_some(aborted);
+                self.queued.closed();
                 self.events.push(Ordered::Closed {
                     range,
                     native_turn_id: closed,
@@ -406,19 +406,6 @@ impl InputFacts {
         self.state = next;
         self.awaiting_boundary = false;
         self.carried = TurnState::Unknown;
-    }
-}
-
-/// Claude's receipt of a queued input, which opens no turn: `Some(true)` for a `queued_command`
-/// attachment, `Some(false)` for an `enqueue` queue operation.
-fn queued_input_receipt(provider: ShadowProvider, value: &Value) -> Option<bool> {
-    if provider != ShadowProvider::Claude {
-        return None;
-    }
-    match value["type"].as_str()? {
-        "queue-operation" => (value["operation"] == "enqueue").then_some(false),
-        "attachment" => (value["attachment"]["type"] == "queued_command").then_some(true),
-        _ => None,
     }
 }
 

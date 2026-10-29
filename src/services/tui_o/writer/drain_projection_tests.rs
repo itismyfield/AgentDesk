@@ -377,6 +377,16 @@ async fn actual_actor_captured_unposted_end_keeps_carried_turn() {
     assert_eq!(harness.port.posts(), ["held"]);
     let done = owed.borrow().clone().unwrap();
     assert_eq!((done.posting, done.prepared, done.owed), (0, 0, 0));
+
+    // A POST another writer of the channel is running is published on its own.
+    let release = held_post(&harness);
+    let mut other = harness.writer();
+    let running = tokio::spawn(async move { other.deliver(&piece("m9", "other")).await });
+    polls(2).await;
+    let posting = owed.borrow().clone().unwrap();
+    assert_eq!(posting.posting, 1, "{posting:?}");
+    release.send(()).unwrap();
+    running.await.unwrap();
     halt(stop, task).await;
 }
 
