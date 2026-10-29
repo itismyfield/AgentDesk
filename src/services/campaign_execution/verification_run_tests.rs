@@ -197,8 +197,9 @@ fn started(phase: &str, pid: u32) -> PhaseInitiation {
     }
 }
 
-fn indeterminate() -> PhaseInitiation {
+fn indeterminate(id: &str) -> PhaseInitiation {
     PhaseInitiation::Indeterminate {
+        initiation_id: id.into(),
         evidence: "spawn reply lost".into(),
         observed_at: at(),
     }
@@ -207,12 +208,14 @@ fn indeterminate() -> PhaseInitiation {
 fn observation(
     run: &VerificationRun,
     phase: &str,
+    initiation_id: &str,
     outcome: ReconciledInitiation,
 ) -> InitiationObservation {
     InitiationObservation {
         execution_id: run.origin.execution_id.clone(),
         action_id: run.phase(phase).unwrap().action_id.clone(),
         phase_id: phase.into(),
+        initiation_id: initiation_id.into(),
         outcome,
         evidence: "process table and nonce env read directly".into(),
         observed_at: at(),
@@ -596,6 +599,23 @@ fn plan_binds_the_tests_the_plan_selected_not_the_whole_universe() {
     let (mut pg, _) = prepared_with(spec(), universe.clone(), vec![listed("pg_b", false)]);
     pg.bind_plan(&spec()).unwrap();
     assert_eq!(ids(&pg), ["agentdesk pg_b"]);
+    // The listed universe binds only a plan that selected every runnable listed test.
+    let mut whole = spec();
+    whole.checks[0].selection = SelectionRule::ListedUniverse;
+    let (mut partial, _) = prepared_with(
+        whole.clone(),
+        universe.clone(),
+        vec![listed("unit_a", false)],
+    );
+    assert_eq!(partial.bind_plan(&whole), Err(VerificationError::Conflict));
+    assert_eq!(partial.plan, Slot::Unbound);
+    let (mut complete, _) = prepared_with(
+        whole.clone(),
+        universe.clone(),
+        vec![listed("pg_b", false), listed("unit_a", false)],
+    );
+    complete.bind_plan(&whole).unwrap();
+    assert_eq!(ids(&complete), ["agentdesk pg_b", "agentdesk unit_a"]);
     for selected in [
         vec![listed("ghost", false)],
         vec![listed("old", false)],
@@ -734,7 +754,9 @@ fn started_or_indeterminate_phases_reconcile_instead_of_restarting_after_reload(
     let (mut fresh, mut fresh_actions) = registered();
     fresh.bind_subject(subject()).unwrap();
     fresh.bind_phase_input("archive", input(&[])).unwrap();
-    fresh.record_initiation("archive", indeterminate()).unwrap();
+    fresh
+        .record_initiation("archive", indeterminate("i-1"))
+        .unwrap();
     fresh_actions.get_mut(&action_id).unwrap().state = ActionState::Unknown;
     assert_eq!(
         fresh.admit_phase_start("archive", &fresh_actions[&action_id], &work, fence()),
@@ -757,13 +779,13 @@ fn started_or_indeterminate_phases_reconcile_instead_of_restarting_after_reload(
         receipt: receipt("archive", 41),
         process: process(41),
     };
-    let mut other_execution = observation(&fresh, "archive", seen.clone());
+    let mut other_execution = observation(&fresh, "archive", "i-1", seen.clone());
     other_execution.execution_id = "v-other".into();
     assert!(matches!(
         fresh.reconcile_initiation(other_execution),
         Err(VerificationError::ActionMismatch(_))
     ));
-    let mut other_action = observation(&fresh, "archive", ReconciledInitiation::Unstarted);
+    let mut other_action = observation(&fresh, "archive", "i-1", ReconciledInitiation::Unstarted);
     other_action.action_id = fresh.phase("list").unwrap().action_id.clone();
     assert!(matches!(
         fresh.reconcile_initiation(other_action),
@@ -774,7 +796,7 @@ fn started_or_indeterminate_phases_reconcile_instead_of_restarting_after_reload(
         process: process(42),
     };
     assert_eq!(
-        fresh.reconcile_initiation(observation(&fresh, "archive", other_process)),
+        fresh.reconcile_initiation(observation(&fresh, "archive", "i-1", other_process)),
         Err(VerificationError::Conflict)
     );
     assert_eq!(
@@ -784,7 +806,7 @@ fn started_or_indeterminate_phases_reconcile_instead_of_restarting_after_reload(
     let mut fresh: VerificationRun =
         serde_json::from_slice(&serde_json::to_vec(&fresh).unwrap()).unwrap();
     assert_eq!(
-        fresh.reconcile_initiation(observation(&fresh, "archive", seen)),
+        fresh.reconcile_initiation(observation(&fresh, "archive", "i-1", seen)),
         Ok(ActionState::Started)
     );
     let archive = fresh_actions.get_mut(&action_id).unwrap();
@@ -804,6 +826,7 @@ fn started_or_indeterminate_phases_reconcile_instead_of_restarting_after_reload(
         fresh.reconcile_initiation(observation(
             &fresh,
             "archive",
+            "i-1",
             ReconciledInitiation::Unstarted
         )),
         Err(VerificationError::Conflict)
@@ -813,7 +836,7 @@ fn started_or_indeterminate_phases_reconcile_instead_of_restarting_after_reload(
         process: process(41),
     };
     assert_eq!(
-        fresh.reconcile_initiation(observation(&fresh, "archive", replay)),
+        fresh.reconcile_initiation(observation(&fresh, "archive", "i-1", replay)),
         Ok(ActionState::Started)
     );
     let other_after = ReconciledInitiation::Started {
@@ -821,23 +844,41 @@ fn started_or_indeterminate_phases_reconcile_instead_of_restarting_after_reload(
         process: process(44),
     };
     assert_eq!(
-        fresh.reconcile_initiation(observation(&fresh, "archive", other_after)),
+        fresh.reconcile_initiation(observation(&fresh, "archive", "i-1", other_after)),
         Err(VerificationError::Conflict)
     );
     let mut finished = result("archive", 0, PhaseOutput::None);
     finished.receipt = receipt("archive", 41);
     fresh
-        .record_result("archive", &fresh_actions[&action_id], finished)
+        .record_result("archive", &fresh_actions[&action_id], finished.clone())
         .unwrap();
+    // A late copy of the resolving Started observation answers with the finished state and
+    // leaves the recorded result alone instead of moving the action back to Started.
+    let mut fresh: VerificationRun =
+        serde_json::from_slice(&serde_json::to_vec(&fresh).unwrap()).unwrap();
+    let late = ReconciledInitiation::Started {
+        receipt: receipt("archive", 41),
+        process: process(41),
+    };
+    assert_eq!(
+        fresh.reconcile_initiation(observation(&fresh, "archive", "i-1", late)),
+        Ok(ActionState::Reconciled)
+    );
+    assert_eq!(
+        fresh.phase("archive").unwrap().result.as_ref(),
+        Some(&finished)
+    );
     let (mut idle, mut idle_actions) = registered();
     idle.bind_subject(subject()).unwrap();
     idle.bind_phase_input("archive", input(&[])).unwrap();
-    idle.record_initiation("archive", indeterminate()).unwrap();
+    idle.record_initiation("archive", indeterminate("i-1"))
+        .unwrap();
     idle_actions.get_mut(&action_id).unwrap().state = ActionState::Unknown;
     assert_eq!(
         idle.reconcile_initiation(observation(
             &idle,
             "archive",
+            "i-1",
             ReconciledInitiation::Unstarted
         )),
         Ok(ActionState::Planned)
@@ -856,6 +897,7 @@ fn started_or_indeterminate_phases_reconcile_instead_of_restarting_after_reload(
         idle.reconcile_initiation(observation(
             &idle,
             "archive",
+            "i-1",
             ReconciledInitiation::Unstarted
         )),
         Ok(ActionState::Planned)
@@ -870,12 +912,13 @@ fn started_or_indeterminate_phases_reconcile_instead_of_restarting_after_reload(
     relaunched.bind_subject(subject()).unwrap();
     relaunched.bind_phase_input("archive", input(&[])).unwrap();
     relaunched
-        .record_initiation("archive", indeterminate())
+        .record_initiation("archive", indeterminate("i-1"))
         .unwrap();
     relaunched
         .reconcile_initiation(observation(
             &relaunched,
             "archive",
+            "i-1",
             ReconciledInitiation::Unstarted,
         ))
         .unwrap();
@@ -886,10 +929,80 @@ fn started_or_indeterminate_phases_reconcile_instead_of_restarting_after_reload(
         relaunched.reconcile_initiation(observation(
             &relaunched,
             "archive",
+            "i-1",
             ReconciledInitiation::Unstarted
         )),
         Err(VerificationError::Conflict)
     );
+    // A second lost start is resolved only by an observation naming it: the earlier Unstarted,
+    // an unknown id or a reused id cannot stand in for it, before or after a reload.
+    let (mut relost, _) = registered();
+    relost.bind_subject(subject()).unwrap();
+    relost.bind_phase_input("archive", input(&[])).unwrap();
+    relost
+        .record_initiation("archive", indeterminate("i-1"))
+        .unwrap();
+    relost
+        .reconcile_initiation(observation(
+            &relost,
+            "archive",
+            "i-1",
+            ReconciledInitiation::Unstarted,
+        ))
+        .unwrap();
+    relost
+        .record_initiation("archive", indeterminate("i-1"))
+        .unwrap();
+    assert_eq!(relost.phase("archive").unwrap().initiations.len(), 2);
+    let rewritten = PhaseInitiation::Indeterminate {
+        initiation_id: "i-1".into(),
+        evidence: "spawn reply lost again".into(),
+        observed_at: at(),
+    };
+    assert_eq!(
+        relost.record_initiation("archive", rewritten),
+        Err(VerificationError::Conflict)
+    );
+    relost
+        .record_initiation("archive", indeterminate("i-2"))
+        .unwrap();
+    assert_eq!(
+        relost.phase("archive").unwrap().unresolved_initiation(),
+        Some("i-2")
+    );
+    let mut relost: VerificationRun =
+        serde_json::from_slice(&serde_json::to_vec(&relost).unwrap()).unwrap();
+    for stale in ["i-1", "i-9"] {
+        assert_eq!(
+            relost.reconcile_initiation(observation(
+                &relost,
+                "archive",
+                stale,
+                ReconciledInitiation::Unstarted
+            )),
+            Err(VerificationError::Conflict)
+        );
+        assert!(relost.phase("archive").unwrap().unresolved());
+    }
+    assert_eq!(
+        relost.reconcile_initiation(observation(
+            &relost,
+            "archive",
+            "i-2",
+            ReconciledInitiation::Unstarted
+        )),
+        Ok(ActionState::Planned)
+    );
+    assert_eq!(
+        relost.reconcile_initiation(observation(
+            &relost,
+            "archive",
+            "i-2",
+            ReconciledInitiation::Unstarted
+        )),
+        Ok(ActionState::Planned)
+    );
+    assert_eq!(relost.phase("archive").unwrap().initiations.len(), 4);
 }
 
 #[test]
@@ -1153,7 +1266,8 @@ fn audit_follows_failed_tests_and_collection_waits_for_every_fixed_phase() {
         ),
         Ok(PhaseAdmission::Start { .. })
     ));
-    run.record_initiation("audit", indeterminate()).unwrap();
+    run.record_initiation("audit", indeterminate("i-1"))
+        .unwrap();
     actions.get_mut(&audit_id).unwrap().state = ActionState::Unknown;
     assert_eq!(collect(&run, &actions), Err(VerificationError::NotFinished));
     let seen = ReconciledInitiation::Started {
@@ -1161,7 +1275,7 @@ fn audit_follows_failed_tests_and_collection_waits_for_every_fixed_phase() {
         process: process(7),
     };
     assert_eq!(
-        run.reconcile_initiation(observation(&run, "audit", seen)),
+        run.reconcile_initiation(observation(&run, "audit", "i-1", seen)),
         Ok(ActionState::Started)
     );
     let audit_action = start_action(&mut actions, &audit_id, "audit");

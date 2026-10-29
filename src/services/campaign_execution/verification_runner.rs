@@ -212,14 +212,14 @@ pub fn process_tree_state(process: &ProcessIdentity) -> TreeState {
 }
 
 // Windows has no process group to probe: the leader and every descendant are enumerated, and
-// a failed enumeration stays Unknown rather than passing for Gone.
+// anything short of a complete, well-formed process list stays Unknown rather than passing for Gone.
 #[cfg(not(unix))]
 pub fn process_tree_state(process: &ProcessIdentity) -> TreeState {
     let Ok(output) = Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
-            "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId)\" }",
+            "$ErrorActionPreference = 'Stop'; try { Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId)\" } } catch { exit 1 }",
         ])
         .output()
     else {
@@ -228,24 +228,44 @@ pub fn process_tree_state(process: &ProcessIdentity) -> TreeState {
     if !output.status.success() {
         return TreeState::Unknown;
     }
-    let edges: Vec<(u32, u32)> = String::from_utf8_lossy(&output.stdout)
+    match parse_process_edges(&String::from_utf8_lossy(&output.stdout)) {
+        Some(edges) => tree_state_from_edges(process.pid, &edges),
+        None => TreeState::Unknown,
+    }
+}
+
+// Every line must be a `pid,parent` pair; an empty or partly unreadable listing is no observation.
+pub fn parse_process_edges(listing: &str) -> Option<Vec<(u32, u32)>> {
+    let lines: Vec<&str> = listing
         .lines()
-        .filter_map(|line| {
-            let (pid, parent) = line.trim().split_once(',')?;
-            Some((pid.parse().ok()?, parent.parse().ok()?))
-        })
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
         .collect();
-    let mut tree = vec![process.pid];
+    if lines.is_empty() {
+        return None;
+    }
+    lines
+        .iter()
+        .map(|line| {
+            let (pid, parent) = line.split_once(',')?;
+            Some((pid.trim().parse().ok()?, parent.trim().parse().ok()?))
+        })
+        .collect()
+}
+
+// Alive while the leader or any of its descendants is still listed.
+pub fn tree_state_from_edges(leader: u32, edges: &[(u32, u32)]) -> TreeState {
+    let mut tree = vec![leader];
     let mut index = 0;
     while index < tree.len() {
         let parent = tree[index];
-        tree.extend(
-            edges
-                .iter()
-                .filter(|(_, p)| *p == parent)
-                .map(|(pid, _)| *pid)
-                .filter(|pid| !tree.contains(pid)),
-        );
+        let children: Vec<u32> = edges
+            .iter()
+            .filter(|(_, p)| *p == parent)
+            .map(|(pid, _)| *pid)
+            .filter(|pid| !tree.contains(pid))
+            .collect();
+        tree.extend(children);
         index += 1;
     }
     if edges.iter().any(|(pid, _)| tree.contains(pid)) {

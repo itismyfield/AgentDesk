@@ -10,6 +10,8 @@ use crate::services::campaign_execution::verification_run::tests as run_tests;
 use crate::services::campaign_execution::verification_run::{
     PhaseInput, SelectionRule, VerificationCollection, VerificationRun, VerificationSpec, digest_of,
 };
+#[cfg(unix)]
+use crate::services::campaign_execution::verification_run::{Slot, VerificationError};
 
 fn at() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-10-29T09:00:00Z")
@@ -776,10 +778,10 @@ fn test_children_do_not_inherit_the_operational_root() {
     );
 }
 
-// The listed-universe selection plans every runnable test without a classifier file.
+// Plans the two-test universe with the real helper under the listed-universe policy. `partial`
+// forges a plan command that claims the universe scope while reading a one-test selection file.
 #[cfg(unix)]
-#[test]
-fn listed_universe_plans_the_whole_list_with_the_real_helper() {
+fn universe_plan_with_real_helper(partial: bool) -> (VerificationRun, VerificationSpec, usize) {
     let temp = tempfile::tempdir().unwrap();
     let scratch = temp.path().join("scratch");
     let target = temp.path().join("target");
@@ -837,7 +839,22 @@ fn listed_universe_plans_the_whole_list_with_the_real_helper() {
         &logs,
         None,
     );
-    let classify_input = phase_input(&run, sh("true", checkout), &["list"], vec![], vec![]);
+    let selection = scratch.join("selection.json");
+    let classify_script = if partial {
+        format!(
+            "printf '%s' '{{\"non_pg\":[\"campaign::probe\"]}}' > {}",
+            selection.display()
+        )
+    } else {
+        "true".to_owned()
+    };
+    let classify_input = phase_input(
+        &run,
+        sh(&classify_script, checkout),
+        &["list"],
+        vec![],
+        vec![],
+    );
     drive(
         &mut run,
         &mut actions,
@@ -849,15 +866,29 @@ fn listed_universe_plans_the_whole_list_with_the_real_helper() {
     );
     let plan_json = scratch.join("plan/plan.json");
     let config = scratch.join("plan/worker-0.toml");
+    let mut plan_command = adk_phase_command(
+        PhaseKind::Plan,
+        &paths,
+        &identity,
+        &policy,
+        if partial {
+            SelectionRule::NonPgClassifier
+        } else {
+            SelectionRule::ListedUniverse
+        },
+    );
+    if partial {
+        let scope = plan_command
+            .argv
+            .iter()
+            .position(|a| a == "--scope")
+            .unwrap();
+        plan_command.argv[scope + 1] = "campaign:universe".into();
+        assert!(plan_command.argv.iter().any(|a| a == "--only"));
+    }
     let plan_input = phase_input(
         &run,
-        adk_phase_command(
-            PhaseKind::Plan,
-            &paths,
-            &identity,
-            &policy,
-            SelectionRule::ListedUniverse,
-        ),
+        plan_command,
         &["list", "classify"],
         vec![expected("plan", &plan_json), expected("config", &config)],
         vec![],
@@ -878,7 +909,47 @@ fn listed_universe_plans_the_whole_list_with_the_real_helper() {
         panic!("real plan output: {:?}", plan.output);
     };
     assert_eq!(scope, "campaign:universe");
-    assert_eq!(selected.len(), 2);
+    (run, spec, selected.len())
+}
+
+#[cfg(unix)]
+#[test]
+fn listed_universe_plans_the_whole_list_with_the_real_helper() {
+    let (mut run, spec, selected) = universe_plan_with_real_helper(false);
+    assert_eq!(selected, 2);
     run.bind_plan(&spec).unwrap();
     assert_eq!(run.plan.bound().unwrap().manifest.len(), 2);
+}
+
+// The helper records whatever `--scope` it is given, so a partial plan can call itself the
+// universe; the run refuses to bind it instead of trusting that self-declaration.
+#[cfg(unix)]
+#[test]
+fn a_partial_plan_claiming_the_universe_scope_does_not_bind() {
+    let (mut run, spec, selected) = universe_plan_with_real_helper(true);
+    assert_eq!(selected, 1);
+    assert_eq!(run.bind_plan(&spec), Err(VerificationError::Conflict));
+    assert_eq!(run.plan, Slot::Unbound);
+}
+
+// The Windows tree observation is only trusted when the whole process listing parsed; a
+// missing or malformed listing is Unknown, and Gone needs the leader and every descendant absent.
+#[test]
+fn a_windows_process_listing_must_be_complete_before_a_tree_is_gone() {
+    assert_eq!(parse_process_edges(""), None);
+    assert_eq!(parse_process_edges("\r\n\r\n"), None);
+    assert_eq!(
+        parse_process_edges("12,4\r\nProcessId,ParentProcessId\r\n"),
+        None
+    );
+    assert_eq!(parse_process_edges("12,4\r\n13\r\n"), None);
+    let edges = parse_process_edges("4,1\r\n12,4\r\n13,12\r\n20,1\r\n").unwrap();
+    assert_eq!(edges, vec![(4, 1), (12, 4), (13, 12), (20, 1)]);
+    assert_eq!(tree_state_from_edges(12, &edges), TreeState::Alive);
+    assert_eq!(tree_state_from_edges(99, &edges), TreeState::Gone);
+    // Once the leader has exited the tree is Gone only when nothing it spawned is listed either.
+    let orphans = [(4u32, 1u32), (20, 1)];
+    assert_eq!(tree_state_from_edges(12, &orphans), TreeState::Gone);
+    let survivors = [(4u32, 1u32), (13, 12), (14, 13), (20, 1)];
+    assert_eq!(tree_state_from_edges(12, &survivors), TreeState::Alive);
 }
