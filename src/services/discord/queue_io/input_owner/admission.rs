@@ -40,7 +40,7 @@ pub(crate) enum AdmissionState {
 }
 
 /// Where a committed ticket's original stands in the owner: the owner's own single definition.
-pub(crate) use crate::services::turn_orchestrator::{ExactTurn, TurnBind};
+pub(crate) use crate::services::turn_orchestrator::TurnBind;
 
 pub(crate) async fn admit(
     handle: &ChannelMailboxHandle,
