@@ -291,7 +291,7 @@ pub mod campaign_adapter {
     pub use crate::db::server_campaigns::evidence_store;
     pub use crate::services::campaign_execution::{
         adk_profile, adk_resources, adk_workspace, candidate_seal, evidence, evidence_gate,
-        execution_pin, profile, review_gate, verification_run,
+        execution_pin, profile, review_gate, verification_run, verification_runner,
     };
 }
 

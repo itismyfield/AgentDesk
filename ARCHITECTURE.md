@@ -812,6 +812,8 @@ src/
 │   │   ├── review_gate_tests.rs
 │   │   ├── verification_run.rs
 │   │   ├── verification_run_tests.rs
+│   │   ├── verification_runner.rs
+│   │   ├── verification_runner_tests.rs
 │   │   ├── view.rs
 │   │   └── view_tests.rs
 │   ├── claude/

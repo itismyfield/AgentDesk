@@ -11,4 +11,5 @@ pub mod model;
 pub mod profile;
 pub mod review_gate;
 pub mod verification_run;
+pub mod verification_runner;
 pub mod view;
