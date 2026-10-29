@@ -119,10 +119,15 @@ function revisionEight() {
   latest.view.definition_revision = 8;
   latest.definition.goal = "Changed elsewhere";
   latest.definition.nodes[1].group = "group-from-r8";
+  latest.definition.nodes.push({
+    id: "D", title: "Deploy service", issue_url: "https://github.com/itismyfield/AgentDesk/issues/7441", group: "rollout-r8", dependencies: ["A"],
+    acceptance: [{ id: "AC-D1", description: "Production deployment verified", verification: "deployment" }],
+  });
   return latest;
 }
-function latestValues() {
-  return [...container.querySelectorAll(".campaign-server-latest > div")].map((row) => [row.querySelector("dt")?.textContent, row.querySelector("dd")?.textContent]);
+const addedD = "Deploy service\nissue_url: https://github.com/itismyfield/AgentDesk/issues/7441\ngroup: rollout-r8\ndependencies: A\nacceptance.AC-D1: Production deployment verified (deployment)";
+function latestValues(scope = '[aria-label="Values in revision 8"]') {
+  return [...container.querySelectorAll(`${scope} > div`)].map((row) => [row.querySelector("dt")?.textContent, row.querySelector("dd")?.textContent]);
 }
 
 it("keeps the draft on a 409 and shows the newer definition's changed values next to it", async () => {
@@ -133,12 +138,17 @@ it("keeps the draft on a 409 and shows the newer definition's changed values nex
   await type(field("Name"), "My new name");
   await press("Save");
   expect(container.textContent).toContain("This definition changed (revision 8). Your draft is kept.");
-  expect(container.textContent).toContain("Changed elsewhere: goal, B.group");
-  expect(latestValues()).toEqual([["goal", "Changed elsewhere"], ["B.group", "group-from-r8"]]);
+  expect(container.textContent).toContain("Changed elsewhere: goal, B.group, D (added)");
+  expect(latestValues()).toEqual([["goal", "Changed elsewhere"], ["B.group", "group-from-r8"], ["D (added)", addedD]]);
+  // The whole newer definition stays readable, not only what changed.
+  expect(latestValues(".campaign-server-latest-definition dl").map(([id]) => id)).toEqual(["A", "B", "C", "D"]);
+  expect(latestValues(".campaign-server-latest-definition dl")[3][1]).toBe(addedD);
+  expect(container.querySelectorAll('[aria-label="Task ID"]')).toHaveLength(3);
   expect(field("Name").value).toBe("My new name");
   expect(field("Goal").value).toBe("Integrate and verify the release");
   expect(field("Group", 1).value).toBe("release");
   // Saving over the newer revision is an explicit choice; the draft is still the user's.
+  expect(edit).toHaveBeenCalledOnce();
   await press("Save over revision 8");
   expect(edit.mock.calls[1].slice(1, 3)).toEqual([8, { ...fixtures.prepared.definition, title: "My new name" }]);
 });

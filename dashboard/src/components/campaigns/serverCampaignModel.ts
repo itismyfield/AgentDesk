@@ -219,8 +219,16 @@ export function changedDefinitionValues(base: ServerCampaignDefinition, latest: 
     }
     for (const ac of next.acceptance) if (!node.acceptance.some((candidate) => candidate.id === ac.id)) changed.push({ field: `${node.id}.acceptance.${ac.id} (added)`, value: acValue(ac) });
   }
-  for (const [id, node] of after) if (!base.nodes.some((candidate) => candidate.id === id)) changed.push({ field: `${id} (added)`, value: node.title });
+  for (const [id, node] of after) if (!base.nodes.some((candidate) => candidate.id === id)) changed.push({ field: `${id} (added)`, value: nodeDefinitionText(node) });
   return changed;
+}
+
+/** One task's whole definition as read-only lines: title, link, group, dependencies and every acceptance. */
+export function nodeDefinitionText(node: ServerCampaignDefinition["nodes"][number]): string {
+  return [
+    node.title, `issue_url: ${node.issue_url}`, `group: ${node.group ?? ""}`, `dependencies: ${node.dependencies.join(", ")}`,
+    ...node.acceptance.map((ac) => `acceptance.${ac.id}: ${ac.description} (${ac.verification})`),
+  ].join("\n");
 }
 
 export function newIdempotencyKey(): string {

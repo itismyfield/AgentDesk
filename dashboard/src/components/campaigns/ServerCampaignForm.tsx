@@ -4,7 +4,7 @@ import {
   type ServerCampaignCommandResult, type ServerCampaignDefinition, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
 import type { Tr } from "./campaignPresentation";
-import { changedDefinitionValues, newIdempotencyKey, rejectionText } from "./serverCampaignModel";
+import { changedDefinitionValues, newIdempotencyKey, nodeDefinitionText, rejectionText } from "./serverCampaignModel";
 
 type Definition = ServerCampaignDefinition;
 type Node = Definition["nodes"][number];
@@ -149,7 +149,7 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCa
   const status = draft.status;
   return <form className="campaign-server-form" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
     <div className="campaign-edit-grid">
-      {draft.mode === "create" && <label>{tr("캠페인 ID", "Campaign ID")}<input aria-label={tr("캠페인 ID", "Campaign ID")} value={draft.id} onChange={(event) => update({ id: event.target.value })} /></label>}
+      {draft.mode === "create" && <label>{tr("캠페인 ID", "Campaign ID")}<input aria-label={tr("캠페인 ID", "Campaign ID")} disabled={saving} value={draft.id} onChange={(event) => update({ id: event.target.value })} /></label>}
       <label>{tr("이름", "Name")}<input aria-label={tr("이름", "Name")} value={definition.title} onChange={(event) => setDefinition({ title: event.target.value })} /></label>
       <label>{tr("저장소", "Repository")}<select aria-label={tr("저장소", "Repository")} value={definition.repository} onChange={(event) => setDefinition({ repository: event.target.value as Definition["repository"] })}><option value="adk">AgentDesk</option><option value="cooking_heart">CookingHeart</option></select></label>
     </div>
@@ -199,6 +199,13 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCa
       {status.changed.length > 0 && <dl className="campaign-server-latest" aria-label={tr(`revision ${status.revision}의 값`, `Values in revision ${status.revision}`)}>
         {status.changed.map(({ field, value }) => <div key={field}><dt>{field}</dt><dd>{value || "—"}</dd></div>)}
       </dl>}
+      <details className="campaign-server-latest-definition">
+        <summary>{tr(`revision ${status.revision}의 전체 정의`, `Full definition in revision ${status.revision}`)}</summary>
+        <p>{status.latest.title} · {status.latest.repository} · {status.latest.goal}</p>
+        <dl className="campaign-server-latest">
+          {status.latest.nodes.map((node) => <div key={node.id}><dt>{node.id}</dt><dd>{nodeDefinitionText(node)}</dd></div>)}
+        </dl>
+      </details>
       <button type="button" disabled={saving || disabled} onClick={() => void save(status.revision, status.latest)}>{tr(`revision ${status.revision} 위에 저장`, `Save over revision ${status.revision}`)}</button>
     </div>}
     <div className="campaign-actions">

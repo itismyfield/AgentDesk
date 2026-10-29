@@ -228,13 +228,23 @@ it("continues edits typed while a create was in flight as an edit of the new cam
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
   };
+  const input = (label: string) => container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
   await typeInto("Campaign ID", "release");
   await typeInto("Name", "Sent name");
+  await click(buttonByText("Add task"));
+  await click(buttonByText("Add acceptance"));
   await click(buttonByText("Create"));
+  // The ID names what is being created, so only it locks once the request is out.
+  expect(input("Campaign ID")?.disabled).toBe(true);
+  expect(input("Name")?.disabled).toBe(false);
+  expect(input("Acceptance description")?.disabled).toBe(false);
   await typeInto("Name", "Typed while waiting");
+  await typeInto("Acceptance description", "AC typed while waiting");
   await act(async () => answer({ ...accepted, definition_revision: 1, control: "prepared" }));
+  expect(vi.mocked(createServerCampaign).mock.calls[0][0]).toBe("release");
   expect(window.location.search).toBe("?mode=server&campaign=release");
-  expect(container.querySelector('input[aria-label="Campaign ID"]')).toBeNull();
-  expect(container.querySelector<HTMLInputElement>('input[aria-label="Name"]')?.value).toBe("Typed while waiting");
+  expect(input("Campaign ID")).toBeNull();
+  expect(input("Name")?.value).toBe("Typed while waiting");
+  expect(input("Acceptance description")?.value).toBe("AC typed while waiting");
   expect(container.textContent).toContain("Saved as revision 1. Changes made since then are not saved yet.");
 });
