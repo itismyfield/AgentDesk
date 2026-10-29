@@ -113,20 +113,29 @@ pub(crate) enum TicketStatus {
     Absent,
 }
 
-/// What the owner holds for a committed ticket's original; each case has one meaning.
+/// An attempt for an admitted original and the native source it was bound to, if any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExactTurn {
+    pub(crate) attempt: String,
+    pub(crate) turn: Option<serde_json::Value>,
+}
+
+impl ExactTurn {
+    /// Whether an actual bind names this attempt and this source.
+    pub(crate) fn is(&self, attempt: &str, turn: Option<&serde_json::Value>) -> bool {
+        self.attempt == attempt && self.turn.as_ref() == turn
+    }
+}
+
+/// Where a committed ticket's original stands in the owner; each case has one meaning.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TurnBind {
-    /// An attempt may have sent it.
-    Armed {
-        attempt: String,
-        source: Option<serde_json::Value>,
-    },
+    /// An attempt may have sent it; an actual bind must name this turn.
+    Armed(ExactTurn),
     /// Queued, reserved, or retained as proven or opaque unsent.
     NotArmed,
-    Settled {
-        attempt: String,
-        source: Option<serde_json::Value>,
-    },
+    /// Delivered under this turn.
+    Settled(ExactTurn),
     /// Committed, but the owner no longer keeps a record of it; never re-issue.
     Unknown,
     /// No committed admission under this ticket.
@@ -135,29 +144,11 @@ pub(crate) enum TurnBind {
 
 impl TurnBind {
     pub(crate) fn armed(&self) -> bool {
-        matches!(self, Self::Armed { .. })
+        matches!(self, Self::Armed(_))
     }
 
     pub(crate) fn settled(&self) -> bool {
-        matches!(self, Self::Settled { .. })
-    }
-
-    pub(crate) fn not_armed(&self) -> bool {
-        *self == Self::NotArmed
-    }
-
-    pub(crate) fn unknown(&self) -> bool {
-        *self == Self::Unknown
-    }
-
-    /// The attempt nonce and bound source of an armed or settled turn.
-    pub(crate) fn into_bind(self) -> Option<(String, Option<serde_json::Value>)> {
-        match self {
-            Self::Armed { attempt, source } | Self::Settled { attempt, source } => {
-                Some((attempt, source))
-            }
-            _ => None,
-        }
+        matches!(self, Self::Settled(_))
     }
 }
 
@@ -370,10 +361,10 @@ impl Owner {
                 })
             {
                 return Ok(match input.phase {
-                    HeadPhase::MayHaveSent | HeadPhase::Unknown => TurnBind::Armed {
+                    HeadPhase::MayHaveSent | HeadPhase::Unknown => TurnBind::Armed(ExactTurn {
                         attempt: attempt.nonce.clone(),
-                        source: input.resolved_source.clone(),
-                    },
+                        turn: input.resolved_source.clone(),
+                    }),
                     HeadPhase::Reserved => TurnBind::NotArmed,
                 });
             }
@@ -394,10 +385,10 @@ impl Owner {
             .find_map(|bind| match &bind.at {
                 BindAt::Settled {
                     attempt, source, ..
-                } => Some(TurnBind::Settled {
+                } => Some(TurnBind::Settled(ExactTurn {
                     attempt: attempt.clone(),
-                    source: source.clone(),
-                }),
+                    turn: source.clone(),
+                })),
                 _ => None,
             })
             .unwrap_or(TurnBind::Unknown))

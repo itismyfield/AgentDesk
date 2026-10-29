@@ -90,6 +90,8 @@ pub(super) mod compat;
 mod snapshot;
 #[cfg(test)]
 mod v2;
+#[cfg(test)]
+pub(crate) use v2::source_admission::{ExactTurn, TurnBind};
 mod v2_types;
 pub(super) use snapshot::{parse_snapshot, snapshot_json};
 

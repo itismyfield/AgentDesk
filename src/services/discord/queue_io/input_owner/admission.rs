@@ -39,34 +39,8 @@ pub(crate) enum AdmissionState {
     Absent,
 }
 
-/// An attempt for an admitted original and the native source it was bound to, if any.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ExactTurn {
-    pub(crate) attempt: String,
-    pub(crate) turn: Option<serde_json::Value>,
-}
-
-impl ExactTurn {
-    /// Whether an actual bind names this attempt and this source.
-    pub(crate) fn is(&self, attempt: &str, turn: Option<&serde_json::Value>) -> bool {
-        self.attempt == attempt && self.turn.as_ref() == turn
-    }
-}
-
-/// Where a committed ticket's original stands in the owner.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum TurnBind {
-    /// An attempt may have sent it; an actual bind must name this turn.
-    Armed(ExactTurn),
-    /// Held and not yet attempted, or proven unsent.
-    NotArmed,
-    /// Delivered under this turn.
-    Settled(ExactTurn),
-    /// Committed, but the owner keeps no record any more: treat it as run and never re-issue.
-    Unknown,
-    /// Nothing committed under the ticket; its status tells Pending from never admitted.
-    Absent,
-}
+/// Where a committed ticket's original stands in the owner: the owner's own single definition.
+pub(crate) use crate::services::turn_orchestrator::{ExactTurn, TurnBind};
 
 pub(crate) async fn admit(
     handle: &ChannelMailboxHandle,
@@ -102,21 +76,9 @@ pub(crate) async fn exact_turn(
     ticket: &AdmissionTicket,
     original: &PendingQueueItem,
 ) -> Result<TurnBind, String> {
-    let found = handle
+    handle
         .v2_exact_turn(original.clone(), ticket.0.clone())
-        .await?;
-    let (armed, settled) = (found.armed(), found.settled());
-    let (not_armed, unknown) = (found.not_armed(), found.unknown());
-    let turn = found
-        .into_bind()
-        .map(|(attempt, turn)| ExactTurn { attempt, turn });
-    Ok(match turn {
-        Some(turn) if armed => TurnBind::Armed(turn),
-        Some(turn) if settled => TurnBind::Settled(turn),
-        _ if not_armed => TurnBind::NotArmed,
-        _ if unknown => TurnBind::Unknown,
-        _ => TurnBind::Absent,
-    })
+        .await
 }
 
 pub(crate) async fn admit_with_context(
