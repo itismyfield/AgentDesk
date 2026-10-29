@@ -323,9 +323,8 @@ fn legacy_guard_value_does_not_block_owner_a() {
     rig.delivered();
 }
 
-/// A swallowed Enter on the owner's own paste gets main's one finishing Enter and no second
-/// paste. Seen in the transcript it is delivered; never seen it is unconfirmed as main reports it:
-/// one alert, the head left Unknown, nothing re-held or sent again.
+/// A swallowed Enter gets main's one finishing Enter and no second paste; seen, it is delivered,
+/// never seen, it is unconfirmed as in main: one alert, head Unknown, nothing re-held or resent.
 #[test]
 fn owner_busy_claude_confirms_once_without_requeue() {
     let _root = crate::config::TestRuntimeRootGuard::new();
