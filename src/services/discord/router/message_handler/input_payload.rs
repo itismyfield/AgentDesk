@@ -122,5 +122,17 @@ pub(in crate::services::discord) fn owned_original(
     original
 }
 
+/// One queued original's prompt body as a single dispatch builds it before any channel prelude is
+/// selected: its uploads, the restored reply context, then its text.
+#[cfg(test)]
+pub(in crate::services::discord) fn member_body(
+    item: &crate::services::turn_orchestrator::PendingQueueItem,
+    uploads: &[String],
+) -> String {
+    let context = RetryPromptContext::restore(item.reply_context.clone())
+        .render_with(super::super::response_format::merge_reply_contexts);
+    render_input_chunks(uploads, context, item.text.clone())
+}
+
 #[cfg(test)]
 mod tests;

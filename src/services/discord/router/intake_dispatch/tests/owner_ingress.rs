@@ -3,6 +3,7 @@
 use super::*;
 use crate::services::discord::queue_io::input_ingress::{self, Hold, Intake, OwnerPending};
 use crate::services::discord::queue_io::input_admission::{self, TurnBind};
+use crate::services::discord::router::input_payload::member_body;
 use crate::services::discord::shared_state::test_rest;
 use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
@@ -98,7 +99,7 @@ async fn reserve(handle: &ChannelMailboxHandle, nonce: &str) -> (Value, String) 
     handle.v2_request(move |slot| {
         let owner = slot.as_mut().ok_or("no owner")?;
         let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
-        let key = owner.reserve_unit(attempt, |item| Some((format!("user{}", item.author_id), Vec::new())))?;
+        let key = owner.reserve_unit(attempt, |item| Some((format!("user{}", item.author_id), member_body(item, &[]))))?;
         let head = owner.snapshot.head_injection.as_ref().ok_or("no head")?;
         let frame = head.payload.as_ref().ok_or("no payload")?.frame.clone();
         Ok((serde_json::to_value(key).map_err(|e| e.to_string())?, frame))
@@ -111,7 +112,7 @@ async fn reprepare(handle: &ChannelMailboxHandle, key: &Value, nonce: &str) -> (
     handle.v2_request(move |slot| {
         let owner = slot.as_mut().ok_or("no owner")?;
         let key = serde_json::from_value(key).map_err(|e| e.to_string())?;
-        let next = owner.reprepare(&key, nonce, |item| Some((format!("user{}", item.author_id), Vec::new())))?;
+        let next = owner.reprepare(&key, nonce, |item| Some((format!("user{}", item.author_id), member_body(item, &[]))))?;
         let head = owner.snapshot.head_injection.as_ref().ok_or("no head")?;
         let frame = head.payload.as_ref().ok_or("no payload")?.frame.clone();
         Ok((serde_json::to_value(next).map_err(|e| e.to_string())?, frame))
@@ -156,7 +157,9 @@ async fn held_queue_and_the_new_arrival_inject_together_in_order() {
     let (bodies, _rest) = notices(channel.get()).await;
     shared.restart.reconcile_done.store(false, Relaxed);
     for (message, text) in [(7_272_401_001, "queued one"), (7_272_401_002, "queued two")] {
-        dispatch_text_intake(&deps, live(channel, message, text)).await.unwrap();
+        let mut submission = live(channel, message, text);
+        submission.request.reply_context = (message == 7_272_401_002).then(|| "quoted line".to_string());
+        dispatch_text_intake(&deps, submission).await.unwrap();
     }
     let reason = Hold::RestartRecovery.notice();
     assert_eq!(said(&bodies), [(reason.clone(), 7_272_401_001), (reason, 7_272_401_002)]);
@@ -168,6 +171,7 @@ async fn held_queue_and_the_new_arrival_inject_together_in_order() {
     let at = |text: &str| frame.find(text).unwrap_or_else(|| panic!("{text} missing from {frame:?}"));
     assert!(at("queued one") < at("queued two") && at("queued two") < at("new arrival"));
     assert_eq!(frame.matches("new arrival").count(), 1);
+    assert!(frame.contains("quoted line\n\nqueued two") && !frame.contains('\u{1e}'), "a reply context is rendered, never its envelope: {frame:?}");
     write(&handle, &key).await;
     submitted(&handle, &key).await;
     assert!(items(&handle).await.is_empty(), "the queue is empty after one injection");
@@ -253,8 +257,7 @@ async fn a_herdr_channel_is_injected_through_the_owner() {
     assert!(super::super::super::intake_gate::busy_inject::owner_takes(&shared, channel).await);
     dispatch_text_intake(&deps, live(channel, 7_272_403_001, "to the herdr pane")).await.unwrap();
     let (key, frame) = reserve(&handle, "herdr").await;
-    let prompt = crate::services::discord::router::input_payload::render_input_chunks(&[], None, "to the herdr pane".into());
-    assert_eq!(frame, prompt, "a one-member body is the single input's prompt, byte for byte");
+    assert_eq!(frame, "to the herdr pane", "a one-member body is the single input's prompt, byte for byte");
     write(&handle, &key).await;
     submitted(&handle, &key).await;
     assert!(items(&handle).await.is_empty());

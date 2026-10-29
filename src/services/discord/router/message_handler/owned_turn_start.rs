@@ -259,7 +259,7 @@ mod tests {
             "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}});
         assert!(handle.v2_request(move |slot| {
             let attempt = serde_json::from_value(ahead).map_err(|e| e.to_string())?;
-            slot.as_mut().unwrap().reserve_unit(attempt, |_| Some((String::new(), Vec::new()))).map(drop)
+            slot.as_mut().unwrap().reserve_unit(attempt, |_| Some((String::new(), String::new()))).map(drop)
         }).await.is_err(), "nothing runs ahead of the standing successor");
         let mut scoped = target; scoped["_attempt"] = next_key.clone();
         let (_next, result, proof) = leaf(&handle, next, scoped).await;

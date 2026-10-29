@@ -691,7 +691,7 @@ fn a_v2_checked_purge_keeps_every_member_of_a_reserved_unit() {
                     "target":{"host":"tmux","owner":"projection-unit","root":"/test","execution_nonce":"e"},
                     "source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}))
                     .map_err(|e| e.to_string())?;
-                let unit = |item: &PendingQueueItem| (item.message_id != 300).then(|| ("name".to_string(), Vec::new()));
+                let unit = |item: &PendingQueueItem| (item.message_id != 300).then(|| ("name".to_string(), item.text.clone()));
                 owner.reserve_unit(attempt, unit).map(drop)
             })
             .await

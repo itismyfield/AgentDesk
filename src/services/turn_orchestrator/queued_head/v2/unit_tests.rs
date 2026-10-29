@@ -57,8 +57,8 @@ fn admit_item(owner: &mut Owner, n: u64, original: PendingQueueItem) -> PendingQ
     original
 }
 
-fn named(item: &PendingQueueItem) -> Option<(String, Vec<String>)> {
-    Some((format!("user{}", item.author_id), Vec::new()))
+fn named(item: &PendingQueueItem) -> Option<(String, String)> {
+    Some((format!("user{}", item.author_id), item.text.clone()))
 }
 
 fn turn(owner: &Owner, n: u64, original: &PendingQueueItem) -> TurnBind {

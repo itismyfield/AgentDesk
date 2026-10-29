@@ -140,13 +140,14 @@ impl Owner {
         Ok(key)
     }
 
-    /// Reserves the queue front the caller prepared as one unit: `prepared` names each original's
-    /// shown name and upload lines, and the first original it does not know starts the next unit.
+    /// Reserves the queue front the caller prepared as one unit: `prepared` gives each original's
+    /// shown name and its prompt body as a single input, and the first original it does not know
+    /// starts the next unit.
     /// Each original keeps its own identity and ticket.
     pub(crate) fn reserve_unit(
         &mut self,
         attempt: AttemptIdentity,
-        prepared: impl Fn(&PendingQueueItem) -> Option<(String, Vec<String>)>,
+        prepared: impl Fn(&PendingQueueItem) -> Option<(String, String)>,
     ) -> Result<AttemptRef, String> {
         let payload = self.unit(&prepared)?;
         self.reserve(attempt, payload)
@@ -159,7 +160,7 @@ impl Owner {
         &mut self,
         key: &AttemptRef,
         nonce: String,
-        prepared: impl Fn(&PendingQueueItem) -> Option<(String, Vec<String>)>,
+        prepared: impl Fn(&PendingQueueItem) -> Option<(String, String)>,
     ) -> Result<AttemptRef, String> {
         let head = self.snapshot.head_injection.as_ref().ok_or("no reserved unit")?;
         if !key.matches(head) || head.phase != HeadPhase::Reserved {
@@ -179,12 +180,12 @@ impl Owner {
     /// The one ordered member list a unit is made of, and the frame and digest rendered from it.
     fn unit(
         &self,
-        prepared: &impl Fn(&PendingQueueItem) -> Option<(String, Vec<String>)>,
+        prepared: &impl Fn(&PendingQueueItem) -> Option<(String, String)>,
     ) -> Result<PreparedPayload, String> {
         let views: Vec<MemberView> = (self.snapshot.items.iter())
             .map_while(|item| {
-                let (name, uploads) = prepared(item)?;
-                Some(MemberView { original: item.clone(), name, uploads })
+                let (name, body) = prepared(item)?;
+                Some(MemberView { original: item.clone(), name, body })
             })
             .collect();
         if views.is_empty() {
@@ -214,30 +215,26 @@ impl InputAttempt {
     }
 }
 
-/// One queued original as the caller prepared it for a unit: its shown name and upload lines.
+/// One queued original as the caller prepared it for a unit: its shown name and prompt body.
 struct MemberView {
-    pub(crate) original: PendingQueueItem,
-    pub(crate) name: String,
-    pub(crate) uploads: Vec<String>,
+    original: PendingQueueItem,
+    name: String,
+    body: String,
 }
 
 /// The unit's body without the busy header the leaf adds for the first author: each original's
-/// body as a single input's prompt, in arrival order, with an author line only where the author
-/// changes after the first.
+/// body in arrival order, with an author line only where the author changes after the first.
 fn render(views: &[MemberView]) -> String {
     let mut author = None;
     let bodies = views.iter().map(|view| {
         let item = &view.original;
-        let uploads = (!view.uploads.is_empty()).then(|| view.uploads.join("\n"));
-        let parts = uploads.into_iter().chain(item.reply_context.clone());
-        let parts: Vec<String> = parts.chain((!item.text.is_empty()).then(|| item.text.clone())).collect();
-        let body = parts.join("\n\n");
         let who = (item.author_id, item.author_is_bot);
         if author.replace(who).is_none_or(|before| before == who) {
-            return body;
+            return view.body.clone();
         }
         let id = item.author_id.to_string();
-        format!("{}\n{body}", crate::services::tui_input::human_frame::idle(&view.name, &id, ""))
+        let line = crate::services::tui_input::human_frame::idle(&view.name, &id, "");
+        format!("{line}\n{}", view.body)
     });
     bodies.collect::<Vec<_>>().join("\n\n")
 }
