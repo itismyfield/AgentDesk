@@ -797,6 +797,8 @@ src/
 │   │   ├── host_gate.rs
 │   │   ├── host_gate_tests.rs
 │   │   ├── process_session_launch.rs
+│   │   ├── session_handoff.rs
+│   │   ├── session_handoff_tests.rs
 │   │   ├── stream_result.rs
 │   │   ├── tui_session_launch.rs
 │   │   └── tui_session_launch_geometry_tests.rs
@@ -832,6 +834,8 @@ src/
 │   │   │   ├── response_window.rs
 │   │   │   └── transport_retry.rs
 │   │   ├── hook_server/
+│   │   │   ├── observation_ingress/
+│   │   │   │   └── resume_start.rs
 │   │   │   ├── adoption_retry.rs
 │   │   │   ├── codex_ingress_tests.rs
 │   │   │   ├── hook_event.rs
@@ -3830,6 +3834,7 @@ src/
 │   │   │   ├── claude_fold.rs
 │   │   │   ├── codex.rs
 │   │   │   ├── codex_claim_tests.rs
+│   │   │   ├── herdr_resume.rs
 │   │   │   ├── lane_tests.rs
 │   │   │   └── log_record.rs
 │   │   ├── hosted_source/
