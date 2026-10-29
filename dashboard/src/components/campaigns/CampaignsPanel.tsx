@@ -94,7 +94,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const [stops, setStops] = useState<Record<string, StopIntent>>({});
   // A command's progress and refusal belong to the campaign it was sent for.
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
-  const [commandError, setCommandError] = useState<{ campaign: string; text: string } | null>(null);
+  const [commandErrors, setCommandErrors] = useState<Record<string, string>>({});
   const serverRequest = useRef(0);
   // `ticks`: poll slots this read (or the ones it replaced) has waited through unanswered.
   const serverPending = useRef<{ id: number; ticks: number } | null>(null);
@@ -221,7 +221,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
     else body = { command: "retry", expected_definition_revision: view.definition_revision, expected_run: view.run_id ?? "", node_id: nodeId ?? "" };
     const forget = () => setStops((current) => { const next = { ...current }; if (next[campaign]?.key === key) delete next[campaign]; return next; });
     setBusy((current) => new Set(current).add(campaign));
-    setCommandError((current) => current?.campaign === campaign ? null : current);
+    setCommandErrors((current) => { const next = { ...current }; delete next[campaign]; return next; });
     try {
       await sendServerCampaignCommand(campaign, body, key);
       forget();
@@ -231,11 +231,9 @@ export default function CampaignsPanel({ language }: { language: string }) {
         setStops((current) => ({ ...current, [campaign]: { ...intent!, status: "unconfirmed" } }));
       } else {
         forget();
-        setCommandError({
-          campaign,
-          text: !refusal ? tr("응답을 받지 못했습니다. 다음 갱신에서 결과를 확인하세요.", "No answer arrived. The next refresh shows the outcome.")
-            : refusal.rejection ? rejectionText(refusal.rejection, tr) : refusal.status === 409 ? rejectionText("idempotency_conflict", tr) : refusal.message,
-        });
+        const text = !refusal ? tr("응답을 받지 못했습니다. 다음 갱신에서 결과를 확인하세요.", "No answer arrived. The next refresh shows the outcome.")
+          : refusal.rejection ? rejectionText(refusal.rejection, tr) : refusal.status === 409 ? rejectionText("idempotency_conflict", tr) : refusal.message;
+        setCommandErrors((current) => ({ ...current, [campaign]: text }));
       }
     } finally {
       setBusy((current) => { const next = new Set(current); next.delete(campaign); return next; });
@@ -327,7 +325,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
         <ServerCampaignDetail document={serverDoc} events={events?.campaign === serverDoc.view.campaign_id ? events.events : null}
           eventsFailed={events?.campaign === serverDoc.view.campaign_id && events.failedAfter !== null}
           connection={connection} selectedNode={node} onSelectNode={setNode} stopIntent={stops[serverDoc.view.campaign_id] ?? null}
-          busy={busy.has(serverDoc.view.campaign_id)} commandError={commandError?.campaign === serverDoc.view.campaign_id ? commandError.text : null}
+          busy={busy.has(serverDoc.view.campaign_id)} commandError={commandErrors[serverDoc.view.campaign_id] ?? null}
           onCommand={(name, nodeId) => void runCommand(serverDoc, name, nodeId)}
           onEdit={() => openDraft(editKey(serverDoc.view.campaign_id), () => editDraft(serverDoc))}
           onCopy={() => copyToCreate(serverDoc.definition)}

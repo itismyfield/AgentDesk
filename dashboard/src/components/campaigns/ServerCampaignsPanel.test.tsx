@@ -266,6 +266,27 @@ it("keeps a command's progress and refusal with the campaign it was sent for", a
   expect(controlText()).toContain("The target run changed");
 });
 
+it("keeps each campaign's own refusal when commands on several campaigns are refused", async () => {
+  list.mockResolvedValue([fixtures.failedRunning, copyOf(fixtures.failedRunning, "other", "Other")]);
+  const refusal = (rejection: string) => new ApiRequestError("rejected", { status: 409, body: { error: "rejected", code: "x", context: { rejection, target: null } } });
+  command.mockRejectedValueOnce(refusal("stale_run")).mockRejectedValueOnce(refusal("stale_definition"));
+  await render();
+  await openServer("Release");
+  await click(buttonByText("Stop after current stage"));
+  await openServer("Other");
+  await click(buttonByText("Stop after current stage"));
+  await openServer("Release");
+  expect(controlText()).toContain("The target run changed");
+});
+
+it("states the stopped phase without promising commands the server has not offered", async () => {
+  list.mockResolvedValue([fixtures.stoppedGone]);
+  await render();
+  await openServer(fixtures.stoppedGone.definition.title);
+  expect(buttonByText("Resume")?.disabled).toBe(true);
+  expect(controlText()).not.toContain("edit, prepare retry or resume");
+});
+
 it("shows an off-list campaign as stale when its read fails, and as missing only when the server says so", async () => {
   window.history.replaceState(null, "", "/campaigns?mode=server&campaign=elsewhere");
   list.mockImplementation(async () => [fixtures.prepared]); // each poll answers with a new list, as the API does

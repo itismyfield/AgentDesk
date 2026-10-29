@@ -218,3 +218,38 @@ it("applies a save's answer only to the draft it was sent from", async () => {
   await act(async () => fail(new TypeError("Failed to fetch")));
   expect(container.textContent).not.toContain("No answer arrived.");
 });
+
+it("keeps dependencies attached when a task is renamed and shows any that name no task", async () => {
+  create.mockResolvedValue(result);
+  await mount(createDraft(null, () => "k"));
+  await type(field("Campaign ID"), "release-4");
+  await press("Add task");
+  await press("Add task");
+  await check("task-2 depends on task-1");
+  await type(field("Task ID"), "build");
+  expect(container.querySelector<HTMLInputElement>('input[aria-label="task-2 depends on build"]')?.checked).toBe(true);
+  await press("Create");
+  expect(create.mock.calls[0][1].nodes.map((node) => [node.id, node.dependencies])).toEqual([["build", []], ["task-2", ["build"]]]);
+});
+
+it("lists a dependency on a task that no longer exists so it can be removed", async () => {
+  const copied = structuredClone(fixtures.prepared.definition);
+  copied.nodes[1].dependencies = [...copied.nodes[1].dependencies, "gone"];
+  await mount(createDraft(copied, () => "k"));
+  const orphan = container.querySelector<HTMLInputElement>(`input[aria-label="${copied.nodes[1].id} depends on gone"]`)!;
+  expect(orphan.checked).toBe(true);
+  await act(async () => { orphan.click(); });
+  expect(container.querySelector(`input[aria-label="${copied.nodes[1].id} depends on gone"]`)).toBeNull();
+});
+
+it("never moves a dependency onto another task when a rename passes through that task's ID", async () => {
+  await mount(createDraft(null, () => "k"));
+  for (let added = 0; added < 3; added++) await press("Add task");
+  await check("task-3 depends on task-1");
+  // Typing "task-20" over "task-1" passes through "task-2", the other task's ID.
+  for (const step of ["task-", "task-2", "task-20"]) await type(field("Task ID"), step);
+  const box = (label: string) => container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
+  expect(box("task-3 depends on task-2")?.checked).toBe(false);
+  expect(box("task-3 depends on task-20")?.checked).toBe(false);
+  expect(box("task-3 depends on task-")?.checked).toBe(true);
+});
