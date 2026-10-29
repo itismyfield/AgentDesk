@@ -470,10 +470,6 @@ esac
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env(
-            crate::services::tui_o::cutover::test_override::CHILD_ENV,
-            "1",
-        )
-        .env(
             crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
             "[]",
         )

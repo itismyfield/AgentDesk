@@ -1,8 +1,8 @@
 # TUI O writer canary runbook
 
 This runbook covers the first O writer canary: one new channel moved to the O writer by
-[`tui_o.writer.channels`](tui-o-writer-channels.md). It applies to a build whose `O_TUI_WRITER`
-switch is `true`, as this build is. With an empty list every channel stays on Legacy.
+[`tui_o.writer.channels`](tui-o-writer-channels.md). The O writer is always built in; with an empty
+list every channel stays on Legacy.
 
 The first run uses Claude's completed warm-up and historical adoption path. Writer activation
 and turn-mode confirmation are separate gates. Code coordinates below refer to

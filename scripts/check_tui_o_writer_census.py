@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """E4 census gate: pin every Legacy Discord send site and every O cutover gate.
 
-While `O_TUI_WRITER` is off Legacy is the only TUI body writer. When it flips,
 O owns the body on delegated channels and Legacy must skip its body send at the
-gated funnels. This gate keeps that cut honest on every intermediate head:
+gated funnels; channels outside the boot writer selection stay on Legacy. This gate
+keeps that cut honest on every intermediate head:
 
   (a) EXPECTED_PRIMITIVES pins, per file under src/services/discord/, the exact
       production count of each send/edit primitive. A new or moved send fails.
@@ -16,8 +16,8 @@ gated funnels. This gate keeps that cut honest on every intermediate head:
       function, fails its file's pins. CUT_D/CUT_T files and UNREACH_G gate
       files need at least one claim; R-EVID files (real delivery evidence
       readers) must have none of either, so a delegated verdict can never be
-      read as Posted evidence. The `O_TUI_WRITER` token itself may appear only
-      in the O_TUI_WRITER_FILES.
+      read as Posted evidence. The retired `O_TUI_WRITER` switch token may
+      appear only in the O_TUI_WRITER_FILES.
   (d) A claim is the `claim_then_send` helper, which claims just before the
       send it runs; its closure is the transport call alone. `claim_then_send_held`
       also hands back the claimed send for a body sent in more steps. `claim_at_post`
@@ -99,7 +99,7 @@ TURN_MARK_RES = {
 }
 DEFN_RE = re.compile(r"\bfn\s+$")
 FN_RE = re.compile(r"\bfn\s+(\w+)")
-# The switch is defined in topology.rs; the intake gate and its health probe read it there.
+# The retired build switch lived in these files; the token may not reappear elsewhere.
 O_TUI_WRITER_FILES = {
     "src/services/tui_o/cutover.rs",
     "src/services/tui_o/cutover/channel_gate.rs",

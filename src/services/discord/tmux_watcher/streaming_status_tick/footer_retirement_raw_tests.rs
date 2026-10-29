@@ -17,10 +17,6 @@ fn isolated(test: &str) -> bool {
         .env(CHILD, "1")
         .env("AGENTDESK_SINGLE_MESSAGE_PANEL", "1")
         .env(
-            crate::services::tui_o::cutover::test_override::CHILD_ENV,
-            "1",
-        )
-        .env(
             crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
             "[]",
         )

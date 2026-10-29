@@ -26,7 +26,7 @@ fn production_seed_reserves_before_any_host_placement_or_body() {
         let read = std::cell::Cell::new(false);
         let boot = BootChannels::validate(&config)
             .unwrap()
-            .seeded(true, &config, |_, local| {
+            .seeded(&config, |_, local| {
                 assert!(!read.replace(true));
                 assert_eq!(local, !foreign);
                 Ok(BTreeMap::from([
@@ -75,23 +75,17 @@ fn production_seed_reserves_before_any_host_placement_or_body() {
 
 #[test]
 fn boot_off_and_writer_off_keep_the_original_pending_policy() {
-    for (late, writer) in [(false, true), (true, false)] {
-        let config = config(late, false);
-        let boot = BootChannels::validate(&config)
-            .unwrap()
-            .seeded(writer, &config, |_, _| {
-                Ok(BTreeMap::from([(41, Adoption::Pending)]))
-            })
-            .unwrap();
-        if writer {
-            let candidate = boot.candidate(41).unwrap();
-            assert!(!candidate.late_adopt_origin());
-            assert!(!candidate.claim(41));
-            assert_eq!(candidate.peek(), Adoption::Released);
-        } else {
-            assert!(boot.candidate(41).is_none());
-        }
-    }
+    let config = config(false, false);
+    let boot = BootChannels::validate(&config)
+        .unwrap()
+        .seeded(&config, |_, _| {
+            Ok(BTreeMap::from([(41, Adoption::Pending)]))
+        })
+        .unwrap();
+    let candidate = boot.candidate(41).unwrap();
+    assert!(!candidate.late_adopt_origin());
+    assert!(!candidate.claim(41));
+    assert_eq!(candidate.peek(), Adoption::Released);
 }
 
 #[test]
@@ -101,7 +95,7 @@ fn actual_install_child_publishes_reserved_candidate() {
         let root = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "services::tui_o::channel_policy::late_reservation_tests::actual_install_child_publishes_reserved_candidate", "--nocapture"])
-            .env(CHILD, "1").env(test_override::CHILD_ENV, "1")
+            .env(CHILD, "1")
             .env("AGENTDESK_ROOT_DIR", root.path()).output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(

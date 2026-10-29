@@ -12,6 +12,5 @@
   ["src/services/observability/turn_lifecycle.rs", "SESSION_RESUMED_NOTIFY_USER"],
   ["src/services/observability/turn_lifecycle.rs", "SESSION_RESUMED_PERSIST"],
   ["src/services/observability/turn_lifecycle.rs", "SESSION_RESUME_FAILED_WITH_RECOVERY_NOTIFY_USER"],
-  ["src/services/observability/turn_lifecycle.rs", "SESSION_RESUME_FAILED_WITH_RECOVERY_PERSIST"],
-  ["src/services/tui_o/topology.rs", "O_TUI_WRITER"]
+  ["src/services/observability/turn_lifecycle.rs", "SESSION_RESUME_FAILED_WITH_RECOVERY_PERSIST"]
 ]
