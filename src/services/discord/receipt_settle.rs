@@ -311,17 +311,21 @@ impl ClaimClear for FinalizerClear {
     }
 }
 
-/// A forced stop that removes the row cancelled the execution; that receipt commits first.
+/// A forced stop that removes the row cancelled the execution; that receipt commits first. A
+/// `judged` token binds it to the row of the same episode nonce.
 pub(in crate::services::discord) async fn stopped(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
     policy: super::TmuxCleanupPolicy,
+    judged: Option<&crate::services::provider::CancelToken>,
 ) {
     if !policy.should_clear_inflight() {
         return;
     }
-    if let Some(row) = inflight::load_inflight_state_read_only(provider, channel_id.get()) {
+    let row = inflight::load_inflight_state_read_only(provider, channel_id.get())
+        .filter(|row| judged.is_none_or(|token| row.turn_nonce.as_deref() == token.turn_nonce()));
+    if let Some(row) = row {
         let outcome = TerminalOutcome::Cancelled;
         record(shared.pg_pool.as_ref(), &row, outcome, Utc::now()).await;
     }

@@ -157,6 +157,14 @@ fn link_runtime_output(h: &Harness) {
 /// Force-kills the harness turn on its own task and returns the recorded stop's offset; the pane
 /// dies once that stop exists, as the provider exits on its interrupt, within the stop's wait.
 async fn stop_then_die(h: &Harness) -> (tokio::task::JoinHandle<()>, Option<u64>) {
+    let stop = force_stop(h).await;
+    let offset = stop_recorded(h).await;
+    h.pane("dead");
+    (stop, offset)
+}
+
+/// The harness turn's runtime force stop, on its own task.
+async fn force_stop(h: &Harness) -> tokio::task::JoinHandle<()> {
     let registry = crate::services::discord::health::HealthRegistry::new();
     registry
         .register("claude".to_string(), h.shared.clone())
@@ -166,16 +174,18 @@ async fn stop_then_die(h: &Harness) -> (tokio::task::JoinHandle<()>, Option<u64>
         channel_id: Some(h.channel),
         tmux_name: h.tmux.clone(),
     };
-    let stop = tokio::spawn(async move {
+    tokio::spawn(async move {
         let kill = crate::services::turn_lifecycle::force_kill_turn;
         kill(Some(&registry), &target, "i7340 stop", "i7340_test").await;
-    });
+    })
+}
+
+/// Waits for the channel's stop record and returns its output offset.
+async fn stop_recorded(h: &Harness) -> Option<u64> {
     let recorded = crate::services::discord::tmux::recent_turn_stop_for_channel;
     h.until("the stop record", |h| recorded(h.channel).is_some())
         .await;
-    let offset = recorded(h.channel).and_then(|stop| stop.stop_output_offset);
-    h.pane("dead");
-    (stop, offset)
+    recorded(h.channel).and_then(|stop| stop.stop_output_offset)
 }
 
 /// A force stop's pane death is judged by the watcher, which consumes the stop record: its exit
@@ -286,8 +296,8 @@ async fn a_reused_watcher_ends_the_next_stopped_turn_cancelled_pg() {
     db.drop().await;
 }
 
-/// A runtime stop of the execution the mailbox runs, before its first byte: the stop's offset is
-/// that execution's start, inside no output range, and its pane death still ends it cancelled.
+/// A stop of the execution the mailbox runs, before its first byte: the stop's offset is that
+/// execution's start, inside no output range, and its pane death still ends it cancelled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_before_the_first_byte_ends_the_execution_cancelled_pg() {
     let test = "a_stop_before_the_first_byte_ends_the_execution_cancelled_pg";
@@ -296,14 +306,48 @@ async fn a_stop_before_the_first_byte_ends_the_execution_cancelled_pg() {
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
+    // (case, the stop): the runtime force stop, which commits its own receipt first, or a mailbox
+    // cancel, whose live token is all the watcher reads.
+    for (case, via) in [(83, "force"), (89, "mailbox")] {
+        let (mut h, row) = zero_byte_turn(case, &pool).await;
+        let stop = match via {
+            "force" => Some(force_stop(&h).await),
+            _ => {
+                let cancel = crate::services::discord::mailbox_cancel_active_turn;
+                assert!(cancel(&h.shared, h.channel).await.token.is_some());
+                None
+            }
+        };
+        let stopped_at = stop_recorded(&h).await;
+        assert_eq!(
+            stopped_at, row.turn_start_offset,
+            "case {case}: no byte since the start"
+        );
+        h.pane("dead");
+        h.exited("death after the stop").await;
+        let cancelled = Some((vec![ORIGIN.to_string()], "cancelled".to_string()));
+        let ended = receipt(&pool, row.user_msg_id, h.channel).await;
+        assert_eq!(ended, cancelled, "case {case} ({via})");
+        assert!(h.row().is_none(), "case {case}: the dead pane's turn ended");
+        if let Some(stop) = stop {
+            stop.await.unwrap();
+        }
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+/// A managed execution at EOF with no byte of its own, watched and running as the mailbox turn on
+/// a token of its own nonce.
+async fn zero_byte_turn(case: u64, pool: &sqlx::PgPool) -> (Harness, InflightTurnState) {
     let seed = format!("{}{}{}", user("T0"), said(T0), stop());
-    let mut h = Harness::on(83, &seed, Some(pool.clone())).await;
+    let mut h = Harness::on(case, &seed, Some(pool.clone())).await;
     let f = seed.len() as u64;
     h.commit(0, f);
     link_runtime_output(&h);
     let mut row = h.row_at(f);
     row.turn_source = TurnSource::Managed;
-    row.user_msg_id = 7_340_000_183;
+    row.user_msg_id = 7_340_000_100 + case;
     row.input_origin_ids = vec![ORIGIN.to_string()];
     h.save(&row);
     let restored =
@@ -313,13 +357,97 @@ async fn a_stop_before_the_first_byte_ends_the_execution_cancelled_pg() {
     h.until("watching", |h| h.heartbeat() > seen).await;
     assert!(row.turn_nonce.is_some(), "the row names its execution");
     start_live_turn(&h, &row, row.turn_nonce.clone()).await;
-    let (stop, stopped_at) = stop_then_die(&h).await;
+    (h, row)
+}
+
+/// The runtime stop commits its cancel before its kill. When the cancelled bridge then releases the
+/// token through the production finalizer, the paused watcher judges the pane's death without that
+/// token, and a queued turn takes the channel, the one receipt stays cancelled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_released_by_its_bridge_before_the_pane_dies_stays_cancelled_pg() {
+    let test = "a_stop_released_by_its_bridge_before_the_pane_dies_stays_cancelled_pg";
+    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+        return;
+    }
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (mut h, row) = zero_byte_turn(87, &pool).await;
+    let handle = h.shared.tmux_watchers.get(&h.channel).unwrap();
+    handle.paused.store(true, Ordering::Release);
+    drop(handle);
+    let stop = force_stop(&h).await;
+    let stopped_at = stop_recorded(&h).await;
     assert_eq!(stopped_at, row.turn_start_offset, "no byte since the start");
-    h.exited("death after the stop").await;
+    // The stop's receipt, if it commits before its kill, is in place before the bridge's release.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
+    while receipt(&pool, row.user_msg_id, h.channel).await.is_none()
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let key = crate::services::discord::turn_finalizer::TurnKey::new(
+        h.channel,
+        row.effective_finalizer_turn_id(),
+        h.shared.restart.current_generation,
+    );
+    let claim = crate::services::discord::turn_finalizer::SyntheticClaimSnapshot::from_row(&row);
+    let _ = h
+        .shared
+        .turn_finalizer
+        .submit_terminal_with_claim_snapshot(
+            key,
+            CLAUDE,
+            crate::services::discord::turn_finalizer::TerminalEvent::Cancel,
+            crate::services::discord::turn_finalizer::FinalizeContext::bridge(),
+            Some(claim),
+            h.shared.clone(),
+        )
+        .await;
+    let snapshot = h.shared.mailbox(h.channel).snapshot().await;
+    assert!(
+        snapshot.cancel_token.is_none(),
+        "the bridge released the token"
+    );
+    assert!(h.row().is_some(), "the bridge left the row to its reader");
+    let queued = Arc::new(crate::services::provider::CancelToken::new());
+    let author = serenity::UserId::new(7);
+    let next = serenity::MessageId::new(row.user_msg_id + 1);
+    let begin = crate::services::discord::mailbox_try_start_turn;
+    assert!(begin(&h.shared, h.channel, queued, author, next).await);
+    h.pane("dead");
+    h.exited("death after the release").await;
+    stop.await.unwrap();
     let cancelled = Some((vec![ORIGIN.to_string()], "cancelled".to_string()));
     assert_eq!(receipt(&pool, row.user_msg_id, h.channel).await, cancelled);
     assert!(h.row().is_none(), "the dead pane's turn ended");
-    stop.await.unwrap();
+    pool.close().await;
+    db.drop().await;
+}
+
+/// A stop that hands the execution over, keeping its session, commits no receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hand_over_stop_records_no_receipt_pg() {
+    let test = "a_hand_over_stop_records_no_receipt_pg";
+    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+        return;
+    }
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (h, row) = zero_byte_turn(88, &pool).await;
+    let policy = crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
+        restart_mode: crate::services::discord::InflightRestartMode::HotSwapHandoff,
+    };
+    let stop = crate::services::discord::health::stop_channel_runtime;
+    stop(
+        &h.shared,
+        &CLAUDE,
+        h.channel,
+        "i7340 hand-over",
+        policy,
+        None,
+    )
+    .await;
+    assert_eq!(receipt(&pool, row.user_msg_id, h.channel).await, None);
     pool.close().await;
     db.drop().await;
 }

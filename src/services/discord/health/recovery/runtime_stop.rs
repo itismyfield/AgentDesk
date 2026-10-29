@@ -114,6 +114,19 @@ pub(super) async fn stop_judged_channel_runtime(
         let Some(result) = result else {
             return host_guard_preserved(&shared, channel_id).await;
         };
+        // The cancel just published ends the judged execution. Its receipt commits before the kill
+        // below, and before a bridge can release the token the watcher reads as that evidence.
+        if !native_published {
+            let judged = Some(stop.token().as_ref());
+            discord::receipt_settle::stopped(
+                &shared,
+                &provider,
+                channel_id,
+                cleanup_policy,
+                judged,
+            )
+            .await;
+        }
         let legacy_name = stop.legacy_name();
         let skip_provider_interrupt = preserve_cancel_can_skip_provider_interrupt_for_idle_tui(
             &provider,
@@ -144,7 +157,8 @@ pub(super) async fn stop_judged_channel_runtime(
         judged_termination = termination_recorded;
         if wait_for_turn_end(&shared, channel_id, runtime_stop_wait_timeout()).await {
             let snapshot = shared.mailbox(channel_id).snapshot().await;
-            discord::receipt_settle::stopped(&shared, &provider, channel_id, cleanup_policy).await;
+            discord::receipt_settle::stopped(&shared, &provider, channel_id, cleanup_policy, None)
+                .await;
             let idle_inflight_cleared = if skipped_idle_provider_interrupt {
                 discord::clear_inflight_state(&provider, channel_id.get())
             } else {
@@ -227,7 +241,7 @@ pub(super) async fn stop_judged_channel_runtime(
         .intervention_queue
         .len();
     discord::mailbox_clear_recovery_marker(&shared, channel_id).await;
-    discord::receipt_settle::stopped(&shared, &provider, channel_id, cleanup_policy).await;
+    discord::receipt_settle::stopped(&shared, &provider, channel_id, cleanup_policy, None).await;
     let idle_inflight_cleared = if skipped_idle_provider_interrupt {
         discord::clear_inflight_state(&provider, channel_id.get())
     } else {

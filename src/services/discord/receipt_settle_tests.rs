@@ -292,6 +292,7 @@ async fn a_forced_stop_that_removes_the_row_records_the_cancel_pg() {
         &provider,
         ChannelId::new(cleared.channel_id),
         clear,
+        None,
     )
     .await;
     let preserve = crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
@@ -302,6 +303,7 @@ async fn a_forced_stop_that_removes_the_row_records_the_cancel_pg() {
         &provider,
         ChannelId::new(handed.channel_id),
         preserve,
+        None,
     )
     .await;
     assert_eq!(
