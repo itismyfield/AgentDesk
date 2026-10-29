@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getCampaigns, type Campaign } from "../../api/campaigns";
+import { ApiRequestError } from "../../api/httpClient";
 import {
   createServerCampaign, editServerCampaignDefinition, getServerCampaign, getServerCampaignEvents, getServerCampaigns, sendServerCampaignCommand,
   type ServerCampaignCommandResult, type ServerCampaignDocument,
@@ -51,6 +52,7 @@ afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 
 async function render() {
@@ -247,4 +249,126 @@ it("continues edits typed while a create was in flight as an edit of the new cam
   expect(input("Name")?.value).toBe("Typed while waiting");
   expect(input("Acceptance description")?.value).toBe("AC typed while waiting");
   expect(container.textContent).toContain("Saved as revision 1. Changes made since then are not saved yet.");
+});
+
+const notFound = () => new ApiRequestError("server campaign not found", { status: 404, body: { error: "server campaign not found", code: "not_found" } });
+function copyOf(document: ServerCampaignDocument, id: string, title: string) {
+  const next = structuredClone(document);
+  next.view.campaign_id = id;
+  next.definition.title = title;
+  return next;
+}
+
+it("marks the snapshot stale when a poll stays unanswered for a whole interval", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  await render();
+  await openServer();
+  list.mockImplementation(() => new Promise(() => {}));
+  await act(async () => { vi.advanceTimersByTime(15_000); });
+  expect(buttonByText("Edit definition")?.disabled).toBe(false);
+  await act(async () => { vi.advanceTimersByTime(15_000); });
+  expect(container.textContent).toContain("The server is not answering");
+  expect(buttonByText("Edit definition")?.disabled).toBe(true);
+  // The unanswered poll is waited out, not stacked on.
+  expect(list).toHaveBeenCalledTimes(2);
+});
+
+it("keeps a command's progress and refusal with the campaign it was sent for", async () => {
+  list.mockResolvedValue([fixtures.failedRunning, copyOf(fixtures.failedRunning, "other", "Other")]);
+  let refuse: (reason: unknown) => void = () => {};
+  command.mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
+  await render();
+  await openServer("Release");
+  await click(buttonByText("Stop after current stage"));
+  await openServer("Other");
+  expect(buttonByText("Stop after current stage")?.disabled).toBe(false);
+  await act(async () => refuse(new ApiRequestError("rejected", { status: 409, body: { error: "rejected", code: "x", context: { rejection: "stale_run", target: null } } })));
+  expect(controlText()).not.toContain("The target run changed");
+  await openServer("Release");
+  expect(controlText()).toContain("The target run changed");
+});
+
+it("shows an off-list campaign as stale when its read fails, and as missing only when the server says so before any snapshot", async () => {
+  window.history.replaceState(null, "", "/campaigns?mode=server&campaign=elsewhere");
+  list.mockImplementation(async () => [fixtures.prepared]); // each poll answers with a new list, as the API does
+  let answer: (value: ServerCampaignDocument) => void = () => {};
+  vi.mocked(getServerCampaign).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+  await render();
+  expect(container.textContent).not.toContain("This server campaign was not found.");
+  await act(async () => answer(copyOf(fixtures.prepared, "elsewhere", "Linked campaign")));
+  expect(buttonByText("Edit definition")?.disabled).toBe(false);
+  vi.mocked(getServerCampaign).mockRejectedValueOnce(new TypeError("Failed to fetch"));
+  await click(buttonByText("Refresh"));
+  expect(container.querySelector(".campaign-server-title h3")?.textContent).toBe("Linked campaign");
+  expect(container.textContent).toContain("Could not refresh this server campaign.");
+  expect(buttonByText("Edit definition")?.disabled).toBe(true);
+  // After a snapshot a 404 leaves it shown as stale; only a campaign never read is missing.
+  vi.mocked(getServerCampaign).mockRejectedValueOnce(notFound());
+  await click(buttonByText("Refresh"));
+  expect(container.querySelector(".campaign-server-title h3")?.textContent).toBe("Linked campaign");
+  expect(container.textContent).not.toContain("This server campaign was not found.");
+});
+
+it("keeps the create draft apart from the edit draft of a campaign named new", async () => {
+  list.mockResolvedValue([copyOf(fixtures.prepared, "new", "Named new")]);
+  await render();
+  await click(buttonByText("New server campaign"));
+  await openServer("Named new");
+  await click(buttonByText("Edit definition"));
+  expect(container.querySelectorAll("form.campaign-server-form")).toHaveLength(2);
+  expect([...container.querySelectorAll("button")].filter((button) => button.textContent === "Create")).toHaveLength(1);
+  expect([...container.querySelectorAll("button")].filter((button) => button.textContent === "Save")).toHaveLength(1);
+});
+
+it("selects a missing linked campaign in the selector so every listed campaign stays selectable", async () => {
+  window.history.replaceState(null, "", "/campaigns?mode=server&campaign=gone");
+  vi.mocked(getServerCampaign).mockRejectedValue(notFound());
+  await render();
+  const select = container.querySelector<HTMLSelectElement>('select[aria-label="Select campaign"]')!;
+  expect(select.value).toBe("server:gone");
+  expect(container.textContent).toContain("This server campaign was not found.");
+  await act(async () => { select.value = "legacy-1"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+  expect(container.textContent).toContain("Legacy mode");
+});
+
+it("puts the selection back into the URL after a navigation drops the query", async () => {
+  await render();
+  await openServer();
+  window.history.pushState(null, "", "/campaigns");
+  await click(buttonByText("Refresh"));
+  expect(window.location.search).toBe("?mode=server&campaign=release");
+});
+
+it("copies a definition into an untouched create form but never over a draft being written", async () => {
+  const done = structuredClone(fixtures.prepared);
+  done.view.control = "succeeded";
+  list.mockResolvedValue([done]);
+  await render();
+  await openServer();
+  await click(buttonByText("New server campaign"));
+  (document.activeElement as HTMLElement | null)?.blur();
+  await click(buttonByText("Copy definition to a new campaign"));
+  const createName = () => container.querySelector("form.campaign-server-form")!.querySelector<HTMLInputElement>('input[aria-label="Name"]')!;
+  expect(createName().value).toBe("Release");
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Campaign ID");
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(createName(), "Mine");
+    createName().dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await click(buttonByText("Copy definition to a new campaign"));
+  expect(createName().value).toBe("Mine");
+});
+
+it("brings a selected task's details into view on a narrow screen", async () => {
+  const scroll = vi.fn();
+  Object.defineProperty(window, "matchMedia", { configurable: true, value: (query: string) => ({ matches: query === "(max-width: 900px)" }) });
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scroll });
+  list.mockResolvedValue([fixtures.reviewWaiting]);
+  await render();
+  await openServer();
+  await click(container.querySelector('[data-node-id="C"]'));
+  expect(scroll).toHaveBeenCalled();
+  expect(scroll.mock.contexts.at(-1)).toBe(container.querySelector(".campaign-inspector"));
+  Reflect.deleteProperty(window, "matchMedia");
+  Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
 });

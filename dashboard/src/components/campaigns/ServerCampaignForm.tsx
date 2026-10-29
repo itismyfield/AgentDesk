@@ -66,11 +66,18 @@ export function editDraft(document: ServerCampaignDocument, newKey = newIdempote
   };
 }
 
-export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCancel, disabled, tr }: {
+/** A create form nobody has typed into yet. */
+export function isUntouchedCreate(draft: DefinitionDraft): boolean {
+  return draft.mode === "create" && !draft.id && draft.sent === null && JSON.stringify(draft.definition) === JSON.stringify(EMPTY);
+}
+
+export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onConflict, onCancel, disabled, tr }: {
   draft: DefinitionDraft;
   /** Updates apply to the latest draft; returning null closes it. */
   onDraftChange: (update: (current: DefinitionDraft) => DefinitionDraft | null) => void;
   onSaved: (id: string, result: ServerCampaignCommandResult) => void;
+  /** The server holds a newer definition; the caller refreshes what it shows. */
+  onConflict?: () => void;
   onCancel: () => void;
   /** The snapshot is stale or the server refuses edits: nothing may be sent. */
   disabled: boolean;
@@ -129,6 +136,7 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCa
       if (!refusal) return;
       if (refusal.status === 409 && refusal.rejection === "stale_definition" && draft.mode === "edit") {
         // Show the newer values next to the draft; the draft itself is never overwritten.
+        onConflict?.();
         const latest = await getServerCampaign(draft.id).catch(() => null);
         settle(latest && baseDefinition
           ? { kind: "conflict", revision: latest.view.definition_revision, latest: latest.definition, changed: changedDefinitionValues(baseDefinition, latest.definition) }
@@ -138,7 +146,7 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCa
         const text = detail
           ? [tr(...(DEFINITION_ERRORS[detail.code] ?? [detail.code, detail.code])), detail.path.length ? detail.path.join(" → ") : detail.target].filter(Boolean).join(" · ")
           : refusal.rejection ? rejectionText(refusal.rejection, tr)
-            : refusal.status === 409 ? rejectionText("idempotency_conflict", tr) : `HTTP ${refusal.status}`;
+            : refusal.status === 409 ? rejectionText("idempotency_conflict", tr) : refusal.message;
         settle({ kind: "error", text, reasonMissing: refusal.rejection === "missing_change_reason" }, true);
       }
     } finally {
@@ -149,8 +157,8 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCa
   const status = draft.status;
   return <form className="campaign-server-form" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
     <div className="campaign-edit-grid">
-      {draft.mode === "create" && <label>{tr("캠페인 ID", "Campaign ID")}<input aria-label={tr("캠페인 ID", "Campaign ID")} disabled={saving} value={draft.id} onChange={(event) => update({ id: event.target.value })} /></label>}
-      <label>{tr("이름", "Name")}<input aria-label={tr("이름", "Name")} value={definition.title} onChange={(event) => setDefinition({ title: event.target.value })} /></label>
+      {draft.mode === "create" && <label>{tr("캠페인 ID", "Campaign ID")}<input aria-label={tr("캠페인 ID", "Campaign ID")} autoFocus disabled={saving} value={draft.id} onChange={(event) => update({ id: event.target.value })} /></label>}
+      <label>{tr("이름", "Name")}<input aria-label={tr("이름", "Name")} autoFocus={draft.mode === "edit"} value={definition.title} onChange={(event) => setDefinition({ title: event.target.value })} /></label>
       <label>{tr("저장소", "Repository")}<select aria-label={tr("저장소", "Repository")} value={definition.repository} onChange={(event) => setDefinition({ repository: event.target.value as Definition["repository"] })}><option value="adk">AgentDesk</option><option value="cooking_heart">CookingHeart</option></select></label>
     </div>
     <label>{tr("목표", "Goal")}<textarea aria-label={tr("목표", "Goal")} rows={2} value={definition.goal} onChange={(event) => setDefinition({ goal: event.target.value })} /></label>

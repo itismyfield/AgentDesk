@@ -21,10 +21,12 @@ const result = { definition_revision: 1, run_id: null, control_version: null, ev
 let container: HTMLDivElement;
 let root: Root;
 let saved: ReturnType<typeof vi.fn<(id: string, result: unknown) => void>>;
+let conflicted: ReturnType<typeof vi.fn<() => void>>;
 
 function Harness({ initial }: { initial: DefinitionDraft }) {
   const [draft, setDraft] = useState<DefinitionDraft | null>(initial);
-  return draft ? <ServerCampaignForm draft={draft} onDraftChange={(update) => setDraft((current) => current && update(current))} tr={tr} onSaved={saved} onCancel={() => setDraft(null)} disabled={false} /> : <p>closed</p>;
+  return draft ? <ServerCampaignForm draft={draft} onDraftChange={(update) => setDraft((current) => current && update(current))}
+    tr={tr} onSaved={saved} onConflict={conflicted} onCancel={() => setDraft(null)} disabled={false} /> : <p>closed</p>;
 }
 async function mount(initial: DefinitionDraft) {
   await act(async () => root.render(<Harness initial={initial} />));
@@ -56,6 +58,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   saved = vi.fn<(id: string, result: unknown) => void>();
+  conflicted = vi.fn<() => void>();
   create.mockReset();
   edit.mockReset();
   read.mockReset();
@@ -144,6 +147,7 @@ it("keeps the draft on a 409 and shows the newer definition's changed values nex
   expect(latestValues(".campaign-server-latest-definition dl").map(([id]) => id)).toEqual(["A", "B", "C", "D"]);
   expect(latestValues(".campaign-server-latest-definition dl")[3][1]).toBe(addedD);
   expect(container.querySelectorAll('[aria-label="Task ID"]')).toHaveLength(3);
+  expect(conflicted).toHaveBeenCalledOnce();
   expect(field("Name").value).toBe("My new name");
   expect(field("Goal").value).toBe("Integrate and verify the release");
   expect(field("Group", 1).value).toBe("release");
@@ -151,6 +155,28 @@ it("keeps the draft on a 409 and shows the newer definition's changed values nex
   expect(edit).toHaveBeenCalledOnce();
   await press("Save over revision 8");
   expect(edit.mock.calls[1].slice(1, 3)).toEqual([8, { ...fixtures.prepared.definition, title: "My new name" }]);
+});
+
+it("measures the next conflict from the revision the user saved over", async () => {
+  const stale = rejection(409, { rejection: "stale_definition", target: "release" });
+  edit.mockRejectedValueOnce(stale).mockRejectedValueOnce(stale);
+  const r8 = revisionEight();
+  const r9 = structuredClone(r8);
+  r9.view.definition_revision = 9;
+  r9.definition.title = "Renamed in r9";
+  read.mockResolvedValueOnce(r8).mockResolvedValueOnce(r9);
+  await mount(editDraft(fixtures.prepared, () => "key"));
+  await press("Save");
+  await press("Save over revision 8");
+  expect(latestValues('[aria-label="Values in revision 9"]')).toEqual([["title", "Renamed in r9"]]);
+});
+
+it("shows the server's own text for a refusal that carries no decision code", async () => {
+  create.mockRejectedValueOnce(new ApiRequestError("invalid campaign ID", { status: 400, body: { error: "invalid campaign ID", code: "validation", context: {} } }));
+  await mount(createDraft(fixtures.prepared.definition, () => "k"));
+  await press("Create");
+  expect(container.textContent).toContain("invalid campaign ID");
+  expect(container.textContent).not.toContain("HTTP 400");
 });
 
 it.each([
