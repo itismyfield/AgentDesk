@@ -377,6 +377,18 @@ it("shows each campaign's own events when reads for several campaigns overlap or
   expect(summary()).toBe("Events · 0");
 });
 
+it("retries a failing events read once per list read, not more", async () => {
+  vi.mocked(getServerCampaignEvents).mockRejectedValue(new TypeError("Failed to fetch"));
+  list.mockImplementation(async () => [fixtures.prepared]);
+  await render();
+  await openServer();
+  expect(vi.mocked(getServerCampaignEvents)).toHaveBeenCalledTimes(1);
+  await click(buttonByText("Refresh"));
+  await click(buttonByText("Refresh"));
+  await click(buttonByText("Refresh"));
+  expect(vi.mocked(getServerCampaignEvents)).toHaveBeenCalledTimes(4);
+});
+
 it("lets a slow events read or retry finish instead of restarting it on every list read", async () => {
   const events = vi.mocked(getServerCampaignEvents);
   let answer: (value: Awaited<ReturnType<typeof getServerCampaignEvents>>) => void = () => {};
