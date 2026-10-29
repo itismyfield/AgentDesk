@@ -42,8 +42,23 @@ async fn original_adoption_binding_history_and_legacy_artifacts_pg() {
         let (_prepared, native) = binding(provider, channel, &owner);
         sqlx::query("INSERT INTO sessions(session_key,provider,channel_id,instance_id,status) VALUES($1,$2,$3,'mac-a','idle')")
             .bind(&locator).bind(provider).bind(id.raw_channel_id()).execute(&f.pool).await.unwrap();
-        let artifact: i64 = sqlx::query_scalar("INSERT INTO message_outbox(target,content,bot,source) VALUES($1,'old artifact','notify','headless_turn') RETURNING id")
-            .bind(format!("channel:{channel}")).fetch_one(&f.pool).await.unwrap();
+        use crate::services::message_outbox::{
+            OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe,
+        };
+        let target = format!("channel:{channel}");
+        let artifact = enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+            &f.pool,
+            OutboxMessage {
+                target: &target,
+                content: "old artifact",
+                bot: "notify",
+                source: "headless_turn",
+                reason_code: None,
+                session_key: None,
+            },
+        )
+        .await
+        .unwrap();
         let mut tx = f.pool.begin().await.unwrap();
         assert!(
             adopt_on_tx(&mut tx, &id, "mac-a", &locator, &native)

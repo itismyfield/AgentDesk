@@ -917,17 +917,11 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
 │   │   │   ├── owner_record/
-│   │   │   │   ├── adoption/
-│   │   │   │   │   └── tests/
 │   │   │   │   ├── cleanup/
 │   │   │   │   │   └── tests/
 │   │   │   │   │       └── mod.rs
-│   │   │   │   ├── event/
-│   │   │   │   │   └── tests/
 │   │   │   │   ├── fallback/
 │   │   │   │   │   └── notice.rs
-│   │   │   │   ├── snapshot/
-│   │   │   │   │   └── tests/
 │   │   │   │   ├── adoption.rs
 │   │   │   │   ├── adoption_tests.rs
 │   │   │   │   ├── cleanup.rs
