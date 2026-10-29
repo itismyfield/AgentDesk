@@ -113,11 +113,7 @@ export default function SettingsView({
   } = useSettingsPipelineSelector({ activePanel, notify, tr });
 
   const loadConfigEntries = useCallback(async () => {
-    const response = await fetch("/api/settings/config", { credentials: "include" });
-    if (!response.ok) {
-      throw new Error("config-load-failed");
-    }
-    const data = await response.json() as { entries?: ConfigEntry[] };
+    const data = await api.getSettingsConfig();
     const entries = Array.isArray(data.entries) ? data.entries : [];
     setConfigEntries(entries);
     return entries;
@@ -489,15 +485,7 @@ export default function SettingsView({
     setConfigEntries((current) => applyConfigEdits(current, pendingEdits));
     setConfigEdits({});
     try {
-      const response = await fetch("/api/settings/config", {
-        method: "PATCH",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(pendingEdits),
-      });
-      if (!response.ok) {
-        throw new Error("config-save-failed");
-      }
+      await api.patchSettingsConfig(pendingEdits);
       await loadConfigEntries();
       notify(
         "파이프라인 설정을 저장했습니다.",
