@@ -46,7 +46,6 @@ async fn a_stale_isolated_resume_keeps_the_channel_session() {
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
                 cleared: false,
-                remote_profile_name: None,
                 channel_id: Some(channel.get()),
                 channel_name: None,
                 category_name: None,

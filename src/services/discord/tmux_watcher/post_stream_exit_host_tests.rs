@@ -362,7 +362,6 @@ async fn a_configured_channel_keeps_its_session_through_the_watcher_abort_exits_
         history: Vec::new(),
         pending_uploads: Vec::new(),
         cleared: false,
-        remote_profile_name: None,
         channel_id: None,
         channel_name: None,
         category_name: None,

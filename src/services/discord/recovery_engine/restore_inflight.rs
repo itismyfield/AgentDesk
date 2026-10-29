@@ -727,7 +727,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                                 history: Vec::new(),
                                 pending_uploads: Vec::new(),
                                 cleared: false,
-                                remote_profile_name: None,
                                 channel_id: Some(state.channel_id),
                                 channel_name: effective_channel_name.clone(),
                                 category_name: None,
@@ -1891,7 +1890,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                         history: Vec::new(),
                         pending_uploads: Vec::new(),
                         cleared: false,
-                        remote_profile_name: None,
                         channel_id: Some(channel_id.get()),
                         channel_name: effective_channel_name.clone(),
                         category_name: None,
@@ -2168,7 +2166,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     history: Vec::new(),
                     pending_uploads: Vec::new(),
                     cleared: false,
-                    remote_profile_name: None,
                     channel_id: Some(channel_id.get()),
                     channel_name: channel_name.clone(),
                     category_name: None,
@@ -2185,7 +2182,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             if session.channel_name.is_none() {
                 session.channel_name = channel_name.clone();
             }
-            session.remote_profile_name = None;
             restore_recovered_session_worktree(session, &state);
         }
 

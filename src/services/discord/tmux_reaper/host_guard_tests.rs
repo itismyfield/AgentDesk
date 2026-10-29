@@ -36,7 +36,6 @@ async fn map_channel(shared: &SharedData, channel: ChannelId, channel_name: &str
         history: Vec::new(),
         pending_uploads: Vec::new(),
         cleared: false,
-        remote_profile_name: None,
         channel_id: Some(channel.get()),
         channel_name: Some(channel_name.to_string()),
         category_name: None,

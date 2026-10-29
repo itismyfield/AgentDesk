@@ -97,7 +97,7 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         };
         (
             tmux_session_name,
-            session.remote_profile_name.is_some(),
+            false,
             session.current_path.clone(),
             session.session_id.clone(),
         )

@@ -580,7 +580,6 @@ pub(super) async fn handle_text_message(
                                         cleared: false,
                                         channel_name: None,
                                         category_name: None,
-                                        remote_profile_name: None,
                                         channel_id: Some(channel_id.get()),
                                         last_active: tokio::time::Instant::now(),
                                         worktree: None,
@@ -1566,21 +1565,8 @@ pub(super) async fn handle_text_message(
             provider_label,
             session_id.is_some(),
         );
-        // Resolve remote profile for this channel
-        let remote_profile = {
-            let data = shared.core.lock().await;
-            data.sessions
-                .get(&channel_id)
-                .and_then(|s| s.remote_profile_name.as_ref())
-                .and_then(|name| {
-                    let settings = crate::config::Settings::load();
-                    settings
-                        .remote_profiles
-                        .iter()
-                        .find(|p| p.name == *name)
-                        .cloned()
-                })
-        };
+        // No session carries a remote profile; provider signatures still take the slot.
+        let remote_profile: Option<crate::services::remote::RemoteProfile> = None;
         let prelaunch_runtime_kind = prelaunch_runtime_kind_for_managed_session(
             &provider,
             remote_profile.is_none(),

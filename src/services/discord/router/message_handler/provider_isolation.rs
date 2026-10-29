@@ -1064,7 +1064,6 @@ mod thread_role_inheritance_tests {
             history: Vec::new(),
             pending_uploads: Vec::new(),
             cleared: false,
-            remote_profile_name: None,
             channel_id: Some(43_170_001),
             channel_name: Some("restart-reisolation".to_string()),
             category_name: None,

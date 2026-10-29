@@ -243,12 +243,7 @@ impl Request<'_> {
             .await
             .sessions
             .get(&self.channel)
-            .map(|session| {
-                (
-                    session.channel_name.clone(),
-                    session.remote_profile_name.is_some(),
-                )
-            })
+            .map(|session| (session.channel_name.clone(), false))
             .unwrap_or_default();
         let tmux = routine_tmux_session_name(
             self.provider,

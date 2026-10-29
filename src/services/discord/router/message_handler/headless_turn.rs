@@ -251,7 +251,6 @@ async fn start_reserved_headless_turn_admitted(
                     cleared: false,
                     channel_name: resolved_channel_name_for_session.clone(),
                     category_name: None,
-                    remote_profile_name: None,
                     channel_id: Some(channel_id.get()),
                     last_active: tokio::time::Instant::now(),
                     worktree: None,
@@ -742,20 +741,8 @@ async fn start_reserved_headless_turn_admitted(
         session_id.is_some(),
     );
 
-    let remote_profile = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|session| session.remote_profile_name.as_ref())
-            .and_then(|name| {
-                let settings = crate::config::Settings::load();
-                settings
-                    .remote_profiles
-                    .iter()
-                    .find(|profile| profile.name == *name)
-                    .cloned()
-            })
-    };
+    // No session carries a remote profile; provider signatures still take the slot.
+    let remote_profile: Option<crate::services::remote::RemoteProfile> = None;
     let prelaunch_runtime_kind = prelaunch_runtime_kind_for_managed_session(
         &provider,
         remote_profile.is_none(),

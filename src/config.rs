@@ -3060,39 +3060,6 @@ pub(crate) fn pin_runtime_host_for_test() -> PinnedRuntimeHost {
     }
 }
 
-/// Compatibility shim for legacy provider signatures that still mention
-/// `remote_profiles`.
-///
-/// AgentDesk does not load remote profiles from operator config. `Settings`
-/// intentionally returns an empty list so those signatures cannot be mistaken
-/// for supported remote SSH behavior. Future remote SSH work must use the
-/// #2193 `providers.codex.remote_hosts` contract instead.
-pub struct Settings {
-    pub remote_profiles: Vec<crate::services::remote::RemoteProfile>,
-}
-
-impl Settings {
-    pub fn load() -> Self {
-        Self {
-            remote_profiles: Vec::new(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod remote_settings_tests {
-    use super::Settings;
-
-    #[test]
-    fn settings_load_exposes_no_remote_profiles() {
-        let settings = Settings::load();
-        assert!(
-            settings.remote_profiles.is_empty(),
-            "remote profiles are not loaded from AgentDesk config; use the #2193 remote_hosts ADR"
-        );
-    }
-}
-
 #[cfg(test)]
 mod shared_test_env_lock_tests {
     #[test]
