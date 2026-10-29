@@ -4,7 +4,7 @@ import {
   type ServerCampaignCommandResult, type ServerCampaignDefinition, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
 import type { Tr } from "./campaignPresentation";
-import { changedDefinitionFields, newIdempotencyKey, rejectionText } from "./serverCampaignModel";
+import { changedDefinitionValues, newIdempotencyKey, rejectionText } from "./serverCampaignModel";
 
 type Definition = ServerCampaignDefinition;
 type Node = Definition["nodes"][number];
@@ -12,7 +12,8 @@ type Acceptance = Node["acceptance"][number];
 type Status =
   | { kind: "error"; text: string; reasonMissing?: boolean }
   | { kind: "lost" }
-  | { kind: "conflict"; revision: number; changed: string[] };
+  | { kind: "saved"; revision: number }
+  | { kind: "conflict"; revision: number; latest: Definition; changed: Array<{ field: string; value: string }> };
 
 /** A create or edit in progress. The panel owns it so polls and task switches never reset it. */
 export interface DefinitionDraft {
@@ -46,6 +47,10 @@ const DEFINITION_ERRORS: Record<string, [string, string]> = {
   cycle: ["선행 관계가 순환합니다", "The dependencies form a cycle"],
 };
 
+function submittedChange(draft: DefinitionDraft): DefinitionDraft["change"] | null {
+  return draft.mode === "edit" && (draft.change.reference || draft.change.explanation) ? draft.change : null;
+}
+
 export function createDraft(copyOf: Definition | null, newKey = newIdempotencyKey): DefinitionDraft {
   return {
     mode: "create", id: "", baseRevision: null, baseDefinition: null,
@@ -63,7 +68,8 @@ export function editDraft(document: ServerCampaignDocument, newKey = newIdempote
 
 export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCancel, disabled, tr }: {
   draft: DefinitionDraft;
-  onDraftChange: (draft: DefinitionDraft) => void;
+  /** Updates apply to the latest draft; returning null closes it. */
+  onDraftChange: (update: (current: DefinitionDraft) => DefinitionDraft | null) => void;
   onSaved: (id: string, result: ServerCampaignCommandResult) => void;
   onCancel: () => void;
   /** The snapshot is stale or the server refuses edits: nothing may be sent. */
@@ -72,7 +78,7 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCa
 }) {
   const [saving, setSaving] = useState(false);
   const { definition } = draft;
-  const update = (changes: Partial<DefinitionDraft>) => onDraftChange({ ...draft, ...changes });
+  const update = (changes: Partial<DefinitionDraft>) => onDraftChange((current) => ({ ...current, ...changes }));
   const setDefinition = (changes: Partial<Definition>) => update({ definition: { ...definition, ...changes } });
   const setNode = (index: number, changes: Partial<Node>) =>
     setDefinition({ nodes: definition.nodes.map((node, at) => at === index ? { ...node, ...changes } : node) });
@@ -92,44 +98,48 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCa
   };
   const reasonMissing = draft.status?.kind === "error" && draft.status.reasonMissing === true;
 
-  const save = async (expectedRevision = draft.baseRevision) => {
+  const save = async (expectedRevision = draft.baseRevision, baseDefinition = draft.baseDefinition) => {
     if (saving || disabled) return;
-    const change = draft.mode === "edit" && (draft.change.reference || draft.change.explanation) ? draft.change : null;
+    const change = submittedChange(draft);
     const body = JSON.stringify([draft.mode, draft.id, expectedRevision, definition, change]);
     const key = draft.sent?.body === body ? draft.sent.key : draft.newKey();
-    const sending = { ...draft, baseRevision: expectedRevision, sent: { key, body }, status: null };
-    onDraftChange(sending);
+    // Answers merge only their own state into the latest draft, so edits made while waiting survive.
+    const settle = (status: Status, decided: boolean) => onDraftChange((current) => ({
+      ...current, status, sent: decided && current.sent?.key === key ? null : current.sent,
+    }));
+    onDraftChange((current) => ({ ...current, baseRevision: expectedRevision, baseDefinition, sent: { key, body }, status: null }));
     setSaving(true);
     try {
       const result = draft.mode === "create"
         ? await createServerCampaign(draft.id, definition, key)
         : await editServerCampaignDefinition(draft.id, expectedRevision ?? 0, definition, change, key);
+      // Edits made after sending stay open as a draft on top of the saved revision.
+      onDraftChange((current) => JSON.stringify([current.definition, submittedChange(current)]) === JSON.stringify([definition, change]) ? null : {
+        ...current, mode: "edit", id: draft.id, baseRevision: result.definition_revision, baseDefinition: definition,
+        sent: null, status: { kind: "saved", revision: result.definition_revision },
+      });
       onSaved(draft.id, result);
     } catch (error) {
       const refusal = serverCampaignRejection(error);
       if (!isDefinitiveAnswer(refusal)) {
-        onDraftChange({ ...sending, status: { kind: "lost" } });
+        settle({ kind: "lost" }, false);
         return;
       }
       // A decided request keeps its answer under its key; the next save sends a new key.
-      const decided = { ...sending, sent: null };
       if (!refusal) return;
       if (refusal.status === 409 && refusal.rejection === "stale_definition" && draft.mode === "edit") {
-        // Show what changed against the draft's base; the draft itself is never overwritten.
+        // Show the newer values next to the draft; the draft itself is never overwritten.
         const latest = await getServerCampaign(draft.id).catch(() => null);
-        onDraftChange({
-          ...decided,
-          status: latest && sending.baseDefinition
-            ? { kind: "conflict", revision: latest.view.definition_revision, changed: changedDefinitionFields(sending.baseDefinition, latest.definition) }
-            : { kind: "error", text: tr("다른 곳에서 정의가 바뀌었습니다. 초안은 그대로 둡니다.", "The definition changed elsewhere. Your draft is kept.") },
-        });
+        settle(latest && baseDefinition
+          ? { kind: "conflict", revision: latest.view.definition_revision, latest: latest.definition, changed: changedDefinitionValues(baseDefinition, latest.definition) }
+          : { kind: "error", text: tr("다른 곳에서 정의가 바뀌었습니다. 초안은 그대로 둡니다.", "The definition changed elsewhere. Your draft is kept.") }, true);
       } else {
         const detail = refusal.definitionError;
         const text = detail
           ? [tr(...(DEFINITION_ERRORS[detail.code] ?? [detail.code, detail.code])), detail.path.length ? detail.path.join(" → ") : detail.target].filter(Boolean).join(" · ")
           : refusal.rejection ? rejectionText(refusal.rejection, tr)
             : refusal.status === 409 ? rejectionText("idempotency_conflict", tr) : `HTTP ${refusal.status}`;
-        onDraftChange({ ...decided, status: { kind: "error", text, reasonMissing: refusal.rejection === "missing_change_reason" } });
+        settle({ kind: "error", text, reasonMissing: refusal.rejection === "missing_change_reason" }, true);
       }
     } finally {
       setSaving(false);
@@ -181,11 +191,15 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCa
       <label>{tr("변경 설명", "Change explanation")}<input aria-label={tr("변경 설명", "Change explanation")} aria-invalid={reasonMissing} value={draft.change.explanation} onChange={(event) => update({ change: { ...draft.change, explanation: event.target.value } })} /></label>
     </div>}
     {status?.kind === "lost" && <p role="status" className="campaign-filter-note">{tr("응답을 받지 못했습니다. 같은 내용으로 다시 보내도 두 번 적용되지 않습니다.", "No answer arrived. Saving again with the same content cannot apply it twice.")}</p>}
+    {status?.kind === "saved" && <p role="status" className="campaign-filter-note">{tr(`revision ${status.revision}에 저장했습니다. 그 뒤 고친 내용은 아직 저장되지 않았습니다.`, `Saved as revision ${status.revision}. Changes made since then are not saved yet.`)}</p>}
     {status?.kind === "error" && <p role="alert" className="campaign-filter-note">{status.text}</p>}
     {status?.kind === "conflict" && <div role="alert" className="campaign-filter-note">
       <p>{tr(`다른 곳에서 정의가 바뀌었습니다 (revision ${status.revision}). 초안은 그대로 둡니다.`, `This definition changed (revision ${status.revision}). Your draft is kept.`)}</p>
-      <p>{tr("다른 곳에서 바뀐 항목", "Changed elsewhere")}: {status.changed.join(", ") || tr("없음", "none")}</p>
-      <button type="button" disabled={saving || disabled} onClick={() => void save(status.revision)}>{tr(`revision ${status.revision} 위에 저장`, `Save over revision ${status.revision}`)}</button>
+      <p>{tr("다른 곳에서 바뀐 항목", "Changed elsewhere")}: {status.changed.map(({ field }) => field).join(", ") || tr("없음", "none")}</p>
+      {status.changed.length > 0 && <dl className="campaign-server-latest" aria-label={tr(`revision ${status.revision}의 값`, `Values in revision ${status.revision}`)}>
+        {status.changed.map(({ field, value }) => <div key={field}><dt>{field}</dt><dd>{value || "—"}</dd></div>)}
+      </dl>}
+      <button type="button" disabled={saving || disabled} onClick={() => void save(status.revision, status.latest)}>{tr(`revision ${status.revision} 위에 저장`, `Save over revision ${status.revision}`)}</button>
     </div>}
     <div className="campaign-actions">
       <button type="submit" disabled={saving || disabled}>{saving ? tr("저장 중…", "Saving…") : draft.mode === "create" ? tr("생성", "Create") : tr("저장", "Save")}</button>

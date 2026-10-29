@@ -193,23 +193,33 @@ export function feedbackText(link: string, view: View, tr: Tr): string {
 
 /** Fields a newer definition changed against the draft's base, by task and acceptance ID. */
 export function changedDefinitionFields(base: ServerCampaignDefinition, latest: ServerCampaignDefinition): string[] {
-  const changed: string[] = (["repository", "title", "goal", "profile_version"] as const).filter((key) => base[key] !== latest[key]);
+  return changedDefinitionValues(base, latest).map(({ field }) => field);
+}
+
+/** Each changed field with its value in the newer definition; a removed or empty value is "". */
+export function changedDefinitionValues(base: ServerCampaignDefinition, latest: ServerCampaignDefinition): Array<{ field: string; value: string }> {
+  const changed: Array<{ field: string; value: string }> = (["repository", "title", "goal", "profile_version"] as const)
+    .filter((key) => base[key] !== latest[key]).map((key) => ({ field: key, value: latest[key] }));
   const after = new Map(latest.nodes.map((node) => [node.id, node]));
+  const acValue = (ac: ServerCampaignDefinition["nodes"][number]["acceptance"][number]) => `${ac.description} (${ac.verification})`;
   for (const node of base.nodes) {
     const next = after.get(node.id);
-    if (!next) { changed.push(`${node.id} (removed)`); continue; }
+    if (!next) { changed.push({ field: `${node.id} (removed)`, value: "" }); continue; }
     for (const key of ["title", "issue_url", "dependencies", "group"] as const) {
-      if (JSON.stringify(node[key]) !== JSON.stringify(next[key])) changed.push(`${node.id}.${key}`);
+      if (JSON.stringify(node[key]) !== JSON.stringify(next[key])) {
+        const value = next[key];
+        changed.push({ field: `${node.id}.${key}`, value: Array.isArray(value) ? value.join(", ") : value ?? "" });
+      }
     }
     const acceptance = new Map(next.acceptance.map((ac) => [ac.id, ac]));
     for (const ac of node.acceptance) {
       const nextAc = acceptance.get(ac.id);
-      if (!nextAc) changed.push(`${node.id}.acceptance.${ac.id} (removed)`);
-      else if (JSON.stringify(ac) !== JSON.stringify(nextAc)) changed.push(`${node.id}.acceptance.${ac.id}`);
+      if (!nextAc) changed.push({ field: `${node.id}.acceptance.${ac.id} (removed)`, value: "" });
+      else if (JSON.stringify(ac) !== JSON.stringify(nextAc)) changed.push({ field: `${node.id}.acceptance.${ac.id}`, value: acValue(nextAc) });
     }
-    for (const ac of next.acceptance) if (!node.acceptance.some((candidate) => candidate.id === ac.id)) changed.push(`${node.id}.acceptance.${ac.id} (added)`);
+    for (const ac of next.acceptance) if (!node.acceptance.some((candidate) => candidate.id === ac.id)) changed.push({ field: `${node.id}.acceptance.${ac.id} (added)`, value: acValue(ac) });
   }
-  for (const id of after.keys()) if (!base.nodes.some((node) => node.id === id)) changed.push(`${id} (added)`);
+  for (const [id, node] of after) if (!base.nodes.some((candidate) => candidate.id === id)) changed.push({ field: `${id} (added)`, value: node.title });
   return changed;
 }
 

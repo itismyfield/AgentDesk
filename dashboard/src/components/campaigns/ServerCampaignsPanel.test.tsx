@@ -4,8 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getCampaigns, type Campaign } from "../../api/campaigns";
 import {
-  editServerCampaignDefinition, getServerCampaign, getServerCampaignEvents, getServerCampaigns, sendServerCampaignCommand,
-  type ServerCampaignDocument,
+  createServerCampaign, editServerCampaignDefinition, getServerCampaign, getServerCampaignEvents, getServerCampaigns, sendServerCampaignCommand,
+  type ServerCampaignCommandResult, type ServerCampaignDocument,
 } from "../../api/serverCampaigns";
 import { serverCampaignFixtures as fixtures } from "../../api/serverCampaignsFixtures";
 import CampaignsPanel from "./CampaignsPanel";
@@ -178,4 +178,63 @@ it("opens a deep-linked server campaign that is not in the first list page", asy
   await render();
   expect(vi.mocked(getServerCampaign)).toHaveBeenCalledWith("elsewhere");
   expect(container.querySelector(".campaign-server-title h3")?.textContent).toBe("Linked campaign");
+});
+
+it("marks a campaign past the first list page stale when only its own read fails", async () => {
+  window.history.replaceState(null, "", "/campaigns?mode=server&campaign=elsewhere&node=A");
+  const elsewhere = structuredClone(fixtures.failedRunning);
+  elsewhere.view.campaign_id = "elsewhere";
+  elsewhere.definition.title = "Linked campaign";
+  elsewhere.view.commands = elsewhere.view.commands.map((entry) => ({ ...entry, rejection: null }));
+  vi.mocked(getServerCampaign).mockResolvedValue(elsewhere);
+  await render();
+  for (const label of ["Start", "Resume", "Edit definition", "Prepare retry"]) expect(buttonByText(label)?.disabled, label).toBe(false);
+  vi.mocked(getServerCampaign).mockRejectedValue(new Error("Offline"));
+  list.mockImplementation(async () => [fixtures.prepared]); // Each poll answers a new list, as fetch does.
+  await click(buttonByText("Refresh"));
+  expect(vi.mocked(getServerCampaign)).toHaveBeenCalledTimes(2);
+  expect(container.textContent).not.toContain("Could not refresh server campaigns.");
+  expect(container.textContent).toContain("Could not refresh this server campaign.");
+  expect(container.querySelector(".campaign-server-title h3")?.textContent).toBe("Linked campaign");
+  expect(container.textContent).toContain("Running · 1 failed · 1 blocked");
+  for (const label of ["Start", "Resume", "Edit definition", "Prepare retry"]) expect(buttonByText(label)?.disabled, label).toBe(true);
+  expect(buttonByText("Stop now")?.disabled).toBe(false);
+});
+
+it("never calls the screen empty while the server list is pending or failed", async () => {
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [], live: {}, read: 1 });
+  let answer: (error: unknown) => void = () => {};
+  list.mockImplementationOnce(() => new Promise((_resolve, reject) => { answer = reject; }));
+  await render();
+  expect(container.textContent).not.toContain("No campaigns yet.");
+  expect(container.textContent).toContain("Loading campaigns.");
+  await act(async () => answer(new Error("Offline")));
+  expect(container.textContent).toContain("Could not refresh server campaigns.");
+  expect(container.textContent).not.toContain("No campaigns yet.");
+  list.mockResolvedValueOnce([]);
+  await click(buttonByText("Refresh"));
+  expect(container.textContent).toContain("No campaigns yet.");
+});
+
+it("continues edits typed while a create was in flight as an edit of the new campaign", async () => {
+  let answer: (value: ServerCampaignCommandResult) => void = () => {};
+  vi.mocked(createServerCampaign).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+  await render();
+  await click(buttonByText("New server campaign"));
+  const typeInto = async (label: string, value: string) => {
+    const input = container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+  await typeInto("Campaign ID", "release");
+  await typeInto("Name", "Sent name");
+  await click(buttonByText("Create"));
+  await typeInto("Name", "Typed while waiting");
+  await act(async () => answer({ ...accepted, definition_revision: 1, control: "prepared" }));
+  expect(window.location.search).toBe("?mode=server&campaign=release");
+  expect(container.querySelector('input[aria-label="Campaign ID"]')).toBeNull();
+  expect(container.querySelector<HTMLInputElement>('input[aria-label="Name"]')?.value).toBe("Typed while waiting");
+  expect(container.textContent).toContain("Saved as revision 1. Changes made since then are not saved yet.");
 });

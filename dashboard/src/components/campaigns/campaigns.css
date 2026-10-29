@@ -143,6 +143,10 @@
 .campaign-server-ac { display: grid; grid-template-columns: minmax(80px, 140px) minmax(0, 1fr) minmax(110px, 150px) auto; gap: 6px; align-items: center; }
 .campaign-server-feedback textarea { font-family: inherit; resize: vertical; }
 .campaign-server-form [aria-invalid="true"] { border-color: #d97706; }
+.campaign-server-latest { display: grid; gap: 4px; margin: 6px 0; font-size: 11px; }
+.campaign-server-latest > div { display: grid; grid-template-columns: minmax(90px, 180px) minmax(0, 1fr); gap: 8px; }
+.campaign-server-latest dt { color: var(--th-text-muted); overflow-wrap: anywhere; }
+.campaign-server-latest dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 @media (max-width: 1200px) { .campaign-workbench.has-inspector .campaign-task-columns, .campaign-workbench.has-inspector .campaign-task-row { grid-template-columns: minmax(130px, 1fr) 96px 42px; } .campaign-workbench.has-inspector .campaign-task-stage, .campaign-workbench.has-inspector .campaign-task-owner, .campaign-workbench.has-inspector .campaign-task-columns > :nth-child(3), .campaign-workbench.has-inspector .campaign-task-columns > :nth-child(5) { display: none; } }
 @media (max-width: 900px) { .campaign-workbench.has-inspector { grid-template-columns: minmax(0, 1fr); } .campaign-inspector { max-height: none; } .campaign-toolbar { grid-template-columns: 1fr 1fr; } .campaign-search { grid-column: 1 / -1; } .campaign-group-list { max-height: 60vh; } .campaign-main { padding: 12px; } .campaign-selector { width: 100%; } .campaigns-panel .campaign-check { min-height: 44px; } .campaigns-panel button { min-height: 36px; } .campaigns-panel .campaign-task-row { min-height: 48px; } .campaign-graph .react-flow__controls-button { min-height: 26px; } }
 @media (max-width: 600px) {

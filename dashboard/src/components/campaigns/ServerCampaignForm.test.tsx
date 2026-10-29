@@ -24,7 +24,7 @@ let saved: ReturnType<typeof vi.fn<(id: string, result: unknown) => void>>;
 
 function Harness({ initial }: { initial: DefinitionDraft }) {
   const [draft, setDraft] = useState<DefinitionDraft | null>(initial);
-  return draft ? <ServerCampaignForm draft={draft} onDraftChange={setDraft} tr={tr} onSaved={saved} onCancel={() => setDraft(null)} disabled={false} /> : <p>closed</p>;
+  return draft ? <ServerCampaignForm draft={draft} onDraftChange={(update) => setDraft((current) => current && update(current))} tr={tr} onSaved={saved} onCancel={() => setDraft(null)} disabled={false} /> : <p>closed</p>;
 }
 async function mount(initial: DefinitionDraft) {
   await act(async () => root.render(<Harness initial={initial} />));
@@ -114,23 +114,69 @@ it("keeps the draft and names the server's cycle and empty acceptance refusals",
   expect(create.mock.calls.map((call) => call[2])).toEqual(["key-1", "key-2"]);
 });
 
-it("keeps the draft on a 409 and lists what the newer definition changed", async () => {
-  edit.mockRejectedValueOnce(rejection(409, { rejection: "stale_definition", target: "release" })).mockResolvedValueOnce(result);
+function revisionEight() {
   const latest = structuredClone(fixtures.prepared);
   latest.view.definition_revision = 8;
   latest.definition.goal = "Changed elsewhere";
-  read.mockResolvedValueOnce(latest);
+  latest.definition.nodes[1].group = "group-from-r8";
+  return latest;
+}
+function latestValues() {
+  return [...container.querySelectorAll(".campaign-server-latest > div")].map((row) => [row.querySelector("dt")?.textContent, row.querySelector("dd")?.textContent]);
+}
+
+it("keeps the draft on a 409 and shows the newer definition's changed values next to it", async () => {
+  edit.mockRejectedValueOnce(rejection(409, { rejection: "stale_definition", target: "release" })).mockResolvedValueOnce(result);
+  read.mockResolvedValueOnce(revisionEight());
   let next = 0;
   await mount(editDraft(fixtures.prepared, () => `key-${++next}`));
   await type(field("Name"), "My new name");
   await press("Save");
   expect(container.textContent).toContain("This definition changed (revision 8). Your draft is kept.");
-  expect(container.textContent).toContain("Changed elsewhere: goal");
+  expect(container.textContent).toContain("Changed elsewhere: goal, B.group");
+  expect(latestValues()).toEqual([["goal", "Changed elsewhere"], ["B.group", "group-from-r8"]]);
   expect(field("Name").value).toBe("My new name");
   expect(field("Goal").value).toBe("Integrate and verify the release");
+  expect(field("Group", 1).value).toBe("release");
   // Saving over the newer revision is an explicit choice; the draft is still the user's.
   await press("Save over revision 8");
   expect(edit.mock.calls[1].slice(1, 3)).toEqual([8, { ...fixtures.prepared.definition, title: "My new name" }]);
+});
+
+it.each([
+  ["no answer", () => new TypeError("Failed to fetch"), "No answer arrived."],
+  ["a 409", () => rejection(409, { rejection: "stale_definition", target: "release" }), "This definition changed (revision 8)."],
+])("keeps what was typed while a save waited for %s", async (_answer, failure, notice) => {
+  let answer: (error: unknown) => void = () => {};
+  edit.mockImplementationOnce(() => new Promise((_resolve, reject) => { answer = reject; }));
+  read.mockResolvedValueOnce(revisionEight());
+  await mount(editDraft(fixtures.prepared, () => "key-1"));
+  await type(field("Name"), "Sent name");
+  await press("Save");
+  await type(field("Name"), "Typed while waiting");
+  await type(field("Acceptance description", 2), "Added while waiting");
+  await act(async () => answer(failure()));
+  expect(container.textContent).toContain(notice);
+  expect(field("Name").value).toBe("Typed while waiting");
+  expect(field("Acceptance description", 2).value).toBe("Added while waiting");
+});
+
+it("keeps edits made while a save was in flight as a draft on the saved revision", async () => {
+  let answer: (value: typeof result) => void = () => {};
+  edit.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; })).mockResolvedValueOnce({ ...result, definition_revision: 9 });
+  let next = 0;
+  await mount(editDraft(fixtures.prepared, () => `key-${++next}`));
+  await type(field("Name"), "Sent name");
+  await press("Save");
+  await type(field("Name"), "Typed while waiting");
+  await act(async () => answer({ ...result, definition_revision: 8 }));
+  expect(saved).toHaveBeenCalledOnce();
+  expect(container.textContent).toContain("Saved as revision 8. Changes made since then are not saved yet.");
+  expect(field("Name").value).toBe("Typed while waiting");
+  // The next save builds on the saved revision; with nothing typed after it, the draft closes.
+  await press("Save");
+  expect(edit.mock.calls[1].slice(1, 3)).toEqual([8, { ...fixtures.prepared.definition, title: "Typed while waiting" }]);
+  expect(container.textContent).toBe("closed");
 });
 
 it("resends an unanswered save with the same key and a changed draft with a new one", async () => {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCampaigns, type Campaign, type CampaignLive, type CampaignNodeLive } from "../../api/campaigns";
+import { ApiRequestError } from "../../api/httpClient";
 import {
   getServerCampaign, getServerCampaignEvents, getServerCampaigns, isDefinitiveAnswer, sendServerCampaignCommand, serverCampaignRejection,
   type ServerCampaignCommand, type ServerCampaignDocument, type ServerCampaignEvent,
@@ -71,14 +72,15 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const [serverDocs, setServerDocs] = useState<ServerCampaignDocument[]>([]);
   const [serverLoaded, setServerLoaded] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
-  const [outsideList, setOutsideList] = useState<ServerCampaignDocument | null>(null);
+  // Campaigns past the first list page, each with its own last read so a failed read marks only it stale.
+  const [details, setDetails] = useState<Record<string, { doc: ServerCampaignDocument | null; loading: boolean; error: string | null }>>({});
   const [events, setEvents] = useState<{ campaign: string; events: ServerCampaignEvent[] } | null>(null);
   const [serverDrafts, setServerDrafts] = useState<Record<string, DefinitionDraft>>({});
   const [stops, setStops] = useState<Record<string, StopIntent>>({});
   const [busy, setBusy] = useState(false);
   const [commandError, setCommandError] = useState<string | null>(null);
   const serverRequest = useRef(0);
-  const detailRequest = useRef(0);
+  const detailRequest = useRef<Record<string, number>>({});
   const eventsRequest = useRef(0);
   const refreshServer = useCallback(async () => {
     const id = ++serverRequest.current;
@@ -99,14 +101,30 @@ export default function CampaignsPanel({ language }: { language: string }) {
   }, [refreshAll]);
   useEffect(() => { writeLocalStorageValue(STORAGE_KEYS.dashboardActiveCampaign, selectedId); }, [selectedId]);
 
-  const serverDoc = serverDocs.find((doc) => doc.view.campaign_id === serverSelected)
-    ?? (outsideList?.view.campaign_id === serverSelected ? outsideList : undefined);
-  const connection = serverError ? "stale" : "live";
+  const inList = serverDocs.find((doc) => doc.view.campaign_id === serverSelected);
+  const detail = !inList && serverSelected ? details[serverSelected] : undefined;
+  const serverDoc = inList ?? detail?.doc ?? undefined;
+  const connection = serverError || detail?.error ? "stale" : "live";
   // A linked campaign past the first list page is read on its own, after each list poll.
   useEffect(() => {
     if (mode !== "server" || !serverSelected || !serverLoaded || serverDocs.some((doc) => doc.view.campaign_id === serverSelected)) return;
-    const id = ++detailRequest.current;
-    getServerCampaign(serverSelected).then((doc) => { if (mounted.current && id === detailRequest.current) setOutsideList(doc); }).catch(() => undefined);
+    const campaign = serverSelected;
+    const id = (detailRequest.current[campaign] ?? 0) + 1;
+    detailRequest.current[campaign] = id;
+    const settle = (next: { doc?: ServerCampaignDocument; error: string | null; notFound?: boolean }) => {
+      if (!mounted.current || id !== detailRequest.current[campaign]) return;
+      setDetails((current) => {
+        const doc = next.doc ?? current[campaign]?.doc ?? null;
+        // A 404 before any snapshot means the campaign does not exist; after one, the shown snapshot is stale.
+        return { ...current, [campaign]: { doc, loading: false, error: next.notFound && !doc ? null : next.error } };
+      });
+    };
+    setDetails((current) => ({ ...current, [campaign]: { doc: current[campaign]?.doc ?? null, loading: true, error: current[campaign]?.error ?? null } }));
+    getServerCampaign(campaign).then((doc) => settle({ doc, error: null }))
+      .catch((cause) => settle({
+        error: cause instanceof Error ? cause.message : "Unable to load the server campaign",
+        notFound: cause instanceof ApiRequestError && cause.status === 404,
+      }));
   }, [mode, serverSelected, serverLoaded, serverDocs]);
   const selectedCampaign = serverDoc?.view.campaign_id;
   const lastEvent = serverDoc?.view.last_event_sequence;
@@ -121,12 +139,12 @@ export default function CampaignsPanel({ language }: { language: string }) {
     let changed = false;
     const next: Record<string, StopIntent> = {};
     for (const [campaign, intent] of Object.entries(current)) {
-      const doc = serverDocs.find((candidate) => candidate.view.campaign_id === campaign) ?? (outsideList?.view.campaign_id === campaign ? outsideList : undefined);
+      const doc = serverDocs.find((candidate) => candidate.view.campaign_id === campaign) ?? details[campaign]?.doc ?? undefined;
       const settled = doc ? reconcileStop(intent, doc.view, events?.campaign === campaign ? events.events : []) : intent;
       if (settled) next[campaign] = settled; else changed = true;
     }
     return changed ? next : current;
-  }), [serverDocs, outsideList, events]);
+  }), [serverDocs, details, events]);
 
   const location: CampaignLocation | null = mode === "server"
     ? serverSelected ? { mode, campaign: serverSelected, node } : null
@@ -169,15 +187,29 @@ export default function CampaignsPanel({ language }: { language: string }) {
       void refreshServer(); // The screen shows the server's view after a write, never one built from the reply.
     }
   };
-  const setServerDraft = (key: string, draft: DefinitionDraft | null) => setServerDrafts((current) => {
+  const setServerDraft = (key: string, update: (current: DefinitionDraft) => DefinitionDraft | null) => setServerDrafts((current) => {
+    // A save answering after the draft was closed must not reopen it.
+    if (!current[key]) return current;
+    const draft = update(current[key]);
     const next = { ...current };
     if (draft) next[key] = draft; else delete next[key];
     return next;
   });
   const openDraft = (key: string, draft: () => DefinitionDraft) => setServerDrafts((current) => current[key] ? current : { ...current, [key]: draft() });
   const renderForm = (key: string, disabled: boolean) => serverDrafts[key] && <ServerCampaignForm draft={serverDrafts[key]} disabled={disabled} tr={tr}
-    onDraftChange={(draft) => setServerDraft(key, draft)} onCancel={() => setServerDraft(key, null)}
-    onSaved={(id) => { setServerDraft(key, null); if (key === NEW_DRAFT) selectServer(id); void refreshServer(); }} />;
+    onDraftChange={(update) => setServerDraft(key, update)} onCancel={() => setServerDraft(key, () => null)}
+    onSaved={(id) => {
+      // The form keeps edits made while a create was in flight; they continue as an edit of the new campaign.
+      if (key === NEW_DRAFT) {
+        setServerDrafts((current) => {
+          if (!current[NEW_DRAFT]) return current;
+          const { [NEW_DRAFT]: kept, ...rest } = current;
+          return { ...rest, [`server:${id}`]: rest[`server:${id}`] ?? kept };
+        });
+        selectServer(id);
+      }
+      void refreshServer();
+    }} />;
 
   const campaign = campaigns.find((value) => value.id === selectedId);
   const progress = campaign ? campaignProgress(campaign.nodes) : null;
@@ -198,7 +230,8 @@ export default function CampaignsPanel({ language }: { language: string }) {
     <header className="campaign-row"><div><h2>{tr("캠페인", "Campaigns")}</h2><p>{tr("그룹별 작업을 살펴보고, 선택한 작업의 다음 행동부터 이어가세요.", "Browse tasks by group and pick up the next action.")}</p></div><div className="campaign-actions"><button disabled={!!serverError} onClick={() => openDraft(NEW_DRAFT, () => createDraft(null))}>{tr("새 서버 캠페인", "New server campaign")}</button><button disabled={loading} onClick={refreshAll}>{loading ? tr("불러오는 중…", "Refreshing…") : tr("새로고침", "Refresh")}</button></div></header>
     {error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<button onClick={() => void refresh()}>{tr("다시 시도", "Retry")}</button>} />}
     {serverError && <WidgetState kind={serverDocs.length ? "stale" : "error"} title={tr("서버 캠페인을 갱신하지 못했습니다.", "Could not refresh server campaigns.")} description={serverError + (serverDocs.length ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
-    {!campaigns.length && !serverDocs.length && !error && <WidgetState kind={loading ? "loading" : "empty"} title={loading ? tr("캠페인을 불러오고 있습니다.", "Loading campaigns.") : tr("등록된 캠페인이 없습니다.", "No campaigns yet.")} description={loading ? undefined : tr("캠페인이 등록되면 작업 흐름과 진행 상황이 여기에 표시됩니다.", "Registered campaigns and their progress will appear here.")} />}
+    {/* Nothing is called empty until both lists have answered without an error. */}
+    {!campaigns.length && !serverDocs.length && !error && !serverError && <WidgetState kind={loading || !serverLoaded ? "loading" : "empty"} title={loading || !serverLoaded ? tr("캠페인을 불러오고 있습니다.", "Loading campaigns.") : tr("등록된 캠페인이 없습니다.", "No campaigns yet.")} description={loading || !serverLoaded ? undefined : tr("캠페인이 등록되면 작업 흐름과 진행 상황이 여기에 표시됩니다.", "Registered campaigns and their progress will appear here.")} />}
     {renderForm(NEW_DRAFT, !!serverError)}
     {serverDocs.length > 0 && <ServerCampaignList documents={serverDocs} selectedId={mode === "server" ? serverSelected : null} onSelect={selectServer} tr={tr} />}
     {mode === "legacy" && campaign && progress && <div className="campaign-main">
@@ -217,6 +250,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
     </div>}
     {mode === "server" && serverSelected && <div className="campaign-main">
       <div className="campaign-row campaign-summary-header">{selector}</div>
+      {detail?.error && <WidgetState kind={serverDoc ? "stale" : "error"} title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error + (serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
       {serverDoc ? <>
         {renderForm(`server:${serverDoc.view.campaign_id}`, !commandAvailability(serverDoc.view, "edit_definition", connection).enabled)}
         <ServerCampaignDetail document={serverDoc} events={events?.campaign === serverDoc.view.campaign_id ? events.events : null}
@@ -225,7 +259,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
           onEdit={() => openDraft(`server:${serverDoc.view.campaign_id}`, () => editDraft(serverDoc))}
           onCopy={() => openDraft(NEW_DRAFT, () => createDraft(serverDoc.definition))}
           link={`${window.location.origin}${window.location.pathname}${query ?? ""}`} tr={tr} />
-      </> : <WidgetState kind={serverLoaded ? "empty" : "loading"} title={serverLoaded ? tr("이 서버 캠페인을 찾을 수 없습니다.", "This server campaign was not found.") : tr("서버 캠페인을 불러오고 있습니다.", "Loading server campaigns.")} />}
+      </> : detail?.error ? null : <WidgetState kind={serverLoaded && detail && !detail.loading ? "empty" : "loading"} title={serverLoaded && detail && !detail.loading ? tr("이 서버 캠페인을 찾을 수 없습니다.", "This server campaign was not found.") : tr("서버 캠페인을 불러오고 있습니다.", "Loading server campaigns.")} />}
     </div>}
   </section>;
 }
