@@ -99,6 +99,7 @@ impl Frame {
             header: self.header.clone(),
             screen_prefix: self.screen_prefix.clone(),
             events: vec![],
+            append: None,
         }
     }
 }

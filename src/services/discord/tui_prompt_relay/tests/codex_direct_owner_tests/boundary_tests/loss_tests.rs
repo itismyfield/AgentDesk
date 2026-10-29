@@ -264,8 +264,22 @@ fn codex_model_turn_queued_eight_ms_after_completion_delivers_both_answers() {
 const NEW_TURN_TMUX: &str = r#"#!/bin/sh
 d='@D@'
 case "$2" in
-display-message) echo '0,,80,24';;
-capture-pane) if [ -f "$d/pasted" ]; then cat "$d/after"; else cat "$d/before"; fi;;
+display-message)
+  case "$*" in
+    *pane_width*) echo '%5845|5845|80|24|2|19|0';;
+    *) echo '0,,80,24';;
+  esac;;
+capture-pane)
+  if [ -f "$d/pasted" ]; then screen="$d/after"; else screen="$d/before"; fi
+  case "$*" in
+    *' -S '*) cat "$screen";;
+    *) awk '
+      { rows[NR] = $0 }
+      END {
+        for (i = NR; i < 24; i++) print ""
+        for (i = (NR > 24 ? NR - 23 : 1); i <= NR; i++) print rows[i]
+      }' "$screen";;
+  esac;;
 load-buffer) for last do :; done; cp "$last" "$d/buffer";;
 paste-buffer|send-keys)
   shift; echo "$*" >> "$d/keys"

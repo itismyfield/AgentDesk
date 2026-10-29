@@ -329,11 +329,14 @@ fn busy_turn(
             Err(NOT_BUSY)
         };
     }
-    match codex_inject::read_turn(transcript) {
-        Some(codex_inject::TurnVerdict::KnownModelTurn(turn)) => Ok(Some(turn)),
-        Some(codex_inject::TurnVerdict::NotBusy) => Err(NOT_BUSY),
-        Some(codex_inject::TurnVerdict::NonSteerable(_)) => Err("not_steerable"),
-        Some(codex_inject::TurnVerdict::Unknown) | None => Err("turn_unknown"),
+    match codex_inject::read_turn_detail(transcript) {
+        Some(read) => match read.verdict {
+            codex_inject::TurnVerdict::KnownModelTurn(turn) => Ok(Some(turn)),
+            codex_inject::TurnVerdict::NotBusy => Err(NOT_BUSY),
+            codex_inject::TurnVerdict::NonSteerable(_) => Err("not_steerable"),
+            codex_inject::TurnVerdict::Unknown => Err(read.reason),
+        },
+        None => Err("turn_unknown"),
     }
 }
 
@@ -351,10 +354,20 @@ impl SharedData {
         {
             return true;
         }
+        let declined = |reason: &'static str| {
+            tracing::info!(
+                provider = provider.as_str(),
+                channel_id = channel.get(),
+                phase = "has_inject_turn",
+                reason,
+                "human input cannot join native turn"
+            );
+            false
+        };
         let runtime = match provider {
             ProviderKind::Claude => RuntimeHandoffKind::ClaudeTui,
             ProviderKind::Codex => RuntimeHandoffKind::CodexTui,
-            _ => return false,
+            _ => return declined("provider_unsupported"),
         };
         let row = crate::services::discord::inflight::load_inflight_state_read_only(
             provider,
@@ -369,10 +382,19 @@ impl SharedData {
             watcher.map(|binding| binding.tmux_session_name),
             named,
         )
-        .is_some_and(|(_, transcript)| {
-            (runtime == RuntimeHandoffKind::ClaudeTui && turn_mode_tmux(channel.get()))
-                || busy_turn(runtime, &transcript).is_ok()
-        })
+        .map_or_else(
+            || declined(SESSION_UNRESOLVED),
+            |(_, transcript)| {
+                if runtime == RuntimeHandoffKind::ClaudeTui && turn_mode_tmux(channel.get()) {
+                    true
+                } else {
+                    match busy_turn(runtime, &transcript) {
+                        Ok(_) => true,
+                        Err(reason) => declined(reason),
+                    }
+                }
+            },
+        )
     }
 }
 
@@ -382,73 +404,86 @@ async fn resolve(
     request: &HumanInputRequest,
     queued: bool,
 ) -> Result<Target, &'static str> {
-    let channel = request.channel_id.get();
-    let runtime = match request.provider {
-        ProviderKind::Claude => RuntimeHandoffKind::ClaudeTui,
-        ProviderKind::Codex if codex_enabled(channel) => RuntimeHandoffKind::CodexTui,
-        _ => return Err("provider_unsupported"),
-    };
-    // A session that resolves to no TUI pane of that runtime stops here, before acquiring the
-    // session-transition guard or issuing pane I/O.
-    let read = crate::services::discord::inflight::load_inflight_state_read_only;
-    let row = read(&request.provider, channel);
-    let named = channel_name(shared, request.channel_id).await;
-    let live = |row: Option<&InflightTurnState>, named| {
-        live_tui_session(shared, request, runtime, row, named)
-    };
-    let pane = live(row.as_ref(), named).ok_or(SESSION_UNRESOLVED)?;
-    let binding = binding_key(&pane.0);
-    // Transcript-output Claude follows the resulting native turn, whether idle or busy now.
-    let native_turn = if runtime == RuntimeHandoffKind::ClaudeTui && turn_mode_tmux(channel) {
-        None
-    } else {
-        busy_turn(runtime, &pane.1)?
-    };
-    // Held until the pane effect ends. Bounded waiters (claim handback, headless start, /clear,
-    // /resume) give up after 3s; intake and kickoff never wait and fall back to their queue.
-    let transition = shared
-        .session_transition_lock(request.channel_id)
-        .try_lock_owned()
-        .map_err(|_| TRANSITION_BUSY)?;
-    let (snapshot, row) = observe(shared, request).await;
-    let first = holder(&snapshot, row.as_ref(), channel)?;
-    if !queued {
-        backlog(&snapshot, &request.provider, request.channel_id)?;
+    let result = async {
+        let channel = request.channel_id.get();
+        let runtime = match request.provider {
+            ProviderKind::Claude => RuntimeHandoffKind::ClaudeTui,
+            ProviderKind::Codex if codex_enabled(channel) => RuntimeHandoffKind::CodexTui,
+            _ => return Err("provider_unsupported"),
+        };
+        // A session that resolves to no TUI pane of that runtime stops here, before acquiring the
+        // session-transition guard or issuing pane I/O.
+        let read = crate::services::discord::inflight::load_inflight_state_read_only;
+        let row = read(&request.provider, channel);
+        let named = channel_name(shared, request.channel_id).await;
+        let live = |row: Option<&InflightTurnState>, named| {
+            live_tui_session(shared, request, runtime, row, named)
+        };
+        let pane = live(row.as_ref(), named).ok_or(SESSION_UNRESOLVED)?;
+        let binding = binding_key(&pane.0);
+        // Transcript-output Claude follows the resulting native turn, whether idle or busy now.
+        let native_turn = if runtime == RuntimeHandoffKind::ClaudeTui && turn_mode_tmux(channel) {
+            None
+        } else {
+            busy_turn(runtime, &pane.1)?
+        };
+        // Held until the pane effect ends. Bounded waiters (claim handback, headless start, /clear,
+        // /resume) give up after 3s; intake and kickoff never wait and fall back to their queue.
+        let transition = shared
+            .session_transition_lock(request.channel_id)
+            .try_lock_owned()
+            .map_err(|_| TRANSITION_BUSY)?;
+        let (snapshot, row) = observe(shared, request).await;
+        let first = holder(&snapshot, row.as_ref(), channel)?;
+        if !queued {
+            backlog(&snapshot, &request.provider, request.channel_id)?;
+        }
+        // A host the check keeps off tmux takes input only as its Bound Herdr execution's pane.
+        let deferred = crate::services::discord::host_defer_gate::channel_session_deferred;
+        let herdr = if deferred(shared, &request.provider, channel, &pane.0).await {
+            let herdr = herdr::bound_pane(shared, &request.provider, channel, &pane.0).await;
+            Some(herdr.ok_or(SESSION_UNRESOLVED)?)
+        } else {
+            None
+        };
+        // Paths that skip the transition may queue or claim while these lookups wait; the owner's
+        // reservation checks the claim and the queue after them, and the row is read last here.
+        #[cfg(test)]
+        test_hook::final_name_lookup(channel);
+        let named = channel_name(shared, request.channel_id).await;
+        let row = read(&request.provider, channel);
+        if live(row.as_ref(), named).as_ref() != Some(&pane)
+            || (queued && binding_key(&pane.0) != binding)
+        {
+            return Err(SESSION_UNRESOLVED);
+        }
+        if row.as_ref().map(row_key) != first.row {
+            return Err(HOLDER_CHANGED);
+        }
+        let (session, transcript) = pane;
+        Ok(Target {
+            session,
+            transcript,
+            native_turn,
+            turn_id: first.turn_id,
+            claim: first.claim,
+            transition,
+            row: first.row,
+            binding,
+            herdr,
+        })
     }
-    // A host the check keeps off tmux takes input only as its Bound Herdr execution's pane.
-    let deferred = crate::services::discord::host_defer_gate::channel_session_deferred;
-    let herdr = if deferred(shared, &request.provider, channel, &pane.0).await {
-        let herdr = herdr::bound_pane(shared, &request.provider, channel, &pane.0).await;
-        Some(herdr.ok_or(SESSION_UNRESOLVED)?)
-    } else {
-        None
-    };
-    // Paths that skip the transition may queue or claim while these lookups wait; the owner's
-    // reservation checks the claim and the queue after them, and the row is read last here.
-    #[cfg(test)]
-    test_hook::final_name_lookup(channel);
-    let named = channel_name(shared, request.channel_id).await;
-    let row = read(&request.provider, channel);
-    if live(row.as_ref(), named).as_ref() != Some(&pane)
-        || (queued && binding_key(&pane.0) != binding)
-    {
-        return Err(SESSION_UNRESOLVED);
+    .await;
+    if let Err(reason) = &result {
+        tracing::info!(
+            provider = request.provider.as_str(),
+            channel_id = request.channel_id.get(),
+            phase = "resolve",
+            reason,
+            "human input injection declined"
+        );
     }
-    if row.as_ref().map(row_key) != first.row {
-        return Err(HOLDER_CHANGED);
-    }
-    let (session, transcript) = pane;
-    Ok(Target {
-        session,
-        transcript,
-        native_turn,
-        turn_id: first.turn_id,
-        claim: first.claim,
-        transition,
-        row: first.row,
-        binding,
-        herdr,
-    })
+    result
 }
 
 /// Checks the existing effect-free target predicate before origin admission.
@@ -568,6 +603,23 @@ struct Owner {
 
 impl Owner {
     async fn run(self, target: Target, input: Arc<Input>) -> InjectAttempt {
+        let channel = self.channel_id.get();
+        let provider = self.provider.as_str().to_string();
+        let result = self.run_inner(target, input).await;
+        let (outcome, reason, head_state) = result.queued_report();
+        tracing::info!(
+            channel_id = channel,
+            provider,
+            phase = "owner",
+            outcome,
+            reason,
+            head_state,
+            "human input injection outcome"
+        );
+        result
+    }
+
+    async fn run_inner(self, target: Target, input: Arc<Input>) -> InjectAttempt {
         let Owner {
             shared,
             provider,
@@ -837,6 +889,12 @@ impl codex_inject::Ledger for CodexLedger<'_> {
     fn withdraw(&self) {
         let withdraw = crate::services::tui_prompt_dedupe::withdraw_injected_steer;
         withdraw("codex", self.session, self.nonce);
+    }
+    fn message_id(&self) -> Option<u64> {
+        self.message.map(MessageId::get)
+    }
+    fn admitted(&self) {
+        self.withdraw();
     }
 }
 

@@ -924,6 +924,11 @@ pub(crate) fn prepare_codex_restore(
             .unwrap_or(source.complete_end)
             .min(source.complete_end);
     }
+    if let Some(append_start) =
+        crate::services::tui_input::human_frame::history::append::replay_start(tmux, &source.path)
+    {
+        input_start = input_start.min(append_start);
+    }
     Ok(super::super::handoff::CodexRestore::new(
         source,
         input_start,

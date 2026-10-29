@@ -6,7 +6,12 @@ use crate::services::codex_tui::input::{
 };
 
 /// Words that only Codex's status row carries below the composer.
-const STATUS_MARKERS: &[&str] = &["context left", "% left", "tab to queue message"];
+const STATUS_MARKERS: &[&str] = &[
+    "context left",
+    "% left",
+    "tab to queue message",
+    " · ← for agents",
+];
 /// Footers of the transcript overlay and the review pickers, which hide the composer.
 const MODAL_FOOTERS: &[&str] = &[
     "q close",
@@ -18,8 +23,10 @@ const MODAL_FOOTERS: &[&str] = &[
 const QUEUE_HEADERS: &[&str] = &[
     "• Queued follow-up inputs",
     "• Messages to be submitted at end of turn",
+    "Messages to be submitted after next tool call",
+    "• Messages to be submitted after next tool call",
 ];
-/// Bound the pre-paste composer scan; an unread layout does not veto injection.
+/// Bound the pre-paste composer scan; an unread layout falls back before mutation.
 const MAX_COMPOSER_ROWS: usize = 40;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,9 +58,11 @@ pub(super) fn read(capture: &str) -> Screen {
     let overlay = footer.is_some_and(|line| MODAL_FOOTERS.iter().any(|mark| line.contains(mark)));
     let modal = overlay || pane_shows_codex_interactive_modal(&plain.join("\n"));
     let (composer, attachments) = composer(&raw, &plain);
-    let queued = plain
-        .iter()
-        .any(|line| QUEUE_HEADERS.contains(&line.trim()));
+    let queued = plain.iter().any(|line| {
+        QUEUE_HEADERS
+            .iter()
+            .any(|header| line.trim().starts_with(header))
+    });
     Screen {
         modal,
         queued,
@@ -110,7 +119,9 @@ fn composer(raw: &[&str], plain: &[String]) -> (Composer, bool) {
     }
     let first = plain[top].trim_start_matches('›');
     let first = first.strip_prefix(' ').unwrap_or(first);
-    if top == last && (first.trim().is_empty() || only_dim_after_mark(raw[top])) {
+    if top == last
+        && (first.is_empty() || (!first.trim().is_empty() && only_dim_after_mark(raw[top])))
+    {
         return (Composer::Empty, attachments);
     }
     let rest = plain[top + 1..=last]
@@ -184,4 +195,48 @@ fn sgr_dim(params: &str, mut dim: bool) -> bool {
         }
     }
     dim
+}
+
+/// Unknown editor semantics never turn a displayed draft into a proven append position.
+pub(super) fn append_veto(capture: &str, shown: &Screen) -> Option<super::Veto> {
+    use super::Veto;
+    let plain = strip_ansi_escape_sequences(capture);
+    let rows: Vec<_> = plain.lines().collect();
+    let top = rows.iter().rposition(|row| row.starts_with('›'));
+    let draft = top.map(|top| rows[top..].join("\n")).unwrap_or_default();
+    if draft.trim_start_matches('›').trim_start().starts_with('/') {
+        return Some(Veto::DraftCommandUnproven);
+    }
+    if draft
+        .lines()
+        .any(|row| row.trim_start_matches('›').trim_start().starts_with('>'))
+    {
+        return Some(Veto::DraftPasteTransformUnproven);
+    }
+    if top.is_some_and(|top| {
+        rows[top..]
+            .iter()
+            .take_while(|row| !row.trim().is_empty())
+            .count()
+            > MAX_COMPOSER_ROWS
+    }) {
+        return Some(Veto::DraftNotFullyVisible);
+    }
+    if draft.contains("[Pasted") || draft.contains("<pasted_content") {
+        return Some(Veto::DraftPlaceholderUnproven);
+    }
+    // Selection absence and cursor coordinates alone do not establish default editor semantics.
+    if capture
+        .lines()
+        .skip(top.unwrap_or(0))
+        .any(|row| row.contains("[7m") || row.contains(";7m"))
+    {
+        return Some(Veto::DraftSelectionUnproven);
+    }
+    match &shown.composer {
+        Composer::Unread => Some(Veto::ComposerUnread),
+        Composer::Empty if shown.attachments => Some(Veto::DraftImagePositionUnproven),
+        Composer::Text(_) => Some(Veto::DraftNavigationUnproven),
+        Composer::Empty => None,
+    }
 }
