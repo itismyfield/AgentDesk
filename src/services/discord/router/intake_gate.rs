@@ -1420,7 +1420,9 @@ pub(in crate::services::discord) async fn handle_event(
             let settle_checkpoint = attachment_local_permit.is_none()
                 && super::live_checkpoint_waits(&data.provider, channel_id);
             #[cfg(test)]
-            let owner_custody = queue_io::input_ingress::installed(&data.shared.mailbox(channel_id)).await != Ok(false);
+            let owner_custody =
+                queue_io::input_ingress::installed(&data.shared.mailbox(channel_id)).await
+                    != Ok(false);
             #[cfg(test)]
             let settle_checkpoint = settle_checkpoint || owner_custody;
             if !settle_checkpoint {

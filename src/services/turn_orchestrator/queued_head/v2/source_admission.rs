@@ -454,7 +454,9 @@ impl SnapshotV2 {
         let live: Vec<(QueueIdentity, AttemptIdentity)> = (self.retained_inputs.iter())
             .flat_map(|r| {
                 let attempt = r.input.attempt.clone();
-                r.input.members().filter_map(move |m| Some((sources::identity(m), attempt.clone()?)))
+                r.input
+                    .members()
+                    .filter_map(move |m| Some((sources::identity(m), attempt.clone()?)))
             })
             .collect();
         self.admission_binds.retain(|b| match &b.at {
@@ -464,7 +466,10 @@ impl SnapshotV2 {
             _ => true,
         });
         for (receipt, identity) in moved {
-            let at = BindAt::Attempt { identity, attempt: attempt.clone() };
+            let at = BindAt::Attempt {
+                identity,
+                attempt: attempt.clone(),
+            };
             self.admission_binds.push(AdmissionBind { receipt, at });
         }
     }
@@ -476,8 +481,9 @@ pub(super) fn settle_binds(snapshot: &mut SnapshotV2, key: &AttemptRef, now: u64
     let retained = snapshot.retained_inputs.iter().map(|r| &r.input);
     let input = (snapshot.head_injection.iter().chain(retained)).find(|input| key.matches(input));
     let source = input.and_then(|input| input.resolved_source.clone());
-    let members: Vec<QueueIdentity> =
-        input.map(|input| input.members().map(sources::identity).collect()).unwrap_or_default();
+    let members: Vec<QueueIdentity> = input
+        .map(|input| input.members().map(sources::identity).collect())
+        .unwrap_or_default();
     for bind in &mut snapshot.admission_binds {
         if let BindAt::Attempt { identity, attempt } = &bind.at
             && members.contains(identity)

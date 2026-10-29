@@ -696,9 +696,15 @@ fn a_v2_checked_purge_keeps_every_member_of_a_reserved_unit() {
             })
             .await
             .unwrap();
-        let current = (handle.v2_request(|slot| slot.as_ref().ok_or("no owner")?.fingerprint()).await).unwrap();
+        let current = (handle
+            .v2_request(|slot| slot.as_ref().ok_or("no owner")?.fingerprint())
+            .await)
+            .unwrap();
         let expected = ExpectedQueue::of(&handle.snapshot().await).with_v2(current);
-        let purged = handle.try_purge_queue_if_unchanged(ctx(), expected).await.unwrap();
+        let purged = handle
+            .try_purge_queue_if_unchanged(ctx(), expected)
+            .await
+            .unwrap();
         let receipt: Vec<u64> = purged.receipt.iter().map(|i| i.message_id.get()).collect();
         assert_eq!(receipt, [300], "only what no unit holds is purged");
         assert_eq!(queued(&handle).await, (vec![100, 200], true));

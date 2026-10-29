@@ -215,9 +215,13 @@ pub(super) async fn offered(ctx: &serenity::Context, data: &Data, live: &LiveTex
 
 /// An input owner takes every arrival on its channel, Herdr-hosted ones included, through intake,
 /// so the legacy offer never registers the same original beside it. Production joins at 4f.
-pub(in crate::services::discord) async fn owner_takes(shared: &SharedData, channel: ChannelId) -> bool {
+pub(in crate::services::discord) async fn owner_takes(
+    shared: &SharedData,
+    channel: ChannelId,
+) -> bool {
     #[cfg(test)]
-    return crate::services::discord::queue_io::input_ingress::installed(&shared.mailbox(channel)).await
+    return crate::services::discord::queue_io::input_ingress::installed(&shared.mailbox(channel))
+        .await
         != Ok(false);
     #[cfg(not(test))]
     {

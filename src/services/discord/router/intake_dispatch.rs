@@ -561,7 +561,12 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
             waits || super::herdr_consent::endpoint(submission.request.channel_id.get()).is_some();
         // An owner admission moves the checkpoint only once it is Accepted.
         #[cfg(test)]
-        let waits = waits || super::super::queue_io::input_ingress::installed(&deps.shared.mailbox(submission.request.channel_id)).await != Ok(false);
+        let waits = waits
+            || super::super::queue_io::input_ingress::installed(
+                &deps.shared.mailbox(submission.request.channel_id),
+            )
+            .await
+                != Ok(false);
         if !waits {
             checkpoint();
             return finish_text_intake_admission(deps, admission, submission).await;
@@ -712,10 +717,16 @@ pub(crate) async fn finish_admitted_local(
     let preserve_on_cancel = submission.preserve_on_cancel;
     #[cfg(test)]
     if let Some(intake) = super::super::queue_io::input_ingress::intake(
-        deps.shared, &submission.provider, &submission.request,
-        submission.preloaded_uploads.clone(), submission.voice_announcement.clone(),
-        matches!(submission.origin, IntakeOrigin::QueuedDrain(_)), !submission.attachments.is_empty(),
-    ).await {
+        deps.shared,
+        &submission.provider,
+        &submission.request,
+        submission.preloaded_uploads.clone(),
+        submission.voice_announcement.clone(),
+        matches!(submission.origin, IntakeOrigin::QueuedDrain(_)),
+        !submission.attachments.is_empty(),
+    )
+    .await
+    {
         return intake.live();
     }
     local_turn(deps, submission, preserve_on_cancel).await

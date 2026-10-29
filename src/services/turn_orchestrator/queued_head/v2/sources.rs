@@ -20,7 +20,12 @@ impl Owner {
             .chain(
                 (self.snapshot.retained_inputs.iter())
                     .flat_map(|e| e.input.members().skip(1).map(identity))
-                    .chain(self.snapshot.retained_inputs.iter().map(|e| e.input.identity.clone())),
+                    .chain(
+                        self.snapshot
+                            .retained_inputs
+                            .iter()
+                            .map(|e| e.input.identity.clone()),
+                    ),
             )
             .chain(
                 self.snapshot
@@ -70,7 +75,9 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
     }
     snapshot.namespace = Some(namespace.into());
     // Released unarmed, every member still holds the queued bind its reserve kept.
-    snapshot.head_injection.take_if(|head| head.phase == HeadPhase::Reserved);
+    snapshot
+        .head_injection
+        .take_if(|head| head.phase == HeadPhase::Reserved);
     Ok(snapshot)
 }
 

@@ -75,15 +75,29 @@ pub(crate) async fn execute_intake_turn_core(
         return Ok(stopped);
     }
     #[cfg(test)]
-    if crate::services::discord::queue_io::input_ingress::installed(&shared.mailbox(request.channel_id)).await != Ok(false) {
+    if crate::services::discord::queue_io::input_ingress::installed(
+        &shared.mailbox(request.channel_id),
+    )
+    .await
+        != Ok(false)
+    {
         let voice = if let Some(pool) = shared.pg_pool.as_ref() {
-            crate::voice::announce_meta::load_voice_announcement_durable(pool, request.user_msg_id).await?
+            crate::voice::announce_meta::load_voice_announcement_durable(pool, request.user_msg_id)
+                .await?
         } else {
             crate::voice::announce_meta::global_store().peek_clone(request.user_msg_id)
         };
         if let Some(intake) = crate::services::discord::queue_io::input_ingress::intake(
-            shared, &shared.provider, &request, uploads.clone(), voice, true, false,
-        ).await {
+            shared,
+            &shared.provider,
+            &request,
+            uploads.clone(),
+            voice,
+            true,
+            false,
+        )
+        .await
+        {
             return intake.worker();
         }
     }

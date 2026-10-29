@@ -140,10 +140,8 @@ impl Owner {
         Ok(key)
     }
 
-    /// Reserves the queue front the caller prepared as one unit: `prepared` gives each original's
-    /// shown name and its prompt body as a single input, and the first original it does not know
-    /// starts the next unit.
-    /// Each original keeps its own identity and ticket.
+    /// Reserves the prepared queue front as one unit: `prepared` gives each original's shown name
+    /// and single-input body; the first original it does not know starts the next unit.
     pub(crate) fn reserve_unit(
         &mut self,
         attempt: AttemptIdentity,
@@ -153,16 +151,19 @@ impl Owner {
         self.reserve(attempt, payload)
     }
 
-    /// Rebuilds a reserved unit whose write permit is not handed over yet over the current queue
-    /// front, so an arrival during registration joins it in order. Originals, tickets and queue
-    /// order stay; the old key can no longer arm, so its payload never writes.
+    /// Rebuilds a reserved unit whose write permit is not handed over yet over the current front,
+    /// keeping originals, tickets and order; the old key can no longer arm, so it never writes.
     pub(crate) fn reprepare(
         &mut self,
         key: &AttemptRef,
         nonce: String,
         prepared: impl Fn(&PendingQueueItem) -> Option<(String, String)>,
     ) -> Result<AttemptRef, String> {
-        let head = self.snapshot.head_injection.as_ref().ok_or("no reserved unit")?;
+        let head = self
+            .snapshot
+            .head_injection
+            .as_ref()
+            .ok_or("no reserved unit")?;
         if !key.matches(head) || head.phase != HeadPhase::Reserved {
             return Err("the write permit was already handed over".into());
         }
@@ -185,7 +186,11 @@ impl Owner {
         let views: Vec<MemberView> = (self.snapshot.items.iter())
             .map_while(|item| {
                 let (name, body) = prepared(item)?;
-                Some(MemberView { original: item.clone(), name, body })
+                Some(MemberView {
+                    original: item.clone(),
+                    name,
+                    body,
+                })
             })
             .collect();
         if views.is_empty() {
@@ -198,7 +203,11 @@ impl Owner {
             digest: hex::encode(digest),
             frame,
             attribution: serde_json::json!({ "members": members }),
-            followers: views.into_iter().skip(1).map(|view| view.original).collect(),
+            followers: views
+                .into_iter()
+                .skip(1)
+                .map(|view| view.original)
+                .collect(),
         })
     }
 
@@ -210,7 +219,10 @@ impl Owner {
 impl InputAttempt {
     /// Every original this attempt carries, the head original first, in arrival order.
     pub(crate) fn members(&self) -> impl Iterator<Item = &PendingQueueItem> {
-        let followers = self.payload.iter().flat_map(|payload| payload.followers.iter());
+        let followers = self
+            .payload
+            .iter()
+            .flat_map(|payload| payload.followers.iter());
         std::iter::once(&self.original).chain(followers)
     }
 }
@@ -241,7 +253,9 @@ fn render(views: &[MemberView]) -> String {
 
 /// Exact equality of two stored originals, as the restore compares them.
 pub(super) fn same(a: &PendingQueueItem, b: &PendingQueueItem) -> bool {
-    serde_json::to_value(a).ok().is_some_and(|a| serde_json::to_value(b).ok() == Some(a))
+    serde_json::to_value(a)
+        .ok()
+        .is_some_and(|a| serde_json::to_value(b).ok() == Some(a))
 }
 
 /// Whether the queue front holds exactly `input`'s members, in order; every consumer that

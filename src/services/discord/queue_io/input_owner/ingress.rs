@@ -23,7 +23,11 @@ pub(crate) struct OwnerPending(pub(crate) AdmissionTicket);
 
 impl std::fmt::Display for OwnerPending {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "owner admission pending ({}): {PENDING_CONTRACT}", self.0.as_str())
+        write!(
+            f,
+            "owner admission pending ({}): {PENDING_CONTRACT}",
+            self.0.as_str()
+        )
     }
 }
 
@@ -96,7 +100,10 @@ impl Hold {
     }
 
     pub(crate) fn notice(self) -> String {
-        format!("-# {}로 즉시주입 하지 못하고 메시지큐에 들어갔습니다", self.reason())
+        format!(
+            "-# {}로 즉시주입 하지 못하고 메시지큐에 들어갔습니다",
+            self.reason()
+        )
     }
 }
 
@@ -139,7 +146,9 @@ pub(crate) async fn held(
     crate::services::discord::discord_io::rate_limit_wait(shared, channel).await;
     let message = MessageId::new(original.item.message_id);
     let send = crate::services::discord::http::send_channel_message_with_reference;
-    send(&http, channel, &hold.notice(), channel, message).await.is_ok()
+    send(&http, channel, &hold.notice(), channel, message)
+        .await
+        .is_ok()
 }
 
 /// The caller keeps this exact original and ticket across Pending and restart.
@@ -189,10 +198,20 @@ pub(crate) async fn intake(
     if EXISTING_RETRY.try_with(|value| *value).unwrap_or(false) {
         return None;
     }
-    let bot = request.turn_kind.is_background_trigger() || voice.is_some()
-        || shared.settings.read().await.allowed_bot_ids.contains(&request.request_owner.get());
+    let bot = request.turn_kind.is_background_trigger()
+        || voice.is_some()
+        || shared
+            .settings
+            .read()
+            .await
+            .allowed_bot_ids
+            .contains(&request.request_owner.get());
     let raw = crate::services::discord::router::input_payload::owned_original(
-        request, bot, uploads, voice, durable_context,
+        request,
+        bot,
+        uploads,
+        voice,
+        durable_context,
     );
     admit_raw(shared, provider, request.channel_id, &raw, uploads_pending).await
 }
@@ -207,10 +226,14 @@ async fn admit_raw(
     let handle = shared.mailbox(channel);
     match installed(&handle).await {
         Ok(false) => return None,
-        Ok(true) => {},
+        Ok(true) => {}
         Err(error) => return Some(Intake::Rejected(error)),
     }
-    let role = shared.dispatch.role_overrides.get(&channel).map(|value| value.get());
+    let role = shared
+        .dispatch
+        .role_overrides
+        .get(&channel)
+        .map(|value| value.get());
     let original = match original(provider, channel, role, raw) {
         Ok(original) => settled_generation(&handle, original).await,
         Err(error) => return Some(Intake::Rejected(error)),
@@ -225,18 +248,31 @@ async fn admit_raw(
 /// A replay carries a fresh process generation; the stored original's generations keep its receipt.
 async fn settled_generation(handle: &ChannelMailboxHandle, mut original: Original) -> Original {
     let wanted = original.item.clone();
-    let stored = handle.v2_request(move |slot| {
-        let owner = slot.as_ref().ok_or("input owner disappeared")?;
-        let snapshot = &owner.snapshot;
-        let retained = snapshot.retained_inputs.iter().flat_map(|entry| entry.input.members());
-        let mut originals = snapshot.items.iter().chain(retained);
-        Ok(originals.find(|item| item.message_id == wanted.message_id
-            && item.source_message_ids == wanted.source_message_ids).cloned())
-    }).await;
+    let stored = handle
+        .v2_request(move |slot| {
+            let owner = slot.as_ref().ok_or("input owner disappeared")?;
+            let snapshot = &owner.snapshot;
+            let retained = snapshot
+                .retained_inputs
+                .iter()
+                .flat_map(|entry| entry.input.members());
+            let mut originals = snapshot.items.iter().chain(retained);
+            Ok(originals
+                .find(|item| {
+                    item.message_id == wanted.message_id
+                        && item.source_message_ids == wanted.source_message_ids
+                })
+                .cloned())
+        })
+        .await;
     if let Ok(Some(stored)) = stored {
         original.item.queued_generation = stored.queued_generation;
         for source in &mut original.item.source_message_queued_generations {
-            if let Some(old) = stored.source_message_queued_generations.iter().find(|old| old.message_id == source.message_id) {
+            if let Some(old) = stored
+                .source_message_queued_generations
+                .iter()
+                .find(|old| old.message_id == source.message_id)
+            {
                 source.queued_generation = old.queued_generation;
             }
         }
@@ -246,7 +282,12 @@ async fn settled_generation(handle: &ChannelMailboxHandle, mut original: Origina
 
 /// The ticket a Discord original derives from its provider, channel and sources, so every
 /// re-entry of the same message, after Pending or a restart, names the same admission.
-pub(crate) fn discord_ticket(provider: &ProviderKind, channel: ChannelId, message: u64, ids: &[u64]) -> AdmissionTicket {
+pub(crate) fn discord_ticket(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    message: u64,
+    ids: &[u64],
+) -> AdmissionTicket {
     let identity = json!([provider.as_str(), channel.get(), message, ids]);
     let digest = Sha256::digest(identity.to_string().as_bytes());
     AdmissionTicket::stored(&format!("discord-{}", hex::encode(&digest[..16])))
@@ -262,9 +303,16 @@ pub(crate) fn original(
     let ids: Vec<_> = if intervention.source_message_ids.is_empty() {
         vec![intervention.message_id.get()]
     } else {
-        intervention.source_message_ids.iter().map(|id| id.get()).collect()
+        intervention
+            .source_message_ids
+            .iter()
+            .map(|id| id.get())
+            .collect()
     };
-    if ids.iter().any(|id| !crate::services::tui_input::input_key::is_discord_key(*id)) {
+    if ids
+        .iter()
+        .any(|id| !crate::services::tui_input::input_key::is_discord_key(*id))
+    {
         return Err("synthetic input requires its caller's stored admission ticket".into());
     }
     let generations: Vec<_> = intervention.source_message_queued_generations().into_iter().map(|source| json!({
@@ -272,13 +320,24 @@ pub(crate) fn original(
         "enqueued_at_epoch_us":source.enqueued_at_epoch_us,"preserve_on_cancel":source.preserve_on_cancel,
         "route":source.route,"origin":source.origin,
     })).collect();
-    let segments: Vec<_> = intervention.source_text_segments().into_iter().map(|source| json!({
-        "message_id":source.message_id.get(),"text":source.text,
-    })).collect();
+    let segments: Vec<_> = intervention
+        .source_text_segments()
+        .into_iter()
+        .map(|source| {
+            json!({
+                "message_id":source.message_id.get(),"text":source.text,
+            })
+        })
+        .collect();
     let ticket = discord_ticket(provider, channel, intervention.message_id.get(), &ids);
     let age = u64::try_from(intervention.created_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let now = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| error.to_string())?.as_millis()).unwrap_or(u64::MAX);
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
     let item = serde_json::from_value(json!({
         "author_id":intervention.author_id.get(),"author_is_bot":intervention.author_is_bot,
         "message_id":intervention.message_id.get(),"queued_generation":intervention.queued_generation,
@@ -307,7 +366,12 @@ pub(crate) async fn enqueue(
         Intake::Pending(pending) => (false, Some(pending.to_string())),
         Intake::Rejected(reason) => (false, Some(reason)),
     };
-    Some(MailboxEnqueueOutcome { enqueued, merged: false, refusal_reason: None, persistence_error })
+    Some(MailboxEnqueueOutcome {
+        enqueued,
+        merged: false,
+        refusal_reason: None,
+        persistence_error,
+    })
 }
 
 #[cfg(test)]
