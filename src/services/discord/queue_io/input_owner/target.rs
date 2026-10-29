@@ -3,10 +3,8 @@
 #![cfg(unix)]
 use super::origin::{Execution, InputOrigin};
 
-/// One logical writer: host, root and the session the owner's history names. The execution nonce
-/// stays out, so a new process in the same session still waits here. A Herdr session's physical
-/// pane (`socket_path#pane_id`) is held apart by the owner's writer lease for the scope's life:
-/// two sessions naming one pane never write it at once.
+/// One logical writer (host, root, history's session), nonce left out; a Herdr pane itself is
+/// held by the owner's physical writer lease, so two sessions never write one pane at once.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct TargetKey {
     host: String,

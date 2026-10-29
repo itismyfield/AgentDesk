@@ -220,9 +220,8 @@ fn owner_herdr_unconfirmed_alerts_once_and_never_resends() {
     assert_eq!(snapshot["head_injection"]["phase"], "unknown", "{snapshot}");
 }
 
-/// An owner bound to another pane writes nothing to this one: the gate's content fence refuses
-/// before any byte. Health reads that refusal inside the send as a failed paste, so the attempt
-/// stays Unknown with health's one alert and is never sent again.
+/// An owner bound to another pane gets no byte in: health reads the fence's refusal as a failed
+/// paste, so the head stays Unknown with health's one alert and nothing is sent again.
 #[test]
 fn owner_herdr_foreign_pane_gets_no_content() {
     let (rig, completion, snapshot, nonce) = attempt(7_272_533, true, Some("/elsewhere#w1-9"));
