@@ -1812,6 +1812,7 @@ src/
 │   │   │   ├── terminal_text_idempotency.rs
 │   │   │   ├── terminal_watcher.rs
 │   │   │   ├── tmux_probe.rs
+│   │   │   ├── turn_mode_restart_tests.rs
 │   │   │   ├── turn_summary_recovery_tests.rs
 │   │   │   └── two_message_panel.rs
 │   │   ├── recovery_paths/
@@ -2629,7 +2630,8 @@ src/
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
 │   │   │   │   │   ├── recovery_retry_guard_tests/
-│   │   │   │   │   │   └── replay_turn_tests.rs
+│   │   │   │   │   │   ├── replay_turn_tests.rs
+│   │   │   │   │   │   └── turn_mode_retry_tests.rs
 │   │   │   │   │   ├── rowless_receipt_tests/
 │   │   │   │   │   │   ├── background_child_ordering_tests.rs
 │   │   │   │   │   │   ├── o_after_done_chain_tests.rs
