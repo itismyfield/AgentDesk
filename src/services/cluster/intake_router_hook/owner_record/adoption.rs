@@ -61,4 +61,5 @@ pub(crate) async fn adopt_on_tx(
 }
 
 #[cfg(all(test, unix))]
+#[path = "adoption_tests.rs"]
 mod tests;

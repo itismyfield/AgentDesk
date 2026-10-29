@@ -14,7 +14,6 @@ pub(crate) mod adoption;
 pub(crate) mod cleanup;
 pub(crate) mod custody;
 pub(crate) mod event;
-#[path = "../input_fallback.rs"]
 pub(crate) mod fallback;
 pub(crate) mod input_start;
 pub(crate) mod output;

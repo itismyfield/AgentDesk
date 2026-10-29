@@ -918,23 +918,29 @@ src/
 │   │   ├── intake_router_hook/
 │   │   │   ├── owner_record/
 │   │   │   │   ├── adoption/
-│   │   │   │   │   └── tests.rs
+│   │   │   │   │   └── tests/
 │   │   │   │   ├── cleanup/
 │   │   │   │   │   └── tests/
 │   │   │   │   │       └── mod.rs
 │   │   │   │   ├── event/
-│   │   │   │   │   └── tests.rs
+│   │   │   │   │   └── tests/
+│   │   │   │   ├── fallback/
+│   │   │   │   │   └── notice.rs
 │   │   │   │   ├── snapshot/
-│   │   │   │   │   └── tests.rs
+│   │   │   │   │   └── tests/
 │   │   │   │   ├── adoption.rs
+│   │   │   │   ├── adoption_tests.rs
 │   │   │   │   ├── cleanup.rs
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── event.rs
+│   │   │   │   ├── event_tests.rs
+│   │   │   │   ├── fallback.rs
 │   │   │   │   ├── input_start.rs
 │   │   │   │   ├── output.rs
 │   │   │   │   ├── output_tests.rs
 │   │   │   │   ├── plan.rs
-│   │   │   │   └── snapshot.rs
+│   │   │   │   ├── snapshot.rs
+│   │   │   │   └── snapshot_tests.rs
 │   │   │   ├── agent_execution_node_tests.rs
 │   │   │   ├── attachment_tests.rs
 │   │   │   ├── capacity_tests.rs

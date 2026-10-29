@@ -14,6 +14,8 @@ pub(crate) mod capability_routing;
 pub(crate) mod execution_capacity;
 pub(crate) mod execution_requirements;
 #[cfg(test)]
+pub(crate) mod input_fallback;
+#[cfg(test)]
 pub(crate) mod intake_preflight;
 pub(crate) mod intake_router_hook;
 pub(crate) mod intake_routing;

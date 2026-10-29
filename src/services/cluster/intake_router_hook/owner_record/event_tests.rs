@@ -63,6 +63,8 @@ async fn routing_event_real_outbox_history_and_failed_pointer_reuse_pg() {
             .unwrap()
             .unwrap();
         tx.commit().await.unwrap();
+        assert_eq!(event.state, DeliveryState::Pending);
+        assert!(event.post_started_at.is_none() && event.message_id.is_none());
         assert_eq!(event.event.from, from);
         assert_eq!(event.event.to, to);
         events.push(event);
@@ -108,6 +110,7 @@ async fn routing_event_real_outbox_history_and_failed_pointer_reuse_pg() {
         historical, events[0],
         "superseded generations retain their original notice"
     );
+    assert!(sqlx::query("UPDATE intake_session_owners SET routing_notice_delivery_state='sent' WHERE provider='claude' AND generation=1").execute(&f.pool).await.is_err(), "a historical event cannot claim sent without its start and message receipt");
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
         .fetch_one(&f.pool)
         .await

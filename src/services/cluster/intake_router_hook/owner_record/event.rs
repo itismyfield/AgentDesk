@@ -22,10 +22,43 @@ pub(crate) struct Event {
     pub bot: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeliveryState {
+    Pending,
+    Posting,
+    Sent,
+    Uncertain,
+}
+impl DeliveryState {
+    fn read(state: Option<&str>) -> Result<Self, sqlx::Error> {
+        match state {
+            Some("pending") => Ok(Self::Pending),
+            Some("posting") => Ok(Self::Posting),
+            Some("sent") => Ok(Self::Sent),
+            Some("uncertain") => Ok(Self::Uncertain),
+            _ => Err(invalid("unknown notice delivery state")),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Reservation {
     pub outbox_id: i64,
     pub event: Event,
+    pub state: DeliveryState,
+    pub post_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub message_id: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct StoredNotice {
+    owner_instance_id: String,
+    status: String,
+    routing_notice: Option<sqlx::types::Json<Event>>,
+    routing_notice_outbox_id: Option<i64>,
+    routing_notice_delivery_state: Option<String>,
+    routing_notice_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    routing_notice_message_id: Option<String>,
 }
 
 pub(crate) struct Description<'a> {
@@ -48,9 +81,18 @@ pub(crate) async fn reserve_on_tx(
     description: Description<'_>,
 ) -> Result<Option<Reservation>, sqlx::Error> {
     custody::lock(tx, id).await?;
-    let stored: Option<(String, String, Option<sqlx::types::Json<Event>>, Option<i64>)> = sqlx::query_as("SELECT owner_instance_id,status,routing_notice,routing_notice_outbox_id FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND generation=$3 FOR UPDATE")
+    let stored: Option<StoredNotice> = sqlx::query_as("SELECT owner_instance_id,status,routing_notice,routing_notice_outbox_id,routing_notice_delivery_state,routing_notice_started_at,routing_notice_message_id FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND generation=$3 FOR UPDATE")
         .bind(id.provider()).bind(id.raw_channel_id()).bind(generation).fetch_optional(&mut **tx).await?;
-    let Some((to, status, event, pointer)) = stored else {
+    let Some(StoredNotice {
+        owner_instance_id: to,
+        status,
+        routing_notice: event,
+        routing_notice_outbox_id: pointer,
+        routing_notice_delivery_state,
+        routing_notice_started_at,
+        routing_notice_message_id,
+    }) = stored
+    else {
         return Ok(None);
     };
     #[cfg(test)]
@@ -75,6 +117,9 @@ pub(crate) async fn reserve_on_tx(
         return Ok(Some(Reservation {
             outbox_id: pointer,
             event,
+            state: DeliveryState::read(routing_notice_delivery_state.as_deref())?,
+            post_started_at: routing_notice_started_at,
+            message_id: routing_notice_message_id,
         }));
     }
     if status != "active" {
@@ -136,7 +181,7 @@ pub(crate) async fn reserve_on_tx(
         crate::services::message_outbox::OutboxEnqueueError::Database(e) => e,
         other => invalid(format!("{other:?}")),
     })?;
-    let changed = sqlx::query("UPDATE intake_session_owners SET routing_notice=$4,routing_notice_outbox_id=$5 WHERE provider=$1 AND raw_channel_id=$2 AND generation=$3")
+    let changed = sqlx::query("UPDATE intake_session_owners SET routing_notice=$4,routing_notice_outbox_id=$5,routing_notice_delivery_state='pending' WHERE provider=$1 AND raw_channel_id=$2 AND generation=$3")
         .bind(id.provider()).bind(id.raw_channel_id()).bind(generation).bind(sqlx::types::Json(&event))
         .bind(outbox_id).execute(&mut **tx).await?.rows_affected();
     if changed != 1 {
@@ -144,8 +189,15 @@ pub(crate) async fn reserve_on_tx(
             "owner history disappeared during notice reservation",
         ));
     }
-    Ok(Some(Reservation { outbox_id, event }))
+    Ok(Some(Reservation {
+        outbox_id,
+        event,
+        state: DeliveryState::Pending,
+        post_started_at: None,
+        message_id: None,
+    }))
 }
 
 #[cfg(test)]
+#[path = "event_tests.rs"]
 mod tests;

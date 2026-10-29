@@ -146,4 +146,5 @@ pub(crate) async fn read_on_tx(
 }
 
 #[cfg(test)]
+#[path = "snapshot_tests.rs"]
 pub(crate) mod tests;
