@@ -29,12 +29,15 @@ pub(super) fn selection_pressure_policy(agent: Option<&str>) -> (u64, i64) {
                 .copied()
         })
         .unwrap_or_default();
-    let danger = if enabled.unwrap_or_else(gate_enabled) {
-        danger.unwrap_or_else(danger_pct)
+    let danger = if live_setting(&settings::DISPATCH_GATE_ENABLED, enabled).value {
+        live_setting(&settings::DISPATCH_GATE_DANGER_PCT, danger).value
     } else {
         DEFAULT_DANGER_PCT
     };
-    (danger, stale.unwrap_or_else(stale_sec))
+    (
+        danger,
+        live_setting(&settings::RATE_LIMIT_STALE_SEC, stale).value,
+    )
 }
 pub(super) fn account_key(provider: &str, profile_id: &str) -> String {
     if profile_id.is_empty() || profile_id == "default" {

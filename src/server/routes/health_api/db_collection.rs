@@ -43,7 +43,7 @@ pub(super) struct Initial {
     pub(super) server_up: Result<bool, Elapsed>,
     pub(super) outbox: Result<Option<DispatchOutboxStats>, Elapsed>,
     pub(super) cleanup: Result<Option<AutoQueueCleanupBacklog>, Elapsed>,
-    pub(super) kv: Result<HealthKvMeta, Elapsed>,
+    pub(super) kv: Result<Option<HealthKvMeta>, Elapsed>,
 }
 
 impl Initial {
