@@ -329,7 +329,7 @@ fn only_the_adopted_chain_may_resolve_a_finding_an_earlier_review_opened() {
     first.review.verdict = ReviewVerdict::Issues;
     first.review.findings.push(finding(true, None));
     let delta = record("delta", ReviewExtent::Delta, "mid", OUTPUT);
-    // An independent record outside the chain claims F1 resolved; it has no authority over this seal.
+    // An independent record outside the chain claims the finding resolved; it has no authority over this seal.
     let mut unrelated = record("unrelated", ReviewExtent::Delta, "elsewhere", "other");
     unrelated
         .review
