@@ -108,7 +108,9 @@ async fn migration_local_witness_is_issued_only_after_real_durable_ack_pg() {
     let mut f = Fixture::new("disabled").await;
     let (db, pool) = attach_pool(&mut f).await;
     let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")]);
-    let input = submission(8_917_082, IntakeOrigin::LiveMessage);
+    let mut input = submission(8_917_082, IntakeOrigin::LiveMessage);
+    input.request.reply_context = None;
+    input.request.has_reply_boundary = false;
     let wait = intent(&f, &input.request).await;
     let cap = Capability::new(input.request.clone(), wait.clone());
     let witnesses = cap.witnesses.clone();
@@ -414,7 +416,7 @@ async fn migration_selector_change_returns_same_worker_input_to_reclassification
     let after = crate::db::intake_outbox::owner_fence_pg_tests::snapshot(&pool, id).await;
     assert!(
         spawned.load(Ordering::SeqCst),
-        "the actual worker changed only selector after issuing its spawned proof"
+        "the actual worker changes the selector at its spawned checkpoint before the before-effects consumer"
     );
     assert!(matches!(first, Ok(worker::TickOutcome::Held)));
     assert_eq!(
