@@ -1081,10 +1081,8 @@ fn a_herdr_resume_of_the_pane_source_is_logged_once_under_its_new_execution() {
         fs::write(tc::session_temp_path(tmux, "spawn_nonce"), &nonce).unwrap();
         nonce
     };
-    let host = |kind: &str| fs::write(tc::session_temp_path(tmux, "host_kind"), kind).unwrap();
     register_tmux_channel(tmux, channel);
     let path = lane.transcript(&a);
-    host("tmux");
     launch("fresh");
     register_launched_tmux_runtime_binding(tmux, claude(&path, &a));
     launch("resume");
@@ -1095,8 +1093,8 @@ fn a_herdr_resume_of_the_pane_source_is_logged_once_under_its_new_execution() {
         "a tmux respawn of the same source"
     );
 
-    host("herdr");
     let resumed = launch("resume");
+    crate::services::tui_prompt_dedupe::install_herdr_execution(tmux, &resumed);
     for _ in 0..2 {
         register_launched_tmux_runtime_binding(tmux, claude(&path, &a));
     }
@@ -1107,7 +1105,5 @@ fn a_herdr_resume_of_the_pane_source_is_logged_once_under_its_new_execution() {
     assert_eq!(start.cause, BindingCause::Resume);
     assert_eq!(start.new, BindingTarget::Source(src(&path, &a)));
     assert_eq!(start.old, Some(src(&path, &a)));
-    for ext in ["spawn_nonce", "host_kind"] {
-        let _ = fs::remove_file(tc::session_temp_path(tmux, ext));
-    }
+    let _ = fs::remove_file(tc::session_temp_path(tmux, "spawn_nonce"));
 }

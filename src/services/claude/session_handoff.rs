@@ -2,11 +2,12 @@
 //! own `/exit` before the other host resumes; nothing here kills, and anything unobserved stops.
 
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::services::claude_tui::host_input::InputRun;
 use crate::services::claude_tui::input::TuiInputAction;
+use crate::services::tui_o::shadow::SourceId;
 
 /// How long an `/exit` sent to an empty composer may take to end its provider.
 pub(crate) const EXIT_WAIT: Duration = Duration::from_secs(20);
@@ -115,34 +116,41 @@ impl EarlierExecution for LegacyTmux<'_> {
     }
 }
 
-/// The transcript a resume of `session_id` continues and its `(dev, ino)`; `None` only when the
-/// file is certainly absent, never for a read that failed.
+/// The transcript source a resume of `session_id` continues; `None` only when the file is
+/// certainly absent, never for a read that failed.
 pub(crate) fn transcript_file(
     working_dir: &Path,
     session_id: &str,
-) -> Result<Option<(PathBuf, (u64, u64))>, String> {
+) -> Result<Option<SourceId>, String> {
     let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
         working_dir,
         session_id,
         None,
     )?;
     match std::fs::metadata(&path) {
-        Ok(meta) => Ok(Some((path, (meta.dev(), meta.ino())))),
+        Ok(meta) => Ok(Some(SourceId {
+            session_id: session_id.to_owned(),
+            path,
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("resume transcript {}: {error}", path.display())),
     }
 }
 
-/// Whether the channel's O writer already holds a cursor on this exact file, so the resumed
-/// transcript continues from it; a store that cannot be read answers nothing.
-pub(crate) fn o_reads(channel: u64, path: &Path, file: (u64, u64)) -> Result<bool, String> {
+/// Whether the channel's O writer would continue a stored cursor on `source`'s file, as its own
+/// bind names it, rather than read it anew; a store that cannot be read answers nothing.
+pub(crate) fn o_reads(channel: u64, source: &SourceId) -> Result<bool, String> {
     let root = crate::config::runtime_root().ok_or("no runtime root")?;
     let Some(store) = crate::services::tui_o::store::OStore::existing(&root) else {
         return Ok(false);
     };
-    store
-        .peek_cursor_of_file(channel, path, file)
-        .map_err(|error| format!("O cursor of {}: {error:?}", path.display()))
+    let path = source.path.display();
+    let cursors =
+        (store.peek_cursors(channel)).map_err(|error| format!("O cursors of {path}: {error:?}"))?;
+    crate::services::tui_o::writer::claude_cursor_continues(&cursors, source)
+        .map_err(|error| format!("O cursor of {path}: {error}"))
 }
 
 /// The SessionStart of execution `nonce` resuming `session_id`, by its own launch context.

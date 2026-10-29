@@ -2,18 +2,17 @@
 
 use super::*;
 
-/// The nonce of the Herdr execution a resume launched on `tmux_session`; its own transcript may be
-/// the one the pane already names.
+/// The nonce of the Herdr execution a resume launched on `tmux_session`, the one its launch listed
+/// there; its own transcript may be the one the pane already names.
 pub(crate) fn herdr_resume_launch(tmux_session: &str) -> Option<String> {
-    use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
-    let herdr = crate::services::session_host::HostKind::Herdr;
-    if read_host_kind_marker(tmux_session) != HostKindMarker::Known(herdr) {
-        return None;
-    }
     let SpawnNonceMarker::Known(nonce) = observe_spawn_nonce_marker(tmux_session) else {
         return None;
     };
-    (launch_mode("claude", &nonce).as_deref() == Some("resume")).then_some(nonce)
+    if launch_mode("claude", &nonce).as_deref() != Some("resume") {
+        return None;
+    }
+    let listed = crate::services::tui_prompt_dedupe::herdr_listed_execution(tmux_session);
+    (listed.as_deref() == Some(nonce.as_str())).then_some(nonce)
 }
 
 /// A Herdr launch resuming the source its pane already names is still a new execution there: its

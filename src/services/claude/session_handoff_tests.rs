@@ -135,10 +135,13 @@ fn a_resume_transcript_is_absent_only_when_certainly_gone() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(&path, "{}\n").unwrap();
     let meta = std::fs::metadata(&path).unwrap();
-    assert_eq!(
-        transcript_file(cwd.path(), id),
-        Ok(Some((path.clone(), (meta.dev(), meta.ino()))))
-    );
+    let source = SourceId {
+        session_id: id.into(),
+        path: path.clone(),
+        dev: meta.dev(),
+        ino: meta.ino(),
+    };
+    assert_eq!(transcript_file(cwd.path(), id), Ok(Some(source)));
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
     let unreadable = transcript_file(cwd.path(), id);
@@ -147,41 +150,69 @@ fn a_resume_transcript_is_absent_only_when_certainly_gone() {
 }
 
 #[test]
-fn o_reads_only_a_cursor_on_the_same_file() {
+fn o_reads_only_a_cursor_its_own_bind_would_continue() {
     let _root = TestRuntimeRootGuard::new();
-    let (channel, path) = (7_503, Path::new("/tmp/claude/resumed.jsonl"));
-    assert_eq!(o_reads(channel, path, (1, 2)), Ok(false), "no store");
+    let channel = 7_503;
+    let id = "11111111-1111-4111-8111-111111111111";
+    let source = |session: &str, dev: u64, ino: u64| SourceId {
+        session_id: session.into(),
+        path: Path::new("/tmp/claude/resumed.jsonl").to_path_buf(),
+        dev,
+        ino,
+    };
+    let resumed = source(id, 1, 2);
+    assert_eq!(o_reads(channel, &resumed), Ok(false), "no store");
     let root = crate::config::runtime_root().unwrap();
     let cursors = root
         .join("o_store")
         .join(channel.to_string())
         .join("cursor");
     std::fs::create_dir_all(&cursors).unwrap();
-    assert_eq!(o_reads(channel, path, (1, 2)), Ok(false), "no cursor");
-    let source = SourceId {
-        session_id: "11111111-1111-4111-8111-111111111111".into(),
-        path: path.to_path_buf(),
-        dev: 1,
-        ino: 2,
+    assert_eq!(o_reads(channel, &resumed), Ok(false), "no cursor");
+    let store = |stored: &SourceId| {
+        let cursor = Cursor {
+            source: stored.clone(),
+            captured_through: 10,
+            prefix_hash: "00".into(),
+            retired: false,
+            transition_cleanup: None,
+        };
+        let file = cursors.join(format!("{}.json", source_key(stored)));
+        std::fs::write(&file, serde_json::to_vec(&cursor).unwrap()).unwrap();
+        file
     };
-    let cursor = Cursor {
-        source: source.clone(),
-        captured_through: 10,
-        prefix_hash: "00".into(),
-        retired: false,
-        transition_cleanup: None,
-    };
-    let file = cursors.join(format!("{}.json", source_key(&source)));
-    std::fs::write(&file, serde_json::to_vec(&cursor).unwrap()).unwrap();
-    assert_eq!(o_reads(channel, path, (1, 2)), Ok(true));
-    assert_eq!(o_reads(channel, path, (1, 3)), Ok(false), "another file");
+    let file = store(&resumed);
+    assert_eq!(o_reads(channel, &resumed), Ok(true));
     assert_eq!(
-        o_reads(channel + 1, path, (1, 2)),
-        Ok(false),
-        "another channel"
+        o_reads(channel, &source(id, 9, 2)),
+        Ok(true),
+        "a renumbered dev"
     );
+    assert_eq!(
+        o_reads(channel, &source(id, 1, 3)),
+        Ok(false),
+        "another file"
+    );
+    assert_eq!(o_reads(channel + 1, &resumed), Ok(false), "another channel");
     std::fs::write(&file, "{").unwrap();
-    assert!(o_reads(channel, path, (1, 2)).is_err(), "torn cursor");
+    assert!(o_reads(channel, &resumed).is_err(), "torn cursor");
+    std::fs::remove_file(&file).unwrap();
+    let empty = store(&source("", 1, 2));
+    assert_eq!(
+        o_reads(channel, &resumed),
+        Ok(true),
+        "stored with an empty session"
+    );
+    let other_empty = store(&source("", 5, 2));
+    assert!(o_reads(channel, &resumed).is_err(), "two candidates");
+    std::fs::remove_file(&empty).unwrap();
+    std::fs::remove_file(&other_empty).unwrap();
+    store(&source(id, 1, 2));
+    store(&source(id, 5, 2));
+    assert!(
+        o_reads(channel, &resumed).is_err(),
+        "two stored variants of one file"
+    );
 }
 
 #[test]

@@ -1545,6 +1545,12 @@ impl Fixture {
         let path = crate::services::tmux_common::session_temp_path(self.logical(), ext);
         std::fs::read_to_string(path).unwrap()
     }
+
+    /// The account marker of the channel's provider session, as both hosts read it.
+    fn auth_profile(&self) -> Option<String> {
+        let path = crate::services::tmux_common::session_temp_path(self.logical(), "auth_profile");
+        std::fs::read_to_string(path).ok()
+    }
 }
 
 // A tmux session moves to Herdr under its own id: one `/exit`, a resume of the same session bound
@@ -1590,6 +1596,33 @@ fn f1_a_tmux_session_resumes_on_herdr_under_its_own_id_after_its_claude_exits_pg
     assert_eq!(logged[0].cause, BindingCause::Resume);
     assert!(matches!(&logged[0].new, BindingTarget::Source(source) if source.path == path));
     assert!(std::fs::read(&path).unwrap().starts_with(&before));
+    let account = crate::services::provider_auth_profile::DEFAULT_PROFILE_ID;
+    assert_eq!(fx.auth_profile().as_deref(), Some(account));
+}
+
+// A session whose last execution ran under another account is not continued under this one: the
+// launch starts fresh, as tmux does, and the old Claude is not typed to.
+#[test]
+fn f6_a_session_of_another_account_starts_fresh_and_ends_nothing_pg() {
+    let fx = Fixture::new("resume-f6", None);
+    let (session, _) = fx.seed_resumable(true);
+    let marker = crate::services::tmux_common::session_temp_path(fx.logical(), "auth_profile");
+    std::fs::write(marker, "another-account").unwrap();
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        if let Some(started) = fx.start_provider(&launcher, true) {
+            fx.answer(&started);
+        }
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 0);
+    let script = fx.launch_script();
+    assert!(!script.contains(&session), "{script}");
+    assert!(script.contains("'--session-id'"), "{script}");
+    let account = crate::services::provider_auth_profile::DEFAULT_PROFILE_ID;
+    assert_eq!(fx.auth_profile().as_deref(), Some(account));
 }
 
 // A selector whose transcript is certainly gone starts fresh as before; no tmux exit.
@@ -1668,10 +1701,10 @@ fn f4_a_transcript_o_does_not_read_is_never_resumed_pg() {
     assert_eq!(fx.record(), HostedRecord::Legacy);
 }
 
-// The resumed start is logged when its hook arrives, so a turn that stopped between the start
+// The resumed start is logged when its hook arrives, so a turn that stopped between that record
 // and the attach leaves a Pending the next turn attaches and prompts, with no second create or exit.
 #[test]
-fn f5_a_resumed_start_logged_before_the_attach_lets_the_next_turn_attach_pg() {
+fn f5a_a_resumed_start_logged_before_the_attach_lets_the_next_turn_attach_pg() {
     let fx = Fixture::new("resume-f5", None);
     fx.seed_resumable(true);
     let launcher = Arc::new(Launcher::default());
@@ -1707,4 +1740,55 @@ fn f5_a_resumed_start_logged_before_the_attach_lets_the_next_turn_attach_pg() {
         0,
         "a Pending ends nothing"
     );
+}
+
+// A resume that stopped before any start of it was recorded stays the Pending it was: the next
+// turn refuses it as never attached, with no attach, prompt, second create or second exit.
+#[test]
+fn f5b_a_resume_stopped_before_its_start_was_recorded_stays_pending_pg() {
+    let fx = Fixture::new("resume-f5b", None);
+    fx.seed_resumable(true);
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        if fx.start_provider_as(&launcher, false, "resume").is_some() {
+            fx.cancel_now();
+        }
+    });
+    let first = first.unwrap_err();
+    assert!(first.contains("no SessionStart"), "{first}");
+    assert_eq!(fx.row(), Some(HostedState::Pending));
+    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 1);
+    let ports = fx.ports(&launcher);
+    let (second, _) = fx.turn(&fx.record(), &ports, || {});
+    let second = second.unwrap_err();
+    assert!(second.contains("no logged start"), "{second}");
+    assert!(ports.attaches.lock().unwrap().is_empty());
+    assert!(fx.rig.sends().is_empty());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 0);
+    assert_eq!(fx.row(), Some(HostedState::Pending));
+}
+
+// A resume waits for its own resumed start: a fresh start of the same id is not taken for it, so
+// the turn attaches and prompts nothing.
+#[test]
+fn f7_a_resume_does_not_take_a_fresh_start_of_its_session_for_its_own_pg() {
+    let fx = Fixture::new("resume-f7", None);
+    fx.seed_resumable(true);
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
+        if fx.start_provider_as(&launcher, true, "startup").is_some() {
+            std::thread::sleep(Duration::from_millis(1500));
+            fx.cancel_now();
+        }
+    });
+    let error = result.unwrap_err();
+    assert!(error.contains("no SessionStart"), "{error}");
+    assert!(ports.attaches.lock().unwrap().is_empty());
+    assert!(fx.rig.sends().is_empty());
+    assert_eq!(fx.row(), Some(HostedState::Pending));
 }

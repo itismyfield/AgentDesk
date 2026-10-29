@@ -235,6 +235,14 @@ pub(crate) fn herdr_execution_listed(logical: &str) -> bool {
     executions.contains_key(logical)
 }
 
+/// The execution a launch or a reconcile last listed on `logical` as a Herdr pane. Read without
+/// the listed flag, which a test keeps per thread; the lock is a leaf.
+pub(crate) fn herdr_listed_execution(logical: &str) -> Option<String> {
+    let executions = HERDR_EXECUTIONS.lock();
+    let executions = executions.unwrap_or_else(|poison| poison.into_inner());
+    executions.get(logical).map(|(nonce, _)| nonce.clone())
+}
+
 /// Whether hooks must leave the pane on its current source; the lock is a leaf.
 fn herdr_execution_withheld(logical: &str) -> bool {
     if !listed(|flag| flag.load(Acquire)) {

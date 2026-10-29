@@ -480,21 +480,25 @@ fn composer_settled(run: &InputRun) -> bool {
     )
 }
 
-/// The session a launch resumes: the turn's own one while its transcript exists and O already
-/// reads that file. A fresh or cleared turn, or a transcript certainly gone, starts a new session.
-fn resumed_session(turn: &HerdrTurn<'_>) -> Result<Option<String>, String> {
+/// The session a launch resumes: the turn's own one while its transcript exists, its last
+/// execution ran under `profile` and O already reads that file. Otherwise it starts a new one.
+fn resumed_session(turn: &HerdrTurn<'_>, profile: &str) -> Result<Option<String>, String> {
     let Some(session) = turn.session_id.filter(|_| !turn.force_fresh) else {
         return Ok(None);
     };
-    let Some((path, file)) =
-        session_handoff::transcript_file(Path::new(turn.working_dir), session)?
-    else {
+    // As on tmux, a session of another account is never continued under this one.
+    let logical = &turn.owner.logical_key;
+    if !crate::services::tmux_common::tmux_session_auth_profile_matches(logical, profile) {
+        return Ok(None);
+    }
+    let working_dir = Path::new(turn.working_dir);
+    let Some(source) = session_handoff::transcript_file(working_dir, session)? else {
         return Ok(None);
     };
-    if !session_handoff::o_reads(turn.channel_id, &path, file)? {
+    if !session_handoff::o_reads(turn.channel_id, &source)? {
         return Err(format!(
             "herdr turn: O reads no cursor on {}, so a resume would post it again",
-            path.display()
+            source.path.display()
         ));
     }
     Ok(Some(session.to_owned()))
@@ -509,11 +513,6 @@ fn launched_source(
 ) -> Result<Attached, String> {
     let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
     let working_dir = Path::new(turn.working_dir);
-    let resumed = resumed_session(turn)?;
-    let session_id = match &resumed {
-        Some(session) => session.clone(),
-        None => super::fresh_claude_tui_session_resolution(working_dir, None)?.session_id,
-    };
     let hook_endpoint = turn
         .hook_endpoint
         .clone()
@@ -524,6 +523,11 @@ fn launched_source(
         logical,
     )?;
     let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay);
+    let resumed = resumed_session(turn, &overlay.profile_id)?;
+    let session_id = match &resumed {
+        Some(session) => session.clone(),
+        None => super::fresh_claude_tui_session_resolution(working_dir, None)?.session_id,
+    };
     if resumed.is_some() {
         session_handoff::end_by_exit(
             &mut *ports.earlier_tmux(logical),
@@ -533,7 +537,7 @@ fn launched_source(
     let prepare = |prepared: &PreparedIncarnation| {
         let (system, model) = (turn.system_prompt, turn.model);
         let (session, hooks) = (session_id.as_str(), hook_endpoint.clone());
-        super::tui_session_launch::prepare_claude_herdr_launch(
+        let command = super::tui_session_launch::prepare_claude_herdr_launch(
             prepared,
             working_dir,
             session,
@@ -541,7 +545,11 @@ fn launched_source(
             model,
             hooks,
             &auth,
-        )
+        )?;
+        // The account this execution runs under, which a later resume of its session checks.
+        let profile = &overlay.profile_id;
+        crate::services::tmux_common::write_tmux_session_auth_profile(logical, profile)?;
+        Ok(command)
     };
     // Subscribed before the create, so the launch's SessionStart cannot pass unseen.
     let mut hooks = ports.hook_events();
