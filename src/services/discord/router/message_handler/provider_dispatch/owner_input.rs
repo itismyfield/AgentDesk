@@ -73,9 +73,10 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
         host,
         registration.phase,
     )?;
-    // Only a Claude tmux launch hands its created execution's first prompt over so far.
-    let wanted = match (route, turn.provider.as_str(), host) {
-        (target::Route::Cold, "claude", "tmux") => Some(scope::Lineage::Created),
+    // A driver that hands its observed execution over writes the prompt as the owner's effect.
+    let wanted = match (route, turn.provider.as_str()) {
+        (target::Route::Cold, "claude" | "codex") => Some(scope::Lineage::Created),
+        (target::Route::HerdrIdle, "claude" | "codex") => Some(scope::Lineage::Existing),
         _ => None,
     };
     if let Some(wanted) = wanted {
@@ -151,8 +152,9 @@ fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Resul
                 .leaf(),
             )
         }
-        // Every other create belongs to a launch that does not hand its first prompt over yet.
+        // Every other create or idle pane belongs to a driver that does not hand it over yet.
         target::Route::Cold => return Err("NotSent(\"cold_launch_unowned\")".into()),
+        target::Route::HerdrIdle => return Err("NotSent(\"idle_unowned\")".into()),
         target::Route::Held(reason) => return Err(format!("NotSent({reason:?})")),
     };
     let prepared = PreparedPayload {
@@ -167,6 +169,9 @@ fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Resul
     }
 }
 
+#[cfg(test)]
+#[path = "owner_input_herdr_tests.rs"]
+mod herdr_tests;
 #[cfg(test)]
 #[path = "owner_input_tests.rs"]
 mod tests;

@@ -49,6 +49,8 @@ pub(crate) enum Route {
     ClaudeHerdrBusy,
     /// The first prompt of an execution the provider's launch creates.
     Cold,
+    /// An idle Herdr pane's next prompt, written by its driver on the bound execution.
+    HerdrIdle,
     /// The owner keeps the original and sends nothing; no other path takes it either.
     Held(&'static str),
 }
@@ -72,7 +74,8 @@ pub(crate) fn route(
         ("claude", "tmux", Phase::Busy) => Route::ClaudeBusy,
         ("claude", "tmux", Phase::Idle) => Route::ClaudeIdle,
         ("claude", "herdr", Phase::Busy) => Route::ClaudeHerdrBusy,
-        // Codex busy and an idle Herdr pane wait for their owner primitive.
+        ("claude" | "codex", "herdr", Phase::Idle) => Route::HerdrIdle,
+        // Codex busy waits for its owner primitive.
         _ => Route::Held("provider_unsupported"),
     })
 }
@@ -97,9 +100,9 @@ mod tests {
         assert!(TargetKey::of(&json!({"target":{"host":"tmux","owner":"p"}})).is_err());
     }
 
-    /// Codex busy and idle Herdr panes are held, never routed to another driver.
+    /// Codex busy panes are held, never routed to another driver.
     #[test]
-    fn only_claude_live_panes_and_creates_have_an_effect() {
+    fn only_codex_busy_and_unknown_providers_are_held() {
         let local = |provider, host, phase| {
             route(
                 Execution::LocalTui,
@@ -122,10 +125,15 @@ mod tests {
             local("claude", "herdr", Phase::Busy),
             Some(Route::ClaudeHerdrBusy)
         );
+        for provider in ["claude", "codex"] {
+            assert_eq!(
+                local(provider, "herdr", Phase::Idle),
+                Some(Route::HerdrIdle)
+            );
+        }
         for (provider, host, phase) in [
             ("codex", "tmux", Phase::Busy),
             ("codex", "herdr", Phase::Busy),
-            ("claude", "herdr", Phase::Idle),
             ("gemini", "tmux", Phase::Absent),
         ] {
             assert_eq!(

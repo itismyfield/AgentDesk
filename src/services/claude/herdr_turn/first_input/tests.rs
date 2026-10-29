@@ -92,6 +92,7 @@ fn run_case(refuse_commit: bool) {
         transcript: transcript.clone(),
         target,
         bound: true,
+        physical: None,
     };
     let (tx, rx) = std::sync::mpsc::channel();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();

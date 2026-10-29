@@ -152,6 +152,35 @@ struct Attached {
     transcript: PathBuf,
     target: HerdrTarget,
     bound: bool,
+    /// The record's socket and pane, which the gate fences as `socket#pane`.
+    physical: Option<(String, String)>,
+}
+
+/// A test's attached Herdr execution handed to the owner hook on this thread, unobserved.
+#[cfg(all(test, unix))]
+pub(crate) fn owned_prompt_for_tests(
+    turn: &HerdrTurn<'_>,
+    record: &HostedExecution,
+    (session_id, transcript): (&str, PathBuf),
+    lineage: crate::services::claude_tui::owner_input::Lineage,
+) -> Result<(), String> {
+    let hook = crate::services::claude_tui::owner_input::launch_hook().ok_or("no owner hook")?;
+    let attached = Attached {
+        nonce: record.execution_nonce.clone(),
+        session_id: session_id.into(),
+        transcript,
+        target: gate(record)?,
+        bound: true,
+        physical: physical(record),
+    };
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    first_input::submit_owned(turn, hook, lineage, attached, &sender).map(drop)
+}
+
+/// The socket and pane the gate of `record` writes to.
+fn physical(record: &HostedExecution) -> Option<(String, String)> {
+    let location = record.location.as_ref()?;
+    Some((location.socket_addr.clone(), location.pane_id.clone()))
 }
 
 /// Runs one turn on a blocking thread inside the runtime; every error leaves the pane as it is.
@@ -180,21 +209,25 @@ pub(crate) fn execute(
         );
     }
     before_start::observed_execution(turn.cancel.as_deref(), || {
-        let attached = match turn.row {
+        use crate::services::claude_tui::owner_input::Lineage;
+        let (attached, lineage) = match turn.row {
             Some(HostedRecord::Known(record)) if record.state == HostedState::Bound => {
                 not_held(&record.execution_nonce)?;
-                bound_source(&turn, ports, record)?
+                (bound_source(&turn, ports, record)?, Lineage::Existing)
             }
             Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
                 not_held(&record.execution_nonce)?;
-                pending_source(&turn, &runtime, ports, record)?
+                (
+                    pending_source(&turn, &runtime, ports, record)?,
+                    Lineage::Pending,
+                )
             }
             Some(HostedRecord::Unknown(_)) => {
                 return Err("herdr turn: unreadable hosted record".into());
             }
-            _ => launched_source(&turn, &runtime, ports)?,
+            _ => (launched_source(&turn, &runtime, ports)?, Lineage::Created),
         };
-        prompt_and_read(&turn, &runtime, attached, sender)
+        prompt_and_read(&turn, &runtime, attached, lineage, sender)
     })
 }
 
@@ -222,6 +255,7 @@ fn bound_source(
         transcript: PathBuf::from(binding.output_path),
         target,
         bound: true,
+        physical: physical(record),
     })
 }
 
@@ -301,6 +335,7 @@ fn cleared_source(
         transcript,
         target,
         bound: true,
+        physical: physical(record),
     })
 }
 
@@ -619,6 +654,7 @@ fn attach(
         transcript,
         target,
         bound,
+        physical: physical(&record),
     })
 }
 
@@ -628,9 +664,17 @@ fn prompt_and_read(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
     attached: Attached,
+    lineage: crate::services::claude_tui::owner_input::Lineage,
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
-    let Some(submitted) = first_input::submit(turn, attached, &sender)? else {
+    let submitted = match crate::services::claude_tui::owner_input::launch_hook() {
+        // The owner waiting on this thread writes the prompt as its own effect.
+        Some(hook) => Some(first_input::submit_owned(
+            turn, hook, lineage, attached, &sender,
+        )?),
+        None => first_input::submit(turn, attached, &sender)?,
+    };
+    let Some(submitted) = submitted else {
         return Ok(());
     };
     first_input::observe(turn, runtime, submitted, sender)

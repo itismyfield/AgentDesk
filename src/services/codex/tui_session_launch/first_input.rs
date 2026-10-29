@@ -37,14 +37,24 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
         handoff,
     } = launch;
     end_observation.prepare(&prepared.context);
-    let tmux_result =
-        crate::services::claude_tui::owner_input::argv_payload(&prepared.context, || {
+    let command = format!("bash {}", shell_escape(&script_path));
+    let tmux_result = match crate::services::claude_tui::owner_input::launch_hook() {
+        // The owner waiting on this thread spawns the argv create as its own effect.
+        Some(hook) => spawn_owned(
+            hook,
+            &prepared.context,
+            (tmux_session_name, working_dir),
+            prompt,
+            command,
+        )?,
+        None => crate::services::claude_tui::owner_input::argv_payload(&prepared.context, || {
             crate::services::platform::tmux::create_session(
                 tmux_session_name,
                 Some(working_dir),
-                &format!("bash {}", shell_escape(&script_path)),
+                &command,
             )
-        })?;
+        })?,
+    };
 
     if !tmux_result.status.success() {
         let stderr = String::from_utf8_lossy(&tmux_result.stderr);
@@ -79,6 +89,48 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
         rollout_modified_since,
         handoff,
     })
+}
+
+/// The argv create through the owner waiting on this thread: it reserves the frame on the prepared
+/// execution and spawns only when that frame is the prompt the launch script carries.
+pub(in crate::services::codex) fn spawn_owned(
+    hook: crate::services::claude_tui::owner_input::LaunchHook,
+    context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    (session, working_dir): (&str, &str),
+    prompt: &str,
+    command: String,
+) -> Result<std::process::Output, String> {
+    use crate::services::claude_tui::owner_input::{Lineage, argv_payload};
+    let target = serde_json::json!({"host":"tmux","owner":session,
+        "root":context.owner_runtime_root,"execution_nonce":context.execution_nonce});
+    let source = serde_json::json!({"kind":"pre_source","expected_session_id":null,
+        "expected_transcript":null,"binding_watermark":null});
+    let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (spawned, context) = (slot.clone(), context.clone());
+    let (session, working_dir, prompt) = (
+        session.to_owned(),
+        working_dir.to_owned(),
+        prompt.to_owned(),
+    );
+    let submit = Box::new(move |frame: String| {
+        if frame != prompt {
+            return Err("owner frame is not the launch's argv prompt"
+                .to_string()
+                .into());
+        }
+        let output = argv_payload(&context, || {
+            crate::services::platform::tmux::create_session(&session, Some(&working_dir), &command)
+        })?;
+        let created = output.status.success();
+        *spawned.lock().unwrap_or_else(|e| e.into_inner()) = Some(output);
+        match created {
+            true => Ok(()),
+            false => Err("owner argv create failed".to_string().into()),
+        }
+    });
+    hook(Lineage::Created, target, source, None, submit)?;
+    let output = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+    output.ok_or_else(|| "owner spawned without the create's result".into())
 }
 
 pub(in crate::services::codex) struct Observe<'a> {

@@ -11,24 +11,77 @@ pub(super) fn submit(
     runtime: &Handle,
     nonce: &str,
 ) -> Result<Option<Submitted>, String> {
-    let logical = turn.owner.logical_key.as_str();
-    let plan = plan_prompt_submit(turn.prompt)?;
+    let (logical, cancel) = (turn.owner.logical_key.as_str(), turn.cancel.as_deref());
+    let at = (logical, turn.channel_id, nonce);
+    write(at, cancel, turn.prompt, || {
+        gate(&current_record(turn, runtime, nonce)?)
+    })
+}
+
+/// The first prompt through the owner waiting on this thread: it reserves the frame on the
+/// execution the launch recorded, binds its pane, and runs this write as its effect.
+pub(super) fn submit_owned(
+    turn: &CodexHerdrTurn<'_>,
+    hook: crate::services::claude_tui::owner_input::LaunchHook,
+    lineage: crate::services::claude_tui::owner_input::Lineage,
+    record: &HostedExecution,
+) -> Result<Submitted, String> {
+    let nonce = record.execution_nonce.as_str();
+    let location = record
+        .location
+        .as_ref()
+        .ok_or("herdr turn: the execution has no pane")?;
+    let (socket, pane) = (location.socket_addr.clone(), location.pane_id.clone());
+    let target = gate(record)?;
+    let logical = turn.owner.logical_key.clone();
+    let attempt = serde_json::json!({"host":"herdr","owner":logical,"root":socket,
+        "execution_nonce":nonce});
+    let source = serde_json::json!({"kind":"pre_source","expected_session_id":null,
+        "expected_transcript":null,"binding_watermark":null});
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let (ticket, channel, cancel, nonce) = (
+        slot.clone(),
+        turn.channel_id,
+        turn.cancel.clone(),
+        nonce.to_owned(),
+    );
+    let submit = Box::new(move |frame: String| {
+        let at = (logical.as_str(), channel, nonce.as_str());
+        let written = write(at, cancel.as_deref(), &frame, || Ok(target))?;
+        let closed = || "herdr turn: the input closed before its first key".to_string();
+        let submitted = written.ok_or_else(closed)?;
+        *ticket.lock().unwrap_or_else(|e| e.into_inner()) = Some(submitted);
+        Ok(())
+    });
+    hook(
+        lineage,
+        attempt,
+        source,
+        Some(format!("{socket}#{pane}")),
+        submit,
+    )?;
+    let submitted = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+    submitted.ok_or_else(|| "herdr turn: the owner submitted without a ticket".into())
+}
+
+fn write(
+    (logical, channel, nonce): (&str, u64, &str),
+    cancel: Option<&CancelToken>,
+    prompt: &str,
+    target: impl FnOnce() -> Result<HerdrTarget, String>,
+) -> Result<Option<Submitted>, String> {
+    let plan = plan_prompt_submit(prompt)?;
     // Opened before the prompt, so a fast hook cannot land unseen.
-    let logged = subscribe_binding_events(turn.channel_id)
+    let logged = subscribe_binding_events(channel)
         .map_err(|error| format!("herdr turn: binding log unavailable: {error}"))?;
-    let target = gate(&current_record(turn, runtime, nonce)?)?;
-    empty_composer(&target, turn.cancel.as_deref())?;
+    let target = target()?;
+    empty_composer(&target, cancel)?;
     crate::services::tui_prompt_dedupe::register_provider_session("codex", logical, logical);
-    crate::services::tui_prompt_dedupe::register_codex_herdr_placeholder(logical, turn.channel_id);
+    crate::services::tui_prompt_dedupe::register_codex_herdr_placeholder(logical, channel);
     hold(nonce)?;
     #[cfg(test)]
-    crate::services::provider::herdr_before_start::test_input_boundary(turn.cancel.as_deref());
-    let run = observed_input(
-        turn.cancel.as_deref(),
-        nonce,
-        || None,
-        || run_herdr(&target, &plan, turn.cancel.as_deref()),
-    )?;
+    crate::services::provider::herdr_before_start::test_input_boundary(cancel);
+    let run = observed_input(cancel, nonce, || None, || run_herdr(&target, &plan, cancel))?;
     let run = match run {
         crate::services::provider::herdr_before_start::InputRun::Ran(run) => run,
         crate::services::provider::herdr_before_start::InputRun::Closed => {

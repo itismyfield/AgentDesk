@@ -146,10 +146,18 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
             transcript: root.path().join("same-transcript.jsonl"),
             target: target.clone(),
             bound: true,
+            physical: None,
         };
         let (sender, _receiver) = std::sync::mpsc::channel();
         assert!(
-            super::super::prompt_and_read(&turn, runtime.handle(), attached, sender).is_err(),
+            super::super::prompt_and_read(
+                &turn,
+                runtime.handle(),
+                attached,
+                crate::services::claude_tui::owner_input::Lineage::Existing,
+                sender
+            )
+            .is_err(),
             "composer_guard_refuses_before_input_contract: {name}"
         );
         assert!(

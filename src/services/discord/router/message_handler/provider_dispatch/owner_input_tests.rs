@@ -466,19 +466,13 @@ fn codex_busy_held_until_4d2() {
     assert_eq!(rig.bind(), TurnBind::NotArmed);
 }
 
-/// A refusal that writes nothing needs no pane: a create no launch hands over yet, a remote
-/// placement and an unsupported provider each keep the original queued, with no head and no key.
+/// A refusal that writes nothing needs no pane: a remote placement and an unsupported provider
+/// each keep the original queued, with no head and no key.
 #[test]
 fn owner_refusals_before_a_pane_need_no_session() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig = rig("ob-nopane", 7_272_513, "normal", view("", false), BUSY);
     for (provider, phase, execution, reason) in [
-        (
-            ProviderKind::Codex,
-            target::Phase::Absent,
-            Execution::LocalTui,
-            "cold_launch_unowned",
-        ),
         (
             ProviderKind::Claude,
             target::Phase::Busy,
