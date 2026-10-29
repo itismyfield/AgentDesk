@@ -25,9 +25,10 @@ use super::provenance::{ProvenanceEntry, ProvenanceLog};
 use super::send::RepostIds;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
-use crate::services::tui_o::store::ledger::{
-    LedgerEntry, PieceDisposition, PieceOutcome, PieceRecord,
-};
+#[cfg(unix)]
+use crate::services::tui_o::store::ledger::{LedgerEntry, PieceDisposition};
+use crate::services::tui_o::store::ledger::{PieceOutcome, PieceRecord};
+#[cfg(unix)]
 use crate::services::tui_o::store::{Initialized, OStore, STORE_DIR_NAME, StoreConfig};
 
 pub(super) const CHANNEL: u64 = 6325;
@@ -154,6 +155,8 @@ fn only_an_uncertain_original_sent_while_on_is_eligible_and_the_rest_is_reported
     assert!(report_backlog(&mut reopened, latest()).unwrap().is_empty());
 }
 
+// The real O store fixture requires confirmed parent directory fsync.
+#[cfg(unix)]
 #[test]
 fn d4act_not_sent_replays_as_settled_without_reclassifying_legacy_records() {
     let dir = tempfile::tempdir().unwrap();

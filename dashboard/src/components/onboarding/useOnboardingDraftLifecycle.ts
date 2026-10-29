@@ -22,6 +22,7 @@ import {
   type ProviderStatus,
   type ServerOnboardingDraftResponse,
 } from "../onboardingDraft";
+import { ApiRequestError, request, requestWithErrorBody } from "../../api/httpClient";
 import { COMMAND_PROVIDERS } from "./providerConfig";
 import type { CompletionChecklistItem } from "./OnboardingWizardSections";
 
@@ -222,9 +223,9 @@ export function useOnboardingDraftLifecycle({
     setError("");
     setResumeState("none");
     setDraftNoticeVisible(false);
-    void fetch("/api/onboarding/draft", {
+    void request("/api/onboarding/draft", {
       method: "DELETE",
-      credentials: "include",
+      suppressErrorToast: true,
     }).catch(() => {});
   }, [
     initialDraftRef,
@@ -258,14 +259,15 @@ export function useOnboardingDraftLifecycle({
 
     async function loadInitialState() {
       try {
-        const [statusResponse, draftResponse] = await Promise.all([
-          fetch("/api/onboarding/status", { credentials: "include" }),
-          fetch("/api/onboarding/draft", { credentials: "include" }),
+        const [statusData, draftData] = await Promise.all([
+          requestWithErrorBody<OnboardingStatusResponse>("/api/onboarding/status", { maxRetries: 0, shareInflight: false }),
+          request<ServerOnboardingDraftResponse>("/api/onboarding/draft", {
+            maxRetries: 0, shareInflight: false, suppressErrorToast: true,
+          }).catch((error: unknown) => {
+            if (error instanceof ApiRequestError) return null;
+            throw error;
+          }),
         ]);
-        const statusData = (await statusResponse.json()) as OnboardingStatusResponse;
-        const draftData = draftResponse.ok
-          ? ((await draftResponse.json()) as ServerOnboardingDraftResponse)
-          : null;
         if (cancelled) return;
 
         const serverDraft = serverDraftToLocalDraft(draftData?.draft);
@@ -419,10 +421,10 @@ export function useOnboardingDraftLifecycle({
     if (!isMeaningfulOnboardingDraft(nextDraft)) {
       initialDraftRef.current = null;
       clearOnboardingDraft();
-      void fetch("/api/onboarding/draft", {
+      void request("/api/onboarding/draft", {
         method: "DELETE",
-        credentials: "include",
         signal: controller.signal,
+        suppressErrorToast: true,
       }).catch(() => {});
       return () => controller.abort();
     }
@@ -430,10 +432,9 @@ export function useOnboardingDraftLifecycle({
     initialDraftRef.current = nextDraft;
     writeOnboardingDraft(nextDraft);
     const timer = window.setTimeout(() => {
-      void fetch("/api/onboarding/draft", {
+      void request("/api/onboarding/draft", {
         method: "PUT",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
+        suppressErrorToast: true,
         body: JSON.stringify({
           version: nextDraft.version,
           updated_at_ms: nextDraft.updatedAtMs,

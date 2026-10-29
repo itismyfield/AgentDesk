@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { request } from "../../api/httpClient";
 import {
   getProviderLevelColors,
   getProviderMeta,
@@ -212,9 +213,7 @@ export function MiniRateLimitBar({
     let mounted = true;
     const load = async () => {
       try {
-        const res = await fetch("/api/rate-limits", { credentials: "include" });
-        if (!res.ok) return;
-        const json = await res.json() as { providers: RawRLProvider[] };
+        const json = await request<{ providers?: RawRLProvider[] }>("/api/rate-limits", { suppressErrorToast: true });
         if (mounted) setProviders(transformRLProviders(json.providers ?? []));
       } catch { /* ignore */ }
     };

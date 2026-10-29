@@ -140,6 +140,17 @@ pub(super) fn dismiss_startup_dialog(
         if detect_claude_startup_dialog(&shown).as_ref() != Some(dialog) {
             return Ok(());
         }
+        // Under an owner this Enter is the attempt's first key: ready holds first, and the Enter
+        // goes pinned, so no later refusal proves the attempt unsent.
+        if crate::services::claude_tui::owner_input::active() {
+            use crate::services::claude_tui::{busy_inject, owner_input};
+            owner_input::ready_payload().map_err(|refusal| format!("{refusal:?}"))?;
+            owner_input::keyed();
+            let pane = busy_inject::Pane::with_program(session_name, "tmux".into());
+            return (busy_inject::stash::enter(&pane))
+                .then_some(())
+                .ok_or_else(|| "owner startup Enter was not applied".into());
+        }
         run_actions(session_name, &[TuiInputAction::Enter], cancel_token)
     })
 }

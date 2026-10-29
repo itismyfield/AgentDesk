@@ -1773,6 +1773,7 @@ fn execute_streaming_local_tui_tmux(
     }
 
     if session_exists && has_live_pane && resume {
+        crate::services::claude_tui::owner_input::launch_refuses_live()?;
         match guarded_outcome::warm_owned(|| {
             try_claude_tui_warm_followup(
                 resolved_session_id,

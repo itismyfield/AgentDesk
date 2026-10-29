@@ -67,6 +67,14 @@ fn endpoint() -> HerdrEndpoint {
     .unwrap()
 }
 
+fn retired_record() -> HostedExecution {
+    let mut record = record(&owner("return-end"), "n1", HostedState::Retired);
+    // The stored socket must name the same platform-specific endpoint as the transport.
+    record.location.as_mut().unwrap().socket_addr =
+        endpoint().socket_path().to_string_lossy().into_owned();
+    record
+}
+
 pub(crate) fn ended(record: &HostedExecution) -> RetiredEnd {
     RetiredEnd::observe_with_os(
         &endpoint(),
@@ -88,7 +96,7 @@ pub(crate) fn provider_alive(record: &HostedExecution) -> Result<RetiredEnd, Ret
 
 #[test]
 fn legacy_return_end_requires_both_observations() {
-    let r = record(&owner("return-end"), "n1", HostedState::Retired);
+    let r = retired_record();
     assert!(ended(&r).matches(&r));
     assert!(HerdrTarget::new(endpoint(), Arc::new(MissingPane), &r).is_none());
     for (exists, process) in [
@@ -148,7 +156,7 @@ fn legacy_return_end_requires_both_observations() {
 
 #[test]
 fn legacy_return_end_rejects_nonretired_incomplete_and_other_endpoint() {
-    let r = record(&owner("return-end"), "n1", HostedState::Retired);
+    let r = retired_record();
     for state in [HostedState::Pending, HostedState::Bound] {
         let mut next = r.clone();
         next.state = state;

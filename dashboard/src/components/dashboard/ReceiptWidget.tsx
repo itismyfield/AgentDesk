@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { onCredentialChange } from "../../api/authState";
+import { request, TOKEN_ANALYTICS_TIMEOUT_MS } from "../../api/httpClient";
 import type { TFunction } from "./model";
 import {
   SurfaceActionButton,
@@ -60,6 +62,8 @@ interface CachedReceiptEntry {
 }
 
 const receiptCache = new Map<Period, CachedReceiptEntry>();
+// Receipts fetched under a previous credential must not render after re-login.
+onCredentialChange(() => receiptCache.clear());
 const RECEIPT_CACHE_TTL: Record<Period, number> = {
   today: 30 * 60_000,
   week: 210 * 60_000,
@@ -154,13 +158,14 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
 
       if (mounted) setLoading(true);
       try {
-        const res = await fetch(`/api/receipt?period=${period}`, { credentials: "include" });
-        if (!res.ok) return;
-        const json = (await res.json()) as ReceiptData;
+        const json = await request<ReceiptData>(`/api/receipt?period=${period}`, {
+          suppressErrorToast: true,
+          timeoutMs: TOKEN_ANALYTICS_TIMEOUT_MS,
+        });
         receiptCache.set(period, { data: json, fetchedAt: Date.now() });
         if (mounted) setData(json);
       } catch {
-        // ignore network/auth errors and keep cached data if present
+        // request() hands 401 to the shared re-login flow; keep cached data on other failures
       } finally {
         if (mounted) setLoading(false);
       }

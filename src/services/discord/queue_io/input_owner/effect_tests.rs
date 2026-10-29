@@ -42,6 +42,7 @@ fn cold_claude_first_prompt_is_one_owner_attempt() {
             "source_message_ids":[id],"queued_generation":1,"text":frame}))
         .unwrap();
     let transcript = f.root.path().join("not-created.jsonl");
+    let ticket = Arc::new(std::sync::Mutex::new(None));
     let completion = runtime.block_on(async {
         let dir = crate::services::discord::runtime_store::discord_pending_queue_root()
             .unwrap()
@@ -68,10 +69,19 @@ fn cold_claude_first_prompt_is_one_owner_attempt() {
                 "source":{"kind":"pre_source","expected_session_id":null,
                     "expected_transcript":null,"binding_watermark":null}}),
         };
-        let leaf = cold_claude(name.into(), transcript.display().to_string(), 0);
+        let leaf = cold_claude(
+            name.into(),
+            transcript.display().to_string(),
+            0,
+            ticket.clone(),
+        );
         pump::submit(&mailbox, prepared, Arc::new(|| 10_000), leaf).await
     });
     assert_eq!(completion, Ok(Completion::Submitted));
+    assert!(
+        ticket.lock().unwrap().is_some(),
+        "the observer keeps the submit's ticket"
+    );
     assert!(
         !transcript.exists(),
         "a cold submit does not wait for a transcript"

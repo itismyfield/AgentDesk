@@ -5,7 +5,7 @@
 mod catch_up_race;
 #[cfg(all(test, unix))]
 mod first_input;
-mod herdr;
+pub(in crate::services::discord) mod herdr;
 mod names;
 mod queued_owner;
 mod queued_provider;
@@ -774,14 +774,14 @@ async fn record_terminal(
     }
 }
 
-struct Input {
-    channel: u64,
-    provider: String,
-    source: String,
-    author: String,
-    name: String,
-    text: String,
-    nonce: String,
+pub(in crate::services::discord) struct Input {
+    pub(in crate::services::discord) channel: u64,
+    pub(in crate::services::discord) provider: String,
+    pub(in crate::services::discord) source: String,
+    pub(in crate::services::discord) author: String,
+    pub(in crate::services::discord) name: String,
+    pub(in crate::services::discord) text: String,
+    pub(in crate::services::discord) nonce: String,
 }
 
 /// The queued-head effect: its transaction is terminal once Enter is sent.

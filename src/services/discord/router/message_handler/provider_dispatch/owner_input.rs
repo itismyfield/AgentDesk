@@ -4,12 +4,13 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use super::StreamingTurn;
-use crate::services::claude_tui::busy_inject;
+use crate::services::claude_tui::{busy_inject, owner_input as scope};
 use crate::services::discord::queue_io::input_owner::effect::{
-    self, BusyClaude, Clock, Completion, PreparedPayload,
+    self, BusyClaude, BusyClaudeHerdr, Clock, Completion, PreparedPayload,
 };
 use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOrigin};
 use crate::services::discord::queue_io::input_owner::{pump, target};
+use crate::services::session_host::HerdrTarget;
 use crate::services::turn_host::TurnHost;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
@@ -19,11 +20,14 @@ struct Registration {
     execution: Execution,
     origin: InputOrigin,
     phase: target::Phase,
+    /// The attempt as prepared; a created execution's own target and source replace these.
     attempt: serde_json::Value,
     sources: Vec<String>,
     transcript: PathBuf,
     /// The tmux program the busy pane is written through.
     program: PathBuf,
+    /// A Herdr pane's gate and its physical writer `socket_path#pane_id`.
+    herdr: Option<(HerdrTarget, String)>,
     author: String,
     name: String,
     clock: Clock,
@@ -39,9 +43,17 @@ fn register(channel: u64, registration: Registration) {
     registered.push((channel, registration));
 }
 
+/// How dispatch goes on after the owner looked at the turn.
+pub(super) enum Taken {
+    /// The owner ran or refused the input; no driver runs.
+    Done(Result<(), String>),
+    /// The driver runs its launch, and the owner writes the created execution's first prompt.
+    Launch(scope::LaunchGuard),
+}
+
 /// `None` leaves the turn to its driver: the channel is not registered, or its execution is not
 /// one the owner takes.
-pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Result<(), String>> {
+pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
     let registration = {
         let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
         let at = registered
@@ -52,7 +64,7 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Result<(), String>> {
     let host = match turn.host {
         TurnHost::Tmux => "tmux",
         TurnHost::Herdr(_) => "herdr",
-        TurnHost::Refused(refusal) => return Some(Err(refusal.to_string())),
+        TurnHost::Refused(refusal) => return Some(Taken::Done(Err(refusal.to_string()))),
     };
     let route = target::route(
         registration.execution,
@@ -61,19 +73,45 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Result<(), String>> {
         host,
         registration.phase,
     )?;
-    Some(run(turn, route, registration))
+    // Only a Claude tmux launch hands its created execution's first prompt over so far.
+    if route == target::Route::Cold && (turn.provider.as_str(), host) == ("claude", "tmux") {
+        let hook = created(registration, turn.prompt.into());
+        return Some(Taken::Launch(scope::install_launch(hook)));
+    }
+    Some(Taken::Done(run(turn, route, registration)))
+}
+
+/// Reserves the created execution's first prompt on the target its driver read from the created
+/// pane, never on the prepared one, and runs the driver's own submit as the owner's effect.
+fn created(r: Registration, frame: String) -> scope::LaunchHook {
+    Box::new(move |target, source, submit| {
+        let mut attempt = r.attempt;
+        attempt["target"] = target;
+        attempt["source"] = source;
+        let prepared = PreparedPayload {
+            frame,
+            sources: r.sources,
+            attempt,
+        };
+        let leaf = effect::created(submit);
+        let submitted = pump::submit(&r.mailbox, prepared, r.clock, leaf);
+        match tokio::runtime::Handle::current().block_on(submitted)? {
+            Completion::Submitted => Ok(()),
+            other => Err(format!("{other:?}")),
+        }
+    })
 }
 
 fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Result<(), String> {
-    let session = turn.tmux_session_name.ok_or("owner input without a pane")?;
     let nonce = r.attempt["nonce"].as_str().unwrap_or_default().to_string();
+    let session = || turn.tmux_session_name.ok_or("owner input without a pane");
     let (frame, leaf) = match route {
         // The busy frame carries main's header, so the prepared bytes are the ones pasted.
         target::Route::ClaudeBusy => (
             busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
             BusyClaude {
-                pane: busy_inject::Pane::with_program(session, r.program),
-                session: session.into(),
+                pane: busy_inject::Pane::with_program(session()?, r.program),
+                session: session()?.into(),
                 transcript: r.transcript,
                 channel: turn.channel_id,
                 source: "discord".into(),
@@ -85,8 +123,27 @@ fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Resul
             }
             .leaf(),
         ),
-        target::Route::ClaudeIdle => (turn.prompt.into(), effect::idle_claude(session.into())),
-        // The create belongs to the provider's launch, which does not hand its first prompt over.
+        target::Route::ClaudeIdle => (turn.prompt.into(), effect::idle_claude(session()?.into())),
+        target::Route::ClaudeHerdrBusy => {
+            let (target, writer) = r.herdr.ok_or("owner Herdr input without a pane")?;
+            (
+                busy_inject::frame("discord", &r.author, &r.name, &nonce, turn.prompt),
+                BusyClaudeHerdr {
+                    target,
+                    writer,
+                    session: session()?.into(),
+                    transcript: r.transcript,
+                    channel: turn.channel_id,
+                    source: "discord".into(),
+                    author: r.author,
+                    name: r.name,
+                    nonce,
+                    text: turn.prompt.into(),
+                }
+                .leaf(),
+            )
+        }
+        // Every other create belongs to a launch that does not hand its first prompt over yet.
         target::Route::Cold => return Err("NotSent(\"cold_launch_unowned\")".into()),
         target::Route::Held(reason) => return Err(format!("NotSent({reason:?})")),
     };

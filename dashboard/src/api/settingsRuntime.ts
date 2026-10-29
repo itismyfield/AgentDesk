@@ -1,5 +1,6 @@
 import type { CompanySettings, VoiceConfigPutBody, VoiceConfigResponse } from "../types";
-import { clearCachedGet, readCachedGet, request, type CachedGetEntry } from "./httpClient";
+import type { ConfigEditValue, ConfigEntry } from "../components/settings/SettingsModel";
+import { ApiRequestError, clearCachedGet, readCachedGet, request, type CachedGetEntry } from "./httpClient";
 
 export async function getSettings(): Promise<Partial<CompanySettings>> {
   return request("/api/settings");
@@ -40,18 +41,35 @@ export async function getVoiceConfig(): Promise<VoiceConfigResponse> {
 export async function saveVoiceConfig(
   body: VoiceConfigPutBody,
 ): Promise<VoiceConfigResponse> {
-  const response = await fetch("/api/voice/config", {
-    method: "PUT",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const payload = await response.json().catch(() => ({ error: "unknown" }));
-  if (!response.ok) {
-    throw new VoiceConfigApiError(response.status, payload);
+  let payload: VoiceConfigResponse;
+  try {
+    payload = await request<VoiceConfigResponse>("/api/voice/config", {
+      method: "PUT",
+      body: JSON.stringify(body),
+      suppressErrorToast: true,
+    });
+  } catch (error) {
+    if (error instanceof ApiRequestError) {
+      throw new VoiceConfigApiError(error.status, error.body ?? { error: "unknown" });
+    }
+    throw error;
   }
   clearCachedGet("/api/voice/config");
-  return payload as VoiceConfigResponse;
+  return payload;
+}
+
+export async function getSettingsConfig(): Promise<{ entries?: ConfigEntry[] }> {
+  return request("/api/settings/config", { shareInflight: false });
+}
+
+export async function patchSettingsConfig(
+  edits: Record<string, ConfigEditValue>,
+): Promise<unknown> {
+  return request("/api/settings/config", {
+    method: "PATCH",
+    body: JSON.stringify(edits),
+    suppressErrorToast: true,
+  });
 }
 
 // ── Runtime Config ──

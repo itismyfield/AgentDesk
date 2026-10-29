@@ -159,3 +159,48 @@ fn fresh_readiness_exhaustion_keeps_error_and_exact_attempt_budget() {
         "fallback exhaustion message must remain explicit"
     );
 }
+
+/// An owned first prompt runs the launch's own submit on the frame the owner hands back and keeps
+/// that submit's ticket for the observer that reads next.
+#[test]
+fn owned_first_prompt_keeps_its_ticket_for_the_observer() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    let name = "cold-owned-ticket";
+    let prompt = "owned first prompt";
+    frame_renderer(&f, name, prompt, &screen(""), &screen(prompt), &screen(""));
+    let nonce = "00112233445566778899aabbccddee03";
+    let owner_root = crate::services::tmux_common::current_tmux_owner_marker();
+    let context: crate::services::tui_prompt_dedupe::binding_context::BindingContext =
+        serde_json::from_value(serde_json::json!({"schema":1,"provider":"claude",
+            "created_at":chrono::Utc::now(),"execution_nonce":nonce,"tmux_session":name,
+            "channel_id":727396,"owner_runtime_root":owner_root,"host":"owned-test",
+            "expected_native_session_id":null,"launch_mode":"fresh","provider_root":null}))
+        .unwrap();
+    let _prepared =
+        crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(context)
+            .unwrap();
+    let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
+    std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+    std::fs::write(marker, nonce).unwrap();
+    let transcript = f.root.path().join("owned.jsonl");
+    let hook: crate::services::claude_tui::owner_input::LaunchHook =
+        Box::new(move |target, source, submit| {
+            assert_eq!(target["execution_nonce"], nonce);
+            assert_eq!(source["expected_session_id"], "owned-sid");
+            submit(prompt.into()).map_err(|error| format!("{error:?}"))
+        });
+    let submitted = submit_owned(
+        hook,
+        transcript.to_str().unwrap(),
+        0,
+        None,
+        name,
+        "owned-sid",
+    )
+    .unwrap_or_else(|error| panic!("the owner's submit keeps its ticket: {error:?}"));
+    assert_eq!(submitted.start_offset, 0);
+    let pane = f.root.path().join(name);
+    assert_eq!(std::fs::read(pane.join("payloads")).unwrap().len(), 1);
+    assert_eq!(std::fs::read(pane.join("enters")).unwrap().len(), 1);
+}

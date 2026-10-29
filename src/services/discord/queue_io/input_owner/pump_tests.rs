@@ -75,10 +75,17 @@ async fn pump_runs_one_attempt_with_a_multi_source_frame() {
     let (t, i) = (ticket.clone(), item.clone());
     let leaf: Leaf = Box::new(move |frame| {
         seen.lock().unwrap().push(frame);
-        let bind = tokio::runtime::Handle::current().block_on(exact_turn(&mailbox, &t, &i));
+        let runtime = tokio::runtime::Handle::current();
+        let bind = runtime.block_on(exact_turn(&mailbox, &t, &i));
         assert!(
             matches!(&bind, Ok(TurnBind::Armed(turn)) if turn.attempt == "pump-multi"),
             "the effect runs under an armed exact turn: {bind:?}"
+        );
+        let head = runtime.block_on(head(&mailbox));
+        assert_eq!(
+            head["payload"]["attribution"]["sources"],
+            serde_json::json!(["s1", "s2"]),
+            "the reserved head names every source: {head}"
         );
         Ok(Completion::Submitted)
     });
