@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -6,6 +7,7 @@ from collections import Counter
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import check_const_bool_switch_ratchet as ratchet
 from scripts.check_const_bool_switch_ratchet import BASELINE, collect, declarations, parse_baseline, problems
@@ -22,11 +24,15 @@ class ConstBoolSwitchRatchetTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
 
-    def run_main(self, rows, *argv):
+    def run_main(self, rows, *argv, env=None):
         self.put(BASELINE.relative_to(ratchet.ROOT).as_posix(), json.dumps(rows))
         out = StringIO()
-        with redirect_stdout(out):
-            rc = ratchet.main(list(argv), root=self.root)
+        # CI exports the base ref for the real tree; fixtures pass it only as an argument or `env`.
+        with patch.dict(os.environ, env or {}):
+            if env is None:
+                os.environ.pop("TEST_LANE_BASELINE_REF", None)
+            with redirect_stdout(out):
+                rc = ratchet.main(list(argv), root=self.root)
         return rc, out.getvalue()
 
     def test_current_tree_matches_baseline(self):
@@ -94,6 +100,9 @@ class ConstBoolSwitchRatchetTest(unittest.TestCase):
         git("commit", "--quiet", "-m", "base")
         self.put("src/a.rs", "const OLD: bool = true;\nconst NEW: bool = true;\n")
         rc, out = self.run_main([["src/a.rs", "NEW"], ["src/a.rs", "OLD"]], "--base-ref", "HEAD")
+        self.assertEqual(rc, 1)
+        self.assertIn("src/a.rs NEW: baseline row added over HEAD", out)
+        rc, out = self.run_main([["src/a.rs", "NEW"], ["src/a.rs", "OLD"]], env={"TEST_LANE_BASELINE_REF": "HEAD"})
         self.assertEqual(rc, 1)
         self.assertIn("src/a.rs NEW: baseline row added over HEAD", out)
         self.assertEqual(self.run_main([["src/a.rs", "NEW"], ["src/a.rs", "OLD"]])[0], 0)
