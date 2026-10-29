@@ -1,6 +1,10 @@
+pub mod adk_profile;
+pub mod adk_resources;
+pub mod adk_workspace;
 pub mod control;
 pub mod definition;
+pub mod execution_pin;
 pub mod model;
-#[cfg(test)]
 pub mod profile;
+pub mod verification_run;
 pub mod view;

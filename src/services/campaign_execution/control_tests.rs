@@ -88,6 +88,7 @@ pub(crate) fn running() -> CampaignState {
         .collect(),
         actions: BTreeMap::new(),
         sessions: Vec::new(),
+        verifications: BTreeMap::new(),
     });
     state
 }
