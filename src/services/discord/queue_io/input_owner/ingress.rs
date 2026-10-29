@@ -374,6 +374,6 @@ pub(crate) async fn enqueue(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "ingress_tests.rs"]
 mod tests;

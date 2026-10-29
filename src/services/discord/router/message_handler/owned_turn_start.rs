@@ -259,7 +259,7 @@ mod tests {
         let fail = fixture.root.path().join("fail-load");
         let script = std::fs::read_to_string(&shim).unwrap();
         let prefix = format!(
-            "printf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *load-buffer*) [ ! -f '{}' ] || exit 1 ;; esac\n",
+            "printf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *load-buffer*) grep -q fail '{}' && exit 1 ;; esac\n",
             trace.display(),
             fail.display()
         );
@@ -335,7 +335,7 @@ mod tests {
                 .run(NoStartPermit, "", || panic!("old start cannot type"))
                 .is_err()
         );
-        std::fs::remove_file(&fail).unwrap();
+        std::fs::write(&fail, "pass").unwrap();
         let next = first.successor(&handle, proof.unwrap()).await.unwrap();
         let next_key = next.key().clone();
         assert_ne!(next_key["attempt"]["nonce"], key["attempt"]["nonce"]);

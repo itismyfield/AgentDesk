@@ -269,6 +269,7 @@ pub(super) fn front_holds(items: &[PendingQueueItem], input: &InputAttempt) -> b
 #[cfg(test)]
 #[path = "v2/owner_tests.rs"]
 mod tests;
-#[cfg(test)]
+// Unit fixtures adopt real owner files, which need a confirmed parent directory fsync.
+#[cfg(all(test, unix))]
 #[path = "v2/unit_tests.rs"]
 mod unit_tests;
