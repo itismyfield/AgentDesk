@@ -163,13 +163,24 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
     resolved_session_id: &str,
     prompt: &str,
 ) -> Result<(ReadOutputResult, ReadHarvestStats, u64), SubmissionError> {
-    let submitted = super::first_input::submit(
-        transcript_path_string,
-        fresh_turn_start_offset,
-        cancel_token.as_deref(),
-        tmux_session_name,
-        prompt,
-    )?;
+    let submitted = match crate::services::claude_tui::owner_input::launch_hook() {
+        // The owner waiting for this created execution writes its first prompt.
+        Some(hook) => super::first_input::submit_owned(
+            hook,
+            transcript_path_string,
+            fresh_turn_start_offset,
+            cancel_token.clone(),
+            tmux_session_name,
+            resolved_session_id,
+        )?,
+        None => super::first_input::submit(
+            transcript_path_string,
+            fresh_turn_start_offset,
+            cancel_token.as_deref(),
+            tmux_session_name,
+            prompt,
+        )?,
+    };
     super::first_input::observe(
         transcript_path_string,
         sender,

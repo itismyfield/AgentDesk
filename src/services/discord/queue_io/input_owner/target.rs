@@ -3,8 +3,10 @@
 #![cfg(unix)]
 use super::origin::{Execution, InputOrigin};
 
-/// One physical writer: the owner's writer lease key (host, root, pane). The execution nonce
-/// stays out as it does there: a new process in the same pane still writes that pane.
+/// One logical writer: host, root and the session the owner's history names. The execution nonce
+/// stays out, so a new process in the same session still waits here. A Herdr session's physical
+/// pane (`socket_path#pane_id`) is held apart by the owner's writer lease for the scope's life:
+/// two sessions naming one pane never write it at once.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct TargetKey {
     host: String,
@@ -45,6 +47,8 @@ pub(crate) enum Phase {
 pub(crate) enum Route {
     ClaudeBusy,
     ClaudeIdle,
+    /// A busy Claude pane hosted on Herdr: health's gated busy transaction.
+    ClaudeHerdrBusy,
     /// The first prompt of an execution the provider's launch creates.
     Cold,
     /// The owner keeps the original and sends nothing; no other path takes it either.
@@ -69,7 +73,8 @@ pub(crate) fn route(
         ("claude" | "codex", "tmux" | "herdr", Phase::Absent) => Route::Cold,
         ("claude", "tmux", Phase::Busy) => Route::ClaudeBusy,
         ("claude", "tmux", Phase::Idle) => Route::ClaudeIdle,
-        // Codex busy and every Herdr live pane wait for their owner primitive.
+        ("claude", "herdr", Phase::Busy) => Route::ClaudeHerdrBusy,
+        // Codex busy and an idle Herdr pane wait for their owner primitive.
         _ => Route::Held("provider_unsupported"),
     })
 }
@@ -94,9 +99,9 @@ mod tests {
         assert!(TargetKey::of(&json!({"target":{"host":"tmux","owner":"p"}})).is_err());
     }
 
-    /// Codex busy and Herdr live panes are held, never routed to another driver.
+    /// Codex busy and idle Herdr panes are held, never routed to another driver.
     #[test]
-    fn only_claude_tmux_live_panes_and_creates_have_an_effect() {
+    fn only_claude_live_panes_and_creates_have_an_effect() {
         let local = |provider, host, phase| {
             route(
                 Execution::LocalTui,
@@ -115,10 +120,14 @@ mod tests {
             Some(Route::ClaudeIdle)
         );
         assert_eq!(local("codex", "herdr", Phase::Absent), Some(Route::Cold));
+        assert_eq!(
+            local("claude", "herdr", Phase::Busy),
+            Some(Route::ClaudeHerdrBusy)
+        );
         for (provider, host, phase) in [
             ("codex", "tmux", Phase::Busy),
             ("codex", "herdr", Phase::Busy),
-            ("claude", "herdr", Phase::Busy),
+            ("claude", "herdr", Phase::Idle),
             ("gemini", "tmux", Phase::Absent),
         ] {
             assert_eq!(

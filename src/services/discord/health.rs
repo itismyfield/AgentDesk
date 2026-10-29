@@ -129,6 +129,8 @@ pub(crate) use turn_deliver::inject_tests::{
     InjectPane, claim_kinded, end_turn, inject_hook, queue_texts, register_inject_runtime,
     send_meanwhile, start_without_gateway,
 };
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use turn_deliver::{BusyInput, herdr_busy};
 pub use turn_deliver::{
     ExternalHold, HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
     external_turn_hold_for_start,

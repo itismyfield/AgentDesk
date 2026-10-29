@@ -144,6 +144,24 @@ impl Rig {
         phase: target::Phase,
         transcript: &Path,
     ) -> Result<(), String> {
+        self.dispatch_as(
+            provider,
+            phase,
+            transcript,
+            Execution::LocalTui,
+            Some(&self.name),
+        )
+    }
+
+    /// As `dispatch`, on `execution` and with or without a pane name on the turn.
+    fn dispatch_as(
+        &self,
+        provider: ProviderKind,
+        phase: target::Phase,
+        transcript: &Path,
+        execution: Execution,
+        pane: Option<&str>,
+    ) -> Result<(), String> {
         let root = crate::services::tmux_common::current_tmux_owner_marker();
         // A live pane's attempt names the transcript it was observed on.
         let source = if phase == target::Phase::Busy {
@@ -160,7 +178,7 @@ impl Rig {
             self.channel,
             Registration {
                 mailbox: self.mailbox.clone(),
-                execution: Execution::LocalTui,
+                execution,
                 origin: InputOrigin::Discord,
                 phase,
                 attempt: json!({"nonce":self.nonce,"provider":provider.as_str(),
@@ -169,6 +187,7 @@ impl Rig {
                 sources: vec![self.original.message_id.to_string()],
                 transcript: transcript.to_path_buf(),
                 program: self.program.clone(),
+                herdr: None,
                 author: AUTHOR.into(),
                 name: NAME.into(),
                 clock: Arc::new(|| 10_000),
@@ -187,7 +206,7 @@ impl Rig {
             cancel: Arc::new(CancelToken::new()),
             codex_observation: None,
             remote_profile: None,
-            tmux_session_name: Some(&self.name),
+            tmux_session_name: pane,
             teardown: None,
             host: &host,
             channel_id: self.channel,
@@ -441,4 +460,166 @@ fn codex_busy_held_until_4d2() {
     assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
     assert!(rig.events().is_empty());
     assert_eq!(rig.bind(), TurnBind::NotArmed);
+}
+
+/// A refusal that writes nothing needs no pane: a create no launch hands over yet, a remote
+/// placement and an unsupported provider each keep the original queued, with no head and no key.
+#[test]
+fn owner_refusals_before_a_pane_need_no_session() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("ob-nopane", 7_272_513, "normal", view("", false), BUSY);
+    for (provider, phase, execution, reason) in [
+        (
+            ProviderKind::Codex,
+            target::Phase::Absent,
+            Execution::LocalTui,
+            "cold_launch_unowned",
+        ),
+        (
+            ProviderKind::Claude,
+            target::Phase::Busy,
+            Execution::RemoteTui,
+            "remote_placement",
+        ),
+        (
+            ProviderKind::Codex,
+            target::Phase::Busy,
+            Execution::LocalTui,
+            "provider_unsupported",
+        ),
+    ] {
+        let result = rig.dispatch_as(provider, phase, &rig.transcript(), execution, None);
+        assert_eq!(result, Err(format!("NotSent({reason:?})")), "{reason}");
+        let snapshot = rig.snapshot();
+        assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+        assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
+        assert_eq!(rig.bind(), TurnBind::NotArmed);
+    }
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+}
+
+/// The prepared attempt as dispatch holds it before any launch: its target names no execution
+/// the launch will create.
+fn prepared_before_launch(rig: &Rig) -> Registration {
+    Registration {
+        mailbox: rig.mailbox.clone(),
+        execution: Execution::LocalTui,
+        origin: InputOrigin::Discord,
+        phase: target::Phase::Absent,
+        attempt: json!({"nonce":rig.nonce,"provider":"claude",
+            "target":{"host":"tmux","owner":rig.name,"root":"/prepared/root",
+                "execution_nonce":"0".repeat(32)},
+            "source":{"kind":"pre_source","expected_session_id":null,
+                "expected_transcript":null,"binding_watermark":null}}),
+        sources: vec![rig.original.message_id.to_string()],
+        transcript: rig.transcript(),
+        program: rig.program.clone(),
+        herdr: None,
+        author: AUTHOR.into(),
+        name: NAME.into(),
+        clock: Arc::new(|| 10_000),
+        timing: &OWNER_TIMING,
+    }
+}
+
+/// The created pane's first prompt through the owner's launch hook: the driver's submit on the
+/// target read from the created pane.
+fn created_first_prompt(rig: &Rig) -> Result<(), String> {
+    let target = scope::created_tmux_target("claude", &rig.name)?;
+    let source = json!({"kind":"pre_source","expected_session_id":null,
+        "expected_transcript":null,"binding_watermark":null});
+    let (transcript, name) = (rig.transcript().display().to_string(), rig.name.clone());
+    let submit: scope::CreatedSubmit = Box::new(move |frame| {
+        crate::services::claude::first_input::submit_created(&transcript, 0, &name, &frame)
+            .map(drop)
+    });
+    let hook = created(prepared_before_launch(rig), PROMPT.into());
+    let _entered = rig.runtime.enter();
+    hook(target, source, submit)
+}
+
+/// The owner reserves a created execution's first prompt on the identity read from the created
+/// pane, not on the target it prepared before the launch: one paste, one Enter, delivered.
+#[test]
+fn created_first_prompt_reserves_the_created_target_not_the_prepared_one() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oc-created", 7_272_514, "normal", view("", false), IDLE);
+    assert_eq!(created_first_prompt(&rig), Ok(()));
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    assert_eq!(
+        fs::read_to_string(rig.renderer.join("body")).unwrap(),
+        PROMPT
+    );
+    let snapshot = rig.snapshot();
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    assert!(
+        snapshot["items"].as_array().unwrap().is_empty(),
+        "{snapshot}"
+    );
+    let bind = rig.bind();
+    let root = crate::services::tmux_common::current_tmux_owner_marker();
+    assert!(
+        matches!(&bind, TurnBind::Settled(turn) if turn.attempt == rig.nonce),
+        "{bind:?}"
+    );
+    assert_eq!(
+        scope::created_tmux_target("claude", &rig.name).unwrap(),
+        json!({"host":"tmux","owner":rig.name,"root":root,"execution_nonce":rig.nonce})
+    );
+}
+
+/// A startup dialog's Enter is the attempt's first key: the owner's ready holds before it and no
+/// refusal after it proves the attempt unsent, so the head stays Unknown and nothing is re-held.
+#[test]
+fn startup_enter_is_the_attempts_first_key() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dialog = "Resume from summary\n❯ 1. Resume from summary\n  2. Resume full session\n\
+        Enter to confirm · Esc to cancel\n";
+    let rig = rig("oc-dialog", 7_272_515, "normal", dialog.into(), IDLE);
+    fs::write(rig.renderer.join("body"), "").unwrap();
+    let result = created_first_prompt(&rig);
+    assert!(result.is_err(), "{result:?}");
+    let events = rig.events();
+    assert_eq!(
+        events.first().map(String::as_str),
+        Some("Enter"),
+        "{events:?}"
+    );
+    assert!(!events.iter().any(|e| e == "paste"), "{events:?}");
+    let snapshot = rig.snapshot();
+    assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+    assert!(!snapshot["head_injection"].is_null(), "{snapshot}");
+}
+
+/// A fresh launch hands its first prompt to the owner waiting on its thread: the hook gets the
+/// created pane's own target before any key, and the launch writes nothing itself.
+#[test]
+fn fresh_launch_hands_its_first_prompt_to_the_waiting_owner() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oc-wired", 7_272_516, "normal", view("", false), IDLE);
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let _hook = scope::install_launch(Box::new(move |target, source, _submit| {
+        record.lock().unwrap().push((target, source));
+        Err("refused by the test".into())
+    }));
+    let owner = rig.f.root.path().join("oc-wired-marker");
+    fs::write(&owner, "owner").unwrap();
+    let result =
+        crate::services::claude::fresh_hold_for_tests(&rig.transcript(), &rig.name, &owner, PROMPT);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|e| e.contains("refused by the test")),
+        "{result:?}"
+    );
+    let root = crate::services::tmux_common::current_tmux_owner_marker();
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "one hand-over");
+    assert_eq!(
+        seen[0].0,
+        json!({"host":"tmux","owner":rig.name,"root":root,"execution_nonce":rig.nonce})
+    );
+    assert_eq!(seen[0].1["expected_session_id"], "held-sid");
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
 }

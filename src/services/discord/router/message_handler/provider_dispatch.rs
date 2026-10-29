@@ -266,9 +266,11 @@ pub(super) fn execute(
         .spend(&target, turn.prompt, &turn.cancel)
         .map_err(|refusal| format!("replay start refused: {refusal:?}"))?;
     #[cfg(all(test, unix))]
-    if let Some(result) = owner_input::take(&turn) {
-        return result;
-    }
+    let _owned_launch = match owner_input::take(&turn) {
+        Some(owner_input::Taken::Done(result)) => return result,
+        Some(owner_input::Taken::Launch(guard)) => Some(guard),
+        None => None,
+    };
     match turn.host {
         TurnHost::Tmux => {}
         TurnHost::Refused(refusal) => return Err(refusal.to_string()),
