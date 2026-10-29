@@ -67,11 +67,15 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
             return Err("original source identity mismatch".into());
         }
     }
-    // Every member of the head, not only the first, must be the queue front in order.
+    // An unmatched reserved unit goes back to its single originals; an armed or unknown one stays held.
     if let Some(head) = &snapshot.head_injection
         && !super::front_holds(&snapshot.items, head)
     {
-        return Err("active original differs from queue head".into());
+        if head.phase != HeadPhase::Reserved {
+            return Err("active original differs from queue head".into());
+        }
+        let head = snapshot.head_injection.take().ok_or("head disappeared")?;
+        ungroup(&mut snapshot, &head)?;
     }
     snapshot.namespace = Some(namespace.into());
     // Released unarmed, every member still holds the queued bind its reserve kept.
@@ -79,6 +83,34 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
         .head_injection
         .take_if(|head| head.phase == HeadPhase::Reserved);
     Ok(snapshot)
+}
+
+/// Puts each member of an unmatched reserved unit back as a single queued original, in member order
+/// ahead of the rest: the queue's copy is kept when only recomputed fields differ, a lost member
+/// comes back from the unit, and a body conflict refuses rather than guess.
+fn ungroup(snapshot: &mut SnapshotV2, head: &InputAttempt) -> Result<(), String> {
+    let mut front = Vec::new();
+    for member in head.members() {
+        let wanted = identity(member);
+        match snapshot
+            .items
+            .iter()
+            .position(|item| identity(item) == wanted)
+        {
+            Some(at) => {
+                let kept = snapshot.items.remove(at);
+                if !super::source_admission::same_original(&kept, member) {
+                    return Err("a reserved member differs from its queue copy".into());
+                }
+                front.push(kept);
+            }
+            None => front.push(member.clone()),
+        }
+    }
+    front.append(&mut snapshot.items);
+    snapshot.items = front;
+    snapshot.rebind_queued(head);
+    Ok(())
 }
 
 /// Parked without positive evidence of no attempt is retained, never rejected or retried.

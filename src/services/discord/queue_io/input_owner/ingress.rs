@@ -167,18 +167,35 @@ impl Original {
         super::admission::admit(handle, &self.item, self.ticket.clone()).await
     }
 
-    /// Admits under the stable ticket on every call, so a retry after Pending or a restart finds
-    /// the same receipt; true when this call is the first to see it committed.
-    async fn admit_first(&self, handle: &ChannelMailboxHandle) -> (Intake, bool) {
+    /// Admits under the stable ticket on every call; a ticket the owner already holds, even as an
+    /// unconfirmed candidate, resumes the stored original. True when this call first sees it committed.
+    async fn admit_first(&mut self, handle: &ChannelMailboxHandle) -> (Intake, bool) {
         use super::admission::AdmissionState;
         let before = super::admission::status(handle, &self.ticket).await;
         let first = before.is_ok_and(|state| state != AdmissionState::Committed);
-        match self.admit(handle).await {
-            Admission::Accepted(_) => (Intake::Accepted, first),
-            Admission::Pending(ticket) => (Intake::Pending(OwnerPending(ticket)), false),
-            Admission::Rejected(reason) => (Intake::Rejected(reason), false),
+        let ticket = self.ticket.as_str().to_string();
+        match handle
+            .v2_resume_ticket(self.item.clone(), ticket, same_input)
+            .await
+        {
+            Ok((_, stored)) => {
+                self.item = stored;
+                (Intake::Accepted, first)
+            }
+            Err(error) if error.is_pending() => {
+                (Intake::Pending(OwnerPending(self.ticket.clone())), false)
+            }
+            Err(error) => (Intake::Rejected(error.into()), false),
         }
     }
+}
+
+/// A re-entry of the same message, however its route re-rendered it, against the stored original.
+fn same_input(stored: &PendingQueueItem, offered: &PendingQueueItem) -> bool {
+    stored.author_id == offered.author_id
+        && stored.message_id == offered.message_id
+        && stored.source_message_ids == offered.source_message_ids
+        && stored.text == offered.text
 }
 
 pub(crate) async fn installed(handle: &ChannelMailboxHandle) -> Result<bool, String> {
@@ -234,8 +251,8 @@ async fn admit_raw(
         .role_overrides
         .get(&channel)
         .map(|value| value.get());
-    let original = match original(provider, channel, role, raw) {
-        Ok(original) => settled_generation(&handle, original).await,
+    let mut original = match original(provider, channel, role, raw) {
+        Ok(original) => original,
         Err(error) => return Some(Intake::Rejected(error)),
     };
     let (intake, first) = original.admit_first(&handle).await;
@@ -243,41 +260,6 @@ async fn admit_raw(
         held(shared, &handle, channel, &original, hold).await;
     }
     Some(intake)
-}
-
-/// A replay carries a fresh process generation; the stored original's generations keep its receipt.
-async fn settled_generation(handle: &ChannelMailboxHandle, mut original: Original) -> Original {
-    let wanted = original.item.clone();
-    let stored = handle
-        .v2_request(move |slot| {
-            let owner = slot.as_ref().ok_or("input owner disappeared")?;
-            let snapshot = &owner.snapshot;
-            let retained = snapshot
-                .retained_inputs
-                .iter()
-                .flat_map(|entry| entry.input.members());
-            let mut originals = snapshot.items.iter().chain(retained);
-            Ok(originals
-                .find(|item| {
-                    item.message_id == wanted.message_id
-                        && item.source_message_ids == wanted.source_message_ids
-                })
-                .cloned())
-        })
-        .await;
-    if let Ok(Some(stored)) = stored {
-        original.item.queued_generation = stored.queued_generation;
-        for source in &mut original.item.source_message_queued_generations {
-            if let Some(old) = stored
-                .source_message_queued_generations
-                .iter()
-                .find(|old| old.message_id == source.message_id)
-            {
-                source.queued_generation = old.queued_generation;
-            }
-        }
-    }
-    original
 }
 
 /// The ticket a Discord original derives from its provider, channel and sources, so every

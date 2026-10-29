@@ -303,6 +303,29 @@ impl Owner {
         Some(self.unacknowledged.remove(at).1)
     }
 
+    /// The original an admission under `ticket` holds, read from the committed snapshot and then
+    /// the unconfirmed candidate, so a recovery re-enters that exact original.
+    pub(crate) fn ticket_original(&self, ticket: &Ticket) -> Option<PendingQueueItem> {
+        let prefix = ticket.prefix();
+        let candidate = self.pending.as_ref().map(|(_, next)| next);
+        for snapshot in std::iter::once(&self.snapshot).chain(candidate) {
+            let receipts = snapshot.admission_receipts.iter();
+            let Some(receipt) = receipts.into_iter().find(|r| r.starts_with(&prefix)) else {
+                continue;
+            };
+            let inputs = snapshot.head_injection.iter();
+            let inputs = inputs.chain(snapshot.retained_inputs.iter().map(|r| &r.input));
+            let mut held = snapshot
+                .items
+                .iter()
+                .chain(inputs.flat_map(|i| i.members()));
+            if let Some(found) = held.find(|item| ticket.receipt(item) == *receipt) {
+                return Some(found.clone());
+            }
+        }
+        None
+    }
+
     /// Where `ticket` stands, read from the committed snapshot and the unconfirmed candidate only.
     pub(crate) fn admission_status(&self, ticket: &Ticket) -> TicketStatus {
         let prefix = ticket.prefix();
@@ -473,6 +496,40 @@ impl SnapshotV2 {
             self.admission_binds.push(AdmissionBind { receipt, at });
         }
     }
+}
+
+impl SnapshotV2 {
+    /// After an ungrouping moved queue items, every ticket receipt whose original is queued binds
+    /// to its new slot again, once each; the released unit's attempt binds go.
+    pub(super) fn rebind_queued(&mut self, released: &InputAttempt) {
+        let attempt = released.attempt.as_ref();
+        self.admission_binds.retain(|b| match &b.at {
+            BindAt::Queued { .. } => false,
+            BindAt::Attempt { attempt: bound, .. } => Some(bound) != attempt,
+            _ => true,
+        });
+        let bound: Vec<&String> = self.admission_binds.iter().map(|b| &b.receipt).collect();
+        let mut free: Vec<String> = (self.admission_receipts.iter())
+            .filter(|r| r.starts_with("tk:") && !bound.contains(r))
+            .cloned()
+            .collect();
+        for index in 0..self.items.len() {
+            let Some(item) = self.queued_digest(index) else {
+                continue;
+            };
+            let suffix = format!(":{item}");
+            if let Some(at) = free.iter().position(|r| r.ends_with(&suffix)) {
+                let receipt = free.remove(at);
+                let at = BindAt::Queued { index, item };
+                self.admission_binds.push(AdmissionBind { receipt, at });
+            }
+        }
+    }
+}
+
+/// Whether two stored originals are the same admission, ignoring only recomputed fields.
+pub(super) fn same_original(a: &PendingQueueItem, b: &PendingQueueItem) -> bool {
+    canonical(a) == canonical(b)
 }
 
 /// Every member bind of the delivered attempt becomes a settled one at once, keeping its nonce
@@ -669,6 +726,40 @@ impl super::super::super::ChannelMailboxHandle {
         }
         self.v2_admit(Arc::new(Mutex::new(Custody::resume(&original, ticket))))
             .await
+    }
+
+    /// Admits under `ticket` in one actor turn: a ticket the owner already holds, committed or still
+    /// unconfirmed, resumes its stored original when `same_input` accepts the caller's copy as the
+    /// same input; an unknown ticket admits the caller's original. Returns the original admitted.
+    pub(crate) async fn v2_resume_ticket(
+        &self,
+        original: PendingQueueItem,
+        ticket: String,
+        same_input: fn(&PendingQueueItem, &PendingQueueItem) -> bool,
+    ) -> Result<(Admitted, PendingQueueItem), AdmitError> {
+        let ticket = Ticket::new(&ticket).map_err(AdmitError::NotCommitted)?;
+        self.v2_request(move |slot| {
+            let Some(owner) = slot.as_mut() else {
+                return Ok(Err(AdmitError::NotCommitted("V2 not adopted".into())));
+            };
+            let chosen = match owner.ticket_original(&ticket) {
+                Some(stored) if same_input(&stored, &original) => stored,
+                Some(_) => {
+                    return Ok(Err(AdmitError::Conflict(
+                        "another input names the ticket".into(),
+                    )));
+                }
+                None if original.queued_generation == 0 => {
+                    let unsettled = "the original's queued generation is unsettled";
+                    return Ok(Err(AdmitError::NotCommitted(unsettled.into())));
+                }
+                None => original,
+            };
+            let admitted = Custody::resume(&chosen, ticket).advance(owner);
+            Ok(admitted.map(|admitted| (admitted, chosen)))
+        })
+        .await
+        .map_err(|_| AdmitError::Pending)?
     }
 
     /// Reads the ticket's standing; it never recovers, commits or admits.

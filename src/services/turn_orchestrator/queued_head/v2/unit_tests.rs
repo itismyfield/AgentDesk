@@ -188,14 +188,123 @@ fn a_reserved_unit_restores_whole_and_a_changed_member_refuses_the_file() {
         sources::restore(&changed.to_string(), "unit")
             .err()
             .as_deref(),
-        Some("active original differs from queue head")
+        Some("a reserved member differs from its queue copy"),
+        "a body conflict is held, never guessed"
     );
-    changed["items"][2]["text"] = json!("c");
-    changed["items"].as_array_mut().unwrap().truncate(1);
+}
+
+/// Rewrites the stored snapshot of `channel` and reports what boot adoption plans for it.
+fn rewrite_and_plan(channel: u64, edit: impl FnOnce(&mut serde_json::Value)) -> Vec<String> {
+    let mut stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path(channel)).unwrap()).unwrap();
+    edit(&mut stored);
+    std::fs::write(path(channel), stored.to_string()).unwrap();
+    let persistence =
+        super::super::super::QueuePersistenceContext::new(&ProviderKind::Claude, "v2-unit", None);
+    let steps = projection::plan(&persistence, "unit").unwrap();
+    let ours = steps
+        .into_iter()
+        .filter(|step| format!("{step:?}").contains(&format!("({channel})")));
+    ours.map(|step| format!("{step:?}")).collect()
+}
+
+/// A reserved unit that only differs from the queue in recomputed fields goes back to its single
+/// originals: boot adopts the channel, and each original and ticket is there once, unattempted.
+#[test]
+fn an_unmatched_reserved_unit_returns_to_its_single_originals() {
+    let _root = TestRuntimeRootGuard::new();
+    let mut owner = owner(8);
+    let members = [
+        admit(&mut owner, 1, "a"),
+        admit(&mut owner, 2, "b"),
+        admit(&mut owner, 3, "c"),
+    ];
+    let tail = admit(&mut owner, 4, "tail");
+    let unit =
+        |item: &PendingQueueItem| (item.message_id != BASE + 4).then(|| named(item)).flatten();
+    owner.reserve_unit(attempt("unit-g"), unit).unwrap();
+    drop(owner);
+    let steps = rewrite_and_plan(8, |stored| {
+        stored["items"][2]["created_at_wall_time_ms"] = json!(123)
+    });
     assert!(
-        sources::restore(&changed.to_string(), "unit").is_err(),
-        "the first member alone is not the unit"
+        steps.iter().any(|s| s.starts_with("Adopt"))
+            && !steps.iter().any(|s| s.starts_with("Hold")),
+        "{steps:?}"
     );
+    let restored = self::owner(8);
+    assert!(restored.snapshot.head_injection.is_none());
+    let ids: Vec<u64> = restored
+        .snapshot
+        .items
+        .iter()
+        .map(|i| i.message_id)
+        .collect();
+    assert_eq!(ids, [BASE + 1, BASE + 2, BASE + 3, BASE + 4]);
+    assert_eq!(restored.snapshot.admission_receipts.len(), 4);
+    for (n, original) in (1..).zip(members.iter().chain([&tail])) {
+        assert_eq!(
+            turn(&restored, n, original),
+            TurnBind::NotArmed,
+            "ticket {n}"
+        );
+    }
+}
+
+/// Members the queue lost come back from the reserved unit, so no original is dropped.
+#[test]
+fn a_reserved_unit_missing_from_the_queue_comes_back_whole() {
+    let _root = TestRuntimeRootGuard::new();
+    let mut owner = owner(9);
+    let members = [
+        admit(&mut owner, 1, "a"),
+        admit(&mut owner, 2, "b"),
+        admit(&mut owner, 3, "c"),
+    ];
+    owner.reserve_unit(attempt("unit-h"), named).unwrap();
+    drop(owner);
+    let steps = rewrite_and_plan(9, |stored| {
+        stored["items"].as_array_mut().unwrap().truncate(1)
+    });
+    assert!(!steps.iter().any(|s| s.starts_with("Hold")), "{steps:?}");
+    let mut restored = self::owner(9);
+    let ids: Vec<u64> = restored
+        .snapshot
+        .items
+        .iter()
+        .map(|i| i.message_id)
+        .collect();
+    assert_eq!(ids, [BASE + 1, BASE + 2, BASE + 3]);
+    for (n, original) in (1..).zip(&members) {
+        assert_eq!(
+            turn(&restored, n, original),
+            TurnBind::NotArmed,
+            "ticket {n}"
+        );
+        assert_eq!(
+            Custody::with_ticket(original, ticket(n)).advance(&mut restored),
+            Ok(source_admission::Admitted::Duplicate),
+            "ticket {n} is not admitted again"
+        );
+    }
+    assert_eq!(restored.snapshot.items.len(), 3);
+}
+
+/// An armed unit that no longer matches the queue may have been sent: it stays held, never rerun.
+#[test]
+fn an_armed_unit_that_does_not_match_stays_held() {
+    let _root = TestRuntimeRootGuard::new();
+    let mut owner = owner(10);
+    admit(&mut owner, 1, "a");
+    admit(&mut owner, 2, "b");
+    let key = owner.reserve_unit(attempt("unit-i"), named).unwrap();
+    drop(owner.arm(&key, 1).unwrap());
+    drop(owner);
+    let steps = rewrite_and_plan(10, |stored| {
+        stored["items"][1]["created_at_wall_time_ms"] = json!(123)
+    });
+    assert!(steps.iter().any(|s| s.starts_with("Hold")), "{steps:?}");
+    assert!(Owner::adopt(path(10), "unit".into()).is_err());
 }
 
 #[test]

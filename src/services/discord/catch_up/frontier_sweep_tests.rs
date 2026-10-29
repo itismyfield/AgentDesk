@@ -1203,6 +1203,10 @@ mod duplicate_race_tests;
 #[path = "merged_alias_tests.rs"]
 mod merged_alias_tests;
 
+#[cfg(unix)]
+#[path = "owner_pending_recovery_tests.rs"]
+mod owner_pending_recovery_tests;
+
 #[path = "phase2_age_tests.rs"]
 mod phase2_age_tests;
 
