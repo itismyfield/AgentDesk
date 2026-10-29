@@ -219,6 +219,19 @@ pub(crate) fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
     });
 }
 
+/// Execution `nonce` left `logical` for tmux: its listing ends, so the pane's hooks and watcher
+/// read as tmux again. A newer execution listed there stays.
+pub(crate) fn release_herdr_execution(logical: &str, nonce: &str) {
+    change_hold(logical, |executions| {
+        if executions
+            .get(logical)
+            .is_some_and(|(listed, _)| listed == nonce)
+        {
+            executions.remove(logical);
+        }
+    });
+}
+
 /// Whether a claim on `logical` may be withheld: a Herdr host, or a pane a launch listed.
 /// Any other claim is admitted, whatever other panes are listed. Read under `herdr_listing_order`.
 pub(crate) fn herdr_claim_may_be_withheld(logical: &str, herdr_host: bool) -> bool {

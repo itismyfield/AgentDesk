@@ -278,3 +278,48 @@ fn a_tmux_without_a_server_socket_has_ended_and_an_unread_one_stays_unobserved()
         assert_eq!(tmux.take_calls(), Vec::<String>::new(), "{state}");
     }
 }
+
+// A returned resume takes only its own resumed start, even one buffered before the wait; another
+// start of the same id never counts, and a cancel ends the wait as an error.
+#[test]
+fn a_returned_resume_waits_only_for_its_own_resumed_start() {
+    use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
+    use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+    let _root = TestRuntimeRootGuard::new();
+    let id = "22222222-2222-4222-8222-222222222222";
+    let prepare = || {
+        PreparedIncarnation::prepare_at("claude", "returned-start", Some(1), Some(id), true, None)
+            .unwrap()
+            .context
+    };
+    let (own, other) = (prepare(), prepare());
+    let event =
+        |source: &str,
+         context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext| {
+            HookEvent {
+                provider: "claude".into(),
+                session_id: id.into(),
+                kind: HookEventKind::SessionStart,
+                payload: serde_json::json!({"session_id": id, "source": source}),
+                original_context: Some(context.clone()),
+                ..HookEvent::default()
+            }
+        };
+    let (tx, mut starts) = tokio::sync::broadcast::channel(8);
+    for sent in [
+        event("startup", &own),
+        event("resume", &other),
+        event("resume", &own),
+    ] {
+        tx.send(sent).unwrap();
+    }
+    let nonce = &own.execution_nonce;
+    assert_eq!(await_resumed_start(&mut starts, id, nonce, None), Ok(()));
+    tx.send(event("startup", &own)).unwrap();
+    let cancel = crate::services::provider::CancelToken::new();
+    cancel
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = await_resumed_start(&mut starts, id, nonce, Some(&cancel)).unwrap_err();
+    assert!(error.contains("no resumed start"), "{error}");
+}

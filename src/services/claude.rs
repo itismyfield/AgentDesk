@@ -57,6 +57,8 @@ mod backend_routing;
 #[cfg(test)]
 mod c1_teardown_tests;
 #[cfg(unix)]
+pub(crate) mod herdr_return;
+#[cfg(unix)]
 pub(crate) mod herdr_turn;
 pub(crate) mod host_gate;
 #[cfg(unix)]
@@ -1824,13 +1826,17 @@ fn execute_streaming_local_tui_tmux(
                 resume = updated.resume;
             }
         }
-    } else if session_exists {
+    } else if session_exists && !host_gate::returned_dead_pane(tmux_session_name, teardown)? {
         cleanup_stale_claude_tui_session(tmux_session_name, teardown)?;
     }
 
     if let Some(ref token) = cancel_token {
         token.bind_claude_tmux_session(tmux_session_name);
     }
+    // A returned resume waits for its own resumed start; subscribed before the launch.
+    let returned = matches!(teardown, Some(TeardownClearance::Returned));
+    let mut starts =
+        (returned && resume).then(crate::services::claude_tui::hook_server::subscribe_hook_events);
     let (owner_path, prepared) = prepare_and_create_claude_tui_session(
         tmux_session_name,
         working_dir,
@@ -1842,6 +1848,7 @@ fn execute_streaming_local_tui_tmux(
         resume,
         &auth_env_lines,
         report_channel_id,
+        returned && session_exists,
     )?;
     crate::services::tmux_common::write_tmux_session_auth_profile(
         tmux_session_name,
@@ -1861,6 +1868,11 @@ fn execute_streaming_local_tui_tmux(
         tmux_session_name,
         Some(&prepared),
     ))?;
+    if let Some(starts) = starts.as_mut() {
+        let nonce = &prepared.context.execution_nonce;
+        let cancel = cancel_token.as_deref();
+        session_handoff::await_resumed_start(starts, &resolved_session_id, nonce, cancel)?;
+    }
 
     let _ = sender.send(StreamMessage::Init {
         session_id: resolved_session_id.clone(),

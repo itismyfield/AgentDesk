@@ -20,6 +20,7 @@ pub(super) fn prepare_and_create_claude_tui_session(
     resume: bool,
     auth_env_lines: &str,
     channel_id: Option<u64>,
+    respawn: bool,
 ) -> Result<(String, PreparedIncarnation), String> {
     use crate::services::herdr_launch::{HERDR_NOT_ADMITTED, herdr_configured_for_tui_launch};
     // The host is chosen before any launch I/O; a Herdr channel never gets a tmux session.
@@ -54,11 +55,12 @@ pub(super) fn prepare_and_create_claude_tui_session(
                 )
             },
         )?;
-        let result = crate::services::platform::tmux::create_session(
-            tmux_session_name,
-            Some(working_dir),
-            &command,
-        )?;
+        // A returned session's dead pane is started again in place, never replaced.
+        let start = match respawn {
+            true => crate::services::platform::tmux::respawn_dead_pane,
+            false => crate::services::platform::tmux::create_session,
+        };
+        let result = start(tmux_session_name, Some(working_dir), &command)?;
         Ok((result, prepared))
     })();
     let (tmux_result, incarnation) = match launch_result {
@@ -80,6 +82,21 @@ pub(super) fn prepare_and_create_claude_tui_session(
         return Err(format!("tmux error: {}", stderr));
     }
     Ok((owner_path, incarnation))
+}
+
+/// A session returning from Herdr launches on tmux next: its marker names tmux first, read back.
+#[cfg(unix)]
+pub(crate) fn mark_returned_to_tmux(name: &str) -> Result<(), String> {
+    use crate::services::tmux_common::host_marker::{
+        HostKindMarker, read_host_kind_marker, record_tmux_host_marker,
+    };
+    record_tmux_host_marker(name);
+    match read_host_kind_marker(name) {
+        HostKindMarker::Known(crate::services::session_host::HostKind::Tmux) => Ok(()),
+        other => Err(format!(
+            "herdr return: the host marker of {name} reads {other:?}"
+        )),
+    }
 }
 
 /// Herdr pane command for one prepared incarnation: the same launch script as tmux, with
@@ -194,7 +211,22 @@ mod tests {
         let cwd = std::path::Path::new(dir);
         let id = "11111111-1111-4111-8111-111111111111";
         crate::services::tui_prompt_dedupe::binding_context::tests::launch_failures(
-            |t| launch(t, dir, cwd, id, None, None, "".into(), false, "", None).map(|_| ()),
+            |t| {
+                launch(
+                    t,
+                    dir,
+                    cwd,
+                    id,
+                    None,
+                    None,
+                    "".into(),
+                    false,
+                    "",
+                    None,
+                    false,
+                )
+                .map(|_| ())
+            },
             crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
         );
     }
@@ -250,6 +282,7 @@ mod host_marker_tests {
             false,
             "",
             Some(42),
+            false,
         )
         .unwrap();
         assert!(std::fs::read_to_string(&calls).unwrap().contains(tmux));
@@ -273,6 +306,7 @@ mod host_marker_tests {
             false,
             "",
             Some(43),
+            false,
         )
         .expect("a marker write failure must not block the launch");
         assert!(std::fs::read_to_string(&calls).unwrap().contains(blocked));
@@ -330,6 +364,7 @@ mod herdr_off_tests {
             false,
             "",
             Some(44),
+            false,
         );
 
         launched.expect("the tmux launch runs as before");
@@ -401,6 +436,7 @@ mod herdr_off_tests {
                 false,
                 "",
                 Some(channel),
+                false,
             )
         };
         let created = |tmux: &str| {
@@ -567,6 +603,7 @@ mod herdr_env_tests {
             false,
             &auth,
             None,
+            false,
         )
         .unwrap();
         let script = crate::services::tmux_common::session_temp_path(

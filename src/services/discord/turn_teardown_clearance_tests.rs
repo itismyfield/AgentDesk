@@ -18,6 +18,7 @@ async fn verdict(pool: Option<&PgPool>, key: Option<&str>, tmux: Option<&str>) -
         Some(TeardownClearance::Cleared(session)) => format!("cleared {}", session.name()),
         Some(TeardownClearance::Refused(_)) => "refused".to_string(),
         Some(TeardownClearance::Unkeyed) => "unkeyed".to_string(),
+        Some(TeardownClearance::Returned) => "returned".to_string(),
     }
 }
 

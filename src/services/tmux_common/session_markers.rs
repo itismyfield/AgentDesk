@@ -53,12 +53,25 @@ pub(crate) fn claude_session_auth_matches(
     session_id: &str,
     profile_id: &str,
 ) -> Result<bool, String> {
-    let Some(path) = resolve_session_temp_path(session_name, CLAUDE_SESSION_AUTH_TEMP_EXT) else {
+    if resolve_session_temp_path(session_name, CLAUDE_SESSION_AUTH_TEMP_EXT).is_none() {
         return Ok(tmux_session_auth_profile_matches(session_name, profile_id));
+    }
+    Ok(claude_session_auth(session_name, session_id)?.as_deref() == Some(profile_id.trim()))
+}
+
+/// The account `session_id` last launched under, by its own record; `None` when the last launch
+/// recorded is of another session or none recorded one.
+pub(crate) fn claude_session_auth(
+    session_name: &str,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    let Some(path) = resolve_session_temp_path(session_name, CLAUDE_SESSION_AUTH_TEMP_EXT) else {
+        return Ok(None);
     };
     let body = std::fs::read_to_string(&path)
         .map_err(|error| format!("read claude session auth marker: {error}"))?;
-    Ok(body.split_once('\n') == Some((session_id, profile_id.trim())))
+    let own = body.split_once('\n').filter(|(id, _)| *id == session_id);
+    Ok(own.map(|(_, profile)| profile.to_owned()))
 }
 
 pub(crate) fn write_tmux_runtime_kind_marker(

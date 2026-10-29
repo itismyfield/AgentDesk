@@ -1,7 +1,7 @@
 pub(crate) mod host_marker;
 mod session_markers;
 pub(crate) use session_markers::{
-    claude_session_auth_matches, resolve_tmux_runtime_kind_marker,
+    claude_session_auth, claude_session_auth_matches, resolve_tmux_runtime_kind_marker,
     tmux_session_auth_profile_matches, write_claude_session_auth, write_tmux_runtime_kind_marker,
     write_tmux_session_auth_profile,
 };

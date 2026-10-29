@@ -83,6 +83,7 @@ impl Lab {
             false,
             "",
             channel,
+            false,
         )
         .map(|_| ())
     }

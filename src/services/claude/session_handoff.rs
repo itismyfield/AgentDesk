@@ -12,6 +12,8 @@ use crate::services::tui_o::shadow::SourceId;
 /// How long an `/exit` sent to an empty composer may take to end its provider.
 pub(crate) const EXIT_WAIT: Duration = Duration::from_secs(20);
 const EXIT_POLL: Duration = Duration::from_millis(250);
+/// How long a resumed launch may take to report its own start.
+const START_WAIT: Duration = Duration::from_secs(30);
 
 /// Whether the earlier execution's provider still runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +160,32 @@ pub(crate) fn o_reads(channel: u64, source: &SourceId) -> Result<bool, String> {
         (store.peek_cursors(channel)).map_err(|error| format!("O cursors of {path}: {error:?}"))?;
     crate::services::tui_o::writer::claude_cursor_continues(&cursors, source)
         .map_err(|error| format!("O cursor of {path}: {error}"))
+}
+
+/// Waits for execution `nonce`'s own resumed start of `session_id`, before any prompt; another
+/// start, a cancel or [`START_WAIT`] passing ends the wait as an error.
+pub(crate) fn await_resumed_start(
+    starts: &mut tokio::sync::broadcast::Receiver<
+        crate::services::claude_tui::hook_server::HookEvent,
+    >,
+    session_id: &str,
+    nonce: &str,
+    cancel: Option<&crate::services::provider::CancelToken>,
+) -> Result<(), String> {
+    use tokio::sync::broadcast::error::TryRecvError;
+    let deadline = Instant::now() + START_WAIT;
+    loop {
+        match starts.try_recv() {
+            Ok(event) if resumed_start(&event, session_id, nonce) => return Ok(()),
+            Ok(_) | Err(TryRecvError::Lagged(_)) => continue,
+            Err(TryRecvError::Closed) => return Err("resumed start: hook events closed".into()),
+            Err(TryRecvError::Empty) => {}
+        }
+        if crate::services::provider::cancel_requested(cancel) || Instant::now() >= deadline {
+            return Err(format!("no resumed start of {session_id} by {nonce}"));
+        }
+        std::thread::sleep(EXIT_POLL);
+    }
 }
 
 /// The SessionStart of execution `nonce` resuming `session_id`, by its own launch context.

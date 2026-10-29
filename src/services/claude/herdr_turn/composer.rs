@@ -91,6 +91,12 @@ pub(crate) fn run(
     )
 }
 
+/// [`run`] for an `/exit`, which also sends nothing while a draft is stashed.
+pub(crate) fn run_exit(target: &HerdrTarget, plan: &[TuiInputAction]) -> InputRun {
+    let capture = || target.capture_ansi(-80);
+    when_ready_to_exit(capture, None, || run_herdr(target, plan, None))
+}
+
 /// Runs `send` once an ANSI `capture` shows an empty ready Claude composer; a person's draft, a
 /// dialog or a busy screen sends nothing, on any host.
 pub(crate) fn when_ready(
