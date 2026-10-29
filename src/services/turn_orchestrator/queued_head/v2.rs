@@ -130,6 +130,7 @@ impl Owner {
     }
 }
 
-#[cfg(test)]
+// Owner fixtures require a confirmed parent directory fsync for adoption and commits.
+#[cfg(all(test, unix))]
 #[path = "v2/owner_tests.rs"]
 mod tests;

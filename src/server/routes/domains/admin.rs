@@ -2,12 +2,12 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     middleware::map_response,
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
 };
 
 use super::super::{
     ApiRouter, AppState, campaigns, departments, escalation, home_metrics, protected_api_domain,
-    settings, stats, voice_config,
+    server_campaigns, settings, stats, voice_config,
 };
 
 // Category: admin
@@ -25,10 +25,33 @@ fn campaign_router() -> ApiRouter {
         .layer(map_response(campaigns::body_limit_envelope))
 }
 
+fn server_campaign_router() -> ApiRouter {
+    Router::new()
+        .route(
+            "/server-campaigns",
+            get(server_campaigns::list).post(server_campaigns::create),
+        )
+        .route("/server-campaigns/{id}", get(server_campaigns::detail))
+        .route(
+            "/server-campaigns/{id}/definition",
+            put(server_campaigns::edit),
+        )
+        .route(
+            "/server-campaigns/{id}/commands",
+            post(server_campaigns::command),
+        )
+        .route(
+            "/server-campaigns/{id}/events",
+            get(server_campaigns::events),
+        )
+        .layer(DefaultBodyLimit::max(server_campaigns::BODY_LIMIT_BYTES))
+}
+
 pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
         Router::new()
             .merge(campaign_router())
+            .merge(server_campaign_router())
             .route(
                 "/departments",
                 get(departments::list_departments).post(departments::create_department),

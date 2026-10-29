@@ -17,6 +17,8 @@ export {
   saveSettings,
   getVoiceConfig,
   saveVoiceConfig,
+  getSettingsConfig,
+  patchSettingsConfig,
   getStats,
   getKanbanCards,
   createKanbanCard,

@@ -726,5 +726,6 @@ impl super::super::super::ChannelMailboxHandle {
     }
 }
 
-#[cfg(test)]
+// Admission fixtures require an owner backed by confirmed parent directory fsync.
+#[cfg(all(test, unix))]
 mod tests;

@@ -74,7 +74,10 @@ async fn s3act_b1_scoped_readers_preserve_foreign_files_and_mailboxes() {
         .join(token)
         .join(format!(".{}.json.stale.tmp", other.get()));
     fs::write(&tmp, "foreign tmp").unwrap();
-    fs::File::open(&tmp)
+    // Windows timestamp updates require a writable file handle.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp)
         .unwrap()
         .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
         .unwrap();
