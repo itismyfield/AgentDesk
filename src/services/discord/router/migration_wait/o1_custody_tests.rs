@@ -20,6 +20,10 @@ async fn same_body_sources_keep_durable_fifo(merge: bool) {
     let mut b = submission(8_917_081, IntakeOrigin::LiveMessage);
     b.request.user_text = a.request.user_text.clone();
     b.request.merge_consecutive = merge;
+    if merge {
+        a.request.has_reply_boundary = false;
+        b.request.has_reply_boundary = false;
+    }
     let wait = intent(&f, &a.request).await;
     let at = std::time::Instant::now();
     let mut first = Capability::new(a.request.clone(), wait.clone());

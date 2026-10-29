@@ -1,7 +1,7 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::intake_outbox::migration_wait::tests::{pending_row, root, setup};
-use crate::db::intake_outbox::migration_wait::{fenced_waiting, WaitIntent};
+use crate::db::intake_outbox::migration_wait::{WaitIntent, fenced_waiting};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -247,6 +247,10 @@ async fn migration_publication_owns_db_fence_after_caller_cancel_and_serializes_
         .fetch_one(&mut *connection)
         .await
         .unwrap();
+    sqlx::query("SET lock_timeout='200ms'")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
     let registry = ChannelMailboxRegistry::default();
     let handle = registry.handle(channel);
     let fence = fenced_waiting(&pool, &intent).await.unwrap();
@@ -305,6 +309,21 @@ async fn migration_publication_owns_db_fence_after_caller_cancel_and_serializes_
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
+    let written = match tokio::time::timeout(Duration::from_secs(3), &mut writer).await {
+        Ok(done) => Some(done),
+        Err(_) => {
+            writer.abort();
+            let _ = writer.await;
+            None
+        }
+    };
+    let held_code = written
+        .as_ref()
+        .and_then(|joined| joined.as_ref().ok())
+        .and_then(|result| result.as_ref().err())
+        .and_then(sqlx::Error::as_database_error)
+        .and_then(|error| error.code())
+        .map(|code| code.into_owned());
     let left = leave.send(());
     let enqueued = match early_enqueue {
         Ok(enqueued) => Some(enqueued),
@@ -316,35 +335,41 @@ async fn migration_publication_owns_db_fence_after_caller_cancel_and_serializes_
         }
         Err(oneshot::error::TryRecvError::Closed) => None,
     };
-    let written = match tokio::time::timeout(Duration::from_secs(3), &mut writer).await {
-        Ok(done) => Some(done),
-        Err(_) => {
-            writer.abort();
-            let _ = writer.await;
-            None
-        }
-    };
+    let after_release = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut connection = peer.acquire().await?;
+        sqlx::query("SET lock_timeout='2s'")
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query("UPDATE intake_outbox SET last_error='actor peer after release' WHERE id=$1")
+            .bind(row)
+            .execute(&mut *connection)
+            .await
+    })
+    .await;
     peer.close().await;
     pool.close().await;
     db.drop().await;
     left.expect("callback release must reach the original actor");
-    assert!(
-        observation_error.is_none(),
-        "peer lock observation failed: {observation_error:?}"
+    tracing::info!(
+        blocked,
+        ?observation_error,
+        ?held_code,
+        "observed the peer's physical lock retention"
     );
     assert!(
         enqueue_waited,
         "peer enqueue must remain behind the synchronous publication callback"
     );
-    assert!(
-        blocked,
-        "actor must own the real SHARE fence even after its caller future is canceled"
-    );
     assert_eq!(
-        written
-            .expect("fence drop must release peer DML")
-            .expect("join the real peer writer")
-            .expect("the real peer update must succeed")
+        held_code.as_deref(),
+        Some("55P03"),
+        "a paused publication must retain the real SHARE lock through the peer lock_timeout"
+    );
+
+    assert_eq!(
+        after_release
+            .expect("fence drop must release the new peer DML")
+            .expect("the new real peer update must succeed")
             .rows_affected(),
         1
     );
@@ -490,10 +515,12 @@ async fn migration_publication_dangling_queue_snapshot_is_not_empty_pg() {
         .unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink("absent-queue-target", &path).unwrap();
-    assert!(std::fs::symlink_metadata(&path)
-        .unwrap()
-        .file_type()
-        .is_symlink());
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     let count = Arc::new(AtomicUsize::new(0));
     let fence = fenced_waiting(&pool, &intent).await.unwrap();
     let result = handle

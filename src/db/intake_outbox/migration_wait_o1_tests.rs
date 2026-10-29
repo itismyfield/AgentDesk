@@ -105,7 +105,7 @@ async fn fenced_composite_reads_foreign_and_queued_facts_on_its_single_connectio
 }
 
 async fn register(pool: &PgPool, row: &IntakeOutboxRow, user: u64, sources: Vec<u64>) -> i64 {
-    use crate::db::replay_disposition::write::{register_or_reuse, CanonicalInput};
+    use crate::db::replay_disposition::write::{CanonicalInput, register_or_reuse};
     let mut input = CanonicalInput::discord(
         "claude",
         row.channel_id.parse().unwrap(),

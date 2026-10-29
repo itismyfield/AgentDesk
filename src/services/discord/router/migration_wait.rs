@@ -6,8 +6,8 @@ use crate::services::turn_orchestrator::{Intervention, QueuePersistenceContext};
 use poise::serenity_prelude as serenity;
 use sha2::{Digest, Sha256};
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 #[derive(Clone, Copy, Debug)]

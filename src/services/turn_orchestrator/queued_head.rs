@@ -5,8 +5,8 @@ use super::dispatch_reservation::queue_unread;
 use std::path::Path;
 
 use super::pending_queue_persistence::{
-    pending_queue_file_path, pending_queue_item_from_intervention, PendingQueueItem,
-    PendingQueueSourceTextSegment,
+    PendingQueueItem, PendingQueueSourceTextSegment, pending_queue_file_path,
+    pending_queue_item_from_intervention,
 };
 use super::*;
 
@@ -427,9 +427,9 @@ pub(crate) mod mend;
 pub(crate) mod prefix;
 
 pub(super) use claim::step;
-#[cfg(test)]
-pub(crate) use claim::{downgrade_channel_snapshot, HeadTicket};
 pub(crate) use claim::{HeadMsg, HeadOutcome, HeadSettle, QueuedHeadClaim};
+#[cfg(test)]
+pub(crate) use claim::{HeadTicket, downgrade_channel_snapshot};
 
 /// The claim and settlement driven by the busy-TUI executor.
 mod claim {
