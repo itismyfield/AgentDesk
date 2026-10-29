@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::adk_resources::{BuildTokenOutcome, classify_build_token_exit};
 use super::candidate_seal::resolved_subject;
 use super::model::{Action, ActionState};
 use super::profile::{TestOutcome, VerificationPlan};
@@ -128,22 +127,16 @@ pub fn assess_verification(
         Some(VerificationCollection::Interrupted { phase_id, .. }) => {
             StageAssessment::of(Verdict::Wait, GateReason::Interrupted(phase_id.clone()))
         }
-        Some(VerificationCollection::PreparationFailed { phase_id, record }) => {
-            // Only a plain nonzero exit outside the build-token codes is a confirmed code failure.
-            let code_failure = record.signal.is_none()
-                && record.exit_code.is_some_and(|code| code != 0)
-                && classify_build_token_exit(record.exit_code) == Some(BuildTokenOutcome::Held);
-            let reason = GateReason::PreparationFailed(phase_id.clone());
-            if code_failure {
-                StageAssessment::of(Verdict::QualityFail, reason)
-            } else {
-                StageAssessment::new(
-                    Verdict::Reject,
-                    vec![reason, GateReason::Incomplete(phase_id.clone())],
-                    Vec::new(),
-                )
-            }
-        }
+        // An exit code alone never confirms a candidate code error (ENOSPC in the plan helper also
+        // exits 1), and no server-confirmed cause is recorded yet, so this is insufficient evidence.
+        Some(VerificationCollection::PreparationFailed { phase_id, .. }) => StageAssessment::new(
+            Verdict::Reject,
+            vec![
+                GateReason::PreparationFailed(phase_id.clone()),
+                GateReason::Incomplete(phase_id.clone()),
+            ],
+            Vec::new(),
+        ),
         Some(VerificationCollection::Executed { evidence, audit }) => {
             let (Some(subject), Some(actual_plan)) = (resolved_subject(run), run.plan.bound())
             else {
@@ -155,8 +148,18 @@ pub fn assess_verification(
             if evidence.planned != actual_plan.manifest {
                 return StageAssessment::of(Verdict::Reject, GateReason::PlanMismatch(id));
             }
+            let mut scoped = plan.clone();
+            scoped.checks.retain(|c| c.id == run.origin.check_id);
+            if scoped.checks.is_empty()
+                || evidence
+                    .planned
+                    .iter()
+                    .any(|t| t.check_id != run.origin.check_id)
+            {
+                return StageAssessment::of(Verdict::Reject, GateReason::PlanMismatch(id));
+            }
             if let Err(error) =
-                evidence.validate_execution_subject(plan, &run.origin.owner_binding, &subject)
+                evidence.validate_execution_subject(&scoped, &run.origin.owner_binding, &subject)
             {
                 return StageAssessment::of(
                     Verdict::Reject,

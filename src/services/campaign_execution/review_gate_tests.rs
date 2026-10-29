@@ -3,7 +3,7 @@ use crate::services::campaign_execution::{
     control::tests as domain,
     evidence_gate::tests::{OUTPUT, actions, assess, collected, registered, seal},
     profile::TestOutcome,
-    verification_run::{Cancellation, NotSentReason, PhaseInitiation},
+    verification_run::{Cancellation, NotSentReason, PhaseInitiation, VerificationCollection},
 };
 
 fn actor(attempt: &str, session: &str, native: &str) -> ActorIdentity {
@@ -316,4 +316,106 @@ fn resume_reuses_collected_replaces_cancelled_and_blocks_unreconciled_runs() {
     let mut previous = work.clone();
     previous.attempt_id = "attempt-cycle-0".into();
     assert!(resume_disposition(&registered(&previous, 0), &sealed, run).is_err());
+}
+
+#[test]
+fn only_the_adopted_chain_may_resolve_a_finding_an_earlier_review_opened() {
+    let finding = |open, resolution: Option<&str>| Finding {
+        id: "F1".into(),
+        open,
+        resolution: resolution.map(Into::into),
+    };
+    let mut first = record("full", ReviewExtent::Full, "base", "mid");
+    first.review.verdict = ReviewVerdict::Issues;
+    first.review.findings.push(finding(true, None));
+    let delta = record("delta", ReviewExtent::Delta, "mid", OUTPUT);
+    // An independent record outside the chain claims F1 resolved; it has no authority over this seal.
+    let mut unrelated = record("unrelated", ReviewExtent::Delta, "elsewhere", "other");
+    unrelated
+        .review
+        .findings
+        .push(finding(false, Some("fixed somewhere else")));
+    let outside = gate(&[first.clone(), delta.clone(), unrelated]);
+    assert_eq!(outside.verdict, Verdict::QualityFail, "{outside:?}");
+    assert_eq!(outside.reasons, vec![GateReason::OpenFinding("F1".into())]);
+    let mut fix = delta;
+    fix.review
+        .findings
+        .push(finding(false, Some("mid..out removes the race")));
+    assert_eq!(gate(&[first, fix]).verdict, Verdict::Pass);
+}
+
+#[test]
+fn prerequisite_pins_the_sealed_subject_not_just_the_seal_id() {
+    let work = domain::binding(&domain::running());
+    let sealed = seal(&work);
+    let review = review_binding();
+    let unbound = registered(&work, 0);
+    let prerequisite = StagePrerequisite::bind(&unbound, &sealed, &review, 2, 1).unwrap();
+    // Same owner and seal ID but a different output filled the slot later.
+    let mut swapped = unbound.clone();
+    let mut other = sealed.bound_subject();
+    other.output_sha = "output-h2".into();
+    swapped.subject.bind(other).unwrap();
+    assert_eq!(
+        prerequisite.consumes(&review, &swapped),
+        Err(PrerequisiteError::OriginMismatch("subject".into()))
+    );
+    assert_eq!(
+        StagePrerequisite::bind(&swapped, &sealed, &review, 2, 1),
+        Err(PrerequisiteError::OriginMismatch("subject".into()))
+    );
+    let mut filled = unbound.clone();
+    filled.subject.bind(sealed.bound_subject()).unwrap();
+    prerequisite.consumes(&review, &filled).unwrap();
+    let mut repinned = sealed.clone();
+    repinned.pin_hash = "other-pin".into();
+    assert_eq!(
+        StagePrerequisite::bind(&unbound, &repinned, &review, 2, 1),
+        Err(PrerequisiteError::OriginMismatch("pin".into()))
+    );
+}
+
+#[test]
+fn resume_replaces_collected_interruptions_and_unclassified_preparation_failures() {
+    let work = domain::binding(&domain::running());
+    let sealed = seal(&work);
+    let mut state = domain::running();
+    let run = state.run.as_mut().unwrap();
+    let mut interrupted = registered(&work, 0);
+    interrupted.subject.bind(sealed.bound_subject()).unwrap();
+    interrupted.collection = Some(VerificationCollection::Interrupted {
+        phase_id: "test".into(),
+        evidence: "Immediate; process tree gone".into(),
+    });
+    run.actions = actions(&interrupted, ActionState::Reconciled);
+    assert_eq!(
+        resume_disposition(&interrupted, &sealed, run),
+        Ok(ResumeDisposition::Replace)
+    );
+    run.actions = actions(&interrupted, ActionState::Started);
+    assert_eq!(
+        resume_disposition(&interrupted, &sealed, run),
+        Ok(ResumeDisposition::Blocked)
+    );
+    let mut prepared = interrupted.clone();
+    prepared.collection = Some(VerificationCollection::PreparationFailed {
+        phase_id: "plan".into(),
+        record: crate::services::campaign_execution::verification_run::tests::result(
+            "plan",
+            1,
+            crate::services::campaign_execution::verification_run::PhaseOutput::None,
+        )
+        .record,
+    });
+    run.actions = actions(&prepared, ActionState::Reconciled);
+    assert_eq!(
+        resume_disposition(&prepared, &sealed, run),
+        Ok(ResumeDisposition::Replace)
+    );
+    let failed = collected(&work, &sealed, &[("t1", TestOutcome::Failed)], Some(1));
+    assert_eq!(
+        resume_disposition(&failed, &sealed, run),
+        Ok(ResumeDisposition::Reuse)
+    );
 }

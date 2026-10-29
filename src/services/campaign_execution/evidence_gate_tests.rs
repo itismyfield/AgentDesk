@@ -324,7 +324,7 @@ fn waits_and_unclassified_preparation_failures_are_not_quality_failures() {
         });
         assess(&failed).verdict
     };
-    assert_eq!(preparation(Some(101), None), Verdict::QualityFail);
+    assert_eq!(preparation(Some(101), None), Verdict::Reject);
     assert_eq!(preparation(Some(75), None), Verdict::Reject);
     assert_eq!(preparation(Some(69), None), Verdict::Reject);
     assert_eq!(preparation(None, Some(9)), Verdict::Reject);
@@ -358,22 +358,26 @@ fn stage_gate_owes_every_required_check_and_strictest_part_decides() {
     assert_eq!(evaluate_stage(&required, &all).adopted, vec!["v1", "v1"]);
 }
 
-// Drives A1's own V lifecycle for a sealed H1 of A(H0): fixed phases, plan binding and collect().
-fn a1_collected(
+// Drives A1's own V lifecycle for a sealed H1 of A(H0): every fixed phase in order, plan binding
+// and collect(). A nonzero preparation exit stops the run there, as the runner would.
+fn a1_drive(
+    spec: &VerificationSpec,
+    check_id: &str,
     outcomes: &[(&str, TestOutcome)],
-    test_exit: i32,
-    audit_exit: i32,
+    exit: impl Fn(&str) -> i32,
     checkout_sha: &str,
 ) -> (VerificationRun, BTreeMap<String, Action>) {
     use crate::services::campaign_execution::verification_run::tests as a1;
-    let binding = a1::binding();
+    let mut registration = a1::registration();
+    registration.spec = spec.clone();
+    registration.check_id = check_id.into();
+    let binding = registration.owner_binding.clone();
     let claim = claim(&binding, "h1");
     let seal = CandidateSeal::seal(&binding, &claim, REPO, &workspace("h1"), "pin", a1::at());
-    let (mut run, mut actions) = a1::registered_with(a1::spec_with_audit());
+    let (mut run, actions) = VerificationRun::register(registration).unwrap();
+    let mut actions: BTreeMap<_, _> = actions.into_iter().map(|a| (a.id.clone(), a)).collect();
     run.subject.bind(seal.unwrap().bound_subject()).unwrap();
-    let digest = |run: &VerificationRun, phase: &str| {
-        digest_of(&run.phase(phase).unwrap().result.as_ref().unwrap().output).unwrap()
-    };
+    let selection = spec.check(check_id).unwrap().selection;
     let tests: Vec<_> = outcomes
         .iter()
         .map(|(name, _)| ListedTest {
@@ -382,57 +386,46 @@ fn a1_collected(
             ignored: false,
         })
         .collect();
-    let steps = [
-        (
-            "archive",
-            0,
-            PhaseOutput::Archive {
+    let phases: Vec<_> = run.phases.iter().map(|p| (p.id.clone(), p.kind)).collect();
+    for (phase, kind) in phases {
+        let output = match kind {
+            PhaseKind::Archive => PhaseOutput::Archive {
                 digest: "archive-digest".into(),
             },
-        ),
-        (
-            "list",
-            0,
-            PhaseOutput::Universe {
+            PhaseKind::List => PhaseOutput::Universe {
                 tests: tests.clone(),
             },
-        ),
-        (
-            "plan",
-            0,
-            PhaseOutput::Plan {
+            PhaseKind::Plan => PhaseOutput::Plan {
                 plan_digest: "plan-digest".into(),
                 plan_artifact_digest: "plan-file-digest".into(),
                 config_digest: "config-digest".into(),
-                selected: tests,
+                scope: plan_scope(selection).into(),
+                selected: tests.clone(),
             },
-        ),
-        (
-            "test",
-            test_exit,
-            PhaseOutput::Tests {
+            PhaseKind::Test => PhaseOutput::Tests {
                 executed: outcomes
                     .iter()
                     .map(|(name, outcome)| ExecutedTest {
                         id: format!("agentdesk {name}"),
-                        check_id: "lib-tests".into(),
+                        check_id: check_id.into(),
                         outcome: outcome.clone(),
                         log_refs: vec![],
                     })
                     .collect(),
             },
-        ),
-        ("audit", audit_exit, PhaseOutput::None),
-    ];
-    for (phase, exit, output) in steps {
-        let requires = run.phase(phase).unwrap().requires.clone();
+            _ => PhaseOutput::None,
+        };
+        let requires = run.phase(&phase).unwrap().requires.clone();
         let mut input = a1::input(&[]);
         input.predecessors = requires
             .iter()
-            .map(|r| (r.clone(), digest(&run, r)))
+            .map(|r| {
+                let output = &run.phase(r).unwrap().result.as_ref().unwrap().output;
+                (r.clone(), digest_of(output).unwrap())
+            })
             .collect();
-        if phase == "test" {
-            run.bind_plan(&a1::spec_with_audit()).unwrap();
+        if kind == PhaseKind::Test {
+            run.bind_plan(spec).unwrap();
             for (name, digest) in [
                 ("plan", "plan-file-digest"),
                 ("archive", "archive-digest"),
@@ -445,9 +438,9 @@ fn a1_collected(
                 });
             }
         }
-        run.bind_phase_input(phase, input).unwrap();
-        let result = a1::result(phase, exit, output);
-        let action_id = run.phase(phase).unwrap().action_id.clone();
+        run.bind_phase_input(&phase, input).unwrap();
+        let result = a1::result(&phase, exit(&phase), output);
+        let action_id = run.phase(&phase).unwrap().action_id.clone();
         let action = actions.get_mut(&action_id).unwrap();
         action.state = ActionState::Started;
         action.initiation_receipt = Some(result.receipt.clone());
@@ -461,10 +454,14 @@ fn a1_collected(
                 nonce: "nonce".into(),
             },
         };
-        run.record_initiation(phase, started).unwrap();
-        run.record_result(phase, &actions[&action_id].clone(), result)
+        run.record_initiation(&phase, started).unwrap();
+        run.record_result(&phase, &actions[&action_id].clone(), result)
             .unwrap();
         actions.get_mut(&action_id).unwrap().state = ActionState::Reconciled;
+        let preparation = !matches!(kind, PhaseKind::Test | PhaseKind::Audit);
+        if preparation && exit(&phase) != 0 {
+            break;
+        }
     }
     let mut environment = a1::environment();
     environment.checkout.observed_sha = checkout_sha.into();
@@ -475,15 +472,37 @@ fn a1_collected(
     (run, actions)
 }
 
+fn a1_collected(
+    outcomes: &[(&str, TestOutcome)],
+    test_exit: i32,
+    audit_exit: i32,
+    checkout_sha: &str,
+) -> (VerificationRun, BTreeMap<String, Action>) {
+    let spec = crate::services::campaign_execution::verification_run::tests::spec_with_audit();
+    let exit = |phase: &str| match phase {
+        "test" => test_exit,
+        "audit" => audit_exit,
+        _ => 0,
+    };
+    a1_drive(&spec, "lib-tests", outcomes, exit, checkout_sha)
+}
+
+// The whole-spec plan E2 would build, as VerificationSpec::plan() produces it for the sealed H1.
+fn spec_plan(spec: &VerificationSpec, run: &VerificationRun) -> VerificationPlan {
+    let binding = &run.origin.owner_binding;
+    let candidate = Candidate {
+        repository: binding.repository,
+        base_sha: binding.base_sha.clone(),
+        head_sha: "h1".into(),
+    };
+    spec.plan(binding.stage, &candidate, Vec::new())
+}
+
 #[test]
 fn a1_collected_sealed_output_is_judged_against_the_seal_not_the_input_binding() {
+    let spec = crate::services::campaign_execution::verification_run::tests::spec_with_audit();
     let judge = |(run, actions): (VerificationRun, BTreeMap<String, Action>)| {
-        let mut plan = plan(&run.origin.owner_binding);
-        plan.candidate.head_sha = "h1".into();
-        plan.checks[0].id = "lib-tests".into();
-        plan.checks[0].acceptance_ids.clear();
-        plan.acceptance.clear();
-        assess_verification(&run, &actions, &plan)
+        assess_verification(&run, &actions, &spec_plan(&spec, &run))
     };
     let passed = [("a", TestOutcome::Passed), ("b", TestOutcome::Passed)];
     let (run, actions) = a1_collected(&passed, 0, 0, "h1");
@@ -501,4 +520,70 @@ fn a1_collected_sealed_output_is_judged_against_the_seal_not_the_input_binding()
     );
     let moved = judge(a1_collected(&passed, 0, 0, "editing-h2"));
     assert_eq!(moved.verdict, Verdict::Reject);
+}
+
+#[test]
+fn each_v_is_judged_on_its_own_check_of_a_multi_check_plan() {
+    let mut spec = crate::services::campaign_execution::verification_run::tests::spec();
+    let mut second = spec.checks[0].clone();
+    spec.checks[0].id = "c1".into();
+    second.id = "c2".into();
+    spec.checks.push(second);
+    let passed = [("a", TestOutcome::Passed)];
+    let clean = |_: &str| 0;
+    let (v1, a1) = a1_drive(&spec, "c1", &passed, clean, "h1");
+    let (v2, a2) = a1_drive(&spec, "c2", &passed, clean, "h1");
+    let plan = spec_plan(&spec, &v1);
+    let first = assess_verification(&v1, &a1, &plan);
+    let second_pass = assess_verification(&v2, &a2, &plan);
+    assert_eq!(first.verdict, Verdict::Pass, "{first:?}");
+    assert_eq!(second_pass.verdict, Verdict::Pass, "{second_pass:?}");
+    let required = vec!["c1".to_string(), "c2".to_string()];
+    let both = BTreeMap::from([
+        ("c1".to_string(), first.clone()),
+        ("c2".to_string(), second_pass),
+    ]);
+    assert_eq!(evaluate_stage(&required, &both).verdict, Verdict::Pass);
+    let only_first = BTreeMap::from([("c1".to_string(), first)]);
+    assert_eq!(
+        evaluate_stage(&required, &only_first).verdict,
+        Verdict::Wait
+    );
+    let (v2_failed, a2_failed) = a1_drive(
+        &spec,
+        "c2",
+        &[("a", TestOutcome::Failed)],
+        |p| {
+            if p == "test" { 100 } else { 0 }
+        },
+        "h1",
+    );
+    assert_eq!(
+        assess_verification(&v2_failed, &a2_failed, &plan).verdict,
+        Verdict::QualityFail
+    );
+    // A manifest that names another check is not this V's evidence.
+    let mut foreign = v1.clone();
+    if let Some(VerificationCollection::Executed { evidence, .. }) = &mut foreign.collection {
+        evidence.planned[0].check_id = "c2".into();
+    }
+    assert_eq!(
+        assess_verification(&foreign, &a1, &plan).verdict,
+        Verdict::Reject
+    );
+}
+
+#[test]
+fn a1_collected_preparation_failure_without_a_confirmed_cause_is_not_a_quality_failure() {
+    let spec = crate::services::campaign_execution::verification_run::tests::spec_with_audit();
+    // The plan helper's own write failure (ENOSPC) exits 1 with no signal; nothing confirms a code error.
+    let plan_write_failure = |phase: &str| if phase == "plan" { 1 } else { 0 };
+    let passed = [("a", TestOutcome::Passed)];
+    let (run, actions) = a1_drive(&spec, "lib-tests", &passed, plan_write_failure, "h1");
+    assert!(matches!(
+        run.collection,
+        Some(VerificationCollection::PreparationFailed { .. })
+    ));
+    let assessment = assess_verification(&run, &actions, &spec_plan(&spec, &run));
+    assert_eq!(assessment.verdict, Verdict::Reject, "{assessment:?}");
 }

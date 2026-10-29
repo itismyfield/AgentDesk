@@ -7,8 +7,8 @@ use super::evidence_gate::{GateReason, StageAssessment, Verdict};
 use super::model::{ActionState, AttemptBinding, HostGate, Role, Run, SessionIdentity, Stage};
 use super::profile::{ReviewExtent, ReviewRange};
 use super::verification_run::{
-    AuthoritySource, Digest, VerificationRun, VerificationStartAuthority, VerificationSubjectRef,
-    digest_of,
+    AuthoritySource, BoundSubject, Digest, VerificationCollection, VerificationRun,
+    VerificationStartAuthority, VerificationSubjectRef, digest_of,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,10 +117,17 @@ pub fn evaluate_review(
         return StageAssessment::new(Verdict::Reject, reasons, Vec::new());
     }
     // Findings keep their latest state across every independent review, so a fresh full review cannot drop one.
-    let findings: BTreeMap<_, _> = independent
-        .iter()
-        .flat_map(|r| r.review.findings.iter().map(|f| (&f.id, f)))
-        .collect();
+    // Any independent review keeps a finding open; only a record in the adopted chain may resolve it.
+    let adopted: BTreeSet<_> = chain.iter().map(|r| &r.evidence_id).collect();
+    let mut findings = BTreeMap::new();
+    for record in &independent {
+        let resolves = adopted.contains(&record.evidence_id);
+        for finding in &record.review.findings {
+            if finding.open || resolves {
+                findings.insert(&finding.id, finding);
+            }
+        }
+    }
     for record in &chain {
         let review = &record.review;
         reasons.extend(
@@ -189,7 +196,7 @@ pub struct ExecutionRef {
     pub check_id: String,
     pub gate: HostGate,
     pub phase_ids: Vec<String>,
-    pub seal_id: Option<String>,
+    pub subject: Option<BoundSubject>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -216,6 +223,9 @@ impl ExecutionRef {
         {
             return Err(PrerequisiteError::OriginMismatch("seal".into()));
         }
+        if seal.is_some_and(|s| s.pin_hash != o.pin_hash) {
+            return Err(PrerequisiteError::OriginMismatch("pin".into()));
+        }
         let reference = Self {
             execution_id: o.execution_id.clone(),
             owner_attempt: o.owner_attempt.clone(),
@@ -228,7 +238,7 @@ impl ExecutionRef {
             check_id: o.check_id.clone(),
             gate: o.gate.clone(),
             phase_ids: o.phase_ids.clone(),
-            seal_id: seal.map(|s| s.seal_id.clone()),
+            subject: seal.map(CandidateSeal::bound_subject),
         };
         reference.matches(run)?;
         Ok(reference)
@@ -259,19 +269,16 @@ impl ExecutionRef {
         if let Some((field, _)) = fields.iter().find(|(_, same)| !same) {
             return Err(PrerequisiteError::OriginMismatch((*field).into()));
         }
-        // An unbound subject may still be filled by the original owner's seal only.
-        let subject_ok = match run.subject.bound().map(|s| &s.reference) {
-            None => true,
-            Some(VerificationSubjectRef::SealedOutput {
-                owner_attempt,
-                seal_id,
-            }) => {
-                owner_attempt == &o.owner_attempt
-                    && self.seal_id.as_ref().is_none_or(|s| s == seal_id)
-            }
-            Some(VerificationSubjectRef::BoundCandidate { attempt_id }) => {
-                attempt_id == &o.owner_attempt && self.seal_id.is_none()
-            }
+        // A pinned seal fixes the whole subject; without one only the original owner may fill it.
+        let subject_ok = match (run.subject.bound(), &self.subject) {
+            (None, _) => true,
+            (Some(bound), Some(expected)) => bound == expected,
+            (Some(bound), None) => match &bound.reference {
+                VerificationSubjectRef::SealedOutput { owner_attempt, .. }
+                | VerificationSubjectRef::BoundCandidate {
+                    attempt_id: owner_attempt,
+                } => owner_attempt == &o.owner_attempt,
+            },
         };
         if !subject_ok {
             return Err(PrerequisiteError::OriginMismatch("subject".into()));
@@ -377,7 +384,8 @@ pub fn resume_disposition(
     run: &Run,
 ) -> Result<ResumeDisposition, PrerequisiteError> {
     ExecutionRef::of(v, Some(seal))?;
-    if v.collection.is_some() && v.cancellation.is_none() {
+    let consumable = matches!(v.collection, Some(VerificationCollection::Executed { .. }));
+    if consumable && v.cancellation.is_none() {
         return Ok(ResumeDisposition::Reuse);
     }
     let unreconciled = v.phases.iter().any(|p| {
@@ -391,7 +399,8 @@ pub fn resume_disposition(
             )
         })
     });
-    Ok(match (unreconciled, v.cancellation.is_some()) {
+    let ended = v.cancellation.is_some() || v.collection.is_some();
+    Ok(match (unreconciled, ended) {
         (true, _) => ResumeDisposition::Blocked,
         (false, true) => ResumeDisposition::Replace,
         (false, false) => ResumeDisposition::Reuse,
