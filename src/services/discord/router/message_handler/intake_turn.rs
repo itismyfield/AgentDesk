@@ -2179,7 +2179,7 @@ pub(super) async fn handle_text_message(
 
         // Fetch context compact percent from ADK settings (provider-specific)
         let ctx_thresholds =
-            super::super::super::adk_session::fetch_context_thresholds(shared.api_port).await;
+            super::super::super::adk_session::fetch_context_thresholds(shared.pg_pool.as_ref()).await;
         let compact_percent = ctx_thresholds.compact_pct_for(&provider);
         // Use model-specific context window (reads Codex models cache), falling
         // back to the provider default if the model isn't found.

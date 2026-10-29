@@ -41,22 +41,30 @@ We keep per-surface storage, but every settings surface must declare:
 | Policy/config keys | Dashboard policy controls and automation helpers | hardcoded defaults -> YAML sections (`review:`, `runtime:`, `kanban:`) -> individual `kv_meta` rows | YAML-backed keys are re-seeded on restart. Hardcoded-only keys keep their DB override unless the reset flag is on. Read-only entries are surfaced as config metadata only. | `PATCH /api/settings/config` writes editable keys only. `GET` returns effective value plus baseline metadata. |
 | Onboarding / secrets | Onboarding wizard | Dedicated onboarding keys and flows, not general settings | Persist until onboarding updates them. | Managed only through `/api/onboarding/*` and onboarding-specific helpers. |
 
-### Runtime-config keys resolved in Rust
+### Keys resolved through `settings::resolve`
 
 <!-- BEGIN GENERATED: runtime setting precedence -->
 <!-- Generated from the key table in src/services/settings/resolve; regenerate: ADK_WRITE_SETTINGS_PRECEDENCE_DOC=1 cargo test --lib services::settings::resolve:: -->
 
-Rust readers resolve these `runtime-config` keys with `settings::resolve`: the persisted value when it outranks YAML, else the node's YAML snapshot, else the default.
+Rust readers and policy `agentdesk.config.get` resolve these keys with `settings::resolve`: the persisted value when it outranks YAML, else the node's YAML snapshot, else the default. An unreadable kv layer falls through to YAML and the default.
 
-| `runtime-config` field | YAML field | Default | Persisted value outranks YAML when |
+| Persisted value | YAML field | Default | Persisted value outranks YAML when |
 |---|---|---|---|
-| `dispatchRateLimitGateEnabled` | `runtime.dispatch_rate_limit_gate_enabled` | `true` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
-| `dispatchRateLimitGateDangerPct` | `runtime.dispatch_rate_limit_gate_danger_pct` | `100` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
-| `rateLimitStaleSec` | `runtime.rate_limit_stale_sec` | `600` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
-| `maxEntryRetries` | `runtime.max_entry_retries` | `3` | it has the expected JSON type |
+| `runtime-config` field `dispatchRateLimitGateEnabled` | `runtime.dispatch_rate_limit_gate_enabled` | `true` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
+| `runtime-config` field `dispatchRateLimitGateDangerPct` | `runtime.dispatch_rate_limit_gate_danger_pct` | `100` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
+| `runtime-config` field `rateLimitStaleSec` | `runtime.rate_limit_stale_sec` | `600` | it is listed in `__runtimeConfigExplicitKeys` or differs from the default |
+| `runtime-config` field `maxEntryRetries` | `runtime.max_entry_retries` | `3` | it has the expected JSON type |
+| `kv_meta` row `requested_timeout_min` | `runtime.requested_timeout_min` | `45` | it parses as a non-negative integer; every layer is raised to at least 1 |
+| `kv_meta` row `in_progress_stale_min` | `runtime.in_progress_stale_min` | `120` | it parses as a non-negative integer; every layer is raised to at least 1 |
+| `kv_meta` row `context_compact_percent` | `runtime.context_compact_percent` | `60` | it parses as a non-negative integer |
+| `kv_meta` row `context_compact_percent_codex` | `runtime.context_compact_percent_codex` | `100` | it parses as a non-negative integer |
+| `kv_meta` row `context_compact_percent_claude` | `runtime.context_compact_percent_claude` | the `context_compact_percent` value | it parses as a non-negative integer |
+| `kv_meta` row `context_compact_lower_bound_tokens` | `runtime.context_compact_lower_bound_tokens` | `300000` | it parses as a non-negative integer |
 <!-- END GENERATED: runtime setting precedence -->
 
-Policy `agentdesk.config.get` reads only the persisted layer: a legacy scalar `kv_meta` row, else the raw `runtime-config` field, else `null`. It has no YAML or default layer, so each policy applies its own fallback.
+Policy `agentdesk.config.get` returns the resolved value for every key in this table, so policies carry no fallback of their own; a legacy scalar `maxEntryRetries` row is ignored. Other keys keep the persisted-layer read: a scalar `kv_meta` row, else the raw `runtime-config` field for allowlisted runtime keys, else `null`.
+
+The Discord daemon reads the context-threshold rows from `kv_meta` directly each turn. When the read fails it still resolves from YAML and the defaults, and logs one warning per outage with the sources it fell back to.
 
 ## Seeding Ownership
 
