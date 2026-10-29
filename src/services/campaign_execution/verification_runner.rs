@@ -9,11 +9,19 @@ use sha2::Digest as _;
 
 use super::adk_resources::ResourceObservation;
 use super::profile::{ExecutedTest, TestOutcome};
+pub use super::verification_run::TreeState;
 use super::verification_run::{
     ArtifactRef, BoundInput, CommandPolicy, CommandRecord, CommandSpec, Digest, ExpectedArtifact,
     ListedTest, NotSentReason, PhaseInitiation, PhaseKind, PhaseOutput, PhaseResult,
-    ProcessIdentity, Termination,
+    ProcessIdentity, SelectionRule, Termination, plan_scope,
 };
+#[cfg(not(unix))]
+use crate::services::process::kill_pid_tree;
+#[cfg(unix)]
+use crate::services::process::{ProcessGroupProbe, process_group_probe};
+
+// Test children must not see the server's operational root: the native CI run unsets it too.
+const OPERATIONAL_ROOT_ENV: &str = "AGENTDESK_ROOT_DIR";
 
 /// Set on every phase child so a later observation can match the exact process, not just its PID.
 pub const PHASE_NONCE_ENV: &str = "ADK_CAMPAIGN_PHASE_NONCE";
@@ -36,16 +44,11 @@ pub enum Settled {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TreeState {
-    Alive,
-    Gone,
-    Unknown,
-}
-
-// What the test phase leaves for the audit helper: the worker record the native CI path writes.
+// What the test phase needs prepared and leaves behind for the audit helper: the extract
+// directory nextest requires to exist, and the worker record the native CI path writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TestHandoff {
+    pub extract_dir: PathBuf,
     pub record_dir: PathBuf,
     pub worker_json: String,
     pub junit_sources: Vec<PathBuf>,
@@ -140,6 +143,7 @@ pub fn launch(
     std::fs::create_dir_all(ctx.log_dir)?;
     // The verified identity is recorded before the tests start, as verify-archive does on CI.
     if let Some(handoff) = &ctx.handoff {
+        std::fs::create_dir_all(&handoff.extract_dir)?;
         std::fs::create_dir_all(&handoff.record_dir)?;
         std::fs::write(handoff.record_dir.join("worker.json"), &handoff.worker_json)?;
     }
@@ -155,6 +159,9 @@ pub fn launch(
         .stdin(Stdio::null())
         .stdout(std::fs::File::create(&stdout_path)?)
         .stderr(std::fs::File::create(&stderr_path)?);
+    if kind == PhaseKind::Test {
+        command.env_remove(OPERATIONAL_ROOT_ENV);
+    }
     crate::services::process::configure_child_process_group(&mut command);
     let child = command.spawn()?;
     let pid = child.id();
@@ -191,36 +198,60 @@ fn signal_group(pgid: u32, signal: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-// Absence is only reported when kill(1) says the group has no process; any other outcome is Unknown.
+// Gone only when the kernel reports no process in the group; a probe error stays Unknown.
 #[cfg(unix)]
 pub fn process_tree_state(process: &ProcessIdentity) -> TreeState {
     let Some(pgid) = process.process_group else {
         return TreeState::Unknown;
     };
-    match Command::new("kill")
-        .args(["-0", "--", &format!("-{pgid}")])
-        .stdout(Stdio::null())
-        .output()
-    {
-        Ok(out) if out.status.success() => TreeState::Alive,
-        Ok(out) if String::from_utf8_lossy(&out.stderr).contains("No such process") => {
-            TreeState::Gone
-        }
-        _ => TreeState::Unknown,
+    match process_group_probe(pgid) {
+        ProcessGroupProbe::Live => TreeState::Alive,
+        ProcessGroupProbe::Gone => TreeState::Gone,
+        ProcessGroupProbe::ProbeError => TreeState::Unknown,
     }
 }
 
+// Windows has no process group to probe: the leader and every descendant are enumerated, and
+// a failed enumeration stays Unknown rather than passing for Gone.
 #[cfg(not(unix))]
 pub fn process_tree_state(process: &ProcessIdentity) -> TreeState {
-    match Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {}", process.pid)])
+    let Ok(output) = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId)\" }",
+        ])
         .output()
-    {
-        Ok(o) if String::from_utf8_lossy(&o.stdout).contains(&process.pid.to_string()) => {
-            TreeState::Alive
-        }
-        Ok(_) => TreeState::Gone,
-        Err(_) => TreeState::Unknown,
+    else {
+        return TreeState::Unknown;
+    };
+    if !output.status.success() {
+        return TreeState::Unknown;
+    }
+    let edges: Vec<(u32, u32)> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (pid, parent) = line.trim().split_once(',')?;
+            Some((pid.parse().ok()?, parent.parse().ok()?))
+        })
+        .collect();
+    let mut tree = vec![process.pid];
+    let mut index = 0;
+    while index < tree.len() {
+        let parent = tree[index];
+        tree.extend(
+            edges
+                .iter()
+                .filter(|(_, p)| *p == parent)
+                .map(|(pid, _)| *pid)
+                .filter(|pid| !tree.contains(pid)),
+        );
+        index += 1;
+    }
+    if edges.iter().any(|(pid, _)| tree.contains(pid)) {
+        TreeState::Alive
+    } else {
+        TreeState::Gone
     }
 }
 
@@ -304,7 +335,9 @@ impl RunningPhase {
     }
 
     #[cfg(not(unix))]
-    fn end_group(&self) {}
+    fn end_group(&self) {
+        kill_pid_tree(self.process.pid);
+    }
 
     fn settle(
         self,
@@ -424,10 +457,11 @@ fn parse_output(kind: PhaseKind, artifacts: &[ArtifactRef], check_id: &str) -> P
             (Some(plan), Some(config)) => std::fs::read_to_string(&plan.path)
                 .ok()
                 .and_then(|text| parse_plan(&text).ok())
-                .map(|(plan_digest, selected)| PhaseOutput::Plan {
+                .map(|(plan_digest, scope, selected)| PhaseOutput::Plan {
                     plan_digest,
                     plan_artifact_digest: plan.digest.clone(),
                     config_digest: config.digest.clone(),
+                    scope,
                     selected,
                 })
                 .unwrap_or(PhaseOutput::None),
@@ -442,13 +476,20 @@ fn parse_output(kind: PhaseKind, artifacts: &[ArtifactRef], check_id: &str) -> P
     }
 }
 
-// nextest_ci.py plan.json: `plan_digest` and the `[binary_id, name]` pairs its workers will run.
-pub fn parse_plan(text: &str) -> Result<(Digest, Vec<ListedTest>), String> {
+// nextest_ci.py plan.json: `plan_digest`, the identity scope, and the `[binary_id, name]` pairs
+// its workers will run.
+pub fn parse_plan(text: &str) -> Result<(Digest, String, Vec<ListedTest>), String> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let plan_digest = value
         .get("plan_digest")
         .and_then(|d| d.as_str())
         .ok_or("no plan_digest")?
+        .to_owned();
+    let scope = value
+        .get("identity")
+        .and_then(|i| i.get("scope"))
+        .and_then(|s| s.as_str())
+        .ok_or("no identity.scope")?
         .to_owned();
     let workers = value
         .get("workers")
@@ -475,7 +516,7 @@ pub fn parse_plan(text: &str) -> Result<(Digest, Vec<ListedTest>), String> {
             });
         }
     }
-    Ok((plan_digest, selected))
+    Ok((plan_digest, scope, selected))
 }
 
 // `cargo nextest list --message-format json`: rust-suites → binary-id and testcases with `ignored`.
@@ -589,12 +630,14 @@ pub struct AdkBuildIdentity {
     pub run_id: String,
 }
 
-// The same preparation and run steps as scripts/ci/nextest-native.sh, one process per phase.
+// The same preparation and run steps as scripts/ci/nextest-native.sh, one process per phase; the
+// plan is narrowed by the classifier only for the non-PG selection and names its scope.
 pub fn adk_phase_command(
     kind: PhaseKind,
     paths: &AdkPhasePaths<'_>,
     identity: &AdkBuildIdentity,
     policy: &CommandPolicy,
+    selection: SelectionRule,
 ) -> CommandSpec {
     let scratch = paths.scratch.to_string_lossy().into_owned();
     let archive = format!("{scratch}/lib-tests.tar.zst");
@@ -656,8 +699,6 @@ pub fn adk_phase_command(
                 "plan".into(),
                 "--universe".into(),
                 universe.clone(),
-                "--only".into(),
-                format!("{scratch}/selection.json"),
                 "--archive".into(),
                 archive.clone(),
                 "--workers".into(),
@@ -665,7 +706,7 @@ pub fn adk_phase_command(
                 "--sha".into(),
                 paths.sha.into(),
                 "--scope".into(),
-                "campaign".into(),
+                plan_scope(selection).into(),
                 "--run-id".into(),
                 identity.run_id.clone(),
                 "--rust-version".into(),
@@ -678,7 +719,15 @@ pub fn adk_phase_command(
                 policy.nextest_profile.clone(),
                 "--output".into(),
                 format!("{scratch}/plan"),
-            ],
+            ]
+            .into_iter()
+            .chain(
+                (selection == SelectionRule::NonPgClassifier)
+                    .then(|| ["--only".to_owned(), format!("{scratch}/selection.json")])
+                    .into_iter()
+                    .flatten(),
+            )
+            .collect::<Vec<String>>(),
         ),
         PhaseKind::Test => {
             let mut argv = [
@@ -752,6 +801,7 @@ pub fn adk_test_handoff(
         .join(&policy.nextest_profile)
         .join("junit.xml");
     TestHandoff {
+        extract_dir: paths.scratch.join("extract"),
         record_dir: paths.scratch.join("results").join("worker-0"),
         worker_json: format!("{worker}\n"),
         junit_sources: vec![

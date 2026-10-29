@@ -13,7 +13,7 @@ fn spec(repository: Repository) -> VerificationSpec {
             kind: CheckKind::Test,
             required: true,
             acceptance_ids: vec![],
-            selection: SelectionRule::NonPgClassifier,
+            selection: SelectionRule::ListedUniverse,
             phases: vec![PhaseTemplate {
                 id: "test".into(),
                 kind: PhaseKind::Test,

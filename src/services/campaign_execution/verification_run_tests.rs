@@ -66,7 +66,8 @@ pub(crate) fn spec() -> VerificationSpec {
             phases: vec![
                 template("archive", PhaseKind::Archive, &[]),
                 template("list", PhaseKind::List, &["archive"]),
-                template("plan", PhaseKind::Plan, &["list"]),
+                template("classify", PhaseKind::Classify, &["list"]),
+                template("plan", PhaseKind::Plan, &["list", "classify"]),
                 template("test", PhaseKind::Test, &["archive", "plan"]),
             ],
         }],
@@ -295,6 +296,7 @@ fn prepared_with(
     universe: Vec<ListedTest>,
     selected: Vec<ListedTest>,
 ) -> Registered {
+    let scope = plan_scope(spec.checks[0].selection).to_owned();
     let (mut run, mut actions) = registered_with(spec);
     run.bind_subject(subject()).unwrap();
     run.bind_phase_input("archive", input(&[])).unwrap();
@@ -319,8 +321,17 @@ fn prepared_with(
         0,
         PhaseOutput::Universe { tests: universe },
     );
-    run.bind_phase_input("plan", input(&[("list", output_digest(&run, "list"))]))
+    run.bind_phase_input("classify", input(&[("list", output_digest(&run, "list"))]))
         .unwrap();
+    finish_phase(&mut run, &mut actions, "classify", 0, PhaseOutput::None);
+    run.bind_phase_input(
+        "plan",
+        input(&[
+            ("list", output_digest(&run, "list")),
+            ("classify", output_digest(&run, "classify")),
+        ]),
+    )
+    .unwrap();
     finish_phase(
         &mut run,
         &mut actions,
@@ -330,6 +341,7 @@ fn prepared_with(
             plan_digest: "plan-digest".into(),
             plan_artifact_digest: "plan-file-digest".into(),
             config_digest: "config-digest".into(),
+            scope,
             selected,
         },
     );
@@ -391,7 +403,10 @@ fn registration_is_deterministic_and_pre_registers_every_phase_unstarted() {
     assert_eq!(run.origin.owner_attempt, "attempt-a");
     assert_eq!(run.origin.owner_binding.candidate_sha, "h0");
     assert_eq!(run.origin.registered_node_epoch, 3);
-    assert_eq!(run.origin.phase_ids, ["archive", "list", "plan", "test"]);
+    assert_eq!(
+        run.origin.phase_ids,
+        ["archive", "list", "classify", "plan", "test"]
+    );
     assert_eq!(run.subject, Slot::Unbound);
     assert_eq!(
         run.state(|id| actions.get(id)),
@@ -590,6 +605,22 @@ fn plan_binds_the_tests_the_plan_selected_not_the_whole_universe() {
         assert_eq!(bad.bind_plan(&spec()), Err(VerificationError::Conflict));
         assert_eq!(bad.plan, Slot::Unbound);
     }
+    // A plan produced under another selection policy does not bind to this check.
+    let (mut other_scope, _) =
+        prepared_with(spec(), universe.clone(), vec![listed("unit_a", false)]);
+    if let Some(PhaseOutput::Plan { scope, .. }) = other_scope
+        .phases
+        .iter_mut()
+        .find(|p| p.kind == PhaseKind::Plan)
+        .and_then(|p| p.result.as_mut())
+        .map(|r| &mut r.output)
+    {
+        *scope = plan_scope(SelectionRule::ListedUniverse).into();
+    }
+    assert_eq!(
+        other_scope.bind_plan(&spec()),
+        Err(VerificationError::Conflict)
+    );
     let mut optional = spec();
     optional.checks[0].required = false;
     let (mut other_policy, _) =
@@ -777,6 +808,22 @@ fn started_or_indeterminate_phases_reconcile_instead_of_restarting_after_reload(
         )),
         Err(VerificationError::Conflict)
     );
+    let replay = ReconciledInitiation::Started {
+        receipt: receipt("archive", 41),
+        process: process(41),
+    };
+    assert_eq!(
+        fresh.reconcile_initiation(observation(&fresh, "archive", replay)),
+        Ok(ActionState::Started)
+    );
+    let other_after = ReconciledInitiation::Started {
+        receipt: receipt("archive", 44),
+        process: process(44),
+    };
+    assert_eq!(
+        fresh.reconcile_initiation(observation(&fresh, "archive", other_after)),
+        Err(VerificationError::Conflict)
+    );
     let mut finished = result("archive", 0, PhaseOutput::None);
     finished.receipt = receipt("archive", 41);
     fresh
@@ -804,11 +851,44 @@ fn started_or_indeterminate_phases_reconcile_instead_of_restarting_after_reload(
         idle.state(|id| idle_actions.get(id)),
         VerificationRunState::Registered
     );
+    // Replaying the resolving observation is idempotent; a stale Unstarted after a start is not.
+    assert_eq!(
+        idle.reconcile_initiation(observation(
+            &idle,
+            "archive",
+            ReconciledInitiation::Unstarted
+        )),
+        Ok(ActionState::Planned)
+    );
     assert_eq!(
         idle.cancel(&idle_actions, "immediate".into(), at())
             .unwrap()
             .len(),
-        4
+        5
+    );
+    let (mut relaunched, _) = registered();
+    relaunched.bind_subject(subject()).unwrap();
+    relaunched.bind_phase_input("archive", input(&[])).unwrap();
+    relaunched
+        .record_initiation("archive", indeterminate())
+        .unwrap();
+    relaunched
+        .reconcile_initiation(observation(
+            &relaunched,
+            "archive",
+            ReconciledInitiation::Unstarted,
+        ))
+        .unwrap();
+    relaunched
+        .record_initiation("archive", started("archive", 43))
+        .unwrap();
+    assert_eq!(
+        relaunched.reconcile_initiation(observation(
+            &relaunched,
+            "archive",
+            ReconciledInitiation::Unstarted
+        )),
+        Err(VerificationError::Conflict)
     );
 }
 
@@ -854,7 +934,7 @@ fn resource_wait_keeps_the_phase_unstarted_and_admittable() {
 fn unstarted_registered_and_materialized_runs_cancel_and_stay_cancelled() {
     let (mut run, actions) = registered();
     let cancelled = run.cancel(&actions, "immediate".into(), at()).unwrap();
-    assert_eq!(cancelled.len(), 4);
+    assert_eq!(cancelled.len(), 5);
     assert_eq!(
         run.state(|id| actions.get(id)),
         VerificationRunState::Cancelled
@@ -1201,6 +1281,66 @@ fn results_bind_to_their_phase_action_and_receipt_and_record_once() {
 }
 
 #[test]
+fn started_phase_without_a_runner_handle_closes_only_on_a_confirmed_gone_tree() {
+    let (mut run, mut actions) = registered();
+    run.bind_subject(subject()).unwrap();
+    run.bind_phase_input("archive", input(&[])).unwrap();
+    let action_id = run.phase("archive").unwrap().action_id.clone();
+    let action = start_action(&mut actions, &action_id, "archive");
+    run.record_initiation("archive", started("archive", 7))
+        .unwrap();
+    let mut run: VerificationRun =
+        serde_json::from_slice(&serde_json::to_vec(&run).unwrap()).unwrap();
+    let execution_id = run.origin.execution_id.clone();
+    let seen = |tree: TreeState| TerminationObservation {
+        execution_id: execution_id.clone(),
+        action_id: action_id.clone(),
+        phase_id: "archive".into(),
+        receipt: receipt("archive", 7),
+        process: process(7),
+        tree,
+        evidence: "process table read after restart".into(),
+        observed_at: at(),
+    };
+    assert_eq!(
+        run.reconcile_termination(&action, seen(TreeState::Alive)),
+        Err(VerificationError::NotFinished)
+    );
+    assert_eq!(
+        run.reconcile_termination(&action, seen(TreeState::Unknown)),
+        Err(VerificationError::NotFinished)
+    );
+    assert_eq!(collect(&run, &actions), Err(VerificationError::NotFinished));
+    assert_eq!(
+        run.cancel(&actions, "immediate".into(), at()),
+        Err(VerificationError::Started)
+    );
+    let mut other = seen(TreeState::Gone);
+    other.receipt = receipt("archive", 8);
+    other.process = process(8);
+    assert!(matches!(
+        run.reconcile_termination(&action, other),
+        Err(VerificationError::ActionMismatch(_))
+    ));
+    assert!(run.phase("archive").unwrap().result.is_none());
+    run.reconcile_termination(&action, seen(TreeState::Gone))
+        .unwrap();
+    run.reconcile_termination(&action, seen(TreeState::Gone))
+        .unwrap();
+    let result = run.phase("archive").unwrap().result.as_ref().unwrap();
+    assert_eq!(result.record.exit_code, None);
+    assert!(matches!(
+        result.termination,
+        Termination::Interrupted { .. }
+    ));
+    actions.get_mut(&action_id).unwrap().state = ActionState::Reconciled;
+    assert!(matches!(
+        collect(&run, &actions),
+        Ok(VerificationCollection::Interrupted { phase_id, .. }) if phase_id == "archive"
+    ));
+}
+
+#[test]
 fn spec_validation_rejects_unordered_phases_and_test_checks_without_a_test_phase() {
     let mut unordered = spec();
     unordered.checks[0].phases.swap(0, 1);
@@ -1210,6 +1350,34 @@ fn spec_validation_rejects_unordered_phases_and_test_checks_without_a_test_phase
         .phases
         .retain(|p| p.kind != PhaseKind::Test);
     assert!(no_test.validate().is_err());
+    // Only what the runner executes faithfully registers: one worker, no PG selection yet, and a
+    // classifier selection only when a classify phase feeds the plan.
+    let mut two_workers = spec();
+    two_workers.command_policy.workers = 2;
+    assert_eq!(
+        two_workers.validate(),
+        Err(VerificationError::InvalidSpec("workers".into()))
+    );
+    let mut pg = spec();
+    pg.checks[0].selection = SelectionRule::PgClassifier;
+    assert!(matches!(
+        pg.validate(),
+        Err(VerificationError::InvalidSpec(_))
+    ));
+    let mut unclassified = spec();
+    unclassified.checks[0]
+        .phases
+        .retain(|p| p.kind != PhaseKind::Classify);
+    for phase in &mut unclassified.checks[0].phases {
+        phase.requires.retain(|r| r != "classify");
+    }
+    assert!(matches!(
+        unclassified.validate(),
+        Err(VerificationError::InvalidSpec(_))
+    ));
+    unclassified.checks[0].selection = SelectionRule::ListedUniverse;
+    unclassified.validate().unwrap();
+    spec().validate().unwrap();
     let plan = spec().plan(
         Stage::Implementation,
         &Candidate {
