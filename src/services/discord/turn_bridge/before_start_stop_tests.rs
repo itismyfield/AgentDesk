@@ -729,6 +729,16 @@ impl Close {
         shape: impl FnOnce(&mut InflightTurnState),
         setup: impl FnOnce(&mut SharedData),
     ) -> Self {
+        Self::open_with_phase(generation, channel, shape, setup, false).await
+    }
+
+    async fn open_with_phase(
+        generation: u64,
+        channel: u64,
+        shape: impl FnOnce(&mut InflightTurnState),
+        setup: impl FnOnce(&mut SharedData),
+        untouched: bool,
+    ) -> Self {
         let legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         let provider = ProviderKind::Claude;
         let mut shared = discord::make_shared_data_for_tests_with_storage(None);
@@ -766,6 +776,12 @@ impl Close {
         );
         discord::increment_global_active(&shared, "coldstop_test");
         discord::inflight::save_inflight_state(&row).unwrap();
+        if untouched {
+            let state = actor.herdr_interrupt_state().unwrap();
+            let mut input = state.submission.lock().unwrap();
+            assert!(state.prepare_input(&mut input));
+            state.finish_input(&mut input, HerdrSubmission::Unsubmitted, true);
+        }
         actual_fresh_exit(actor.clone(), owner, provider.clone(), true).await;
         let ExitDecision::PolicyClose(proof) = seal_exit(&actor, false, false) else {
             panic!("positive proof required");
@@ -1389,4 +1405,156 @@ async fn run_restored_b_once(
     assert!(!kick.await.started);
     let rerun = tokio::time::timeout(std::time::Duration::from_secs(1), at).await;
     assert!(!matches!(rerun, Ok(Ok(_))), "B runs once");
+}
+
+#[test]
+fn a2_t10_sealed_absent_stop_uses_one_actual_notice_for_o_and_legacy() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t10_sealed_absent_stop_uses_one_actual_notice_for_o_and_legacy"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::discord::recovery_engine::BodyCreateTestRemote;
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _settlement =
+        crate::services::turn_orchestrator::policy_close::test_hooks::Settlement::set(true);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for o in [false, true] {
+                for untouched in [false, true] {
+                    let channel = 75_072_100 + u64::from(o) * 10 + u64::from(untouched);
+                    let close = Close::open_with_phase(
+                        17,
+                        channel,
+                        |row| {
+                            row.current_msg_id = 0;
+                            row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+                        },
+                        |_| {},
+                        untouched,
+                    )
+                    .await;
+                    assert_eq!(
+                        close.proof.basis,
+                        if untouched {
+                            crate::services::provider::herdr_before_start::CloseBasis::Untouched
+                        } else {
+                            crate::services::provider::herdr_before_start::CloseBasis::NoAttempt
+                        }
+                    );
+                    let _o =
+                        crate::services::tui_o::cutover::test_override::force_channels(&if o {
+                            vec![(channel, RuntimeHandoffKind::ClaudeTui)]
+                        } else {
+                            vec![]
+                        });
+                    let remote = BodyCreateTestRemote::new(channel).await;
+                    let _rest = discord::shared_state::test_rest::install(remote.http.clone());
+                    let gateway = discord::gateway::DiscordGateway::new(
+                        remote.http.clone(),
+                        close.shared.clone(),
+                        ProviderKind::Claude,
+                        None,
+                    );
+                    let mailbox = close.shared.mailbox(ChannelId::new(channel));
+                    let ack = Arc::new(std::sync::Mutex::new(None));
+                    let captured = ack.clone();
+                    test_hooks::observe(Some(Box::new(move |stage, _| {
+                        if stage == "before_submit" {
+                            *captured.lock().unwrap() =
+                                discord::inflight::load_inflight_state_read_only(
+                                    &ProviderKind::Claude,
+                                    channel,
+                                );
+                        }
+                    })));
+                    let (shared, gateway) = (&close.shared, &gateway);
+                    let outcome = super::consume(
+                        &close.shared,
+                        (&close.fin, &mailbox),
+                        &close.actor,
+                        &close.row,
+                        (&close.proof, None::<MessageId>),
+                        &mut None,
+                        |admitted| async move {
+                            discord::body_create::create_notice(
+                                shared,
+                                gateway,
+                                &admitted,
+                                ADMITTED_ABORT_NOTICE,
+                                discord::body_create::NoticeScope::BeforeStartStop,
+                            )
+                            .await
+                        },
+                    )
+                    .await;
+                    test_hooks::observe(None);
+                    assert!(matches!(outcome, CloseAttempt::Settled));
+                    let accepted = ack
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .expect("actual ACK persisted before policy submit");
+                    assert_eq!(accepted.current_msg_id, 0);
+                    let actual = accepted
+                        .stop_notice_message_id
+                        .expect("actual created notice, separate from response");
+                    assert!(
+                        accepted
+                            .herdr_before_start_stop
+                            .as_ref()
+                            .unwrap()
+                            .notice_delivered()
+                    );
+                    assert_eq!(
+                        serde_json::to_value(accepted.herdr_before_start_stop)
+                            .unwrap()
+                            .as_object()
+                            .unwrap()
+                            .len(),
+                        6,
+                        "strict legacy receipt format is unchanged"
+                    );
+                    assert!(close.durable().is_none());
+                    assert_eq!(
+                        close.shared.restart.global_active.load(Ordering::Relaxed),
+                        0
+                    );
+                    let calls = remote.calls.lock().unwrap();
+                    assert_eq!(
+                        calls
+                            .iter()
+                            .filter(|(route, _)| route.starts_with("POST"))
+                            .count(),
+                        1
+                    );
+                    assert!(!calls.iter().any(
+                        |(route, _)| route.starts_with("PATCH") || route.starts_with("DELETE")
+                    ));
+                    let request = calls
+                        .iter()
+                        .find(|(route, _)| route.starts_with("POST"))
+                        .unwrap();
+                    assert_eq!(request.1["enforce_nonce"], true);
+                    assert_eq!(
+                        request.1["message_reference"]["message_id"],
+                        close.row.user_msg_id.to_string()
+                    );
+                    assert_eq!(remote.messages.lock().unwrap()[0]["id"], actual.to_string());
+                    assert!(
+                        !root
+                            .path()
+                            .join("runtime/discord_delivery_records")
+                            .exists()
+                    );
+                }
+            }
+        });
 }

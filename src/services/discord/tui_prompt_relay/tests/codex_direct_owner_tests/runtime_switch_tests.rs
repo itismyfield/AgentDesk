@@ -251,11 +251,21 @@ fn a_replaced_runtime_relays_through_its_own_routing_and_output() {
     }
 }
 
-// Recovery cannot post for a Codex TUI row yet (no pane-ready fallback), so a stale runtime there
-// changes no output; once this opens, recovery needs its own B-only case.
+// Native recovery uses structured Ready while pane chrome grants no fallback authority.
 #[test]
-fn codex_tui_recovery_has_no_pane_ready_fallback_yet() {
+fn codex_tui_recovery_uses_structured_ready_without_a_pane_fallback() {
     use crate::services::agent_protocol::RuntimeHandoffKind;
+    let source = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(source.path(), b"{\"type\":\"turn.completed\"}\n").unwrap();
+    assert_eq!(
+        crate::services::tui_turn_state::jsonl_ready_for_input(
+            &ProviderKind::Codex,
+            Some(RuntimeHandoffKind::CodexTui),
+            source.path(),
+            Some(std::fs::metadata(source.path()).unwrap().len())
+        ),
+        Some(crate::services::tui_turn_state::TuiReadyState::Ready)
+    );
     assert!(
         !crate::services::tui_turn_state::pane_ready_fallback_allowed(
             &ProviderKind::Codex,

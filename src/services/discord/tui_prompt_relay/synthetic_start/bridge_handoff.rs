@@ -692,11 +692,6 @@ pub(in crate::services::discord::tui_prompt_relay) async fn capture(
     {
         return Err(failure());
     }
-    if saved.state().current_msg_id == 0
-        && saved.bind_synthetic_anchor_under_guard() != GuardedSaveOutcome::Saved
-    {
-        return Err(failure());
-    }
     row = saved.state().clone();
     drop(saved);
     if !record(&row, Some(&actor), pg_pin) {

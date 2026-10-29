@@ -248,3 +248,149 @@ fn m2_unreadable_mailbox_is_never_an_idle_channel() {
             ));
         });
 }
+
+#[test]
+fn a2_t11_terminate_settlement_accepts_absence_and_preserves_an_accepted_body() {
+    use crate::services::discord::gateway::{DiscordGateway, TurnGateway};
+    use crate::services::discord::{
+        inflight as disk,
+        recovery_engine::{
+            BodyCreateTestRemote, a2_admitted_for_tmux, a2_post_captured_without_bind,
+            a2_stale_captured_recovery_is_held,
+        },
+    };
+    let name = concat!(
+        module_path!(),
+        "::a2_t11_terminate_settlement_accepts_absence_and_preserves_an_accepted_body"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    let source_root = tempfile::tempdir().unwrap();
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        for stage in 0..3 {
+            let mut shared=super::super::make_shared_data_for_tests();
+            Arc::get_mut(&mut shared).unwrap().api_port=0;
+            let channel=ChannelId::new(75_072_140+stage);
+            let remote=BodyCreateTestRemote::new(channel.get()).await;
+            let _http=super::super::shared_state::test_rest::install(remote.http.clone());
+            let gateway=DiscordGateway::new(remote.http.clone(),shared.clone(),ProviderKind::Claude,None);
+            let current=if stage==2 {gateway.send_message(channel,"owned partial body").await.unwrap().get()} else {0};
+            let row=if stage==1 {
+                a2_admitted_for_tmux(source_root.path(),channel.get(),"accepted terminal body before bind",0,&format!("a2-term-{stage}")).await
+            } else {
+                let mut row=disk::InflightTurnState::new(ProviderKind::Claude,channel.get(),None,7,channel.get()+1,current,"original prompt".into(),None,None,None,None,0);
+                row.turn_nonce=Some(format!("a2-term-{stage}"));disk::save_inflight_state(&row).unwrap();row
+            };
+            let token=Arc::new(CancelToken::from_persisted_turn_nonce(row.turn_nonce.clone()));
+            shared.mailbox(channel).restore_active_turn(token.clone(),UserId::new(7),MessageId::new(row.user_msg_id)).await;
+            shared.restart.global_active.store(1,Ordering::Relaxed);
+            let key=TurnKey::new(channel,row.user_msg_id,shared.restart.current_generation).with_episode_nonce(row.turn_nonce.as_deref());
+            shared.turn_finalizer.register_start_with_completion_admission(key,ProviderKind::Claude,disk::RelayOwnerKind::None,super::super::turn_finalizer::CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,&shared);
+            let actual=if stage==1 {Some(a2_post_captured_without_bind(&remote,&shared,&row).await)} else {disk::opt_message_id(current)};
+            let captured=capture_turn(&shared,&ProviderKind::Claude,channel).await.unwrap().expect("actual terminate captures the active episode even with response0");
+            let visible=remote.messages.lock().unwrap().clone();
+            let calls=remote.calls.lock().unwrap().len();
+            let execution=format!("a2-terminated-execution-{stage}");
+            crate::services::claude::herdr_turn::hold(&execution).unwrap();
+            let transition=shared.session_transition_lock(channel).lock_owned().await;
+            assert_eq!(settle_and_release(&shared,&ProviderKind::Claude,&execution,Some(captured),transition).await.map(drop),Ok(()));
+            assert_eq!(shared.restart.global_active.load(Ordering::Relaxed),0);
+            assert!(shared.mailbox(channel).snapshot().await.cancel_token.is_none());
+            assert!(disk::load_inflight_state_read_only(&ProviderKind::Claude,channel.get()).is_none());
+            assert_eq!(*remote.messages.lock().unwrap(),visible);
+            assert_eq!(remote.calls.lock().unwrap().len(),calls,"termination settlement never transports a body or a fake anchor");
+            if let Some(actual)=actual {assert!(remote.messages.lock().unwrap().iter().any(|message|message["id"]==actual.get().to_string()));}
+            if stage==1 {
+                assert!(a2_stale_captured_recovery_is_held(&remote,&shared,&row).await);
+                assert_eq!(remote.calls.lock().unwrap().len(),calls);
+                assert!(disk::load_inflight_state_read_only(&ProviderKind::Claude,channel.get()).is_none());
+            }
+        }
+    });
+}
+
+#[test]
+fn a2_t11_late_terminate_never_releases_an_absent_successor() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t11_late_terminate_never_releases_an_absent_successor"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut shared = super::super::make_shared_data_for_tests();
+            Arc::get_mut(&mut shared).unwrap().api_port = 0;
+            let channel = ChannelId::new(75_072_145);
+            let remote =
+                super::super::recovery_engine::BodyCreateTestRemote::new(channel.get()).await;
+            let _http = super::super::shared_state::test_rest::install(remote.http.clone());
+            let a = test_turn::start(&shared, channel, 51, "a2-old").await;
+            let mut original = super::super::inflight::load_inflight_state_read_only(
+                &ProviderKind::Claude,
+                channel.get(),
+            )
+            .unwrap();
+            original.current_msg_id = 0;
+            let path = super::super::inflight::inflight_state_path(
+                &super::super::inflight::inflight_runtime_root().unwrap(),
+                &ProviderKind::Claude,
+                channel.get(),
+            );
+            std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+            let captured = capture_turn(&shared, &ProviderKind::Claude, channel)
+                .await
+                .unwrap()
+                .expect("real terminate captures current0");
+            let successor = Arc::new(std::sync::Mutex::new(None));
+            let (s, slot, path2) = (shared.clone(), successor.clone(), path.clone());
+            probe_settlement_window(Box::new(move || {
+                Box::pin(async move {
+                    test_turn::finish_naturally(&s, channel, 51, "a2-old", &a).await;
+                    let b = test_turn::start(&s, channel, 61, "a2-new").await;
+                    let mut row = super::super::inflight::load_inflight_state_read_only(
+                        &ProviderKind::Claude,
+                        channel.get(),
+                    )
+                    .unwrap();
+                    row.current_msg_id = 0;
+                    std::fs::write(&path2, serde_json::to_vec(&row).unwrap()).unwrap();
+                    *slot.lock().unwrap() = Some((b, std::fs::read(&path2).unwrap()));
+                })
+            }));
+            crate::services::claude::herdr_turn::hold("a2-old-execution").unwrap();
+            let transition = shared.session_transition_lock(channel).lock_owned().await;
+            assert_eq!(
+                settle_and_release(
+                    &shared,
+                    &ProviderKind::Claude,
+                    "a2-old-execution",
+                    Some(captured),
+                    transition
+                )
+                .await
+                .map(drop),
+                Ok(())
+            );
+            let (b, bytes) = successor.lock().unwrap().take().unwrap();
+            assert!(Arc::ptr_eq(
+                &test_turn::active(&shared, channel).await.unwrap(),
+                &b
+            ));
+            assert!(!b.cancelled.load(Ordering::Relaxed));
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+            assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+            assert!(!remote.calls.lock().unwrap().iter().any(
+                |(route, _)| route.starts_with("POST")
+                    || route.starts_with("PATCH")
+                    || (route.starts_with("DELETE") && !route.contains("/reactions/"))
+            ));
+        });
+}

@@ -316,7 +316,7 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
         return Err("idle continuation must resume from its saved source cursor".into());
     }
     let user_msg_id = MessageId::new(claim.row.user_msg_id);
-    let current_msg_id = MessageId::new(claim.row.current_msg_id);
+    let current_msg_id = super::super::inflight::opt_message_id(claim.row.current_msg_id);
     let anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
         provider.as_str(),
         tmux_session_name,
@@ -366,7 +366,7 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
         memory_recall_usage: TokenUsage::default(),
         context_window_tokens: 0,
         context_compact_percent,
-        current_msg_id: Some(current_msg_id),
+        current_msg_id,
         response_sent_offset: claim.row.response_sent_offset,
         full_response: claim.row.full_response.clone(),
         tmux_last_offset: Some(start_offset),
@@ -401,7 +401,7 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
             .map(|id| id.get())
             .unwrap_or(0),
         inflight_user_msg_id: user_msg_id.get(),
-        inflight_current_msg_id: current_msg_id.get(),
+        inflight_current_msg_id: current_msg_id.map(MessageId::get).unwrap_or(0),
     };
 
     // Forward the buffered prefix + the live reader stream into the SINGLE
@@ -441,7 +441,7 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
         &provider,
         (channel_id, user_msg_id, current_msg_id),
         None,
-        (tmux_session_name, lease, anchor),
+        (tmux_session_name, lease, anchor, Some(&claim.row)),
         true,
     )
     .await;
@@ -460,17 +460,19 @@ pub(super) async fn finish_idle_bridge_completion(
     >,
     gateway: &dyn super::super::gateway::TurnGateway,
     provider: &ProviderKind,
-    message_ids: (ChannelId, MessageId, MessageId),
+    message_ids: (ChannelId, MessageId, impl Into<Option<MessageId>>),
     bridge_created_placeholder: Option<MessageId>,
     turn_context: (
         &str,
         &ExternalInputRelayLease,
         Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor>,
+        Option<&InflightTurnState>,
     ),
     streamed: bool,
 ) -> Result<(), String> {
     let (channel_id, user_msg_id, current_msg_id) = message_ids;
-    let (tmux_session_name, lease, anchor) = turn_context;
+    let current_msg_id = current_msg_id.into();
+    let (tmux_session_name, lease, anchor, expected) = turn_context;
     match completion {
         Ok(Ok(BridgeCompletionSignal::Finalized)) => {
             ensure_tui_direct_bridge_delivery_committed(
@@ -478,6 +480,7 @@ pub(super) async fn finish_idle_bridge_completion(
                 channel_id,
                 user_msg_id,
                 current_msg_id,
+                expected,
                 tmux_session_name,
                 lease,
                 anchor.map(|anchor| anchor.message_id),
@@ -498,7 +501,7 @@ pub(super) async fn finish_idle_bridge_completion(
                 session_key = lease.session_key.as_deref().unwrap_or(""),
                 relay_owner = lease.relay_owner.as_str(),
                 runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
-                current_msg_id = current_msg_id.get(),
+                current_msg_id = current_msg_id.map(MessageId::get).unwrap_or(0),
                 prompt_anchor_message_id = anchor.map(|anchor| anchor.message_id),
                 "{}", if streamed { "TUI-direct bridge adapter completed streamed response relay" }
                 else { "TUI-direct bridge adapter completed response relay" }
@@ -508,17 +511,7 @@ pub(super) async fn finish_idle_bridge_completion(
         aborted @ (Ok(Ok(BridgeCompletionSignal::EntryAborted)) | Ok(Err(_))) => {
             let durable =
                 super::super::inflight::load_inflight_state_read_only(provider, channel_id.get());
-            if let Some(placeholder) = bridge_created_placeholder.filter(|id| {
-                !durable.as_ref().is_some_and(|row| {
-                    row.current_msg_id == id.get()
-                        || row.user_msg_id == id.get()
-                        || row.status_message_id == Some(id.get())
-                })
-            }) {
-                if let Err(error) = gateway.delete_message(channel_id, placeholder).await {
-                    tracing::warn!(%error, "failed to delete aborted bridge placeholder");
-                }
-            }
+            let _ = (gateway, bridge_created_placeholder);
             tracing::warn!(turn_id = lease.turn_id.as_deref().unwrap_or(""),
                 durable_user_msg_id = durable.as_ref().map(|row| row.user_msg_id),
                 reason = ?aborted, "TUI-direct bridge entry aborted before authority");
@@ -756,7 +749,7 @@ pub(super) fn build_tui_direct_bridge_inflight_state(
     provider: ProviderKind,
     channel_id: ChannelId,
     user_msg_id: MessageId,
-    current_msg_id: MessageId,
+    current_msg_id: impl Into<Option<MessageId>>,
     prompt_text: &str,
     tmux_session_name: &str,
     output_path: &Path,
@@ -767,7 +760,7 @@ pub(super) fn build_tui_direct_bridge_inflight_state(
         provider,
         channel_id,
         user_msg_id,
-        Some(current_msg_id),
+        current_msg_id.into(),
         prompt_text,
         tmux_session_name,
         Some(output_path),

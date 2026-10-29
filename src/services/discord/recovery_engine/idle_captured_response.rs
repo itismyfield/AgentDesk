@@ -58,26 +58,40 @@ pub(in crate::services::discord) async fn recover_idle_partial_response(
     let Some(tmux) = row.tmux_session_name.as_deref() else {
         return false;
     };
+    let pinned = row.requires_pinned_terminal_recovery();
     if !recovery_ready_without_output_has_captured_response(row)
         || row.restart_mode.is_some()
         || row.rebind_origin
         || row.terminal_delivery_completed()
-        || row.current_msg_id == 0
+        || (row.current_msg_id == 0 && !pinned)
         || shared.relay_emission_in_flight(ChannelId::new(row.channel_id))
-        || !crate::services::provider::tmux_session_fallback_ready_for_input(
+    {
+        return false;
+    }
+    let ready = if pinned {
+        crate::services::tui_turn_state::jsonl_ready_for_input(
+            &provider,
+            row.runtime_kind,
+            output,
+            Some(row.last_offset),
+        )
+        .is_some_and(crate::services::tui_turn_state::TuiReadyState::is_ready)
+    } else {
+        crate::services::provider::tmux_session_fallback_ready_for_input(
             tmux,
             &provider,
             row.runtime_kind,
         )
         .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
-    {
+    };
+    if !ready {
         return false;
     }
     let gateway = DiscordGateway::new(http.clone(), shared.clone(), provider, None);
     recover_idle_partial_response_from_ready_source(http, shared, row, output, &gateway).await
 }
 
-/// The caller has already observed a ready pane. Keep the source, dormant
+/// The caller has already observed readiness. Keep the source, dormant
 /// claim and delivery settlement identical for production and gateway fixtures.
 #[cfg(unix)]
 pub(in crate::services::discord) async fn recover_idle_partial_response_from_ready_source(

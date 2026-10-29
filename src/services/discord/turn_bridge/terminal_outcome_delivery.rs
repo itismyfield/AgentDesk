@@ -353,6 +353,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 had_prior_session_id_at_turn_start,
                 session_handshake_seen,
                 claude_tui_followup_busy_readiness_timeout,
+                busy_requeue_candidate: claude_tui_followup_pre_submit_requeue_candidate,
                 rx_disconnected,
                 turn_start,
                 review_dispatch_warning: &review_dispatch_warning,
@@ -420,7 +421,9 @@ pub(super) async fn run_terminal_outcome_delivery(
         let preparation_wait = completion_proof::waiting(&inflight_state).is_some();
         let body_claim = (!answerless && !preparation_wait)
             .then(|| bridge_body_claim(channel_id, &inflight_state, direct));
-        if preparation_wait {
+        if busy_requeue_outcome.is_some() || claude_tui_followup_pre_submit_requeue_candidate {
+            // The busy publisher owns its notice and commits no terminal answer.
+        } else if preparation_wait {
             // The non-turn outbox owns the waiting notice; it commits no answer or footer.
         } else if o_body_cut.is_err() || silent_turn_handled {
             preserve_inflight_for_cleanup_retry |= o_body_cut.is_err();

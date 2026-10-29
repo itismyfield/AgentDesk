@@ -752,6 +752,21 @@ pub(super) async fn update_streaming_status_tick(
             };
             let visible_status =
                 crate::services::discord::footer_retirement::visible_anchor(&status_block);
+            let Some(rollover_row) =
+                crate::services::discord::inflight::load_inflight_state_read_only(
+                    &watcher_provider,
+                    channel_id.get(),
+                )
+                .filter(|row| {
+                    row.current_msg_id == msg_id.get()
+                        && row.response_sent_offset == response_sent_offset
+                        && turn_identity_for_panel
+                            .as_ref()
+                            .is_some_and(|identity| identity.matches_state(row))
+                })
+            else {
+                break;
+            };
             if !guard_rollover(ctx, msg_id, raw_current_portion, &plan.frozen_chunk).await {
                 break;
             }
@@ -780,28 +795,28 @@ pub(super) async fn update_streaming_status_tick(
                     .await
                     {
                         Ok(message) => {
-                            // #3871: `msg_id` is now a FROZEN prefix — record it for terminal full-body dedup.
-                            watcher_streaming_rollover_frozen_msg_ids.push(msg_id);
+                            let mut next_frozen = watcher_streaming_rollover_frozen_msg_ids.clone();
+                            next_frozen.push(msg_id);
+                            if crate::services::discord::tmux::persist_watcher_rollover(
+                                &watcher_provider,
+                                channel_id,
+                                &rollover_row,
+                                (Some(message.id), visible_status.len()),
+                                &full_response,
+                                response_sent_offset + raw_split_at,
+                                &next_frozen,
+                            )
+                                != crate::services::discord::inflight::WatcherProgressOutcome::Saved
+                            {
+                                commit_streaming_status_tick_state!();
+                                return StreamingStatusTickOutcome::ContinueStreamingLoop;
+                            }
+                            watcher_streaming_rollover_frozen_msg_ids = next_frozen;
                             placeholder_msg_id = Some(message.id);
                             placeholder_from_restored_inflight = false;
                             watcher_did_rollover_this_interval = true;
                             response_sent_offset += raw_split_at;
                             last_edit_text = visible_status.to_string();
-                            persist_watcher_stream_progress(
-                                &watcher_provider,
-                                channel_id,
-                                &tmux_session_name,
-                                turn_identity_for_panel.as_ref(),
-                                placeholder_msg_id,
-                                &full_response,
-                                response_sent_offset,
-                                tool_state.current_tool_line.as_deref(),
-                                tool_state.prev_tool_status.as_deref(),
-                                task_notification_kind,
-                                tool_state.any_tool_used,
-                                tool_state.has_post_tool_text,
-                                &watcher_streaming_rollover_frozen_msg_ids,
-                            );
                         }
                         Err(error) => {
                             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -909,11 +924,12 @@ pub(super) async fn update_streaming_status_tick(
             &status_block,
         );
         if guard_streaming_frame(&watcher_provider, raw_current_portion, &mut display_text)
-            && crate::services::discord::single_message_panel::streaming_footer_text_changed(
-                single_message_panel_footer_mode,
-                &last_edit_text,
-                &display_text,
-            )
+            && (placeholder_msg_id.is_none()
+                || crate::services::discord::single_message_panel::streaming_footer_text_changed(
+                    single_message_panel_footer_mode,
+                    &last_edit_text,
+                    &display_text,
+                ))
         {
             let write = || async {
                 match placeholder_msg_id {

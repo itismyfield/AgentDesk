@@ -123,7 +123,7 @@ pub(super) fn watcher_terminal_rewind_seed(
     input
         .placeholder_msg_id
         .map(|current_msg_id| RestoredWatcherTurn {
-            current_msg_id,
+            current_msg_id: Some(current_msg_id),
             status_message_id: input.status_panel_msg_id,
             response_sent_offset: input.response_sent_offset,
             full_response: String::new(),

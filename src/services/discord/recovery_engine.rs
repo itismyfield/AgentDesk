@@ -570,3 +570,14 @@ pub(crate) use restore_persist_outcome::codex_restart_output_for_tests;
 #[cfg(all(test, unix))]
 #[path = "recovery_engine/o_settlement_tests.rs"]
 pub(in crate::services::discord) mod o_settlement_tests;
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use completion_delivery::body_create_tests::Remote as BodyCreateTestRemote;
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use completion_delivery::body_create_tests::{
+    a2_admitted_for_tmux, a2_post_captured_without_bind, a2_stale_captured_recovery_is_held,
+};
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use completion_delivery::body_create_tests::a2_commit_captured_body;

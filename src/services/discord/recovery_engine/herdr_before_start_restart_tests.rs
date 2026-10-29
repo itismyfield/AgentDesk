@@ -364,15 +364,14 @@ async fn the_restart_scan_settles_a_marked_receipt_before_the_marker_hold() {
     assert!(fixture.durable().is_none());
 }
 
-/// A planned restart, a live actor or a missing message keep the receipt: nothing is sent, acked
+/// A planned restart, a live actor or an unconfirmed delivered notice keep the receipt: nothing is sent, acked
 /// or cleared.
 #[tokio::test(flavor = "current_thread")]
 async fn a_destination_restart_does_not_own_keeps_the_receipt() {
-    let cases: [(&str, Edit); 3] = [
+    let cases: [(&str, Edit); 2] = [
         ("planned restart", |row| {
             row["restart_mode"] = serde_json::to_value(InflightRestartMode::DrainRestart).unwrap()
         }),
-        ("no message", |row| row["current_msg_id"] = 0.into()),
         ("delivered without its message", |row| {
             row["current_msg_id"] = 0.into();
             row["herdr_before_start_stop"] = receipt("delivered");
@@ -388,10 +387,6 @@ async fn a_destination_restart_does_not_own_keeps_the_receipt() {
             matches!(outcome, BeforeStartRestartReport::Retained(_)),
             "{case}"
         );
-        if case.contains("message") {
-            let held = BeforeStartRestartReport::Retained("no message to show the stop on");
-            assert_eq!(outcome, held, "{case}: held before any later step");
-        }
         assert_eq!(fixture.bytes(), before, "{case}");
         assert!(discord.calls().is_empty(), "{case}: {:?}", discord.calls());
         if case == "delivered without its message" {
@@ -686,4 +681,61 @@ async fn withheld(pool: &sqlx::PgPool, row: &inflight::InflightTurnState) -> i64
         .bind(CHANNEL.to_string()).bind(row.user_msg_id.to_string()).bind(&row.user_text)
         .bind(vec![row.user_msg_id.to_string()]).bind(&row.turn_nonce)
         .bind(serde_json::json!({"body":row.full_response})).fetch_one(pool).await.unwrap()
+}
+
+#[test]
+fn a2_t10_absent_stop_restarts_before_and_after_actual_notice_ack() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t10_absent_stop_restarts_before_and_after_actual_notice_ack"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    use crate::services::discord::gateway::DiscordGateway;
+    use crate::services::discord::recovery_engine::BodyCreateTestRemote;
+    use crate::services::discord::runtime_store::durable_publish::flush_probe::{
+        Plan, Step, Watch,
+    };
+    for acked in [false, true] {
+        let fixture = Fixture::new("a2-absent-notice", false);
+        let _settlement =
+            crate::services::turn_orchestrator::policy_close::test_hooks::Settlement::set(true);
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let mut row=fixture.row.clone(); row.current_msg_id=0;
+            let row=fixture.persist(&row);
+            assert!(row.herdr_before_start_stop.as_ref().unwrap().supported());
+            assert_eq!(serde_json::to_value(&row.herdr_before_start_stop).unwrap().as_object().unwrap().len(),6);
+            let remote=BodyCreateTestRemote::new(CHANNEL).await;
+            let gateway=DiscordGateway::new(remote.http.clone(),fixture.shared.clone(),fixture.provider.clone(),None);
+            let actual=crate::services::discord::body_create::create_notice(&fixture.shared,&gateway,&row,crate::services::discord::recovery_engine::herdr_admitted_restart::ADMITTED_ABORT_NOTICE,crate::services::discord::body_create::NoticeScope::BeforeStartStop).await.unwrap();
+            let pending=fixture.durable().unwrap();
+            assert_eq!(pending.current_msg_id,0);
+            assert_eq!(pending.stop_notice_message_id,None);
+            assert!(pending.herdr_before_start_stop.as_ref().unwrap().notice_pending());
+            let row=if acked {
+                pending.ack_before_start_reply(&Ok(Some(actual))).await.expect("actual notice ACK")
+            } else {
+                let fault=Watch::new(&fixture._root.path().join("runtime/discord_inflight"),Plan{fail:vec![Step::FileSync],..Default::default()});
+                assert!(pending.ack_before_start_reply(&Ok(Some(actual))).await.is_none());
+                assert!(fault.events().iter().any(|event|event.step==Step::FileSync&&!event.ok));
+                drop(fault);
+                let retained=fixture.durable().unwrap();
+                assert_eq!(retained.stop_notice_message_id,None);
+                assert_ne!(retained.clear_before_start_receipt(CURRENT),inflight::GuardedClearOutcome::Cleared,"unconfirmed notice never grants clear");
+                retained
+            };
+            let mut fresh=crate::services::discord::make_shared_data_for_tests();
+            Arc::get_mut(&mut fresh).unwrap().restart.current_generation=CURRENT+1;
+            let before=remote.calls.lock().unwrap().len();
+            let decoded=decode(&fresh,&fixture.provider,&row).expect("new runtime reads the same receipt");
+            assert_eq!(decoded.settle(&remote.http,&fresh,&row).await,BeforeStartRestartReport::Settled);
+            assert!(fixture.durable().is_none());
+            let calls=remote.calls.lock().unwrap();
+            assert_eq!(calls.iter().filter(|(route,_)|route.starts_with("POST")).count(),1);
+            assert!(!calls.iter().any(|(route,_)|route.starts_with("PATCH")||route.starts_with("DELETE")));
+            assert_eq!(calls[before..].iter().filter(|(route,_)|route.starts_with("GET") && route.ends_with(&format!("/{}",actual.get()))).count(),usize::from(!acked),"Accepted is re-adopted only when its ACK is still pending");
+            assert_eq!(remote.messages.lock().unwrap().len(),1);
+        });
+    }
 }

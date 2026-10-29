@@ -64,10 +64,19 @@ pub(super) async fn seed_backlog(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) {
+    seed_backlog_message(shared, provider, channel_id, channel_id.get() + 1).await;
+}
+
+pub(super) async fn seed_backlog_message(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: u64,
+) {
     let persistence = QueuePersistenceContext::new(provider, &shared.token_hash, None);
     let enqueued = shared
         .mailbox(channel_id)
-        .enqueue(queued(channel_id.get() + 1), persistence)
+        .enqueue(queued(message_id), persistence)
         .await;
     assert!(enqueued.enqueued, "the backlog is queued and persisted");
 }

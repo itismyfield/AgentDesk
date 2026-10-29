@@ -194,6 +194,7 @@ fn same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority() {
                 Some(&expected),
                 "AgentDesk-codex-stream-tick",
                 crate::services::discord::inflight::WatcherStreamProgressPatch {
+                    rollover: None,
                     current_msg_id: Some(watcher_rollover_msg_id),
                     full_response: answer.clone(),
                     response_sent_offset: 0,

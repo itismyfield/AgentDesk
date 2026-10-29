@@ -3211,7 +3211,7 @@ async fn s3_completion_fixture_body(
         &provider,
         (channel, user, current),
         owned.map(MessageId::new),
-        (tmux, &lease, anchor),
+        (tmux, &lease, anchor, None),
         streamed,
     )
     .await;
@@ -3252,16 +3252,9 @@ async fn s3_completion_fixture_body(
         "{}",
         gateway.traffic_dump()
     );
-    let expected = if signal != Some(true) {
-        owned
-            .filter(|id| Some(*id) != durable && *id != 880004)
-            .map(MessageId::new)
-            .into_iter()
-            .collect::<Vec<_>>()
-    } else {
-        vec![]
-    };
-    assert_eq!(*gateway.deleted.lock().unwrap(), expected);
+    // An aborted entry's placeholder is an unconfirmed response
+    // candidate, so no abort path deletes it, owned or not.
+    assert_eq!(*gateway.deleted.lock().unwrap(), Vec::<MessageId>::new());
 }
 
 #[cfg(unix)]
@@ -3456,7 +3449,7 @@ fn completion_timeout_is_not_an_ack_and_preserves_anchor() {
                     &provider,
                     (channel, user, current),
                     None,
-                    (tmux, &lease, anchor),
+                    (tmux, &lease, anchor, None),
                     true,
                 )
                 .await;
@@ -6933,4 +6926,110 @@ async fn steer_echo_note_p2_allowed_mentions_preserve_existing_escape() {
         body["allowed_mentions"]["parse"],
         serde_json::json!(["users"])
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a2_t04_actual_capture_keeps_none_hint_pending_then_finishes_one_body() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t04_actual_capture_keeps_none_hint_pending_then_finishes_one_body"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    use crate::services::discord::inflight;
+    use crate::services::discord::recovery_engine::BodyCreateTestRemote;
+    use crate::services::discord::turn_bridge::BridgeCompletionSignal;
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        for (index, provider) in [ProviderKind::Claude, ProviderKind::Codex].into_iter().enumerate() {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(75_072_410 + index as u64);
+            let remote = BodyCreateTestRemote::new(channel.get()).await;
+            let _rest = crate::services::discord::shared_state::test_rest::install(remote.http.clone());
+            let input_gateway = crate::services::discord::gateway::DiscordGateway::new(remote.http.clone(),shared.clone(),provider.clone(),None);
+            let notification = "⌨ TUI direct input: capture prompt";
+            let user = input_gateway.send_message(channel,notification).await.unwrap();
+            let kind = if provider == ProviderKind::Codex { RuntimeHandoffKind::CodexTui } else { RuntimeHandoffKind::ClaudeTui };
+            let tmux = format!("a2-real-idle-capture-{}", channel.get());
+            let generation = crate::services::tmux_common::session_temp_path(&tmux, "generation");
+            std::fs::write(generation, "1").unwrap();
+            let output = temp.path().join(format!("{}.jsonl", channel.get()));
+            let body = "one captured native response🙂";
+            let text = if provider == ProviderKind::Codex {
+                format!("{}\n{}\n{}\n",
+                    serde_json::json!({"type":"session_meta", "payload":{"id":"a2-native-capture"}}),
+                    serde_json::json!({"type":"response_item", "payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":body}]}}),
+                    serde_json::json!({"type":"event_msg", "payload":{"type":"task_complete","last_agent_message":body}}))
+            } else {
+                format!("{}\n{}\n{}\n",
+                    serde_json::json!({"type":"user", "sessionId":"a2-native-capture", "message":{"content":"capture prompt"}}),
+                    serde_json::json!({"type":"assistant", "sessionId":"a2-native-capture", "message":{"content":[{"type":"text","text":body}]}}),
+                    serde_json::json!({"type":"result", "session_id":"a2-native-capture", "subtype":"success", "result":body}))
+            };
+            std::fs::write(&output, text).unwrap();
+            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&tmux, crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: kind, output_path: output.display().to_string(), relay_output_path:None, input_fifo_path:None, session_id:None, last_offset:0, relay_last_offset:None,
+            });
+            let mut lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
+            lease.turn_id = Some(format!("a2-capture-{}",channel.get()));
+            lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
+            lease.runtime_kind = Some(kind);
+            let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(provider.as_str(), &tmux, lease);
+            assert!(synthetic_start::claim_tui_direct_synthetic_turn(&shared, &provider, channel, &tmux, "capture prompt", user, &lease).await.claimed);
+            let captured = inflight::load_inflight_state_read_only(&provider,channel.get()).unwrap();
+            assert_eq!(captured.current_msg_id, 0, "real synthetic admission has no response ID");
+            crate::services::tui_prompt_dedupe::record_prompt_anchor(provider.as_str(), &tmux, channel.get(), user.get());
+            let anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(provider.as_str(), &tmux,channel.get()).unwrap();
+            let prepare = Arc::new(crate::services::discord::turn_bridge::TerminalPrepareTestHook { channel_id:channel.get(), ..Default::default() });
+            *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK.lock().unwrap() = Some(prepare.clone());
+            let gateway = Arc::new(super::bridge_gateway::TuiDirectBridgeGateway { http:remote.http.clone(), shared:shared.clone(), provider:provider.clone() });
+            let (tx, rx) = mpsc::channel();
+            let (end_tx,end_rx) = tokio::sync::oneshot::channel();
+            let reader = synthetic_bridge_handoff_pg_tests::spawn_handoff_reader(&output,0,&tmux,tx,end_tx);
+            let delivery = super::claude_idle_bridge::stream_tui_idle_response_with_gateway(&shared,provider.clone(),channel,
+                super::claude_idle_bridge::IdleBridgeSource { tmux_session_name:&tmux,output_path:&output,start_offset:0,prompt_text:"capture prompt",lease:&lease },
+                (Vec::new(),rx,Some(end_rx)),gateway.clone(),0);
+            let observe = async {
+                tokio::time::timeout(Duration::from_secs(10),prepare.entered.notified()).await.expect("actual reader/capture reaches native terminal preparation");
+                let row = inflight::load_inflight_state_read_only(&provider,channel.get()).unwrap();
+                assert_ne!(row.current_msg_id,0);
+                assert_ne!(row.current_msg_id,user.get(), "input notification is never the response anchor");
+                assert!(!row.terminal_delivery_committed);
+                assert_eq!(row.response_sent_offset,0);
+                let source = inflight::CodexRange::from_retained_tui_terminal(&row).expect("actual native source was admitted").source;
+                assert!(!crate::services::discord::outbound::delivery_record::confirmed_delivery_receipt_exists(&provider,channel,row.current_msg_id,&source));
+                assert!(super::claude_idle_bridge::finish_idle_bridge_completion(Ok(Ok(BridgeCompletionSignal::Finalized)),gateway.as_ref(),&provider,
+                    (channel,user,None::<MessageId>),None,(&tmux,&lease,Some(anchor),Some(&captured)),true).await.is_err(), "None hint/new current must not turn an uncommitted body into success");
+                assert_eq!(crate::services::tui_prompt_dedupe::prompt_anchor_for_response(provider.as_str(),&tmux,channel.get()),Some(anchor));
+                assert_eq!(shared.committed_relay_offset(channel),0);
+                prepare.release.notify_one();
+                row.current_msg_id
+            };
+            let (delivered,actual) = tokio::join!(tokio::time::timeout(Duration::from_secs(15),delivery),observe);
+            *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK.lock().unwrap() = None;
+            assert!(delivered.expect("actual bridge completes").is_ok());
+            tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
+            let calls = remote.calls.lock().unwrap();
+            // The terminal footer is a nonbody POST; bodies are the notification and one response.
+            let footer = |content: &serde_json::Value| content.as_str().is_some_and(|text| text.starts_with("-# ⏱"));
+            assert_eq!(calls.iter().filter(|(route,payload)|route.starts_with("POST") && footer(&payload["content"])).count(),1,"one terminal footer: {:?}",*calls);
+            assert_eq!(calls.iter().filter(|(route,payload)|route.starts_with("POST") && !footer(&payload["content"])).count(),2,"one input notification plus one still-eager response creation: {:?}",*calls);
+            assert!(!calls.iter().any(|(route,_)|route.starts_with("DELETE")));
+            assert!(!calls.iter().any(|(route,_)|route.ends_with(&format!("/{}",user.get())) && (route.starts_with("PATCH") || route.starts_with("DELETE"))));
+            drop(calls);
+            let messages: Vec<_> = remote.messages.lock().unwrap().iter().filter(|message| !footer(&message["content"])).cloned().collect();
+            assert_eq!(messages.len(),2);
+            assert_eq!(messages[0]["id"],user.get().to_string());
+            assert_eq!(messages[0]["content"],notification);
+            assert_eq!(messages[1]["id"],actual.to_string());
+            assert_eq!(messages[1]["content"],body);
+            assert!(crate::services::tui_prompt_dedupe::prompt_anchor_for_response(provider.as_str(),&tmux,channel.get()).is_none());
+        }
+    });
 }

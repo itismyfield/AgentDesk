@@ -353,6 +353,7 @@ pub(super) mod population_tests {
             persist_watcher_stream_progress_locked_in_root,
         };
         let patch = WatcherStreamProgressPatch {
+            rollover: None,
             current_msg_id: None,
             full_response: String::new(),
             response_sent_offset: 0,

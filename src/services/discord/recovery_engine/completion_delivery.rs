@@ -11,7 +11,7 @@ use crate::services::tui_o::cutover::{BodyClaim, BodySend, IdentityError, claim_
 
 #[cfg(all(test, unix))]
 #[path = "completion_delivery/body_create_tests.rs"]
-mod body_create_tests;
+pub(super) mod body_create_tests;
 
 pub(super) fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bool {
     relay_ok

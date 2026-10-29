@@ -477,7 +477,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         let restored_placeholder = post_terminal_state
             .restored_turn
             .as_ref()
-            .and_then(|turn| (turn.current_msg_id.get() != 0).then_some(turn.current_msg_id));
+            .and_then(|turn| turn.current_msg_id);
         let reacquired = reacquire_watcher_inflight_for_active_stream(
             watcher_provider,
             channel_id,

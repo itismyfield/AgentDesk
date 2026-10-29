@@ -19,7 +19,7 @@ struct Part {
 struct Attempt {
     version: u32,
     episode: String,
-    source: super::outbound::delivery_record::ExactJsonlSourceIdentity,
+    source: Option<super::outbound::delivery_record::ExactJsonlSourceIdentity>,
     plan: String,
     scope: String,
     total: usize,
@@ -131,7 +131,7 @@ impl PendingBind {
                     episode(&self.expected),
                     self.expected.response_sent_offset
                 )
-            || expected_source.as_ref() != Some(&attempt.source)
+            || expected_source != attempt.source
             || attempt.scope != "response"
             || attempt.total != attempt.accepted.len()
             || attempt.pending.is_some()
@@ -213,7 +213,7 @@ pub(super) async fn create_terminal(
     row: &InflightTurnState,
     body: &str,
 ) -> CreateOutcome {
-    let result = create_parts(shared, gateway, row, body).await;
+    let result = create_parts(shared, gateway, row, body, CreateScope::Response).await;
     match result {
         Ok(bind) => CreateOutcome::Ready(bind),
         Err(reason) => {
@@ -222,6 +222,65 @@ pub(super) async fn create_terminal(
             CreateOutcome::Held(reason)
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum NoticeScope {
+    BusyFollowup,
+    BeforeStartStop,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CreateScope {
+    Response,
+    Notice(NoticeScope),
+}
+impl CreateScope {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Response => "response",
+            Self::Notice(NoticeScope::BusyFollowup) => "busy-followup",
+            Self::Notice(NoticeScope::BeforeStartStop) => "before-start-stop",
+        }
+    }
+}
+
+/// A notice ACK remains separate from the response anchor and terminal receipt.
+pub(super) async fn create_notice(
+    shared: &std::sync::Arc<SharedData>,
+    gateway: &dyn TurnGateway,
+    row: &InflightTurnState,
+    body: &str,
+    scope: NoticeScope,
+) -> Result<MessageId, String> {
+    let allowed = match scope {
+        NoticeScope::BeforeStartStop => {
+            row.herdr_before_start_stop.as_ref().is_some_and(|receipt| {
+                receipt.supported()
+                    && receipt.notice_pending()
+                    && row.turn_nonce.as_deref() == Some(receipt.turn_nonce())
+            })
+        }
+        NoticeScope::BusyFollowup => {
+            row.herdr_before_start_stop.is_none()
+                && row.full_response.trim().is_empty()
+                && row.tui_terminal_kind.is_none()
+                && !row.terminal_delivery_committed
+        }
+    };
+    if !allowed {
+        return Err("notice has no admitted authority".into());
+    }
+    if super::formatting::needs_multiple_messages(body) {
+        return Err("notice too long".into());
+    }
+    let result = create_parts(shared, gateway, row, body, CreateScope::Notice(scope))
+        .await
+        .map(|ack| ack.anchor);
+    if let Err(reason) = &result {
+        tracing::warn!(episode = %episode(row), scope = CreateScope::Notice(scope).name(),
+            channel_id = row.channel_id, %reason, "notice create held; projection remains pending");
+    }
+    result
 }
 
 fn attempt_path(root: &std::path::Path, shared: &SharedData, row: &InflightTurnState) -> PathBuf {
@@ -263,13 +322,37 @@ async fn create_parts(
     gateway: &dyn TurnGateway,
     row: &InflightTurnState,
     body: &str,
+    scope: CreateScope,
 ) -> Result<PendingBind, String> {
     let root = runtime_store::runtime_root().ok_or("runtime root missing")?;
-    let source = inflight::CodexRange::from_retained_tui_terminal(row)
-        .ok_or("pinned source missing")?
-        .source;
-    let key = format!("{}:{}", episode(row), row.response_sent_offset);
-    let path = attempt_path(&root, shared, row);
+    let source = if scope == CreateScope::Response {
+        Some(
+            inflight::CodexRange::from_retained_tui_terminal(row)
+                .ok_or("pinned source missing")?
+                .source,
+        )
+    } else {
+        None
+    };
+    let key = if scope == CreateScope::Response {
+        format!("{}:{}", episode(row), row.response_sent_offset)
+    } else {
+        format!("{}:{}", episode(row), scope.name())
+    };
+    let path = if scope == CreateScope::Response {
+        attempt_path(&root, shared, row)
+    } else {
+        attempt_path(&root, shared, row).with_file_name(format!(
+            "{}-{}.json",
+            episode(row),
+            scope.name()
+        ))
+    };
+    let reference = if scope == CreateScope::Response {
+        None
+    } else {
+        inflight::opt_message_id(row.user_msg_id).map(|id| (row.channel_id, id.get()))
+    };
     let chunks = split_for_create(body);
     if chunks.is_empty() || body.trim().is_empty() {
         return Err("empty body".into());
@@ -287,7 +370,7 @@ async fn create_parts(
                     episode: key.clone(),
                     source: source.clone(),
                     plan: plan.clone(),
-                    scope: "response".into(),
+                    scope: scope.name().into(),
                     total: chunks.len(),
                     accepted: Vec::new(),
                     pending: None,
@@ -297,7 +380,7 @@ async fn create_parts(
             if attempt.version != 1
                 || attempt.episode != key
                 || attempt.source != source
-                || attempt.scope != "response"
+                || attempt.scope != scope.name()
             {
                 return Err("unknown or foreign attempt".into());
             }
@@ -306,19 +389,23 @@ async fn create_parts(
                 return Err("invalid accepted ID list".into());
             }
             // A bound winner may have been legitimately EDITed after the initial ACK.
-            if row_guard.state().current_msg_id != 0
+            let winner = match scope {
+                CreateScope::Response => row_guard.state().current_msg_id,
+                CreateScope::Notice(NoticeScope::BeforeStartStop) => {
+                    row_guard.state().stop_notice_message_id.unwrap_or(0)
+                }
+                CreateScope::Notice(NoticeScope::BusyFollowup) => 0,
+            };
+            if winner != 0
                 && attempt.accepted.len() == attempt.total
                 && attempt.pending.is_none()
-                && attempt
-                    .accepted
-                    .last()
-                    .is_some_and(|p| p.0 == row_guard.state().current_msg_id)
+                && attempt.accepted.last().is_some_and(|p| p.0 == winner)
             {
                 return Ok(PendingBind {
                     expected: Box::new(row.clone()),
                     path: path.clone(),
                     plan: attempt.plan.clone(),
-                    anchor: MessageId::new(row_guard.state().current_msg_id),
+                    anchor: MessageId::new(winner),
                     len: row_guard.state().current_msg_len,
                     commit: None,
                 });
@@ -350,7 +437,7 @@ async fn create_parts(
                             ChannelId::new(row.channel_id),
                             MessageId::new(id),
                             &chunks[index],
-                            None,
+                            reference,
                         )
                         .await?;
                 }
@@ -368,12 +455,13 @@ async fn create_parts(
             if attempt.pending.is_none() {
                 attempt.last = None;
                 use base64::Engine;
-                let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .encode(&Sha256::digest(format!("{key}:response:{ordinal}").as_bytes())[..16]);
+                let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                    &Sha256::digest(format!("{key}:{}:{ordinal}", scope.name()).as_bytes())[..16],
+                );
                 attempt.pending = Some(Part {
                     nonce: format!("bc{nonce}"),
                     text: chunks[ordinal].clone(),
-                    reference: None,
+                    reference,
                     first_ms: chrono::Utc::now().timestamp_millis(),
                 });
             }
@@ -381,7 +469,7 @@ async fn create_parts(
             if part.text != chunks[ordinal]
                 || part.nonce.len() > 25
                 || part.nonce.is_empty()
-                || part.reference.is_some()
+                || part.reference != reference
             {
                 return Err("invalid frozen part".into());
             }
@@ -416,7 +504,7 @@ async fn create_parts(
         let mut fresh = store::read(&path)?.ok_or("attempt vanished during HTTP")?;
         if fresh.version != 1
             || fresh.episode != key
-            || fresh.scope != "response"
+            || fresh.scope != scope.name()
             || fresh.plan != plan
             || fresh.source != source
             || fresh.total != chunks.len()

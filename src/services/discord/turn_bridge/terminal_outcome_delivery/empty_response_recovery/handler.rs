@@ -52,6 +52,8 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) struct 
         bool,
     pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) claude_tui_followup_busy_readiness_timeout:
         bool,
+    pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) busy_requeue_candidate:
+        bool,
     pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) rx_disconnected: bool,
     pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) turn_start:
         std::time::Instant,
@@ -449,7 +451,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
         // Headless silent trigger (metadata.silent=true): suppress assistant
         // text delivery entirely. Lifecycle/error/cancel notifications still
         // flow through their own paths.
-        let silent_turn_handled = if inflight_state.silent_turn {
+        let silent_turn_handled = if inflight_state.silent_turn && !ctx.busy_requeue_candidate && !claude_tui_busy_requeue_pending {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 🤫 turn_bridge: silent_turn suppressed terminal delivery for channel {} ({} chars)",

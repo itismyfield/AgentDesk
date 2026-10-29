@@ -78,7 +78,7 @@ pub(super) async fn apply_busy_requeue_if_pending(
     preserve_inflight_for_cleanup_retry: &mut bool,
 ) -> Option<followup_requeue::FollowupRequeueOutcome> {
     let attempt = pending?;
-    let outcome = followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
+    let mut outcome = followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
         shared_owned,
         provider,
         channel_id,
@@ -102,21 +102,31 @@ pub(super) async fn apply_busy_requeue_if_pending(
             "Claude TUI busy follow-up requeue failed; preserving inflight instead of reporting success"
         );
     }
-    // #4888: the bound notice IS this turn's placeholder (intake reuses the
-    // binding, and the first busy binds `current_msg_id`), so the normal
-    // terminal-delivery edit below lands on the same single card. A divergence
-    // means the binding was just dropped as unusable; leave it to the next
-    // attempt rather than editing a card this turn does not own.
-    if outcome.notice_message_id != MessageId::new(inflight_state.current_msg_id) {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            user_msg_id = inflight_state.user_msg_id,
-            notice_message_id = outcome.notice_message_id.get(),
-            current_msg_id = inflight_state.current_msg_id,
-            "busy follow-up notice diverged from the live placeholder; delivering on the placeholder"
-        );
+    if !outcome.preparation_held && !outcome.notice_projection_pending {
+        let shown = if let (Some(http), Some(id)) = (
+            shared_owned.serenity_http_or_token_fallback(),
+            outcome.notice_message_id,
+        ) {
+            let gateway = super::super::super::gateway::DiscordGateway::new(
+                http,
+                shared_owned.clone(),
+                provider.clone(),
+                None,
+            );
+            super::super::super::gateway::TurnGateway::edit_message(
+                &gateway, channel_id, id, response,
+            )
+            .await
+            .is_ok()
+        } else {
+            false
+        };
+        if !shown {
+            outcome.notice_projection_pending = true;
+            *preserve_inflight_for_cleanup_retry = true;
+        }
     }
+    delivery_response.clear();
     Some(outcome)
 }
 
@@ -130,7 +140,8 @@ mod tests {
             preparation_held: false,
             requeued: false,
             retry_capped: true,
-            notice_message_id: MessageId::new(100_000_004_888_301),
+            notice_message_id: Some(MessageId::new(100_000_004_888_301)),
+            notice_projection_pending: false,
         };
 
         let (preserve_inflight, response) = busy_requeue_delivery_policy(outcome);

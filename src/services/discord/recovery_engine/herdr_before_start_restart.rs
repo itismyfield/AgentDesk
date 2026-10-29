@@ -136,9 +136,6 @@ impl BeforeStartRestart {
         }
         let mut row = state.clone();
         // A pending or delivered receipt without its message is never settled.
-        if row.current_msg_id == 0 {
-            return kept(state, "no message to show the stop on");
-        }
         if row
             .herdr_before_start_stop
             .as_ref()
@@ -146,7 +143,7 @@ impl BeforeStartRestart {
             || inflight::receipt_mutant("delivered-resend")
         {
             // Where O owns the body the stop is a reply to the turn's message, never an edit of it.
-            let acked = if o_body {
+            let acked = if o_body || row.current_msg_id == 0 {
                 let notice =
                     crate::services::discord::turn_bridge::before_start_stop::reply_and_ack_stop;
                 notice(http, shared, &row).await

@@ -31,9 +31,10 @@ pub(super) async fn exit_held(
     gateway: &dyn TurnGateway,
     actor: &Arc<CancelToken>,
     row: &InflightTurnState,
-    current_msg_id: MessageId,
+    current_msg_id: impl Into<Option<MessageId>>,
     (cancelled, terminal_admitted, held): (bool, bool, bool),
 ) -> bool {
+    let current_msg_id = current_msg_id.into();
     // The row pass already settled this turn and woke its reader: nothing is left to finish.
     let settled = actor.is_completion_cleanup() && actor.herdr_interrupt_state().is_some();
     if held
@@ -60,7 +61,7 @@ async fn run_policy_close(
     gateway: &dyn TurnGateway,
     actor: &Arc<CancelToken>,
     row: &InflightTurnState,
-    current_msg_id: MessageId,
+    current_msg_id: Option<MessageId>,
     proof: &BeforeStartProof,
 ) -> bool {
     let channel = ChannelId::new(row.channel_id);
@@ -77,12 +78,31 @@ async fn run_policy_close(
                 row,
                 (proof, current_msg_id),
                 &mut previous_sent,
-                || {
-                    gateway.replace_message_with_outcome(
-                        channel,
-                        current_msg_id,
-                        ADMITTED_ABORT_NOTICE,
-                    )
+                |admitted: InflightTurnState| async move {
+                    if let Some(current) = current_msg_id {
+                        gateway
+                            .replace_message_with_outcome(channel, current, ADMITTED_ABORT_NOTICE)
+                            .await
+                            .map(StopNotice::Existing)
+                    } else {
+                        #[cfg(unix)]
+                        {
+                            crate::services::discord::body_create::create_notice(
+                                shared,
+                                gateway,
+                                &admitted,
+                                ADMITTED_ABORT_NOTICE,
+                                crate::services::discord::body_create::NoticeScope::BeforeStartStop,
+                            )
+                            .await
+                            .map(StopNotice::from)
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = admitted;
+                            Err("unanchored stop notice unavailable".into())
+                        }
+                    }
                 },
             )
             .await;
@@ -115,24 +135,42 @@ async fn run_policy_close(
     settled
 }
 
+#[derive(Clone)]
+enum StopNotice {
+    Existing(ReplaceLongMessageOutcome),
+    Created(MessageId),
+}
+impl From<ReplaceLongMessageOutcome> for StopNotice {
+    fn from(value: ReplaceLongMessageOutcome) -> Self {
+        Self::Existing(value)
+    }
+}
+impl From<MessageId> for StopNotice {
+    fn from(value: MessageId) -> Self {
+        Self::Created(value)
+    }
+}
+
 enum CloseAttempt {
     Settled,
     Held,
     Retry(&'static str),
 }
 
-async fn consume<F>(
+async fn consume<F, N>(
     shared: &Arc<SharedData>,
     (fin, mailbox): (&TurnFinalizer, &ChannelMailboxHandle),
     actor: &Arc<CancelToken>,
     row: &InflightTurnState,
-    (proof, anchor): (&BeforeStartProof, MessageId),
-    previous_sent: &mut Option<ReplaceLongMessageOutcome>,
-    notice: impl FnOnce() -> F,
+    (proof, anchor): (&BeforeStartProof, impl Into<Option<MessageId>>),
+    previous_sent: &mut Option<StopNotice>,
+    notice: impl FnOnce(InflightTurnState) -> F,
 ) -> CloseAttempt
 where
-    F: std::future::Future<Output = Result<ReplaceLongMessageOutcome, String>>,
+    F: std::future::Future<Output = Result<N, String>>,
+    N: Into<StopNotice>,
 {
+    let anchor = anchor.into();
     let Some(state) = actor.herdr_interrupt_state() else {
         return CloseAttempt::Held;
     };
@@ -166,7 +204,9 @@ where
     // The stop shows on the durable row's message, as a reply where O owns that body; an
     // unreadable ownership shows nothing.
     let o_body = o_owns_body(&admitted);
-    if admitted.current_msg_id != anchor.get() || o_body.is_none() {
+    if crate::services::discord::inflight::opt_message_id(admitted.current_msg_id) != anchor
+        || o_body.is_none()
+    {
         return CloseAttempt::Held;
     }
     if !mailbox_owns(mailbox, actor).await {
@@ -193,16 +233,26 @@ where
         // A successful send remains evidence for this anchor's ACK, never a substitute for it.
         let sent = match previous_sent.as_ref() {
             Some(sent) => Ok(sent.clone()),
-            None => notice().await,
+            None => notice(admitted.clone()).await.map(Into::into),
         };
         if let Ok(
-            sent @ (ReplaceLongMessageOutcome::EditedOriginal
-            | ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }),
+            sent @ (StopNotice::Existing(
+                ReplaceLongMessageOutcome::EditedOriginal
+                | ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. },
+            )
+            | StopNotice::Created(_)),
         ) = &sent
         {
             *previous_sent = Some(sent.clone());
         }
-        let Some(acked) = admitted.ack_before_start_notice(&sent).await else {
+        let acked = match &sent {
+            Ok(StopNotice::Existing(sent)) => {
+                admitted.ack_before_start_notice(&Ok(sent.clone())).await
+            }
+            Ok(StopNotice::Created(id)) => admitted.ack_before_start_reply(&Ok(Some(*id))).await,
+            Err(_) => None,
+        };
+        let Some(acked) = acked else {
             return CloseAttempt::Retry(if previous_sent.is_some() {
                 "ack"
             } else {
@@ -258,7 +308,27 @@ pub(in crate::services::discord) async fn send_stop_reply(
     row: &InflightTurnState,
 ) -> Result<Option<MessageId>, String> {
     if row.current_msg_id == 0 {
-        return Err("no message to reply to".into());
+        #[cfg(unix)]
+        {
+            let provider = row.provider_kind().ok_or("stop provider missing")?;
+            let gateway = crate::services::discord::gateway::DiscordGateway::new(
+                http.clone(),
+                shared.clone(),
+                provider,
+                None,
+            );
+            return crate::services::discord::body_create::create_notice(
+                shared,
+                &gateway,
+                row,
+                ADMITTED_ABORT_NOTICE,
+                crate::services::discord::body_create::NoticeScope::BeforeStartStop,
+            )
+            .await
+            .map(Some);
+        }
+        #[cfg(not(unix))]
+        return Err("unanchored stop notice unavailable".into());
     }
     let nonce = row.turn_nonce.as_deref().unwrap_or_default();
     crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
@@ -312,7 +382,7 @@ async fn consume_once(
             row,
             proof,
             &mut None,
-            || notice
+            |_| notice
         )
         .await,
         CloseAttempt::Settled

@@ -9,12 +9,12 @@ use std::sync::Mutex;
 
 type PostHook = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 
-struct Remote {
-    http: Arc<serenity::Http>,
-    calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
-    messages: Arc<Mutex<Vec<serde_json::Value>>>,
-    fault: Arc<Mutex<Option<(usize, bool)>>>,
-    on_post: PostHook,
+pub(in crate::services::discord) struct Remote {
+    pub(in crate::services::discord) http: Arc<serenity::Http>,
+    pub(in crate::services::discord) calls: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    pub(in crate::services::discord) messages: Arc<Mutex<Vec<serde_json::Value>>>,
+    pub(in crate::services::discord) fault: Arc<Mutex<Option<(usize, bool)>>>,
+    pub(in crate::services::discord) on_post: PostHook,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Remote {
@@ -23,7 +23,7 @@ impl Drop for Remote {
     }
 }
 impl Remote {
-    async fn new(channel: u64) -> Self {
+    pub(in crate::services::discord) async fn new(channel: u64) -> Self {
         use axum::{
             Json, Router,
             body::Bytes,
@@ -46,6 +46,7 @@ impl Remote {
             async move {
                 let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
                 log.lock().unwrap().push((format!("{method} {}", uri.path()), payload.clone()));
+                if method == Method::PUT && uri.path().contains("/reactions/") { return axum::http::StatusCode::NO_CONTENT.into_response(); }
                 let mut messages = store.lock().unwrap();
                 if method == Method::POST {
                     let number = posts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -140,6 +141,27 @@ async fn admitted_episode_kind(
     episode: u64,
     synthetic: bool,
 ) -> inflight::InflightTurnState {
+    admitted_episode_kind_in_tmux(
+        root,
+        channel,
+        body,
+        current,
+        provider,
+        episode,
+        (synthetic, None),
+    )
+    .await
+}
+
+async fn admitted_episode_kind_in_tmux(
+    root: &std::path::Path,
+    channel: u64,
+    body: &str,
+    current: u64,
+    provider: ProviderKind,
+    episode: u64,
+    (synthetic, tmux_override): (bool, Option<&str>),
+) -> inflight::InflightTurnState {
     let shared = make_shared_data_for_tests();
     let kind = if provider == ProviderKind::Codex {
         RuntimeHandoffKind::CodexTui
@@ -149,7 +171,9 @@ async fn admitted_episode_kind(
     let actor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(format!(
         "body-{channel}-{episode}"
     ))));
-    let tmux = format!("test-body-create-{channel}");
+    let tmux = tmux_override
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("test-body-create-{channel}"));
     let path = root.join(format!("{channel}.jsonl"));
     std::fs::write(
         &path,
@@ -1722,4 +1746,463 @@ fn r1_short_terminal_boundaries_create_one_message() {
                 no_body_delete(&remote);
             }
         });
+}
+
+#[test]
+fn a2_t08_public_idle_busy_unknown_preserve_the_eager_anchor() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t08_public_idle_busy_unknown_preserve_the_eager_anchor"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for (index, provider) in [ProviderKind::Claude, ProviderKind::Codex]
+                .into_iter()
+                .enumerate()
+            {
+                for mode in 0..4 {
+                    let channel = 75_072_850 + index as u64 * 10 + mode;
+                    let remote = Remote::new(channel).await;
+                    let shared = runtime(2);
+                    let gateway = DiscordGateway::new(
+                        remote.http.clone(),
+                        shared.clone(),
+                        provider.clone(),
+                        None,
+                    );
+                    let current = gateway
+                        .send_message(ChannelId::new(channel), "⠋ 계속 처리 중")
+                        .await
+                        .unwrap()
+                        .get();
+                    let mut row = admitted_episode_kind(
+                        root.path(),
+                        channel,
+                        "retained native answer",
+                        current,
+                        provider.clone(),
+                        0,
+                        true,
+                    )
+                    .await;
+                    let output = std::path::Path::new(row.output_path.as_ref().unwrap());
+                    if mode == 1 {
+                        std::fs::write(output, "{\"unrecognized\":true}\n").unwrap();
+                        row.last_offset = std::fs::metadata(output).unwrap().len();
+                        inflight::save_inflight_state(&row).unwrap();
+                    } else if mode == 2 {
+                        let ongoing = if provider == ProviderKind::Claude {
+                            "{\"type\":\"user\",\"message\":{\"content\":\"ongoing\"}}\n"
+                        } else {
+                            // The native rollout's task start envelope, not the exec-mode event.
+                            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n"
+                        };
+                        assert!(!ongoing.contains("result") && !ongoing.contains("turn.completed"));
+                        std::fs::write(output, ongoing).unwrap();
+                    } else if mode == 3 {
+                        std::fs::write(output, "").unwrap();
+                    } else {
+                        use std::io::Write;
+                        std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(output)
+                            .unwrap()
+                            .write_all(b"{\"ty")
+                            .unwrap();
+                    }
+                    let readiness = crate::services::tui_turn_state::jsonl_ready_for_input(
+                        &provider,
+                        row.runtime_kind,
+                        output,
+                        Some(row.last_offset),
+                    );
+                    assert_eq!(
+                        readiness,
+                        Some(if mode == 1 || mode == 3 {
+                            crate::services::tui_turn_state::TuiReadyState::Unknown
+                        } else {
+                            crate::services::tui_turn_state::TuiReadyState::Busy
+                        }),
+                        "the exact structured readiness premise must hold ({provider:?} mode {mode})"
+                    );
+                    let path = inflight::inflight_state_path(
+                        &inflight::inflight_runtime_root().unwrap(),
+                        &provider,
+                        channel,
+                    );
+                    let before = std::fs::read(&path).unwrap();
+                    let calls = remote.calls.lock().unwrap().len();
+                    assert!(
+                        !super::super::idle_captured_response::recover_idle_partial_response(
+                            &remote.http,
+                            &shared,
+                            &row,
+                            output
+                        )
+                        .await
+                    );
+                    assert_eq!(
+                        std::fs::read(&path).unwrap(),
+                        before,
+                        "hold keeps the entire delivery obligation"
+                    );
+                    assert_eq!(
+                        remote.calls.lock().unwrap().len(),
+                        calls,
+                        "Busy/Unknown makes no POST/PATCH/DELETE"
+                    );
+                    assert_eq!(
+                        remote.messages.lock().unwrap()[0]["content"],
+                        "⠋ 계속 처리 중"
+                    );
+                }
+            }
+        });
+}
+
+#[test]
+fn a2_t08_public_idle_live_emission_and_actor_claim_have_no_second_owner() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t08_public_idle_live_emission_and_actor_claim_have_no_second_owner"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for (index, provider) in [ProviderKind::Claude, ProviderKind::Codex]
+                .into_iter()
+                .enumerate()
+            {
+                let channel = 75_072_880 + index as u64;
+                let remote = Remote::new(channel).await;
+                let shared = runtime(2);
+                let row = admitted_episode_kind(
+                    root.path(),
+                    channel,
+                    "a live owner retains this body",
+                    0,
+                    provider.clone(),
+                    0,
+                    true,
+                )
+                .await;
+                let output = std::path::Path::new(row.output_path.as_ref().unwrap());
+                assert_eq!(
+                    crate::services::tui_turn_state::jsonl_ready_for_input(
+                        &provider,
+                        row.runtime_kind,
+                        output,
+                        Some(row.last_offset)
+                    ),
+                    Some(crate::services::tui_turn_state::TuiReadyState::Ready)
+                );
+                let path = inflight::inflight_state_path(
+                    &inflight::inflight_runtime_root().unwrap(),
+                    &provider,
+                    channel,
+                );
+                let before = std::fs::read(&path).unwrap();
+                let coord = shared.tmux_relay_coord(ChannelId::new(channel));
+                coord
+                    .relay_slot
+                    .store(1, std::sync::atomic::Ordering::Release);
+                assert!(shared.relay_emission_in_flight(ChannelId::new(channel)));
+                assert!(
+                    !super::super::idle_captured_response::recover_idle_partial_response(
+                        &remote.http,
+                        &shared,
+                        &row,
+                        output
+                    )
+                    .await
+                );
+                coord
+                    .relay_slot
+                    .store(0, std::sync::atomic::Ordering::Release);
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+                let claim = crate::services::discord::tui_prompt_relay::capture_dormant_partial(
+                    &shared, &row, output,
+                )
+                .await
+                .expect("actual dormant capture owns the actor and channel admission");
+                assert!(
+                    crate::services::discord::mailbox_snapshot(&shared, ChannelId::new(channel))
+                        .await
+                        .cancel_token
+                        .as_ref()
+                        .is_some_and(|actor| Arc::ptr_eq(actor, &claim.actor))
+                );
+                let owned = std::fs::read(&path).unwrap();
+                assert!(
+                    !super::super::idle_captured_response::recover_idle_partial_response(
+                        &remote.http,
+                        &shared,
+                        &claim.row,
+                        output
+                    )
+                    .await
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), owned);
+                assert!(
+                    remote.calls.lock().unwrap().is_empty(),
+                    "a second owner issues no transport method"
+                );
+            }
+        });
+}
+
+#[test]
+fn a2_t08_public_idle_rejects_replaced_source_successor_and_runtime() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t08_public_idle_rejects_replaced_source_successor_and_runtime"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for (index, provider) in [ProviderKind::Claude, ProviderKind::Codex]
+                .into_iter()
+                .enumerate()
+            {
+                for case in 0..4 {
+                    let channel = 75_072_900 + index as u64 * 10 + case;
+                    let remote = Remote::new(channel).await;
+                    let shared = runtime(2);
+                    let row = admitted_episode_kind(
+                        root.path(),
+                        channel,
+                        "exact old native source",
+                        0,
+                        provider.clone(),
+                        0,
+                        true,
+                    )
+                    .await;
+                    let output = std::path::Path::new(row.output_path.as_ref().unwrap());
+                    let path = inflight::inflight_state_path(
+                        &inflight::inflight_runtime_root().unwrap(),
+                        &provider,
+                        channel,
+                    );
+                    let mut fresh = row.clone();
+                    let passed = if case == 0 {
+                        let saved = output.with_extension("original");
+                        std::fs::rename(output, &saved).unwrap();
+                        std::fs::copy(saved, output).unwrap();
+                        output.to_path_buf()
+                    } else if case == 1 {
+                        let wrong = output.with_extension("other");
+                        std::fs::copy(output, &wrong).unwrap();
+                        wrong
+                    } else {
+                        if case == 2 {
+                            fresh.turn_nonce = Some("successor-native-turn".into());
+                        } else {
+                            fresh.runtime_kind = Some(if provider == ProviderKind::Codex {
+                                RuntimeHandoffKind::ClaudeTui
+                            } else {
+                                RuntimeHandoffKind::CodexTui
+                            });
+                        }
+                        std::fs::write(&path, serde_json::to_vec(&fresh).unwrap()).unwrap();
+                        output.to_path_buf()
+                    };
+                    assert_eq!(
+                        crate::services::tui_turn_state::jsonl_ready_for_input(
+                            &provider,
+                            row.runtime_kind,
+                            &passed,
+                            Some(row.last_offset)
+                        ),
+                        Some(crate::services::tui_turn_state::TuiReadyState::Ready),
+                        "negative is identity, not a missing Ready hit"
+                    );
+                    let before = std::fs::read(&path).unwrap();
+                    assert!(
+                        !super::super::idle_captured_response::recover_idle_partial_response(
+                            &remote.http,
+                            &shared,
+                            &row,
+                            &passed
+                        )
+                        .await,
+                        "case={case}, provider={provider:?}"
+                    );
+                    assert_eq!(std::fs::read(&path).unwrap(), before);
+                    assert!(remote.calls.lock().unwrap().is_empty());
+                }
+            }
+        });
+}
+
+pub(in crate::services::discord) async fn a2_admitted_for_tmux(
+    root: &std::path::Path,
+    channel: u64,
+    body: &str,
+    current: u64,
+    tmux: &str,
+) -> inflight::InflightTurnState {
+    admitted_episode_kind_in_tmux(
+        root,
+        channel,
+        body,
+        current,
+        ProviderKind::Claude,
+        0,
+        (false, Some(tmux)),
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn a2_post_captured_without_bind(
+    remote: &Remote,
+    shared: &Arc<SharedData>,
+    row: &inflight::InflightTurnState,
+) -> MessageId {
+    let delivery = recovery_on(remote, row, shared).await;
+    assert_eq!(delivery.outcome, RecoveryRelayOutcome::Delivered);
+    assert!(
+        delivery.body_bind.is_some(),
+        "actual captured pinned publisher returned an uncommitted bind"
+    );
+    drop(delivery);
+    assert_eq!(
+        inflight::load_inflight_state_read_only(&row.provider_kind().unwrap(), row.channel_id)
+            .unwrap()
+            .current_msg_id,
+        0
+    );
+    let messages = remote.messages.lock().unwrap();
+    MessageId::new(
+        messages.last().unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+    )
+}
+
+pub(in crate::services::discord) async fn a2_stale_captured_recovery_is_held(
+    remote: &Remote,
+    shared: &Arc<SharedData>,
+    row: &inflight::InflightTurnState,
+) -> bool {
+    matches!(
+        recovery_on(remote, row, shared).await.outcome,
+        RecoveryRelayOutcome::TransientFailure
+    )
+}
+
+#[test]
+fn a2_t08_public_idle_refuses_an_unproven_actor_even_with_the_same_nonce() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t08_public_idle_refuses_an_unproven_actor_even_with_the_same_nonce"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for (index, provider) in [ProviderKind::Claude, ProviderKind::Codex]
+                .into_iter()
+                .enumerate()
+            {
+                let channel = 75_072_890 + index as u64;
+                let remote = Remote::new(channel).await;
+                let shared = runtime(2);
+                let row = admitted_episode_kind(
+                    root.path(),
+                    channel,
+                    "native body held by another actor",
+                    0,
+                    provider.clone(),
+                    0,
+                    true,
+                )
+                .await;
+                let output = std::path::Path::new(row.output_path.as_ref().unwrap());
+                assert_eq!(
+                    crate::services::tui_turn_state::jsonl_ready_for_input(
+                        &provider,
+                        row.runtime_kind,
+                        output,
+                        Some(row.last_offset)
+                    ),
+                    Some(crate::services::tui_turn_state::TuiReadyState::Ready)
+                );
+                let foreign = Arc::new(CancelToken::from_persisted_turn_nonce(
+                    row.turn_nonce.clone(),
+                ));
+                shared
+                    .mailbox(ChannelId::new(channel))
+                    .restore_active_turn(
+                        foreign.clone(),
+                        UserId::new(row.request_owner_user_id),
+                        MessageId::new(row.user_msg_id),
+                    )
+                    .await;
+                let path = inflight::inflight_state_path(
+                    &inflight::inflight_runtime_root().unwrap(),
+                    &provider,
+                    channel,
+                );
+                let before = std::fs::read(&path).unwrap();
+                assert!(
+                    !super::super::idle_captured_response::recover_idle_partial_response(
+                        &remote.http,
+                        &shared,
+                        &row,
+                        output
+                    )
+                    .await
+                );
+                assert_eq!(std::fs::read(path).unwrap(), before);
+                assert!(remote.calls.lock().unwrap().is_empty());
+                assert!(
+                    crate::services::discord::mailbox_snapshot(&shared, ChannelId::new(channel))
+                        .await
+                        .cancel_token
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &foreign))
+                );
+                assert!(!foreign.cancelled.load(std::sync::atomic::Ordering::Acquire));
+            }
+        });
+}
+
+pub(in crate::services::discord) async fn a2_commit_captured_body(
+    remote: &Remote,
+    shared: &Arc<SharedData>,
+    row: &inflight::InflightTurnState,
+) -> inflight::InflightTurnState {
+    let delivery = recovery_on(remote, row, shared).await;
+    finish(shared, row, delivery).await
 }

@@ -393,6 +393,8 @@ async fn recorder_with_failed_tail(channel: ChannelId) -> Recorder {
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     Recorder {
+        on_post: Default::default(),
+        on_patch: Default::default(),
         calls,
         bodies,
         visible,

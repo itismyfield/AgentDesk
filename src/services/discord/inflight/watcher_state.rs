@@ -19,6 +19,7 @@ use super::{
 #[derive(Debug, Clone)]
 pub(in crate::services::discord) struct WatcherStreamProgressPatch {
     pub current_msg_id: Option<u64>,
+    pub rollover: Option<WatcherRolloverGuard>,
     pub full_response: String,
     pub response_sent_offset: usize,
     pub current_tool_line: Option<String>,
@@ -31,6 +32,13 @@ pub(in crate::services::discord) struct WatcherStreamProgressPatch {
     /// grows (a terminal full-body fallback in a later iteration / after restart
     /// can delete every accumulated prefix).
     pub streaming_rollover_frozen_msg_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::services::discord) struct WatcherRolloverGuard {
+    pub expected: Box<super::InflightTurnState>,
+    pub next_msg_len: usize,
+    pub runtime_root: std::path::PathBuf,
 }
 
 /// #3558: outcome of [`persist_watcher_stream_progress_locked_in_root`].
@@ -181,6 +189,48 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
         return WatcherProgressOutcome::TerminalAlreadyCommitted;
     }
 
+    if let Some(rollover) = &patch.rollover {
+        let expected = &rollover.expected;
+        if !super::InflightEpisodePin::from_state(expected)
+            .is_same_episode_as(&super::InflightEpisodePin::from_state(&state))
+        {
+            return WatcherProgressOutcome::SuccessorOwned;
+        }
+        if expected.current_msg_id == 0
+            || state.current_msg_id != expected.current_msg_id
+            || state.current_msg_len != expected.current_msg_len
+            || state.response_sent_offset != expected.response_sent_offset
+            || state.full_response != expected.full_response
+            || state.runtime_kind != expected.runtime_kind
+            || state.output_path != expected.output_path
+            || state.tui_terminal_source_file_identity != expected.tui_terminal_source_file_identity
+            || state.tui_terminal_generation_mtime_ns != expected.tui_terminal_generation_mtime_ns
+            || state.watcher_owner_channel_id != expected.watcher_owner_channel_id
+            || super::StreamRelayAuthority::from_state(expected)
+                != super::StreamRelayAuthority::from_state(&state)
+            || !patch.full_response.starts_with(&expected.full_response)
+            || patch.current_msg_id == Some(0)
+            || patch.response_sent_offset <= expected.response_sent_offset
+            || patch.response_sent_offset > patch.full_response.len()
+            || !patch
+                .full_response
+                .is_char_boundary(patch.response_sent_offset)
+            || !patch
+                .streaming_rollover_frozen_msg_ids
+                .contains(&expected.current_msg_id)
+        {
+            return WatcherProgressOutcome::CoordinateMismatch;
+        }
+        state.current_msg_id = patch.current_msg_id.unwrap_or(0);
+        state.current_msg_len = if patch.current_msg_id.is_some() {
+            rollover.next_msg_len
+        } else {
+            0
+        };
+        if patch.current_msg_id.is_none() {
+            state.long_running_placeholder_active = false;
+        }
+    }
     if let Some(msg_id) = patch.current_msg_id {
         state.current_msg_id = msg_id;
     }
@@ -190,12 +240,14 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
     // from the caller's last unlocked snapshot.
     state.response_sent_offset =
         normalize_response_sent_offset(&state.full_response, patch.response_sent_offset);
-    state.current_tool_line = patch.current_tool_line;
-    state.prev_tool_status = patch.prev_tool_status;
-    state.any_tool_used = patch.any_tool_used;
-    state.has_post_tool_text = patch.has_post_tool_text;
-    if patch.task_notification_kind.is_some() {
-        state.task_notification_kind = patch.task_notification_kind;
+    if patch.rollover.is_none() {
+        state.current_tool_line = patch.current_tool_line;
+        state.prev_tool_status = patch.prev_tool_status;
+        state.any_tool_used = patch.any_tool_used;
+        state.has_post_tool_text = patch.has_post_tool_text;
+        if patch.task_notification_kind.is_some() {
+            state.task_notification_kind = patch.task_notification_kind;
+        }
     }
     // #3871: union-merge the frozen rollover-prefix ids into the reloaded row so
     // the set is monotonic (never drops an id another iteration already froze).
@@ -212,7 +264,20 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
         &state,
         "src/services/discord/inflight.rs:persist_watcher_stream_progress_locked_in_root",
     ) {
-        Ok(()) => WatcherProgressOutcome::Saved,
+        Ok(()) => {
+            if let Some(rollover) = &patch.rollover {
+                use crate::services::discord::runtime_store::durable_publish::{
+                    FlushStatus, flush_chain_before_publish,
+                };
+                if !path.starts_with(&rollover.runtime_root)
+                    || flush_chain_before_publish(&rollover.runtime_root, &path)
+                        != FlushStatus::Flushed
+                {
+                    return WatcherProgressOutcome::IoError;
+                }
+            }
+            WatcherProgressOutcome::Saved
+        }
         Err(_) => WatcherProgressOutcome::IoError,
     }
 }
@@ -463,6 +528,7 @@ mod watcher_progress_outcome_tests {
 
     fn patch() -> WatcherStreamProgressPatch {
         WatcherStreamProgressPatch {
+            rollover: None,
             current_msg_id: Some(900_100),
             full_response: "watcher body".to_string(),
             response_sent_offset: 0,

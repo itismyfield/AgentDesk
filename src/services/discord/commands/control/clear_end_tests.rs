@@ -10,7 +10,9 @@ use serenity::{ChannelId, MessageId, UserId};
 
 use super::super::SESSION_CLEARED_RESPONSE;
 use super::clear_channel_session_state;
-use super::clear_persist_failure_tests::{queue_len, seed_backlog, session_state};
+use super::clear_persist_failure_tests::{
+    queue_len, seed_backlog, seed_backlog_message, session_state,
+};
 use crate::services::discord::host_defer_gate::tests::{map_channel, postgres};
 use crate::services::discord::{SharedData, make_shared_data_for_tests_with_storage};
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -473,4 +475,188 @@ fn a_herdr_clear_ends_a_never_attached_pending_with_recorded_evidence_pg() {
         pool.close().await;
         db.drop().await;
     });
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a2_t11_clear_absent_accepted_and_bound_preserves_body_and_never_reposts_pg() {
+    use crate::services::discord::gateway::{DiscordGateway, TurnGateway};
+    use crate::services::discord::{
+        inflight as disk,
+        recovery_engine::{
+            BodyCreateTestRemote, a2_admitted_for_tmux, a2_post_captured_without_bind,
+            a2_stale_captured_recovery_is_held,
+        },
+    };
+    // The pinned recovery publisher reads the O writer list from runtime worker threads.
+    let name = concat!(
+        module_path!(),
+        "::a2_t11_clear_absent_accepted_and_bound_preserves_body_and_never_reposts_pg"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let source_root = tempfile::tempdir().unwrap();
+    let (db, pool) = postgres().await;
+    let mut shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    Arc::get_mut(&mut shared).unwrap().api_port = 0;
+    let provider = ProviderKind::Claude;
+    for stage in 0..3 {
+        let channel = ChannelId::new(75_072_110 + stage);
+        let name = format!("a2-clear-{stage}-{}", uuid::Uuid::new_v4().simple());
+        let managed = Managed::start(&shared, &pool, &provider, (channel, &name)).await;
+        let remote = BodyCreateTestRemote::new(channel.get()).await;
+        let _http = crate::services::discord::shared_state::test_rest::install(remote.http.clone());
+        let gateway =
+            DiscordGateway::new(remote.http.clone(), shared.clone(), provider.clone(), None);
+        let current = if stage == 2 {
+            gateway
+                .send_message(channel, "owned partial body")
+                .await
+                .unwrap()
+                .get()
+        } else {
+            0
+        };
+        if stage == 1 {
+            a2_admitted_for_tmux(
+                source_root.path(),
+                channel.get(),
+                "accepted body before bind",
+                0,
+                &managed.tmux,
+            )
+            .await;
+        } else {
+            let mut row = disk::InflightTurnState::new(
+                provider.clone(),
+                channel.get(),
+                None,
+                7,
+                channel.get() + 1,
+                current,
+                "original prompt".into(),
+                None,
+                Some(managed.tmux.clone()),
+                None,
+                None,
+                0,
+            );
+            row.turn_nonce = Some(format!("a2-clear-{stage}"));
+            row.full_response = if stage == 2 {
+                "owned partial body".into()
+            } else {
+                String::new()
+            };
+            disk::save_inflight_state(&row).unwrap();
+        };
+        let row = disk::load_inflight_state_read_only(&provider, channel.get()).unwrap();
+        let token = Arc::new(CancelToken::from_persisted_turn_nonce(
+            row.turn_nonce.clone(),
+        ));
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel,
+                token.clone(),
+                UserId::new(7),
+                MessageId::new(row.user_msg_id)
+            )
+            .await
+        );
+        crate::services::discord::increment_global_active(&shared, "a2 clear captured turn");
+        // A queued input distinct from the active one, which the mailbox already holds.
+        seed_backlog_message(&shared, &provider, channel, row.user_msg_id + 1_000).await;
+        let actual = if stage == 1 {
+            Some(a2_post_captured_without_bind(&remote, &shared, &row).await)
+        } else {
+            disk::opt_message_id(current)
+        };
+        let visible = remote.messages.lock().unwrap().clone();
+        let calls = remote.calls.lock().unwrap().len();
+        managed.fake.take_calls();
+        let report =
+            clear_channel_session_state(&remote.http, &shared, &provider, channel, "/clear")
+                .await
+                .unwrap();
+        assert_eq!(report.reply(), cleared(1));
+        assert!(token.cancelled.load(Ordering::SeqCst));
+        assert_eq!(queue_len(&shared, channel).await, 0);
+        assert!(managed.ended());
+        let retained = disk::load_inflight_state_read_only(&provider, channel.get())
+            .expect("clear leaves durable retirement with the captured producer");
+        assert_eq!(retained.current_msg_id, row.current_msg_id);
+        assert!(!retained.terminal_delivery_committed);
+        let cleanup = disk::clear_inflight_state_for_captured_episode(
+            &provider,
+            channel.get(),
+            &disk::InflightTurnIdentity::from_state(&row),
+            row.turn_nonce.as_deref(),
+        );
+        assert_eq!(
+            cleanup,
+            disk::GuardedClearOutcome::Cleared,
+            "existing exact-episode producer retirement accepts response absence"
+        );
+        assert_eq!(
+            *remote.messages.lock().unwrap(),
+            visible,
+            "clear preserves any already accepted Discord body"
+        );
+        assert!(
+            !remote.calls.lock().unwrap()[calls..]
+                .iter()
+                .any(|(route, _)| ["POST", "PATCH", "DELETE"]
+                    .iter()
+                    .any(|method| route.starts_with(method))
+                    && actual.is_some_and(|id| route.ends_with(&format!("/{}", id.get()))))
+        );
+        if stage == 1 {
+            let before = remote.calls.lock().unwrap().len();
+            assert!(a2_stale_captured_recovery_is_held(&remote, &shared, &row).await);
+            assert_eq!(
+                remote.calls.lock().unwrap().len(),
+                before,
+                "cleared captured work cannot POST or rebind"
+            );
+            assert!(disk::load_inflight_state_read_only(&provider, channel.get()).is_none());
+            let mut successor = disk::InflightTurnState::new(
+                provider.clone(),
+                channel.get(),
+                None,
+                7,
+                row.user_msg_id + 50,
+                0,
+                "successor prompt".into(),
+                None,
+                None,
+                None,
+                None,
+                0,
+            );
+            successor.turn_nonce = Some("a2-clear-successor".into());
+            disk::save_inflight_state(&successor).unwrap();
+            let successor = disk::load_inflight_state_read_only(&provider, channel.get()).unwrap();
+            assert_eq!(
+                disk::clear_inflight_state_for_captured_episode(
+                    &provider,
+                    channel.get(),
+                    &disk::InflightTurnIdentity::from_state(&row),
+                    row.turn_nonce.as_deref()
+                ),
+                disk::GuardedClearOutcome::UserMsgMismatch
+            );
+            assert!(a2_stale_captured_recovery_is_held(&remote, &shared, &row).await);
+            assert_eq!(
+                serde_json::to_value(
+                    disk::load_inflight_state_read_only(&provider, channel.get()).unwrap()
+                )
+                .unwrap(),
+                serde_json::to_value(&successor).unwrap()
+            );
+            assert_eq!(remote.calls.lock().unwrap().len(), before);
+        }
+    }
+    pool.close().await;
+    db.drop().await;
 }

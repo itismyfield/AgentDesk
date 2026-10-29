@@ -7,6 +7,7 @@ use crate::services::discord::inflight::{
     InflightTurnIdentity, WatcherProgressOutcome, inflight_runtime_root, load_inflight_state,
     save_inflight_state,
 };
+use crate::services::discord::make_shared_data_for_tests;
 use std::sync::Mutex;
 use std::time::Duration;
 use tracing_subscriber::fmt::MakeWriter;
@@ -156,7 +157,13 @@ fn wrapper_patch(fx: &Fixture, identity: Option<&InflightTurnIdentity>,
     )
 }
 
+use crate::services::discord::tmux::persist_watcher_rollover;
+
+type A2RequestHook = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
 struct Recorder {
+    on_post: A2RequestHook,
+    on_patch: A2RequestHook,
     calls: Arc<Mutex<Vec<(String, String)>>>,
     bodies: Arc<Mutex<Vec<String>>>,
     visible: Arc<Mutex<std::collections::BTreeMap<u64, String>>>,
@@ -195,6 +202,9 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
     use axum::http::{Method, StatusCode, Uri};
     use axum::response::IntoResponse;
     use axum::{Json, Router, routing::any};
+    let on_post: A2RequestHook = Arc::new(Mutex::new(None));
+    let on_patch: A2RequestHook = Arc::new(Mutex::new(None));
+    let hooks = (on_post.clone(), on_patch.clone());
     let calls = Arc::new(Mutex::new(Vec::new()));
     let recorded = calls.clone();
     let bodies = Arc::new(Mutex::new(Vec::new()));
@@ -211,9 +221,12 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
         let (recorded, channel_text, bodies) =
             (recorded.clone(), channel_text.clone(), captured_bodies.clone());
         let body_check = captured_check.clone();
+        let (post_hook, patch_hook) = (hooks.0.clone(), hooks.1.clone());
         let (visible, terminal_gate, next_id) =
             (captured_visible.clone(), captured_gate.clone(), next_id.clone());
         async move {
+            if method == Method::POST { if let Some(hook) = post_hook.lock().unwrap().take() { hook(); } }
+            if method == Method::PATCH { if let Some(hook) = patch_hook.lock().unwrap().take() { hook(); } }
             let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             recorded.lock().unwrap().push((method.to_string(), uri.to_string()));
             if method == Method::DELETE {
@@ -267,7 +280,7 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
             .build(),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Recorder { calls, bodies, visible, terminal_gate, check, http, server: server.abort_handle() }
+    Recorder { on_post, on_patch, calls, bodies, visible, terminal_gate, check, http, server: server.abort_handle() }
 }
 
 #[rustfmt::skip]
@@ -984,4 +997,282 @@ fn committed_progress_tick_preserves_cleanup_and_panel_parity() {
         "panel parity child failed: {output:?}"
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+}
+
+#[test]
+fn a2_t07_actual_freeze_commits_the_eager_tail_before_editing_it() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t07_actual_freeze_commits_the_eager_tail_before_editing_it"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    let (_lock, guard) = isolate_root();
+    let fx = seed_row(guard.root.path(), 75_072_701, false, false);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let rec = recorder_for_cycle(fx.channel, true, true).await;
+            let path = fx.path();
+            let at_tail_edit = Arc::new(Mutex::new(None));
+            let captured = at_tail_edit.clone();
+            let patch_hook = rec.on_patch.clone();
+            *rec.on_post.lock().unwrap() = Some(Box::new(move || {
+                *patch_hook.lock().unwrap() = Some(Box::new(move || {
+                    let row: InflightTurnState =
+                        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                    *captured.lock().unwrap() = Some(row);
+                }));
+            }));
+            let shared = make_shared_data_for_tests();
+            let body = "raw🙂".repeat(420);
+            let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
+            run_tick_body(&mut locals, &rec, &shared, &fx, false, &body).await;
+            assert_eq!(
+                rec.seen("POST").len(),
+                1,
+                "A2 still eagerly creates the rollover tail"
+            );
+            assert_eq!(
+                rec.seen("PATCH")
+                    .iter()
+                    .filter(|uri| *uri == &fx.uri(PLACEHOLDER_MSG))
+                    .count(),
+                1
+            );
+            assert!(rec.seen("DELETE").is_empty());
+            let row = at_tail_edit
+                .lock()
+                .unwrap()
+                .take()
+                .expect("the actual first tail-body PATCH was reached");
+            assert_eq!(row.current_msg_id, SERVER_MSG);
+            assert!(
+                row.current_msg_len > 0,
+                "the still-eager tail has a visible marker at commit"
+            );
+            assert_eq!(row.streaming_rollover_frozen_msg_ids, vec![PLACEHOLDER_MSG]);
+            assert!(row.response_sent_offset > 0 && row.response_sent_offset < body.len());
+            assert!(body.is_char_boundary(row.response_sent_offset));
+            assert_eq!(row.response_sent_offset, locals.sent);
+            assert_eq!(row.full_response, body);
+            assert_eq!(
+                row.last_offset, 0,
+                "rollover does not own the relay watermark"
+            );
+            assert_eq!(locals.placeholder, msg(SERVER_MSG));
+            let visible = rec.visible.lock().unwrap();
+            assert!(!visible[&PLACEHOLDER_MSG].contains("계속 처리 중"));
+            assert!(!visible[&SERVER_MSG].contains("계속 처리 중"));
+        });
+}
+
+#[test]
+fn a2_t07_failed_rollover_commit_does_not_advance_local_progress() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t07_failed_rollover_commit_does_not_advance_local_progress"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    use crate::services::discord::runtime_store::durable_publish::flush_probe::{
+        Plan, Step, Watch,
+    };
+    let (_lock, guard) = isolate_root();
+    let fx = seed_row(guard.root.path(), 75_072_702, false, false);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let rec = recorder_for_cycle(fx.channel, true, true).await;
+            let fault = Arc::new(Mutex::new(None));
+            let installed = fault.clone();
+            // The row as committed right before the first tail POST: the ordinary
+            // streaming save before it is not the rollover commit under test.
+            let at_post = Arc::new(Mutex::new(None));
+            let snapshot = at_post.clone();
+            let row_path = fx.path();
+            let scope = guard.root.path().join("runtime/discord_inflight");
+            *rec.on_post.lock().unwrap() = Some(Box::new(move || {
+                *snapshot.lock().unwrap() = Some(std::fs::read(&row_path).expect("row on disk"));
+                *installed.lock().unwrap() = Some(Watch::new(
+                    &scope,
+                    Plan {
+                        fail: vec![Step::FileSync],
+                        ..Default::default()
+                    },
+                ));
+            }));
+            let shared = make_shared_data_for_tests();
+            let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
+            let outcome =
+                run_tick_body(&mut locals, &rec, &shared, &fx, false, &"raw🙂".repeat(420)).await;
+            assert_eq!(outcome, CONTINUE);
+            assert_eq!(rec.seen("POST").len(), 1);
+            assert_eq!(rec.seen("PATCH"), vec![fx.uri(PLACEHOLDER_MSG)]);
+            assert!(rec.seen("DELETE").is_empty());
+            assert!(
+                fault
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .expect("post boundary installed the fault")
+                    .events()
+                    .iter()
+                    .any(|event| event.step == Step::FileSync && !event.ok)
+            );
+            let before = at_post
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("the first tail POST captured the committed row");
+            assert_eq!(
+                fx.row_bytes(),
+                before,
+                "pre-rename fault leaves the durable row unchanged"
+            );
+            assert_eq!(locals.placeholder, msg(PLACEHOLDER_MSG));
+            assert_eq!(locals.sent, 0);
+            assert!(locals.frozen.is_empty());
+        });
+}
+
+#[test]
+fn a2_t07_narrow_none_clears_only_the_frozen_tail_and_ordinary_none_keeps() {
+    let (_lock, guard) = isolate_root();
+    let fx = seed_row(guard.root.path(), 75_072_703, false, false);
+    let mut row = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
+    row.current_msg_len = 12;
+    row.long_running_placeholder_active = true;
+    save_inflight_state(&row).unwrap();
+    let expected = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
+    assert_eq!(
+        persist_watcher_rollover(
+            &fx.provider,
+            fx.channel,
+            &expected,
+            (None, 0),
+            "frozen prefix and remaining body",
+            13,
+            &[serenity::MessageId::new(PLACEHOLDER_MSG)]
+        ),
+        WatcherProgressOutcome::Saved
+    );
+    let after = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
+    assert_eq!((after.current_msg_id, after.current_msg_len), (0, 0));
+    assert!(!after.long_running_placeholder_active);
+    assert_eq!(
+        after.streaming_rollover_frozen_msg_ids,
+        vec![PLACEHOLDER_MSG]
+    );
+    assert_eq!(after.last_offset, expected.last_offset);
+    let ordinary = seed_row(guard.root.path(), 75_072_704, false, false);
+    assert_eq!(
+        wrapper_patch(&ordinary, Some(&ordinary.identity), None, TRAILING_BODY),
+        WatcherProgressOutcome::Saved
+    );
+    assert_eq!(
+        load_inflight_state(&ordinary.provider, ordinary.channel.get())
+            .unwrap()
+            .current_msg_id,
+        PLACEHOLDER_MSG,
+        "ordinary None still means Keep"
+    );
+}
+
+#[test]
+fn a2_t08_equal_restored_cache_without_an_id_still_sends_the_body() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t08_equal_restored_cache_without_an_id_still_sends_the_body"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    let (_lock, guard) = isolate_root();
+    let fx = seed_row(guard.root.path(), 75_072_705, false, false);
+    let mut row = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
+    row.current_msg_id = 0;
+    row.full_response = TRAILING_BODY.into();
+    save_inflight_state(&row).unwrap();
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        let rec = recorder_for_cycle(fx.channel, true, true).await;
+        let shared = make_shared_data_for_tests();
+        let mut locals = tick_locals(&fx, None);
+        locals.edit = crate::services::discord::tmux::placeholder_suppression::reconstructed_inflight_placeholder_body(&row, &fx.provider);
+        assert_eq!(locals.edit, TRAILING_BODY, "the next display already equals the restored cache");
+        run_tick(&mut locals, &rec, &shared, &fx, false).await;
+        assert_eq!(rec.seen("POST").len(), 1);
+        assert!(rec.seen("PATCH").is_empty() && rec.seen("DELETE").is_empty());
+        assert_eq!(locals.placeholder, msg(SERVER_MSG));
+        assert!(rec.bodies.lock().unwrap().iter().any(|body| body.contains(TRAILING_BODY)));
+    });
+}
+
+#[test]
+fn a2_t07_rollover_never_commits_after_a_relay_owner_handoff() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t07_rollover_never_commits_after_a_relay_owner_handoff"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    let (_lock, guard) = isolate_root();
+    let fx = seed_row(guard.root.path(), 75_072_706, false, false);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let rec = recorder_for_cycle(fx.channel, true, true).await;
+            let expected = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
+            let path = fx.path();
+            let fresh_bytes = Arc::new(Mutex::new(None));
+            let captured = fresh_bytes.clone();
+            *rec.on_post.lock().unwrap() = Some(Box::new(move || {
+                let mut next: InflightTurnState =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                next.set_relay_owner_kind(
+                    crate::services::discord::inflight::RelayOwnerKind::StandbyRelay,
+                );
+                next.save_generation = next.save_generation.saturating_add(1);
+                std::fs::write(&path, serde_json::to_vec(&next).unwrap()).unwrap();
+                *captured.lock().unwrap() = Some(std::fs::read(&path).unwrap());
+            }));
+            let shared = make_shared_data_for_tests();
+            let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
+            assert_eq!(
+                run_tick_body(&mut locals, &rec, &shared, &fx, false, &"raw🙂".repeat(420)).await,
+                CONTINUE
+            );
+            assert_eq!(rec.seen("POST").len(), 1);
+            assert_eq!(rec.seen("PATCH"), vec![fx.uri(PLACEHOLDER_MSG)]);
+            assert!(rec.seen("DELETE").is_empty());
+            assert_eq!(
+                fx.row_bytes(),
+                fresh_bytes
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("the actual tail POST changed ownership before the writer")
+            );
+            let fresh = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
+            assert_eq!(
+                fresh.watcher_owner_channel_id, expected.watcher_owner_channel_id,
+                "the authority change is not an owner-channel-ID change"
+            );
+            assert_eq!(
+                fresh.effective_relay_owner_kind(),
+                crate::services::discord::inflight::RelayOwnerKind::StandbyRelay
+            );
+            assert_eq!(locals.placeholder, msg(PLACEHOLDER_MSG));
+            assert_eq!(locals.sent, 0);
+            assert!(locals.frozen.is_empty());
+        });
 }

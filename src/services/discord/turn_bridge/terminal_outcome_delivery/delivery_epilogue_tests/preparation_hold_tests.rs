@@ -52,6 +52,21 @@ async fn a2_fresh_hold_preserves_binding_through_no_init_and_notifies_once_pg() 
         .tmux_watchers
         .remove(&ChannelId::new(driver.inflight.channel_id));
     let mut row = driver.inflight.clone();
+    // A bare current ID is no busy notice. The placeholder is a real message whose
+    // marker the requeue verifies over the wire before binding it.
+    let remote =
+        crate::services::discord::recovery_engine::BodyCreateTestRemote::new(row.channel_id).await;
+    let _http = crate::services::discord::shared_state::test_rest::install(remote.http.clone());
+    row.current_msg_id = crate::services::discord::gateway::DiscordGateway::new(
+        remote.http.clone(),
+        shared.clone(),
+        ProviderKind::Claude,
+        None,
+    )
+    .send_message(ChannelId::new(row.channel_id), "⠋ 계속 처리 중")
+    .await
+    .unwrap()
+    .get();
     row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
     row.tmux_session_name = Some(name.clone());
     row.session_id = Some("held-sid".into());
@@ -125,6 +140,25 @@ async fn a2_fresh_hold_preserves_binding_through_no_init_and_notifies_once_pg() 
     assert_eq!(
         budget.notice_message_id, row.current_msg_id,
         "an outbox id must never replace the actual placeholder binding"
+    );
+    let routes: Vec<String> = remote
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(route, _)| route.clone())
+        .collect();
+    assert_eq!(
+        routes
+            .iter()
+            .filter(|route| !route.starts_with("GET"))
+            .count(),
+        1,
+        "only the seeded placeholder was posted; the hold edits or creates nothing: {routes:?}"
+    );
+    assert!(
+        routes.iter().any(|route| route.starts_with("GET")),
+        "the marker was verified: {routes:?}"
     );
     let queue = crate::services::discord::mailbox_snapshot(&shared, ChannelId::new(row.channel_id))
         .await

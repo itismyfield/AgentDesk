@@ -135,8 +135,8 @@ pub(in crate::services::discord) use self::restart_mark::{
 
 mod watcher_state;
 pub(in crate::services::discord) use self::watcher_state::{
-    WatcherProgressOutcome, WatcherRelayWatermarkPatch, WatcherStreamProgressPatch,
-    WatcherTerminalCommitOutcome, WatcherTerminalCommitPatch,
+    WatcherProgressOutcome, WatcherRelayWatermarkPatch, WatcherRolloverGuard,
+    WatcherStreamProgressPatch, WatcherTerminalCommitOutcome, WatcherTerminalCommitPatch,
     commit_watcher_terminal_delivery_locked, persist_watcher_relay_watermark_locked,
     persist_watcher_stream_progress_locked,
 };
@@ -1518,6 +1518,7 @@ mod stall_recovery_tests {
             Some(&identity),
             session,
             WatcherStreamProgressPatch {
+                rollover: None,
                 current_msg_id: Some(43),
                 full_response: "hello world".to_string(),
                 response_sent_offset: 11,
@@ -1568,6 +1569,7 @@ mod stall_recovery_tests {
             Some(&stale_identity),
             session,
             WatcherStreamProgressPatch {
+                rollover: None,
                 current_msg_id: Some(43),
                 full_response: "stale write".to_string(),
                 response_sent_offset: 11,
@@ -1880,6 +1882,7 @@ mod stall_recovery_tests {
             Some(&identity),
             session,
             WatcherStreamProgressPatch {
+                rollover: None,
                 current_msg_id: Some(43),
                 full_response: "retry body".to_string(),
                 response_sent_offset: 10,

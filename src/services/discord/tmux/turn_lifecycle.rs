@@ -58,7 +58,7 @@ mod absent_seed_tests {
 
 #[derive(Debug, Clone)]
 pub(in crate::services::discord) struct RestoredWatcherTurn {
-    pub(super) current_msg_id: MessageId,
+    pub(super) current_msg_id: Option<MessageId>,
     pub(super) status_message_id: Option<MessageId>,
     pub(super) response_sent_offset: usize,
     pub(super) full_response: String,
@@ -128,7 +128,7 @@ pub(in crate::services::discord) fn restored_watcher_turn_from_inflight(
     }
 
     let provider = state.provider_kind()?;
-    let current_msg_id = super::super::inflight::opt_message_id(state.current_msg_id)?;
+    let current_msg_id = super::super::inflight::opt_message_id(state.current_msg_id);
     let response_sent_offset =
         normalize_response_sent_offset(&state.full_response, state.response_sent_offset);
     let delivery_channel_id =
@@ -188,7 +188,7 @@ pub(in crate::services::discord) fn restored_watcher_turn_from_inflight(
 pub(super) fn watcher_stream_seed(restored_turn: Option<RestoredWatcherTurn>) -> WatcherStreamSeed {
     match restored_turn {
         Some(restored) => WatcherStreamSeed {
-            placeholder_msg_id: Some(restored.current_msg_id),
+            placeholder_msg_id: restored.current_msg_id,
             status_panel_msg_id: restored.status_message_id,
             response_sent_offset: restored.response_sent_offset,
             full_response: restored.full_response,
@@ -239,25 +239,31 @@ pub(super) fn restored_seed_reassigned_to_different_turn(
     // only an exact session+generation+nonce+range+owner+destination proof can
     // turn that stale clone into a discard. Body fingerprints are intentionally
     // absent from this authority decision.
-    if restored.delivery_source.as_ref().is_some_and(|source| {
-        let Some(provider) = ProviderKind::from_str(&source.provider) else {
-            return false;
-        };
-        let Some(delivery_channel) =
-            super::super::inflight::opt_channel_id(source.delivery_channel_id)
-        else {
-            return false;
-        };
-        if super::super::inflight::opt_channel_id(source.offset_authority_channel_id).is_none() {
-            return false;
-        }
-        super::super::outbound::delivery_record::confirmed_delivery_receipt_exists(
-            &provider,
-            delivery_channel,
-            restored.current_msg_id.get(),
-            source,
-        )
-    }) {
+    if restored
+        .delivery_source
+        .as_ref()
+        .zip(restored.current_msg_id)
+        .is_some_and(|(source, current)| {
+            let Some(provider) = ProviderKind::from_str(&source.provider) else {
+                return false;
+            };
+            let Some(delivery_channel) =
+                super::super::inflight::opt_channel_id(source.delivery_channel_id)
+            else {
+                return false;
+            };
+            if super::super::inflight::opt_channel_id(source.offset_authority_channel_id).is_none()
+            {
+                return false;
+            }
+            super::super::outbound::delivery_record::confirmed_delivery_receipt_exists(
+                &provider,
+                delivery_channel,
+                current.get(),
+                source,
+            )
+        })
+    {
         return true;
     }
     if let (Some(seed_anchor), Some(current_anchor)) = (

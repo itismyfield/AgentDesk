@@ -1931,3 +1931,143 @@ async fn the_delivery_commit_stores_the_scheduled_outcome_of_its_transcript() {
         assert_eq!(stored, expected, "{case}");
     }
 }
+
+#[test]
+fn a2_t06_busy_shown_and_pending_do_not_run_generic_terminal_delivery() {
+    let name = concat!(
+        module_path!(),
+        "::a2_t06_busy_shown_and_pending_do_not_run_generic_terminal_delivery"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            // Cases 1-2 take the early busy-readiness publisher, which edits a bound notice when
+            // HTTP is up; cases 0 and 3 are late candidates requeued after the silent consumer.
+            for case in 0..4 {
+                let early = case == 1 || case == 2;
+                let shown = case == 1 || case == 3;
+                let bound = case != 0;
+                let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0)
+                    .with_body(String::new());
+                let notice = 75_072_601;
+                if bound {
+                    crate::services::discord::busy_followup_retry_store::bind_notice_if_absent(&ProviderKind::Claude,DRIVER_CHANNEL_ID,DRIVER_USER_MSG_ID,notice).unwrap();
+                }
+                let (log, _http) = if shown {
+                    let (log, guard) =
+                        crate::services::discord::shared_state::test_rest::recording_mock(
+                            notice,
+                            DRIVER_CHANNEL_ID,
+                        )
+                        .await;
+
+                    (Some(log), Some(guard))
+                } else {
+                    (None, None)
+                };
+                let before = crate::services::discord::inflight::load_inflight_state_read_only(
+                    &ProviderKind::Claude,
+                    DRIVER_CHANNEL_ID,
+                )
+                .unwrap();
+                let (mut ctx, mut state) = driver.parts();
+                ctx.watcher_delivery_pin = None;
+                ctx.claude_tui_followup_pre_submit_requeue_candidate = true;
+                if early {
+                    state.inflight_state.runtime_kind =
+                        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+                    ctx.tui_error_classification =
+                        super::super::streaming_edit_text::classify_raw_tui_error(
+                            &ProviderKind::Claude,
+                            "timeout waiting for claude tui follow-up prompt input readiness after 45s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=true; capture_available=true",
+                        );
+                }
+                assert_eq!(
+                    super::super::streaming_edit_text::bridge_claude_tui_followup_busy_readiness_timeout(
+                        &state.provider,
+                        state.inflight_state.runtime_kind,
+                        ctx.tui_error_classification,
+                    ),
+                    early,
+                    "the typed busy-readiness premise selects the early publisher"
+                );
+                state.terminal_full_replay_cleanup_msg_ids.clear();
+                let output = run_terminal_outcome_delivery(ctx, state).await;
+                let busy = output
+                    .busy_requeue_outcome
+                    .expect("actual busy terminal caller reached its publisher");
+                assert_eq!(busy.notice_projection_pending, !(bound && shown), "case {case}");
+                assert_eq!(
+                    busy.notice_message_id,
+                    bound.then(|| MessageId::new(notice))
+                );
+                assert!(
+                    !output.terminal_delivery_committed
+                        && !output.inflight_state.terminal_delivery_committed,
+                    "a busy projection is no terminal answer, including the empty-body case"
+                );
+                assert_eq!(output.response_sent_offset, 0);
+                assert!(
+                    !output.bridge_should_emit_completion
+                        && !output.status_panel_terminal_committed
+                );
+                assert!(
+                    driver.observations().is_empty(),
+                    "generic POST/PATCH/DELETE must stay at zero: {:?}",
+                    driver.observations()
+                );
+                assert_eq!(driver.completed_publications(), 0);
+                if busy.notice_projection_pending {
+                    let (boundary, ()) = followup_requeue::TerminalProjectionSettled::after(async {}).await;
+                    let completion = crate::services::discord::turn_bridge::guards::CompletionGuard::for_completion_test(driver.shared.clone(),ChannelId::new(DRIVER_CHANNEL_ID),DRIVER_USER_MSG_ID);
+                    assert!(!boundary.release_completion_admission(&completion,Some(busy),&driver.shared,&ProviderKind::Claude,ChannelId::new(DRIVER_CHANNEL_ID),"a2_notice_pending"));
+                    assert_eq!(driver.shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),0);
+                }
+                let after = crate::services::discord::inflight::load_inflight_state_read_only(
+                    &ProviderKind::Claude,
+                    DRIVER_CHANNEL_ID,
+                )
+                .unwrap();
+                assert!(
+                    !after.terminal_delivery_committed,
+                    "the epilogue must not mirror a terminal commit"
+                );
+                assert_eq!(
+                    (
+                        after.current_msg_id,
+                        after.response_sent_offset,
+                        after.full_response
+                    ),
+                    (
+                        before.current_msg_id,
+                        before.response_sent_offset,
+                        before.full_response
+                    )
+                );
+                let receipt_root = driver._temp.path().join("runtime/discord_delivery_records");
+                assert!(
+                    !receipt_root.exists(),
+                    "a busy notice must create no terminal answer receipt"
+                );
+                if let Some(log) = log {
+                    let calls = log.lock().unwrap();
+                    assert_eq!(
+                        calls
+                            .iter()
+                            .any(|(method, id)| method == "PATCH" && *id == notice),
+                        early,
+                        "only the early publisher edits its own real notice: {calls:?}"
+                    );
+                    assert!(!calls.iter().any(|(method, id)| {
+                        ["POST", "PATCH", "DELETE"].contains(&method.as_str())
+                            && *id == DRIVER_CURRENT_MSG_ID
+                    }));
+                }
+            }
+        });
+}

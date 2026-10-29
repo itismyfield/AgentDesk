@@ -4,10 +4,20 @@ fn tui_direct_bridge_uncommitted_delivery_error(
     provider: &ProviderKind,
     channel_id: ChannelId,
     user_msg_id: MessageId,
-    current_msg_id: MessageId,
+    current_msg_id: impl Into<Option<MessageId>>,
+    expected: Option<&InflightTurnState>,
 ) -> Option<String> {
     let state = super::super::inflight::load_inflight_state(provider, channel_id.get())?;
-    if state.user_msg_id != user_msg_id.get() || state.current_msg_id != current_msg_id.get() {
+    let current_msg_id = current_msg_id.into();
+    if state.user_msg_id != user_msg_id.get()
+        || (expected.is_none() && current_msg_id.is_some_and(|id| state.current_msg_id != id.get()))
+        || expected.is_some_and(|expected| {
+            !super::super::inflight::InflightEpisodePin::from_state(expected).is_same_episode_as(
+                &super::super::inflight::InflightEpisodePin::from_state(&state),
+            ) || expected.runtime_kind != state.runtime_kind
+                || expected.output_path != state.output_path
+        })
+    {
         return None;
     }
     if state.terminal_delivery_committed {
@@ -24,7 +34,7 @@ fn tui_direct_bridge_uncommitted_delivery_error(
         provider.as_str(),
         channel_id.get(),
         user_msg_id.get(),
-        current_msg_id.get()
+        current_msg_id.map(MessageId::get).unwrap_or(0)
     ))
 }
 
@@ -33,17 +43,20 @@ pub(super) fn ensure_tui_direct_bridge_delivery_committed(
     provider: &ProviderKind,
     channel_id: ChannelId,
     user_msg_id: MessageId,
-    current_msg_id: MessageId,
+    current_msg_id: impl Into<Option<MessageId>>,
+    expected: Option<&InflightTurnState>,
     tmux_session_name: &str,
     lease: &ExternalInputRelayLease,
     prompt_anchor_message_id: Option<u64>,
     streamed: bool,
 ) -> Result<(), String> {
+    let current_msg_id = current_msg_id.into();
     let Some(error) = tui_direct_bridge_uncommitted_delivery_error(
         provider,
         channel_id,
         user_msg_id,
         current_msg_id,
+        expected,
     ) else {
         return Ok(());
     };
@@ -57,7 +70,7 @@ pub(super) fn ensure_tui_direct_bridge_delivery_committed(
             session_key = lease.session_key.as_deref().unwrap_or(""),
             relay_owner = lease.relay_owner.as_str(),
             runtime_kind = lease.runtime_kind.map(|kind| kind.as_str()).unwrap_or("unknown"),
-            current_msg_id = current_msg_id.get(),
+            current_msg_id = current_msg_id.map(MessageId::get).unwrap_or(0),
             prompt_anchor_message_id,
             error = %error,
             "TUI-direct bridge adapter finished without committed streamed response relay"
@@ -71,7 +84,7 @@ pub(super) fn ensure_tui_direct_bridge_delivery_committed(
             session_key = lease.session_key.as_deref().unwrap_or(""),
             relay_owner = lease.relay_owner.as_str(),
             runtime_kind = lease.runtime_kind.map(|kind| kind.as_str()).unwrap_or("unknown"),
-            current_msg_id = current_msg_id.get(),
+            current_msg_id = current_msg_id.map(MessageId::get).unwrap_or(0),
             prompt_anchor_message_id,
             error = %error,
             "TUI-direct bridge adapter finished without committed response relay"
@@ -91,7 +104,6 @@ mod tests {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(75_072_401);
         let user = MessageId::new(75_072_402);
-        let initial = MessageId::new(75_072_403);
         let fresh = MessageId::new(75_072_404);
         let lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
         let mut row = super::super::build_tui_direct_bridge_inflight_state(
@@ -108,8 +120,14 @@ mod tests {
         row.full_response = "preview only".into();
         super::super::super::inflight::save_inflight_state(&row).unwrap();
         assert!(
-            tui_direct_bridge_uncommitted_delivery_error(&provider, channel, user, initial)
-                .is_some(),
+            tui_direct_bridge_uncommitted_delivery_error(
+                &provider,
+                channel,
+                user,
+                None::<MessageId>,
+                Some(&row)
+            )
+            .is_some(),
             "a new response ID in the same input's row is not a committed terminal"
         );
     }
@@ -155,6 +173,7 @@ mod tests {
             channel_id,
             user_msg_id,
             current_msg_id,
+            None,
         )
         .expect("matching uncommitted inflight must be an error");
         assert!(error.contains("without committed terminal delivery"));
@@ -170,6 +189,7 @@ mod tests {
                 channel_id,
                 user_msg_id,
                 current_msg_id,
+                None,
             )
             .is_none(),
             "fallback delivery that advanced response_sent_offset must not be retried"
@@ -185,6 +205,7 @@ mod tests {
                 channel_id,
                 user_msg_id,
                 current_msg_id,
+                None,
             )
             .is_none(),
             "committed terminal delivery must not be reported as placeholder-only failure"
@@ -245,7 +266,7 @@ mod tests {
                         &provider,
                         (channel_id, user_msg_id, current_msg_id),
                         None,
-                        (tmux, &lease, Some(anchor)),
+                        (tmux, &lease, Some(anchor), None),
                         streamed,
                     ),
                 );
@@ -315,6 +336,7 @@ mod tests {
                 channel_id,
                 user_msg_id,
                 current_msg_id,
+                None,
             )
             .is_some(),
             "premise: with OUR uncommitted row present the probe must testify, \
@@ -332,6 +354,7 @@ mod tests {
                 channel_id,
                 user_msg_id,
                 current_msg_id,
+                None,
             )
             .is_none(),
             "an ABSENT durable row is no evidence of a missed delivery; \
@@ -343,6 +366,7 @@ mod tests {
                 channel_id,
                 user_msg_id,
                 current_msg_id,
+                None,
                 tmux,
                 &lease,
                 None,
@@ -399,6 +423,7 @@ mod tests {
                 channel_id,
                 foreign_user,
                 foreign_current,
+                None,
             )
             .is_some(),
             "premise: the seeded row must be an uncommitted delivery error for \
@@ -425,6 +450,7 @@ mod tests {
                     channel_id,
                     user_msg_id,
                     current_msg_id,
+                    None,
                 )
                 .is_none(),
                 "{label}: another turn's row is no evidence about THIS turn"
@@ -436,6 +462,7 @@ mod tests {
                 channel_id,
                 MessageId::new(88_304),
                 foreign_current,
+                None,
                 tmux,
                 &lease,
                 None,

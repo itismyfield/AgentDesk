@@ -300,7 +300,7 @@ mod restored_seed_discard_tests {
             ..seed_identity.clone()
         };
         let restored = RestoredWatcherTurn {
-            current_msg_id: MessageId::new(4105),
+            current_msg_id: Some(MessageId::new(4105)),
             status_message_id: None,
             response_sent_offset: 0,
             full_response: "WARMUP".to_string(),
@@ -356,8 +356,15 @@ mod restored_seed_discard_tests {
 
         // The bridge then commits the exact split-channel receipt and clears the
         // inflight before the watcher consumes its stale clone.
-        write_receipt(&provider, source, restored.current_msg_id.get())
-            .expect("write exact confirmed receipt");
+        write_receipt(
+            &provider,
+            source,
+            restored
+                .current_msg_id
+                .expect("fixture has a response anchor")
+                .get(),
+        )
+        .expect("write exact confirmed receipt");
         crate::services::discord::inflight::delete_inflight_state_file(
             &provider,
             delivery_channel.get(),
@@ -391,8 +398,16 @@ mod restored_seed_discard_tests {
         let restored = restored_seed_fixture(provider.clone(), channel, channel, tmux_session_name);
         let source = restored.delivery_source.clone().expect("captured source");
 
-        write_receipt(&provider, source.clone(), restored.current_msg_id.get() + 1)
-            .expect("write destination-mismatch receipt");
+        write_receipt(
+            &provider,
+            source.clone(),
+            restored
+                .current_msg_id
+                .expect("fixture has a response anchor")
+                .get()
+                + 1,
+        )
+        .expect("write destination-mismatch receipt");
         assert!(!restored_seed_reassigned_to_different_turn(
             Some(&restored),
             None,
@@ -401,8 +416,15 @@ mod restored_seed_discard_tests {
 
         let mut wrong_nonce = source.clone();
         wrong_nonce.turn_nonce = "different-turn-same-body".into();
-        write_receipt(&provider, wrong_nonce, restored.current_msg_id.get())
-            .expect("write nonce-mismatch receipt");
+        write_receipt(
+            &provider,
+            wrong_nonce,
+            restored
+                .current_msg_id
+                .expect("fixture has a response anchor")
+                .get(),
+        )
+        .expect("write nonce-mismatch receipt");
         assert!(!restored_seed_reassigned_to_different_turn(
             Some(&restored),
             None,
@@ -411,8 +433,15 @@ mod restored_seed_discard_tests {
 
         let mut wrong_range = source;
         wrong_range.range = (100, 201);
-        write_receipt(&provider, wrong_range, restored.current_msg_id.get())
-            .expect("write range-mismatch receipt");
+        write_receipt(
+            &provider,
+            wrong_range,
+            restored
+                .current_msg_id
+                .expect("fixture has a response anchor")
+                .get(),
+        )
+        .expect("write range-mismatch receipt");
         assert!(!restored_seed_reassigned_to_different_turn(
             Some(&restored),
             None,
@@ -445,7 +474,12 @@ mod restored_seed_discard_tests {
                 range: source.range,
                 generation_mtime_ns: source.generation_mtime_ns,
                 attempts: 1,
-                panel_msg_id: Some(restored.current_msg_id.get()),
+                panel_msg_id: Some(
+                    restored
+                        .current_msg_id
+                        .expect("fixture has a response anchor")
+                        .get(),
+                ),
                 panel_channel_id: Some(channel.get()),
             },
         )
@@ -464,7 +498,10 @@ mod restored_seed_discard_tests {
             write_receipt(
                 &provider,
                 stale_source.clone(),
-                restored.current_msg_id.get(),
+                restored
+                    .current_msg_id
+                    .expect("fixture has a response anchor")
+                    .get(),
             )
             .is_err(),
             "the guarded writer must reject stale-incarnation authority"
@@ -1533,6 +1570,7 @@ fn persist_watcher_stream_progress(
         require_identity,
         tmux_session_name,
         super::inflight::WatcherStreamProgressPatch {
+            rollover: None,
             current_msg_id: current_msg_id.map(MessageId::get),
             full_response: full_response.to_string(),
             response_sent_offset,
@@ -1545,6 +1583,43 @@ fn persist_watcher_stream_progress(
                 .iter()
                 .map(|id| id.get())
                 .collect(),
+        },
+    )
+}
+
+pub(super) fn persist_watcher_rollover(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected: &super::inflight::InflightTurnState,
+    next: (Option<MessageId>, usize),
+    full_response: &str,
+    split_offset: usize,
+    frozen: &[MessageId],
+) -> super::inflight::WatcherProgressOutcome {
+    let Some(runtime_root) = super::runtime_store::runtime_root() else {
+        return super::inflight::WatcherProgressOutcome::IoError;
+    };
+    let identity = super::inflight::InflightTurnIdentity::from_state(expected);
+    super::inflight::persist_watcher_stream_progress_locked(
+        provider,
+        channel_id.get(),
+        Some(&identity),
+        expected.tmux_session_name.as_deref().unwrap_or_default(),
+        super::inflight::WatcherStreamProgressPatch {
+            current_msg_id: next.0.map(MessageId::get),
+            rollover: Some(super::inflight::WatcherRolloverGuard {
+                expected: Box::new(expected.clone()),
+                next_msg_len: next.1,
+                runtime_root,
+            }),
+            full_response: full_response.into(),
+            response_sent_offset: split_offset,
+            current_tool_line: None,
+            prev_tool_status: None,
+            task_notification_kind: None,
+            any_tool_used: false,
+            has_post_tool_text: false,
+            streaming_rollover_frozen_msg_ids: frozen.iter().map(|id| id.get()).collect(),
         },
     )
 }

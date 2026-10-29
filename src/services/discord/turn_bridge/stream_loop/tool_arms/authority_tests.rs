@@ -409,6 +409,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
             Some(&expected),
             "AgentDesk-codex-r8-restart",
             crate::services::discord::inflight::WatcherStreamProgressPatch {
+                rollover: None,
                 current_msg_id: None,
                 full_response: "base".to_string(),
                 response_sent_offset: 0,

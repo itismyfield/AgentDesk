@@ -26,7 +26,8 @@ fn retry_present_or_accepted(outcome: &crate::services::discord::MailboxEnqueueO
 pub(in crate::services::discord) struct FollowupRequeueOutcome {
     pub(super) requeued: bool,
     pub(super) retry_capped: bool,
-    pub(super) notice_message_id: MessageId,
+    pub(super) notice_message_id: Option<MessageId>,
+    pub(super) notice_projection_pending: bool,
     pub(super) preparation_held: bool,
 }
 
@@ -57,8 +58,9 @@ impl TerminalProjectionSettled {
         let queue_eligible = outcome.is_none_or(|outcome| {
             outcome.requeued && !outcome.retry_capped && !outcome.preparation_held
         });
-        completion_guard.note_terminal_projection_settled(true);
-        completion_guard.note_terminal_disposition_settled(queue_eligible);
+        let settled = !outcome.is_some_and(|outcome| outcome.notice_projection_pending);
+        completion_guard.note_terminal_projection_settled(settled);
+        completion_guard.note_terminal_disposition_settled(settled && queue_eligible);
         schedule_retry_if_eligible(outcome, shared, provider, channel_id, reason)
     }
 }
@@ -73,7 +75,11 @@ fn schedule_retry_if_eligible(
     let Some(outcome) = outcome else {
         return false;
     };
-    if !outcome.requeued || outcome.retry_capped || outcome.preparation_held {
+    if !outcome.requeued
+        || outcome.retry_capped
+        || outcome.preparation_held
+        || outcome.notice_projection_pending
+    {
         return false;
     }
     super::super::schedule_deferred_idle_queue_kickoff(
@@ -335,6 +341,18 @@ mod tests {
         )
     }
 
+    /// A busy notice already shown for this input. A bare current ID is
+    /// never trusted as a notice; budget/reaction fixtures supply the prior binding instead.
+    fn bind_prior_notice(row: &InflightTurnState) {
+        crate::services::discord::busy_followup_retry_store::bind_notice_if_absent(
+            &ProviderKind::Claude,
+            row.channel_id,
+            row.effective_busy_followup_retry_user_msg_id(),
+            row.current_msg_id,
+        )
+        .expect("bind prior busy notice");
+    }
+
     #[test]
     fn already_queued_refusal_preserves_existing_merged_marker() {
         let outcome = crate::services::discord::MailboxEnqueueOutcome {
@@ -386,6 +404,7 @@ mod tests {
         let channel_id = ChannelId::new(100_000_004_248_003);
         let message_id = MessageId::new(100_000_004_248_004);
         let inflight = inflight(channel_id, message_id);
+        bind_prior_notice(&inflight);
         assert!(
             crate::services::discord::outbound::reaction_control::take_test_reply_deliveries()
                 .is_empty()
@@ -420,6 +439,7 @@ mod tests {
         let channel_id = ChannelId::new(100_000_004_888_101);
         let message_id = MessageId::new(100_000_004_888_102);
         let inflight = inflight(channel_id, message_id);
+        bind_prior_notice(&inflight);
 
         let outcome = requeue_claude_tui_followup_pre_submit_timeout(
             &shared,
@@ -591,7 +611,8 @@ mod tests {
             preparation_held: false,
             requeued: true,
             retry_capped: true,
-            notice_message_id: message_id,
+            notice_message_id: Some(message_id),
+            notice_projection_pending: false,
         };
         assert!(
             !boundary.release_completion_admission(
@@ -675,7 +696,7 @@ mod tests {
         );
         assert_eq!(
             outcome.notice_message_id,
-            MessageId::new(inflight.current_msg_id)
+            Some(MessageId::new(inflight.current_msg_id))
         );
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
         assert_eq!(snapshot.intervention_queue.len(), 1);
@@ -1006,6 +1027,7 @@ mod tests {
         // second watch request is a no-op.
         let mut held = inflight(channel_id, held_id);
         held.tmux_session_name = Some(session.clone());
+        bind_prior_notice(&held);
         for (turn_id, secs) in [("turn-held-1", 0), ("turn-held-2", 300)] {
             let cost = std::time::Duration::from_secs(secs);
             let outcome = requeue_claude_tui_followup_pre_submit_timeout(
@@ -1115,6 +1137,7 @@ mod tests {
                 cost,
             };
             let state = inflight(channel_id, id);
+            bind_prior_notice(&state);
             let outcome = requeue_claude_tui_followup_pre_submit_timeout(
                 &shared, &provider, channel_id, &state, None, None, attempt,
             )
@@ -1354,6 +1377,7 @@ mod tests {
         let channel_id = ChannelId::new(100_000_004_248_001);
         let message_id = MessageId::new(100_000_004_248_002);
         let inflight = inflight(channel_id, message_id);
+        bind_prior_notice(&inflight);
 
         requeue_claude_tui_followup_pre_submit_timeout(
             &shared,
@@ -1390,5 +1414,330 @@ mod tests {
             intervention.message_id == message_id
                 || intervention.source_message_ids.contains(&message_id)
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a2_t06_actual_notice_loss_and_budget_failure_preserve_the_input() {
+        let name = concat!(
+            module_path!(),
+            "::a2_t06_actual_notice_loss_and_budget_failure_preserve_the_input"
+        );
+        if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+            return;
+        }
+        use crate::services::discord::{
+            busy_followup_retry_store as budget, inflight as disk,
+            recovery_engine::BodyCreateTestRemote,
+        };
+        let _root = scoped_runtime_root();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for accepted in [false, true] {
+                    let channel = ChannelId::new(75_072_620 + u64::from(accepted));
+                    let user = MessageId::new(channel.get() + 100);
+                    let shared = crate::services::discord::make_shared_data_for_tests();
+                    let mut row = inflight(channel, user);
+                    row.current_msg_id = 0;
+                    row.turn_nonce = Some(format!("a2-busy-{}", channel.get()));
+                    disk::save_inflight_state(&row).unwrap();
+                    let before =
+                        disk::load_inflight_state_read_only(&ProviderKind::Claude, channel.get())
+                            .unwrap();
+                    let remote = BodyCreateTestRemote::new(channel.get()).await;
+                    let _http = crate::services::discord::shared_state::test_rest::install(
+                        remote.http.clone(),
+                    );
+                    *remote.fault.lock().unwrap() = Some((1, accepted));
+                    let pending = requeue_claude_tui_followup_pre_submit_timeout(
+                        &shared,
+                        &ProviderKind::Claude,
+                        channel,
+                        &row,
+                        None,
+                        None,
+                        attempt("lost-busy-notice"),
+                    )
+                    .await;
+                    assert!(
+                        pending.notice_projection_pending
+                            && !pending.requeued
+                            && pending.notice_message_id.is_none()
+                    );
+                    assert!(
+                        budget::load(&ProviderKind::Claude, channel.get(), user.get()).is_none()
+                    );
+                    assert!(
+                        crate::services::discord::mailbox_snapshot(&shared, channel)
+                            .await
+                            .intervention_queue
+                            .is_empty()
+                    );
+                    assert_eq!(
+                        serde_json::to_value(
+                            disk::load_inflight_state_read_only(
+                                &ProviderKind::Claude,
+                                channel.get()
+                            )
+                            .unwrap()
+                        )
+                        .unwrap(),
+                        serde_json::to_value(&before).unwrap()
+                    );
+                    let shown = requeue_claude_tui_followup_pre_submit_timeout(
+                        &shared,
+                        &ProviderKind::Claude,
+                        channel,
+                        &row,
+                        None,
+                        None,
+                        attempt("confirmed-busy-notice"),
+                    )
+                    .await;
+                    assert!(shown.requeued && !shown.notice_projection_pending);
+                    let actual = shown.notice_message_id.unwrap();
+                    assert_eq!(
+                        remote.messages.lock().unwrap().len(),
+                        1,
+                        "nonce replay creates only one notice even after response loss"
+                    );
+                    assert_eq!(
+                        budget::load(&ProviderKind::Claude, channel.get(), user.get())
+                            .unwrap()
+                            .busy_retry_count,
+                        1
+                    );
+                    assert_eq!(
+                        disk::load_inflight_state_read_only(&ProviderKind::Claude, channel.get())
+                            .unwrap()
+                            .current_msg_id,
+                        0,
+                        "notice is never bound as the response"
+                    );
+                    let queue = crate::services::discord::mailbox_snapshot(&shared, channel)
+                        .await
+                        .intervention_queue;
+                    assert_eq!(queue.len(), 1);
+                    assert_eq!(queue[0].text, row.user_text);
+                    let calls = remote.calls.lock().unwrap();
+                    let posts: Vec<_> = calls
+                        .iter()
+                        .filter(|(route, _)| route.starts_with("POST"))
+                        .collect();
+                    assert_eq!(posts.len(), 2);
+                    assert_eq!(posts[0].1["nonce"], posts[1].1["nonce"]);
+                    assert_eq!(posts[1].1["enforce_nonce"], true);
+                    assert_eq!(
+                        posts[1].1["message_reference"]["message_id"],
+                        user.get().to_string()
+                    );
+                    assert_eq!(
+                        remote.messages.lock().unwrap()[0]["id"],
+                        actual.get().to_string()
+                    );
+                    assert!(!calls.iter().any(|(route, _)| route.starts_with("DELETE")));
+                }
+                let channel = ChannelId::new(75_072_630);
+                let user = MessageId::new(75_072_631);
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                let mut row = inflight(channel, user);
+                row.current_msg_id = 0;
+                row.turn_nonce = Some("a2-busy-budget-failure".into());
+                disk::save_inflight_state(&row).unwrap();
+                let remote = BodyCreateTestRemote::new(channel.get()).await;
+                let _http =
+                    crate::services::discord::shared_state::test_rest::install(remote.http.clone());
+                budget::fail_saves_for_tests(true);
+                let held = requeue_claude_tui_followup_pre_submit_timeout(
+                    &shared,
+                    &ProviderKind::Claude,
+                    channel,
+                    &row,
+                    None,
+                    None,
+                    attempt("budget-failed"),
+                )
+                .await;
+                budget::fail_saves_for_tests(false);
+                assert!(held.notice_projection_pending && !held.requeued);
+                assert!(budget::load(&ProviderKind::Claude, channel.get(), user.get()).is_none());
+                assert!(
+                    crate::services::discord::mailbox_snapshot(&shared, channel)
+                        .await
+                        .intervention_queue
+                        .is_empty()
+                );
+                let shown = requeue_claude_tui_followup_pre_submit_timeout(
+                    &shared,
+                    &ProviderKind::Claude,
+                    channel,
+                    &row,
+                    None,
+                    None,
+                    attempt("budget-confirmed"),
+                )
+                .await;
+                assert!(shown.requeued && !shown.notice_projection_pending);
+                assert_eq!(remote.messages.lock().unwrap().len(), 1);
+                assert_eq!(
+                    remote
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(route, _)| route.starts_with("POST"))
+                        .count(),
+                    1,
+                    "Accepted notice re-adoption needs no new POST"
+                );
+                assert_eq!(
+                    budget::load(&ProviderKind::Claude, channel.get(), user.get())
+                        .unwrap()
+                        .busy_retry_count,
+                    1
+                );
+            });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a2_t06_notice_binding_is_never_a_response_binding() {
+        let name = concat!(
+            module_path!(),
+            "::a2_t06_notice_binding_is_never_a_response_binding"
+        );
+        if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+            return;
+        }
+        use crate::services::discord::{
+            busy_followup_retry_store as budget, inflight as disk,
+            recovery_engine::{
+                BodyCreateTestRemote, a2_admitted_for_tmux, a2_commit_captured_body,
+            },
+        };
+        let root = scoped_runtime_root();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let channel = ChannelId::new(75_072_640);
+                let user = MessageId::new(channel.get() + 1);
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                let remote = BodyCreateTestRemote::new(channel.get()).await;
+                let _http =
+                    crate::services::discord::shared_state::test_rest::install(remote.http.clone());
+                let mut row = inflight(channel, user);
+                row.current_msg_id = 0;
+                row.turn_nonce = Some("a2-notice-owner".into());
+                disk::save_inflight_state(&row).unwrap();
+                let shown = requeue_claude_tui_followup_pre_submit_timeout(
+                    &shared,
+                    &ProviderKind::Claude,
+                    channel,
+                    &row,
+                    None,
+                    None,
+                    attempt("busy-owner"),
+                )
+                .await;
+                assert!(shown.requeued && !shown.notice_projection_pending);
+                let notice = shown.notice_message_id.unwrap();
+                assert_eq!(
+                    disk::load_inflight_state_read_only(&ProviderKind::Claude, channel.get())
+                        .unwrap()
+                        .current_msg_id,
+                    0
+                );
+                let notice_body = remote.messages.lock().unwrap()[0]["content"].clone();
+                assert_eq!(
+                    disk::clear_inflight_state_for_captured_episode(
+                        &ProviderKind::Claude,
+                        channel.get(),
+                        &disk::InflightTurnIdentity::from_state(&row),
+                        row.turn_nonce.as_deref()
+                    ),
+                    disk::GuardedClearOutcome::Cleared
+                );
+                let captured = a2_admitted_for_tmux(
+                    root._temp.path(),
+                    channel.get(),
+                    "actual retry native body🙂",
+                    0,
+                    "a2-notice-response-native",
+                )
+                .await;
+                assert_eq!(captured.user_msg_id, user.get());
+                let delivered = a2_commit_captured_body(&remote, &shared, &captured).await;
+                assert_ne!(delivered.current_msg_id, notice.get());
+                assert!(delivered.terminal_delivery_committed);
+                assert_eq!(
+                    delivered.response_sent_offset,
+                    delivered.full_response.len()
+                );
+                assert_eq!(
+                    budget::load(&ProviderKind::Claude, channel.get(), user.get())
+                        .unwrap()
+                        .notice_message_id,
+                    notice.get()
+                );
+                let messages = remote.messages.lock().unwrap();
+                assert_eq!(messages.len(), 2);
+                assert_eq!(messages[0]["content"], notice_body);
+                assert_eq!(messages[1]["content"], "actual retry native body🙂");
+                let calls = remote.calls.lock().unwrap();
+                assert_eq!(
+                    calls
+                        .iter()
+                        .filter(|(route, _)| route.starts_with("POST"))
+                        .count(),
+                    2
+                );
+                assert!(!calls.iter().any(|(route, _)| route.starts_with("DELETE")));
+            });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a2_t06_preparation_hold_does_not_create_a_busy_notice() {
+        let name = concat!(
+            module_path!(),
+            "::a2_t06_preparation_hold_does_not_create_a_busy_notice"
+        );
+        if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name) {
+            return;
+        }
+        use crate::services::discord::{
+            busy_followup_retry_store as budget, inflight as disk,
+            recovery_engine::BodyCreateTestRemote,
+        };
+        let _root = scoped_runtime_root();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let channel = ChannelId::new(75_072_640);
+            let user = MessageId::new(channel.get() + 100);
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let mut row = inflight(channel, user);
+            row.current_msg_id = 0;
+            row.turn_nonce = Some(format!("a2-preparation-{}", channel.get()));
+            let session = format!("i7507-preparation-{}", uuid::Uuid::new_v4());
+            row.tmux_session_name = Some(session.clone());
+            crate::services::claude_tui::composer_lock::guard_draft(&session, crate::services::claude_tui::composer_lock::DraftGuard::RecoveryRequired);
+            assert!(crate::services::claude_tui::composer_lock::draft_guarded(&session));
+            disk::save_inflight_state(&row).unwrap();
+            let path = disk::inflight_state_path(&disk::inflight_runtime_root().unwrap(), &ProviderKind::Claude, channel.get());
+            let before = std::fs::read(&path).unwrap();
+            let remote = BodyCreateTestRemote::new(channel.get()).await;
+            let _http = crate::services::discord::shared_state::test_rest::install(remote.http.clone());
+            let outcome = requeue_claude_tui_followup_pre_submit_timeout(&shared, &ProviderKind::Claude, channel, &row, None, None, attempt("preparation-owned-notice")).await;
+            assert!(remote.calls.lock().unwrap().is_empty(), "the guarded preparation's existing non-turn publisher owns its notice; no busy POST/PATCH/DELETE");
+            assert!(outcome.preparation_held && outcome.notice_projection_pending && !outcome.requeued);
+            assert!(outcome.notice_message_id.is_none());
+            assert!(budget::load(&ProviderKind::Claude, channel.get(), user.get()).is_none());
+            assert!(crate::services::discord::mailbox_snapshot(&shared, channel).await.intervention_queue.is_empty());
+            assert_eq!(std::fs::read(&path).unwrap(), before, "the source input remains owned by the uncommitted turn");
+        });
     }
 }

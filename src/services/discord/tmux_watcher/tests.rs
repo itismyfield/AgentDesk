@@ -1462,7 +1462,7 @@ fn wait_inflight_defer_arms_same_rewind_seed_4169() {
     })
     .expect("WaitInFlight retry keeps restored-turn evidence for the next pass");
     assert!(seed.same_turn_rewind);
-    assert_eq!(seed.current_msg_id, MessageId::new(4169));
+    assert_eq!(seed.current_msg_id, Some(MessageId::new(4169)));
     assert_eq!(seed.status_message_id, Some(MessageId::new(4170)));
     assert_eq!(seed.last_edit_text, "streamed terminal body");
     assert_eq!(seed.streaming_rollover_frozen_msg_ids, rollover_ids);
@@ -2802,7 +2802,7 @@ async fn relay_emission_timeout_rewinds_and_releases_slot_4194() {
             streaming_rollover_frozen_msg_ids: &[MessageId::new(41_942)],
         })
         .expect("timeout retry must preserve the original delivery row context");
-        assert_eq!(seed.current_msg_id, placeholder);
+        assert_eq!(seed.current_msg_id, Some(placeholder));
         assert_eq!(seed.status_message_id, Some(status_panel));
         assert_eq!(seed.response_sent_offset, 64);
         assert_eq!(seed.last_edit_text, "streamed prefix before hung emission");
@@ -2976,7 +2976,7 @@ fn edit_arm_rewind_seed_preserves_placeholder_context_4154() {
     })
     .expect("placeholder context should seed retry");
 
-    assert_eq!(seed.current_msg_id, placeholder);
+    assert_eq!(seed.current_msg_id, Some(placeholder));
     assert_eq!(seed.status_message_id, Some(status_panel));
     assert_eq!(seed.response_sent_offset, 128);
     assert!(
@@ -3040,7 +3040,7 @@ fn cross_turn_watcher_reuse_discards_restored_seed_through_watcher_wiring_4105()
         ..seed_identity.clone()
     };
     let restored = RestoredWatcherTurn {
-        current_msg_id: MessageId::new(4105),
+        current_msg_id: Some(MessageId::new(4105)),
         status_message_id: None,
         response_sent_offset: 0,
         full_response: "WARMUP".to_string(),
