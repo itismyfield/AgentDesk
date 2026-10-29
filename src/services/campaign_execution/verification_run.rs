@@ -138,11 +138,13 @@ pub struct VerificationOrigin {
     pub registered_at: DateTime<Utc>,
 }
 
+// plan_digest is the helper's semantic plan identity; plan_artifact_digest is the plan file's bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActualPlan {
     pub archive_digest: Digest,
     pub manifest: Vec<PlannedTest>,
     pub plan_digest: Digest,
+    pub plan_artifact_digest: Digest,
     pub config_digest: Digest,
 }
 
@@ -223,6 +225,7 @@ pub enum NotSentReason {
     StaleAuthority,
     AuthorityRevoked,
     PhaseCancelled,
+    ReconciledUnstarted,
 }
 
 // Resource waits and preflight mismatches leave the phase unstarted; only Started carries a receipt.
@@ -272,19 +275,44 @@ pub enum PhaseOutput {
     },
     Plan {
         plan_digest: Digest,
+        plan_artifact_digest: Digest,
         config_digest: Digest,
+        selected: Vec<ListedTest>,
     },
     Tests {
         executed: Vec<ExecutedTest>,
     },
 }
 
+// A result names the Started receipt it belongs to, so a late or foreign result cannot fill a slot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseResult {
+    pub receipt: String,
     pub record: CommandRecord,
     pub termination: Termination,
     pub artifacts: Vec<ArtifactRef>,
     pub output: PhaseOutput,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ReconciledInitiation {
+    Started {
+        receipt: String,
+        process: ProcessIdentity,
+    },
+    Unstarted,
+}
+
+// A direct observation of one phase child, named by the execution, action and phase it resolves.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InitiationObservation {
+    pub execution_id: String,
+    pub action_id: String,
+    pub phase_id: String,
+    pub outcome: ReconciledInitiation,
+    pub evidence: String,
+    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +325,22 @@ pub struct VerificationPhase {
     pub input: Slot<BoundInput>,
     pub initiations: Vec<PhaseInitiation>,
     pub result: Option<PhaseResult>,
+}
+
+impl VerificationPhase {
+    // An Indeterminate start stays unresolved until a later direct observation is appended.
+    pub fn unresolved(&self) -> bool {
+        matches!(
+            self.initiations.last(),
+            Some(PhaseInitiation::Indeterminate { .. })
+        )
+    }
+
+    pub fn started(&self) -> bool {
+        self.initiations
+            .iter()
+            .any(|i| matches!(i, PhaseInitiation::Started { .. }))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,7 +412,9 @@ pub struct ExecutionAudit {
     pub skipped: Vec<String>,
     pub missing: Vec<String>,
     pub duplicate: Vec<String>,
+    pub extra: Vec<String>,
     pub exit_code: Option<i32>,
+    pub audit_exit_code: Option<i32>,
     pub complete: bool,
     pub all_passed: bool,
 }
@@ -607,10 +653,19 @@ impl VerificationRun {
             .ok_or_else(|| VerificationError::UnknownPhase(id.to_owned()))
     }
 
+    // The subject slot takes only the original owner's output: another attempt's seal or candidate
+    // with the same repository and base is a conflict, not a first binding.
     pub fn bind_subject(&mut self, subject: BoundSubject) -> Result<(), VerificationError> {
-        if subject.repository != self.origin.owner_binding.repository
-            || subject.base_sha != self.origin.owner_binding.base_sha
-        {
+        let owner = &self.origin.owner_binding;
+        let owned = match &subject.reference {
+            VerificationSubjectRef::SealedOutput { owner_attempt, .. } => {
+                *owner_attempt == owner.attempt_id
+            }
+            VerificationSubjectRef::BoundCandidate { attempt_id } => {
+                *attempt_id == owner.attempt_id && subject.output_sha == owner.candidate_sha
+            }
+        };
+        if !owned || subject.repository != owner.repository || subject.base_sha != owner.base_sha {
             return Err(VerificationError::Conflict);
         }
         self.subject.bind(subject)
@@ -630,12 +685,13 @@ impl VerificationRun {
         }
         let phase = self.phase(id)?;
         for required in &phase.requires {
-            let digest = self.finished_output_digest(required)?;
+            let digest = self.predecessor_digest(phase, required)?;
             if input.predecessors.get(required) != Some(&digest) {
                 return Err(VerificationError::PredecessorPending(required.clone()));
             }
         }
-        // The test phase pins the archive, plan and worker config this V produced for its preflight.
+        // The test phase pins the archive, plan file and worker config this V produced as file
+        // digests for its preflight; the semantic plan identity is re-checked by the helper.
         if phase.kind == PhaseKind::Test {
             let plan = self
                 .plan
@@ -643,7 +699,7 @@ impl VerificationRun {
                 .ok_or_else(|| VerificationError::Unbound("plan".into()))?;
             let pinned = |digest: &str| input.preflight.iter().any(|a| a.digest == digest);
             if !pinned(&plan.archive_digest)
-                || !pinned(&plan.plan_digest)
+                || !pinned(&plan.plan_artifact_digest)
                 || !pinned(&plan.config_digest)
             {
                 return Err(VerificationError::Unbound("plan".into()));
@@ -653,18 +709,39 @@ impl VerificationRun {
         self.phase_mut(id)?.input.bind(bound)
     }
 
-    fn finished_output_digest(&self, id: &str) -> Result<Digest, VerificationError> {
+    // Preparation outputs are consumed only after a clean exit; an audit consumes the test phase's
+    // raw result however the tests exited.
+    fn predecessor_digest(
+        &self,
+        consumer: &VerificationPhase,
+        id: &str,
+    ) -> Result<Digest, VerificationError> {
+        let required = self.phase(id)?;
+        let raw = consumer.kind == PhaseKind::Audit && required.kind == PhaseKind::Test;
+        self.output_digest(id, raw)
+    }
+
+    fn output_digest(&self, id: &str, raw: bool) -> Result<Digest, VerificationError> {
         let result = self
             .phase(id)?
             .result
             .as_ref()
-            .filter(|r| r.termination == Termination::Exited && r.record.exit_code == Some(0))
+            .filter(|r| {
+                r.termination == Termination::Exited && (raw || r.record.exit_code == Some(0))
+            })
             .ok_or_else(|| VerificationError::PredecessorPending(id.to_owned()))?;
         digest_of(&result.output).map_err(|_| VerificationError::Encoding)
     }
 
-    // The actual plan binds once, from the archive/list/plan outputs this same V produced.
-    pub fn bind_plan(&mut self, check: &SpecCheck) -> Result<(), VerificationError> {
+    // The actual plan binds once from this V's own archive, list and plan outputs: the manifest is
+    // what the plan selected, each entry listed and not ignored, under the registered check policy.
+    pub fn bind_plan(&mut self, spec: &VerificationSpec) -> Result<(), VerificationError> {
+        if spec.hash()? != self.origin.spec_hash {
+            return Err(VerificationError::Conflict);
+        }
+        let check = spec
+            .check(&self.origin.check_id)
+            .ok_or_else(|| VerificationError::UnknownPhase(self.origin.check_id.clone()))?;
         let archive = self.output_of(PhaseKind::Archive)?;
         let universe = self.output_of(PhaseKind::List)?;
         let plan = self.output_of(PhaseKind::Plan)?;
@@ -675,26 +752,39 @@ impl VerificationRun {
         };
         let PhaseOutput::Plan {
             plan_digest,
+            plan_artifact_digest,
             config_digest,
+            selected,
         } = plan
         else {
             return Err(VerificationError::Conflict);
         };
-        let manifest = tests
+        let listed: BTreeSet<(&str, &str)> = tests
             .iter()
             .filter(|t| !t.ignored)
-            .map(|t| PlannedTest {
-                id: format!("{} {}", t.binary_id, t.name),
+            .map(|t| (t.binary_id.as_str(), t.name.as_str()))
+            .collect();
+        let mut chosen = BTreeSet::new();
+        let mut manifest = Vec::with_capacity(selected.len());
+        for test in selected {
+            let key = (test.binary_id.as_str(), test.name.as_str());
+            if test.ignored || !listed.contains(&key) || !chosen.insert(key) {
+                return Err(VerificationError::Conflict);
+            }
+            manifest.push(PlannedTest {
+                id: format!("{} {}", test.binary_id, test.name),
                 check_id: check.id.clone(),
                 required: check.required,
-            })
-            .collect();
-        self.plan.bind(ActualPlan {
+            });
+        }
+        let actual = ActualPlan {
             archive_digest: digest.clone(),
             manifest,
             plan_digest: plan_digest.clone(),
+            plan_artifact_digest: plan_artifact_digest.clone(),
             config_digest: config_digest.clone(),
-        })
+        };
+        self.plan.bind(actual)
     }
 
     fn output_of(&self, kind: PhaseKind) -> Result<&PhaseOutput, VerificationError> {
@@ -703,7 +793,7 @@ impl VerificationRun {
             .iter()
             .find(|p| p.kind == kind)
             .ok_or_else(|| VerificationError::UnknownPhase(format!("{kind:?}")))?;
-        self.finished_output_digest(&phase.id)?;
+        self.output_digest(&phase.id, false)?;
         phase
             .result
             .as_ref()
@@ -748,12 +838,7 @@ impl VerificationRun {
             ActionState::Unknown => return Ok(PhaseAdmission::Reconcile),
             _ => {}
         }
-        if phase.initiations.iter().any(|i| {
-            matches!(
-                i,
-                PhaseInitiation::Started { .. } | PhaseInitiation::Indeterminate { .. }
-            )
-        }) {
+        if phase.started() || phase.unresolved() {
             return Ok(PhaseAdmission::Reconcile);
         }
         let subject = self
@@ -765,7 +850,7 @@ impl VerificationRun {
             .bound()
             .ok_or_else(|| VerificationError::Unbound(phase.id.clone()))?;
         for required in &phase.requires {
-            self.finished_output_digest(required)?;
+            self.predecessor_digest(phase, required)?;
         }
         // Consumer epoch and control version stay out of the payload: handover keeps the same effect.
         let payload = (
@@ -794,29 +879,70 @@ impl VerificationRun {
         if phase.initiations.contains(&initiation) {
             return Ok(());
         }
-        if phase
-            .initiations
-            .iter()
-            .any(|i| matches!(i, PhaseInitiation::Started { .. }))
-        {
+        if phase.started() || phase.unresolved() {
             return Err(VerificationError::Conflict);
         }
         phase.initiations.push(initiation);
         Ok(())
     }
 
+    // Only a direct observation of the same execution, action and phase resolves an Indeterminate
+    // start; the history is kept and the returned state is what the action should be reconciled to.
+    pub fn reconcile_initiation(
+        &mut self,
+        observation: InitiationObservation,
+    ) -> Result<ActionState, VerificationError> {
+        let execution_id = self.origin.execution_id.clone();
+        let phase = self.phase_mut(&observation.phase_id)?;
+        if observation.execution_id != execution_id || observation.action_id != phase.action_id {
+            return Err(VerificationError::ActionMismatch(observation.action_id));
+        }
+        if !phase.unresolved() {
+            return Err(VerificationError::Conflict);
+        }
+        let (entry, state) = match observation.outcome {
+            ReconciledInitiation::Started { receipt, process } => {
+                if receipt != format!("{}:{}:{}", phase.id, process.pid, process.nonce) {
+                    return Err(VerificationError::Conflict);
+                }
+                (
+                    PhaseInitiation::Started { receipt, process },
+                    ActionState::Started,
+                )
+            }
+            ReconciledInitiation::Unstarted => (
+                PhaseInitiation::NotSent {
+                    reason: NotSentReason::ReconciledUnstarted,
+                    evidence: observation.evidence,
+                    observed_at: observation.observed_at,
+                },
+                ActionState::Planned,
+            ),
+        };
+        phase.initiations.push(entry);
+        Ok(state)
+    }
+
+    // A result is accepted once for the phase, action and Started receipt it names.
     pub fn record_result(
         &mut self,
         id: &str,
+        action: &Action,
         result: PhaseResult,
     ) -> Result<(), VerificationError> {
         let phase = self.phase_mut(id)?;
-        if !phase
-            .initiations
-            .iter()
-            .any(|i| matches!(i, PhaseInitiation::Started { .. }))
-        {
+        if !phase.started() {
             return Err(VerificationError::NotFinished);
+        }
+        let receipt_known = phase.initiations.iter().any(
+            |i| matches!(i, PhaseInitiation::Started { receipt, .. } if *receipt == result.receipt),
+        );
+        if result.record.phase_id != phase.id
+            || action.id != phase.action_id
+            || action.initiation_receipt.as_deref() != Some(result.receipt.as_str())
+            || !receipt_known
+        {
+            return Err(VerificationError::ActionMismatch(result.receipt));
         }
         match &phase.result {
             None => phase.result = Some(result),
@@ -838,13 +964,7 @@ impl VerificationRun {
             .iter()
             .map(|p| action(&p.action_id).map_or(ActionState::Unknown, |a| a.state))
             .collect();
-        if states.contains(&ActionState::Unknown)
-            || self.phases.iter().any(|p| {
-                p.initiations
-                    .iter()
-                    .any(|i| matches!(i, PhaseInitiation::Indeterminate { .. }))
-            })
-        {
+        if states.contains(&ActionState::Unknown) || self.phases.iter().any(|p| p.unresolved()) {
             return VerificationRunState::Unknown;
         }
         let running = self
@@ -888,15 +1008,12 @@ impl VerificationRun {
         let mut to_cancel = Vec::new();
         for phase in &self.phases {
             let state = actions.get(&phase.action_id).map(|a| a.state);
-            let started = phase.initiations.iter().any(|i| {
-                matches!(
-                    i,
-                    PhaseInitiation::Started { .. } | PhaseInitiation::Indeterminate { .. }
-                )
-            }) || matches!(
-                state,
-                Some(ActionState::Started | ActionState::Unknown | ActionState::StartPending)
-            );
+            let started = phase.started()
+                || phase.unresolved()
+                || matches!(
+                    state,
+                    Some(ActionState::Started | ActionState::Unknown | ActionState::StartPending)
+                );
             if started && phase.result.is_none() {
                 return Err(VerificationError::Started);
             }
@@ -913,22 +1030,28 @@ impl VerificationRun {
         Ok(to_cancel)
     }
 
-    // Raw collection: the complete/all_passed split is kept; the stage verdict is not decided here.
-    pub fn collect(
+    // Raw collection: every started or unresolved phase must have terminated before anything is
+    // classified; the complete/all_passed split is kept and the stage verdict is not decided here.
+    pub fn collect<'a>(
         &self,
+        action: impl Fn(&str) -> Option<&'a Action>,
         environment: ExecutionEnvironment,
         log_refs: Vec<String>,
     ) -> Result<VerificationCollection, VerificationError> {
-        let mut test_result = None;
         for phase in &self.phases {
-            let started = phase
-                .initiations
-                .iter()
-                .any(|i| matches!(i, PhaseInitiation::Started { .. }));
+            let state = action(&phase.action_id).map(|a| a.state);
+            let live = phase.started()
+                || phase.unresolved()
+                || !matches!(
+                    state,
+                    Some(ActionState::Planned | ActionState::Reconciled | ActionState::Cancelled)
+                );
+            if live && phase.result.is_none() {
+                return Err(VerificationError::NotFinished);
+            }
+        }
+        for phase in &self.phases {
             let Some(result) = &phase.result else {
-                if started {
-                    return Err(VerificationError::NotFinished);
-                }
                 continue;
             };
             if let Termination::Interrupted { evidence } = &result.termination {
@@ -937,22 +1060,37 @@ impl VerificationRun {
                     evidence: evidence.clone(),
                 });
             }
-            if phase.kind == PhaseKind::Test {
-                test_result = Some(result);
-            } else if result.record.exit_code != Some(0) {
+            let preparation = !matches!(phase.kind, PhaseKind::Test | PhaseKind::Audit);
+            if preparation && result.record.exit_code != Some(0) {
                 return Ok(VerificationCollection::PreparationFailed {
                     phase_id: phase.id.clone(),
                     record: result.record.clone(),
                 });
             }
         }
-        let (Some(result), Some(plan)) = (test_result, self.plan.bound()) else {
+        // Executed needs every fixed phase finished, including an audit that followed failed tests.
+        if self.phases.iter().any(|p| p.result.is_none()) {
+            return Err(VerificationError::NotFinished);
+        }
+        let result_of = |kind: PhaseKind| {
+            self.phases
+                .iter()
+                .find(|p| p.kind == kind)
+                .and_then(|p| p.result.as_ref())
+        };
+        let (Some(result), Some(plan)) = (result_of(PhaseKind::Test), self.plan.bound()) else {
             return Err(VerificationError::NotFinished);
         };
         let PhaseOutput::Tests { executed } = &result.output else {
             return Err(VerificationError::Conflict);
         };
-        let audit = audit_execution(&plan.manifest, executed, result.record.exit_code);
+        let mut audit = audit_execution(&plan.manifest, executed, result.record.exit_code);
+        if let Some(audited) = result_of(PhaseKind::Audit) {
+            audit.audit_exit_code = audited.record.exit_code;
+            audit.all_passed = audit.all_passed
+                && audited.termination == Termination::Exited
+                && audited.record.exit_code == Some(0);
+        }
         Ok(VerificationCollection::Executed {
             evidence: Box::new(TestEvidence {
                 execution_id: self.origin.execution_id.clone(),
@@ -967,7 +1105,8 @@ impl VerificationRun {
     }
 }
 
-// Completeness is judged against the bound manifest, never from the exit code or pass count.
+// Completeness is judged against the bound manifest in both directions, never from the exit
+// code or pass count; the audit phase's own exit is folded in by collect().
 pub fn audit_execution(
     planned: &[PlannedTest],
     executed: &[ExecutedTest],
@@ -1004,10 +1143,20 @@ pub fn audit_execution(
         })
         .map(|p| p.id.clone())
         .collect();
+    let extra: Vec<String> = executed
+        .iter()
+        .filter(|t| {
+            !planned
+                .iter()
+                .any(|p| p.id == t.id && p.check_id == t.check_id)
+        })
+        .map(|t| t.id.clone())
+        .collect();
     let complete = !planned.is_empty()
         && !executed.is_empty()
         && missing.is_empty()
         && duplicate.is_empty()
+        && extra.is_empty()
         && planned
             .iter()
             .filter(|p| p.required)
@@ -1020,11 +1169,13 @@ pub fn audit_execution(
         skipped,
         missing,
         duplicate,
+        extra,
         exit_code,
+        audit_exit_code: None,
         complete,
     }
 }
 
 #[cfg(test)]
 #[path = "verification_run_tests.rs"]
-mod tests;
+pub(crate) mod tests;
