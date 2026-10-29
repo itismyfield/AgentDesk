@@ -128,12 +128,12 @@
 | `GET` | `/api/github-issues` | `github_dashboard::list_issues` | `src/server/routes/github_dashboard.rs:61` | `src/server/routes/domains/integrations.rs:86` |
 | `PATCH` | `/api/github-issues/{owner}/{repo}/{number}/close` | `github_dashboard::close_issue` | `src/server/routes/github_dashboard.rs:104` | `src/server/routes/domains/integrations.rs:87` |
 | `GET` | `/api/github-repos` | `github_dashboard::list_repos` | `src/server/routes/github_dashboard.rs:27` | `src/server/routes/domains/integrations.rs:85` |
-| `POST` | `/api/github/issues/create` | `github::create_issue` | `src/server/routes/github.rs:300` | `src/server/routes/domains/integrations.rs:74` |
+| `POST` | `/api/github/issues/create` | `github::create_issue` | `src/server/routes/github.rs:298` | `src/server/routes/domains/integrations.rs:74` |
 | `GET` | `/api/github/pr-summary` | `pr_summary::get_pr_summary` | `src/server/routes/pr_summary.rs:88` | `src/server/routes/domains/integrations.rs:80` |
 | `POST` | `/api/github/pr-summary/invalidate` | `pr_summary::invalidate_pr_summary` | `src/server/routes/pr_summary.rs:131` | `src/server/routes/domains/integrations.rs:81` |
-| `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:783` | `src/server/routes/domains/integrations.rs:75` |
-| `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:816` | `src/server/routes/domains/integrations.rs:75` |
-| `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:860` | `src/server/routes/domains/integrations.rs:79` |
+| `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:790` | `src/server/routes/domains/integrations.rs:75` |
+| `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:823` | `src/server/routes/domains/integrations.rs:75` |
+| `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:867` | `src/server/routes/domains/integrations.rs:79` |
 | `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:368` | `src/server/routes/domains/access.rs:15` |
 | `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:373` | `src/server/routes/domains/runtime.rs:21` |
 | `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:37` | `src/server/routes/domains/ops.rs:267` |
