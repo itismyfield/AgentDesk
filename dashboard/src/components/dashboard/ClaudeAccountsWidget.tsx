@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { CheckCircle2, KeyRound, Loader2, RefreshCw } from "lucide-react";
+import { ApiRequestError, request } from "../../api/httpClient";
 import TooltipLabel from "../common/TooltipLabel";
 import {
   SurfaceActionButton,
@@ -90,6 +91,11 @@ function createTimedController(timeoutMs: number) {
     controller,
     cleanup: () => window.clearTimeout(timeoutId),
   };
+}
+
+// Status/install/hostname fields of a non-2xx response drive the widget state.
+function errorPayload<T>(error: ApiRequestError): Partial<T> {
+  return typeof error.body === "object" && error.body !== null ? (error.body as Partial<T>) : {};
 }
 
 function accountKey(account: ClaudeAccount): string {
@@ -323,27 +329,27 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
       setIsRefreshing(true);
 
       try {
-        const res = await fetch("/api/claude-accounts", {
-          credentials: "include",
+        const raw = await request<ClaudeAccountsResponse>("/api/claude-accounts", {
           signal: controller.signal,
+          timeoutMs: CLAUDE_ACCOUNTS_FETCH_TIMEOUT_MS,
+          maxRetries: 0,
+          suppressErrorToast: true,
         });
-        const raw = (await res.json()) as ClaudeAccountsResponse | ClaudeAccountsErrorResponse;
         if (controller.signal.aborted) return;
 
-        if (!res.ok) {
-          const errorPayload = raw as ClaudeAccountsErrorResponse;
-          setLoadState(errorPayload.status === "not_installed" ? "not_installed" : "execution_failure");
-          setError(errorPayload.error ?? `HTTP ${res.status}`);
-          setInstallHint(errorPayload.install?.command ?? null);
-          return;
-        }
-
-        setData(raw as ClaudeAccountsResponse);
+        setData(raw);
         setLoadState("ready");
         setError(null);
         setInstallHint(null);
       } catch (nextError) {
         if (controller.signal.aborted) return;
+        if (nextError instanceof ApiRequestError) {
+          const failure = errorPayload<ClaudeAccountsErrorResponse>(nextError);
+          setLoadState(failure.status === "not_installed" ? "not_installed" : "execution_failure");
+          setError(failure.error ?? `HTTP ${nextError.status}`);
+          setInstallHint(failure.install?.command ?? null);
+          return;
+        }
         setLoadState("execution_failure");
         setError(nextError instanceof Error ? nextError.message : String(nextError));
       } finally {
@@ -367,30 +373,28 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
       setSwitchResult(null);
 
       try {
-        const res = await fetch("/api/claude-accounts/switch", {
+        const raw = await request<SwitchResponse>("/api/claude-accounts/switch", {
           method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ account: target }),
           signal: controller.signal,
+          timeoutMs: CLAUDE_ACCOUNTS_FETCH_TIMEOUT_MS,
+          suppressErrorToast: true,
         });
-        const raw = (await res.json()) as SwitchResponse;
         if (controller.signal.aborted) return;
-
-        if (!res.ok) {
-          setSwitchResult({ ...raw, status: raw.status ?? "execution_failure", error: raw.error ?? `HTTP ${res.status}` });
-          return;
-        }
 
         setSwitchResult(raw);
         requestRefresh();
       } catch (nextError) {
-        if (!controller.signal.aborted) {
-          setSwitchResult({
-            status: "execution_failure",
-            error: nextError instanceof Error ? nextError.message : String(nextError),
-          });
+        if (controller.signal.aborted) return;
+        if (nextError instanceof ApiRequestError) {
+          const failure = errorPayload<SwitchResponse>(nextError);
+          setSwitchResult({ ...failure, status: failure.status ?? "execution_failure", error: failure.error ?? `HTTP ${nextError.status}` });
+          return;
         }
+        setSwitchResult({
+          status: "execution_failure",
+          error: nextError instanceof Error ? nextError.message : String(nextError),
+        });
       } finally {
         cleanup();
         if (!controller.signal.aborted) setSwitchingAccount(null);

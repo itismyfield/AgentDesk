@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { beginAuthentication } from "../../api/authState";
 import { useOnboardingWizardActions } from "./OnboardingWizardActions";
 
 type Args = Parameters<typeof useOnboardingWizardActions>[0];
@@ -20,6 +21,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root?.unmount());
   container?.remove();
+  beginAuthentication(null);
   vi.unstubAllGlobals();
 });
 
@@ -105,4 +107,44 @@ it("rejects an empty communication token and uses the command token for channel 
   expect(payloads("/api/onboarding/validate-token")).toHaveLength(2);
   expect(args.setError).toHaveBeenLastCalledWith("Enter communication bot token.");
   expect(payloads("/api/onboarding/channels")).toEqual([{ token: "test-command" }]);
+});
+
+it("sends the tab token on every wizard action and still renders the server's failure body", async () => {
+  beginAuthentication("tab-only-token");
+  const replies: Record<string, { status: number; body: unknown }> = {
+    "/api/onboarding/validate-token": { status: 200, body: { valid: true, bot_id: "1", bot_name: "bot" } },
+    "/api/onboarding/check-provider": { status: 200, body: { installed: true, logged_in: true } },
+    "/api/onboarding/channels": { status: 200, body: { guilds: [{ id: "g1", name: "Guild", channels: [] }] } },
+    "/api/onboarding/generate-prompt": { status: 200, body: { prompt: "generated" } },
+    "/api/onboarding/complete": { status: 500, body: { ok: false, error: "discord apply failed", partial_apply: true } },
+  };
+  fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+    const authorized = new Headers(init.headers).get("Authorization") === "Bearer tab-only-token";
+    const reply = authorized ? replies[url] : { status: 401, body: { error: "unauthorized" } };
+    return new Response(JSON.stringify(reply.body), { status: reply.status });
+  });
+  const setGuilds = vi.fn();
+  const setProviderStatuses = vi.fn();
+  const setAgents = vi.fn();
+  const args = await render({
+    agents: [{ id: "a1", name: "Agent", description: "desc", prompt: "", custom: true }],
+    setGuilds, setProviderStatuses, setAgents,
+  });
+  await act(async () => {
+    await actions.validateStep1();
+    await actions.checkProviders();
+    await actions.fetchChannels();
+    await actions.generateAiPrompt("a1");
+    await actions.handleComplete();
+  });
+  expect(new Set(fetchMock.mock.calls.map(([url]) => url))).toEqual(new Set(Object.keys(replies)));
+  for (const [, init] of fetchMock.mock.calls) {
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer tab-only-token");
+  }
+  expect(setProviderStatuses).toHaveBeenLastCalledWith({
+    claude: { installed: true, logged_in: true }, codex: { installed: true, logged_in: true },
+  });
+  expect(setGuilds).toHaveBeenLastCalledWith([{ id: "g1", name: "Guild", channels: [] }]);
+  expect(setAgents.mock.calls.at(-1)![0]([{ id: "a1", prompt: "" }])).toEqual([{ id: "a1", prompt: "generated" }]);
+  expect(args.setError).toHaveBeenLastCalledWith(expect.stringMatching(/^discord apply failed Setup was partially applied/));
 });
