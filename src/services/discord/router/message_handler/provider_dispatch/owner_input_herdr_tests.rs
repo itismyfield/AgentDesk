@@ -323,8 +323,8 @@ fn owned_herdr_claude_launch_reserves_the_observed_execution_and_its_pane() {
     );
 }
 
-/// A Pending Herdr execution is not a create: whether or not it already took a first prompt, the
-/// owner refuses it before any reservation, so no hold, proof, leaf or key exists.
+/// A Pending Herdr execution, which may already hold an unheld first prompt, is refused before any
+/// hold, reservation, proof, leaf or key, and its original resumes under its ticket as stored.
 #[test]
 fn owned_herdr_pending_execution_is_refused_before_any_reservation() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -348,6 +348,21 @@ fn owned_herdr_pending_execution_is_refused_before_any_reservation() {
         crate::services::claude::herdr_turn::not_held(&owner.execution),
         Ok(()),
         "no input hold was taken"
+    );
+    let same = |a: &PendingQueueItem, b: &PendingQueueItem| a.message_id == b.message_id;
+    let resumed = owner.runtime.block_on(owner.mailbox.v2_resume_ticket(
+        owner.original.clone(),
+        owner.ticket.as_str().into(),
+        same,
+    ));
+    let (_, stored) = resumed.expect("the refused original resumes under its ticket");
+    let json = |item: &PendingQueueItem| serde_json::to_value(item).unwrap();
+    assert_eq!(json(&stored), json(&owner.original));
+    let snapshot = owner.snapshot();
+    assert_eq!(
+        snapshot["items"].as_array().map(Vec::len),
+        Some(1),
+        "{snapshot}"
     );
 }
 
@@ -570,6 +585,51 @@ fn two_herdr_rigs_serialize_one_physical_pane_through_the_gate() {
         "{on_a:?}"
     );
     assert_eq!(pasted(&b).len(), 1);
+}
+
+/// With the pane bound before the owner's first ready, a submit that readies before its paste pins
+/// that pane through the real V2 pin, so the paste after it is not a writer transfer.
+#[test]
+fn owned_herdr_ready_before_content_pins_the_bound_pane() {
+    use crate::services::claude_tui::guarded_outcome::SubmissionError;
+    use crate::services::session_host::{HerdrMutation as Mutation, HostMutation};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let owner = HerdrOwner::start("claude", 7_272_610);
+    let _registry = owner.rig.registry_on_this_thread();
+    owner.rig.answer("pane.read", claude_ready());
+    let pane =
+        crate::services::claude::herdr_turn::gate(&owner.record("claude", HostedState::Bound))
+            .unwrap();
+    let root = owner.rig.socket().display().to_string();
+    let target = json!({"host":"herdr","owner":owner.logical,"root":root,
+        "execution_nonce":owner.execution});
+    let source = json!({"kind":"pre_source","expected_session_id":null,
+        "expected_transcript":null,"binding_watermark":null});
+    let submit: scope::CreatedSubmit = Box::new(move |frame| {
+        scope::ready_payload().map_err(|refusal| SubmissionError::from(format!("{refusal:?}")))?;
+        pane.pin(Mutation::Input)
+            .map_err(|refusal| SubmissionError::from(format!("{refusal:?}")))?;
+        match pane.send_paste(&frame) {
+            Ok(HostMutation::Confirmed) => Ok(()),
+            other => Err(format!("{other:?}").into()),
+        }
+    });
+    let hook = owner.hook("claude", "herdr", Lineage::Created);
+    let _entered = owner.runtime.enter();
+    let writer = Some(format!("{root}#{PANE}"));
+    assert_eq!(
+        hook(Lineage::Created, target, source, writer, submit),
+        Ok(())
+    );
+    let sends = owner.rig.sends();
+    assert_eq!(sends.len(), 1, "{sends:?}");
+    assert!(
+        sends[0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(PROMPT)
+    );
+    assert!(matches!(owner.bind(), TurnBind::Settled(_)));
 }
 
 /// Herdr input admitted on this thread, as on an unstopped node.

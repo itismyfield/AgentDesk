@@ -721,3 +721,30 @@ fn unconsumed_launch_hook_is_not_owned() {
     }
     assert!(rig.events().is_empty(), "{:?}", rig.events());
 }
+
+/// Through `execute`, a create route's owner takes only a created execution: a driver handing over
+/// an existing one is refused before any reservation and nothing is written.
+#[test]
+fn a_create_route_refuses_an_existing_hand_over() {
+    use super::super::CLAUDE_LEGACY_PROBE;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oc-existing", 7_272_520, "normal", view("", false), IDLE);
+    let handed: super::super::ClaudeLegacyProbe = Box::new(|| {
+        let hook = scope::launch_hook().ok_or("no owner hook")?;
+        let submit: scope::CreatedSubmit = Box::new(|_| Ok(()));
+        hook(scope::Lineage::Existing, json!({}), json!({}), None, submit)
+    });
+    *CLAUDE_LEGACY_PROBE.lock().unwrap() = Some((rig.channel, handed));
+    let result = rig.dispatch(
+        ProviderKind::Claude,
+        target::Phase::Absent,
+        &rig.transcript(),
+    );
+    assert_eq!(result, Err("NotSent(\"lineage_refused: Existing\")".into()));
+    let snapshot = rig.snapshot();
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
+    assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+    assert_eq!(rig.bind(), TurnBind::NotArmed);
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+}
