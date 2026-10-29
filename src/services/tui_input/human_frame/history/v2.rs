@@ -733,6 +733,8 @@ pub(super) fn scoped() -> bool {
     context().is_some()
 }
 
+// Writer fixtures require Unix file identity and confirmed parent directory fsync.
+#[cfg(unix)]
 #[path = "v2_tests.rs"]
 mod tests;
 
