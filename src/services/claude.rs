@@ -1744,6 +1744,8 @@ fn execute_streaming_local_tui_tmux(
     )?;
     let auth_env_lines =
         crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+    // The account's own home holds its sessions; the selector and the launch context read it.
+    let claude_home = auth_overlay.home.as_deref();
     let session_exists = host_gate::session_exists(tmux_session_name)?;
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
@@ -1765,7 +1767,7 @@ fn execute_streaming_local_tui_tmux(
     let session_id = profile_matches.then_some(session_id).flatten();
     let working_dir_path = std::path::Path::new(working_dir);
     let session_resolution =
-        resolve_claude_tui_session_for_launch(working_dir_path, session_id, None)?;
+        resolve_claude_tui_session_for_launch(working_dir_path, session_id, claude_home)?;
     let mut resolved_session_id = session_resolution.session_id;
     let mut transcript_path = session_resolution.transcript_path;
     let mut transcript_path_string = transcript_path.display().to_string();
@@ -1847,6 +1849,7 @@ fn execute_streaming_local_tui_tmux(
         hook_endpoint,
         resume,
         &auth_env_lines,
+        claude_home,
         report_channel_id,
         returned && session_exists,
     )?;
@@ -1903,6 +1906,7 @@ pub(crate) use fresh_lifecycle::fresh_hold_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) fn tmux_tui_turn_for_tests(
     working_dir: &str,
+    session_id: Option<&str>,
     cancel_token: std::sync::Arc<CancelToken>,
     tmux_session_name: &str,
     teardown: &TeardownClearance,
@@ -1913,7 +1917,7 @@ pub(crate) fn tmux_tui_turn_for_tests(
     let (channel, cancel) = (Some(report_channel_id), Some(cancel_token));
     execute_streaming_local_tui_tmux(
         "hello",
-        None,
+        session_id,
         working_dir,
         sender,
         cancel,

@@ -422,3 +422,92 @@ async fn the_promote_gate_reads_the_channel_row_with_no_channel_name_pg() {
     assert!(unread, "a failed row read is not a legacy answer");
     db.drop().await;
 }
+
+// A channel that left Herdr starts the queued turn that moves this node's Claude execution back
+// to tmux, Bound or not yet back; a pending, foreign, other-provider or unreadable row still holds.
+#[tokio::test]
+async fn the_promote_gate_starts_only_the_turn_that_moves_this_node_s_claude_back_pg() {
+    use crate::db::dispatched_sessions::hosted_execution::HostedState;
+    use crate::db::dispatched_sessions::hosted_execution::tests::{future_schema, record};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install("-");
+    let _hosts = crate::config::session_hosts::force_for_test(Some("test-node"), &[]);
+    let (db, pool) = postgres().await;
+    let shared = shared_on(&pool).await;
+    let provider = ProviderKind::Claude;
+    let gate = crate::services::discord::router::hosted_tui_promote_readiness_blocked;
+    // (case, state, execution node, provider, readable, held)
+    let cases = [
+        (
+            "bound",
+            HostedState::Bound,
+            "test-node",
+            "claude",
+            true,
+            false,
+        ),
+        (
+            "retired, not back yet",
+            HostedState::Retired,
+            "test-node",
+            "claude",
+            true,
+            false,
+        ),
+        (
+            "pending",
+            HostedState::Pending,
+            "test-node",
+            "claude",
+            true,
+            true,
+        ),
+        (
+            "another node",
+            HostedState::Bound,
+            "another-node",
+            "claude",
+            true,
+            true,
+        ),
+        (
+            "another provider",
+            HostedState::Bound,
+            "test-node",
+            "codex",
+            true,
+            true,
+        ),
+        (
+            "unreadable",
+            HostedState::Bound,
+            "test-node",
+            "claude",
+            false,
+            true,
+        ),
+    ];
+    for (n, (case, state, node, by, readable, held)) in cases.into_iter().enumerate() {
+        let channel = ChannelId::new(1_479_671_301_387_066_000 + n as u64);
+        let channel_name = format!("i7503-return-{n}");
+        map_channel(&shared, channel, &channel_name).await;
+        let name = provider.build_tmux_session_name(&channel_name);
+        let mut row_owner = owner(&channel.get().to_string());
+        row_owner.discord_token_hash = shared.token_hash.clone();
+        row_owner.provider = by.into();
+        let mut stored = record(&row_owner, "n1", state);
+        if let Some(at) = stored.location.as_mut() {
+            at.execution_node = node.into();
+        }
+        let raw = match readable {
+            true => wire(&stored),
+            false => future_schema(&row_owner),
+        };
+        let seed = crate::services::discord::host_key_derivation::tests::seed_row;
+        let hash = Some(shared.token_hash.as_str());
+        let key = channel_key(&shared, &name);
+        seed(&pool, "claude", hash, &key, channel.get(), Some(raw)).await;
+        assert_eq!(gate(&shared, &provider, channel).await, held, "{case}");
+    }
+    db.drop().await;
+}

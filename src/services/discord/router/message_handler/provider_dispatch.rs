@@ -447,8 +447,7 @@ pub(super) fn execute(
     }
 }
 
-/// The switch is read first; off, the turn is refused before any I/O.
-#[cfg_attr(not(unix), allow(unused_variables))]
+/// Hands the channel's Herdr execution back to tmux before its tmux turn runs.
 #[cfg(unix)]
 fn return_to_tmux(turn: &StreamingTurn<'_>, plan: &ReturnPlan) -> Result<(), String> {
     use crate::services::claude::herdr_return::{ProductionPorts, ReturnTurn, execute};
@@ -473,6 +472,8 @@ fn return_to_tmux(_turn: &StreamingTurn<'_>, _plan: &ReturnPlan) -> Result<(), S
     Err("herdr return: unix only".into())
 }
 
+/// The switch is read first; off, the turn is refused before any I/O.
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn herdr_turn(
     turn: &StreamingTurn<'_>,
     plan: &HerdrTurnPlan,

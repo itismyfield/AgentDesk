@@ -82,6 +82,7 @@ impl Lab {
             "".into(),
             false,
             "",
+            None,
             channel,
             false,
         )

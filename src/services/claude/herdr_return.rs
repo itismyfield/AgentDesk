@@ -94,9 +94,14 @@ fn resumable(turn: &ReturnTurn<'_>, record: &HostedExecution) -> Result<Option<S
     let Some(session) = turn.session_id.filter(|_| !turn.force_fresh) else {
         return Ok(None);
     };
-    // The tmux turn looks for it under the daemon's Claude home, as here.
-    let working_dir = Path::new(turn.working_dir);
-    let Some(source) = session_handoff::transcript_file(working_dir, session, None)? else {
+    // The tmux turn looks for it under the home of the account it launches under, as here.
+    let logical = &record.owner.logical_key;
+    let overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
+        crate::services::provider::ProviderKind::Claude,
+        logical,
+    )?;
+    let (working_dir, home) = (Path::new(turn.working_dir), overlay.home.as_deref());
+    let Some(source) = session_handoff::transcript_file(working_dir, session, home)? else {
         return Ok(None);
     };
     if !session_handoff::o_reads(turn.channel_id, &source)? {
@@ -105,7 +110,6 @@ fn resumable(turn: &ReturnTurn<'_>, record: &HostedExecution) -> Result<Option<S
             source.path.display()
         ));
     }
-    let logical = &record.owner.logical_key;
     match crate::services::tmux_common::claude_session_auth(logical, session)? {
         Some(profile) => Ok(Some(profile)),
         None => Err(format!(
@@ -167,4 +171,4 @@ impl EarlierExecution for HerdrPane<'_> {
 
 #[cfg(test)]
 #[path = "herdr_return_tests.rs"]
-mod tests;
+pub(crate) mod tests;

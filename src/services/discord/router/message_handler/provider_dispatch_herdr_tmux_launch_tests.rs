@@ -1,4 +1,4 @@
-//! A tmux Claude that moved on to a new session by `/clear` moves to Herdr under that session.
+//! Real tmux Claude launches whose sessions move to Herdr or come back from it.
 
 use super::*;
 use crate::services::provider_teardown::tests::test_support::{FakeTmux, cleared};
@@ -45,17 +45,15 @@ fn read_through(path: &Path, session: &str) {
     std::fs::write(file, serde_json::to_vec(&cursor).unwrap()).unwrap();
 }
 
-// The tmux launch records its session's account, a `/clear` of that execution moves the record on
-// to the new session, and the move to Herdr resumes the new session after one `/exit`.
-#[test]
-fn f9_a_session_a_clear_moved_on_to_resumes_on_herdr_under_its_launch_account_pg() {
-    let fx = Fixture::new("resume-f9", None);
+/// Runs the channel's tmux turn on a fake tmux until its launch recorded its session's account and
+/// spawn nonce, then cancels it; the recorded `session\naccount` and the nonce.
+fn launch_tmux(fx: &Fixture, session: Option<&str>) -> (String, String) {
     let logical = fx.logical().to_owned();
     let cwd = fx.cwd.path().to_str().unwrap().to_owned();
     let tmux = FakeTmux::install(&logical);
     tmux.mark_missing();
     tmux.enable_fixture_launch();
-    let launch_bin = fx.own_claude();
+    let _launch_bin = fx.own_claude();
     let record = crate::services::tmux_common::session_temp_path(&logical, "auth_session");
     let spawn = crate::services::tmux_common::session_temp_path(&logical, "spawn_nonce");
     let cancel = Arc::new(CancelToken::new());
@@ -65,7 +63,7 @@ fn f9_a_session_a_clear_moved_on_to_resumes_on_herdr_under_its_launch_account_pg
         let (cwd, logical) = (&cwd, &logical);
         let turn = scope.spawn(move || {
             crate::services::claude::tmux_tui_turn_for_tests(
-                cwd, token, logical, &clearance, CHANNEL,
+                cwd, session, token, logical, &clearance, CHANNEL,
             )
         });
         eventually("the tmux launch", || {
@@ -75,6 +73,17 @@ fn f9_a_session_a_clear_moved_on_to_resumes_on_herdr_under_its_launch_account_pg
         let _ = turn.join().unwrap();
     });
     let launched = std::fs::read_to_string(&record).unwrap();
+    let nonce = std::fs::read_to_string(&spawn).unwrap();
+    (launched, nonce.trim().to_owned())
+}
+
+// The tmux launch records its session's account, a `/clear` of that execution moves the record on
+// to the new session, and the move to Herdr resumes the new session after one `/exit`.
+#[test]
+fn f9_a_session_a_clear_moved_on_to_resumes_on_herdr_under_its_launch_account_pg() {
+    let fx = Fixture::new("resume-f9", None);
+    let logical = fx.logical().to_owned();
+    let (launched, nonce) = launch_tmux(&fx, None);
     let (s0, account) = launched.split_once('\n').unwrap();
     let s0 = s0.to_owned();
     assert_eq!(
@@ -91,7 +100,6 @@ fn f9_a_session_a_clear_moved_on_to_resumes_on_herdr_under_its_launch_account_pg
     )
     .unwrap();
     append(&path, &[json!({"type": "mode", "sessionId": s1})]);
-    let nonce = std::fs::read_to_string(&spawn).unwrap();
     let s0_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
         fx.cwd.path(),
         &s0,
@@ -105,7 +113,7 @@ fn f9_a_session_a_clear_moved_on_to_resumes_on_herdr_under_its_launch_account_pg
         claude(&s0_path, &s0),
     );
     let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(execution_context("claude", nonce.trim()).unwrap()),
+        context: CapturedContext::Captured(execution_context("claude", &nonce).unwrap()),
         observed: Default::default(),
     };
     let payload = json!({"session_id": s1, "source": "clear", "transcript_path": path});
@@ -129,7 +137,6 @@ fn f9_a_session_a_clear_moved_on_to_resumes_on_herdr_under_its_launch_account_pg
     append(&path, &[said, answered]);
     read_through(&path, &s1);
     *fx.session.lock().unwrap() = Some(s1.clone());
-    drop((launch_bin, tmux));
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
     ports.old_tmux.alive.store(true, Ordering::SeqCst);
@@ -148,4 +155,36 @@ fn f9_a_session_a_clear_moved_on_to_resumes_on_herdr_under_its_launch_account_pg
     assert!(script.contains(&format!("'--resume' '{s1}'")), "{script}");
     assert!(!script.contains("'--session-id'"), "{script}");
     crate::services::tmux_common::cleanup_session_temp_files(&logical);
+}
+
+// A session handed back to tmux under a named account is found in that account's own home and
+// resumed there, its launch context naming that home; in the daemon's home only it starts anew.
+#[test]
+fn a_named_account_tmux_turn_resumes_its_session_from_its_own_home_pg() {
+    use crate::services::claude::herdr_return::tests::claude_account;
+    for own in [true, false] {
+        let fx = Fixture::new("resume-home", None);
+        let (_account, _user, home) = claude_account("work");
+        let session = uuid();
+        let under = own.then_some(home.as_path());
+        let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            fx.cwd.path(),
+            &session,
+            under,
+        )
+        .unwrap();
+        append(&path, &[json!({"type": "mode", "sessionId": session})]);
+        // As the return to tmux leaves it: the account the session last ran under.
+        crate::services::tmux_common::write_tmux_session_auth_profile(fx.logical(), "work")
+            .unwrap();
+        let (_, nonce) = launch_tmux(&fx, Some(&session));
+        let script = fx.launch_script();
+        let resumed = script.contains(&format!("'--resume' '{session}'"));
+        assert_eq!(resumed, own, "own home: {own}\n{script}");
+        assert_eq!(script.contains("'--session-id'"), !own, "{script}");
+        assert!(script.contains(home.to_str().unwrap()), "{script}");
+        let context = execution_context("claude", &nonce).unwrap();
+        assert_eq!(context.provider_root, Some(home.join("projects")));
+        crate::services::tmux_common::cleanup_session_temp_files(fx.logical());
+    }
 }

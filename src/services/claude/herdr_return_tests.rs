@@ -145,11 +145,16 @@ impl Fixture {
 
     /// The session's transcript, with O reading it when `cursor`.
     fn transcript(&self, cursor: bool) -> PathBuf {
+        self.transcript_under(None, cursor)
+    }
+
+    /// As `transcript`, in the Claude home `home` (the daemon's when `None`).
+    fn transcript_under(&self, home: Option<&std::path::Path>, cursor: bool) -> PathBuf {
         use crate::services::tui_o::store::spool::{Cursor, source_key};
         let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
             self.cwd.path(),
             &self.session,
-            None,
+            home,
         )
         .unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -158,7 +163,7 @@ impl Fixture {
         let dir = dir.join("o_store").join(CHANNEL.to_string()).join("cursor");
         let _ = std::fs::remove_dir_all(&dir);
         if cursor {
-            let source = session_handoff::transcript_file(self.cwd.path(), &self.session, None)
+            let source = session_handoff::transcript_file(self.cwd.path(), &self.session, home)
                 .unwrap()
                 .unwrap();
             std::fs::create_dir_all(&dir).unwrap();
@@ -379,4 +384,45 @@ fn b7_a_session_moved_on_from_its_launch_returns_under_the_launch_account_pg() {
     let profile = tc::session_temp_path(LOGICAL, "auth_profile");
     assert_eq!(std::fs::read_to_string(profile).unwrap(), "work");
     assert_eq!(ports.herdr.lock().unwrap().exits, 1);
+}
+
+/// Makes `profile` the configured Claude account, with its own managed home under a scratch HOME.
+pub(crate) fn claude_account(profile: &str) -> (TestEnvVarGuard, tempfile::TempDir, PathBuf) {
+    let user = tempfile::tempdir().unwrap();
+    let guard = TestEnvVarGuard::set_path_after_shared_test_env_lock("HOME", user.path());
+    let claude = crate::services::provider::ProviderKind::Claude;
+    let home =
+        crate::services::provider_auth_profile::extra_account_home(&claude, profile).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let org = serde_yaml::to_string(&serde_json::json!({"version": 1, "agents": {},
+        "provider_auth_profiles": {profile: {"provider": "claude", "home": home}},
+        "provider_auth_primary_profiles": {"claude": profile}}))
+    .unwrap();
+    let path = crate::runtime_layout::org_schema_path(&crate::config::runtime_root().unwrap());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, org).unwrap();
+    (guard, user, home)
+}
+
+// A named account's session is looked for in that account's own home, as its tmux turn does:
+// found there it returns under that account; in the daemon's home only it starts anew.
+#[test]
+fn b8_a_named_account_session_returns_from_its_own_home_pg() {
+    for own in [false, true] {
+        let fx = Fixture::new();
+        let (_account, _user, home) = claude_account("work");
+        tc::write_claude_session_auth(LOGICAL, &fx.session, "work").unwrap();
+        if own {
+            fx.transcript_under(Some(&home), true);
+        }
+        let ports = running();
+        assert_eq!(fx.run(&ports), Ok(()), "own home: {own}");
+        let marker = std::fs::read_to_string(tc::session_temp_path(LOGICAL, "auth_profile"));
+        assert_eq!(
+            marker.ok().as_deref(),
+            own.then_some("work"),
+            "own home: {own}"
+        );
+        assert_eq!(ports.herdr.lock().unwrap().exits, 1);
+    }
 }

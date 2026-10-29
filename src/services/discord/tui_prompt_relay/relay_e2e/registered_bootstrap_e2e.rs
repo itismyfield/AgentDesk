@@ -22,6 +22,8 @@ enum Trace {
     LegacyRowHerdrMarker,
     HerdrInflight,
     FailedRead,
+    /// The hosted row of this node's Claude execution, with its input held back.
+    ReturningRowHeld,
 }
 
 pub(super) fn recent_message_id() -> u64 {
@@ -138,6 +140,13 @@ async fn seed(trace: Trace, pool: &sqlx::PgPool, own: &str) {
                 .await
                 .expect("hide the sessions table");
         }
+        Trace::ReturningRowHeld => {
+            let case = Nameless::Hosted;
+            case.seed(pool, own, other, CHANNEL_ID, &tmux_name).await;
+            let hold = crate::services::claude::herdr_turn::hold_path("n1").unwrap();
+            std::fs::create_dir_all(hold.parent().unwrap()).unwrap();
+            std::fs::write(hold, "a draft").unwrap();
+        }
         Trace::Nothing => {}
     }
 }
@@ -251,4 +260,62 @@ async fn host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg(
         assert_eq!(run.harness.placeholder_posts(), 0, "{trace:?}");
         run.close().await;
     }
+}
+
+// A channel whose Herdr mapping was removed starts its first queued input, whose turn moves this
+// node's Claude execution back to tmux; a held input there stops it before any exit or launch.
+#[test]
+fn the_first_queued_input_of_a_channel_that_left_herdr_starts_its_return_pg() {
+    // Hosts are forced per thread, so every runtime thread runs on this node with no mapping.
+    let this_node = || {
+        std::mem::forget(crate::config::session_hosts::force_for_test(
+            Some("test-node"),
+            &[],
+        ))
+    };
+    this_node();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .on_thread_start(this_node)
+        .build()
+        .unwrap()
+        .block_on(first_queued_input_returns());
+}
+
+async fn first_queued_input_returns() {
+    let mut run = first_catch_up_input(Trace::ReturningRowHeld).await;
+    assert!(run.started, "the queue starts the return turn");
+    assert_eq!(run.queued, 0, "the input left the queue");
+    let completed = tokio::time::timeout(Duration::from_secs(10), run.completions.recv()).await;
+    completed
+        .expect("the turn ends")
+        .expect("completion bus open");
+    let harness = &run.harness;
+    // The harness holds Discord output behind its O writer, so the turn keeps its answer here.
+    let row =
+        inflight::load_inflight_state(&ProviderKind::Claude, CHANNEL_ID).expect("the turn's row");
+    assert!(
+        row.full_response.contains("herdr return") && row.full_response.contains("unsubmitted"),
+        "{}",
+        row.full_response
+    );
+    assert_eq!(harness.provider_starts(), 0, "no tmux Claude started");
+    let pool = harness.shared.pg_pool.as_ref().unwrap();
+    let raw: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id = $1")
+            .bind(CHANNEL_ID.to_string())
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
+    let HostedRecord::Known(record) = HostedRecord::decode(raw.as_ref()) else {
+        panic!("{raw:?}");
+    };
+    assert_eq!(
+        record.state,
+        HostedState::Bound,
+        "the row is left as it was"
+    );
+    run.close().await;
 }

@@ -19,6 +19,7 @@ pub(super) fn prepare_and_create_claude_tui_session(
     hook_endpoint: String,
     resume: bool,
     auth_env_lines: &str,
+    claude_home: Option<&std::path::Path>,
     channel_id: Option<u64>,
     respawn: bool,
 ) -> Result<(String, PreparedIncarnation), String> {
@@ -46,6 +47,7 @@ pub(super) fn prepare_and_create_claude_tui_session(
                 hook_endpoint,
                 resume,
                 auth_env_lines,
+                claude_home,
                 channel_id,
             },
             &mut prepared_session_files,
@@ -223,6 +225,7 @@ mod tests {
                     false,
                     "",
                     None,
+                    None,
                     false,
                 )
                 .map(|_| ())
@@ -281,6 +284,7 @@ mod host_marker_tests {
             "".into(),
             false,
             "",
+            None,
             Some(42),
             false,
         )
@@ -305,6 +309,7 @@ mod host_marker_tests {
             "".into(),
             false,
             "",
+            None,
             Some(43),
             false,
         )
@@ -363,6 +368,7 @@ mod herdr_off_tests {
             "".into(),
             false,
             "",
+            None,
             Some(44),
             false,
         );
@@ -435,6 +441,7 @@ mod herdr_off_tests {
                 "".into(),
                 false,
                 "",
+                None,
                 Some(channel),
                 false,
             )
@@ -602,6 +609,7 @@ mod herdr_env_tests {
             "http://127.0.0.1:1".into(),
             false,
             &auth,
+            None,
             None,
             false,
         )
