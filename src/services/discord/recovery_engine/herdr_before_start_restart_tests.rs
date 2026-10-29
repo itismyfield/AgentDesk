@@ -699,6 +699,7 @@ async fn a_turn_mode_anchorless_receipt_replies_to_the_user_message_then_clears(
         row["current_msg_id"] = 0.into();
         row["turn_nonce"] = "turn-mode-anchorless".into();
         row["herdr_before_start_stop"]["turn_nonce"] = "turn-mode-anchorless".into();
+        row["anchorless_turn_mode"] = true.into();
     };
     let cases: [(&str, Edit, usize); 3] = [
         ("pending", |_| {}, 1),
@@ -721,7 +722,6 @@ async fn a_turn_mode_anchorless_receipt_replies_to_the_user_message_then_clears(
     for (case, edit, sent) in cases {
         let fixture = Fixture::new("turn-mode", false);
         let _o = force_channels(&[(CHANNEL, RuntimeHandoffKind::ClaudeTui)]);
-        let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(CHANNEL);
         let row = fixture.persist(&edited(&edited(&fixture.row, anchorless), edit));
         let before = fixture.bytes();
         let discord = super::o_cut_recorder::start(CHANNEL).await;

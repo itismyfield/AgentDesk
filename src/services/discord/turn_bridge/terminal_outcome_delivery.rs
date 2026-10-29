@@ -233,21 +233,6 @@ pub(super) async fn run_terminal_outcome_delivery(
         match outcome {
             RecoveryRetryOutcome::Continue => {}
         }
-        // A turn with no anchor shows a queued retry's continue notice as a reply.
-        if auto_retry.queued()
-            && current_message_anchor::turn_mode_anchorless(channel_id, current_msg_id)
-        {
-            let notice = "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.";
-            let anchorless = current_message_anchor::send_anchorless_notice;
-            let _ = anchorless(
-                &shared_owned,
-                channel_id,
-                &inflight_state,
-                notice,
-                "session_retry",
-            )
-            .await;
-        }
     }
 
     let mut epilogue_response = None;
@@ -392,6 +377,13 @@ pub(super) async fn run_terminal_outcome_delivery(
             },
         )
         .await;
+        // A queued retry of a turn with no anchor shows one continue notice, never a failure.
+        if auto_retry.queued()
+            && current_message_anchor::turn_mode_anchorless(channel_id, current_msg_id)
+        {
+            let notice = "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.".to_string();
+            (terminal_empty_response_notice, delivery_response) = (Some(notice.clone()), notice);
+        }
         // Recovery wrote `claude_tui_busy_requeue_pending` back through its state
         // borrow (now released), so the requeue re-borrows the shared locals here
         // sequentially — never aliased with the recovery call above.

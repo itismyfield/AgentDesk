@@ -2017,6 +2017,7 @@ pub(super) async fn handle_text_message(
                 )
             });
         inflight_state.busy_followup_retry_user_msg_id = busy_followup_retry_user_msg_id.get();
+        inflight_state.anchorless_turn_mode = placeholderless && placeholder_msg_id.is_none();
         inflight_state.turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
         apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
         let (worktree_path, worktree_branch, base_commit) = {

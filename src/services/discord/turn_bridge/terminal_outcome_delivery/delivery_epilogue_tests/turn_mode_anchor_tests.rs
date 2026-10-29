@@ -148,6 +148,9 @@ async fn the_live_gateway_sends_no_edit_for_the_sentinel() {
     let sentinel =
         crate::services::discord::turn_bridge::current_message_anchor::detached_current_msg_id_from_durable(0);
     let edited = TurnGateway::edit_message(&gateway, ChannelId::new(channel), sentinel, "x").await;
-    assert!(edited.is_err());
+    assert_eq!(
+        edited,
+        Err(crate::services::discord::gateway::SYNTHETIC_MESSAGE_EDIT_ERROR.to_string())
+    );
     assert!(discord.calls().is_empty(), "{:?}", discord.calls());
 }

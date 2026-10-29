@@ -73,7 +73,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         return;
     }
 
+    let channels: Vec<u64> = states.iter().map(|state| state.channel_id).collect();
     Box::pin(restore_inflight_states(http, shared, provider, states)).await;
+    #[cfg(unix)]
+    super::herdr_before_start_restart::reconfirm_codex_turn_mode(provider, &channels);
     replay_decision::spawn_pg_only(shared.pg_pool.as_ref(), provider.as_str());
 }
 

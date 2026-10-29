@@ -118,10 +118,10 @@ async fn coldstop_turn_mode_anchorless_turn_replies_to_the_user_message_then_set
     let close = Close::open(930, |row| {
         row.runtime_kind = Some(ClaudeTui);
         row.current_msg_id = 0;
+        row.anchorless_turn_mode = true;
     })
     .await;
     let _o = force_channels(&[(930, ClaudeTui)]);
-    let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(930);
     let discord = o_cut_recorder::start(930).await;
     let _rest = test_rest::install(discord.http.clone());
     let submitted = test_hooks::submitted();
@@ -172,10 +172,10 @@ async fn coldstop_turn_mode_bridge_exit_normalizes_the_sentinel_and_settles_by_r
     let close = Close::open(932, |row| {
         row.runtime_kind = Some(ClaudeTui);
         row.current_msg_id = 0;
+        row.anchorless_turn_mode = true;
     })
     .await;
     let _o = force_channels(&[(932, ClaudeTui)]);
-    let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(932);
     let key = TurnKey::new(ChannelId::new(932), close.row.user_msg_id, 17)
         .with_episode_nonce(close.row.turn_nonce.as_deref());
     close.shared.turn_finalizer.register_start(

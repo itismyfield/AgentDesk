@@ -5,7 +5,7 @@ use super::{
     migrate_separate_status_panel_to_footer, should_open_long_running_placeholder_controller,
     status_panel_completion_action, status_panel_completion_edit_aliases_newer_turn,
     status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
-    status_panel_wip_inflight_for_completion,
+    status_panel_message_missing_error, status_panel_wip_inflight_for_completion,
 };
 use crate::services::discord::footer_retirement::legacy_for_test;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
@@ -269,6 +269,14 @@ async fn actual_bridge_children_run_through_cleanup_and_retry_completion() {
             completion.lock().unwrap().take().unwrap().send(()).unwrap();
         }
     }
+}
+
+/// A synthetic id's edit error reads as the panel's message being gone.
+#[test]
+fn a_synthetic_id_edit_error_reads_as_a_missing_message() {
+    assert!(status_panel_message_missing_error(
+        crate::services::discord::gateway::SYNTHETIC_MESSAGE_EDIT_ERROR
+    ));
 }
 
 #[test]

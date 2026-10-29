@@ -26,6 +26,23 @@ pub(super) async fn settle_receipt(
     true
 }
 
+/// A Codex channel whose boot confirmation waited on a row restore has now settled confirms as a
+/// completion would; a refusal keeps Legacy turns, and only the boot selection is ever confirmed.
+pub(super) fn reconfirm_codex_turn_mode(provider: &ProviderKind, channels: &[u64]) {
+    use crate::services::discord::tui_direct_pending_start::turn_retirement::codex;
+    if *provider != ProviderKind::Codex {
+        return;
+    }
+    for &channel in channels {
+        let Some(turn) = crate::services::tui_o::cutover::codex_turn_awaited(channel) else {
+            continue;
+        };
+        if codex::confirm_current(channel, &turn) == codex::Confirmation::Confirmed {
+            crate::services::discord::turn_presence::supervisor::register(provider, &[channel]);
+        }
+    }
+}
+
 pub(super) fn herdr_turn_held(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
@@ -135,10 +152,8 @@ impl BeforeStartRestart {
             return kept(state, "a live actor owns the channel");
         }
         let mut row = state.clone();
-        // A pending or delivered receipt without its message is never settled.
-        if row.current_msg_id == 0
-            && !crate::services::tui_o::turn_mode::transcript_turns(row.channel_id)
-        {
+        // A receipt without its message settles only for a turn started anchorless in turn mode.
+        if row.current_msg_id == 0 && !row.anchorless_turn_mode {
             return kept(state, "no message to show the stop on");
         }
         if row

@@ -264,10 +264,10 @@ pub(in crate::services::discord) fn o_owns_body(row: &InflightTurnState) -> Opti
     .ok()
 }
 
-/// The turn's message, or on a turn-mode channel, which shows no anchor, the user's own message.
+/// The turn's message, or for a turn started anchorless in turn mode, the user's own message.
 fn stop_reply_target(row: &InflightTurnState) -> Option<MessageId> {
     crate::services::discord::inflight::opt_message_id(row.current_msg_id).or_else(|| {
-        crate::services::tui_o::turn_mode::transcript_turns(row.channel_id)
+        row.anchorless_turn_mode
             .then(|| crate::services::discord::inflight::opt_message_id(row.user_msg_id))
             .flatten()
     })
