@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+mod agent_start;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -2356,64 +2357,6 @@ impl RoutineStore {
             },
         )
         .await
-    }
-
-    pub async fn mark_agent_turn_started(
-        &self,
-        run_id: &str,
-        turn_id: &str,
-        result_json: Option<Value>,
-        agent_id: &str,
-        attempt_kind: &str,
-    ) -> Result<bool> {
-        let result = sqlx::query(
-            r#"
-            UPDATE routine_runs
-            SET action = 'agent',
-                turn_id = $2,
-                result_json = $3,
-                lease_expires_at = NOW() + ($4::bigint * INTERVAL '1 second'),
-                next_retry_at = NULL,
-                owned_tmux_session = NULL,
-                attempts = COALESCE(attempts, '[]'::jsonb) || jsonb_build_array(
-                    jsonb_build_object(
-                        'event', 'started',
-                        'agent_id', $5,
-                        'kind', $6,
-                        'turn_id', $2,
-                        'execution_mode', $3::jsonb ->> 'execution_mode',
-                        'provider', $3::jsonb ->> 'provider',
-                        'channel_id', $3::jsonb ->> 'channel_id',
-                        'at', NOW()
-                    )
-                ),
-                updated_at = NOW()
-            WHERE id = $1
-              AND status = 'running'
-            "#,
-        )
-        .bind(run_id)
-        .bind(turn_id)
-        .bind(result_json)
-        .bind(RUN_LEASE_SECS)
-        .bind(agent_id)
-        .bind(attempt_kind)
-        .execute(&*self.pool)
-        .await
-        .map_err(|e| anyhow!("mark routine agent turn started {run_id}: {e}"))?;
-
-        Ok(result.rows_affected() == 1)
-    }
-
-    pub async fn confirm_agent_turn_started(&self, run_id: &str, turn_id: &str) -> Result<bool> {
-        let result = sqlx::query(CONFIRM_AGENT_TURN_STARTED_QUERY)
-            .bind(run_id)
-            .bind(turn_id)
-            .execute(&*self.pool)
-            .await
-            .map_err(|e| anyhow!("confirm routine agent turn started {run_id}: {e}"))?;
-
-        Ok(result.rows_affected() == 1)
     }
 
     pub async fn schedule_agent_retry(

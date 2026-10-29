@@ -104,7 +104,7 @@ fn a_unit_freezes_the_prepared_front_in_order_and_binds_every_ticket_at_once() {
     drop(owner.arm(&key, 1).unwrap());
     for (n, original) in [(1, &q1), (2, &q2), (3, &new)] {
         assert!(
-            matches!(turn(&owner, n, original), TurnBind::Armed { attempt, .. } if attempt == "unit-a"),
+            matches!(turn(&owner, n, original), TurnBind::Armed(t) if t.attempt == "unit-a"),
             "ticket {n}"
         );
     }
@@ -333,7 +333,7 @@ fn an_arrival_before_the_permit_is_handed_over_joins_the_reprepared_unit() {
     owner.settle(&key, true, 2).unwrap();
     for (n, original) in (1..).zip(queued.iter().chain([&new])) {
         assert!(
-            matches!(turn(&owner, n, original), TurnBind::Settled { attempt, .. } if attempt == "reprepared")
+            matches!(turn(&owner, n, original), TurnBind::Settled(t) if t.attempt == "reprepared")
         );
     }
     assert_eq!(

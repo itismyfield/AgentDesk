@@ -23,9 +23,16 @@ pub(crate) async fn enqueue(
                 .map_err(|error| error.to_string())?
         )
     );
-    let text = super::super::dispatch_policy::prepend_operational_alert_origin(
-        "⚠️ 이 입력은 전달 여부를 확인하지 못해 원문을 보관했습니다. 다음 입력은 계속 처리합니다. 자동으로 다시 보내지 않습니다. 같은 내용을 새 메시지로 보내면 중복 실행될 수 있습니다.",
-    );
+    // A proven-unsent original asks for a resend; only a true ambiguity warns of a duplicate.
+    let body = match identity["notice"]["kind"].as_str() {
+        Some("retained_retry_required") => {
+            "⚠️ 이 입력은 전달되지 않은 것을 확인해 원문을 보관했습니다. 다음 입력은 계속 처리합니다. 필요하면 같은 내용을 다시 보내 주세요."
+        }
+        _ => {
+            "⚠️ 이 입력은 전달 여부를 확인하지 못해 원문을 보관했습니다. 다음 입력은 계속 처리합니다. 자동으로 다시 보내지 않습니다. 같은 내용을 새 메시지로 보내면 중복 실행될 수 있습니다."
+        }
+    };
+    let text = super::super::dispatch_policy::prepend_operational_alert_origin(body);
     enqueue_outbox_pg_returning_id_with_persistent_dedupe(
         pool,
         OutboxMessage {

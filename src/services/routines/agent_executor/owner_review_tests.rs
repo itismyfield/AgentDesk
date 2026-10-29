@@ -1,0 +1,261 @@
+use super::*;
+use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
+
+async fn accepted_fixture() -> (
+    TestPostgresDb,
+    sqlx::PgPool,
+    RoutineStore,
+    RoutineAgentExecutor,
+    RunningAgentRoutineRun,
+    ChannelMailboxHandle,
+) {
+    let (handle, _) = owner().await;
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    sqlx::query("INSERT INTO agents(id,name,provider,discord_channel_cc) VALUES('primary','Primary','claude','7272')")
+        .execute(&pool).await.unwrap();
+    let store =
+        RoutineStore::new_with_timezone_and_checkpoint_limit(Arc::new(pool.clone()), "UTC", 262144);
+    store
+        .attach_routine(NewRoutine {
+            agent_id: Some("primary".into()),
+            fallback_agent_id: None,
+            max_retries: Some(1),
+            script_ref: "review.js".into(),
+            name: "review".into(),
+            status: None,
+            execution_strategy: "persistent".into(),
+            schedule: None,
+            next_due_at: Some(Utc::now() - Duration::minutes(1)),
+            checkpoint: None,
+            discord_thread_id: None,
+            timeout_secs: Some(60),
+        })
+        .await
+        .unwrap();
+    let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
+    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 60);
+    OWNER
+        .scope(
+            handle.clone(),
+            STARTS.scope(RefCell::new(VecDeque::from([true])), async {
+                let result = executor
+                    .start_agent_run(
+                        &store,
+                        claimed,
+                        "review work".into(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.status, "running");
+            }),
+        )
+        .await;
+    let run = store
+        .list_running_agent_runs(10)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    (db, pool, store, executor, run, handle)
+}
+
+#[tokio::test]
+async fn owner_review_p2_bad_owner_does_not_block_a_legacy_completion_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool, store, executor, run, handle) = accepted_fixture().await;
+    sqlx::query("UPDATE routine_runs SET result_json=jsonb_set(result_json,'{owner_input,context,run_id}','\"foreign-run\"'),started_at=NOW()-INTERVAL '2 hours' WHERE id=$1")
+        .bind(&run.run_id).execute(&pool).await.unwrap();
+    store
+        .attach_routine(NewRoutine {
+            agent_id: Some("primary".into()),
+            fallback_agent_id: None,
+            max_retries: Some(0),
+            script_ref: "legacy.js".into(),
+            name: "legacy review".into(),
+            status: None,
+            execution_strategy: "persistent".into(),
+            schedule: None,
+            next_due_at: Some(Utc::now() - Duration::minutes(1)),
+            checkpoint: None,
+            discord_thread_id: None,
+            timeout_secs: Some(60),
+        })
+        .await
+        .unwrap();
+    let legacy = store.claim_due_runs(1).await.unwrap().pop().unwrap();
+    let turn = "review-legacy-turn";
+    assert!(
+        store
+            .mark_agent_turn_started(
+                &legacy.run_id,
+                turn,
+                Some(json!({"status":"started","execution_mode":"process","turn_id":turn})),
+                "primary",
+                "primary"
+            )
+            .await
+            .unwrap()
+    );
+    sqlx::query(
+        "INSERT INTO session_transcripts(turn_id,assistant_message) VALUES($1,'legacy answer')",
+    )
+    .bind(turn)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let outcomes = OWNER
+        .scope(handle, executor.poll_agent_runs(&store, 10, false))
+        .await
+        .unwrap();
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "one malformed owner must not abort the batch"
+    );
+    assert_eq!(outcomes[0].run_id, legacy.run_id);
+    assert_eq!(outcomes[0].status, "succeeded");
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn owner_review_p2_completion_before_bind_is_preserved_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool, store, executor, run, handle) = accepted_fixture().await;
+    let turn = run.turn_id.as_deref().unwrap();
+    sqlx::query("INSERT INTO session_transcripts(turn_id,assistant_message) VALUES($1,'fast answer before bind')").bind(turn).execute(&pool).await.unwrap();
+    handle.v2_arm_head_for_tests("fast-attempt").await.unwrap();
+    assert!(
+        OWNER
+            .scope(handle.clone(), executor.poll_agent_runs(&store, 10, false))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        owner_input::custody::bind_observer(&store, &run, &handle, "fast-attempt", None)
+            .await
+            .unwrap()
+    );
+    let outcomes = OWNER
+        .scope(handle, executor.poll_agent_runs(&store, 10, false))
+        .await
+        .unwrap();
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "intent < completion < bind must remain observable"
+    );
+    assert_eq!(outcomes[0].status, "succeeded");
+    let attempts: Value = sqlx::query_scalar("SELECT attempts FROM routine_runs WHERE id=$1")
+        .bind(&run.run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for event in attempts
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e["event"].as_str(), Some("input_pending" | "started")))
+    {
+        assert_eq!(event["kind"], "primary");
+        assert_eq!(event["agent_id"], "primary");
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn owner_review_p2_armed_timeout_waits_for_settlement_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool, store, executor, run, handle) = accepted_fixture().await;
+    handle.v2_arm_head_for_tests("slow-attempt").await.unwrap();
+    assert!(
+        owner_input::custody::bind_observer(&store, &run, &handle, "slow-attempt", None)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE routine_runs SET started_at=NOW()-INTERVAL '2 hours',attempts=jsonb_set(attempts,ARRAY[(jsonb_array_length(attempts)-1)::text,'at'],$2::jsonb) WHERE id=$1")
+        .bind(&run.run_id).bind(json!((Utc::now()-Duration::hours(2)).to_rfc3339())).execute(&pool).await.unwrap();
+    let outcomes = OWNER
+        .scope(handle.clone(), executor.poll_agent_runs(&store, 10, false))
+        .await
+        .unwrap();
+    assert!(
+        outcomes.is_empty(),
+        "an armed attempt cannot authorize a retry while it still owns the input"
+    );
+    let count: i32 = sqlx::query_scalar("SELECT retry_count FROM routine_runs WHERE id=$1")
+        .bind(&run.run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    handle
+        .v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("owner missing")?;
+            let key = owner.active_attempt()?;
+            owner.settle(&key, true, 1000)
+        })
+        .await
+        .unwrap();
+    let outcomes = OWNER
+        .scope(handle, executor.poll_agent_runs(&store, 10, false))
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1);
+    let count: i32 = sqlx::query_scalar("SELECT retry_count FROM routine_runs WHERE id=$1")
+        .bind(&run.run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "a settled attempt may enter the existing retry policy"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn owner_review_p2_accepted_missing_owner_never_readmits_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool, store, executor, run, _old_handle) = accepted_fixture().await;
+    let registry = ChannelMailboxRegistry::default();
+    let handle = registry.handle(poise::serenity_prelude::ChannelId::new(7272));
+    let path = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("empty-owner.json");
+    handle
+        .v2_adopt(path.clone(), "routine-tests".into())
+        .await
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        OWNER
+            .scope(handle, executor.poll_agent_runs(&store, 10, false))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        before,
+        std::fs::read(&path).unwrap(),
+        "a known accepted receipt cannot be recreated from an absent owner"
+    );
+    let state: (String, i32) =
+        sqlx::query_as("SELECT status,retry_count FROM routine_runs WHERE id=$1")
+            .bind(&run.run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, ("running".into(), 0));
+    pool.close().await;
+    db.drop().await;
+}

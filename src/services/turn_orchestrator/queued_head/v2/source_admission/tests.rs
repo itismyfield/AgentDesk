@@ -560,10 +560,10 @@ async fn an_exact_turn_follows_its_ticket_not_a_shared_identity() {
         |input: &PendingQueueItem, ticket: &str| handle.v2_exact_turn(input.clone(), ticket.into());
     assert_eq!(
         turn(&a, "run-a").await,
-        Ok(TurnBind::Armed {
+        Ok(TurnBind::Armed(ExactTurn {
             attempt: "attempt-a".into(),
-            source: None
-        })
+            turn: None
+        }))
     );
     assert_eq!(turn(&b, "run-b").await, Ok(TurnBind::NotArmed));
     assert_eq!(turn(&a, "run-a-again").await, Ok(TurnBind::NotArmed));
@@ -870,10 +870,10 @@ async fn a_dropped_input_leaves_no_bind_for_the_input_that_takes_its_place() {
             Ok(Admitted::Queued)
         );
         handle.v2_arm_head_for_tests("attempt-2").await.unwrap();
-        let armed = TurnBind::Armed {
+        let armed = TurnBind::Armed(ExactTurn {
             attempt: "attempt-2".into(),
-            source: None,
-        };
+            turn: None,
+        });
         assert_eq!(turn(handle, &input, "run-t2").await, Ok(armed), "{way}");
         assert_eq!(
             turn(handle, &input, "run-t1").await,
@@ -881,10 +881,10 @@ async fn a_dropped_input_leaves_no_bind_for_the_input_that_takes_its_place() {
             "{way}"
         );
         settle_head(handle).await;
-        let settled = TurnBind::Settled {
+        let settled = TurnBind::Settled(ExactTurn {
             attempt: "attempt-2".into(),
-            source: None,
-        };
+            turn: None,
+        });
         assert_eq!(turn(handle, &input, "run-t2").await, Ok(settled), "{way}");
         assert_eq!(
             turn(handle, &input, "run-t1").await,
@@ -1031,10 +1031,10 @@ async fn a_ticket_bind_keeps_its_attempt_and_source_through_retention_and_restar
             (a, turn(&handle, &input, "run-tb").await.unwrap())
         }
     };
-    let armed = TurnBind::Armed {
+    let armed = TurnBind::Armed(ExactTurn {
         attempt: "attempt-a".into(),
-        source: Some(bound.clone()),
-    };
+        turn: Some(bound.clone()),
+    });
     assert_eq!(
         stands(&owned).await,
         (armed.clone(), TurnBind::NotArmed),
@@ -1077,10 +1077,10 @@ async fn a_ticket_bind_keeps_its_attempt_and_source_through_retention_and_restar
         })
         .await
         .unwrap();
-    let settled = TurnBind::Settled {
+    let settled = TurnBind::Settled(ExactTurn {
         attempt: "attempt-a".into(),
-        source: Some(bound),
-    };
+        turn: Some(bound),
+    });
     assert_eq!(
         stands(&owned).await,
         (settled.clone(), TurnBind::NotArmed),

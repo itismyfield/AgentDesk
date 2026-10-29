@@ -1721,9 +1721,13 @@ src/
 │   │   │   │   ├── ingress.rs
 │   │   │   │   ├── ingress_tests.rs
 │   │   │   │   ├── mod.rs
+│   │   │   │   ├── notice.rs
+│   │   │   │   ├── notice_tests.rs
 │   │   │   │   ├── origin.rs
 │   │   │   │   ├── pump.rs
 │   │   │   │   ├── pump_tests.rs
+│   │   │   │   ├── recovery.rs
+│   │   │   │   ├── routine.rs
 │   │   │   │   └── target.rs
 │   │   │   ├── transport/
 │   │   │   │   └── tests.rs
@@ -3364,12 +3368,18 @@ src/
 │   │   │   ├── execution.rs
 │   │   │   ├── launch.rs
 │   │   │   ├── owned_session.rs
+│   │   │   ├── owner_custody_tests.rs
+│   │   │   ├── owner_input.rs
+│   │   │   ├── owner_input_tests.rs
+│   │   │   ├── owner_review_tests.rs
 │   │   │   ├── reliability.rs
 │   │   │   └── start_deferral.rs
 │   │   ├── discord_log/
 │   │   │   └── failure_alert.rs
 │   │   ├── loader/
 │   │   │   └── discovery.rs
+│   │   ├── store/
+│   │   │   └── agent_start.rs
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
@@ -3387,6 +3397,8 @@ src/
 │   │   ├── context_snapshot.rs
 │   │   ├── evidence.rs
 │   │   ├── external_delivery.rs
+│   │   ├── owner_input.rs
+│   │   ├── owner_input_tests.rs
 │   │   ├── postgres_tests.rs
 │   │   ├── provider_targets.rs
 │   │   ├── push_handoff.rs
@@ -3990,6 +4002,7 @@ src/
 │   │   │   │   ├── source_admission/
 │   │   │   │   │   ├── tests/
 │   │   │   │   │   │   └── pg_tests.rs
+│   │   │   │   │   ├── context_tests.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── actor.rs
 │   │   │   │   ├── attempt.rs

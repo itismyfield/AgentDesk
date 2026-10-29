@@ -73,6 +73,44 @@ pub(crate) fn load_pending_queues_checked(
     recovery
 }
 
+/// Source ids a read-only V2 queue file keeps, queued, attempted, retained or settled, so a binary
+/// that cannot write V2 never takes them again; a legacy, missing or unreadable file keeps none.
+pub(crate) fn v2_held_sources(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel: ChannelId,
+) -> Vec<u64> {
+    let read = super::pending_queue_file_path(provider, token_hash, channel)
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|content| compat::inspect(&content).ok());
+    let Some(SnapshotRead::ReadOnlyV2(snapshot)) = read else {
+        return Vec::new();
+    };
+    let ids = |item: &super::PendingQueueItem| match item.source_message_ids.as_slice() {
+        [] => vec![item.message_id],
+        ids => ids.to_vec(),
+    };
+    let inputs = snapshot.head_injection.iter();
+    let inputs = inputs.chain(snapshot.retained_inputs.iter().map(|entry| &entry.input));
+    let attempted = inputs.flat_map(|input| {
+        let followers = input
+            .payload
+            .iter()
+            .flat_map(|payload| payload.followers.iter());
+        std::iter::once(&input.original).chain(followers)
+    });
+    let settled = snapshot.terminal_identities.iter();
+    let settled =
+        settled.flat_map(|terminal| terminal.identity.sources.iter().map(|s| s.message_id));
+    snapshot
+        .items
+        .iter()
+        .chain(attempted)
+        .flat_map(ids)
+        .chain(settled)
+        .collect()
+}
+
 pub(crate) fn read_catalog(provider: &ProviderKind, token_hash: &str) -> SnapshotCatalog {
     let mut recovery = SnapshotCatalog::default();
     let Some(root) = pending_queue_root() else {

@@ -113,20 +113,29 @@ pub(crate) enum TicketStatus {
     Absent,
 }
 
-/// What the owner holds for a committed ticket's original; each case has one meaning.
+/// An attempt for an admitted original and the native source it was bound to, if any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExactTurn {
+    pub(crate) attempt: String,
+    pub(crate) turn: Option<serde_json::Value>,
+}
+
+impl ExactTurn {
+    /// Whether an actual bind names this attempt and this source.
+    pub(crate) fn is(&self, attempt: &str, turn: Option<&serde_json::Value>) -> bool {
+        self.attempt == attempt && self.turn.as_ref() == turn
+    }
+}
+
+/// Where a committed ticket's original stands in the owner; each case has one meaning.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TurnBind {
-    /// An attempt may have sent it.
-    Armed {
-        attempt: String,
-        source: Option<serde_json::Value>,
-    },
+    /// An attempt may have sent it; an actual bind must name this turn.
+    Armed(ExactTurn),
     /// Queued, reserved, or retained as proven or opaque unsent.
     NotArmed,
-    Settled {
-        attempt: String,
-        source: Option<serde_json::Value>,
-    },
+    /// Delivered under this turn.
+    Settled(ExactTurn),
     /// Committed, but the owner no longer keeps a record of it; never re-issue.
     Unknown,
     /// No committed admission under this ticket.
@@ -135,29 +144,11 @@ pub(crate) enum TurnBind {
 
 impl TurnBind {
     pub(crate) fn armed(&self) -> bool {
-        matches!(self, Self::Armed { .. })
+        matches!(self, Self::Armed(_))
     }
 
     pub(crate) fn settled(&self) -> bool {
-        matches!(self, Self::Settled { .. })
-    }
-
-    pub(crate) fn not_armed(&self) -> bool {
-        *self == Self::NotArmed
-    }
-
-    pub(crate) fn unknown(&self) -> bool {
-        *self == Self::Unknown
-    }
-
-    /// The attempt nonce and bound source of an armed or settled turn.
-    pub(crate) fn into_bind(self) -> Option<(String, Option<serde_json::Value>)> {
-        match self {
-            Self::Armed { attempt, source } | Self::Settled { attempt, source } => {
-                Some((attempt, source))
-            }
-            _ => None,
-        }
+        matches!(self, Self::Settled(_))
     }
 }
 
@@ -370,10 +361,10 @@ impl Owner {
                 })
             {
                 return Ok(match input.phase {
-                    HeadPhase::MayHaveSent | HeadPhase::Unknown => TurnBind::Armed {
+                    HeadPhase::MayHaveSent | HeadPhase::Unknown => TurnBind::Armed(ExactTurn {
                         attempt: attempt.nonce.clone(),
-                        source: input.resolved_source.clone(),
-                    },
+                        turn: input.resolved_source.clone(),
+                    }),
                     HeadPhase::Reserved => TurnBind::NotArmed,
                 });
             }
@@ -394,10 +385,10 @@ impl Owner {
             .find_map(|bind| match &bind.at {
                 BindAt::Settled {
                     attempt, source, ..
-                } => Some(TurnBind::Settled {
+                } => Some(TurnBind::Settled(ExactTurn {
                     attempt: attempt.clone(),
-                    source: source.clone(),
-                }),
+                    turn: source.clone(),
+                })),
                 _ => None,
             })
             .unwrap_or(TurnBind::Unknown))
@@ -427,7 +418,11 @@ impl SnapshotV2 {
             Admitted::Duplicate => return,
         };
         let receipt = receipt.to_string();
-        self.admission_binds.push(AdmissionBind { receipt, at });
+        self.admission_binds.push(AdmissionBind {
+            receipt,
+            at,
+            context: None,
+        });
     }
 
     /// Drops queued binds past the end, which a cut of the queue's tail left; run before a push.
@@ -489,11 +484,18 @@ impl SnapshotV2 {
             _ => true,
         });
         for (receipt, identity) in moved {
+            let context = (self.admission_binds.iter())
+                .find(|b| b.receipt == receipt)
+                .and_then(|b| b.context.clone());
             let at = BindAt::Attempt {
                 identity,
                 attempt: attempt.clone(),
             };
-            self.admission_binds.push(AdmissionBind { receipt, at });
+            self.admission_binds.push(AdmissionBind {
+                receipt,
+                at,
+                context,
+            });
         }
     }
 }
@@ -503,6 +505,9 @@ impl SnapshotV2 {
     /// to its new slot again, once each; the released unit's attempt binds go.
     pub(super) fn rebind_queued(&mut self, released: &InputAttempt) {
         let attempt = released.attempt.as_ref();
+        let contexts: Vec<(String, AdmissionContext)> = (self.admission_binds.iter())
+            .filter_map(|b| Some((b.receipt.clone(), b.context.clone()?)))
+            .collect();
         self.admission_binds.retain(|b| match &b.at {
             BindAt::Queued { .. } => false,
             BindAt::Attempt { attempt: bound, .. } => Some(bound) != attempt,
@@ -520,8 +525,15 @@ impl SnapshotV2 {
             let suffix = format!(":{item}");
             if let Some(at) = free.iter().position(|r| r.ends_with(&suffix)) {
                 let receipt = free.remove(at);
+                let context = (contexts.iter())
+                    .find(|(r, _)| *r == receipt)
+                    .map(|(_, c)| c.clone());
                 let at = BindAt::Queued { index, item };
-                self.admission_binds.push(AdmissionBind { receipt, at });
+                self.admission_binds.push(AdmissionBind {
+                    receipt,
+                    at,
+                    context,
+                });
             }
         }
     }
@@ -839,6 +851,117 @@ impl super::super::super::ChannelMailboxHandle {
         .await
     }
 }
+
+impl Owner {
+    fn context_in<'a>(
+        snapshot: &'a SnapshotV2,
+        receipt: &str,
+    ) -> Option<&'a super::super::v2_types::AdmissionContext> {
+        snapshot.admission_binds.iter().find_map(|b| {
+            (b.receipt == receipt)
+                .then_some(b.context.as_ref())
+                .flatten()
+        })
+    }
+
+    fn admit_with_context(
+        &mut self,
+        original: &PendingQueueItem,
+        ticket: Ticket,
+        execution: serde_json::Value,
+    ) -> Result<Admitted, AdmitError> {
+        let receipt = ticket.receipt_for(&canonical(original));
+        let expected = super::super::v2_types::AdmissionContext {
+            original: Some(canonical(original)),
+            execution: Some(execution),
+        };
+        // Refuse conflicting committed or unconfirmed originals before any recovery writes.
+        for snapshot in
+            std::iter::once(&self.snapshot).chain(self.pending.iter().map(|(_, next)| next))
+        {
+            if snapshot
+                .admission_receipts
+                .iter()
+                .any(|r| r.starts_with(&ticket.prefix()))
+            {
+                if !snapshot.admission_receipts.contains(&receipt)
+                    || Self::context_in(snapshot, &receipt) != Some(&expected)
+                {
+                    return Err(AdmitError::Conflict(
+                        "ticket original or execution context differs".into(),
+                    ));
+                }
+            }
+        }
+        if self.pending.is_some() && self.recover().is_err() && self.pending.is_some() {
+            return Err(AdmitError::Pending);
+        }
+        if self.snapshot.admission_receipts.contains(&receipt) {
+            return Custody::with_ticket(original, ticket).advance(self);
+        }
+        let (next, outcome) = self.fresh_candidate(original)?;
+        let Some(mut next) = next else {
+            return Err(AdmitError::SourceAlreadyKnown);
+        };
+        next.bind_admitted(&receipt, outcome, &digest(&canonical(original)));
+        let bind = next
+            .admission_binds
+            .iter_mut()
+            .find(|b| b.receipt == receipt)
+            .ok_or_else(|| AdmitError::NotCommitted("admission bind absent".into()))?;
+        bind.context = Some(expected);
+        match self.admit_commit(next, Some(receipt.clone())) {
+            Err(AdmitError::Pending) => {
+                self.unacknowledged.push((receipt, outcome));
+                Err(AdmitError::Pending)
+            }
+            Ok(()) => Ok(outcome),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl super::super::super::ChannelMailboxHandle {
+    pub(crate) async fn v2_admit_ticket_with_context(
+        &self,
+        original: PendingQueueItem,
+        ticket: String,
+        context: serde_json::Value,
+    ) -> Result<Admitted, AdmitError> {
+        let ticket = Ticket::new(&ticket).map_err(AdmitError::NotCommitted)?;
+        if original.queued_generation == 0 {
+            return Err(AdmitError::NotCommitted(
+                "the original's queued generation is unsettled".into(),
+            ));
+        }
+        self.v2_request(move |slot| {
+            Ok(match slot.as_mut() {
+                Some(owner) => owner.admit_with_context(&original, ticket, context),
+                None => Err(AdmitError::NotCommitted("V2 not adopted".into())),
+            })
+        })
+        .await
+        .map_err(|_| AdmitError::Pending)?
+    }
+
+    pub(crate) async fn v2_admission_context(
+        &self,
+        original: PendingQueueItem,
+        ticket: String,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let ticket = Ticket::new(&ticket)?;
+        self.v2_request(move |slot| {
+            let owner = slot.as_ref().ok_or("V2 not adopted")?;
+            owner.exact_turn(&ticket, &original)?;
+            let receipt = ticket.receipt_for(&canonical(&original));
+            Ok(Owner::context_in(&owner.snapshot, &receipt).and_then(|c| c.execution.clone()))
+        })
+        .await
+    }
+}
+
+#[cfg(test)]
+mod context_tests;
 
 // Admission fixtures require an owner backed by confirmed parent directory fsync.
 #[cfg(all(test, unix))]

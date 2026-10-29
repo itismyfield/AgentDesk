@@ -45,13 +45,11 @@ pub(super) fn read_legacy(path: &Path) -> Result<Store, String> {
     }
 }
 
-#[cfg(test)]
 fn v2_value(path: &Path) -> Option<serde_json::Value> {
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     (value.get("version")?.as_u64() == Some(2) && value.get("entries").is_none()).then_some(value)
 }
 
-#[cfg(test)]
 pub(super) fn known_v2(path: &Path, hashes: &[String]) -> Option<bool> {
     let value = v2_value(path)?;
     // An abandoned frame was proven never pasted, so it marks no native row as injected.
@@ -89,7 +87,6 @@ pub(super) fn known_v2(path: &Path, hashes: &[String]) -> Option<bool> {
     Some(bound || planned || unbound)
 }
 
-#[cfg(test)]
 pub(super) fn screen_frames_v2(path: &Path) -> Option<Vec<(String, String)>> {
     let value = v2_value(path)?;
     let entries = value["live"].as_array()?.iter().chain(
