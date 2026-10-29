@@ -360,9 +360,8 @@ async fn zero_byte_turn(case: u64, pool: &sqlx::PgPool) -> (Harness, InflightTur
     (h, row)
 }
 
-/// The runtime stop commits its cancel before its kill. When the cancelled bridge then releases the
-/// token through the production finalizer, the paused watcher judges the pane's death without that
-/// token, and a queued turn takes the channel, the one receipt stays cancelled.
+/// The runtime stop commits its cancel before its kill; the bridge's finalizer release of the token,
+/// the paused watcher's tokenless death judgment and a queued turn leave that one receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_released_by_its_bridge_before_the_pane_dies_stays_cancelled_pg() {
     let test = "a_stop_released_by_its_bridge_before_the_pane_dies_stays_cancelled_pg";
