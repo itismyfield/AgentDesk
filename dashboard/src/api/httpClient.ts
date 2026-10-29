@@ -68,15 +68,18 @@ export class ApiRequestError extends Error {
   readonly code: string;
   readonly status: number;
   readonly serverCode?: string;
+  /** Parsed JSON error payload, for callers that render server-specific fields. */
+  readonly body?: unknown;
   constructor(
     message: string,
-    options: { status: number; code?: string; serverCode?: string },
+    options: { status: number; code?: string; serverCode?: string; body?: unknown },
   ) {
     super(message);
     this.name = "ApiRequestError";
     this.status = options.status;
     this.code = options.code ?? `HTTP_${options.status}`;
     this.serverCode = options.serverCode;
+    this.body = options.body;
   }
 }
 
@@ -210,7 +213,8 @@ export async function request<T>(
         });
         auth.signal.throwIfAborted();
         if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: "unknown" }));
+          const body: unknown = await res.json().catch(() => undefined);
+          const err = (body ?? { error: "unknown" }) as { error?: string; code?: unknown; error_code?: unknown };
           auth.signal.throwIfAborted();
           if (res.status === 401) requireAuthentication("인증이 만료되었거나 토큰이 변경되었습니다. 다시 로그인해 주세요.");
           // #2050 P2 finding 9 — throw typed ApiRequestError with status +
@@ -223,7 +227,7 @@ export async function request<T>(
                 : undefined;
           const error = new ApiRequestError(
             err.error || `HTTP ${res.status}`,
-            { status: res.status, serverCode },
+            { status: res.status, serverCode, body },
           );
           if (isGet && isRetryable(res.status) && attempt < maxRetries) {
             lastError = error;
@@ -285,4 +289,17 @@ export async function request<T>(
   if (shouldDedupe) inflightGets.set(url, decorated);
 
   return decorated;
+}
+
+/**
+ * For handlers that answer failures with a JSON body the caller renders as data
+ * (onboarding). 401 still goes through the shared re-login flow and rejects.
+ */
+export async function requestWithErrorBody<T>(url: string, opts?: RequestOptions): Promise<T> {
+  try {
+    return await request<T>(url, { ...opts, suppressErrorToast: true });
+  } catch (error) {
+    if (error instanceof ApiRequestError && error.body !== undefined) return error.body as T;
+    throw error;
+  }
 }
