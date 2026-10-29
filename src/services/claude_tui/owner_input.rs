@@ -97,6 +97,18 @@ pub(crate) fn load_failed() {
     }
 }
 
+/// The leaf's typed veto came before any key; a key already sent keeps it from proving unsent,
+/// and a refusal the scope already recorded keeps its own reason.
+#[cfg(all(test, unix))]
+pub(crate) fn vetoed(reason: &str) {
+    if let Some(scope) = current()
+        && !scope.keyed.load(Ordering::SeqCst)
+        && (scope.refused.lock().unwrap_or_else(|e| e.into_inner())).is_none()
+    {
+        scope.refuse(format!("vetoed: {reason}"));
+    }
+}
+
 /// `None` without an owner on this thread; otherwise whether this owner may write `physical`,
 /// holding it for the owner's lifetime. A foreign host or tmux owner fails closed.
 pub(crate) fn hold_content(host: &str, physical: &str, key: &str) -> Option<Result<(), String>> {

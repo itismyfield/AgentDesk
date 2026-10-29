@@ -18,6 +18,8 @@ use crate::services::stream_json_cli::{
 use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, TurnHost};
 use crate::services::{claude, claude_tui, codex, gemini, opencode, qwen};
 
+#[cfg(all(test, unix))]
+mod owner_input;
 pub(super) mod replay_scope;
 
 pub(super) struct StreamingTurn<'a> {
@@ -263,6 +265,10 @@ pub(super) fn execute(
     start
         .spend(&target, turn.prompt, &turn.cancel)
         .map_err(|refusal| format!("replay start refused: {refusal:?}"))?;
+    #[cfg(all(test, unix))]
+    if let Some(result) = owner_input::take(&turn) {
+        return result;
+    }
     match turn.host {
         TurnHost::Tmux => {}
         TurnHost::Refused(refusal) => return Err(refusal.to_string()),

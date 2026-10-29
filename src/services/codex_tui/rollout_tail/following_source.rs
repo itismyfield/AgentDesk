@@ -597,6 +597,17 @@ fn tail_source<L: Into<PaneLiveness>>(
                     if let Some(observe) = observe.as_mut() {
                         observe(seek_offset + state.bytes_read, &line)?;
                     }
+                    if line
+                        .windows(b"UserMessage".len())
+                        .any(|word| word == b"UserMessage")
+                        && let Ok(json) = serde_json::from_slice(&line)
+                    {
+                        let _ = crate::services::codex_tui::busy_inject::observe_native_record(
+                            &current_path,
+                            seek_offset + state.bytes_read,
+                            &json,
+                        );
+                    }
                     state.record(line.len());
                     if process_rollout_line_bytes(&line, &sender, &mut state) {
                         last_output_at = Some(Instant::now());

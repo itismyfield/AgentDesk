@@ -1011,8 +1011,10 @@ src/
 │   │   └── reconnect_tests.rs
 │   ├── codex_tui/
 │   │   ├── busy_inject/
+│   │   │   ├── expanded_contract_tests.rs
 │   │   │   ├── inject_tests.rs
 │   │   │   ├── rollout.rs
+│   │   │   ├── scan_tests.rs
 │   │   │   └── screen.rs
 │   │   ├── execution_end/
 │   │   │   ├── attempt.rs
@@ -1682,8 +1684,13 @@ src/
 │   │   │   ├── input_owner/
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── effect.rs
+│   │   │   │   ├── effect_tests.rs
 │   │   │   │   ├── mod.rs
-│   │   │   │   └── origin.rs
+│   │   │   │   ├── origin.rs
+│   │   │   │   ├── pump.rs
+│   │   │   │   ├── pump_tests.rs
+│   │   │   │   └── target.rs
 │   │   │   ├── transport/
 │   │   │   │   └── tests.rs
 │   │   │   ├── auto_queue_eligibility.rs
@@ -1960,6 +1967,8 @@ src/
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
+│   │   │   │   │   ├── owner_input.rs
+│   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── producer_error_test_support.rs
 │   │   │   │   │   └── replay_scope.rs
 │   │   │   │   ├── provider_isolation/
@@ -3502,6 +3511,8 @@ src/
 │   │   │   │   │   ├── collision.rs
 │   │   │   │   │   ├── migration.rs
 │   │   │   │   │   └── s4_tests.rs
+│   │   │   │   ├── append.rs
+│   │   │   │   ├── append_tests.rs
 │   │   │   │   ├── compat.rs
 │   │   │   │   ├── compat_tests.rs
 │   │   │   │   ├── rollback_reader_tests.rs
@@ -3886,6 +3897,7 @@ src/
 │   │   ├── binding_context_snapshot_tests.rs
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs
+│   │   ├── handed_identity_tests.rs
 │   │   ├── handoff.rs
 │   │   ├── handoff_tests.rs
 │   │   ├── hosted_source.rs
