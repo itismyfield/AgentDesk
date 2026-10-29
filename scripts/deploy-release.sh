@@ -645,6 +645,7 @@ _write_release_source_manifest() {
     AGENTDESK_MANIFEST_SKIP_REMOTE_FRESHNESS="${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}" \
     AGENTDESK_MANIFEST_O_TUI_WRITER="$(_binary_build_flag "${REL_BINARY:-}" o_tui_writer)" \
     AGENTDESK_MANIFEST_O_LEDGER_OPERATOR_RESUME="$(_binary_build_flag "${REL_BINARY:-}" o_ledger_operator_resume)" \
+    AGENTDESK_MANIFEST_O_LEDGER_INPUT_NOTICE="$(_binary_build_flag "${REL_BINARY:-}" o_ledger_input_notice)" \
     python3 - "$manifest_tmp" <<PY
 import json
 import os
@@ -671,6 +672,7 @@ payload = {
     "skip_remote_freshness": os.environ.get("AGENTDESK_MANIFEST_SKIP_REMOTE_FRESHNESS", "0"),
     "o_tui_writer": os.environ.get("AGENTDESK_MANIFEST_O_TUI_WRITER", "unknown"),
     "o_ledger_operator_resume": os.environ.get("AGENTDESK_MANIFEST_O_LEDGER_OPERATOR_RESUME") == "true",
+    "o_ledger_input_notice": os.environ.get("AGENTDESK_MANIFEST_O_LEDGER_INPUT_NOTICE") == "true",
 }
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
@@ -1012,30 +1014,36 @@ PY
 
 _rollback_would_revert_o_ledger() {
     # Only first use raises the floor; an unused new build can still roll back after a failed deploy.
-    local floor="$ADK_REL/o_store/operator_resume.floor"
-    [ -e "$floor" ] || [ -L "$floor" ] || return 1
-    if python3 - "$ADK_REL/runtime/release-source.json" <<'PY' 2>/dev/null
+    local floor field
+    for field in o_ledger_operator_resume o_ledger_input_notice; do
+        floor="$ADK_REL/o_store/${field#o_ledger_}.floor"
+        [ -e "$floor" ] || [ -L "$floor" ] || continue
+        if ! python3 - "$ADK_REL/runtime/release-source.json" "$field" <<'PY' 2>/dev/null
 import json
 import sys
 try:
     with open(sys.argv[1], encoding="utf-8") as handle:
-        compatible = json.load(handle).get("o_ledger_operator_resume") is True
+        compatible = json.load(handle).get(sys.argv[2]) is True
 except (OSError, ValueError, AttributeError):
     compatible = False
 sys.exit(0 if compatible else 1)
 PY
-    then
-        return 1
-    fi
-    return 0
+        then
+            return 0
+        fi
+    done
+    return 1
 }
 
 _binary_would_revert_o_ledger() {
-    # Returns 0 (refuse) when the OperatorResume floor exists and binary $1 does not
-    # report a compatible O ledger reader.
-    local floor="$ADK_REL/o_store/operator_resume.floor"
-    [ -e "$floor" ] || [ -L "$floor" ] || return 1
-    [ "$(_binary_build_flag "$1" o_ledger_operator_resume)" != "true" ]
+    # Any used ledger format requires a reader this binary explicitly supports.
+    local floor field
+    for field in o_ledger_operator_resume o_ledger_input_notice; do
+        floor="$ADK_REL/o_store/${field#o_ledger_}.floor"
+        [ -e "$floor" ] || [ -L "$floor" ] || continue
+        [ "$(_binary_build_flag "$1" "$field")" = "true" ] || return 0
+    done
+    return 1
 }
 
 _rollback_would_revert_o_writer() {
@@ -1240,7 +1248,7 @@ _rollback_release_binary() {
     fi
 
     if _rollback_would_revert_o_ledger; then
-        echo "🛑 ROLLBACK REFUSED — OperatorResume floor requires a compatible O ledger reader"
+        echo "🛑 ROLLBACK REFUSED — O ledger floor requires a compatible reader"
         echo "   The new binary stays live; $rel_backup is preserved. Fix forward with a compatible build."
         return 0
     fi
@@ -2752,7 +2760,7 @@ if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ "$PEER_BINARY_ACCEPTED" != 1 ]; th
 fi
 # The binary itself reports its O ledger reader; refuse before anything is staged.
 if _binary_would_revert_o_ledger "$SOURCE_BINARY"; then
-    echo "✗ OperatorResume floor refuses this build's incompatible O ledger reader" >&2
+    echo "✗ O ledger floor refuses this build's incompatible reader" >&2
     exit 1
 fi
 

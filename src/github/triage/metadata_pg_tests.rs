@@ -1,5 +1,6 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::db::kanban::upsert_card_from_issue_pg;
 use crate::github::test_support::issue;
 use serde_json::{Value, json};
 
@@ -180,6 +181,117 @@ async fn issue_label_writes_keep_concurrent_metadata_pg() {
             },
         );
     }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn label_writes_replace_non_object_metadata_with_object_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let card = seed(&pool).await;
+    for (stored, sql, inferred) in [
+        (
+            "array",
+            "UPDATE kanban_cards SET metadata = '[1]'::jsonb WHERE id = $1",
+            false,
+        ),
+        (
+            "string",
+            "UPDATE kanban_cards SET metadata = '\"s\"'::jsonb WHERE id = $1",
+            false,
+        ),
+        (
+            "json null",
+            "UPDATE kanban_cards SET metadata = 'null'::jsonb WHERE id = $1",
+            true,
+        ),
+        (
+            "sql null",
+            "UPDATE kanban_cards SET metadata = NULL WHERE id = $1",
+            true,
+        ),
+    ] {
+        sqlx::query(sql).bind(&card).execute(&pool).await.unwrap();
+        let issue = issue("Unrouted maintenance", None, &["bug"]);
+        let expected = if inferred {
+            update_card_metadata_with_inferred_agent_label_pg(
+                &pool,
+                &card,
+                &issue,
+                "project-agentdesk",
+            )
+            .await
+            .unwrap();
+            json!({"labels": "bug,agent:project-agentdesk"})
+        } else {
+            triage_new_issues_pg(&pool, "sync/repo", &[issue])
+                .await
+                .unwrap();
+            json!({"labels": "bug"})
+        };
+        let kind: String =
+            sqlx::query_scalar("SELECT jsonb_typeof(metadata) FROM kanban_cards WHERE id = $1")
+                .bind(&card)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(kind, "object", "{stored}");
+        assert_eq!(metadata(&pool, &card).await, expected, "{stored}");
+    }
+    sqlx::query("UPDATE kanban_cards SET metadata = '[1]'::jsonb WHERE id = $1")
+        .bind(&card)
+        .execute(&pool)
+        .await
+        .unwrap();
+    upsert_card_from_issue_pg(
+        &pool,
+        IssueCardUpsert {
+            repo_id: "sync/repo".into(),
+            issue_number: 42,
+            title: "Unrouted maintenance".into(),
+            metadata_json: Some(json!({"depends_on": [100]}).to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(metadata(&pool, &card).await, json!({"depends_on": [100]}));
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn new_issue_card_is_inserted_with_labels_before_inferred_label_write_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let mut new_issue = issue("Unrouted maintenance", None, &[" bug", " ", "ready "]);
+    new_issue.number = 43;
+    assert_eq!(
+        triage_new_issues_pg(&pool, "sync/repo", &[new_issue.clone()])
+            .await
+            .unwrap(),
+        1
+    );
+    let card: String = sqlx::query_scalar(
+        "SELECT id FROM kanban_cards WHERE repo_id = 'sync/repo' AND github_issue_number = 43",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(metadata(&pool, &card).await, json!({"labels": "bug,ready"}));
+    update_card_metadata_with_inferred_agent_label_pg(
+        &pool,
+        &card,
+        &new_issue,
+        "project-agentdesk",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        metadata(&pool, &card).await,
+        json!({"labels": "bug,ready,agent:project-agentdesk"})
+    );
     pool.close().await;
     db.drop().await;
 }

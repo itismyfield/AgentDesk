@@ -115,12 +115,11 @@ fn resolve_config_get_raw(key: &str, scalar: Option<&str>, runtime_config: Optio
         return "null".to_string();
     }
 
+    // The raw kv layer only: policies apply their own fallback when this is `null`.
     runtime_config
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| {
-            value
-                .as_object()
-                .and_then(|values| values.get(key))
+        .and_then(|blob| {
+            crate::services::settings::runtime_config_field(&blob, key)
                 .and_then(|value| serde_json::to_string(value).ok())
         })
         .unwrap_or_else(|| "null".to_string())

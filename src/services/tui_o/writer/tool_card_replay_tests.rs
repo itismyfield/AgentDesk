@@ -260,6 +260,7 @@ async fn a_folded_run_is_reconstructed_once_at_every_durable_crash_boundary() {
             writer
                 .store()
                 .append_ledger(LedgerEntry::Prepared {
+                    notice_origin: None,
                     local_retry: Some(LocalRetryMark::Budget),
                     serial: 0,
                     unit_key: expected.unit_key.clone(),
@@ -336,6 +337,7 @@ async fn rollback_identity_mode_does_not_recreate_synthetic_card_or_turn_work() 
         },
         index: 0,
         payload: "-# ✅ 1초 · 📦 1%".into(),
+        notice_origin: None,
     };
     deliver_all(&mut writer, &[Derived::Piece(summary.clone())]).await;
     let before = std::fs::read(ledger_path(&harness)).unwrap();

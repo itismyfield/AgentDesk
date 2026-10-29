@@ -46,6 +46,7 @@ fn fixture_records(settled: usize, open: Option<bool>) -> (Harness, SourceId, Pi
         };
         if index < settled {
             entries.push(LedgerEntry::Prepared {
+                notice_origin: None,
                 serial: index as u64,
                 unit_key: piece.unit_key.clone(),
                 piece_index: piece.index,
@@ -61,6 +62,7 @@ fn fixture_records(settled: usize, open: Option<bool>) -> (Harness, SourceId, Pi
             harness.port.say(BOT, &text);
         } else if is_open {
             entries.push(LedgerEntry::Prepared {
+                notice_origin: None,
                 serial: settled as u64,
                 unit_key: piece.unit_key.clone(),
                 piece_index: piece.index,
@@ -227,6 +229,7 @@ fn pending_fixture(state: &str) -> (Harness, PieceWork) {
         .unwrap();
     channel
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             serial: 2,
             unit_key: piece.unit_key.clone(),
             piece_index: piece.index,
@@ -387,6 +390,7 @@ async fn restart_replay_partial_unit_preserves_fresh_indices_and_blocked_work() 
     writer
         .store()
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             serial: 0,
             unit_key: first.unit_key.clone(),
             piece_index: 0,

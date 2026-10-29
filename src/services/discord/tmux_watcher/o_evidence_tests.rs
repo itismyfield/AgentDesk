@@ -32,13 +32,13 @@ async fn plan(
     producer: Option<RelayProducer>,
     target: &mut Option<SessionBoundRelayAckTarget>,
     mirrored: bool,
-    start: u64,
+    (turn_start, batch_start): (u64, u64),
 ) {
     let authorized = before.as_ref().is_some_and(|row| {
         row.turn_nonce == f.row.turn_nonce
             && row.effective_relay_owner_kind()
                 != crate::services::discord::inflight::RelayOwnerKind::None
-            && start == row.turn_start_offset.unwrap_or(0)
+            && batch_start == row.turn_start_offset.unwrap_or(0)
     });
     let provider = f.row.provider_kind().unwrap();
     let session = f.row.tmux_session_name.clone().unwrap();
@@ -92,7 +92,8 @@ async fn plan(
     let empty = String::new();
     let locals = TerminalRelayPlanLocals {
         current_offset: f.row.last_offset,
-        data_start_offset: start,
+        data_start_offset: batch_start,
+        turn_data_start_offset: turn_start,
         all_data: &empty,
         full_response: &f.body,
         current_response: &f.body,
@@ -195,7 +196,7 @@ async fn i7441b_actual_o_terminal_denials_and_true_orphans_pg() {
                     .tmux_relay_coord(ChannelId::new(f.row.channel_id))
                     .confirmed_end_offset
                     .load(Ordering::Acquire);
-                plan(&f, &shared, &http, before, None, &mut None, false, 0).await;
+                plan(&f, &shared, &http, before, None, &mut None, false, (0, 0)).await;
                 assert_eq!(
                     shared
                         .tmux_relay_coord(ChannelId::new(f.row.channel_id))
@@ -469,7 +470,7 @@ async fn soft_ack_cases(cases: &[u64], injected: bool) {
             f.port.messages.lock().unwrap()[0].content = "mismatch".into();
         } else if proof == 3 {
             use std::io::Write;
-            let extra = b"{\"type\":\"system\",\"subtype\":\"metadata\"}\n";
+            let extra = b"{\"type\":\"assistant\",\"uuid\":\"a-next\",\"apiBlockIndex\":0,\"message\":{\"id\":\"body-next\",\"content\":[{\"type\":\"text\",\"text\":\"next turn\"}]}}\n";
             std::fs::OpenOptions::new()
                 .append(true)
                 .open(&f.source.path)
@@ -514,7 +515,7 @@ async fn soft_ack_cases(cases: &[u64], injected: bool) {
             cached,
             &mut ack,
             mirrored,
-            start as u64,
+            (start as u64, start as u64),
         )
         .await;
         assert!(
@@ -616,7 +617,10 @@ pub(in crate::services::discord) async fn assert_receipted_fixture_suppressed(
             None,
             &mut None,
             false,
-            f.row.turn_start_offset.unwrap_or(0),
+            (
+                f.row.turn_start_offset.unwrap_or(0),
+                f.row.turn_start_offset.unwrap_or(0),
+            ),
         )
         .await;
         assert!(f.get_calls.load(Ordering::SeqCst) > reads);
@@ -704,7 +708,10 @@ pub(in crate::services::discord) async fn assert_uncovered_fixture_recorded(
         None,
         &mut None,
         false,
-        f.row.turn_start_offset.unwrap_or(0),
+        (
+            f.row.turn_start_offset.unwrap_or(0),
+            f.row.turn_start_offset.unwrap_or(0),
+        ),
     )
     .await;
     let rows: Vec<String> = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -756,7 +763,7 @@ async fn i7441b_authorized_direct_drops_unknown_evidence_before_one_second() {
             None,
             &mut target,
             false,
-            0,
+            (0, 0),
         ),
     )
     .await
@@ -778,6 +785,139 @@ async fn i7441b_legacy_channel_never_uses_stale_o_receipts_pg() {
     let reads = f.get_calls.load(Ordering::SeqCst);
     assert_uncovered_fixture_recorded(&f, &pool).await;
     assert_eq!(f.get_calls.load(Ordering::SeqCst), reads);
+    pool.close().await;
+    db.drop().await;
+}
+
+/// Records Claude writes after an injected turn's Stop hook summary; none carries a body.
+fn append_after_stop_hook(f: &mut Fixture) {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&f.source.path)
+        .unwrap();
+    for record in [
+        serde_json::json!({"type":"system","subtype":"turn_duration","durationMs":1200}),
+        serde_json::json!({"type":"attachment","attachment":{"type":"queued_command"}}),
+        serde_json::json!({"type":"last-prompt","lastPrompt":"monitor"}),
+    ] {
+        let line = format!("{record}\n");
+        file.write_all(line.as_bytes()).unwrap();
+        f.row.last_offset += line.len() as u64;
+    }
+}
+
+/// An injected turn's frame that ran past its Stop hook summary is recorded only when O did not
+/// post its body, and suppression must come from an exact GET.
+async fn assert_injected_tail_case(
+    pool: &sqlx::PgPool,
+    channel: u64,
+    outside_frame: bool,
+    delivered: bool,
+    replayed: bool,
+) {
+    let mut f = Fixture::injected_with_prefix(
+        channel,
+        &["background task finished. ", "monitor followup"],
+        4096,
+    )
+    .await;
+    append_after_stop_hook(&mut f);
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        f.row.channel_id,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    let (http, _http) = f.http().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    assert!(load_inflight_state(&ProviderKind::Claude, channel).is_none());
+    let before = outside_frame.then(|| {
+        let mut row = f.row.clone();
+        row.turn_start_offset = Some(f.row.last_offset + 1);
+        save_inflight_state(&row).unwrap();
+        row
+    });
+    if !delivered {
+        f.port.messages.lock().unwrap()[0].content = "wrong payload".into();
+    }
+    let turn_start = f.row.turn_start_offset.unwrap();
+    // A restart replay hands the leftover turn a read batch that began at the file end.
+    let batch_start = if replayed {
+        f.row.last_offset
+    } else {
+        turn_start
+    };
+    let reads = f.get_calls.load(Ordering::SeqCst);
+    plan(
+        &f,
+        &shared,
+        &http,
+        before,
+        None,
+        &mut None,
+        false,
+        (turn_start, batch_start),
+    )
+    .await;
+    let rows: Vec<String> =
+        sqlx::query_scalar("SELECT content FROM relay_dead_letter WHERE channel_id=$1")
+            .bind(channel.to_string())
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    let expected = if delivered {
+        Vec::new()
+    } else {
+        vec![f.body.clone()]
+    };
+    assert_eq!(
+        rows, expected,
+        "outside_frame={outside_frame} delivered={delivered} replayed={replayed}"
+    );
+    assert!(!delivered || f.get_calls.load(Ordering::SeqCst) > reads);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441d_injected_turn_past_stop_hook_records_only_unposted_body_pg() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7441d_tail",
+        "injected turn tail",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    for (index, (outside_frame, delivered)) in
+        [(false, true), (false, false), (true, true), (true, false)]
+            .into_iter()
+            .enumerate()
+    {
+        assert_injected_tail_case(
+            &pool,
+            744400 + index as u64,
+            outside_frame,
+            delivered,
+            false,
+        )
+        .await;
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441d_replayed_leftover_turn_proves_from_turn_start_pg() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7441d_replay",
+        "leftover turn replay",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    for (index, delivered) in [true, false].into_iter().enumerate() {
+        assert_injected_tail_case(&pool, 744410 + index as u64, false, delivered, true).await;
+    }
     pool.close().await;
     db.drop().await;
 }
