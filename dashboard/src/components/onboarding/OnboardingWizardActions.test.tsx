@@ -15,7 +15,7 @@ const fetchMock = vi.fn();
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("fetch", fetchMock);
-  fetchMock.mockReset().mockResolvedValue({ json: async () => ({ valid: true, ok: true, guilds: [] }) });
+  fetchMock.mockReset().mockResolvedValue({ ok: true, status: 200, json: async () => ({ valid: true, ok: true, guilds: [] }) });
 });
 
 afterEach(async () => {
