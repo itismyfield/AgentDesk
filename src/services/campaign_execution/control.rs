@@ -155,7 +155,12 @@ pub fn validate_new_start(state: &CampaignState, binding: &AttemptBinding) -> De
         .nodes
         .get(&binding.node_id)
         .ok_or_else(|| reject(RejectionCode::StaleBinding))?;
-    if binding.control_version != run.control_version {
+    // An interrupted node gets no new launch or continuation; late facts still arrive by observation.
+    let interrupted = run
+        .fences
+        .get(&binding.node_id)
+        .is_some_and(|f| f.interruption.is_some());
+    if binding.control_version != run.control_version || interrupted {
         return Err(reject(RejectionCode::StaleFence));
     }
     if binding.campaign_id != state.id

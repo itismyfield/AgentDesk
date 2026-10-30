@@ -699,8 +699,9 @@ pub(super) fn accept_stage_result(
                 ),
                 None => StageAssessment::of(Verdict::Wait, GateReason::Pending(attempt_id.into())),
             };
-            if assessment.verdict == Verdict::Pass {
-                // A passing Work stage hands over only through BeginReview.
+            // A passing Work hands over only through BeginReview, except a finishing stop, which
+            // records the result and creates no Review.
+            if assessment.verdict == Verdict::Pass && next.control != CampaignControl::Stopping {
                 return reject(RejectionCode::InvalidState);
             }
             let executions = execution
@@ -755,6 +756,11 @@ pub(super) fn accept_stage_result(
         }
         _ => return reject(RejectionCode::InvalidState),
     };
+    // A stopping Work keeps Review only as its next stage; nothing is enqueued for it.
+    let next_stage = match attempt.binding.stage {
+        Stage::Implementation => Stage::Review,
+        _ => Stage::Landing,
+    };
     let verdict = assessment.verdict;
     let limits = limits(next)?;
     let run = next.run.as_mut().expect("checked above");
@@ -766,7 +772,7 @@ pub(super) fn accept_stage_result(
         Verdict::Pass | Verdict::QualityFail => {
             let fenced = run.fences.entry(node_id.into()).or_default();
             let outcome = if verdict == Verdict::Pass {
-                node.stage = Stage::Landing;
+                node.stage = next_stage;
                 node.disposition = NodeDisposition::Pending;
                 AttemptOutcome::Passed
             } else {

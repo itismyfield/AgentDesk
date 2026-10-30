@@ -608,6 +608,89 @@ fn finish_stage_keeps_the_unsealed_work_v_slots_for_the_same_work() {
     );
     assert_eq!(action(&claimed, &archive), ActionState::Claimed);
     assert_eq!(claimed.run.as_ref().unwrap().verifications.len(), 2);
+    // A passing self-check still settles the finishing Work; the Review stays only the next stage.
+    let mut passed = finishing.clone();
+    let seal = seal_of(&state, &work);
+    run_v(&mut passed, &start, &seal, 0);
+    let before = passed.run.as_ref().unwrap();
+    let (attempts, actions) = (before.attempts.len(), before.actions.len());
+    let settled = apply(&passed, accept(&passed, "work-a", None));
+    let run = settled.run.as_ref().unwrap();
+    assert_eq!(run.attempts["work-a"].outcome, Some(AttemptOutcome::Passed));
+    assert_eq!((run.attempts.len(), run.actions.len()), (attempts, actions));
+    let node = &settled.nodes["a"];
+    assert_eq!(
+        (node.stage, node.current_attempt.as_deref()),
+        (Stage::Review, None)
+    );
+    assert_eq!(epoch(&settled, "a"), epoch(&passed, "a") + 1);
+    let finish = execution(&state, "work-a").finish_executions[0].clone();
+    let finish_archive = phase_action(&settled, &finish, "archive");
+    assert_eq!(action(&settled, &finish_archive), ActionState::Cancelled);
+    assert_eq!(
+        refused(
+            &settled,
+            advance(&finish, "archive", &work, ActionState::Claimed)
+        ),
+        RejectionCode::StaleFence
+    );
+}
+
+#[test]
+fn interrupted_node_gets_no_new_general_action_but_late_facts_still_land() {
+    let (mut state, work_a) = assigned();
+    let other = work("c", "work-c");
+    state = apply(&state, assign(&other, assignment(&other)));
+    let run = state.run.as_mut().unwrap();
+    run.attempts.get_mut("work-c").unwrap().started = true;
+    // The launch was already in flight when the node was interrupted.
+    run.actions.get_mut("launch-work-a").unwrap().state = ActionState::StartPending;
+    let interrupted = apply(&state, interrupt(&state, "a", &work_a.session));
+    let general = |binding: &AttemptBinding, id: &str, kind: ActionKind| {
+        let mut action = launch(binding);
+        action.id = id.into();
+        action.kind = kind;
+        Command::PlanAction {
+            action: Box::new(action),
+        }
+    };
+    for kind in [ActionKind::Launch, ActionKind::DeliverStage] {
+        assert_eq!(
+            refused(&interrupted, general(&work_a, "again-a", kind)),
+            RejectionCode::StaleFence
+        );
+    }
+    let mut pending = interrupted.clone();
+    let mut planned = launch(&work_a);
+    planned.id = "planned-a".into();
+    planned.kind = ActionKind::DeliverStage;
+    let run = pending.run.as_mut().unwrap();
+    run.actions.insert(planned.id.clone(), planned);
+    assert_eq!(
+        refused(
+            &pending,
+            Command::AdvanceAction {
+                action_id: "planned-a".into(),
+                binding: Box::new(work_a.clone()),
+                state: ActionState::Claimed,
+            }
+        ),
+        RejectionCode::StaleFence
+    );
+    let deliver = general(&other, "deliver-c", ActionKind::DeliverStage);
+    let planned_c = apply(&interrupted, deliver);
+    assert_eq!(action(&planned_c, "deliver-c"), ActionState::Planned);
+    let observed = apply(
+        &interrupted,
+        Command::ObserveAction {
+            action_id: "launch-work-a".into(),
+            binding: Box::new(work_a),
+            observation: ActionObservation::Started {
+                receipt: "launch-receipt".into(),
+            },
+        },
+    );
+    assert_eq!(action(&observed, "launch-work-a"), ActionState::Started);
 }
 
 #[test]
