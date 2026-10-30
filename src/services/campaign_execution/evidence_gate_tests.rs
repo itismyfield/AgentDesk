@@ -377,6 +377,22 @@ fn a1_drive(
     let (mut run, actions) = VerificationRun::register(registration).unwrap();
     let mut actions: BTreeMap<_, _> = actions.into_iter().map(|a| (a.id.clone(), a)).collect();
     run.subject.bind(seal.unwrap().bound_subject()).unwrap();
+    a1_finish(&mut run, &mut actions, spec, outcomes, exit, checkout_sha);
+    (run, actions)
+}
+
+// Runs every fixed phase of a registered V whose subject is bound, then stores collect()'s result.
+pub(crate) fn a1_finish(
+    run: &mut VerificationRun,
+    actions: &mut BTreeMap<String, Action>,
+    spec: &VerificationSpec,
+    outcomes: &[(&str, TestOutcome)],
+    exit: impl Fn(&str) -> i32,
+    checkout_sha: &str,
+) {
+    use crate::services::campaign_execution::verification_run::tests as a1;
+    let check_id = run.origin.check_id.clone();
+    let check_id = check_id.as_str();
     let selection = spec.check(check_id).unwrap().selection;
     let tests: Vec<_> = outcomes
         .iter()
@@ -469,7 +485,6 @@ fn a1_drive(
         .collect(|id| actions.get(id), environment, vec!["nextest".into()])
         .unwrap();
     run.collection = Some(collection);
-    (run, actions)
 }
 
 fn a1_collected(

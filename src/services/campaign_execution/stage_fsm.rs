@@ -44,6 +44,10 @@ fn node<'a>(state: &'a CampaignState, id: &str) -> Result<&'a NodeRuntime, Rejec
         .ok_or_else(|| Rejection::new(RejectionCode::StaleBinding))
 }
 
+fn fence(run: &Run, node_id: &str) -> NodeFence {
+    run.fences.get(node_id).cloned().unwrap_or_default()
+}
+
 fn digest<T: serde::Serialize>(value: &T) -> Result<String, Rejection> {
     digest_of(value).map_err(|_| Rejection::new(RejectionCode::InvalidState))
 }
@@ -134,9 +138,10 @@ pub(super) fn assign_work(
         .as_ref()
         .and_then(|id| run.attempts.get(id))
         .is_some_and(|a| a.outcome.is_none());
+    let fenced = fence(run, &binding.node_id);
     if busy
         || current.stage != Stage::Implementation
-        || current.interruption.is_some()
+        || fenced.interruption.is_some()
         || matches!(
             current.disposition,
             NodeDisposition::Failed | NodeDisposition::Complete
@@ -162,7 +167,7 @@ pub(super) fn assign_work(
     {
         return reject(RejectionCode::InvalidState);
     }
-    let epoch = current.epoch + 1;
+    let epoch = fenced.epoch + 1;
     let repair_cycle = current.repair_cycles;
     let mut registered = Vec::new();
     let mut actions = Vec::new();
@@ -215,8 +220,8 @@ pub(super) fn assign_work(
     for action in actions.into_iter().chain([launch.clone()]) {
         run.actions.insert(action.id.clone(), action);
     }
+    run.fences.entry(binding.node_id.clone()).or_default().epoch = epoch;
     let node = next.nodes.get_mut(&binding.node_id).expect("checked above");
-    node.epoch = epoch;
     node.current_attempt = Some(binding.attempt_id.clone());
     node.disposition = NodeDisposition::Assigned;
     node.wait_reason = None;
@@ -291,7 +296,8 @@ pub(super) fn begin_review(
             reject(RejectionCode::AlreadyExists)
         };
     }
-    if current.epoch != expected_epoch || current.interruption.is_some() {
+    let fenced = fence(run, node_id);
+    if fenced.epoch != expected_epoch || fenced.interruption.is_some() {
         return reject(RejectionCode::StaleFence);
     }
     let work = current
@@ -340,7 +346,7 @@ pub(super) fn begin_review(
     if start.verdict != Verdict::Pass {
         return gate_not_passed(&start);
     }
-    let epoch = current.epoch + 1;
+    let epoch = fenced.epoch + 1;
     let mut prerequisites = Vec::new();
     for id in &execution.finish_executions {
         let v = run
@@ -371,8 +377,8 @@ pub(super) fn begin_review(
             .insert(prerequisite.id.clone(), prerequisite);
     }
     run.actions.insert(launch.id.clone(), launch.clone());
+    run.fences.entry(node_id.into()).or_default().epoch = epoch;
     let node = next.nodes.get_mut(node_id).expect("checked above");
-    node.epoch = epoch;
     node.stage = Stage::Review;
     node.current_attempt = Some(review.attempt_id.clone());
     node.disposition = NodeDisposition::Assigned;
@@ -397,7 +403,8 @@ pub(super) fn validate_verification_start(
         .get(&consumer.attempt_id)
         .filter(|a| a.binding == *consumer && consumer.node_id == v.origin.node_id)
         .ok_or_else(|| Rejection::new(RejectionCode::StaleBinding))?;
-    if current.interruption.is_some()
+    let fenced = fence(run, &v.origin.node_id);
+    if fenced.interruption.is_some()
         || current.current_attempt.as_ref() != Some(&consumer.attempt_id)
         || attempt.outcome.is_some()
         || (current.stage, current.series) != (consumer.stage, consumer.series)
@@ -421,7 +428,7 @@ pub(super) fn validate_verification_start(
         consumer_attempt: consumer.attempt_id.clone(),
         consumer_binding_digest: consumer_digest.clone(),
         consumer_stage: consumer.stage,
-        consumer_node_epoch: current.epoch,
+        consumer_node_epoch: fenced.epoch,
         run_control_version: run.control_version,
         source,
     };
@@ -429,7 +436,7 @@ pub(super) fn validate_verification_start(
     match (state.control, &run.stop) {
         (CampaignControl::Running, None) if consumer.attempt_id == v.origin.owner_attempt => {
             let owns = attempt.execution.as_deref().is_some_and(|e| {
-                e.node_epoch == current.epoch
+                e.node_epoch == fenced.epoch
                     && e.start_executions
                         .iter()
                         .chain(&e.finish_executions)
@@ -437,7 +444,7 @@ pub(super) fn validate_verification_start(
             });
             if !owns
                 || consumer.control_version != run.control_version
-                || v.origin.registered_node_epoch != current.epoch
+                || v.origin.registered_node_epoch != fenced.epoch
                 || v.origin.repair_cycle != current.repair_cycles
             {
                 return reject(RejectionCode::StaleFence);
@@ -451,7 +458,7 @@ pub(super) fn validate_verification_start(
                 .find(|p| p.consumer_attempt == consumer.attempt_id && &p.target.execution_id == id)
                 .ok_or_else(|| Rejection::new(RejectionCode::StaleFence))?;
             if prerequisite.consumer_binding_digest != consumer_digest
-                || prerequisite.consumer_node_epoch != current.epoch
+                || prerequisite.consumer_node_epoch != fenced.epoch
                 || prerequisite.run_control_version != run.control_version
                 || prerequisite.target.matches(v).is_err()
             {
@@ -466,7 +473,7 @@ pub(super) fn validate_verification_start(
                 .find(|g| &g.execution_id == id && g.consumer_attempt == consumer.attempt_id)
                 .ok_or_else(|| Rejection::new(RejectionCode::StaleFence))?;
             if grant.consumer_binding_digest != consumer_digest
-                || grant.consumer_node_epoch != current.epoch
+                || grant.consumer_node_epoch != fenced.epoch
                 || grant.original_binding_digest != v.origin.binding_digest
             {
                 return reject(RejectionCode::StaleFence);
@@ -505,7 +512,7 @@ pub(super) fn advance_verification_phase(
         .ok_or_else(|| Rejection::new(RejectionCode::StaleBinding))?;
     let fence = CurrentFence {
         run_control_version: run.control_version,
-        node_epoch: node(next, &v.origin.node_id)?.epoch,
+        node_epoch: fence(run, &v.origin.node_id).epoch,
     };
     match v.admit_phase_start(phase_id, action, &authority, fence) {
         Ok(PhaseAdmission::Start { .. }) => {}
@@ -588,7 +595,8 @@ pub(super) fn interrupt_node(
         return reject(RejectionCode::StaleRun);
     }
     let current = node(next, node_id)?;
-    if let Some(existing) = &current.interruption {
+    let fenced = fence(run, node_id);
+    if let Some(existing) = &fenced.interruption {
         return if existing.session == *session {
             Ok(None)
         } else {
@@ -603,7 +611,7 @@ pub(super) fn interrupt_node(
     if !bound {
         return reject(RejectionCode::StaleBinding);
     }
-    if current.epoch != expected_epoch {
+    if fenced.epoch != expected_epoch {
         return reject(RejectionCode::StaleFence);
     }
     let executions = node_executions(run, node_id);
@@ -622,10 +630,10 @@ pub(super) fn interrupt_node(
         stop.finish_grants
             .retain(|g| !executions.contains(&g.execution_id));
     }
-    let node = next.nodes.get_mut(node_id).expect("checked above");
-    node.epoch += 1;
-    node.interruption = Some(NodeInterruption {
-        epoch: node.epoch,
+    let fenced = run.fences.entry(node_id.into()).or_default();
+    fenced.epoch += 1;
+    fenced.interruption = Some(NodeInterruption {
+        epoch: fenced.epoch,
         attempt_id,
         session: session.clone(),
         reason: reason.into(),
@@ -633,7 +641,7 @@ pub(super) fn interrupt_node(
     });
     Ok(Some(EventKind::NodeInterruptionRequested {
         node_id: node_id.into(),
-        epoch: node.epoch,
+        epoch: fenced.epoch,
         revoked,
     }))
 }
@@ -659,7 +667,8 @@ pub(super) fn accept_stage_result(
         return reject(RejectionCode::InvalidState);
     }
     let current = node(next, node_id)?;
-    if current.epoch != expected_epoch || current.interruption.is_some() {
+    let fenced = fence(run, node_id);
+    if fenced.epoch != expected_epoch || fenced.interruption.is_some() {
         return reject(RejectionCode::StaleFence);
     }
     let attempt = run
@@ -755,20 +764,24 @@ pub(super) fn accept_stage_result(
             node.disposition = NodeDisposition::Verifying;
         }
         Verdict::Pass | Verdict::QualityFail => {
+            let fenced = run.fences.entry(node_id.into()).or_default();
             let outcome = if verdict == Verdict::Pass {
                 node.stage = Stage::Landing;
                 node.disposition = NodeDisposition::Pending;
                 AttemptOutcome::Passed
             } else {
-                if record_quality_failure(node, cycle, &limits) == FailureDisposition::Repair {
+                let counted = &mut fenced.counted_failure;
+                if record_quality_failure(node, counted, cycle, &limits)
+                    == FailureDisposition::Repair
+                {
                     node.stage = Stage::Implementation;
                 }
                 AttemptOutcome::QualityFailed
             };
+            fenced.epoch += 1;
             if let Some(attempt) = run.attempts.get_mut(attempt_id) {
                 attempt.outcome = Some(outcome);
             }
-            node.epoch += 1;
             node.current_attempt = None;
             revoke_unstarted(run, &executions, "stage result finalized", at);
         }
@@ -783,7 +796,11 @@ pub(super) fn accept_stage_result(
 // FinishStage freezes the exact V each finishing consumer may still continue.
 pub(super) fn finish_grants(state: &CampaignState, run: &Run) -> Vec<FinishGrant> {
     let mut grants = Vec::new();
-    for current in state.nodes.values().filter(|n| n.interruption.is_none()) {
+    for (node_id, current) in &state.nodes {
+        let fenced = fence(run, node_id);
+        if fenced.interruption.is_some() {
+            continue;
+        }
         let Some(attempt) = current
             .current_attempt
             .as_ref()
@@ -819,7 +836,7 @@ pub(super) fn finish_grants(state: &CampaignState, run: &Run) -> Vec<FinishGrant
                 consumer_attempt: attempt.binding.attempt_id.clone(),
                 consumer_binding_digest: consumer_digest.clone(),
                 consumer_stage: attempt.binding.stage,
-                consumer_node_epoch: current.epoch,
+                consumer_node_epoch: fenced.epoch,
                 phase_actions: v.phases.iter().map(|p| p.action_id.clone()).collect(),
             });
         }
@@ -829,4 +846,4 @@ pub(super) fn finish_grants(state: &CampaignState, run: &Run) -> Vec<FinishGrant
 
 #[cfg(test)]
 #[path = "stage_fsm_tests.rs"]
-mod tests;
+pub(crate) mod tests;

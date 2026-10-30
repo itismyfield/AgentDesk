@@ -225,5 +225,7 @@ async fn apply(
 #[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]
+mod stage_store_tests;
+#[cfg(test)]
 #[path = "storage_tests.rs"]
 mod tests;

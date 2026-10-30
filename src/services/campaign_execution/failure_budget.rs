@@ -12,14 +12,15 @@ pub enum FailureDisposition {
 // last allowed repair fails the node. Waits, rejected evidence and interruptions never reach here.
 pub fn record_quality_failure(
     node: &mut NodeRuntime,
+    counted: &mut Option<(u32, u32)>,
     failed_cycle: u32,
     limits: &ProfileLimits,
 ) -> FailureDisposition {
     let key = (node.series, failed_cycle);
-    if failed_cycle < node.repair_cycles || node.counted_failure == Some(key) {
+    if failed_cycle < node.repair_cycles || *counted == Some(key) {
         return FailureDisposition::AlreadyCounted;
     }
-    node.counted_failure = Some(key);
+    *counted = Some(key);
     node.quality_failures += 1;
     if failed_cycle >= limits.quality_repairs {
         node.disposition = NodeDisposition::Failed;

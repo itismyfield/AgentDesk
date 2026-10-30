@@ -276,6 +276,8 @@ pub struct Run {
     // Review prerequisites fixed by each BeginReview, keyed by prerequisite ID; kept after revocation.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub prerequisites: BTreeMap<String, StagePrerequisite>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fences: BTreeMap<String, NodeFence>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,13 +293,15 @@ pub struct NodeRuntime {
     pub acceptance_complete: bool,
     pub evidence_current: bool,
     pub wait_reason: Option<ReasonCode>,
+}
+
+// A node's start fence, kept in the run document and out of the public node projection.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeFence {
     // Advanced once per stage handover or interruption; every start authority names the epoch it holds.
-    #[serde(default)]
     pub epoch: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interruption: Option<NodeInterruption>,
     // The (series, repair cycle) whose quality failure was already counted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counted_failure: Option<(u32, u32)>,
 }
 
@@ -323,9 +327,6 @@ impl Default for NodeRuntime {
             acceptance_complete: false,
             evidence_current: false,
             wait_reason: None,
-            epoch: 0,
-            interruption: None,
-            counted_failure: None,
         }
     }
 }
