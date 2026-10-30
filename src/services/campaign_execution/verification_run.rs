@@ -250,7 +250,9 @@ pub enum PhaseInitiation {
         receipt: String,
         process: ProcessIdentity,
     },
+    // The persistent id names this lost start, so a later observation resolves exactly it.
     Indeterminate {
+        initiation_id: String,
         evidence: String,
         observed_at: DateTime<Utc>,
     },
@@ -320,6 +322,7 @@ pub struct InitiationObservation {
     pub execution_id: String,
     pub action_id: String,
     pub phase_id: String,
+    pub initiation_id: String,
     pub outcome: ReconciledInitiation,
     pub evidence: String,
     pub observed_at: DateTime<Utc>,
@@ -361,10 +364,15 @@ pub struct VerificationPhase {
 impl VerificationPhase {
     // An Indeterminate start stays unresolved until a later direct observation is appended.
     pub fn unresolved(&self) -> bool {
-        matches!(
-            self.initiations.last(),
-            Some(PhaseInitiation::Indeterminate { .. })
-        )
+        self.unresolved_initiation().is_some()
+    }
+
+    // The id a direct observation must name to resolve the current Indeterminate start.
+    pub fn unresolved_initiation(&self) -> Option<&str> {
+        match self.initiations.last() {
+            Some(PhaseInitiation::Indeterminate { initiation_id, .. }) => Some(initiation_id),
+            _ => None,
+        }
     }
 
     pub fn started(&self) -> bool {
@@ -845,6 +853,10 @@ impl VerificationRun {
                 required: check.required,
             });
         }
+        // The listed universe means every runnable listed test; a partial plan cannot claim it.
+        if check.selection == SelectionRule::ListedUniverse && chosen != listed {
+            return Err(VerificationError::Conflict);
+        }
         let actual = ActualPlan {
             archive_digest: digest.clone(),
             manifest,
@@ -950,12 +962,20 @@ impl VerificationRun {
         if phase.started() || phase.unresolved() {
             return Err(VerificationError::Conflict);
         }
+        if let PhaseInitiation::Indeterminate { initiation_id, .. } = &initiation {
+            let reused = phase.initiations.iter().any(|i| {
+                matches!(i, PhaseInitiation::Indeterminate { initiation_id: id, .. } if id == initiation_id)
+            });
+            if reused {
+                return Err(VerificationError::Conflict);
+            }
+        }
         phase.initiations.push(initiation);
         Ok(())
     }
 
-    // Only a direct observation of the same execution, action and phase resolves an Indeterminate
-    // start; the history is kept and the returned state is what the action should be reconciled to.
+    // Only an observation naming the execution, action, phase and lost start resolves it; replaying
+    // the latest resolution answers with the phase's current state, an older start conflicts.
     pub fn reconcile_initiation(
         &mut self,
         observation: InitiationObservation,
@@ -965,6 +985,14 @@ impl VerificationRun {
         if observation.execution_id != execution_id || observation.action_id != phase.action_id {
             return Err(VerificationError::ActionMismatch(observation.action_id));
         }
+        let index = phase
+            .initiations
+            .iter()
+            .position(|i| {
+                matches!(i, PhaseInitiation::Indeterminate { initiation_id, .. }
+                    if *initiation_id == observation.initiation_id)
+            })
+            .ok_or(VerificationError::Conflict)?;
         let (entry, state) = match observation.outcome {
             ReconciledInitiation::Started { receipt, process } => {
                 if receipt != format!("{}:{}:{}", phase.id, process.pid, process.nonce) {
@@ -984,26 +1012,21 @@ impl VerificationRun {
                 ActionState::Planned,
             ),
         };
-        // Replaying the observation that resolved the latest Indeterminate is idempotent; anything
-        // else after a resolution, including a stale Unstarted once a start followed, conflicts.
-        let last_indeterminate = phase
-            .initiations
-            .iter()
-            .rposition(|i| matches!(i, PhaseInitiation::Indeterminate { .. }));
-        let resolved_since = last_indeterminate.map_or(&[][..], |i| &phase.initiations[i + 1..]);
-        let started_since = resolved_since
-            .iter()
-            .any(|i| matches!(i, PhaseInitiation::Started { .. }));
-        let replayed = resolved_since.contains(&entry)
-            && (matches!(entry, PhaseInitiation::Started { .. }) || !started_since);
-        if replayed {
+        let Some(resolution) = phase.initiations.get(index + 1) else {
+            phase.initiations.push(entry);
             return Ok(state);
-        }
-        if !phase.unresolved() {
+        };
+        if *resolution != entry || index + 2 != phase.initiations.len() {
             return Err(VerificationError::Conflict);
         }
-        phase.initiations.push(entry);
-        Ok(state)
+        let PhaseInitiation::Started { receipt, .. } = entry else {
+            return Ok(state);
+        };
+        match &phase.result {
+            None => Ok(state),
+            Some(result) if result.receipt == receipt => Ok(ActionState::Reconciled),
+            Some(_) => Err(VerificationError::Conflict),
+        }
     }
 
     // After a restart no runner handle remains: a Started phase closes only once its tree is seen
