@@ -26,6 +26,16 @@ pub(crate) struct Owner {
     pub(crate) fault: Fault,
     /// Ticket admissions committed while their caller saw Pending, with the outcome owed to it.
     unacknowledged: Vec<(String, source_admission::Admitted)>,
+    /// The front message the drive handed to a turn by exact ticket and original; one claim spends it.
+    front_grant: Option<u64>,
+}
+
+/// What a turn claim is to the owner: the granted front, a source it holds, or none of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClaimClass {
+    OwnerFront,
+    OwnerHeld,
+    NonOwner,
 }
 
 impl Owner {
@@ -56,6 +66,7 @@ impl Owner {
             pending: None,
             fault: Fault::None,
             unacknowledged: Vec::new(),
+            front_grant: None,
         };
         // A restored bootstrap is possibly sent; missing deadline never proves NotSent.
         let mut restored = owner.snapshot.clone();
@@ -209,6 +220,67 @@ impl Owner {
                 .map(|view| view.original)
                 .collect(),
         })
+    }
+
+    /// The unattempted queue front and the ticket whose receipt names it.
+    pub(crate) fn front(&self) -> Option<(Ticket, PendingQueueItem)> {
+        let front = self.snapshot.items.first()?;
+        if self.snapshot.head_injection.is_some() {
+            return None;
+        }
+        let receipts = self.snapshot.admission_receipts.iter();
+        let tickets =
+            receipts.filter_map(|r| Ticket::new(r.strip_prefix("tk:")?.rsplit_once(':')?.0).ok());
+        let ticket = tickets
+            .into_iter()
+            .find(|t| self.ticket_original(t).is_some_and(|o| same(&o, front)))?;
+        Some((ticket, front.clone()))
+    }
+
+    /// Lets the next claim for exactly this ticket's original at the front start a turn.
+    pub(crate) fn grant_front(
+        &mut self,
+        ticket: &Ticket,
+        original: &PendingQueueItem,
+    ) -> Result<(), String> {
+        match self.front() {
+            Some((at, front)) if at == *ticket && same(&front, original) => {
+                self.front_grant = Some(front.message_id);
+                Ok(())
+            }
+            _ => Err("not the owner's unattempted front".into()),
+        }
+    }
+
+    /// A message ID is no execution right: only the granted front starts, and any source the owner
+    /// holds, queued, attempted, retained or settled, never starts beside it.
+    pub(crate) fn claim_class(&mut self, message: u64) -> ClaimClass {
+        let front = self.front().map(|(_, front)| front.message_id);
+        if self.front_grant == Some(message) && front == Some(message) {
+            self.front_grant = None;
+            return ClaimClass::OwnerFront;
+        }
+        let s = &self.snapshot;
+        let attempts = s
+            .head_injection
+            .iter()
+            .chain(s.retained_inputs.iter().map(|r| &r.input));
+        let mut held = s
+            .items
+            .iter()
+            .chain(attempts.flat_map(InputAttempt::members));
+        let names = |item: &PendingQueueItem| {
+            item.message_id == message || item.source_message_ids.contains(&message)
+        };
+        let settled = (s.terminal_identities.iter()).any(|t| {
+            t.identity.primary == message
+                || t.identity.sources.iter().any(|x| x.message_id == message)
+        });
+        if held.any(names) || settled {
+            ClaimClass::OwnerHeld
+        } else {
+            ClaimClass::NonOwner
+        }
     }
 
     pub(crate) fn json(&self) -> Result<serde_json::Value, String> {

@@ -349,6 +349,78 @@ fn a_v2_owner_lets_persisted_claims_past_retained_inputs_only() {
     });
 }
 
+/// Only the front the owner granted by exact ticket and original starts a turn; a claim naming a
+/// source it holds never does, and a claim it never admitted keeps V1's order.
+#[test]
+fn a_v2_owner_starts_only_its_granted_front_and_never_a_held_source() {
+    let _root = TestRuntimeRootGuard::new();
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        let claim = |handle: ChannelMailboxHandle, id: u64, order| async move {
+            handle
+                .try_start_turn_kinded_result(
+                    Arc::new(CancelToken::new()),
+                    poise::serenity_prelude::UserId::new(7),
+                    MessageId::new(id),
+                    ActiveTurnKind::UserOrAgent,
+                    order,
+                    Some(ctx()),
+                )
+                .await
+                .started
+        };
+        let (behind, now) = (
+            TurnAdmissionOrder::BehindQueue,
+            TurnAdmissionOrder::Immediate,
+        );
+        let queued = |channel: u64| {
+            let registry = &registry;
+            async move {
+                let (handle, _) = owned(registry, channel, &[], false).await;
+                handle
+                    .v2_admit_ticket(item(100), "front-100".into())
+                    .await
+                    .unwrap();
+                handle
+            }
+        };
+        let (metadata_only, _) = owned(&registry, 7_272_640, &[], false).await;
+        assert!(claim(metadata_only, 900, behind).await);
+        assert!(
+            !claim(queued(7_272_641).await, 900, behind).await,
+            "older queued work goes first"
+        );
+        assert!(
+            claim(queued(7_272_642).await, 900, now).await,
+            "a process or recovery claim starts as in V1"
+        );
+        for order in [behind, now] {
+            let disguised = queued(7_272_643).await;
+            assert!(
+                !claim(disguised, 100, order).await,
+                "a message ID alone never runs the owner's original"
+            );
+        }
+        let (retained, _) = owned(&registry, 7_272_644, &[], true).await;
+        assert!(!claim(retained.clone(), 300, now).await);
+        assert!(claim(retained, 900, now).await, "retained is no barrier");
+        let front = queued(7_272_645).await;
+        front
+            .v2_request(|slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                let (ticket, original) = owner.front().ok_or("no front")?;
+                assert_eq!(ticket, Ticket::new("front-100").unwrap());
+                let other = Ticket::new("front-101").unwrap();
+                assert!(owner.grant_front(&other, &original).is_err());
+                owner.grant_front(&ticket, &original)
+            })
+            .await
+            .unwrap();
+        assert!(!claim(front.clone(), 101, behind).await);
+        assert!(claim(front, 100, behind).await, "the granted front starts");
+    });
+}
+
 #[test]
 fn a_foreign_legacy_file_under_a_v2_owner_is_never_hydrated_or_requeued_into_v1() {
     let _root = TestRuntimeRootGuard::new();

@@ -1936,8 +1936,12 @@ fn input_mailbox_step(
                 && !refused_released_episode
                 && !state.remint_fence.refuses_discarded(&[user_message_id]);
             let yields = idle
-                && (queued_head::blocks_claims(&mut state, channel_id, persistence.as_ref())
-                    || claim_yields(&mut state, turn_kind, user_message_id, admission_order));
+                && (queued_head::blocks_claims(
+                    &mut state,
+                    channel_id,
+                    persistence.as_ref(),
+                    (user_message_id, admission_order),
+                ) || claim_yields(&mut state, turn_kind, user_message_id, admission_order));
             let mut queue_exit_events = Vec::new();
             let mut persistence_error = None;
             let can_start = idle && !yields;
