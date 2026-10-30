@@ -2,14 +2,12 @@
 //! so one paste and one Enter reach the open model turn, or no key is sent.
 use crate::services::claude_tui::busy_inject::{MAX_INPUT_BYTES, at_offsets, frame};
 use crate::services::claude_tui::owner_input::{self, ReadyRefusal};
+use crate::services::codex_tui::busy_inject::screen::{self, Composer};
 use crate::services::codex_tui::busy_inject::{
     Ledger, Outcome, Request, TIMING, TurnVerdict, Unconfirmed, Veto, read_turn,
 };
 use crate::services::codex_tui::host_input::InputRun;
-use crate::services::codex_tui::input::{
-    ComposerContent, TuiInputAction, active_composer_content_in_pane,
-    pane_shows_codex_interactive_modal, try_with_composer_mutation_lock,
-};
+use crate::services::codex_tui::input::{TuiInputAction, try_with_composer_mutation_lock};
 use crate::services::session_host::HerdrTarget;
 use crate::services::tui_input::human_frame::history;
 
@@ -44,16 +42,18 @@ pub(crate) fn inject(target: &HerdrTarget, request: &Request<'_>, ledger: &dyn L
     locked.unwrap_or(Outcome::NotSent(Veto::LockContended))
 }
 
-/// One read of the pane: no modal, and a composer shown whole and empty.
+/// One read of the pane with its colors, through the tmux path's own reader: no modal, a bottom
+/// composer holding only its dimmed placeholder, and nothing the append rules leave unproven.
 fn composer(target: &HerdrTarget) -> Result<(), Veto> {
-    let screen = target.capture(-80).ok_or(Veto::PaneUnavailable)?;
-    if pane_shows_codex_interactive_modal(&screen) {
+    let capture = target.capture_ansi(-80).ok_or(Veto::PaneUnavailable)?;
+    let shown = screen::read(&capture);
+    if shown.modal {
         return Err(Veto::Modal);
     }
-    match active_composer_content_in_pane(&screen) {
-        ComposerContent::Empty => Ok(()),
-        ComposerContent::Draft | ComposerContent::Unread => Err(Veto::ComposerUnread),
+    if shown.composer != Composer::Empty || shown.attachments {
+        return Err(Veto::ComposerUnread);
     }
+    screen::append_veto(&capture, &shown).map_or(Ok(()), Err)
 }
 
 /// The rollout's open turn is still the one the caller aimed at.
@@ -104,13 +104,16 @@ fn locked(target: &HerdrTarget, request: &Request<'_>, text: &str, ledger: &dyn 
         history::withdraw(request.nonce, request.rollout);
         not_sent(veto)
     };
-    // The turn and the composer are read again just before the owner's ready, as the tmux path does.
-    let recheck = turn(request).and_then(|()| composer(target));
+    // The turn and the composer are read again just before the owner's ready, as the tmux path
+    // does; a failed read withdraws before the owner is asked at all.
+    if let Err(veto) = turn(request).and_then(|()| composer(target)) {
+        return withdraw(veto);
+    }
     let ready = owner_input::ready_payload().map_err(|refusal| match refusal {
         ReadyRefusal::Target(_) => Veto::PaneUnavailable,
         ReadyRefusal::Lease(_) => Veto::LockContended,
     });
-    if let Err(veto) = recheck.and(ready) {
+    if let Err(veto) = ready {
         return withdraw(veto);
     }
     use history::append::{self, Admission};
@@ -144,3 +147,7 @@ fn locked(target: &HerdrTarget, request: &Request<'_>, text: &str, ledger: &dyn 
     }
     Outcome::Injected
 }
+
+#[cfg(test)]
+#[path = "busy_tests.rs"]
+mod tests;

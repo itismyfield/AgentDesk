@@ -19,7 +19,9 @@ const T: &str = "01a11d88-ef31-7860-9d48-88926c4b1809";
 
 /// A busy Codex screen whose composer shows `draft`, as Herdr reads the pane.
 fn screen(draft: &str) -> Value {
-    let text = format!("• Working (3s • esc to interrupt)\n\n› {draft}\ngpt-5.4 xhigh · /tmp");
+    let text = format!(
+        "• Working (3s • esc to interrupt)\n\n› {draft}\n\n  gpt-5.4 xhigh · 87% context left"
+    );
     json!({"type": "pane_read", "read": {
         "pane_id": PANE, "workspace_id": "w1", "tab_id": "w1:1", "source": "recent_unwrapped",
         "format": "text", "text": text, "revision": 3, "truncated": false

@@ -4,7 +4,7 @@
 #[cfg(all(test, unix))]
 mod inject_tests;
 mod rollout;
-mod screen;
+pub(crate) mod screen;
 
 use std::io::Write;
 use std::path::Path;
