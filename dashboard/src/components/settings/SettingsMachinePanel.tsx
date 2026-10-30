@@ -30,17 +30,17 @@ export function SettingsMachinePanel({ tr }: { tr: SettingsTr }) {
         <p className="text-xs text-th-text-muted">{tr("마지막 조회", "Last updated")}: {machineTimestamp(nodes.dataUpdatedAt || null, tr)}</p>
         <p className="text-xs text-th-text-muted">{tr("5초마다 자동 갱신합니다.", "Refreshes automatically every 5 seconds.")}</p>
       </div>
-      <button type="button" className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-th-border px-3 py-2 text-sm disabled:opacity-50" disabled={nodes.isFetching}
+      <button type="button" className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md border border-th-border px-3 py-2 text-sm disabled:opacity-50" disabled={nodes.isFetching}
         onClick={() => void nodes.refetch()}>
         <RefreshCw size={14} aria-hidden className={nodes.isFetching ? "animate-spin" : undefined} />
         {nodes.isFetching ? tr("확인 중…", "Checking…") : tr("상태 새로고침", "Refresh status")}
       </button>
     </div>
     {nodes.isPending && <p role="status">{tr("머신 정보를 불러오는 중…", "Loading machine details…")}</p>}
-    {nodes.isError && <p role="alert" className="rounded-xl border border-amber-400/30 bg-amber-400/10 p-3 text-sm">{nodes.data
+    {nodes.isError && <p role="alert" className="rounded-md border border-amber-400/30 bg-amber-400/10 p-3 text-sm">{nodes.data
       ? tr("머신 상태 갱신에 실패했습니다. 마지막 조회 정보를 표시하며 연결 상태는 미확인으로 처리합니다.", "Machine refresh failed. Showing the last snapshot with connectivity marked unverified.")
       : tr("머신 정보를 불러오지 못했습니다. 서버 연결을 확인한 뒤 다시 시도해 주세요.", "Unable to load machines. Check the server connection and retry.")}</p>}
-    {cluster && !cluster.enabled && <p role="status" className="rounded-xl border border-th-border p-4">{tr(
+    {cluster && !cluster.enabled && <p role="status" className="rounded-md border border-th-border p-4">{tr(
       "현재 서버는 단독 운영 중입니다. Hub·Runner 클러스터가 활성화되어 있지 않습니다.",
       "This server runs standalone. The Hub and Runner cluster is not enabled.",
     )}</p>}

@@ -2624,8 +2624,8 @@ test.describe("Dashboard smoke tests", () => {
           ),
         };
       });
-    expect(navMetrics.scrollWidth).toBeGreaterThan(navMetrics.clientWidth);
-    expect(navMetrics.overflowX).toMatch(/auto|scroll/);
+    expect(navMetrics.scrollWidth).toBeLessThanOrEqual(navMetrics.clientWidth + 1);
+    expect(navMetrics.maxButtonHeight).toBeGreaterThanOrEqual(44);
     expect(navMetrics.maxButtonHeight).toBeLessThan(64);
 
     const before = await settingsPage.evaluate((node) => ({
@@ -2800,7 +2800,7 @@ test.describe("Dashboard smoke tests", () => {
     const panel = page.getByTestId("settings-machine-panel");
     await expect(panel).toBeVisible();
     await expect(page.locator("#settings-tab-machine")).toHaveAttribute("aria-selected", "true");
-    await expect(page.locator("#settings-tab-machine").getByText("2", { exact: true })).toBeVisible();
+    await expect(page.locator("#settings-panel-content > div").first().getByText("2", { exact: true })).toBeVisible();
     const order = await page.getByRole("tablist", { name: /설정 패널|Settings panels/ }).getByRole("tab").evaluateAll(tabs => tabs.map(tab => tab.id));
     expect(order[order.indexOf("settings-tab-general") + 1]).toBe("settings-tab-machine");
     const runner = page.getByTestId("machine-node-runner-example");

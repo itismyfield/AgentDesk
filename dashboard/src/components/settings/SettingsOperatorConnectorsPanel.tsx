@@ -52,7 +52,7 @@ export function SettingsOperatorConnectorsPanel({
 
       {error ? (
         <div
-          className="rounded-2xl border px-4 py-3 text-sm"
+          className="rounded-lg border px-4 py-3 text-sm"
           style={{
             borderColor: "rgba(248, 113, 113, 0.38)",
             background: "rgba(248, 113, 113, 0.10)",
@@ -120,7 +120,7 @@ function ConnectorRow({
 
   return (
     <div
-      className="rounded-2xl border px-4 py-4"
+      className="rounded-lg border px-4 py-4"
       style={{
         borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
         background: "color-mix(in srgb, var(--th-bg-surface) 88%, transparent)",
@@ -162,7 +162,7 @@ function ConnectorRow({
           </div>
           <ul className="space-y-1.5 text-[12px] leading-5" style={{ color: "var(--th-text)" }}>
             {connector.setup_actions.map((action) => (
-              <li key={action} className="rounded-xl border px-3 py-2" style={{
+              <li key={action} className="rounded-md border px-3 py-2" style={{
                 borderColor: "color-mix(in srgb, var(--th-border) 62%, transparent)",
                 background: "color-mix(in srgb, var(--th-overlay-medium) 70%, transparent)",
               }}>

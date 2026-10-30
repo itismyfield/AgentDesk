@@ -105,7 +105,7 @@ export function SettingsRuntimePanel({
                         step={step}
                         value={value}
                         onChange={(event) => onRuntimeChange(field.key, Number(event.target.value))}
-                        className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
+                        className="h-11 min-w-0 flex-1 cursor-pointer"
                         style={{ accentColor: "var(--th-accent-primary)" }}
                       />
                       <input
@@ -120,7 +120,7 @@ export function SettingsRuntimePanel({
                             onRuntimeChange(field.key, next);
                           }
                         }}
-                        className="w-20 rounded-xl px-2 py-1.5 text-right text-xs"
+                        className="min-h-11 w-20 rounded-md px-2 py-1.5 text-right text-xs"
                         style={{
                           ...inputStyle,
                           fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
@@ -150,14 +150,10 @@ export function SettingsRuntimePanel({
                 <Accordion.Item
                   key={category.id}
                   value={category.id}
-                  className="overflow-hidden rounded-[20px] border"
+                  className="min-w-0 overflow-hidden rounded-lg border"
                   style={{
-                    borderColor: isOpen
-                      ? "color-mix(in srgb, var(--th-accent-primary) 32%, var(--th-border) 68%)"
-                      : "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                    background: isOpen
-                      ? "color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-primary-soft) 18%)"
-                      : "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+                    borderColor: "var(--th-border-subtle)",
+                    background: "var(--th-bg-surface)",
                   }}
                 >
                   <Accordion.Header>
@@ -175,7 +171,7 @@ export function SettingsRuntimePanel({
                       </span>
                       <span className="flex shrink-0 items-center gap-2">
                         <span
-                          className="settings-count-chip inline-flex rounded-full border px-2.5 py-1 text-[10px] font-medium"
+                          className="inline-flex text-xs tabular-nums bg-transparent!"
                           style={{
                             borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
                             background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",

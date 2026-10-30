@@ -1,6 +1,5 @@
 import { Check, RefreshCw } from "lucide-react";
 import { Modal } from "../common/overlay/Modal";
-import { SurfaceCard as SettingsCard } from "../common/SurfacePrimitives";
 import { SettingsGeneralPanel } from "./SettingsGeneralPanel";
 import { SettingsMachinePanel } from "./SettingsMachinePanel";
 import { SettingsNavigation } from "./SettingsNavigation";
@@ -345,13 +344,12 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
   return (
     <div
       data-testid="settings-page"
-      className="page fade-in mx-auto h-full w-full max-w-[1600px] min-w-0 overflow-x-hidden overflow-y-auto px-4 py-4 pb-40 sm:px-6"
-      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
+      className="mx-auto h-full w-full max-w-[88rem] min-w-0 overflow-y-auto px-4 py-5 pb-8 text-th-text-primary sm:px-8 sm:py-7"
     >
-      <div className="page-header">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-th-border-subtle pb-5">
         <div className="min-w-0">
-          <div className="page-title">{tr("설정", "Settings")}</div>
-          <div className="page-sub">
+          <h1 className="text-2xl font-semibold tracking-tight">{tr("설정", "Settings")}</h1>
+          <div className="mt-2 text-xs leading-5 text-th-text-muted">
             {tr(
               "대시보드 표시, 운영 흐름, 음성 설정을 관리합니다.",
               "Manage dashboard display, operating flow, and voice settings.",
@@ -361,7 +359,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
         <div className="flex flex-wrap gap-2">{renderHeaderActions()}</div>
       </div>
 
-      <div className="settings-grid mt-4 grid gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
+      <div className="mt-5 grid min-w-0 gap-5 md:grid-cols-[12rem_minmax(0,1fr)] md:gap-7">
         <SettingsNavigation
           activePanel={activePanel}
           inputStyle={inputStyle}
@@ -375,20 +373,16 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
         />
 
         <div className="min-w-0 space-y-4">
-          <SettingsCard
+          <section
             id="settings-panel-content"
             role="tabpanel"
             aria-labelledby={`settings-tab-${activePanel}`}
             tabIndex={-1}
-            className="min-w-0 rounded-[28px] border px-4 py-4 outline-none sm:px-5 sm:py-5"
-            style={{
-              borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-              background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-            }}
+            className="min-w-0 outline-none"
           >
             <div className="flex flex-wrap items-start justify-between gap-3 border-b pb-4" style={{ borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)" }}>
               <div className="min-w-0">
-                <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                <div className="text-base font-semibold" style={{ color: "var(--th-text)" }}>
                   {activeNavItem.title}
                 </div>
                 <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
@@ -397,7 +391,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
               </div>
               {activeNavItem.count ? (
                 <span
-                  className="inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-medium"
+                  className="inline-flex items-center text-xs tabular-nums bg-transparent!"
                   style={{
                     borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
                     background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
@@ -411,7 +405,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
             <div className="mt-5 min-w-0">
               {renderActivePanel()}
             </div>
-          </SettingsCard>
+          </section>
         </div>
       </div>
 
@@ -426,7 +420,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
         size="sm"
       >
         <div className="space-y-4">
-          <div className="rounded-2xl border px-4 py-3 text-sm leading-6"
+          <div className="rounded-lg border px-4 py-3 text-sm leading-6"
             style={{
               borderColor: "rgba(251, 191, 36, 0.35)",
               background: "rgba(251, 191, 36, 0.10)",

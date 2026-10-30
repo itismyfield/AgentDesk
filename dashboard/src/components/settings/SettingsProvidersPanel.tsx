@@ -57,8 +57,8 @@ export function SettingsProvidersPanel({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
           {tr(
-            `시스템 기본 홈은 그대로 두고 extra 계정만 누적합니다. extra ${extras}개.`,
-            `System default homes stay untouched; extra accounts accumulate. ${extras} extra.`,
+            `기본 계정과 추가 계정을 관리합니다. 추가 계정 ${extras}개.`,
+            `Manage the default and additional accounts. ${extras} additional accounts.`,
           )}
         </div>
         <p className="basis-full text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
@@ -87,7 +87,7 @@ export function SettingsProvidersPanel({
 
       {error ? (
         <div
-          className="rounded-2xl border px-4 py-3 text-sm"
+          className="rounded-lg border px-4 py-3 text-sm"
           style={{
             borderColor: "rgba(248, 113, 113, 0.38)",
             background: "rgba(248, 113, 113, 0.10)",
@@ -100,7 +100,7 @@ export function SettingsProvidersPanel({
 
       {pendingLogin ? (
         <div
-          className="rounded-2xl border px-4 py-3 text-sm"
+          className="rounded-lg border px-4 py-3 text-sm"
           data-testid="settings-providers-login-pending"
           style={{
             borderColor: "color-mix(in srgb, var(--th-accent-primary) 35%, transparent)",
@@ -122,7 +122,7 @@ export function SettingsProvidersPanel({
             )}
           </div>
           <pre
-            className="mt-2 overflow-x-auto rounded-xl px-3 py-2 text-[11px]"
+            className="mt-2 overflow-x-auto rounded-md px-3 py-2 text-[11px]"
             style={{
               background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
             }}
@@ -193,7 +193,7 @@ function ProviderCard({
   const accounts = provider.accounts ?? [];
   return (
     <section
-      className="rounded-2xl border px-4 py-4"
+      className="rounded-lg border px-4 py-4"
       data-testid={`settings-provider-${provider.id}`}
       style={{
         borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
@@ -257,7 +257,7 @@ function AccountRow({
   const buckets = account.usage?.buckets ?? [];
   return (
     <div
-      className="rounded-xl border px-3 py-3"
+      className="rounded-md border px-3 py-3"
       data-testid={`settings-provider-account-${account.id}`}
       style={{
         borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",

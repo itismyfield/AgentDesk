@@ -4,47 +4,17 @@ import type { SettingFlag, SettingRowMeta } from "./SettingsModel";
 import { SurfaceCard as SettingsCard } from "../common/SurfacePrimitives";
 
 function flagTone(flag: SettingFlag): { bg: string; fg: string; border: string } {
-  switch (flag) {
-    case "kv_meta":
-      return {
-        bg: "color-mix(in srgb, var(--th-overlay-medium) 92%, transparent)",
-        fg: "var(--th-text-secondary)",
-        border: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-      };
-    case "live_override":
-      return {
-        bg: "rgba(56, 189, 248, 0.16)",
-        fg: "rgba(186, 230, 253, 0.92)",
-        border: "rgba(56, 189, 248, 0.42)",
-      };
-    case "alert":
-      return {
-        bg: "rgba(251, 191, 36, 0.16)",
-        fg: "rgba(253, 230, 138, 0.92)",
-        border: "rgba(251, 191, 36, 0.42)",
-      };
-    case "read_only":
-      return {
-        bg: "rgba(148, 163, 184, 0.18)",
-        fg: "rgba(226, 232, 240, 0.85)",
-        border: "rgba(148, 163, 184, 0.40)",
-      };
-    case "restart_required":
-      return {
-        bg: "rgba(244, 114, 182, 0.16)",
-        fg: "rgba(251, 207, 232, 0.92)",
-        border: "rgba(244, 114, 182, 0.42)",
-      };
-  }
+  return flag === "alert" || flag === "restart_required"
+    ? { bg: "var(--th-badge-amber-bg)", fg: "var(--th-badge-amber-text)", border: "var(--th-border-subtle)" }
+    : { bg: "var(--th-overlay-subtle)", fg: "var(--th-text-muted)", border: "var(--th-border-subtle)" };
 }
 
 function flagLabel(flag: SettingFlag, isKo: boolean): string {
-  if (flag === "kv_meta") return "kv_meta";
-  if (flag === "live_override") return isKo ? "live override" : "live override";
-  if (flag === "alert") return isKo ? "alert" : "alert";
-  if (flag === "read_only") return isKo ? "read-only" : "read-only";
-  if (flag === "restart_required") return isKo ? "restart" : "restart";
-  return flag;
+  const labels = {
+    kv_meta: ["저장됨", "Stored"], live_override: ["즉시 반영", "Live override"],
+    alert: ["주의", "Attention"], read_only: ["읽기 전용", "Read-only"], restart_required: ["재시작 필요", "Restart required"],
+  };
+  return labels[flag][isKo ? 0 : 1];
 }
 
 interface SettingRowProps {
@@ -77,7 +47,7 @@ export function SettingRow({
     if (readOnly) {
       return (
         <div
-          className="w-full truncate rounded-xl px-3 py-2 text-sm"
+          className="w-full rounded-md px-3 py-2 text-xs leading-5 [overflow-wrap:anywhere]"
           style={{
             background: "color-mix(in srgb, var(--th-bg-surface) 60%, transparent)",
             border: "1px dashed color-mix(in srgb, var(--th-border) 70%, transparent)",
@@ -101,24 +71,22 @@ export function SettingRow({
           role="switch"
           aria-checked={enabled}
           onClick={() => onChange?.(meta.key, !enabled)}
-          className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors"
-          style={{
-            background: enabled ? "var(--th-accent-primary)" : "color-mix(in srgb, var(--th-border) 80%, transparent)",
-          }}
+          aria-label={labelText}
+          className="relative inline-flex h-11 w-11 items-center justify-center rounded-md"
         >
-          <span
-            className="inline-block h-5 w-5 rounded-full bg-white shadow transition-transform"
-            style={{ transform: enabled ? "translateX(1.4rem)" : "translateX(0.15rem)" }}
-          />
+          <span className="inline-flex h-6 w-11 items-center rounded-full" style={{ background: enabled ? "var(--th-accent-primary)" : "var(--th-border)" }}>
+            <span className="inline-block h-5 w-5 rounded-full bg-white transition-transform" style={{ transform: enabled ? "translateX(1.4rem)" : "translateX(0.15rem)" }} />
+          </span>
         </button>
       );
     }
     if (meta.inputKind === "select" && meta.selectOptions) {
       return (
         <select
+          aria-label={labelText}
           value={String(meta.effectiveValue ?? "")}
           onChange={(event) => onChange?.(meta.key, event.target.value)}
-          className="w-full rounded-xl px-3 py-2 text-sm"
+          className="min-h-11 w-full min-w-0 rounded-md px-3 py-2 text-sm"
           style={{
             background: "var(--th-bg-surface)",
             border: "1px solid color-mix(in srgb, var(--th-border) 70%, transparent)",
@@ -135,6 +103,7 @@ export function SettingRow({
     }
     return (
       <input
+        aria-label={labelText}
         type={meta.inputKind === "number" ? "number" : "text"}
         inputMode={meta.inputKind === "number" ? "numeric" : undefined}
         min={meta.numericRange?.min}
@@ -147,7 +116,7 @@ export function SettingRow({
             meta.inputKind === "number" ? Number(event.target.value) : event.target.value,
           )
         }
-        className="w-full rounded-xl px-3 py-2 text-sm"
+        className="min-h-11 w-full min-w-0 rounded-md px-3 py-2 text-sm"
         style={{
           background: "var(--th-bg-surface)",
           border: "1px solid color-mix(in srgb, var(--th-border) 70%, transparent)",
@@ -163,10 +132,10 @@ export function SettingRow({
       style={{ borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)" }}
       data-testid={`setting-row-${meta.key}`}
     >
-      <div className="setting-row-grid items-center gap-3 px-2 py-3 sm:gap-4 sm:px-3 sm:py-4">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_2.75rem] items-start gap-x-3 gap-y-2 py-4 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,0.9fr)_2.75rem] sm:items-center sm:gap-x-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="setting-row-label text-sm font-medium" style={{ color: "var(--th-text)" }}>
+            <span className="text-sm font-medium [overflow-wrap:anywhere]" style={{ color: "var(--th-text)" }}>
               {labelText}
             </span>
             {visibleFlags.map((flag) => {
@@ -183,12 +152,12 @@ export function SettingRow({
             })}
           </div>
           {hintText ? (
-            <div className="setting-row-hint mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+            <div className="mt-1 text-xs leading-5 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
               {hintText}
             </div>
           ) : null}
         </div>
-        <div className="min-w-0">
+        <div className="col-start-1 row-start-2 min-w-0 sm:col-start-2 sm:row-start-1">
           {controlOverlay ?? renderDefaultControl()}
         </div>
         <button
@@ -196,7 +165,7 @@ export function SettingRow({
           aria-expanded={open}
           aria-label={tr("자세히 보기", "Show details")}
           onClick={() => setOpen((current) => !current)}
-          className="grid h-8 w-8 place-items-center rounded-full border"
+          className="col-start-2 row-start-1 grid h-11 w-11 place-items-center rounded-md border sm:col-start-3"
           style={{
             borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
             color: "var(--th-text-muted)",
@@ -214,7 +183,7 @@ export function SettingRow({
       </div>
       {open ? (
         <div
-          className="mx-2 mb-3 grid gap-2 rounded-2xl p-3 text-[11px] sm:mx-3 sm:grid-cols-2 sm:gap-3 sm:p-4"
+          className="mb-4 grid min-w-0 gap-2 rounded-md p-3 text-xs [overflow-wrap:anywhere] sm:grid-cols-2 sm:gap-3 sm:p-4"
           style={{
             background: "color-mix(in srgb, var(--th-overlay-medium) 70%, transparent)",
             border: "1px solid color-mix(in srgb, var(--th-border) 60%, transparent)",
@@ -270,13 +239,7 @@ export function CompactFieldCard({
   footer?: ReactNode;
 }) {
   return (
-    <SettingsCard
-      className="rounded-2xl p-4"
-      style={{
-        borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-        background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
-      }}
-    >
+    <div className="min-w-0 border-b border-th-border-subtle py-4 last:border-b-0">
       <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
         {label}
       </div>
@@ -289,7 +252,7 @@ export function CompactFieldCard({
           {footer}
         </div>
       )}
-    </SettingsCard>
+    </div>
   );
 }
 
@@ -315,7 +278,7 @@ export function StorageSurfaceCard({
 }) {
   return (
     <SettingsCard
-      className="rounded-2xl p-4"
+      className="rounded-lg p-4"
       style={{
         borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
         background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
