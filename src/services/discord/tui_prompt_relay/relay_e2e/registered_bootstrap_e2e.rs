@@ -172,7 +172,7 @@ async fn seed(trace: Trace, pool: &sqlx::PgPool, own: &str) {
             let key = key(own, &ProviderKind::Claude, &tmux_name);
             let seed_row = crate::services::discord::host_key_derivation::tests::seed_row;
             seed_row(pool, "claude", Some(own), &key, CHANNEL_ID, Some(raw)).await;
-            // The Herdr launch left the marker naming Herdr; a retired move back has not cleared it.
+            // The Herdr launch left the marker naming Herdr; an unfinished move back keeps it.
             let marker = crate::services::tmux_common::session_temp_path(&tmux_name, "host_kind");
             std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
             std::fs::write(marker, "herdr").unwrap();
