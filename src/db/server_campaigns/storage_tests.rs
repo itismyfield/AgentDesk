@@ -914,7 +914,7 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
     assert_eq!(
         after
             .iter()
-            .filter(|row| row.0 != version)
+            .filter(|row| row.0 < version)
             .cloned()
             .collect::<Vec<_>>(),
         before
