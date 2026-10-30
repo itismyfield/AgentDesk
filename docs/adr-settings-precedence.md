@@ -43,9 +43,9 @@ We keep per-surface storage, but every settings surface must declare:
 
 ### Organization and channel configuration
 
-`~/.adk/release/config/org.yaml` remains an optional organization schema for agent/channel definitions, workspaces, shared prompts, meetings, and provider authentication/recovery policy. Runtime role, workspace, shared-prompt and meeting lookups use agentdesk YAML first, then org.yaml. Registered-channel lists give agentdesk YAML precedence over duplicate org.yaml IDs. The existing org.yaml loaders and error behavior are retained.
+`~/.adk/release/config/org.yaml` is an optional organization schema. It retains agent/channel, workspace, shared-prompt, meeting and provider authentication/recovery definitions. Role bindings, workspaces, shared prompts and meetings use agentdesk YAML first, then org.yaml; registered channel lists give agentdesk YAML precedence over duplicate org.yaml IDs. The existing org.yaml loader and its error behavior are unchanged.
 
-`agents[].channels.<provider>.thread_inherit` is a YAML boolean with default `true`. It is read through the validated snapshot at intake and classified `live`; a valid reload updates future intake. It controls parent role/workspace/memory and placement-policy inheritance for threads. Legacy JSON `threadInherit` is ignored. No new command, switch or migration procedure is introduced.
+`agents[].channels.<provider>.thread_inherit` is a YAML boolean with default `true`. It is read through the validated snapshot at intake and is classified `live`; a valid reload updates future intake. It controls thread parent role/workspace/memory and placement-policy inheritance. Legacy `threadInherit` in `role_map.json` is ignored. No migration command or compatibility fallback is provided, and org.yaml is not absorbed or removed.
 
 ### Keys resolved through `settings::resolve`
 

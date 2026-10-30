@@ -57,10 +57,6 @@ pub(super) fn bot_settings_path() -> Option<PathBuf> {
     agentdesk_root().map(|root| crate::runtime_layout::config_dir(&root).join("bot_settings.json"))
 }
 
-pub(super) fn role_map_path() -> Option<PathBuf> {
-    agentdesk_root().map(|root| crate::runtime_layout::role_map_path(&root))
-}
-
 pub(super) fn org_schema_path() -> Option<PathBuf> {
     agentdesk_root().map(|root| org_schema_path_for_root(&root))
 }

@@ -83,7 +83,7 @@ fn parse_channel_id(raw: &str) -> AppResult<ChannelId> {
 /// the proxy to channels that are registered in the agentdesk role-map.
 ///
 /// We accept any binding the resolver returns (`agentdesk_config`,
-/// `org_schema`, or `role_map.json`) — the goal is "is this channel known to
+/// or `org_schema`) — the goal is "is this channel known to
 /// the operator?" not "which agent owns it?". Threads inherit the parent's
 /// binding via the resolver's parent walk where applicable.
 async fn ensure_channel_is_role_mapped(channel_id: ChannelId) -> AppResult<()> {

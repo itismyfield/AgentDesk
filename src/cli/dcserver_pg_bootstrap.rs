@@ -271,7 +271,6 @@ pub(crate) async fn initialize_postgres_for_bootstrap(
     pool: &sqlx::PgPool,
     mut config: crate::config::Config,
     runtime_root: Option<&Path>,
-    legacy_scan: &crate::services::discord_config_audit::LegacySourceScan,
 ) -> Result<crate::config::Config, PgConnectFailure> {
     let initialized = crate::db::postgres::with_startup_advisory_lock(pool, || async {
         crate::db::postgres::migrate(pool).await?;
@@ -282,7 +281,6 @@ pub(crate) async fn initialize_postgres_for_bootstrap(
                 loaded.config,
                 loaded.path,
                 loaded.existed,
-                legacy_scan,
                 false,
             )?
             .config;
@@ -666,14 +664,9 @@ mod tests {
                 .execute(&pool)
                 .await
                 .expect("insert unknown migration row");
-                initialize_postgres_for_bootstrap(
-                    &pool,
-                    crate::config::Config::default(),
-                    None,
-                    &crate::services::discord_config_audit::LegacySourceScan::default(),
-                )
-                .await
-                .expect_err("an unknown applied migration must fail startup")
+                initialize_postgres_for_bootstrap(&pool, crate::config::Config::default(), None)
+                    .await
+                    .expect_err("an unknown applied migration must fail startup")
             }
         };
 
