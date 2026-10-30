@@ -993,7 +993,9 @@ pub(crate) fn set_test_root(root: Option<&Path>) {
 #[cfg(test)]
 pub(crate) fn forget_channel_for_tests(channel_id: u64) {
     if let Ok(Some(path)) = log_path(channel_id) {
-        lock_logs().remove(&path);
+        let mut logs = lock_logs();
+        logs.remove(&path);
+        read_cache::invalidate(&path);
     }
 }
 
