@@ -27,11 +27,14 @@ pub(crate) enum Completion {
     WriteUncertain(String),
 }
 
+/// The refusal of a pane showing a modal: the original is held at the front, not retained.
+pub(crate) const MODAL: &str = "Modal";
+
 pub(crate) type Leaf = Box<dyn FnOnce(String) -> Result<Completion, String> + Send>;
 pub(crate) type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// Runs `leaf` on the reserved head and settles it: Submitted delivers, a proven NotSent returns
-/// to custody, anything else leaves the head Unknown.
+/// to custody or, under a modal, to the front, anything else leaves the head Unknown.
 pub(crate) async fn run(
     mailbox: &ChannelMailboxHandle,
     clock: Clock,
@@ -42,10 +45,14 @@ pub(crate) async fn run(
         .await?;
     let completion = outcome.result.unwrap_or_else(Completion::WriteUncertain);
     if let Some(proof) = outcome.not_sent {
+        let held = completion == Completion::NotSent(MODAL.into());
         mailbox
             .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("V2 not adopted")?;
-                owner.retain_not_sent(&parse(identity)?, proof)
+                match held {
+                    true => owner.hold_not_sent(&parse(identity)?, proof),
+                    false => owner.retain_not_sent(&parse(identity)?, proof),
+                }
             })
             .await?;
         return Ok(match completion {

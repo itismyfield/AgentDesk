@@ -128,6 +128,22 @@ impl Owner {
         Ok(())
     }
 
+    /// A modal refused the input before any key: the attempt ends unretained and the original
+    /// keeps its queue slot and ticket for the release wake.
+    pub(crate) fn hold_not_sent(
+        &mut self,
+        key: &AttemptRef,
+        proof: crate::services::claude_tui::owner_input::NotSentProof,
+    ) -> Result<(), String> {
+        proof.into_reason(&serde_json::to_value(key).map_err(|e| e.to_string())?)?;
+        let mut next = self.snapshot.clone();
+        (next.head_injection.take_if(|head| key.matches(head))).ok_or("stale held attempt")?;
+        let attempt = &key.attempt;
+        (next.admission_binds)
+            .retain(|b| !matches!(&b.at, BindAt::Attempt { attempt: a, .. } if a == attempt));
+        self.commit(next)
+    }
+
     pub(crate) fn retain_not_sent(
         &mut self,
         key: &AttemptRef,
