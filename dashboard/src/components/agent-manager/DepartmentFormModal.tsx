@@ -224,7 +224,7 @@ export default function DepartmentFormModal({
   };
 
   const inputCls =
-    "w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors";
+    "w-full min-h-11 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors";
   const inputStyle = {
     background: "var(--th-input-bg)",
     borderColor: "var(--th-input-border)",
@@ -278,10 +278,10 @@ export default function DepartmentFormModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="dept-modal-title"
-        className="w-full max-w-2xl max-h-full overflow-y-auto rounded-t-3xl p-5 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:max-h-[85vh] sm:rounded-[28px] sm:p-6"
+        className="w-full max-w-2xl max-h-full overflow-y-auto rounded-t-lg p-5 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:max-h-[85vh] sm:rounded-lg sm:p-6"
         style={{
           background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+            "var(--th-bg-surface)",
           borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
           paddingBottom: "max(1.25rem, calc(1.25rem + env(safe-area-inset-bottom)))",
         }}

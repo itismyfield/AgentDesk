@@ -56,9 +56,9 @@ export function AgentsGridView({
   return (
 <div
   data-testid="agents-view-grid"
-  className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.95fr)]"
+  className={selectedAgent ? "grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.9fr)]" : "grid min-w-0 gap-3"}
 >
-  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
+  <div className={`grid min-w-0 grid-cols-1 gap-3 ${selectedAgent ? "" : "sm:grid-cols-2 2xl:grid-cols-3"}`}>
     {sortedAgents.map((agent) => {
       const department = departments.find((candidate) => candidate.id === agent.department_id);
       const providerMeta = getProviderMeta(agent.cli_provider);
@@ -71,18 +71,8 @@ export function AgentsGridView({
           type="button"
           data-testid={`agents-grid-card-${agent.id}`}
           onClick={() => setSelectedAgentId(agent.id)}
-          className="rounded-[28px] border p-4 text-left transition-transform hover:-translate-y-0.5"
-          style={{
-            background: isSelected
-              ? "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 98%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 95%, transparent) 100%)"
-              : "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 88%, transparent) 100%)",
-            borderColor: isSelected
-              ? "color-mix(in srgb, var(--th-accent) 56%, var(--th-border))"
-              : "color-mix(in srgb, var(--th-border) 68%, transparent)",
-            boxShadow: isSelected
-              ? "0 0 0 1px color-mix(in srgb, var(--th-accent) 22%, transparent), 0 22px 50px rgba(15, 23, 42, 0.24)"
-              : undefined,
-          }}
+          aria-pressed={isSelected}
+          className={`min-w-0 rounded-lg border p-4 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)] ${isSelected ? "border-[var(--th-accent-primary)] bg-surface-subtle" : "border-th-border-subtle bg-th-bg-surface hover:bg-surface-subtle"}`}
         >
           <div className="flex items-start gap-3">
             <div className="relative shrink-0">
@@ -102,34 +92,34 @@ export function AgentsGridView({
             </div>
 
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
+              <div className="text-sm font-semibold leading-6 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-heading)" }}>
                 {localeName(locale, agent)}
               </div>
-              <div className="truncate text-xs" style={{ color: "var(--th-text-muted)" }}>
+              <div className="text-xs leading-5 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
                 {agentSecondaryLine(agent, locale)}
               </div>
             </div>
 
             <span
-              className="rounded-full border px-2 py-0.5 text-[10px] font-medium"
+              className="shrink-0 text-xs leading-6"
               style={{
-                borderColor: providerMeta.border,
-                background: providerMeta.bg,
-                color: providerMeta.color,
+                borderColor: "transparent",
+                background: "transparent",
+                color: "var(--th-text-secondary)",
               }}
             >
               {providerMeta.label}
             </span>
           </div>
 
-          <div className="mt-4 flex flex-wrap items-center gap-2">
+          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-th-text-muted">
             {department ? (
               <span
-                className="rounded-full border px-2 py-1 text-[11px]"
+                className="text-xs leading-5"
                 style={{
-                  color: department.color,
-                  borderColor: `color-mix(in srgb, ${department.color} 30%, var(--th-border))`,
-                  background: `color-mix(in srgb, ${department.color} 12%, transparent)`,
+                  color: "var(--th-text-muted)",
+                  borderColor: "transparent",
+                  background: "transparent",
                 }}
                 onDoubleClick={(event) => {
                   event.preventDefault();
@@ -142,7 +132,7 @@ export function AgentsGridView({
               </span>
             ) : null}
             <span
-              className="rounded-full border px-2 py-1 text-[11px]"
+              className="text-xs leading-5"
               style={{
                 borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
                 color: "var(--th-text-secondary)",
@@ -157,7 +147,7 @@ export function AgentsGridView({
   </div>
 
   {selectedAgent ? (
-    <SurfaceCard className="rounded-[30px] p-5 sm:p-6 xl:sticky xl:top-0">
+    <SurfaceCard className="min-w-0 p-4 sm:p-5 xl:sticky xl:top-0">
       {(() => {
         const department = departments.find((candidate) => candidate.id === selectedAgent.department_id);
         const providerMeta = getProviderMeta(selectedAgent.cli_provider);
@@ -175,7 +165,7 @@ export function AgentsGridView({
                 <div className="truncate text-base font-semibold" style={{ color: "var(--th-text-heading)" }}>
                   {localeName(locale, selectedAgent)}
                 </div>
-                <div className="truncate text-xs" style={{ color: "var(--th-text-muted)" }}>
+                <div className="text-xs leading-5 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
                   {agentSecondaryLine(selectedAgent, locale)} · {providerMeta.label}
                 </div>
               </div>
@@ -212,7 +202,7 @@ export function AgentsGridView({
               ].map((item) => (
                 <div
                   key={item.label}
-                  className="flex items-center justify-between gap-3 rounded-2xl border px-3 py-2"
+                  className="flex items-center justify-between gap-3 border-b border-th-border-subtle py-2"
                   style={{
                     borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
                     background: "color-mix(in srgb, var(--th-bg-surface) 82%, transparent)",
@@ -229,7 +219,7 @@ export function AgentsGridView({
             </div>
 
             <div
-              className="rounded-[24px] border px-4 py-4"
+              className="border-t border-th-border-subtle py-4"
               style={{
                 borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
                 background: "color-mix(in srgb, var(--th-bg-surface) 84%, transparent)",
@@ -241,7 +231,7 @@ export function AgentsGridView({
               >
                 {task.label}
               </div>
-              <div className="mt-2 text-sm leading-6" style={{ color: "var(--th-text-primary)" }}>
+              <div className="mt-2 text-sm leading-6 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-primary)" }}>
                 {task.value}
               </div>
             </div>
@@ -255,7 +245,7 @@ export function AgentsGridView({
                   topSkills.map((skill) => (
                     <span
                       key={`${selectedAgent.id}-${skill}`}
-                      className="rounded-full border px-2 py-1 text-[11px]"
+                      className="text-xs leading-5"
                       style={{
                         borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
                         background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
@@ -313,18 +303,7 @@ export function AgentsGridView({
       })()}
     </SurfaceCard>
   ) : (
-    <SurfaceCard className="rounded-[30px] p-8 text-center">
-      <div className="text-3xl">🧑‍💻</div>
-      <div className="mt-3 text-sm font-medium" style={{ color: "var(--th-text-secondary)" }}>
-        {tr("에이전트를 선택하세요", "Select an agent")}
-      </div>
-      <div className="mt-2 text-xs leading-6" style={{ color: "var(--th-text-muted)" }}>
-        {tr(
-          "상세 정보와 운영 액션이 오른쪽 패널에 열립니다.",
-          "Details and operational actions appear in the side panel.",
-        )}
-      </div>
-    </SurfaceCard>
+    <p className="text-xs leading-5 text-th-text-muted">{tr("에이전트를 선택하면 상세 정보와 편집·복제·삭제 동작을 확인할 수 있습니다.", "Select an agent to view details, edit, duplicate, or delete.")}</p>
   )}
 </div>
   );

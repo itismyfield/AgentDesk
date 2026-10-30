@@ -217,7 +217,7 @@ function SessionCard({
 
   return (
     <SurfaceCard
-      className="rounded-2xl p-3 sm:p-4"
+      className="rounded-lg p-3 sm:p-4"
       style={{
         borderColor: staleIdle
           ? "color-mix(in srgb, var(--th-accent-warn) 24%, var(--th-border) 76%)"

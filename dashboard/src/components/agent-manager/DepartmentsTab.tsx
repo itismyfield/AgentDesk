@@ -87,7 +87,7 @@ export default function DepartmentsTab({
             <SurfaceCard
               data-testid={`agents-department-card-${dept.id}`}
               key={dept.id}
-              className={`group relative flex h-full flex-col px-4 py-4 transition-all hover:shadow-md ${isDragging ? "opacity-60" : ""}`}
+              className={`group relative flex h-full flex-col px-4 py-4 transition-all hover:bg-surface-subtle ${isDragging ? "opacity-60" : ""}`}
               onDragStart={(e) => onDragStart(dept.id, e)}
               onDragOver={(e) => onDragOver(dept.id, e)}
               onDrop={(e) => onDrop(dept.id, e)}
@@ -112,7 +112,7 @@ export default function DepartmentsTab({
               <div className="flex h-full flex-col">
                 <div className="flex items-start gap-3">
                   <div
-                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl text-xl"
+                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-xl"
                     style={{ background: `${dept.color}1f`, color: dept.color }}
                   >
                     {dept.icon}
@@ -153,7 +153,7 @@ export default function DepartmentsTab({
                     members.slice(0, 4).map((member) => (
                       <div
                         key={member.id}
-                        className="flex items-center gap-2 rounded-2xl border px-3 py-2"
+                        className="flex items-center gap-2 rounded-lg border px-3 py-2"
                         style={{
                           borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
                           background:
@@ -177,7 +177,7 @@ export default function DepartmentsTab({
                     ))
                   ) : (
                     <div
-                      className="rounded-2xl border border-dashed px-3 py-4 text-center text-xs"
+                      className="rounded-lg border border-dashed px-3 py-4 text-center text-xs"
                       style={{
                         borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)",
                         color: "var(--th-text-muted)",
@@ -204,7 +204,7 @@ export default function DepartmentsTab({
                       disabled={index === 0}
                       tone="neutral"
                       compact
-                      className="h-7 min-w-7 px-0 py-0"
+                      className="h-11 min-w-11 px-0 py-0"
                       aria-label={tr("위로 이동", "Move up")}
                     >
                       ▲
@@ -214,7 +214,7 @@ export default function DepartmentsTab({
                       disabled={index === deptOrder.length - 1}
                       tone="neutral"
                       compact
-                      className="h-7 min-w-7 px-0 py-0"
+                      className="h-11 min-w-11 px-0 py-0"
                       aria-label={tr("아래로 이동", "Move down")}
                     >
                       ▼

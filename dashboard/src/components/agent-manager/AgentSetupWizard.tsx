@@ -91,7 +91,7 @@ export default function AgentSetupWizard({
         role="dialog"
         aria-modal="true"
         aria-label={tr("에이전트 설정 마법사", "Agent setup wizard")}
-        className="w-full max-w-5xl overflow-hidden rounded-[30px] border shadow-2xl"
+        className="w-full max-w-5xl overflow-hidden rounded-lg border shadow-2xl"
         style={{
           maxHeight: "min(92vh, 860px)",
           background:
@@ -112,20 +112,20 @@ export default function AgentSetupWizard({
                 : tr("에이전트 생성", "Create Agent")}
             </h3>
           </div>
-          <SurfaceActionButton onClick={onClose} tone="neutral" compact className="h-10 w-10" style={{ padding: 0 }} aria-label={tr("닫기", "Close")}>
+          <SurfaceActionButton onClick={onClose} tone="neutral" compact className="h-11 w-11" style={{ padding: 0 }} aria-label={tr("닫기", "Close")}>
             x
           </SurfaceActionButton>
         </div>
 
         <div className="grid min-h-0 grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)]">
           <aside className="border-b p-4 md:border-b-0 md:border-r" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
-            <div className="grid gap-2">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-1">
               {steps.map((step, index) => (
                 <button
                   key={step}
                   type="button"
                   onClick={() => setStepIndex(index)}
-                  className="flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-left text-xs"
+                  className="flex min-h-11 items-center justify-between gap-3 rounded-md border px-3 py-2 text-left text-xs"
                   style={{
                     borderColor:
                       stepIndex === index

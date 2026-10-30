@@ -66,7 +66,7 @@ export function SessionInfoCard({
     >
       <div className="w-full max-w-lg" role="dialog" aria-modal="true" aria-label="Session details">
         <SurfaceCard
-          className="overflow-hidden rounded-[28px] p-0 shadow-2xl"
+          className="overflow-hidden rounded-lg p-0 shadow-2xl"
           style={{
             borderColor: "color-mix(in srgb, var(--th-border) 76%, transparent)",
             background:
@@ -76,7 +76,7 @@ export function SessionInfoCard({
           <div className="max-h-[min(78vh,720px)] overflow-y-auto">
             <div className="flex items-start gap-4 border-b px-5 py-5 sm:px-6" style={{ borderColor: "var(--th-border-subtle)" }}>
               <div className="relative shrink-0">
-                <div className="h-14 w-14 overflow-hidden rounded-2xl bg-th-card-bg">
+                <div className="h-14 w-14 overflow-hidden rounded-lg bg-th-card-bg">
                   <img
                     src={`/sprites/${spriteNum}-D-1.png`}
                     alt={s.name || ""}
@@ -123,7 +123,7 @@ export function SessionInfoCard({
 
             <div className="space-y-4 px-5 py-4 sm:px-6">
               <div
-                className="rounded-2xl border px-4 py-4"
+                className="rounded-lg border px-4 py-4"
                 style={{
                   borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
                   background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
@@ -151,7 +151,7 @@ export function SessionInfoCard({
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <SurfaceCard
-                  className="rounded-2xl p-4"
+                  className="rounded-lg p-4"
                   style={{
                     borderColor: `color-mix(in srgb, ${tier.color} 22%, var(--th-border) 78%)`,
                     background: `color-mix(in srgb, ${tier.color} 10%, var(--th-card-bg) 90%)`,
@@ -176,7 +176,7 @@ export function SessionInfoCard({
                 </SurfaceCard>
 
                 <SurfaceCard
-                  className="rounded-2xl p-4"
+                  className="rounded-lg p-4"
                   style={{
                     borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
                     background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",

@@ -59,202 +59,43 @@ export default function AgentCard({
     <SurfaceCard
       data-testid={`agents-card-${agent.id}`}
       onClick={onOpen}
-      className={`group cursor-pointer rounded-[28px] p-4 transition-all hover:-translate-y-0.5 ${
-        viewMode === "list" ? "flex flex-col gap-4 md:flex-row md:items-center" : ""
-      }`}
+      onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onOpen(); } }}
+      role="button"
+      tabIndex={0}
+      aria-label={tr(`${primaryLabel} 상세 열기`, `Open ${primaryLabel} details`)}
+      className={`group min-w-0 cursor-pointer p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--th-accent-primary)] ${viewMode === "list" ? "grid items-start gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_auto]" : "space-y-4"}`}
       draggable={false}
-      onDragStart={(event) => event.preventDefault()}
-      style={{
-        background:
-          "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 92%, transparent) 100%)",
-        borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
-        touchAction: "pan-y",
-        userSelect: "none",
-      }}
+      onDragStart={event => event.preventDefault()}
     >
-      <div
-        className={`min-w-0 ${
-          viewMode === "list"
-            ? "flex flex-1 flex-col gap-4 md:flex-row md:items-start"
-            : "space-y-4"
-        }`}
-      >
-        <div className="flex items-start gap-3">
-          <div className="relative shrink-0">
-            <AgentAvatar
-              agent={agent}
-              spriteMap={spriteMap}
-              size={viewMode === "list" ? 56 : 52}
-              rounded="xl"
-            />
-            <div
-              className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 ${
-                STATUS_DOT[agent.status] ?? STATUS_DOT.idle
-              }`}
-              style={{ borderColor: "var(--th-card-bg)" }}
-            />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <span
-                className="truncate text-sm font-semibold"
-                style={{
-                  color: "var(--th-text-heading)",
-                  fontFamily: getFontFamilyForText(primaryLabel, "pixel"),
-                }}
-              >
-                {primaryLabel}
-              </span>
-              <span
-                className="rounded-full border px-2 py-0.5 text-[11px] font-medium"
-                style={{
-                  borderColor: "rgba(250,204,21,0.32)",
-                  background: "rgba(250,204,21,0.12)",
-                  color: "#fde68a",
-                }}
-              >
-                Lv.{levelInfo.level} {levelTitle}
-              </span>
-              <span
-                className="rounded-full border px-2 py-0.5 text-[11px] font-medium"
-                style={{
-                  borderColor: providerMeta.border,
-                  background: providerMeta.bg,
-                  color: providerMeta.color,
-                }}
-              >
-                {providerMeta.label}
-              </span>
-            </div>
-            <div
-              className="mt-1 text-xs"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {locale === "en" ? agent.name_ko || agent.name : agent.name}
-            </div>
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              {dept ? (
-                <span
-                  className="rounded-full border px-2 py-1 text-[11px]"
-                  style={{
-                    background:
-                      "color-mix(in srgb, var(--th-bg-surface) 92%, transparent)",
-                    color: "var(--th-text-muted)",
-                    border:
-                      "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)",
-                  }}
-                >
-                  {dept.icon} {localeName(locale, dept)}
-                </span>
-              ) : null}
-              <span
-                className="rounded-full border px-2 py-1 text-[11px] font-medium"
-                style={{
-                  background: "rgba(59,130,246,0.12)",
-                  borderColor: "rgba(59,130,246,0.22)",
-                  color: "#93c5fd",
-                }}
-              >
-                XP {agent.stats_xp.toLocaleString()}
-              </span>
-              <span
-                className="rounded-full border px-2 py-1 text-[11px] font-medium"
-                style={{
-                  background: "rgba(16,185,129,0.12)",
-                  borderColor: "rgba(16,185,129,0.22)",
-                  color: "#6ee7b7",
-                }}
-              >
-                {tr("완료", "Done")} {agent.stats_tasks_done.toLocaleString()}
-              </span>
-            </div>
-          </div>
+      <div className="flex min-w-0 items-start gap-3">
+        <div className="relative shrink-0">
+          <AgentAvatar agent={agent} spriteMap={spriteMap} size={40} rounded="xl" />
+          <span className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-th-card-bg ${STATUS_DOT[agent.status] ?? STATUS_DOT.idle}`} aria-hidden="true" />
         </div>
-
-        <div className="min-w-0 flex-1">
-          <div
-            className="rounded-2xl border px-3 py-3"
-            style={{
-              background:
-                "color-mix(in srgb, var(--th-bg-surface) 84%, transparent)",
-              borderColor:
-                "color-mix(in srgb, var(--th-border) 68%, transparent)",
-            }}
-          >
-            <div
-              className="text-[11px] font-semibold uppercase tracking-[0.18em]"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {task.label}
-            </div>
-            <div
-              className="mt-2 line-clamp-2 text-sm"
-              style={{
-                color: "var(--th-text-primary)",
-                fontFamily: contentFont,
-              }}
-            >
-              {task.value}
-            </div>
+        <div className="min-w-0">
+          <div className="text-sm font-semibold leading-6 text-th-text-heading [overflow-wrap:anywhere]">{primaryLabel}</div>
+          <div className="text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">{locale === "en" ? agent.name_ko || agent.name : agent.name}</div>
+          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs leading-5 text-th-text-muted">
+            <span>{providerMeta.label}</span>
+            <span>Lv.{levelInfo.level} {levelTitle}</span>
+            <span>{dept ? localeName(locale, dept) : tr("미배정", "Unassigned")}</span>
           </div>
-
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            {topSkills.length > 0 ? (
-              topSkills.map((skill) => (
-                <span
-                  key={`${agent.id}-${skill}`}
-                  className="rounded-full border px-2 py-1 text-[11px]"
-                  style={{
-                    borderColor:
-                      "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                    background:
-                      "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
-                    color: "var(--th-text-secondary)",
-                  }}
-                >
-                  {skill}
-                </span>
-              ))
-            ) : (
-              <span
-                className="text-xs"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                {tr("최근 스킬 데이터 없음", "No recent skill data")}
-              </span>
-            )}
-          </div>
+          <div className="mt-1 text-xs leading-5 tabular-nums text-th-text-muted">XP {agent.stats_xp.toLocaleString()} · {tr("완료", "Done")} {agent.stats_tasks_done.toLocaleString()}</div>
         </div>
       </div>
-
-      <div
-        className={`flex shrink-0 items-center gap-1.5 ${
-          viewMode === "list" ? "justify-end" : "justify-between pt-2"
-        }`}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <SurfaceActionButton onClick={onEdit} tone="neutral" compact>
-          {tr("편집", "Edit")}
-        </SurfaceActionButton>
-        {isDeleting ? (
-          <>
-            <SurfaceActionButton
-              onClick={onDeleteConfirm}
-              disabled={saving || agent.status === "working"}
-              tone="danger"
-              compact
-            >
-              {tr("해고", "Fire")}
-            </SurfaceActionButton>
-            <SurfaceActionButton onClick={onDeleteCancel} tone="neutral" compact>
-              {tr("취소", "No")}
-            </SurfaceActionButton>
-          </>
-        ) : (
-          <SurfaceActionButton onClick={onDeleteClick} tone="neutral" compact>
-            {tr("삭제", "Delete")}
-          </SurfaceActionButton>
-        )}
+      <div className="min-w-0">
+        <div className="text-xs text-th-text-muted">{task.label}</div>
+        <div className="mt-1 text-sm leading-6 text-th-text-primary [overflow-wrap:anywhere]" style={{fontFamily:contentFont}}>{task.value}</div>
+        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs leading-5 text-th-text-muted">
+          {topSkills.length ? topSkills.map(skill => <span key={`${agent.id}-${skill}`} className="[overflow-wrap:anywhere]">{skill}</span>) : <span>{tr("최근 스킬 데이터 없음", "No recent skill data")}</span>}
+        </div>
+      </div>
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2" onClick={event => event.stopPropagation()}>
+        <SurfaceActionButton onClick={onEdit} tone="neutral" compact>{tr("편집", "Edit")}</SurfaceActionButton>
+        {isDeleting ? <>
+          <SurfaceActionButton onClick={onDeleteConfirm} disabled={saving || agent.status === "working"} tone="danger" compact>{tr("해고", "Fire")}</SurfaceActionButton>
+          <SurfaceActionButton onClick={onDeleteCancel} tone="neutral" compact>{tr("취소", "No")}</SurfaceActionButton>
+        </> : <SurfaceActionButton onClick={onDeleteClick} tone="neutral" compact>{tr("삭제", "Delete")}</SurfaceActionButton>}
       </div>
     </SurfaceCard>
   );
