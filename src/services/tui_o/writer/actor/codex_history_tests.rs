@@ -354,7 +354,7 @@ mod companions {
     const CHANNEL: u64 = 1509350778043895902;
 
     fn rows() -> Vec<Value> {
-        include_str!("fixtures/codex_resume_companions.jsonl")
+        include_str!("../../../../../tests/fixtures/codex_history/resume_companions.jsonl")
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
