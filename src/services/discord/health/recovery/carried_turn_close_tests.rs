@@ -420,6 +420,96 @@ mod cases {
         }
     }
 
+    /// The 10-30 deploy shape: an earlier generation's managed row with a synthetic id, re-saved by
+    /// this process after restart, above a transcript whose history holds background notifications
+    /// Claude queued and drained mid-turn. Those drained notifications owe nothing, so the turn
+    /// closes; the kept reason is logged once while it held.
+    #[tokio::test(flavor = "current_thread")]
+    async fn drained_notifications_in_history_do_not_hold_a_carried_managed_row() {
+        let note = "<task-notification>job done</task-notification>";
+        let notification = format!(
+            r#"{{"type":"attachment","attachment":{{"type":"queued_command","prompt":"{note}","commandMode":"task-notification","origin":{{"kind":"task-notification"}}}}}}"#
+        );
+        let options = Options {
+            transcript: vec![
+                user("earlier"),
+                enqueue(note),
+                notification,
+                answer(),
+                END.to_string(),
+                user("carried"),
+                answer(),
+                END.to_string(),
+            ],
+            ..Options::default()
+        };
+        let fx = Fixture::new(7_533_336, 9_100_095_491_915_387_881, options).await;
+        // This process saved the row again after the restart.
+        let mut row = fx.row().unwrap();
+        assert_eq!(row.turn_source, inflight::TurnSource::Managed);
+        row.save_generation += 1;
+        let file = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &PROVIDER,
+            fx.channel.get(),
+        );
+        std::fs::write(&file, serde_json::to_vec(&row).unwrap()).unwrap();
+        fx.pass().await;
+        fx.assert_closed("the drained notifications owed nothing")
+            .await;
+        assert_eq!(events(fx.channel.get()), ["complete"]);
+    }
+
+    /// A kept carried turn names its reason once per change, never each pass.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_kept_turn_logs_its_reason_once_per_change() {
+        let fx = Fixture::new(7_533_337, 9_100_095_491_915_388_016, Options::default()).await;
+        append(&fx.path, &[&enqueue("waiting")]);
+        let logs = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(logs.clone())
+            .finish();
+        crate::logging::test_capture::pin_callsite_interest();
+        let guard = tracing::subscriber::set_default(subscriber);
+        fx.pass().await;
+        fx.pass().await;
+        drop(guard);
+        let logs = logs.text();
+        let kept = "no_native_end:pending_receipt:owed_inputs=1";
+        assert_eq!(logs.matches(kept).count(), 1, "{logs}");
+        fx.assert_kept("waiting").await;
+    }
+
+    #[derive(Clone, Default)]
+    struct Logs(Arc<Mutex<Vec<u8>>>);
+
+    impl Logs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl Write for Logs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+        type Writer = Logs;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
     /// An unconfirmed paste settled after the transcript last grew may have reached the pane unrecorded.
     #[tokio::test(flavor = "current_thread")]
     async fn injection_delivered_after_last_growth_keeps_carried_episode() {

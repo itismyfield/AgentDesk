@@ -26,19 +26,31 @@ enum Record {
     /// Every queued input pulled back to the prompt.
     WithdrawAll,
     Dequeue,
+    /// Taken into the running turn (`remove`, `absorbed_mid_turn`); its command follows.
+    Absorbed,
     /// A human prompt command (`queued_command`, `prompt` mode, human origin).
     Human(String),
-    /// A user prompt row.
+    /// Any other `queued_command`, such as a background task's notification drained mid-turn.
+    Command(String),
+    /// A user prompt row, or a meta row (a notification opening its own turn).
     Prompt(String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct QueuedInputs(Vec<(String, Stage)>);
+pub(super) struct QueuedInputs {
+    inputs: Vec<(String, Stage)>,
+    /// Removals whose own `dequeue` record is still to come; that dequeue takes no other input.
+    removed: usize,
+}
 
 impl QueuedInputs {
-    /// An input received whose run has not started.
-    pub(super) fn owed(&self) -> bool {
-        self.0.iter().any(|(_, stage)| *stage != Stage::Running)
+    /// How many received inputs have not started their run.
+    pub(super) fn owed(&self) -> usize {
+        let waiting = self
+            .inputs
+            .iter()
+            .filter(|(_, stage)| *stage != Stage::Running);
+        waiting.count()
     }
 
     /// Applies `value`, read after its own turn facts left the reader `open`; `opened` when this
@@ -55,32 +67,37 @@ impl QueuedInputs {
         }
         let record = classify(value);
         if mutant("bulk") && (opened || value["type"] == "attachment") {
-            self.0.clear();
+            self.inputs.clear();
             return;
         }
         match record {
-            Some(Record::Enqueue(body)) => self.0.push((body, Stage::Waiting)),
+            Some(Record::Enqueue(body)) => self.inputs.push((body, Stage::Waiting)),
             Some(Record::Withdraw(body)) => {
+                self.removed += 1;
                 if let Some(at) = self.find(&body, |stage| stage != Stage::Running) {
-                    self.0.remove(at);
+                    self.inputs.remove(at);
                 }
             }
-            Some(Record::WithdrawAll) => self.0.retain(|(_, stage)| *stage == Stage::Running),
+            Some(Record::Absorbed) => self.removed += 1,
+            Some(Record::WithdrawAll) => self.inputs.retain(|(_, stage)| *stage == Stage::Running),
+            Some(Record::Dequeue) if self.removed > 0 && !mutant("dequeue_credit") => {
+                self.removed -= 1
+            }
             Some(Record::Dequeue) => {
                 if let Some(at) = self.find_stage(Stage::Waiting) {
-                    self.0[at].1 = Stage::Dequeued;
+                    self.inputs[at].1 = Stage::Dequeued;
                 }
             }
             Some(Record::Human(body)) if open => self.run(&body),
             Some(Record::Human(body)) => match self.find(&body, |stage| stage == Stage::Waiting) {
-                Some(at) => self.0[at].1 = Stage::Attached,
-                None => self.0.push((body, Stage::Attached)),
+                Some(at) => self.inputs[at].1 = Stage::Attached,
+                None => self.inputs.push((body, Stage::Attached)),
             },
-            Some(Record::Prompt(body)) if open => self.run(&body),
-            Some(Record::Prompt(_)) | None => {}
+            Some(Record::Command(body) | Record::Prompt(body)) if open => self.run(&body),
+            Some(Record::Command(_) | Record::Prompt(_)) | None => {}
         }
         if opened {
-            for (_, stage) in &mut self.0 {
+            for (_, stage) in &mut self.inputs {
                 if matches!(stage, Stage::Dequeued | Stage::Attached) {
                     *stage = Stage::Running;
                 }
@@ -90,23 +107,23 @@ impl QueuedInputs {
 
     /// The open turn closed: what it ran is settled.
     pub(super) fn closed(&mut self) {
-        self.0.retain(|(_, stage)| *stage != Stage::Running);
+        self.inputs.retain(|(_, stage)| *stage != Stage::Running);
     }
 
     fn run(&mut self, body: &str) {
         if let Some(at) = self.find(body, |stage| stage != Stage::Running) {
-            self.0[at].1 = Stage::Running;
+            self.inputs[at].1 = Stage::Running;
         }
     }
 
     fn find(&self, body: &str, stage: impl Fn(Stage) -> bool) -> Option<usize> {
-        self.0
+        self.inputs
             .iter()
             .position(|(queued, at)| queued == body && stage(*at))
     }
 
     fn find_stage(&self, stage: Stage) -> Option<usize> {
-        self.0.iter().position(|(_, at)| *at == stage)
+        self.inputs.iter().position(|(_, at)| *at == stage)
     }
 }
 
@@ -115,25 +132,23 @@ fn classify(value: &Value) -> Option<Record> {
     match value["type"].as_str()? {
         "queue-operation" => match value["operation"].as_str()? {
             "enqueue" => Some(Record::Enqueue(text("content")?)),
-            "remove" if value["reason"] == "absorbed_mid_turn" => None,
+            "remove" if value["reason"] == "absorbed_mid_turn" => Some(Record::Absorbed),
             "remove" => Some(Record::Withdraw(text("content")?)),
             "popAll" => Some(Record::WithdrawAll),
             "dequeue" => Some(Record::Dequeue),
             _ => None,
         },
-        "attachment" => {
+        "attachment" if value["attachment"]["type"] == "queued_command" => {
             let command = &value["attachment"];
-            let human = command["type"] == "queued_command"
-                && command["commandMode"] == "prompt"
-                && command["origin"]["kind"] == "human";
-            human
-                .then(|| body(&command["prompt"]))
-                .flatten()
-                .map(Record::Human)
+            let human = command["commandMode"] == "prompt" && command["origin"]["kind"] == "human";
+            let prompt = body(&command["prompt"])?;
+            match human {
+                true => Some(Record::Human(prompt)),
+                false if mutant("notification_unlinked") => None,
+                false => Some(Record::Command(prompt)),
+            }
         }
-        "user" if value["isMeta"] != Value::Bool(true) => {
-            body(&value["message"]["content"]).map(Record::Prompt)
-        }
+        "user" => body(&value["message"]["content"]).map(Record::Prompt),
         _ => None,
     }
 }
