@@ -255,6 +255,7 @@ impl Fixture {
             boot: BootPorts {
                 pool: &self.pool,
                 channel_id: CHANNEL,
+                shared: None,
             },
             launcher: launcher.clone(),
             rig: &self.rig,
@@ -1012,6 +1013,7 @@ fn o_posts_a_cold_start_once_across_its_attach_and_a_repeated_start_pg() {
         let boot = BootPorts {
             pool: &fx.pool,
             channel_id: CHANNEL,
+            shared: None,
         };
         CodexHerdrPorts::attach(&boot, &fx.owner, &record, &source, &target)
     };
@@ -1089,6 +1091,7 @@ async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_
             let (sender, _receiver) = std::sync::mpsc::channel();
             let turn = StreamingTurn {
                 pool: None,
+                shared: None,
                 provider: &provider,
                 prompt: "question",
                 session_id: None,

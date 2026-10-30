@@ -990,6 +990,7 @@ async fn start_reserved_headless_turn_admitted(
     let prompt_owned = prompt.to_string();
     let provider_for_blocking = provider.clone();
     let execution_pool = shared.pg_pool.clone();
+    let turn_shared = shared.clone();
     let producer_registration = original_registration.clone();
     let producer = {
         let codex_observation = super::provider_dispatch::observe_codex_turn(
@@ -1019,6 +1020,7 @@ async fn start_reserved_headless_turn_admitted(
                         super::provider_dispatch::execute(
                             super::provider_dispatch::StreamingTurn {
                                 pool: execution_pool.as_ref(),
+                                shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,
                                 prompt: &context_prompt,
                                 session_id: session_id_clone.as_deref(),

@@ -675,6 +675,7 @@ fn p4_final_dispatch_refuses_a_changed_driver_scope_pg() {
         let provider = ProviderKind::Claude;
         let turn = StreamingTurn {
             pool: Some(&host.pool), provider: &provider, prompt: "prepared", session_id: None,
+            shared: None,
             working_dir: host._workspace.path().to_str().unwrap(), system_prompt: None,
             allowed_tools: &[], cancel: token.clone(), codex_observation: None, remote_profile: None,
             tmux_session_name: Some("p4-owned-fixture"), teardown: None, host: &turn_host,

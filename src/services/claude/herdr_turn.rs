@@ -27,9 +27,11 @@ use crate::services::claude_tui::host_input::InputRun;
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
 use crate::services::claude_tui::transcript_tail::claude_transcript_path;
 use crate::services::cluster::stream_relay::SourceFileIdentity;
+use crate::services::discord::UnplacedLease;
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchEndpoint,
     HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
+    unplaced::{self, Resolution, Unplaced},
 };
 use crate::services::provider::cancel_token_claude_interrupt::{
     HerdrTurnStart, herdr_stop_settlement_available,
@@ -97,6 +99,29 @@ impl HerdrLaunchHost for Boot<'_> {
     fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
         self.0.launch_evidence(probe)
     }
+    fn unplaced_witness(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+        nonce: &str,
+    ) -> Result<crate::services::session_host::ServerWitness, String> {
+        self.0.unplaced_witness(endpoint, nonce)
+    }
+    fn channel_panes(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+        logical_key: &str,
+        witness: &crate::services::session_host::ServerWitness,
+    ) -> Result<Vec<unplaced::ChannelPane>, String> {
+        self.0.channel_panes(endpoint, logical_key, witness)
+    }
+    fn dispose_residue(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+        nonce: &str,
+        residue: &unplaced::Residue,
+    ) -> Result<(), String> {
+        self.0.dispose_residue(endpoint, nonce, residue)
+    }
 }
 
 /// The boot registry's launch host, on its endpoints only.
@@ -143,6 +168,10 @@ pub(crate) trait HerdrTurnPorts {
         record: &HostedExecution,
         target: &HerdrTarget,
     ) -> Result<(), String>;
+    /// The channel's transition lease for resolving `owner`'s unplaced Pending.
+    fn unplaced_lease(&self, _owner: &HostedOwner) -> Result<UnplacedLease, String> {
+        Err("no channel lease".into())
+    }
 }
 
 /// The source a prompt goes to.
@@ -313,6 +342,10 @@ fn pending_source(
     record: &HostedExecution,
 ) -> Result<Attached, String> {
     let nonce = &record.execution_nonce;
+    let adopted = record.location.is_none() && record.expected.is_none();
+    if adopted && unplaced_resolved(turn, runtime, ports, nonce)? == Resolution::Retired {
+        return launched_source(turn, runtime, ports);
+    }
     let session_id = execution_context("claude", nonce)?
         .expected_native_session_id
         .ok_or("herdr turn: the pending launch named no session")?;
@@ -320,14 +353,39 @@ fn pending_source(
         event.execution_nonce.as_deref() == Some(nonce.as_str())
             && logged_session(&event.new) == Some(session_id.as_str())
     });
+    if !started && adopted {
+        return Err(format!(
+            "herdr turn: pending execution {nonce} took its launched pane; no start of \
+             {session_id} is logged yet"
+        ));
+    }
     if !started {
         let refused = never_attached::refusal(turn, runtime, ports, record, &session_id);
         return Err(refused);
     }
-    if record.expected.is_none() {
+    if record.expected.is_none() && !adopted {
         never_attached::probe_again(turn, runtime, ports)?;
     }
     attach(turn, runtime, ports, nonce, &session_id)
+}
+
+/// The turn's resolution of its unplaced Pending `nonce`: adopted, or retired for a fresh launch.
+fn unplaced_resolved(
+    turn: &HerdrTurn<'_>,
+    runtime: &Handle,
+    ports: &dyn HerdrTurnPorts,
+    nonce: &str,
+) -> Result<Resolution, String> {
+    let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
+    let target = Unplaced {
+        pool: turn.pool,
+        owner: &turn.owner,
+        nonce,
+        endpoint: &turn.endpoint,
+        host,
+        quiet: unplaced::quiet(),
+    };
+    unplaced::resolve_for_turn(runtime, ports.unplaced_lease(&turn.owner), target)
 }
 
 /// The pane's latest logged record that moved it; refusal audits do not.
