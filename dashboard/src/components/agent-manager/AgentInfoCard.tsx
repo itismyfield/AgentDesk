@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useRef, useState } from "react";
 import {
   getAgentWarnings,
@@ -407,12 +408,13 @@ export default function AgentInfoCard({
   const levelInfo = getAgentLevel(agent.stats_xp);
   const levelTitle = getAgentTitle(agent.stats_xp, isKo);
 
-  return (
+  return createPortal(
+    <>
+    <div aria-hidden="true" className="fixed inset-0 z-[70]" style={{ background: "var(--th-modal-overlay)" }} />
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
+      className="fixed inset-0 z-[80] flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
       style={{
-        background: "var(--th-modal-overlay)",
         paddingTop: "max(1rem, calc(env(safe-area-inset-top) + 0.75rem))",
         paddingBottom: "max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem))",
       }}
@@ -604,5 +606,7 @@ export default function AgentInfoCard({
         </div>
       </div>
     </div>
+    </>,
+    document.body,
   );
 }

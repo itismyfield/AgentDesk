@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useRef } from "react";
 import type { Agent, Department, DispatchedSession } from "../../types";
 import { getRankTier } from "../dashboard/model";
@@ -55,11 +56,12 @@ export function SessionInfoCard({
   };
   const statusTone = isDisconnected ? "neutral" : s.status === "working" ? "success" : staleIdle ? "warn" : "info";
 
-  return (
+  return createPortal(
+    <>
+    <div aria-hidden="true" className="fixed inset-0 z-[70]" style={{ background: "rgba(0,0,0,0.6)" }} />
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(0,0,0,0.6)" }}
+      className="fixed inset-0 z-[80] flex items-center justify-center p-4"
       onClick={(e) => {
         if (e.target === overlayRef.current) onClose();
       }}
@@ -204,6 +206,8 @@ export function SessionInfoCard({
         </SurfaceCard>
       </div>
     </div>
+    </>,
+    document.body,
   );
 }
 

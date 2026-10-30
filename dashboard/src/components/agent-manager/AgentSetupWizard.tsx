@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import type { CliProvider } from "../../types";
 import { localeName } from "../../i18n";
 import { summarizeRollback } from "../../api/agentsSetup";
@@ -79,10 +80,11 @@ export default function AgentSetupWizard({
     </label>
   );
 
-  return (
+  return createPortal(
+    <>
+    <div aria-hidden="true" className="fixed inset-0 z-[70]" style={{ background: "var(--th-modal-overlay)" }} />
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
-      style={{ background: "var(--th-modal-overlay)" }}
+      className="fixed inset-0 z-[80] flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
       onClick={(event) => {
         if (event.currentTarget === event.target) onClose();
       }}
@@ -520,5 +522,7 @@ export default function AgentSetupWizard({
         </div>
       </div>
     </div>
+    </>,
+    document.body,
   );
 }
