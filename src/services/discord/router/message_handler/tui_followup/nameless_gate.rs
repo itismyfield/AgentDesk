@@ -21,6 +21,9 @@ pub(super) async fn nameless_promote_blocked(
     }
     let nameless = crate::services::discord::host_defer_gate::nameless_channel_deferred;
     let held = nameless(shared, provider, channel_id.get()).await;
+    if held && Box::pin(returns_to_tmux(shared, provider, channel_id)).await {
+        return false;
+    }
     #[cfg(unix)]
     if held && crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
         if Box::pin(local_legacy_start_ready(shared, provider, channel_id, None)).await {
@@ -58,8 +61,8 @@ pub(super) fn named_blocked(
     clear_relaunch::launch_blocked_observed(tmux, &observation)
 }
 
-/// Probe hosted readiness before teardown; host-kept sessions, verified Codex holds and busy panes defer.
-/// The normal post-claim path retains responsibility for message preservation and defer UX.
+/// Probe hosted readiness before teardown; host-kept sessions not moving back to tmux, verified
+/// Codex holds and busy panes defer. The post-claim path keeps message preservation and defer UX.
 pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -112,6 +115,9 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     }
     let host = crate::services::discord::host_defer_gate::channel_session_deferred;
     if host(shared, provider, channel_id.get(), &tmux_session_name).await {
+        if Box::pin(returns_to_tmux(shared, provider, channel_id)).await {
+            return false;
+        }
         #[cfg(unix)]
         if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
             if Box::pin(local_legacy_start_ready(
@@ -158,6 +164,21 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         );
     }
     blocked
+}
+
+/// Whether the channel's next turn first moves its Herdr execution back to tmux, as its turn host
+/// judges it; that turn starts, while any other kept Herdr row still holds the queue.
+async fn returns_to_tmux(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    let key = crate::services::discord::adk_session::turn_session_key;
+    let key = key(shared, channel_id, provider).await;
+    let pool = shared.pg_pool.as_ref();
+    let host =
+        crate::services::turn_host::for_turn(pool, provider, channel_id.get(), key.as_deref());
+    matches!(host.await, crate::services::turn_host::TurnHost::Return(_))
 }
 
 #[cfg(unix)]

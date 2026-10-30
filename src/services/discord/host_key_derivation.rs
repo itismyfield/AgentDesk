@@ -99,6 +99,18 @@ pub(super) async fn derive_channel_session_name(
     provider: &ProviderKind,
     channel_id: u64,
 ) -> Result<String, HostedLookup> {
+    let key = derive_channel_session_key(pool, hashes, provider, channel_id).await?;
+    super::session_identity::tmux_name_from_session_key(&key)
+        .ok_or_else(|| HostedLookup::Unknown(format!("row key {key} names no tmux session")))
+}
+
+/// The key of that one row, answered as [`derive_channel_session_name`] answers.
+pub(super) async fn derive_channel_session_key(
+    pool: &PgPool,
+    hashes: &[String],
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Result<String, HostedLookup> {
     let hashes: Vec<&String> = hashes
         .iter()
         .filter(|hash| !hash.trim().is_empty())
@@ -138,8 +150,7 @@ pub(super) async fn derive_channel_session_name(
             SessionIdentityConflictKind::EvidenceDivergence,
         ));
     }
-    super::session_identity::tmux_name_from_session_key(key)
-        .ok_or_else(|| HostedLookup::Unknown(format!("row key {key} names no tmux session")))
+    Ok(key.clone())
 }
 
 /// Whether a routine probe's failure on `tmux_name` may stand: the row behind a registered

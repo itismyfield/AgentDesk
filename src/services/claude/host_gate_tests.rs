@@ -319,3 +319,98 @@ fn a_failed_presence_probe_never_prepares_a_fresh_session() {
         }
     }
 }
+
+// A returned session tears nothing down: the pane its provider's exit left dead is started again
+// in place without `-k`, a live pane stops the turn, and no kill or new session ever runs.
+#[test]
+fn a_returned_session_starts_its_dead_pane_again_and_never_tears_it_down() {
+    use std::os::unix::fs::PermissionsExt;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let bin = tempfile::tempdir().unwrap();
+    let claude = bin.path().join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let returned = Some(TeardownClearance::Returned);
+    for (name, dead) in [
+        ("adk-i7503-returned-dead", true),
+        ("adk-i7503-returned-live", false),
+    ] {
+        let tmux = FakeTmux::install(name);
+        let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+        let _claude = set("AGENTDESK_CLAUDE_PATH", &claude);
+        if dead {
+            tmux.mark_dead_pane();
+        }
+        let error = tui_turn(name, returned.as_ref()).unwrap_err();
+        assert!(!error.contains("host guard kept"), "{name}: {error}");
+        let calls = tmux.take_calls();
+        let respawn = format!("respawn-pane -t ={name}:");
+        let respawned = calls.iter().any(|call| call.starts_with(&respawn));
+        assert_eq!(respawned, dead, "{name}: {calls:?}");
+        assert!(dead || error.contains("runs a pane"), "{name}: {error}");
+        assert!(
+            !calls.iter().any(|call| call.contains(" -k")),
+            "{name}: {calls:?}"
+        );
+        assert!(!called(&calls, "kill-session"), "{name}: {calls:?}");
+        assert!(!called(&calls, "new-session"), "{name}: {calls:?}");
+        crate::services::tmux_common::cleanup_session_temp_files(name);
+    }
+}
+
+// A returned resume reaches its prompt only after its own resumed start: with none arriving, the
+// turn ends before anything is typed into the new pane.
+#[test]
+fn a_returned_resume_without_its_resumed_start_types_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    const NAME: &str = "adk-i7503-returned-resume";
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = FakeTmux::install(NAME);
+    tmux.mark_missing();
+    tmux.enable_fixture_launch();
+    let (bin, home, cwd) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let claude = bin.path().join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
+    let _env = [
+        set("AGENTDESK_CLAUDE_PATH", &claude),
+        set("CLAUDE_CONFIG_DIR", home.path()),
+    ];
+    let session = "33333333-3333-4333-8333-333333333333";
+    let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        cwd.path(),
+        session,
+        None,
+    )
+    .unwrap();
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, "{}\n").unwrap();
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let error = execute_streaming_local_tui_tmux(
+        "hello",
+        Some(session),
+        cwd.path().to_str().unwrap(),
+        tx,
+        None,
+        NAME,
+        Some(&TeardownClearance::Returned),
+        None,
+        None,
+        None,
+        None,
+        "http://127.0.0.1:9".to_string(),
+    )
+    .unwrap_err();
+    assert!(error.contains("no resumed start"), "{error}");
+    let calls = tmux.take_calls();
+    assert!(called(&calls, "new-session"), "{calls:?}");
+    for typed in ["send-keys", "paste-buffer", "load-buffer", "set-buffer"] {
+        assert!(!called(&calls, typed), "{typed}: {calls:?}");
+    }
+    crate::services::tmux_common::cleanup_session_temp_files(NAME);
+}

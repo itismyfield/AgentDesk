@@ -214,14 +214,24 @@ fn blocks(row: &MigrationRow, old: &BootSessionHosts, new: &BootSessionHosts) ->
             let Some(location) = &record.location else {
                 return true;
             };
-            let Some(endpoint) = new.channels.get(&row.channel) else {
-                return true;
-            };
             let locator_matches = |ep: &ChannelEndpoint| {
                 location.execution_node == ep.execution_node
                     && location.endpoint_config_key == ep.key
                     && location.socket_addr == ep.socket_path.to_string_lossy()
                     && location.named_session == ep.herdr_session
+            };
+            let Some(endpoint) = new.channels.get(&row.channel) else {
+                // Only the mapping of a Bound local Claude execution may go: its first turn ends
+                // that execution and resumes its session on tmux, on the endpoint kept as it was.
+                let kept = old.channels.get(&row.channel).is_some_and(|approved| {
+                    let was = old.config.herdr.endpoints.get(&approved.key);
+                    let now = new.config.herdr.endpoints.get(&approved.key);
+                    locator_matches(approved) && was.is_some() && was == now
+                });
+                let local = new.local_node.as_deref() == Some(location.execution_node.as_str());
+                let claude = record.owner.provider == "claude";
+                let bound = record.state == HostedState::Bound;
+                return !(kept && local && claude && bound && old.local_node == new.local_node);
             };
             let source = |boot: &BootSessionHosts| {
                 boot.channels

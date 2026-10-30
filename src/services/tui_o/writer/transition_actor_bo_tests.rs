@@ -251,6 +251,7 @@ impl Observer for Observed {
             current: self.sources.last().unwrap().clone(),
             tail: events.len() as u64,
             events,
+            settled_companions: Default::default(),
             log_digest: if delta.tail {
                 "full-tail-3"
             } else {

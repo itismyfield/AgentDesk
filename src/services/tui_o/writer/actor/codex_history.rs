@@ -125,6 +125,9 @@ fn checked(mut inputs: Inputs) -> Result<Snapshot, String> {
                 payload_session_id,
                 payload_transcript_path,
             } => {
+                if inputs.settled_companions.contains(event.seq) {
+                    continue;
+                }
                 if pending.is_some() {
                     return Err("multiple unresolved Pending bindings".into());
                 }

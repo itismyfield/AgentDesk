@@ -658,6 +658,41 @@ async fn a_filled_return_takes_its_reader_out_of_rotation_and_restarts_keep_it_o
     }
 }
 
+// A cursor the resume preflight continues is the one the writer reads on: after an exact name, a
+// renumbered dev or an empty session's filled rebind, only what follows the resume is posted.
+#[tokio::test(start_paused = true)]
+async fn a_cursor_the_resume_preflight_continues_is_read_on_without_reposting() {
+    for variant in ["exact", "renumbered", "empty"] {
+        let body = row("m0", "before the switch");
+        let (harness, path, stored, bindings) = match variant {
+            "empty" => started_empty(&body),
+            _ => started(&body),
+        };
+        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+        append(&path, &row("m1", "first"));
+        polls(3).await;
+        halt(stop, task).await;
+        let _reboot = (variant == "renumbered").then(|| renumber::shift(&path, REBOOT));
+        let session = if variant == "empty" { "A" } else { "s1" };
+        let resumed = named(&stored, session);
+        let cursors = harness.channel().cursors().cloned().collect::<Vec<_>>();
+        let continues = crate::services::tui_o::writer::claude_cursor_continues(&cursors, &resumed);
+        assert_eq!(continues, Ok(true), "{variant}");
+        bindings.commit(resume(2, &stored, &resumed));
+        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+        append(&path, &row("m2", "after the resume"));
+        polls(3).await;
+        assert!(!task.is_finished(), "{variant}");
+        assert_eq!(
+            harness.port.posts(),
+            ["first", "after the resume"],
+            "{variant}"
+        );
+        assert_eq!(harness.alarms.taken(), [], "{variant}");
+        halt(stop, task).await;
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn device_change_resume_preserves_delivery_and_legacy_pending_across_restarts() {
     for legacy in [false, true] {

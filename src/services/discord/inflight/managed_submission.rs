@@ -400,7 +400,7 @@ pub(in crate::services::discord) fn install_managed_submission_boundary(
     let managed = provider == ProviderKind::Claude
         && state.runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
         && state.tmux_session_name.is_some()
-        && matches!(host, TurnHost::Tmux);
+        && matches!(host, TurnHost::Tmux | TurnHost::Return(_));
     if !managed
         || state
             .managed_submission

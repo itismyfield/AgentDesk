@@ -858,10 +858,14 @@ src/
 │   │   ├── backend_routing.rs
 │   │   ├── c1_teardown_tests.rs
 │   │   ├── first_input.rs
+│   │   ├── herdr_return.rs
+│   │   ├── herdr_return_tests.rs
 │   │   ├── herdr_turn.rs
 │   │   ├── host_gate.rs
 │   │   ├── host_gate_tests.rs
 │   │   ├── process_session_launch.rs
+│   │   ├── session_handoff.rs
+│   │   ├── session_handoff_tests.rs
 │   │   ├── stream_result.rs
 │   │   ├── tui_session_launch.rs
 │   │   └── tui_session_launch_geometry_tests.rs
@@ -897,6 +901,8 @@ src/
 │   │   │   ├── response_window.rs
 │   │   │   └── transport_retry.rs
 │   │   ├── hook_server/
+│   │   │   ├── observation_ingress/
+│   │   │   │   └── resume_start.rs
 │   │   │   ├── adoption_retry.rs
 │   │   │   ├── codex_ingress_tests.rs
 │   │   │   ├── hook_event.rs
@@ -2056,6 +2062,7 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_tmux_launch_tests.rs
 │   │   │   │   ├── provider_dispatch_idle_stash_tests.rs
 │   │   │   │   ├── provider_dispatch_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
@@ -3954,6 +3961,7 @@ src/
 │   │   │   ├── claude_fold.rs
 │   │   │   ├── codex.rs
 │   │   │   ├── codex_claim_tests.rs
+│   │   │   ├── herdr_resume.rs
 │   │   │   ├── lane_tests.rs
 │   │   │   ├── log_record.rs
 │   │   │   └── read_cache.rs
