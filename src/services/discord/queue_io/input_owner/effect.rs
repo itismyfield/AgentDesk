@@ -215,7 +215,7 @@ pub(crate) fn cold_claude(
 
 mod codex;
 mod herdr;
-pub(crate) use codex::{BusyCodex, BusyCodexHerdr, CodexInput};
+pub(crate) use codex::{BusyCodex, BusyCodexHerdr, CodexInput, idle_codex};
 pub(crate) use herdr::BusyClaudeHerdr;
 
 #[cfg(test)]

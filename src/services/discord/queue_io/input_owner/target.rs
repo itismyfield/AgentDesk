@@ -49,6 +49,8 @@ pub(crate) enum Route {
     ClaudeHerdrBusy,
     /// A busy Codex tmux pane: main's Codex busy transaction aimed at the open model turn.
     CodexBusy,
+    /// An idle Codex tmux pane: the owner's pinned paste and Enter after one composer read.
+    CodexIdle,
     /// A busy Codex pane hosted on Herdr: the owner's adapter of that transaction on the gate.
     CodexHerdrBusy,
     /// The first prompt of an execution the provider's launch creates.
@@ -79,6 +81,7 @@ pub(crate) fn route(
         ("claude", "tmux", Phase::Idle) => Route::ClaudeIdle,
         ("claude", "herdr", Phase::Busy) => Route::ClaudeHerdrBusy,
         ("codex", "tmux", Phase::Busy) => Route::CodexBusy,
+        ("codex", "tmux", Phase::Idle) => Route::CodexIdle,
         ("codex", "herdr", Phase::Busy) => Route::CodexHerdrBusy,
         ("claude" | "codex", "herdr", Phase::Idle) => Route::HerdrIdle,
         _ => Route::Held("provider_unsupported"),

@@ -117,7 +117,7 @@ fn created(r: Registration, frame: String, wanted: scope::Lineage) -> scope::Lau
     })
 }
 
-/// The bytes a Codex Herdr write types for `prompt`: the text of its submit plan.
+/// The bytes a Codex write types for `prompt`: the text of its submit plan.
 fn codex_herdr_frame(prompt: &str) -> Result<String, String> {
     use crate::services::codex_tui::input::{TuiInputAction, plan_prompt_submit};
     let plan = plan_prompt_submit(prompt)?;
@@ -150,6 +150,14 @@ fn run(turn: &StreamingTurn<'_>, route: target::Route, r: Registration) -> Resul
             .leaf(),
         ),
         target::Route::ClaudeIdle => (turn.prompt.into(), effect::idle_claude(session()?.into())),
+        target::Route::CodexIdle => (
+            codex_herdr_frame(turn.prompt)
+                .map_err(|error| format!("NotSent(\"invalid_prompt: {error}\")"))?,
+            effect::idle_codex(
+                busy_inject::Pane::with_program(session()?, r.program),
+                session()?.into(),
+            ),
+        ),
         target::Route::ClaudeHerdrBusy => {
             let (target, writer) = r.herdr.ok_or("owner Herdr input without a pane")?;
             (

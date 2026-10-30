@@ -112,6 +112,67 @@ impl BusyCodexHerdr {
     }
 }
 
+/// An idle Codex tmux pane: one pre-key read of the composer, then the owner's pinned paste, settle
+/// and Enter; nothing is read after a key, and a paste of unknown effect is never resent.
+pub(crate) fn idle_codex(pane: busy_inject::Pane, session: String) -> Leaf {
+    use crate::services::claude_tui::busy_inject::stash::{Key, key};
+    use crate::services::codex_tui::input::{
+        admit_codex_prompt_under_lock, try_with_composer_mutation_lock,
+    };
+    let refused = |reason: String| {
+        owner_input::vetoed(&reason);
+        Completion::NotSent(reason)
+    };
+    Box::new(move |frame| {
+        let send = || {
+            if let Err(error) = admit_codex_prompt_under_lock(&session, &frame, false) {
+                return refused(format!("composer_refused: {error}"));
+            }
+            let buffer = format!("agentdesk-owner-idle-{session}");
+            let loaded = tempfile::NamedTempFile::new().ok().filter(|file| {
+                let path = file.path().to_string_lossy().into_owned();
+                std::fs::write(&path, &frame).is_ok()
+                    && pane.ok(&["load-buffer", "-b", &buffer, &path]).is_some()
+            });
+            if loaded.is_none() {
+                return refused("load_failed".into());
+            }
+            if owner_input::ready_payload().is_err() || owner_input::start_payload().is_err() {
+                let _ = pane.ok(&["delete-buffer", "-b", &buffer]);
+                return refused("owner_refused".into());
+            }
+            owner_input::keyed();
+            let paste = |target: &str| {
+                [
+                    "paste-buffer",
+                    "-p",
+                    "-r",
+                    "-d",
+                    "-b",
+                    &buffer,
+                    "-t",
+                    target,
+                ]
+                .map(String::from)
+            };
+            match key(&pane, paste) {
+                Key::Applied => {}
+                Key::Held => return refused("pane_moved".into()),
+                Key::Failed => return Completion::WriteUncertain("paste_failed".into()),
+            }
+            std::thread::sleep(codex_inject::TIMING.settle);
+            match key(&pane, |target: &str| {
+                ["send-keys", "-t", target, "Enter"].map(String::from)
+            }) {
+                Key::Applied => Completion::Submitted,
+                _ => Completion::WriteUncertain("enter_failed".into()),
+            }
+        };
+        Ok(try_with_composer_mutation_lock(&session, send)
+            .unwrap_or_else(|| refused("lock_contended".into())))
+    })
+}
+
 /// Main's `run_codex` mapping: a veto proves nothing reached the pane, a paste or Enter failure
 /// and a panic may have, and a local paste and Enter is the submission.
 fn map(

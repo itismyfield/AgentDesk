@@ -18,12 +18,20 @@ fn fixture(name: &str) -> String {
     fs::read_to_string(dir.join(name)).unwrap()
 }
 
-/// A pane that draws the bottom of a captured busy Codex screen with the cursor in its empty
-/// composer; a paste is recorded and drawn in the composer, and each Enter is recorded.
-fn codex_renderer(f: &Fixture, name: &str) -> std::path::PathBuf {
+/// A pane that draws the bottom of a captured busy, or idle, Codex screen with the cursor in its
+/// empty composer; a paste is recorded and drawn in the composer, and each Enter is recorded.
+fn codex_renderer(f: &Fixture, name: &str, idle: bool) -> std::path::PathBuf {
     let root = f.root.path().join(name);
     fs::create_dir(&root).unwrap();
-    let shown = fixture("busy_empty.ansi");
+    // An idle pane is a captured idle Codex composer at 80 columns, drawn at the pane's bottom.
+    let (shown, width) = if idle {
+        let idle = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tui_input/codex-status-sol-80-idle.ansi");
+        let pad = "\n".repeat(ROWS);
+        (pad + &fs::read_to_string(idle).unwrap(), "80")
+    } else {
+        (fixture("busy_empty.ansi"), "160")
+    };
     let lines: Vec<&str> = shown.lines().collect();
     let rows = &lines[lines.len() - ROWS..];
     let plain = |row: &str| crate::services::codex_tui::input::strip_ansi_escape_sequences(row);
@@ -76,13 +84,13 @@ while True:
         "-s",
         name,
         "-x",
-        "160",
+        width,
         "-y",
         &height,
         &command,
     ]);
     f.tmux(&["set-window-option", "-t", &pane, "window-size", "manual"]);
-    f.tmux(&["resize-window", "-t", &pane, "-x", "160", "-y", &height]);
+    f.tmux(&["resize-window", "-t", &pane, "-x", width, "-y", &height]);
     wait("codex-renderer", || root.join("ready").exists());
     wait("codex-renderer-capture", || {
         f.tmux(&["capture-pane", "-p", "-t", &pane])
@@ -92,8 +100,12 @@ while True:
 }
 
 fn codex_rig(name: &str, channel: u64) -> Rig {
+    codex_rig_on(name, channel, false)
+}
+
+fn codex_rig_on(name: &str, channel: u64, idle: bool) -> Rig {
     let f = Fixture::after_shared_test_env_lock();
-    let renderer = codex_renderer(&f, name);
+    let renderer = codex_renderer(&f, name, idle);
     owned(f, name, channel, renderer, "codex")
 }
 
@@ -191,4 +203,29 @@ fn after_the_codex_paste_only_a_replaced_pane_stops_the_enter() {
     assert_eq!(swapped.events(), ["paste"]);
     swapped.uncertain();
     assert!(matches!(swapped.bind(), TurnBind::Armed(_)));
+}
+
+/// An idle Codex pane takes the prompt's typed text as one pinned paste and one Enter after a
+/// single composer read; nothing reads the pane after the keys, and the head settles unreceipted.
+#[test]
+fn owner_idle_codex_pastes_and_enters_once_without_a_later_read() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = codex_rig_on("oc-idle", 7_272_525, true);
+    let result = rig.dispatch(ProviderKind::Codex, target::Phase::Idle, &rig.transcript());
+    assert_eq!(result, Ok(()));
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    assert_eq!(rig.pasted(), codex_herdr_frame(PROMPT).unwrap());
+    rig.delivered();
+    let dir = rig.f.root.path().join(format!("{}-owner", rig.name));
+    let trace = fs::read_to_string(dir.join("trace")).unwrap();
+    let keys: Vec<_> = (trace.lines())
+        .filter(|line| line.contains("paste-buffer") || line.contains("send-keys"))
+        .collect();
+    assert_eq!(keys.len(), 2, "{trace}");
+    assert!(
+        keys.iter().all(|line| line.contains("if-shell")),
+        "pinned: {trace}"
+    );
+    let last = trace.lines().last().unwrap_or_default();
+    assert!(last.contains("send-keys"), "no read after Enter: {trace}");
 }
