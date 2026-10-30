@@ -252,7 +252,7 @@
 | `POST` | `/api/queue/slots/{agent_id}/{slot_index}/reset-thread` | `auto_queue::reset_slot_thread` | `src/server/routes/auto_queue.rs:102` | `src/server/routes/domains/ops.rs:248` |
 | `GET` | `/api/queue/status` | `auto_queue::status` | `src/server/routes/auto_queue.rs:42` | `src/server/routes/domains/ops.rs:226` |
 | `GET` | `/api/rate-limits` | `analytics::rate_limits` | `src/server/routes/analytics.rs:504` | `src/server/routes/domains/analytics.rs:22` |
-| `GET` | `/api/receipt` | `receipt::get_receipt` | `src/server/routes/receipt.rs:335` | `src/server/routes/domains/analytics.rs:18` |
+| `GET` | `/api/receipt` | `receipt::get_receipt` | `src/server/routes/receipt.rs:426` | `src/server/routes/domains/analytics.rs:18` |
 | `POST` | `/api/reviews/decision` | `review_verdict::submit_review_decision` | `src/server/routes/review_verdict/decision_route.rs:45` | `src/server/routes/domains/reviews.rs:23` |
 | `POST` | `/api/reviews/recovery` | `reviews::recover_review_target` | `src/server/routes/reviews.rs:613` | `src/server/routes/domains/reviews.rs:21` |
 | `POST` | `/api/reviews/tuning/aggregate` | `review_verdict::aggregate_review_tuning` | `src/server/routes/review_verdict/tuning_aggregate.rs:10` | `src/server/routes/domains/reviews.rs:27` |
@@ -316,7 +316,7 @@
 | `GET` | `/api/stats` | `stats::get_stats` | `src/server/routes/stats.rs:424` | `src/server/routes/domains/admin.rs:67` |
 | `GET` | `/api/stats/memento` | `stats::get_memento_stats` | `src/server/routes/stats.rs:441` | `src/server/routes/domains/admin.rs:68` |
 | `GET` | `/api/streaks` | `analytics::streaks` | `src/server/routes/analytics.rs:409` | `src/server/routes/domains/analytics.rs:15` |
-| `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:411` | `src/server/routes/domains/analytics.rs:19` |
+| `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:506` | `src/server/routes/domains/analytics.rs:19` |
 | `POST` | `/api/turn-lease/release` | `turn_lease::release` | `src/server/routes/turn_lease.rs:32` | `src/server/routes/domains/runtime.rs:20` |
 | `GET` | `/api/turn-lease/{provider}/{channel_id}` | `turn_lease::inspect` | `src/server/routes/turn_lease.rs:14` | `src/server/routes/domains/runtime.rs:16` |
 | `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:209` | `src/server/routes/domains/runtime.rs:122` |
