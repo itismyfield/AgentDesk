@@ -24,6 +24,22 @@ pub(super) async fn flush_dlq_tasks() {
     }
 }
 
+struct EvidenceFrame {
+    turn_start: u64,
+    batch_start: u64,
+    tail: String,
+}
+
+impl From<(u64, u64)> for EvidenceFrame {
+    fn from((turn_start, batch_start): (u64, u64)) -> Self {
+        Self {
+            turn_start,
+            batch_start,
+            tail: String::new(),
+        }
+    }
+}
+
 async fn plan(
     f: &Fixture,
     shared: &Arc<SharedData>,
@@ -32,8 +48,13 @@ async fn plan(
     producer: Option<RelayProducer>,
     target: &mut Option<SessionBoundRelayAckTarget>,
     mirrored: bool,
-    (turn_start, batch_start): (u64, u64),
+    frame: impl Into<EvidenceFrame>,
 ) {
+    let EvidenceFrame {
+        turn_start,
+        batch_start,
+        tail,
+    } = frame.into();
     let authorized = before.as_ref().is_some_and(|row| {
         row.turn_nonce == f.row.turn_nonce
             && row.effective_relay_owner_kind()
@@ -73,7 +94,7 @@ async fn plan(
         startup_soft_terminal_authority: watcher_soft_terminal_has_turn_authority(
             Some(&f.row),
             &session,
-            0,
+            batch_start,
             f.row.turn_nonce.as_deref(),
         ),
     };
@@ -89,12 +110,11 @@ async fn plan(
         monitor_auto_turn_ledger_generation: &mut generation,
     };
     let tools = WatcherToolState::new();
-    let empty = String::new();
     let locals = TerminalRelayPlanLocals {
-        current_offset: f.row.last_offset,
+        current_offset: f.row.last_offset + tail.len() as u64,
         data_start_offset: batch_start,
         turn_data_start_offset: turn_start,
-        all_data: &empty,
+        all_data: &tail,
         full_response: &f.body,
         current_response: &f.body,
         response_sent_offset: 0,
@@ -920,4 +940,166 @@ async fn i7441d_replayed_leftover_turn_proves_from_turn_start_pg() {
     }
     pool.close().await;
     db.drop().await;
+}
+
+async fn residual_frame(replayed: bool, delivered: bool, large: bool) {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i7441r_large_frame",
+        "long terminal evidence frame",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    let mut f = Fixture::continued_frame(
+        744500 + u64::from(replayed) + 2 * u64::from(delivered) + 4 * u64::from(large),
+        large,
+    )
+    .await;
+    append_after_stop_hook(&mut f);
+    let raw = std::fs::read(&f.source.path).unwrap();
+    let turn_start = f.row.turn_start_offset.unwrap();
+    let start_after_prompt = turn_start
+        + raw[turn_start as usize..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .unwrap() as u64
+        + 1;
+    let mut buffer = String::from_utf8(raw[start_after_prompt as usize..].to_vec()).unwrap();
+    let mut parsed = String::new();
+    let outcome = crate::services::discord::tmux::process_watcher_lines_for_turn(
+        &mut buffer,
+        &mut crate::services::session_backend::StreamLineState::new(),
+        &mut parsed,
+        &mut WatcherToolState::new(),
+        Some(start_after_prompt),
+        Some(turn_start),
+    );
+    assert!(outcome.soft_terminal_candidate && !outcome.found_result);
+    assert_eq!(
+        parsed, f.body,
+        "the watcher includes the late body after the soft Stop hint"
+    );
+    let tail = if replayed {
+        let tail = format!(
+            "{}\n",
+            serde_json::json!({"type":"user","uuid":"next-turn","message":{"content":"next input"}})
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&f.source.path)
+            .unwrap()
+            .write_all(tail.as_bytes())
+            .unwrap();
+        tail
+    } else {
+        String::new()
+    };
+    let batch_start = if replayed {
+        f.row.last_offset + tail.len() as u64
+    } else {
+        start_after_prompt
+    };
+    let mut before = f.row.clone();
+    before.turn_start_offset = Some(turn_start);
+    save_inflight_state(&before).unwrap();
+    let authority = watcher_soft_terminal_has_turn_authority(
+        Some(&before),
+        f.row.tmux_session_name.as_deref().unwrap(),
+        batch_start,
+        before.turn_nonce.as_deref(),
+    );
+    assert_eq!(
+        authority
+            .authorize_pre_relay_inflight(Some(&before), f.row.last_offset + tail.len() as u64),
+        Err(SoftTerminalAuthorityDenial::TurnStartOutsideFrame)
+    );
+    assert_eq!(
+        f.row.last_offset - start_after_prompt > 2 * 1024 * 1024,
+        large
+    );
+    if !delivered {
+        if replayed {
+            f.port.messages.lock().unwrap().clear();
+        } else {
+            f.port.messages.lock().unwrap().pop();
+        }
+    }
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        f.row.channel_id,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    let (http, _http_guard) = f.http().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let reads = f.get_calls.load(Ordering::SeqCst);
+    plan(
+        &f,
+        &shared,
+        &http,
+        Some(before),
+        None,
+        &mut None,
+        false,
+        EvidenceFrame {
+            turn_start: if replayed {
+                turn_start
+            } else {
+                start_after_prompt
+            },
+            batch_start,
+            tail,
+        },
+    )
+    .await;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT content, reason FROM relay_dead_letter WHERE channel_id=$1")
+            .bind(f.row.channel_id.to_string())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    eprintln!(
+        "RESIDUAL replayed={replayed} delivered={delivered} large={large} frame_bytes={} jsonl_start={batch_start} jsonl_end={} rows={} gets={}",
+        f.row.last_offset - start_after_prompt,
+        f.row.last_offset,
+        rows.len(),
+        f.get_calls.load(Ordering::SeqCst) - reads
+    );
+    if delivered {
+        assert!(
+            rows.is_empty(),
+            "already posted body was recorded: {rows:?}"
+        );
+        assert!(f.get_calls.load(Ordering::SeqCst) > reads);
+    } else {
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, f.body);
+        assert!(rows[0].1.contains("denial=turn_start_outside_frame"));
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441r_restart_replay_posted_large_frame_has_no_dead_letter_pg() {
+    residual_frame(true, true, true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441r_live_midturn_posted_large_frame_has_no_dead_letter_pg() {
+    residual_frame(false, true, true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441r_live_midturn_soft_hint_keeps_late_posted_body_pg() {
+    residual_frame(false, true, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441r_unposted_large_frames_remain_recorded_pg() {
+    for large in [true, false] {
+        residual_frame(true, false, large).await;
+        residual_frame(false, false, large).await;
+    }
 }

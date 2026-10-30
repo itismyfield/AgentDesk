@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::Path,
 };
 use tokio::time::Instant;
@@ -75,21 +75,23 @@ pub(super) fn build(root: &Path, query: Query<'_>, deadline: Instant) -> Option<
 pub(super) fn build_terminal(root: &Path, query: Query<'_>, deadline: Instant) -> Option<Manifest> {
     const GUARD: u64 = 4096;
     let (start, end) = query.range;
-    if start >= end || end - start > SOURCE_CAP as u64 || Instant::now() >= deadline {
+    if start >= end || Instant::now() >= deadline {
         return None;
     }
     let source = delivery_evidence::source(root, query.channel, query.path, query.file)?.source;
-    let mut file = File::open(query.path).ok()?;
+    let path = query.path;
+    let file_identity = query.file;
+    let mut file = File::open(path).ok()?;
     let matches = |meta: std::fs::Metadata| {
-        shadow::capture::file_identity(&meta) == query.file && meta.len() >= end
+        shadow::capture::file_identity(&meta) == file_identity && meta.len() >= end
     };
     if !matches(file.metadata().ok()?) {
         return None;
     }
     let window_start = start.saturating_sub(GUARD);
-    let mut bytes = Vec::new();
     let mut digest = Sha256::new();
     digest.update(b"terminal-frame-v1");
+    let mut preceding = None;
     for (index, (from, through)) in [(0, start.min(GUARD)), (window_start, end)]
         .into_iter()
         .enumerate()
@@ -98,12 +100,13 @@ pub(super) fn build_terminal(root: &Path, query: Query<'_>, deadline: Instant) -
         digest.update(through.to_le_bytes());
         file.seek(SeekFrom::Start(from)).ok()?;
         let mut position = from;
+        let guard_end = if index == 1 { start } else { through };
         let mut chunk = [0; 8192];
-        while position < through {
+        while position < guard_end {
             if Instant::now() >= deadline {
                 return None;
             }
-            let remaining = (through - position).min(chunk.len() as u64);
+            let remaining = (guard_end - position).min(chunk.len() as u64);
             let read = file.read(&mut chunk[..remaining as usize]).ok()?;
             if read == 0 {
                 return None;
@@ -112,24 +115,50 @@ pub(super) fn build_terminal(root: &Path, query: Query<'_>, deadline: Instant) -
             SOURCE_BYTES.fetch_add(read, std::sync::atomic::Ordering::Relaxed);
             digest.update(&chunk[..read]);
             if index == 1 {
-                bytes.extend_from_slice(&chunk[..read]);
+                preceding = chunk.get(read - 1).copied();
             }
             position += read as u64;
         }
     }
-    if !matches(file.metadata().ok()?)
-        || !matches(std::fs::metadata(query.path).ok()?)
+    if start > 0 && preceding != Some(b'\n') {
+        return None;
+    }
+    // Tool output can make a short answer span a large frame; bound each record and the
+    // derived body instead of rejecting the whole frame before consulting its receipts.
+    let mut reader = BufReader::new((&mut file).take(end - start));
+    let mut consumed = 0;
+    let lines = std::iter::from_fn(|| {
+        if consumed == end - start {
+            return None;
+        }
+        if Instant::now() >= deadline {
+            return Some(None);
+        }
+        let mut line = Vec::new();
+        let read = reader
+            .by_ref()
+            .take(SOURCE_CAP as u64 + 1)
+            .read_until(b'\n', &mut line)
+            .ok()?;
+        #[cfg(test)]
+        SOURCE_BYTES.fetch_add(read, std::sync::atomic::Ordering::Relaxed);
+        if read == 0 || read > SOURCE_CAP || line.last() != Some(&b'\n') {
+            return Some(None);
+        }
+        consumed += read as u64;
+        digest.update(&line);
+        Some(Some(line))
+    });
+    let mut plan = derive_lines(query, source, String::new(), lines, deadline, true)?;
+    if consumed != end - start
+        || !matches(file.metadata().ok()?)
+        || !matches(std::fs::metadata(path).ok()?)
         || Instant::now() >= deadline
     {
         return None;
     }
-    let at = (start - window_start) as usize;
-    if (start > 0 && bytes.get(at - 1) != Some(&b'\n')) || bytes.last() != Some(&b'\n') {
-        return None;
-    }
-    let prefix = format!("terminal-frame-v1:{}", hex::encode(digest.finalize()));
-    let plan = derive(query, source, prefix, bytes.get(at..)?, deadline, true)?;
-    (Instant::now() < deadline).then_some(plan)
+    plan.prefix = format!("terminal-frame-v1:{}", hex::encode(digest.finalize()));
+    Some(plan)
 }
 
 fn build_with_prefix_limit(
@@ -228,6 +257,26 @@ fn derive(
     deadline: Instant,
     through_frame_end: bool,
 ) -> Option<Manifest> {
+    derive_lines(
+        query,
+        source,
+        prefix,
+        bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .map(|line| Some(line.to_vec())),
+        deadline,
+        through_frame_end,
+    )
+}
+
+fn derive_lines(
+    query: Query<'_>,
+    source: SourceId,
+    prefix: String,
+    lines: impl IntoIterator<Item = Option<Vec<u8>>>,
+    deadline: Instant,
+    through_frame_end: bool,
+) -> Option<Manifest> {
     let interrupted = |value: &serde_json::Value| {
         value["type"] == "user"
             || value["is_error"] == true
@@ -250,11 +299,12 @@ fn derive(
     let mut saw_body = false;
     let mut unit_spans = HashMap::new();
     let mut consumed = HashMap::new();
-    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+    for line in lines {
+        let line = line?;
         if Instant::now() >= deadline {
             return None;
         }
-        let value: serde_json::Value = serde_json::from_slice(line).ok()?;
+        let value: serde_json::Value = serde_json::from_slice(&line).ok()?;
         if value["type"] == "event_msg" && value["payload"]["type"] == "turn_aborted" {
             return None;
         }
@@ -328,11 +378,18 @@ fn derive(
         }
         let native_complete =
             value["type"] == "event_msg" && value["payload"]["type"] == "task_complete";
+        // A Stop hook can precede late assistant text and injected notifications. Terminal
+        // coverage follows the whole frame; input settlement still uses the first boundary.
+        let soft_stop = through_frame_end
+            && matches!(query.provider, ProviderKind::Claude)
+            && value["type"] == "system"
+            && value["subtype"] == "stop_hook_summary";
         let completed = native_complete
-            || crate::services::tui_turn_state::envelope_is_turn_end_terminator(
-                query.provider,
-                &value,
-            );
+            || (!soft_stop
+                && crate::services::tui_turn_state::envelope_is_turn_end_terminator(
+                    query.provider,
+                    &value,
+                ));
         if completed {
             manifest.completed = !interrupted(&value) && saw_body;
             if !manifest.completed {
