@@ -383,7 +383,10 @@ fn derive_lines(
         let soft_stop = through_frame_end
             && matches!(query.provider, ProviderKind::Claude)
             && value["type"] == "system"
-            && value["subtype"] == "stop_hook_summary";
+            && matches!(
+                value["subtype"].as_str(),
+                Some("stop_hook_summary" | "turn_duration")
+            );
         let completed = native_complete
             || (!soft_stop
                 && crate::services::tui_turn_state::envelope_is_turn_end_terminator(

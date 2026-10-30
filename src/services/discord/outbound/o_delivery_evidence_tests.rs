@@ -134,7 +134,7 @@ impl Fixture {
             uncertain,
             ending,
             None,
-            (0, false),
+            (0, false, false),
         )
         .await
     }
@@ -147,12 +147,12 @@ impl Fixture {
             0,
             None,
             Some(prefix),
-            (0, false),
+            (0, false, false),
         )
         .await
     }
 
-    pub async fn continued_frame(channel: u64, large: bool) -> Self {
+    pub async fn continued_frame(channel: u64, large: bool, duration: bool) -> Self {
         Self::new_scoped(
             channel,
             ProviderKind::Claude,
@@ -160,7 +160,7 @@ impl Fixture {
             0,
             None,
             Some(4096),
-            (if large { 2_426_345 } else { 0 }, true),
+            (if large { 2_426_345 } else { 0 }, true, duration),
         )
         .await
     }
@@ -172,7 +172,7 @@ impl Fixture {
         uncertain: u8,
         ending: Option<serde_json::Value>,
         prefix: Option<usize>,
-        (padding, early_stop): (usize, bool),
+        (padding, early_stop, duration): (usize, bool, bool),
     ) -> Self {
         let root = crate::config::runtime_root().unwrap();
         std::fs::create_dir_all(&root).unwrap();
@@ -195,6 +195,10 @@ impl Fixture {
         for (index, text) in bodies.iter().enumerate() {
             if early_stop && index == 1 {
                 values.push(json!({"type":"system","subtype":"stop_hook_summary"}));
+                if duration {
+                    values
+                        .push(json!({"type":"system","subtype":"turn_duration","durationMs":1200}));
+                }
                 values.push(json!({"type":"user","uuid":"background-input","isMeta":true,"message":{"content":"<task-notification>background task completed</task-notification>"}}));
             }
             if !body.is_empty()
@@ -1317,7 +1321,7 @@ async fn i7441c2_frame_read_bound_and_expired_deadline_are_exact() {
             0,
             None,
             Some(prefix),
-            (padding, false),
+            (padding, false, false),
         )
         .await;
         let query = || manifest::Query {
@@ -1587,7 +1591,7 @@ async fn i7441r_oversized_or_malformed_source_records_fail_closed() {
     .into_iter()
     .enumerate()
     {
-        let f = Fixture::continued_frame(744520 + index as u64, true).await;
+        let f = Fixture::continued_frame(744520 + index as u64, true, false).await;
         std::fs::OpenOptions::new()
             .append(true)
             .open(&f.source.path)

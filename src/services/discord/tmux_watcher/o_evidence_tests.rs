@@ -943,6 +943,15 @@ async fn i7441d_replayed_leftover_turn_proves_from_turn_start_pg() {
 }
 
 async fn residual_frame(replayed: bool, delivered: bool, large: bool) {
+    residual_frame_with_duration(replayed, delivered, large, false).await;
+}
+
+async fn residual_frame_with_duration(
+    replayed: bool,
+    delivered: bool,
+    large: bool,
+    duration: bool,
+) {
     use std::io::Write;
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
@@ -953,10 +962,16 @@ async fn residual_frame(replayed: bool, delivered: bool, large: bool) {
     .await;
     let pool = db.connect_and_migrate().await;
     let mut f = Fixture::continued_frame(
-        744500 + u64::from(replayed) + 2 * u64::from(delivered) + 4 * u64::from(large),
+        744500
+            + u64::from(replayed)
+            + 2 * u64::from(delivered)
+            + 4 * u64::from(large)
+            + 8 * u64::from(duration),
         large,
+        duration,
     )
     .await;
+    assert_eq!(f.port.messages.lock().unwrap().len(), 2);
     append_after_stop_hook(&mut f);
     let raw = std::fs::read(&f.source.path).unwrap();
     let turn_start = f.row.turn_start_offset.unwrap();
@@ -1020,10 +1035,14 @@ async fn residual_frame(replayed: bool, delivered: bool, large: bool) {
         large
     );
     if !delivered {
-        if replayed {
+        if replayed && !duration {
             f.port.messages.lock().unwrap().clear();
         } else {
-            f.port.messages.lock().unwrap().pop();
+            let mut messages = f.port.messages.lock().unwrap();
+            let missing = messages.pop().unwrap();
+            assert!(missing.content.contains("monitor followup"));
+            assert_eq!(messages.len(), 1);
+            assert!(messages[0].content.contains("background task finished."));
         }
     }
     let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
@@ -1060,7 +1079,7 @@ async fn residual_frame(replayed: bool, delivered: bool, large: bool) {
             .await
             .unwrap();
     eprintln!(
-        "RESIDUAL replayed={replayed} delivered={delivered} large={large} frame_bytes={} jsonl_start={batch_start} jsonl_end={} rows={} gets={}",
+        "RESIDUAL replayed={replayed} delivered={delivered} large={large} duration={duration} frame_bytes={} jsonl_start={batch_start} jsonl_end={} rows={} gets={}",
         f.row.last_offset - start_after_prompt,
         f.row.last_offset,
         rows.len(),
@@ -1101,5 +1120,29 @@ async fn i7441r_unposted_large_frames_remain_recorded_pg() {
     for large in [true, false] {
         residual_frame(true, false, large).await;
         residual_frame(false, false, large).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441r1_duration_small_continuation_posted_has_no_dead_letter_pg() {
+    residual_frame_with_duration(false, true, false, true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441r1_duration_large_live_posted_has_no_dead_letter_pg() {
+    residual_frame_with_duration(false, true, true, true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441r1_duration_large_replay_posted_has_no_dead_letter_pg() {
+    residual_frame_with_duration(true, true, true, true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441r1_duration_missing_late_body_remains_recorded_pg() {
+    for large in [false, true] {
+        for replayed in [false, true] {
+            residual_frame_with_duration(replayed, false, large, true).await;
+        }
     }
 }
