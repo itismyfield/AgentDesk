@@ -35,3 +35,4 @@ The command exits 1 when any rule breaks, which is the expected result for a mod
 |---|---|---|---|
 | `session-lifecycle` (tmux) | `e8d94425a0` | stale inflight row after a deferred boot probe (T-A/T-B), FIFO open race (T-C) | tracked by #7331 (I21 in `docs/relay-state-contract.md`) |
 | `session-lifecycle` (Herdr) | `e8d94425a0` | Pending row with no pane after a lost create reply or crash (H-A/H-B), prompt to an exited Claude pane (H-C) | H-A/H-B fixed by #7563 |
+| `host-migration` (tmux ↔ Herdr, #7503) | `db99888121` (branch `feat/i7503-claude-resume-both`) | old tmux Claude left running after a fresh forward launch (C1), which then blocks every Return turn (C2); id-only channel's queued input never starts Return (C3) | C1 already in main; C2 new, not raised by #7503 reviews; C3 is review B2 P1-1 (repair B-2) |
