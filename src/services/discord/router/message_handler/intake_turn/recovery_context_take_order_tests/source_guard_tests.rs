@@ -26,7 +26,7 @@ const CLEARED_VIEW: &str = "note_intake_turn_cleared_current(";
 const BRIDGE_CONTEXT: &str = "TurnBridgeContext {";
 const BRIDGE_IDS: [&str; 3] = [
     "user_msg_id: Some(user_msg_id),",
-    "current_msg_id: Some(placeholder_msg_id),",
+    "current_msg_id: placeholder_msg_id,",
     "is_external_input_tui_direct: false",
 ];
 const STALE_CALL: &str = "abort_terminal_dispatch_at_turn_start(";

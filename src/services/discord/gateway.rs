@@ -52,6 +52,10 @@ fn watcher_classified_error_string(error: &(dyn std::error::Error + 'static)) ->
 }
 
 #[allow(dead_code)]
+/// A synthetic id's edit error, classified like Discord's own missing message.
+pub(in crate::services::discord) const SYNTHETIC_MESSAGE_EDIT_ERROR: &str =
+    "Unknown Message: synthetic id has no Discord message";
+
 pub(super) trait TurnGateway: Send + Sync {
     fn output_pool(&self) -> Option<&sqlx::PgPool> {
         None
@@ -637,6 +641,12 @@ impl TurnGateway for DiscordGateway {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<(), String>> {
         Box::pin(async move {
+            // A synthetic id is a turn's in-memory absence: there is no message to edit.
+            if super::synthetic_headless_message_id::is_synthetic_headless_message_id_raw(
+                message_id.get(),
+            ) {
+                return Err(SYNTHETIC_MESSAGE_EDIT_ERROR.to_string());
+            }
             let client = SerenityTurnOutboundClient {
                 http: self.http.clone(),
                 shared: self.shared.clone(),

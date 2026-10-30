@@ -77,10 +77,10 @@ export function Step3AgentSelection({
   return (
     <div className={stepBox} style={{ borderColor: borderLight }}>
       <div>
-        <h2 ref={stepHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
+        <h2 ref={stepHeadingRef} tabIndex={-1} className="text-base font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
           {tr("역할 프리셋과 에이전트 구성", "Role Presets & Agents")}
         </h2>
-        <p className="text-sm mt-1" style={{ color: "var(--th-text-muted)" }}>
+        <p className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
           {tr(
             "역할별 프리셋으로 팀을 빠르게 시작하거나, 필요한 에이전트를 직접 추가할 수 있습니다.",
             "Start from a role-based preset or add the exact agents you need.",
@@ -93,7 +93,7 @@ export function Step3AgentSelection({
           <button type="button"
             key={template.key}
             onClick={() => selectTemplate(template.key)}
-            className="rounded-xl p-4 border text-left transition-all hover:scale-[1.02]"
+            className="rounded-lg p-4 border text-left transition-colors hover:bg-surface-subtle"
             style={{
               borderColor: selectedTemplate === template.key ? "var(--th-accent-primary)" : borderLight,
               backgroundColor:
@@ -102,7 +102,7 @@ export function Step3AgentSelection({
                   : "transparent",
             }}
           >
-            <div className="text-2xl mb-2">{template.icon}</div>
+            <div className="text-base mb-2">{template.icon}</div>
             <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>{tr(template.name, template.nameEn)}</div>
             <div className="text-xs mt-1" style={{ color: "var(--th-text-muted)" }}>{tr(template.description, template.descriptionEn)}</div>
             <div className="text-xs mt-2" style={{ color: "var(--th-text-muted)" }}>
@@ -113,10 +113,10 @@ export function Step3AgentSelection({
       </div>
 
       <div
-        className="rounded-xl border p-4 space-y-2"
-        style={{ borderColor: "rgba(99,102,241,0.2)", backgroundColor: "rgba(99,102,241,0.08)" }}
+        className="rounded-lg border p-4 space-y-2"
+        style={{ borderColor: "var(--th-border-subtle)", backgroundColor: "var(--th-overlay-subtle)" }}
       >
-        <div className="text-sm font-medium" style={{ color: "#c7d2fe" }}>
+        <div className="text-sm font-medium" style={{ color: "var(--th-text-secondary)" }}>
           {tr("커스텀 에이전트의 AI 프롬프트 초안 만들기", "Create AI prompt drafts for custom agents")}
         </div>
         <div className="text-xs space-y-1" style={{ color: "var(--th-text-secondary)" }}>
@@ -132,28 +132,18 @@ export function Step3AgentSelection({
             {tr(`${agents.length}개 에이전트`, `${agents.length} agents`)}
           </div>
           {agents.map((agent) => (
-            <div key={agent.id} className="rounded-xl border overflow-hidden" style={{ borderColor: borderLight }}>
-              <div
-                className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-surface-subtle"
-                onClick={() => setExpandedAgent(expandedAgent === agent.id ? null : agent.id)}
-              >
-                <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
-                  {tr(agent.name, agent.nameEn || agent.name)}
-                </span>
-                <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                  {tr(agent.description, agent.descriptionEn || agent.description)}
-                </span>
-                <span className="ml-auto text-xs" style={{ color: "var(--th-text-muted)" }}>
-                  {expandedAgent === agent.id ? "▲" : "▼"}
-                </span>
-                {agent.custom && (
-                  <button type="button"
-                    onClick={(event) => { event.stopPropagation(); removeAgent(agent.id); }}
-                    className="text-xs text-red-400 hover:text-red-300"
-                  >
-                    {tr("삭제", "Del")}
-                  </button>
-                )}
+            <div key={agent.id} className="rounded-lg border overflow-hidden" style={{ borderColor: borderLight }}>
+              <div className="flex min-w-0 items-start gap-2 px-3 py-2">
+                <button type="button" aria-expanded={expandedAgent === agent.id}
+                  onClick={() => setExpandedAgent(expandedAgent === agent.id ? null : agent.id)}
+                  className="flex min-h-11 min-w-0 flex-1 items-center justify-between gap-3 rounded-md px-1 py-2 text-left hover:bg-surface-subtle">
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium text-th-text-primary [overflow-wrap:anywhere]">{tr(agent.name, agent.nameEn || agent.name)}</span>
+                    <span className="mt-1 block text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">{tr(agent.description, agent.descriptionEn || agent.description)}</span>
+                  </span>
+                  <span className="shrink-0 text-xs text-th-text-muted" aria-hidden="true">{expandedAgent === agent.id ? "▲" : "▼"}</span>
+                </button>
+                {agent.custom ? <button type="button" onClick={() => removeAgent(agent.id)} className="min-h-11 min-w-11 shrink-0 rounded-md px-2 text-xs text-[var(--th-accent-danger)]">{tr("삭제", "Del")}</button> : null}
               </div>
               {expandedAgent === agent.id && (
                 <div className="px-4 pb-3 space-y-2 border-t" style={{ borderColor: borderLight }}>
@@ -206,7 +196,7 @@ export function Step3AgentSelection({
             placeholder={tr("에이전트 이름", "Agent name")}
             value={customName}
             onChange={(event) => setCustomName(event.target.value)}
-            className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
+            className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm bg-surface-subtle border"
             style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
           />
           <input
@@ -215,7 +205,7 @@ export function Step3AgentSelection({
             placeholder={tr("한줄 설명", "Brief description")}
             value={customDesc}
             onChange={(event) => setCustomDesc(event.target.value)}
-            className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
+            className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm bg-surface-subtle border"
             style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
           />
         </div>
@@ -226,7 +216,7 @@ export function Step3AgentSelection({
             placeholder={tr("영문 이름 (선택)", "English name (optional)")}
             value={customNameEn}
             onChange={(event) => setCustomNameEn(event.target.value)}
-            className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
+            className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm bg-surface-subtle border"
             style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
           />
           <input
@@ -235,13 +225,13 @@ export function Step3AgentSelection({
             placeholder={tr("영문 설명 (선택)", "English description (optional)")}
             value={customDescEn}
             onChange={(event) => setCustomDescEn(event.target.value)}
-            className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
+            className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm bg-surface-subtle border"
             style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
           />
           <button type="button"
             onClick={addCustomAgent}
             disabled={!customName.trim()}
-            className="w-full sm:w-auto px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors whitespace-nowrap"
+            className="min-h-11 w-full sm:w-auto px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors whitespace-nowrap"
           >
             + {tr("추가", "Add")}
           </button>
@@ -257,7 +247,7 @@ export function Step3AgentSelection({
       <ChecklistPanel title={tr("Step 3 체크리스트", "Step 3 checklist")} items={step3Checklist} />
 
       <div className={actionRow}>
-        <button type="button" onClick={() => goToStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+        <button type="button" onClick={() => goToStep(2)} className={btnSecondary} style={{ borderColor: "var(--th-border-subtle)" }}>
           {tr("이전", "Back")}
         </button>
         <button type="button" onClick={() => goToStep(4)} disabled={agents.length === 0} className={btnPrimary}>

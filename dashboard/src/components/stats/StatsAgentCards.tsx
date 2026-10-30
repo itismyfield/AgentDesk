@@ -35,7 +35,7 @@ export function AgentSpendCard({
   const maxCost = Math.max(1, ...rows.map((row) => row.cost));
 
   return (
-    <article className="card">
+    <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
       <CardHead
         title={t(
           msg(
@@ -55,7 +55,7 @@ export function AgentSpendCard({
         )}
       />
 
-      <div className="card-body">
+      <div className="px-4 py-4 sm:px-5">
         {rows.length === 0 ? (
           <DashboardEmptyState
             icon={<Users size={18} />}
@@ -95,7 +95,7 @@ export function AgentSpendCard({
                 <div className="min-w-0">
                   <div className="mb-1 flex items-center gap-2">
                     <span
-                      className="truncate text-sm font-medium"
+                      className="[overflow-wrap:anywhere] text-sm font-medium"
                       style={{ color: "var(--th-text-heading)" }}
                     >
                       {row.label}
@@ -110,9 +110,9 @@ export function AgentSpendCard({
                       {formatTokens(row.tokens)} · {formatPercent(row.share)}
                     </span>
                   </div>
-                  <div className="bar-track" style={{ height: 5 }}>
+                  <div className="h-1.5 overflow-hidden rounded bg-surface-medium" style={{ height: 5 }}>
                     <div
-                      className="bar-fill"
+                      className="h-full rounded transition-[width] duration-300 motion-reduce:transition-none"
                       style={{
                         width: `${(row.cost / maxCost) * 100}%`,
                         background: row.color,
@@ -147,7 +147,7 @@ export function AgentCacheCard({
   overallCacheHitRate: number;
 }) {
   return (
-    <article className="card">
+    <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
       <CardHead
         title={t(
           msg(
@@ -166,14 +166,14 @@ export function AgentCacheCard({
           ),
         )}
         actions={
-          <span className="chip" style={positiveChipStyle}>
+          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-md border border-th-border-subtle bg-surface-subtle px-2 py-1 text-xs tabular-nums text-th-text-secondary" style={positiveChipStyle}>
             {formatPercent(overallCacheHitRate)}{" "}
             {t(msg("전체", "overall", "全体", "整体"))}
           </span>
         }
       />
 
-      <div className="card-body">
+      <div className="px-4 py-4 sm:px-5">
         {rows.length === 0 ? (
           <DashboardEmptyState
             icon={<Gauge size={18} />}
@@ -248,9 +248,9 @@ export function AgentCacheCard({
                         {sub}
                       </span>
                     </div>
-                    <div className="bar-track" style={{ height: 5 }}>
+                    <div className="h-1.5 overflow-hidden rounded bg-surface-medium" style={{ height: 5 }}>
                       <div
-                        className="bar-fill"
+                        className="h-full rounded transition-[width] duration-300 motion-reduce:transition-none"
                         style={{
                           width: `${Math.max(row.hitRate, row.hitRate > 0 ? 4 : 0)}%`,
                           background:
@@ -291,7 +291,7 @@ export function SkillUsageCard({
   const maxCalls = Math.max(1, ...rows.map((row) => row.windowCalls));
 
   return (
-    <article className="card">
+    <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
       <CardHead
         title={t(msg("스킬 사용", "Skill Usage", "スキル使用量", "技能使用"))}
         subtitle={t(
@@ -303,14 +303,14 @@ export function SkillUsageCard({
           ),
         )}
         actions={
-          <span className="chip" style={numericBadgeStyle}>
+          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-md border border-th-border-subtle bg-surface-subtle px-2 py-1 text-xs tabular-nums text-th-text-secondary" style={numericBadgeStyle}>
             {windowCalls.toLocaleString()}{" "}
             {t(msg("calls", "calls", "calls", "calls"))}
           </span>
         }
       />
 
-      <div className="card-body">
+      <div className="px-4 py-4 sm:px-5">
         {rows.length === 0 && byAgentRows.length === 0 ? (
           <DashboardEmptyState
             icon={<BarChart3 size={18} />}
@@ -331,14 +331,14 @@ export function SkillUsageCard({
             }
           />
         ) : (
-          <div className="grid grid-2 gap-3">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 gap-3">
             <div>
-              <div className="list-section">
+              <div className="mb-2 text-xs font-medium text-th-text-muted">
                 {t(msg("상위 스킬", "Top Skills", "上位スキル", "高频技能"))}
               </div>
               <div className="space-y-3">
                 {rows.slice(0, 6).map((row, index) => (
-                  <div key={`${row.id}-${index}`} className="list-card">
+                  <div key={`${row.id}-${index}`} className="min-w-0 border-b border-th-border-subtle py-3 last:border-b-0">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div
@@ -370,9 +370,9 @@ export function SkillUsageCard({
                         </div>
                       </div>
                     </div>
-                    <div className="bar-track mt-3" style={{ height: 5 }}>
+                    <div className="h-1.5 overflow-hidden rounded bg-surface-medium mt-3" style={{ height: 5 }}>
                       <div
-                        className="bar-fill"
+                        className="h-full rounded transition-[width] duration-300 motion-reduce:transition-none"
                         style={{
                           width: `${Math.max((row.windowCalls / maxCalls) * 100, row.windowCalls > 0 ? 4 : 0)}%`,
                           background:
@@ -386,7 +386,7 @@ export function SkillUsageCard({
             </div>
 
             <div>
-              <div className="list-section">
+              <div className="mb-2 text-xs font-medium text-th-text-muted">
                 {t(
                   msg(
                     "에이전트별 상위 조합",
@@ -409,17 +409,17 @@ export function SkillUsageCard({
                   />
                 ) : (
                   byAgentRows.map((row, index) => (
-                    <div key={`${row.id}-${index}`} className="list-card tight">
+                    <div key={`${row.id}-${index}`} className="min-w-0 border-b border-th-border-subtle py-3 last:border-b-0">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div
-                            className="truncate text-sm font-semibold"
+                            className="[overflow-wrap:anywhere] text-sm font-semibold"
                             style={{ color: "var(--th-text-heading)" }}
                           >
                             {row.agentName}
                           </div>
                           <div
-                            className="mt-1 truncate text-[11px]"
+                            className="mt-1 [overflow-wrap:anywhere] text-[11px]"
                             style={{ color: "var(--th-text-secondary)" }}
                           >
                             {row.skillName}
@@ -474,7 +474,7 @@ export function AgentLeaderboardCard({
   const maxTokens = Math.max(1, ...rows.map((row) => row.tokens));
 
   return (
-    <article className="card">
+    <article className="min-w-0 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface">
       <CardHead
         title={t(
           msg(
@@ -493,13 +493,13 @@ export function AgentLeaderboardCard({
           ),
         )}
         actions={
-          <span className="chip" style={numericBadgeStyle}>
+          <span className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-md border border-th-border-subtle bg-surface-subtle px-2 py-1 text-xs tabular-nums text-th-text-secondary" style={numericBadgeStyle}>
             {rows.length} {t(msg("agents", "agents", "agents", "agents"))}
           </span>
         }
       />
 
-      <div className="card-body">
+      <div className="px-4 py-4 sm:px-5">
         {rows.length === 0 ? (
           <DashboardEmptyState
             icon={<Users size={18} />}
@@ -513,7 +513,7 @@ export function AgentLeaderboardCard({
         ) : (
           <div className="flex flex-col gap-3">
             {rows.map((row, index) => (
-              <div key={row.id} className="list-card">
+              <div key={row.id} className="min-w-0 border-b border-th-border-subtle py-3 last:border-b-0">
                 <div className="flex items-center gap-3">
                   <span
                     className="inline-grid h-6 w-6 place-items-center rounded-full text-[10px] font-semibold"
@@ -535,7 +535,7 @@ export function AgentLeaderboardCard({
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div
-                          className="truncate text-sm font-semibold"
+                          className="[overflow-wrap:anywhere] text-sm font-semibold"
                           style={{ color: "var(--th-text-heading)" }}
                         >
                           {row.label}
@@ -561,9 +561,9 @@ export function AgentLeaderboardCard({
                         {formatTokens(row.tokens)}
                       </div>
                     </div>
-                    <div className="bar-track mt-3" style={{ height: 5 }}>
+                    <div className="h-1.5 overflow-hidden rounded bg-surface-medium mt-3" style={{ height: 5 }}>
                       <div
-                        className="bar-fill"
+                        className="h-full rounded transition-[width] duration-300 motion-reduce:transition-none"
                         style={{
                           width: `${Math.max((row.tokens / maxTokens) * 100, row.tokens > 0 ? 4 : 0)}%`,
                           background:

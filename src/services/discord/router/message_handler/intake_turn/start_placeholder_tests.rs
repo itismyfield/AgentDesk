@@ -136,6 +136,22 @@ impl Discord {
     fn posted(&self) -> usize {
         self.minted.lock().unwrap().len()
     }
+
+    /// The content of every message POST, as sent.
+    fn posted_contents(&self) -> Vec<String> {
+        let prefix = format!("POST {} ", self.messages_path());
+        self.mock
+            .successful_requests_for(self.channel.get())
+            .iter()
+            .filter_map(|request| request.strip_prefix(&prefix))
+            .map(|body| {
+                serde_json::from_str::<serde_json::Value>(body).unwrap_or_default()["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect()
+    }
 }
 
 struct Host {
@@ -639,4 +655,65 @@ async fn a_refused_requeue_still_removes_the_placeholder_and_keeps_the_input() {
         return;
     }
     refused_requeue_removes_the_placeholder().await;
+}
+
+/// On a turn-mode channel a Discord start shows no processing placeholder, so a refused one has
+/// nothing to post or remove; off turn mode the same refusal posts its own and removes it.
+async fn turn_mode_start(turn_mode: bool) {
+    let host = blocked_host(7_290_400 + 10 * u64::from(turn_mode)).await;
+    let _turn = turn_mode
+        .then(|| crate::services::tui_o::turn_mode::TestConfirmation::new(host.channel.get()));
+    let message = MessageId::new(host.channel.get() + 1);
+    host.intake(message).await;
+    assert_eq!(
+        host.queued().await,
+        [message.get()],
+        "the input is kept once"
+    );
+    assert!(
+        host.blocker_kept(),
+        "the start was refused by the foreign row"
+    );
+    assert_eq!(host.dispatches(), 0);
+    let spinners = host
+        .discord
+        .posted_contents()
+        .iter()
+        .filter(|content| content.contains('⠋'))
+        .count();
+    if turn_mode {
+        assert_eq!(host.discord.posted(), 0, "no placeholder POST");
+        assert_eq!(spinners, 0);
+        assert!(host.discord.deleted().is_empty(), "nothing to remove");
+    } else {
+        assert_eq!((host.discord.posted(), spinners), (1, 1));
+        assert_eq!(
+            host.discord.deleted(),
+            [FIRST_POSTED],
+            "its own placeholder goes"
+        );
+    }
+    host.shared.mailboxes.remove_fixture_for_test(host.channel);
+}
+
+#[tokio::test]
+async fn a_turn_mode_discord_start_posts_no_processing_placeholder() {
+    if !child(concat!(
+        "services::discord::router::message_handler::intake_turn::start_placeholder::tests::",
+        "a_turn_mode_discord_start_posts_no_processing_placeholder"
+    )) {
+        return;
+    }
+    turn_mode_start(true).await;
+}
+
+#[tokio::test]
+async fn a_legacy_discord_start_still_posts_its_processing_placeholder() {
+    if !child(concat!(
+        "services::discord::router::message_handler::intake_turn::start_placeholder::tests::",
+        "a_legacy_discord_start_still_posts_its_processing_placeholder"
+    )) {
+        return;
+    }
+    turn_mode_start(false).await;
 }

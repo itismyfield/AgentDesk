@@ -209,7 +209,7 @@ fn claude_submission_modal(plain: &str) -> bool {
     tmux_capture_indicates_claude_tui_interactive_modal(&chrome)
 }
 
-// Busy evidence excludes a proven composer body while retaining native activity above it.
+// Clear a proven composer body while preserving its borders for footer evidence.
 pub(crate) fn submission_busy(provider: ShadowProvider, plain: &str) -> bool {
     if provider == ShadowProvider::Codex {
         return crate::services::codex_tui::input::submission_busy_in_pane(plain);
@@ -221,8 +221,9 @@ pub(crate) fn submission_busy(provider: ShadowProvider, plain: &str) -> bool {
         Some(
             lines[..start]
                 .iter()
-                .chain(lines[end + 1..].iter())
                 .copied()
+                .chain(["❯"])
+                .chain(lines[end..].iter().copied())
                 .collect::<Vec<_>>()
                 .join("\n"),
         )

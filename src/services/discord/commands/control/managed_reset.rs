@@ -34,8 +34,9 @@ pub(in crate::services::discord) async fn verified_codex_reset_refusal_for_targe
             && crate::services::codex_tui::canary::enabled_for(canary)
             && (tmux == Some(canary)
                 || (tmux.is_none()
-                    && crate::services::tmux_common::read_tmux_channel_binding(canary)
-                        == Some(canary_channel)))
+                    && crate::services::discord::tui_prompt_relay::resolve_known_tmux_channel_id(
+                        shared, canary,
+                    ) == Some(canary_channel)))
         {
             return Some(VERIFIED_CODEX_RESET_REFUSAL);
         }

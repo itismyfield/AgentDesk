@@ -249,6 +249,13 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// The policy receipt of a stop before input started; `None` on every other turn.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "super::save_store::identity_gate::runtime_stamp::before_start_stop_admission::deserialize_receipt")]
     pub(in crate::services::discord) herdr_before_start_stop: Option<super::save_store::identity_gate::runtime_stamp::before_start_stop_admission::BeforeStartReceipt>,
+    /// Actual stop notice, independent of an optional response anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::services::discord) stop_notice_message_id: Option<u64>,
+    /// Started without a response anchor because its channel was in confirmed turn mode then;
+    /// survives restart, when the in-memory confirmation is empty again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(in crate::services::discord) anchorless_turn_mode: bool,
     #[serde(default)]
     pub current_tool_line: Option<String>,
     #[serde(default)]
@@ -1095,6 +1102,8 @@ impl InflightTurnState {
             tui_terminal_generation_mtime_ns: None,
             tui_terminal_kind: None,
             herdr_before_start_stop: None,
+            stop_notice_message_id: None,
+            anchorless_turn_mode: false,
             current_tool_line: None,
             last_tool_name: None,
             last_tool_summary: None,

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type TouchEvent as ReactTouchEvent } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type TouchEvent as ReactTouchEvent } from "react";
 
 interface TooltipLabelProps {
   text: string;
@@ -9,9 +9,22 @@ interface TooltipLabelProps {
 
 export default function TooltipLabel({ text, tooltip, className, onClick }: TooltipLabelProps) {
   const [open, setOpen] = useState(false);
+  const [offset, setOffset] = useState(0);
   const tooltipId = useId();
   const containerRef = useRef<HTMLSpanElement | null>(null);
   const lastTouchAtRef = useRef(0);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const left = containerRef.current?.getBoundingClientRect().left ?? 0;
+      const width = Math.min(288, window.innerWidth - 32);
+      setOffset(Math.max(16 - left, Math.min(0, window.innerWidth - 16 - left - width)));
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -59,7 +72,7 @@ export default function TooltipLabel({ text, tooltip, className, onClick }: Tool
       {onClick ? (
         <button
           type="button"
-          className="min-w-0 flex-1 truncate text-left"
+          className="min-h-11 min-w-11 flex-1 truncate text-left"
           title={tooltip}
           aria-describedby={tooltipId}
           aria-expanded={open}
@@ -76,10 +89,10 @@ export default function TooltipLabel({ text, tooltip, className, onClick }: Tool
           {text}
         </button>
       ) : (
-        <span
-          className="min-w-0 flex-1 truncate"
-          role="button"
-          title={tooltip}
+        <button
+          type="button"
+          className="min-h-11 min-w-11 flex-1 truncate text-left"
+          onClick={() => setOpen(true)}
           aria-describedby={tooltipId}
           aria-expanded={open}
           tabIndex={0}
@@ -90,7 +103,7 @@ export default function TooltipLabel({ text, tooltip, className, onClick }: Tool
           onTouchStart={handleTouchStart}
         >
           {text}
-        </span>
+        </button>
       )}
       <span
         className="text-xs shrink-0"
@@ -104,8 +117,9 @@ export default function TooltipLabel({ text, tooltip, className, onClick }: Tool
       <span
         id={tooltipId}
         role="tooltip"
-        className={`absolute left-0 top-full mt-1 max-w-[min(18rem,calc(100vw-3rem))] rounded-md px-2 py-1 text-[10px] whitespace-normal break-words transition-opacity ${open ? "z-50 opacity-100" : "pointer-events-none -z-10 opacity-0"}`}
+        className={`absolute left-0 top-full mt-1 w-[min(18rem,calc(100vw-2rem))] rounded-md px-2 py-1 text-xs leading-5 whitespace-normal break-words transition-opacity ${open ? "z-50 opacity-100" : "hidden"}`}
         style={{
+          left: offset,
           background: "var(--th-card-bg)",
           color: "var(--th-text-primary)",
           border: "1px solid var(--th-border)",

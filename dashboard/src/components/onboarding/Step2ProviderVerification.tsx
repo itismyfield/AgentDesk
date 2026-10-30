@@ -57,12 +57,12 @@ export function Step2ProviderVerification({
         <h2
           ref={stepHeadingRef}
           tabIndex={-1}
-          className="text-lg font-semibold outline-none"
+          className="text-base font-semibold outline-none"
           style={{ color: "var(--th-text-heading)" }}
         >
           {tr("AI 프로바이더 확인", "AI Provider Verification")}
         </h2>
-        <p className="text-sm mt-1" style={{ color: "var(--th-text-muted)" }}>
+        <p className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
           {tr(
             "에이전트가 작업하려면 터미널에서 AI 프로바이더에 로그인되어 있어야 합니다.",
             "Agents need the AI provider CLI to be installed and logged in on this machine.",
@@ -75,7 +75,7 @@ export function Step2ProviderVerification({
           const status = providerStatuses[provider];
           const name = providerCliName(provider);
           return (
-            <div key={provider} className="rounded-xl p-4 border space-y-2" style={{ borderColor: borderLight }}>
+            <div key={provider} className="rounded-lg p-4 border space-y-2" style={{ borderColor: borderLight }}>
               <div className="flex items-center gap-3">
                 <span className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>{name}</span>
                 {checkingProviders && (
@@ -89,7 +89,7 @@ export function Step2ProviderVerification({
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 text-sm">
                     <span>{status.installed ? "OK" : "NO"}</span>
-                    <span style={{ color: status.installed ? "#86efac" : "#fca5a5" }}>
+                    <span style={{ color: status.installed ? "var(--th-accent-success)" : "var(--th-accent-danger)" }}>
                       {status.installed
                         ? tr("설치됨", "Installed") + (status.version ? ` (${status.version})` : "")
                         : tr("설치되지 않음", "Not installed")}
@@ -98,7 +98,7 @@ export function Step2ProviderVerification({
                   {status.installed && (
                     <div className="flex items-center gap-2 text-sm">
                       <span>{status.logged_in ? "OK" : "!"}</span>
-                      <span style={{ color: status.logged_in ? "#86efac" : "#fde68a" }}>
+                      <span style={{ color: status.logged_in ? "var(--th-accent-success)" : "var(--th-badge-amber-text)" }}>
                         {status.logged_in
                           ? tr("로그인됨", "Logged in")
                           : tr("로그인 필요", "Login required")}
@@ -110,7 +110,7 @@ export function Step2ProviderVerification({
 
               {status && !status.installed && (
                 <div className="rounded-lg p-3 text-xs space-y-1" style={{ backgroundColor: "rgba(251,191,36,0.08)" }}>
-                  <div style={{ color: "#fde68a" }}>
+                  <div style={{ color: "var(--th-badge-amber-text)" }}>
                     {providerInstallHint(provider, isKo)}
                   </div>
                   <div style={{ color: "var(--th-text-muted)" }}>
@@ -121,7 +121,7 @@ export function Step2ProviderVerification({
 
               {status && status.installed && !status.logged_in && (
                 <div className="rounded-lg p-3 text-xs" style={{ backgroundColor: "rgba(251,191,36,0.08)" }}>
-                  <div style={{ color: "#fde68a" }}>
+                  <div style={{ color: "var(--th-badge-amber-text)" }}>
                     {tr("터미널에서 로그인하세요:", "Login in terminal:")}
                     <code
                       className="ml-2 px-1.5 py-0.5 rounded"
@@ -140,22 +140,22 @@ export function Step2ProviderVerification({
       <ChecklistPanel title={tr("Step 2 체크리스트", "Step 2 checklist")} items={step2Checklist} />
 
       <div className={actionRow}>
-        <button type="button" onClick={() => goToStep(1)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+        <button type="button" onClick={() => goToStep(1)} className={btnSecondary} style={{ borderColor: "var(--th-border-subtle)" }}>
           {tr("이전", "Back")}
         </button>
-        <button type="button" onClick={() => void onCheckProviders()} disabled={checkingProviders} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+        <button type="button" onClick={() => void onCheckProviders()} disabled={checkingProviders} className={btnSecondary} style={{ borderColor: "var(--th-border-subtle)" }}>
           {tr("다시 확인", "Re-check")}
         </button>
         <button type="button"
           onClick={() => goToStep(3)}
           className={providersReady ? btnPrimary : btnSecondary}
-          style={providersReady ? undefined : { borderColor: "rgba(148,163,184,0.3)" }}
+          style={providersReady ? undefined : { borderColor: "var(--th-border-subtle)" }}
         >
           {providersReady ? tr("다음", "Next") : tr("확인 없이 계속", "Continue anyway")}
         </button>
       </div>
       {!providersReady ? (
-        <p className="text-xs leading-5" style={{ color: "#fde68a" }}>
+        <p className="text-xs leading-5" style={{ color: "var(--th-badge-amber-text)" }}>
           {tr(
             "CLI 설치나 로그인이 안 된 상태로 넘어가면 Step 5에서 완료할 수 없습니다. 지금은 역할 구성만 먼저 이어서 준비하는 용도입니다.",
             "If installation or login is still missing, Step 5 cannot complete. Continue only if you want to prepare the rest of the setup first.",

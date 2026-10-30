@@ -18,8 +18,7 @@ export default function KanbanTabView({ ctx }: KanbanTabViewProps) {
   return (
     <div
       data-testid="kanban-page"
-      className="mx-auto w-full max-w-6xl min-w-0 space-y-4 overflow-x-hidden pb-24 md:pb-0"
-      style={{ paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))" }}
+      className="[&_button]:min-h-11 [&_button]:min-w-11 [&_select]:min-h-11 [&_input:not([type=checkbox])]:min-h-11 mx-auto w-full max-w-6xl min-w-0 space-y-4 overflow-x-hidden pb-6"
     >
       <KanbanHeaderSurface
         ctx={{

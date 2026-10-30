@@ -221,7 +221,8 @@ fn save_in_root(
     user_msg_id: u64,
     state: &BusyFollowupRetryState,
 ) -> Result<(), String> {
-    if channel_id == 0 || user_msg_id == 0 || state.notice_message_id == 0 {
+    // A budget may exist without a card; only a bound card needs its real id.
+    if channel_id == 0 || user_msg_id == 0 || (state.notice_bound && state.notice_message_id == 0) {
         return Err("busy follow-up retry ids must be non-zero".to_string());
     }
     #[cfg(test)]
@@ -490,7 +491,7 @@ fn record_retry_at(
             None => {
                 own = Some(BusyFollowupRetryState {
                     notice_message_id,
-                    notice_bound: true,
+                    notice_bound: notice_message_id != 0,
                     draft_session: None,
                     ..carried
                 })

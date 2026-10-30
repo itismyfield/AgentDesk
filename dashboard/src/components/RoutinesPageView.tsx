@@ -9,25 +9,18 @@ export default function RoutinesPageView() {
   return (
     <div
       data-testid="routines-page"
-      className="h-full overflow-auto px-4 pb-28 pt-4 sm:px-6 sm:pb-12 sm:pt-6"
-      style={{ background: "var(--th-bg)" }}
+      className="h-full overflow-auto bg-th-bg-primary px-4 py-5 sm:px-8 sm:py-7"
     >
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-5">
-        <header>
-          <p
-            className="text-[11px] font-semibold uppercase tracking-[0.18em]"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {t({ ko: "Routines", en: "Routines" })}
-          </p>
+        <header className="border-b border-th-border-subtle pb-5">
           <h1
-            className="mt-2 text-2xl font-semibold tracking-normal sm:text-3xl"
+            className="text-2xl font-semibold tracking-tight"
             style={{ color: "var(--th-text-heading)" }}
           >
-            {t({ ko: "루틴 시간표", en: "Routines Timeline" })}
+            {t({ ko: "루틴", en: "Routines" })}
           </h1>
           <p
-            className="mt-2 max-w-2xl text-sm leading-6"
+            className="mt-2 max-w-2xl text-xs leading-5"
             style={{ color: "var(--th-text-muted)" }}
           >
             {t({
@@ -38,6 +31,7 @@ export default function RoutinesPageView() {
         </header>
 
         <RoutinesTimelineWidget
+          variant="home"
           t={t}
           localeTag={locale}
           language={language}

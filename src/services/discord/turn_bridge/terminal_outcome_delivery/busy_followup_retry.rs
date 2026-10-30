@@ -107,12 +107,14 @@ pub(super) async fn apply_busy_requeue_if_pending(
     // terminal-delivery edit below lands on the same single card. A divergence
     // means the binding was just dropped as unusable; leave it to the next
     // attempt rather than editing a card this turn does not own.
-    if outcome.notice_message_id != MessageId::new(inflight_state.current_msg_id) {
+    if outcome.notice_message_id
+        != crate::services::discord::inflight::opt_message_id(inflight_state.current_msg_id)
+    {
         tracing::warn!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
             user_msg_id = inflight_state.user_msg_id,
-            notice_message_id = outcome.notice_message_id.get(),
+            notice_message_id = outcome.notice_message_id.map_or(0, MessageId::get),
             current_msg_id = inflight_state.current_msg_id,
             "busy follow-up notice diverged from the live placeholder; delivering on the placeholder"
         );
@@ -130,7 +132,7 @@ mod tests {
             preparation_held: false,
             requeued: false,
             retry_capped: true,
-            notice_message_id: MessageId::new(100_000_004_888_301),
+            notice_message_id: Some(MessageId::new(100_000_004_888_301)),
         };
 
         let (preserve_inflight, response) = busy_requeue_delivery_policy(outcome);

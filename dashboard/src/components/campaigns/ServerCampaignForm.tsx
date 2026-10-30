@@ -195,8 +195,8 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
   };
 
   const status = draft.status;
-  return <form ref={form} className="campaign-server-form" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
-    <div className="campaign-edit-grid">
+  return <form ref={form} className="campaign-server-form grid min-w-0 gap-4 rounded-lg border border-th-border-subtle bg-th-bg-surface p-4" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
+    <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
       {draft.mode === "create" && <label>{tr("캠페인 ID", "Campaign ID")}<input aria-label={tr("캠페인 ID", "Campaign ID")} disabled={saving} value={draft.id} onChange={(event) => update({ id: event.target.value })} /></label>}
       <label>{tr("이름", "Name")}<input aria-label={tr("이름", "Name")} value={definition.title} onChange={(event) => setDefinition({ title: event.target.value })} /></label>
       <label>{tr("저장소", "Repository")}<select aria-label={tr("저장소", "Repository")} value={definition.repository} onChange={(event) => setDefinition({ repository: event.target.value as Definition["repository"] })}><option value="adk">AgentDesk</option><option value="cooking_heart">CookingHeart</option></select></label>
@@ -209,7 +209,7 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
       const missing = node.dependencies.filter((id) => !others.some(({ other }) => other.id === id));
       return <fieldset key={index} className="campaign-server-task">
         <legend>{tr(`작업 ${index + 1}`, `Task ${index + 1}`)}</legend>
-        <div className="campaign-edit-grid">
+        <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
           <label>{tr("작업 ID", "Task ID")}<input aria-label={tr("작업 ID", "Task ID")} readOnly={draft.saved[index] === true} value={node.id} onChange={(event) => setNode(index, { id: event.target.value })} /></label>
           <label>{tr("작업 제목", "Task title")}<input aria-label={tr("작업 제목", "Task title")} value={node.title} onChange={(event) => setNode(index, { title: event.target.value })} /></label>
           <label>{tr("이슈 링크", "Issue link")}<input aria-label={tr("이슈 링크", "Issue link")} inputMode="url" value={node.issue_url} onChange={(event) => setNode(index, { issue_url: event.target.value })} /></label>
@@ -230,12 +230,12 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
             </label>;
           })}
         </div>}
-        {node.acceptance.map((ac, acIndex) => <div key={acIndex} className="campaign-server-ac">
-          <input aria-label={tr("수용조건 ID", "Acceptance ID")} value={ac.id} onChange={(event) => setAcceptance(index, acIndex, { id: event.target.value })} />
-          <input aria-label={tr("수용조건 설명", "Acceptance description")} value={ac.description} onChange={(event) => setAcceptance(index, acIndex, { description: event.target.value })} />
-          <select aria-label={tr("검증 종류", "Verification")} value={ac.verification} onChange={(event) => setAcceptance(index, acIndex, { verification: event.target.value as Acceptance["verification"] })}>
+        {node.acceptance.map((ac, acIndex) => <div key={acIndex} className="campaign-server-ac items-end">
+          <label>{tr("수용조건 ID", "Acceptance ID")}<input aria-label={tr("수용조건 ID", "Acceptance ID")} value={ac.id} onChange={(event) => setAcceptance(index, acIndex, { id: event.target.value })} /></label>
+          <label>{tr("수용조건 설명", "Acceptance description")}<input aria-label={tr("수용조건 설명", "Acceptance description")} value={ac.description} onChange={(event) => setAcceptance(index, acIndex, { description: event.target.value })} /></label>
+          <label>{tr("검증 종류", "Verification")}<select aria-label={tr("검증 종류", "Verification")} value={ac.verification} onChange={(event) => setAcceptance(index, acIndex, { verification: event.target.value as Acceptance["verification"] })}>
             {VERIFICATIONS.map(([value, label]) => <option key={value} value={value}>{tr(...label)}</option>)}
-          </select>
+          </select></label>
           <button type="button" onClick={() => setNode(index, { acceptance: node.acceptance.filter((_, at) => at !== acIndex) })}>{tr("수용조건 삭제", "Remove acceptance")}</button>
         </div>)}
         <div className="campaign-actions">
@@ -245,7 +245,7 @@ export default function ServerCampaignForm({ draft, onDraftChange, onSaved, onCo
       </fieldset>;
     })}
     <button type="button" onClick={addNode}>{tr("작업 추가", "Add task")}</button>
-    {draft.mode === "edit" && <div className="campaign-edit-grid">
+    {draft.mode === "edit" && <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
       <label>{tr("변경 근거 링크", "Change reference")}<input aria-label={tr("변경 근거 링크", "Change reference")} inputMode="url" aria-invalid={reasonMissing} value={draft.change.reference} onChange={(event) => update({ change: { ...draft.change, reference: event.target.value } })} /></label>
       <label>{tr("변경 설명", "Change explanation")}<input aria-label={tr("변경 설명", "Change explanation")} aria-invalid={reasonMissing} value={draft.change.explanation} onChange={(event) => update({ change: { ...draft.change, explanation: event.target.value } })} /></label>
     </div>}

@@ -687,3 +687,65 @@ async fn withheld(pool: &sqlx::PgPool, row: &inflight::InflightTurnState) -> i64
         .bind(vec![row.user_msg_id.to_string()]).bind(&row.turn_nonce)
         .bind(serde_json::json!({"body":row.full_response})).fetch_one(pool).await.unwrap()
 }
+
+/// A turn-mode turn has no anchor: a pending stop shows once as a reply to the user's message and
+/// clears; a delivered one clears on its own notice id; one with no notice id is never cleared.
+#[tokio::test(flavor = "current_thread")]
+async fn a_turn_mode_anchorless_receipt_replies_to_the_user_message_then_clears() {
+    use crate::services::tui_o::cutover::test_override::force_channels;
+    // Its own nonce keeps the outbound dedupe from answering for another test's stop reply.
+    let anchorless: Edit = |row| {
+        row["runtime_kind"] = serde_json::to_value(RuntimeHandoffKind::ClaudeTui).unwrap();
+        row["current_msg_id"] = 0.into();
+        row["turn_nonce"] = "turn-mode-anchorless".into();
+        row["herdr_before_start_stop"]["turn_nonce"] = "turn-mode-anchorless".into();
+        row["anchorless_turn_mode"] = true.into();
+    };
+    let cases: [(&str, Edit, usize); 3] = [
+        ("pending", |_| {}, 1),
+        (
+            "delivered",
+            |row| {
+                row["herdr_before_start_stop"]["notice"] = "delivered".into();
+                row["stop_notice_message_id"] = 900_001.into();
+            },
+            0,
+        ),
+        (
+            "delivered without a notice id",
+            |row| {
+                row["herdr_before_start_stop"]["notice"] = "delivered".into();
+            },
+            0,
+        ),
+    ];
+    for (case, edit, sent) in cases {
+        let fixture = Fixture::new("turn-mode", false);
+        let _o = force_channels(&[(CHANNEL, RuntimeHandoffKind::ClaudeTui)]);
+        let row = fixture.persist(&edited(&edited(&fixture.row, anchorless), edit));
+        let before = fixture.bytes();
+        let discord = super::o_cut_recorder::start(CHANNEL).await;
+        let outcome = fixture.settle(&discord.http, &row).await;
+        let calls = discord.calls();
+        assert_eq!(calls.len(), sent, "{case}: {calls:?}");
+        for call in &calls {
+            assert!(call.route.starts_with("POST "), "{case}: {call:?}");
+            assert_eq!(call.content.as_deref(), Some(ADMITTED_ABORT_NOTICE));
+            assert_eq!(
+                call.reply_to.as_deref(),
+                Some("2"),
+                "a reply to the user's message"
+            );
+        }
+        if case == "delivered without a notice id" {
+            assert!(
+                matches!(outcome, BeforeStartRestartReport::Retained(_)),
+                "{case}"
+            );
+            assert_eq!(fixture.bytes(), before, "{case}");
+        } else {
+            assert_eq!(outcome, BeforeStartRestartReport::Settled, "{case}");
+            assert!(fixture.durable().is_none(), "{case}");
+        }
+    }
+}

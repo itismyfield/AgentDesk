@@ -64,17 +64,17 @@ export function SettingsOnboardingOverlay({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-[#0a0e1a]" role="dialog" aria-modal="true" aria-label="Onboarding wizard">
-      <div className="flex min-h-screen items-start justify-center pb-16 pt-8">
-        <div ref={onboardingDialogRef} className="w-full max-w-2xl">
+    <div className="fixed inset-0 z-[80] overflow-y-auto bg-th-bg-primary text-th-text-primary" role="dialog" aria-modal="true" aria-label="Onboarding wizard">
+      <div className="flex min-h-screen items-start justify-center pb-8 pt-4">
+        <div ref={onboardingDialogRef} className="w-full max-w-3xl">
           <div className="mb-2 flex justify-end px-4">
             <button
               ref={onboardingCloseButtonRef}
               onClick={onClose}
-              className="min-h-[44px] rounded-lg border px-4 py-2.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0e1a]"
+              className="min-h-[44px] rounded-lg border px-4 py-2.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--th-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--th-bg-primary)]"
               style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-muted)" }}
             >
-              x {tr("닫기", "Close")}
+              {tr("닫기", "Close")}
             </button>
           </div>
           <Suspense fallback={<div className="py-8 text-center" style={{ color: "var(--th-text-muted)" }}>Loading...</div>}>

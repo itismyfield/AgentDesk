@@ -15,7 +15,6 @@ import { formatRelativeTime, notificationColor } from "./shellFormatting";
 import { areStringArraysEqual, HOME_DEFAULT_WIDGETS, HOME_PRIMARY_WIDGET_SET, HOME_SUPPORT_WIDGET_SET, normalizeHomeWidgetOrder } from "./HomeOverviewConfig";
 import { HomeSortableWidget } from "./HomeOverviewWidgets";
 import { buildHomeWidgetSpecs } from "./HomeWidgetSpecs";
-import { StatusBadge } from "../components/common/StatusBadge";
 import { FreshnessIndicator } from "../components/common/FreshnessIndicator";
 import { coerceTimestampMs } from "../components/agent-manager/kanban-utils";
 
@@ -99,10 +98,6 @@ export default function HomeOverviewPage({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
   const outstandingMeetings = meetings.filter((meeting) => countOpenMeetingIssues(meeting) > 0).length;
-  const liveNotifications = notifications.filter(
-    (notification) => Date.now() - notification.ts < 60_000,
-  ).length;
-  const requestedCards = kanbanCards.filter((card) => card.status === "requested").length;
   const topAgents = useMemo(
     () =>
       (stats?.top_agents?.length
@@ -141,13 +136,11 @@ export default function HomeOverviewPage({
           (coerceTimestampMs(a.completed_at) ?? 0),
       );
   }, [kanbanCards]);
-  const recentDoneCount = recentDoneCards.length;
   const blockedCards = kanbanCards.filter((card) => card.status === "blocked").length;
   const totalMeetings = meetings.length;
   const reviewQueue = stats?.kanban.review_queue ?? kanbanCards.filter((card) => card.status === "review").length;
   const agentTotal = stats?.agents.total ?? topAgents.length;
   const liveSessions = stats?.dispatched_count ?? 0;
-  const providerSummary = tr("2/2 프로바이더 연결", "2/2 providers connected");
   const operationalMissionRows: DailyMissionViewModel[] = [
     {
       id: "review",
@@ -203,12 +196,7 @@ export default function HomeOverviewPage({
         ? "var(--th-accent-primary)"
         : "var(--th-accent-warn)",
   }));
-  const kanbanColumns = [
-    { id: "requested", label: tr("요청", "Requested"), accent: "#7dd3fc" },
-    { id: "in_progress", label: tr("진행", "In progress"), accent: "#6ef2a3" },
-    { id: "review", label: tr("리뷰", "Review"), accent: "#f5bd47" },
-    { id: "done", label: tr("완료", "Done"), accent: "#c084fc" },
-  ] as const;
+
 
   useEffect(() => loadHomeTokenAnalytics(setAnalytics), []);
 
@@ -262,6 +250,7 @@ export default function HomeOverviewPage({
   const todayLabel = useMemo(
     () =>
       new Intl.DateTimeFormat(isKo ? "ko-KR" : "en-US", {
+        timeZone: "Asia/Seoul",
         weekday: "long",
         month: "short",
         day: "numeric",
@@ -367,14 +356,11 @@ export default function HomeOverviewPage({
     gamificationLevel,
     isKo,
     kanbanCards,
-    kanbanColumns,
     latestAnalyticsDay,
     localeTag,
     missionResetLabel,
     missionXpLabel,
     recentDoneCards,
-    recentDoneCount,
-    requestedCards,
     reviewQueue,
     stats,
     streakLeader,
@@ -427,74 +413,52 @@ export default function HomeOverviewPage({
   );
 
   return (
-    <div className="mx-auto h-full w-full max-w-[92rem] overflow-auto px-4 py-6 pb-32 sm:px-6">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div className="max-w-3xl">
-          <div className="mb-1.5 flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-            <span>{todayLabel}</span>
-            <span className="h-1 w-1 rounded-full" style={{ background: "var(--th-text-muted)" }} />
-            <StatusBadge
-              tone={wsConnected ? "healthy" : "critical"}
-              size="xs"
-              pulse={wsConnected}
-              title={wsConnected ? tr("실시간 연결 정상", "Live connection healthy") : tr("WebSocket 끊김 — 페이지를 새로고침해 보세요", "WebSocket disconnected — refresh the page")}
-            >
-              {wsConnected ? tr("연결됨", "all systems normal") : tr("연결 끊김", "connection degraded")}
-            </StatusBadge>
-            {wsConnected ? (
-              <FreshnessIndicator
-                timestamp={wsLastEventTs ?? null}
-                compact
-                label={tr("업데이트", "updated")}
-                staleAfterSeconds={45}
-                criticalAfterSeconds={180}
-              />
+    <div data-testid="home-overview" className="h-full w-full overflow-auto bg-th-bg-primary text-th-text-primary">
+      <div className="mx-auto max-w-[88rem] px-4 py-5 pb-8 sm:px-8 sm:py-7">
+        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-th-border-subtle pb-5">
+          <div className="min-w-0">
+            <div className="mb-2 text-xs text-th-text-muted">{todayLabel}</div>
+            <h1 className="text-2xl font-semibold tracking-tight text-th-text-heading">{tr("운영 개요", "Overview")}</h1>
+            <p className="mt-2 text-xs leading-5 text-th-text-muted">{tr(`에이전트 ${agentTotal}명 · 활성 세션 ${liveSessions}개`, `${agentTotal} agents · ${liveSessions} active sessions`)}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2 text-xs text-th-text-secondary">
+              <span className={`h-1.5 w-1.5 rounded-full ${wsConnected ? "bg-[var(--th-accent-success)]" : "bg-[var(--th-accent-danger)]"}`} aria-hidden="true" />
+              <span role="status">{wsConnected ? tr("실시간 연결됨", "Live connection") : tr("실시간 연결 끊김", "Live connection lost")}</span>
+              {wsConnected ? <FreshnessIndicator timestamp={wsLastEventTs} compact label={tr("업데이트", "Updated")} staleAfterSeconds={45} criticalAfterSeconds={180} /> : null}
+            </div>
+            {!isMobileViewport && editing && (
+              <button
+                type="button"
+                onClick={() => setWidgets([...defaultWidgets])}
+                data-testid="home-reset-order"
+                className="min-h-11 rounded-md border px-3 py-2 text-xs font-medium transition-colors hover:bg-white/5"
+                style={{ borderColor: "var(--th-border-subtle)", color: "var(--th-text-muted)" }}
+              >
+                {tr("기본값", "Reset")}
+              </button>
+            )}
+            {!isMobileViewport ? (
+              <button
+                type="button"
+                onClick={() => setEditing((prev) => !prev)}
+                data-testid="home-edit-toggle"
+                className="inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-2 text-xs font-medium transition-colors hover:bg-white/5"
+                style={{
+                  borderColor: editing ? "var(--th-accent-primary)" : "var(--th-border-subtle)",
+                  background: editing ? "var(--th-accent-primary-soft)" : "transparent",
+                  color: editing ? "var(--th-text-heading)" : "var(--th-text-primary)",
+                }}
+              >
+                <GripVertical size={14} />
+                {editing ? tr("완료", "Done") : tr("편집", "Edit")}
+              </button>
             ) : null}
           </div>
-          <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl" style={{ color: "var(--th-text-heading)" }}>
-            {tr("오늘의 AgentDesk", "Today's AgentDesk")}
-          </h1>
-          <p className="mt-2 max-w-2xl text-sm leading-7 sm:text-base" style={{ color: "var(--th-text-secondary)" }}>
-            {tr(
-              `에이전트 ${agentTotal}명 · 세션 ${liveSessions} 활성 · ${providerSummary}`,
-              `${agentTotal} agents · ${liveSessions} live sessions · ${providerSummary}`,
-            )}
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          {!isMobileViewport && editing && (
-            <button
-              type="button"
-              onClick={() => setWidgets([...defaultWidgets])}
-              data-testid="home-reset-order"
-              className="rounded-full border px-3 py-2 text-xs font-medium transition-colors hover:bg-white/5"
-              style={{ borderColor: "var(--th-border-subtle)", color: "var(--th-text-muted)" }}
-            >
-              {tr("기본값", "Reset")}
-            </button>
-          )}
-          {!isMobileViewport ? (
-            <button
-              type="button"
-              onClick={() => setEditing((prev) => !prev)}
-              data-testid="home-edit-toggle"
-              className="inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-medium transition-colors hover:bg-white/5"
-              style={{
-                borderColor: editing ? "var(--th-accent-primary)" : "var(--th-border-subtle)",
-                background: editing ? "var(--th-accent-primary-soft)" : "transparent",
-                color: editing ? "var(--th-text-heading)" : "var(--th-text-primary)",
-              }}
-            >
-              <GripVertical size={14} />
-              {editing ? tr("완료", "Done") : tr("편집", "Edit")}
-            </button>
-          ) : null}
-        </div>
-      </div>
+        </header>
 
       {!isMobileViewport && editing && (
-        <div className="mt-4 rounded-2xl border px-4 py-3 text-sm" style={{ borderColor: "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)", background: "var(--th-accent-primary-soft)", color: "var(--th-text-secondary)" }}>
+        <div className="mt-4 rounded-lg border px-4 py-3 text-sm" style={{ borderColor: "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)", background: "var(--th-accent-primary-soft)", color: "var(--th-text-secondary)" }}>
           <span className="inline-flex items-center gap-2">
             <GripVertical size={14} />
             {tr(
@@ -514,7 +478,7 @@ export default function HomeOverviewPage({
         onDragCancel={handleHomeWidgetDragCancel}
       >
         <SortableContext items={visibleWidgets} strategy={rectSortingStrategy}>
-          <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-12">
+          <div className="mt-5 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-12">
             {visibleWidgets.map((widgetId) => {
               const spec = widgetSpecs[widgetId as keyof typeof widgetSpecs];
               if (!spec) return null;
@@ -522,7 +486,7 @@ export default function HomeOverviewPage({
                 <HomeSortableWidget
                   key={widgetId}
                   widgetId={widgetId}
-                  className={spec.className}
+                  className={`${spec.className} ${widgetId === "m_tokens" || widgetId === "m_cost" ? "" : "col-span-2"}`}
                   disabled={!homeWidgetDragEnabled}
                   showHandle={homeWidgetDragEnabled}
                   activeWidgetId={activeWidgetId}
@@ -539,10 +503,10 @@ export default function HomeOverviewPage({
 
       {!editing && supportWidgets.length > 0 ? (
         <section
-          className="mt-4 rounded-[1.15rem] border"
+          className="mt-5 rounded-lg border"
           style={{
             borderColor: "var(--th-border-subtle)",
-            background: "color-mix(in srgb, var(--th-card-bg) 86%, transparent)",
+            background: "var(--th-bg-surface)",
           }}
           data-testid="home-support-section"
         >
@@ -592,6 +556,7 @@ export default function HomeOverviewPage({
           ) : null}
         </section>
       ) : null}
+      </div>
     </div>
   );
 }

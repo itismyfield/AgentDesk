@@ -197,6 +197,37 @@ function RateLimitBucketGauge({
   );
 }
 
+function HomeSummaryBucket({ bucket, isKo }: { bucket: RLBucket; isKo: boolean }) {
+  const isNearLimit = bucket.utilization !== null && bucket.utilization >= 90;
+  const resetLabel = formatRateLimitResetLabel(bucket.resetAtMs, isKo);
+
+  return (
+    <div className="min-w-0 space-y-1">
+      <div className="flex min-w-0 flex-wrap items-baseline gap-x-1 gap-y-0.5 text-[11px] leading-4">
+        <span className="min-w-0 break-words text-th-text-secondary">{bucket.label}</span>
+        <span className="min-w-0 break-words text-th-text-muted" title={resetLabel}>
+          {formatRateLimitResetLabel(bucket.resetAtMs, isKo, Date.now(), "short")}
+        </span>
+        <span
+          className="ml-auto font-mono tabular-nums text-th-text-primary"
+          style={isNearLimit ? { color: "var(--th-badge-amber-text)" } : undefined}
+        >
+          {formatCompactPctPair(bucket, shouldShowProjectedUtilization(bucket))}
+        </span>
+      </div>
+      <div className="h-1 overflow-hidden rounded-full bg-th-border-subtle" aria-hidden="true">
+        <div
+          className="h-full rounded-full bg-th-text-secondary"
+          style={{
+            width: rateLimitFillWidth(bucket.utilization),
+            ...(isNearLimit ? { backgroundColor: "var(--th-badge-amber-text)" } : {}),
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function MiniRateLimitBar({
   isKo,
   density = "compact",
@@ -204,9 +235,10 @@ export function MiniRateLimitBar({
 }: {
   isKo: boolean;
   density?: "compact" | "comfortable";
-  layout?: "default" | "homeWide";
+  layout?: "default" | "homeWide" | "homeSummary";
 }) {
   const [providers, setProviders] = useState<RLProvider[]>([]);
+  const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const isComfy = density === "comfortable";
 
   useEffect(() => {
@@ -214,13 +246,57 @@ export function MiniRateLimitBar({
     const load = async () => {
       try {
         const json = await request<{ providers?: RawRLProvider[] }>("/api/rate-limits", { suppressErrorToast: true });
-        if (mounted) setProviders(transformRLProviders(json.providers ?? []));
-      } catch { /* ignore */ }
+        if (mounted) {
+          setProviders(transformRLProviders(json.providers ?? []));
+          setLoadState("ready");
+        }
+      } catch {
+        if (mounted) setLoadState("error");
+      }
     };
     load();
     const timer = setInterval(load, 30_000);
     return () => { mounted = false; clearInterval(timer); };
   }, []);
+
+  if (layout === "homeSummary") {
+    return (
+      <div className="mt-3 min-w-0">
+        {loadState === "loading" || loadState === "error" || providers.length === 0 ? (
+          <p role="status" className="text-xs leading-5 text-th-text-muted">
+            {loadState === "loading"
+              ? isKo ? "한도 불러오는 중…" : "Loading rate limits…"
+              : loadState === "error"
+                ? isKo ? "한도를 불러오지 못했습니다. 잠시 후 다시 확인합니다." : "Could not load rate limits. Retrying shortly."
+                : isKo ? "표시할 한도 데이터가 없습니다." : "No rate-limit data available."}
+          </p>
+        ) : null}
+        {providers.length > 0 ? (
+          <div className={`grid min-w-0 grid-cols-2 gap-x-4 gap-y-5${loadState === "error" ? " mt-3" : ""}`}>
+            {providers.map((p) => (
+              <div key={`${p.provider}:${p.profileId}`} className="min-w-0">
+                <div className="mb-2 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                  <span className="min-w-0 break-words text-xs font-medium leading-4 text-th-text-primary">{p.provider}</span>
+                  {p.stale ? <span className="text-[11px] leading-4 text-th-text-muted">{isKo ? "지연" : "Stale"}</span> : null}
+                </div>
+                {p.unsupported || p.buckets.length === 0 ? (
+                  <p className="break-words text-[11px] leading-4 text-th-text-muted">
+                    {p.unsupported
+                      ? p.reason ?? (isKo ? "한도 측정을 지원하지 않습니다." : "Rate-limit telemetry unavailable.")
+                      : isKo ? "버킷 데이터가 없습니다." : "No bucket data."}
+                  </p>
+                ) : (
+                  <div className="space-y-3">
+                    {p.buckets.map((bucket) => <HomeSummaryBucket key={bucket.id} bucket={bucket} isKo={isKo} />)}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
 
   if (providers.length === 0) return null;
 

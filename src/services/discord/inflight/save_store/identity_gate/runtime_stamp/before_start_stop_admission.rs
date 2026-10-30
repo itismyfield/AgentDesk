@@ -150,7 +150,9 @@ impl InflightTurnState {
                     && receipt.0["notice"].as_str() == Some(DELIVERED)
                     && receipt.admitted_generation() == generation
                     && generation != 0
-                    && fresh.current_msg_id != 0
+                    && (fresh.current_msg_id != 0
+                        || fresh.stop_notice_message_id.is_some_and(|id| id != 0))
+                    && fresh.stop_notice_message_id == self.stop_notice_message_id
                     && fresh.herdr_before_start_stop.as_ref() == Some(receipt)
                     && fresh.turn_nonce.as_deref() == Some(receipt.turn_nonce())
                     && fresh.restart_mode.is_none()
@@ -173,7 +175,7 @@ impl InflightTurnState {
             return Err("receipt required".into());
         }
         let durable = existing.and_then(|row| row.herdr_before_start_stop.as_ref());
-        if durable.is_some()
+        if (durable.is_some() || existing.is_some_and(|row| row.stop_notice_message_id.is_some()))
             && existing.is_some_and(|row| {
                 !InflightEpisodePin::from_state(row)
                     .is_same_episode_as(&InflightEpisodePin::from_state(self))
@@ -209,6 +211,7 @@ impl InflightTurnState {
             return Ok(());
         }
         self.herdr_before_start_stop = durable.cloned();
+        self.stop_notice_message_id = existing.and_then(|row| row.stop_notice_message_id);
         Ok(())
     }
 
@@ -248,7 +251,8 @@ impl InflightTurnState {
             .ok()?;
         let fresh = guard.state();
         if fresh.turn_nonce.as_deref() != Some(receipt.turn_nonce())
-            || fresh.current_msg_id == 0
+            || (self.current_msg_id != 0 && fresh.current_msg_id == 0)
+            || (fresh.herdr_before_start_stop.is_none() && fresh.stop_notice_message_id.is_some())
             || !InflightTurnIdentity::from_state(self).matches_state(fresh)
             || fresh.effective_finalizer_turn_id() != self.effective_finalizer_turn_id()
             || fresh.rebind_origin
@@ -282,7 +286,17 @@ impl InflightTurnState {
             return None;
         }
         let row = self.clone();
-        off_scheduler(move || row.ack_locked()).await
+        let actual = match sent {
+            Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
+                super::super::super::super::opt_message_id(self.current_msg_id).map(|id| id.get())
+            }
+            Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                replacement_anchor,
+                ..
+            }) => replacement_anchor.map(|id| id.get()),
+            _ => return None,
+        };
+        off_scheduler(move || row.ack_locked(actual)).await
     }
 
     /// The same ack for a stop shown as a reply where O owns the body: only a send that returned a
@@ -295,10 +309,14 @@ impl InflightTurnState {
             return None;
         }
         let row = self.clone();
-        off_scheduler(move || row.ack_locked()).await
+        let actual = match sent {
+            Ok(Some(id)) => id.get(),
+            _ => return None,
+        };
+        off_scheduler(move || row.ack_locked(Some(actual))).await
     }
 
-    fn ack_locked(&self) -> Option<InflightTurnState> {
+    fn ack_locked(&self, actual: Option<u64>) -> Option<InflightTurnState> {
         let expected = self.herdr_before_start_stop.as_ref()?;
         let provider = self.provider_kind()?;
         let pin = InflightEpisodePin::from_state(self);
@@ -318,7 +336,11 @@ impl InflightTurnState {
         if fresh.turn_nonce.as_deref() != Some(durable.turn_nonce())
             || fresh.tui_terminal_kind.is_some()
             || fresh.terminal_delivery_committed
-            || self.current_msg_id == 0
+            || actual == Some(0)
+            || (self.current_msg_id == 0 && actual.is_none())
+            || fresh
+                .stop_notice_message_id
+                .is_some_and(|id| Some(id) != actual)
             || fresh.current_msg_id != self.current_msg_id
         {
             return None;
@@ -328,6 +350,7 @@ impl InflightTurnState {
         }
         let mut updated = fresh.clone();
         updated.herdr_before_start_stop.as_mut()?.0["notice"] = DELIVERED.into();
+        updated.stop_notice_message_id = actual.or(fresh.stop_notice_message_id);
         commit(&mut guard, &updated, ACK_CALLER)
     }
 
@@ -344,7 +367,8 @@ impl InflightTurnState {
         };
         receipt.supported()
             && receipt.0["notice"].as_str() == Some(DELIVERED)
-            && fresh.current_msg_id != 0
+            && (fresh.current_msg_id != 0 || fresh.stop_notice_message_id.is_some_and(|id| id != 0))
+            && fresh.stop_notice_message_id == self.stop_notice_message_id
             && fresh.herdr_before_start_stop.as_ref() == Some(receipt)
             && fresh.turn_nonce.as_deref() == Some(receipt.turn_nonce())
             && receipt.admitted_generation() != 0

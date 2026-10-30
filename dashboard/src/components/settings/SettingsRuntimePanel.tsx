@@ -27,6 +27,7 @@ interface SettingsRuntimePanelProps extends Pick<
   panelQueryNormalized: string;
   rcDirty: boolean;
   rcLoaded: boolean;
+  rcError: boolean;
   rcSaving: boolean;
   renderSettingRow: RenderSettingRow;
   runtimeMetas: SettingRowMeta[];
@@ -45,6 +46,7 @@ export function SettingsRuntimePanel({
   primaryActionStyle,
   rcDirty,
   rcLoaded,
+  rcError,
   rcSaving,
   renderSettingRow,
   runtimeMetas,
@@ -54,7 +56,11 @@ export function SettingsRuntimePanel({
 }: SettingsRuntimePanelProps) {
   return (
     <div className="space-y-4">
-      {!rcLoaded ? (
+      {rcError ? (
+        <p role="alert" className="rounded-md border border-th-border-subtle px-4 py-5 text-sm leading-6 text-th-text-secondary">
+          {tr("런타임 설정을 불러오지 못했습니다. 페이지를 새로고침해 다시 확인해 주세요.", "Runtime settings could not be loaded. Refresh the page to try again.")}
+        </p>
+      ) : !rcLoaded ? (
         <SettingsEmptyState className="text-sm">
           {tr("런타임 설정을 불러오는 중...", "Loading runtime config...")}
         </SettingsEmptyState>
@@ -105,7 +111,7 @@ export function SettingsRuntimePanel({
                         step={step}
                         value={value}
                         onChange={(event) => onRuntimeChange(field.key, Number(event.target.value))}
-                        className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
+                        className="h-11 min-w-0 flex-1 cursor-pointer"
                         style={{ accentColor: "var(--th-accent-primary)" }}
                       />
                       <input
@@ -120,7 +126,7 @@ export function SettingsRuntimePanel({
                             onRuntimeChange(field.key, next);
                           }
                         }}
-                        className="w-20 rounded-xl px-2 py-1.5 text-right text-xs"
+                        className="min-h-11 w-20 rounded-md px-2 py-1.5 text-right text-xs"
                         style={{
                           ...inputStyle,
                           fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
@@ -150,14 +156,10 @@ export function SettingsRuntimePanel({
                 <Accordion.Item
                   key={category.id}
                   value={category.id}
-                  className="overflow-hidden rounded-[20px] border"
+                  className="min-w-0 overflow-hidden rounded-lg border"
                   style={{
-                    borderColor: isOpen
-                      ? "color-mix(in srgb, var(--th-accent-primary) 32%, var(--th-border) 68%)"
-                      : "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                    background: isOpen
-                      ? "color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-primary-soft) 18%)"
-                      : "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+                    borderColor: "var(--th-border-subtle)",
+                    background: "var(--th-bg-surface)",
                   }}
                 >
                   <Accordion.Header>
@@ -175,10 +177,8 @@ export function SettingsRuntimePanel({
                       </span>
                       <span className="flex shrink-0 items-center gap-2">
                         <span
-                          className="settings-count-chip inline-flex rounded-full border px-2.5 py-1 text-[10px] font-medium"
+                          className="inline-flex shrink-0 whitespace-nowrap px-1 text-xs tabular-nums"
                           style={{
-                            borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                            background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
                             color: "var(--th-text-muted)",
                           }}
                         >

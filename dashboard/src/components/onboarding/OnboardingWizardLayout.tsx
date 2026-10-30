@@ -6,18 +6,18 @@ import { Step4ChannelSetup } from "./Step4ChannelSetup";
 import { Step5OwnerConfirm } from "./Step5OwnerConfirm";
 
 export const ONBOARDING_WIZARD_STYLES = {
-  stepBox: "rounded-2xl border p-6 space-y-5",
-  inputStyle: "w-full rounded-xl px-4 py-3 text-sm bg-surface-subtle border",
+  stepBox: "min-w-0 rounded-lg border bg-th-bg-surface p-4 space-y-5 sm:p-5",
+  inputStyle: "min-h-11 w-full min-w-0 rounded-md px-3 py-2 text-sm bg-th-bg-primary border",
   btnPrimary:
-    "px-6 py-3 rounded-xl text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors",
+    "min-h-11 px-4 py-2.5 rounded-md text-sm font-medium bg-th-text-primary text-th-bg-primary hover:opacity-90 disabled:opacity-50 transition-colors",
   btnSecondary:
-    "px-6 py-3 rounded-xl text-sm font-medium border bg-surface-subtle text-th-text-secondary hover:text-th-text-primary hover:opacity-100 disabled:opacity-50 transition-[opacity,color]",
+    "min-h-11 px-4 py-2.5 rounded-md text-sm font-medium border bg-surface-subtle text-th-text-secondary hover:text-th-text-primary hover:opacity-100 disabled:opacity-50 transition-[opacity,color]",
   btnSmall:
-    "px-3 py-1.5 rounded-lg text-xs font-medium border bg-surface-subtle text-th-text-secondary hover:text-th-text-primary hover:opacity-100 transition-[opacity,color]",
+    "min-h-11 min-w-11 px-3 py-2 rounded-md text-xs font-medium border bg-surface-subtle text-th-text-secondary hover:text-th-text-primary hover:opacity-100 transition-[opacity,color]",
   labelStyle: "text-xs font-medium block mb-1",
   actionRow: "flex flex-col sm:flex-row gap-3 pt-2",
-  borderLight: "rgba(148,163,184,0.2)",
-  borderInput: "rgba(148,163,184,0.24)",
+  borderLight: "var(--th-border-subtle)",
+  borderInput: "var(--th-input-border)",
 };
 
 type OnboardingWizardLayoutProps = Record<string, any>;
@@ -116,15 +116,17 @@ export function OnboardingWizardLayout(props: OnboardingWizardLayoutProps) {
   const TOTAL_STEPS = totalSteps;
 
   return (
-    <div className="mx-auto w-full max-w-2xl min-w-0 space-y-6 p-4 sm:p-8">
+    <div className="mx-auto w-full max-w-3xl min-w-0 space-y-5 p-4 sm:px-6">
+      <header className="border-b border-th-border-subtle pb-5">
+        <h1 className="text-2xl font-semibold tracking-tight text-th-text-heading">{tr("AgentDesk 설정", "AgentDesk Setup")}</h1>
+        <p className="mt-2 text-xs leading-5 text-th-text-muted">{tr(`초기 연결 · ${step}/${TOTAL_STEPS}단계`, `Initial setup · Step ${step}/${TOTAL_STEPS}`)}</p>
+      </header>
       {draftNoticeVisible && (
         <div
           className="rounded-xl border px-4 py-3"
           style={{
-            borderColor:
-              "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)",
-            background:
-              "color-mix(in srgb, var(--th-accent-primary-soft) 74%, transparent)",
+            borderColor: "var(--th-border-subtle)",
+            background: "var(--th-bg-surface)",
           }}
         >
           <div
@@ -145,7 +147,7 @@ export function OnboardingWizardLayout(props: OnboardingWizardLayoutProps) {
               onClick={() => setDraftNoticeVisible(false)}
               className={btnSmall}
               style={{
-                borderColor: "rgba(148,163,184,0.3)",
+                borderColor: "var(--th-border-subtle)",
                 color: "var(--th-text-secondary)",
               }}
             >
@@ -155,42 +157,13 @@ export function OnboardingWizardLayout(props: OnboardingWizardLayoutProps) {
               type="button"
               onClick={resetDraft}
               className={btnSmall}
-              style={{ borderColor: "rgba(248,113,113,0.3)", color: "#fca5a5" }}
+              style={{ borderColor: "rgba(248,113,113,0.3)", color: "var(--th-accent-danger)" }}
             >
               {tr("임시 저장 비우기", "Clear draft")}
             </button>
           </div>
         </div>
       )}
-
-      <div className="text-center space-y-2">
-        <h1
-          className="text-2xl font-bold"
-          style={{ color: "var(--th-text-heading)" }}
-        >
-          {tr("AgentDesk 설정", "AgentDesk Setup")}
-        </h1>
-        <p className="text-sm" style={{ color: "var(--th-text-muted)" }}>
-          Step {step}/{TOTAL_STEPS}
-        </p>
-        <div className="flex gap-1 justify-center">
-          {Array.from({ length: TOTAL_STEPS }, (_, index) => index + 1).map(
-            (itemStep) => (
-              <div
-                key={itemStep}
-                className="h-1.5 rounded-full transition-all"
-                style={{
-                  width: itemStep <= step ? 40 : 20,
-                  backgroundColor:
-                    itemStep <= step
-                      ? "var(--th-accent-primary)"
-                      : "rgba(148,163,184,0.3)",
-                }}
-              />
-            ),
-          )}
-        </div>
-      </div>
 
       <StepStatusRail items={stepStatusItems} isKo={isKo} setItemRef={setItemRef} />
 
@@ -199,7 +172,7 @@ export function OnboardingWizardLayout(props: OnboardingWizardLayoutProps) {
           className="rounded-xl px-4 py-3 text-sm border"
           style={{
             borderColor: "rgba(248,113,113,0.4)",
-            color: "#fca5a5",
+            color: "var(--th-accent-danger)",
             backgroundColor: "rgba(127,29,29,0.2)",
           }}
         >

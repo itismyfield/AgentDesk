@@ -145,6 +145,29 @@ pub(crate) fn legacy_inject(source: &str, author: &str, nonce: &str, body: &str)
     )
 }
 
+/// Whether `text` opens with the pre-v1 frame `legacy_inject` wrote: a source, a numeric author
+/// and an 8-hex nonce.
+pub(crate) fn opens_legacy_inject(text: &str) -> bool {
+    let Some((header, _)) = text.trim_start().strip_prefix("[📱 ").and_then(|rest| {
+        rest.split_once("]\n")
+            .or_else(|| rest.strip_suffix(']').map(|header| (header, "")))
+    }) else {
+        return false;
+    };
+    let mut fields = header.rsplitn(3, " · ");
+    let (Some(nonce), Some(author), Some(source)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return false;
+    };
+    nonce.len() == 8
+        && nonce
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        && !author.is_empty()
+        && author.bytes().all(|b| b.is_ascii_digit())
+        && !source.trim().is_empty()
+}
+
 /// A durable-owned plain user header or a v1 header, with the bytes after its closing bracket.
 /// V1 metadata is read from the right, so a name that looks like metadata never supplies it.
 pub(crate) fn parse(text: &str) -> Option<(Header<'_>, &str)> {

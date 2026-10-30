@@ -558,7 +558,7 @@ export default function MeetingMinutesView({
         />
       )}
 
-      <MeetingTimelineSection
+      {(!embedded || meetings.length > 0) && <MeetingTimelineSection
         meetings={meetings}
         showStartForm={showStartForm}
         locale={locale}
@@ -590,7 +590,7 @@ export default function MeetingMinutesView({
         }
         onDiscardAllIssues={(meetingId) => void handleDiscardAllIssues(meetingId)}
         onRepoChange={(meetingId, repo) => void handleRepoChange(meetingId, repo)}
-      />
+      />}
 
       {detailMeeting && (
         <MeetingDetailModal

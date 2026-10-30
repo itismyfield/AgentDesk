@@ -43,7 +43,7 @@ export default function MeetingIssuePreview({
 
   return (
     <SurfaceCard
-      className="space-y-2 rounded-2xl p-3"
+      className="space-y-2 rounded-lg p-3"
       style={{
         background:
           "color-mix(in srgb, var(--th-bg-surface) 88%, transparent)",
@@ -53,8 +53,8 @@ export default function MeetingIssuePreview({
     >
       <button
         onClick={() => onToggle(meeting.id)}
-        className="flex min-w-0 items-center gap-1.5 break-words text-left text-xs font-medium transition-colors hover:opacity-80 [overflow-wrap:anywhere]"
-        style={{ color: "#34d399" }}
+        className="flex min-h-11 min-w-11 items-center gap-1.5 break-words text-left text-xs font-medium transition-colors hover:opacity-80 [overflow-wrap:anywhere]"
+        style={{ color: "var(--th-badge-emerald-text)" }}
         aria-expanded={expanded}
         aria-label={t({
           ko: `생성될 일감 미리보기 ${expanded ? "닫기" : "열기"}`,
@@ -80,7 +80,7 @@ export default function MeetingIssuePreview({
                 ? {
                     label: t({ ko: "생성됨", en: "Created" }),
                     icon: CheckCircle2,
-                    color: "#34d399",
+                    color: "var(--th-badge-emerald-text)",
                     bg: "rgba(16,185,129,0.12)",
                     border: "rgba(16,185,129,0.18)",
                   }
@@ -88,7 +88,7 @@ export default function MeetingIssuePreview({
                   ? {
                       label: t({ ko: "폐기됨", en: "Discarded" }),
                       icon: Ban,
-                      color: "#94a3b8",
+                      color: "var(--th-text-secondary)",
                       bg: "rgba(148,163,184,0.12)",
                       border: "rgba(148,163,184,0.18)",
                     }
@@ -96,14 +96,14 @@ export default function MeetingIssuePreview({
                     ? {
                         label: t({ ko: "실패", en: "Failed" }),
                         icon: TriangleAlert,
-                        color: "#fbbf24",
+                        color: "var(--th-badge-amber-text)",
                         bg: "rgba(245,158,11,0.12)",
                         border: "rgba(245,158,11,0.18)",
                       }
                     : {
                         label: t({ ko: "대기", en: "Pending" }),
                         icon: CircleDashed,
-                        color: "#60a5fa",
+                        color: "var(--th-badge-sky-text)",
                         bg: "rgba(96,165,250,0.12)",
                         border: "rgba(96,165,250,0.18)",
                       };
@@ -161,7 +161,7 @@ export default function MeetingIssuePreview({
                     {issueResult?.error && issueState === "failed" && (
                       <div
                         className="mt-1 break-words [overflow-wrap:anywhere]"
-                        style={{ color: "#fbbf24" }}
+                        style={{ color: "var(--th-badge-amber-text)" }}
                       >
                         {t({
                           ko: `실패: ${issueResult.error}`,
@@ -175,7 +175,7 @@ export default function MeetingIssuePreview({
                         target="_blank"
                         rel="noopener noreferrer"
                         className="mt-1 inline-flex max-w-full break-all hover:underline"
-                        style={{ color: "#34d399" }}
+                        style={{ color: "var(--th-badge-emerald-text)" }}
                       >
                         {t({
                           ko: "생성된 이슈 열기",

@@ -48,15 +48,14 @@ export function AppTweaksPanel({
 
   return (
     <div
-      className="pointer-events-none fixed right-4 top-[5.25rem] w-[min(22rem,calc(100vw-2rem))]"
+      className="pointer-events-none fixed right-4 top-24 sm:top-20 w-[min(22rem,calc(100vw-2rem))]"
       style={{ zIndex: popoverZIndex }}
     >
       <div
-        className="pointer-events-auto rounded-[1.75rem] border p-4 shadow-2xl"
+        className="pointer-events-auto max-h-[calc(100dvh-10rem)] overflow-auto rounded-lg border p-4 shadow-lg"
         style={{
           borderColor: "var(--th-border-subtle)",
-          background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 95%, transparent) 100%)",
+          background: "var(--th-bg-surface)",
         }}
       >
         <div className="flex items-center justify-between gap-3">
@@ -65,7 +64,7 @@ export function AppTweaksPanel({
               className="text-sm font-semibold"
               style={{ color: "var(--th-text-heading)" }}
             >
-              Tweaks
+              {tr("디자인", "Appearance")}
             </div>
             <div
               className="mt-1 text-xs"
@@ -77,7 +76,7 @@ export function AppTweaksPanel({
           <button
             type="button"
             onClick={() => setShowTweaksPanel(false)}
-            className="flex h-8 w-8 items-center justify-center rounded-xl text-[var(--th-text-muted)]"
+            className="flex h-11 w-11 items-center justify-center rounded-md text-[var(--th-text-muted)]"
             aria-label={tr("패널 닫기", "Close panel")}
           >
             <X size={14} />
@@ -87,13 +86,13 @@ export function AppTweaksPanel({
         <div className="mt-4 space-y-4">
           <div>
             <div
-              className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em]"
+              className="mb-2 text-xs font-medium"
               style={{ color: "var(--th-text-muted)" }}
             >
-              Theme
+              {tr("테마", "Theme")}
             </div>
             <div
-              className="flex items-center gap-1 rounded-full p-1"
+              className="flex items-center gap-1 rounded-md p-1"
               style={{ background: "var(--th-overlay-subtle)" }}
             >
               {THEME_OPTIONS.map((option) => {
@@ -104,7 +103,7 @@ export function AppTweaksPanel({
                     type="button"
                     onClick={() => setThemePreference(option.id)}
                     aria-pressed={active}
-                    className="flex-1 rounded-full px-3 py-1.5 text-xs font-medium transition-colors"
+                    className="flex-1 min-h-11 rounded-md px-3 py-2 text-xs font-medium transition-colors"
                     style={
                       active
                         ? {
@@ -123,10 +122,10 @@ export function AppTweaksPanel({
 
           <div>
             <div
-              className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em]"
+              className="mb-2 text-xs font-medium"
               style={{ color: "var(--th-text-muted)" }}
             >
-              Accent
+              {tr("강조색", "Accent")}
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {ACCENT_OPTIONS.map((option) => {
@@ -140,7 +139,7 @@ export function AppTweaksPanel({
                     aria-pressed={active}
                     data-accent-preset={option.id}
                     onClick={() => setAccentPreset(option.id)}
-                    className="dash-accent-swatch flex h-9 w-9 items-center justify-center rounded-full transition-transform"
+                    className="dash-accent-swatch flex h-11 w-11 items-center justify-center rounded-full transition-transform"
                     style={{
                       border: active
                         ? "2px solid var(--th-text-heading)"

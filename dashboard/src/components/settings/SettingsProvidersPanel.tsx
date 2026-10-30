@@ -57,8 +57,8 @@ export function SettingsProvidersPanel({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
           {tr(
-            `시스템 기본 홈은 그대로 두고 extra 계정만 누적합니다. extra ${extras}개.`,
-            `System default homes stay untouched; extra accounts accumulate. ${extras} extra.`,
+            `기본 계정과 추가 계정을 관리합니다. 추가 계정 ${extras}개.`,
+            `Manage the default and additional accounts. ${extras} additional accounts.`,
           )}
         </div>
         <p className="basis-full text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
@@ -87,7 +87,7 @@ export function SettingsProvidersPanel({
 
       {error ? (
         <div
-          className="rounded-2xl border px-4 py-3 text-sm"
+          className="rounded-lg border px-4 py-3 text-sm"
           style={{
             borderColor: "rgba(248, 113, 113, 0.38)",
             background: "rgba(248, 113, 113, 0.10)",
@@ -100,7 +100,7 @@ export function SettingsProvidersPanel({
 
       {pendingLogin ? (
         <div
-          className="rounded-2xl border px-4 py-3 text-sm"
+          className="rounded-lg border px-4 py-3 text-sm"
           data-testid="settings-providers-login-pending"
           style={{
             borderColor: "color-mix(in srgb, var(--th-accent-primary) 35%, transparent)",
@@ -122,7 +122,7 @@ export function SettingsProvidersPanel({
             )}
           </div>
           <pre
-            className="mt-2 overflow-x-auto rounded-xl px-3 py-2 text-[11px]"
+            className="mt-2 overflow-x-auto rounded-md px-3 py-2 text-[11px]"
             style={{
               background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
             }}
@@ -146,6 +146,10 @@ export function SettingsProvidersPanel({
       {loading && providers.length === 0 ? (
         <SettingsEmptyState className="text-sm">
           {tr("프로바이더 계정을 불러오는 중입니다.", "Loading provider accounts.")}
+        </SettingsEmptyState>
+      ) : providers.length === 0 ? (
+        <SettingsEmptyState className="text-sm">
+          {tr("표시할 프로바이더 계정이 없습니다. CLI 로그인 상태를 확인한 뒤 다시 불러와 주세요.", "No provider accounts available. Check CLI sign-in and reload.")}
         </SettingsEmptyState>
       ) : (
         <div className="grid gap-3">
@@ -193,7 +197,7 @@ function ProviderCard({
   const accounts = provider.accounts ?? [];
   return (
     <section
-      className="rounded-2xl border px-4 py-4"
+      className="rounded-lg border px-4 py-4"
       data-testid={`settings-provider-${provider.id}`}
       style={{
         borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
@@ -205,7 +209,7 @@ function ProviderCard({
           <div className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
             {provider.id}
           </div>
-          <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+          <div className="mt-1 text-[11px] [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
             {tr("시스템 기본", "System default")}: {provider.default_home}
           </div>
         </div>
@@ -257,7 +261,7 @@ function AccountRow({
   const buckets = account.usage?.buckets ?? [];
   return (
     <div
-      className="rounded-xl border px-3 py-3"
+      className="rounded-md border px-3 py-3"
       data-testid={`settings-provider-account-${account.id}`}
       style={{
         borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
@@ -265,49 +269,51 @@ function AccountRow({
       }}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
+        <div className="min-w-0 text-sm font-medium [overflow-wrap:anywhere]" style={{ color: "var(--th-text)" }}>
           {isDefault ? tr("시스템 기본", "System default") : account.id}
         </div>
-        {isDefault ? null : (
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {isDefault ? null : (
+            <button
+              type="button"
+              onClick={onRemove}
+              disabled={removing}
+              className="flex h-11 w-11 items-center justify-center rounded-md disabled:opacity-50"
+              style={{ color: "var(--th-text-muted)" }}
+              title={tr("연결 해제 (자격 증명은 유지)", "Unlink (keep credentials)")}
+              aria-label={tr("계정 연결 해제", "Unlink account")}
+            >
+              <X size={14} />
+            </button>
+          )}
           <button
             type="button"
-            onClick={onRemove}
-            disabled={removing}
-            className="rounded-lg p-1 disabled:opacity-50"
-            style={{ color: "var(--th-text-muted)" }}
-            title={tr("연결 해제 (자격 증명은 유지)", "Unlink (keep credentials)")}
-            aria-label={tr("계정 연결 해제", "Unlink account")}
+            onClick={onSetPrimary}
+            disabled={isPrimary}
+            className="inline-flex min-h-11 min-w-11 items-center justify-center gap-1 rounded-md border px-2 py-1 text-xs disabled:opacity-70"
+            style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
+            title={tr("이 provider의 기본 계정으로 사용", "Use as this provider's primary account")}
           >
-            <X size={14} />
+            {isPrimary ? <Check size={12} /> : null}
+            {isPrimary ? tr("기본", "Primary") : tr("기본으로", "Make primary")}
           </button>
-        )}
-        <button
-          type="button"
-          onClick={onSetPrimary}
-          disabled={isPrimary}
-          className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] disabled:opacity-70"
-          style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
-          title={tr("이 provider의 기본 계정으로 사용", "Use as this provider's primary account")}
-        >
-          {isPrimary ? <Check size={12} /> : null}
-          {isPrimary ? tr("기본", "Primary") : tr("기본으로", "Make primary")}
-        </button>
+        </div>
         {account.usage?.unsupported ? (
           <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
             {account.usage.reason ?? tr("사용량 미지원", "Usage unsupported")}
           </span>
         ) : null}
       </div>
-      <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+      <div className="mt-1 text-[11px] [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
         {account.home}
       </div>
       {(account.bound_agents ?? []).length > 0 ? (
-        <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+        <div className="mt-1 text-[11px] [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
           {tr("연결된 에이전트", "Bound agents")}: {(account.bound_agents ?? []).join(", ")}
         </div>
       ) : null}
       {(account.bound_channels ?? []).length > 0 ? (
-        <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+        <div className="mt-1 text-[11px] [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
           {tr("채널 override", "Channel overrides")}: {(account.bound_channels ?? []).join(", ")}
         </div>
       ) : null}

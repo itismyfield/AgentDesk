@@ -62,10 +62,10 @@ export function Step4ChannelSetup({
   return (
     <div className={stepBox} style={{ borderColor: borderLight }}>
       <div>
-        <h2 ref={stepHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
+        <h2 ref={stepHeadingRef} tabIndex={-1} className="text-base font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
           {tr("채널 설정", "Channel Setup")}
         </h2>
-        <p className="text-sm mt-1" style={{ color: "var(--th-text-muted)" }}>
+        <p className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
           {tr(
             "각 에이전트가 사용할 Discord 채널을 실제 서버 기준으로 설정합니다. 기존 채널을 재사용하거나, 추천 이름으로 새 채널을 만들 수 있습니다.",
             "Configure real Discord channels for each agent. Reuse existing channels or create new ones from the recommended names.",
@@ -100,8 +100,8 @@ export function Step4ChannelSetup({
       )}
 
       {guilds.length === 0 && (
-        <div className="rounded-xl p-4 text-sm" style={{ backgroundColor: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)" }}>
-          <div style={{ color: "#fde68a" }}>
+        <div className="rounded-lg p-4 text-sm" style={{ backgroundColor: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)" }}>
+          <div style={{ color: "var(--th-badge-amber-text)" }}>
             {tr(
               "통신 봇이 어떤 서버에도 초대되지 않았거나 토큰 검증이 끝나지 않았습니다. 실제 채널 생성 보장을 위해 Step 1로 돌아가 봇 초대부터 완료하세요.",
               "The communication bot is not invited to any server yet, or token validation is incomplete. Go back to Step 1 and finish the invite before continuing.",
@@ -112,7 +112,7 @@ export function Step4ChannelSetup({
 
       <div className="space-y-2">
         {channelAssignments.map((assignment, index) => (
-          <div key={assignment.agentId} className="rounded-xl p-3 border space-y-2" style={{ borderColor: "rgba(148,163,184,0.15)" }}>
+          <div key={assignment.agentId} className="rounded-lg p-3 border space-y-2" style={{ borderColor: "var(--th-border-subtle)" }}>
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>{assignment.agentName}</span>
               <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>-&gt;</span>
@@ -137,7 +137,7 @@ export function Step4ChannelSetup({
                       return copy;
                     });
                   }}
-                  className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
+                  className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm bg-surface-subtle border"
                   style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
                 >
                   <option value="">{tr(`새 채널: #${assignment.recommendedName}`, `New: #${assignment.recommendedName}`)}</option>
@@ -154,7 +154,7 @@ export function Step4ChannelSetup({
                   )}
                   value={assignment.channelName || assignment.recommendedName}
                   readOnly
-                  className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
+                  className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm bg-surface-subtle border"
                   style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
                   placeholder={assignment.recommendedName}
                 />
@@ -183,7 +183,7 @@ export function Step4ChannelSetup({
       <ChecklistPanel title={tr("Step 4 체크리스트", "Step 4 checklist")} items={step4Checklist} />
 
       <div className={actionRow}>
-        <button type="button" onClick={() => goToStep(3)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+        <button type="button" onClick={() => goToStep(3)} className={btnSecondary} style={{ borderColor: "var(--th-border-subtle)" }}>
           {tr("이전", "Back")}
         </button>
         <button type="button" onClick={() => goToStep(5)} disabled={!hasSelectedGuild || !channelAssignmentsReady} className={btnPrimary}>
