@@ -420,10 +420,8 @@ mod cases {
         }
     }
 
-    /// The 10-30 deploy shape: an earlier generation's managed row with a synthetic id, re-saved by
-    /// this process after restart, above a transcript whose history holds background notifications
-    /// Claude queued and drained mid-turn. Those drained notifications owe nothing, so the turn
-    /// closes; the kept reason is logged once while it held.
+    /// The deploy shape: an earlier generation's managed row re-saved after restart, above history
+    /// whose queued background notifications were drained mid-turn and so owe nothing.
     #[tokio::test(flavor = "current_thread")]
     async fn drained_notifications_in_history_do_not_hold_a_carried_managed_row() {
         let note = "<task-notification>job done</task-notification>";
