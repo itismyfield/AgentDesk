@@ -291,6 +291,78 @@ fn an_idle_owner_front_needs_execution_capacity_before_any_key() {
     assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
 }
 
+/// A submitted idle turn holds its execution slot and lease until its AI turn ends, so another
+/// channel finds the node full meanwhile; the slot returns once, and only then may another run.
+#[test]
+fn an_idle_owner_turn_holds_its_capacity_until_its_ai_turn_ends_pg() {
+    use crate::services::cluster::execution_capacity::acquire;
+    let path = module_path!().split_once("::").unwrap().1;
+    let test = format!("{path}::an_idle_owner_turn_holds_its_capacity_until_its_ai_turn_ends_pg");
+    if !crate::services::discord::admin_host_guard::tests::api_child(&test) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let data = tempfile::tempdir().unwrap();
+    let mut config = crate::config::Config::default();
+    config.data.dir = data.path().to_path_buf();
+    config.cluster.enabled = true;
+    config.cluster.execution_slots = Some(1);
+    crate::config_live_reload::install(config);
+    let rig = codex_rig_on("oc-slot", 7_272_539, true);
+    let db = rig
+        .runtime
+        .block_on(crate::db::auto_queue::test_support::TestPostgresDb::create());
+    let pool = rig.runtime.block_on(db.connect_and_migrate());
+    rig.pool.set(pool.clone()).unwrap();
+    let leases = || {
+        let count = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM node_execution_leases");
+        rig.runtime.block_on(count.fetch_one(&pool)).unwrap()
+    };
+    let other = |channel| {
+        let _entered = rig.runtime.enter();
+        let cancel = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+        acquire(Some(&pool), "codex", channel, cancel)
+    };
+    let (settled, answer) = tokio::sync::oneshot::channel();
+    let claim = rig.claim(&rig.granted_front()).unwrap();
+    let transcript = rig.transcript();
+    std::thread::scope(|scope| {
+        // Inside the scope, so a failed assertion drops it and ends the held AI turn.
+        let (release, turn) = std::sync::mpsc::channel::<()>();
+        let until_done: Box<dyn FnOnce() + Send> = Box::new(move || {
+            let _ = turn.recv();
+        });
+        let first = scope.spawn(|| {
+            let how = (
+                ProviderKind::Codex,
+                target::Phase::Idle,
+                transcript.as_path(),
+            );
+            rig.execute_until(claim, how, settled, Some(until_done))
+        });
+        let wait = async { tokio::time::timeout(std::time::Duration::from_secs(20), answer).await };
+        let answered = rig.runtime.block_on(wait);
+        let (held, refused) = (leases(), other(7_272_540).err());
+        release.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), Ok(()));
+        assert_eq!(answered.map(Result::ok), Ok(Some(Ok(()))));
+        assert_eq!(held, 1, "the lease stays while the AI turn runs");
+        assert!(
+            refused.is_some_and(|e| e.contains("exhausted")),
+            "the slot stays taken"
+        );
+    });
+    assert_eq!(leases(), 0, "released once the turn ended");
+    let next = other(7_272_540).expect("the returned slot");
+    assert!(next.is_some());
+    assert!(
+        other(7_272_546).is_err(),
+        "returned once: one slot, now taken"
+    );
+    drop(next);
+    rig.runtime.block_on(db.drop());
+}
+
 /// A first paste held by a pane replaced before it ran settles not sent with one notice; a pane
 /// replaced after the paste holds only the Enter, a write that may have landed.
 #[test]

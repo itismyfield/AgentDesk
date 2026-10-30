@@ -38,11 +38,13 @@ pub(super) struct Rig {
     pub(super) nonce: String,
     pub(super) renderer: std::path::PathBuf,
     program: std::path::PathBuf,
-    runtime: tokio::runtime::Runtime,
+    pub(super) runtime: tokio::runtime::Runtime,
     _registry: ChannelMailboxRegistry,
     mailbox: ChannelMailboxHandle,
     ticket: AdmissionTicket,
     original: PendingQueueItem,
+    /// The database an idle turn's execution capacity is leased in, when a test gives one.
+    pub(super) pool: std::sync::OnceLock<sqlx::PgPool>,
 }
 
 /// A known pane over `transcript` and an owner with one admitted original.
@@ -143,6 +145,7 @@ pub(super) fn owned(
         mailbox,
         ticket,
         original,
+        pool: std::sync::OnceLock::new(),
     }
 }
 
@@ -216,9 +219,22 @@ impl Rig {
         phase: target::Phase,
         transcript: &Path,
     ) -> Result<(), String> {
-        let owner = self.registration(&provider, phase, transcript, Execution::LocalTui);
+        let (settled, _) = tokio::sync::oneshot::channel();
+        self.execute_until(claim, (provider, phase, transcript), settled, None)
+    }
+
+    /// As `execute`, answering the drive on `settled` and observing the AI turn with `until_done`.
+    pub(super) fn execute_until(
+        &self,
+        claim: FrontClaim,
+        (provider, phase, transcript): (ProviderKind, target::Phase, &Path),
+        settled: Settled,
+        until_done: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<(), String> {
+        let mut owner = self.registration(&provider, phase, transcript, Execution::LocalTui);
+        owner.until_done = until_done;
         self.with_turn(&provider, Some(&self.name), |turn, sender| {
-            execute_front(turn, sender, claim, owner)
+            execute_front(turn, sender, claim, owner, settled)
         })
     }
 
@@ -268,6 +284,7 @@ impl Rig {
             name: NAME.into(),
             clock: Arc::new(|| 10_000),
             timing: &OWNER_TIMING,
+            until_done: None,
         }
     }
 
@@ -282,7 +299,7 @@ impl Rig {
     ) -> Result<(), String> {
         let host = TurnHost::Tmux;
         let turn = StreamingTurn {
-            pool: None,
+            pool: self.pool.get(),
             provider,
             prompt: PROMPT,
             session_id: None,
@@ -522,6 +539,68 @@ fn rig_cancelled_after_claim() -> Rig {
     rig
 }
 
+/// An idle front's handoff ends at its local settlement while its AI turn runs on: the next front
+/// is delivered busy before that turn ends, and the turn's end is observed once.
+#[test]
+fn an_idle_handoff_ends_at_settlement_while_its_ai_turn_runs() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("oi-turn", 7_272_538, "normal", view("", false), BUSY);
+    let mut next = rig.original.clone();
+    next.message_id += 1;
+    next.source_message_ids = vec![next.message_id];
+    let admitted = rig
+        .runtime
+        .block_on(admit(&rig.mailbox, &next, AdmissionTicket::new()));
+    assert!(matches!(
+        admitted,
+        crate::services::discord::queue_io::input_owner::admission::Admission::Accepted(_)
+    ));
+    let done = Arc::new(Mutex::new(0));
+    let (settled, answer) = tokio::sync::oneshot::channel();
+    let claim = rig.claim(&rig.granted_front()).unwrap();
+    let transcript = rig.transcript();
+    std::thread::scope(|scope| {
+        // Inside the scope, so a failed assertion drops it and ends the held AI turn.
+        let (release, turn) = std::sync::mpsc::channel::<()>();
+        let observed = done.clone();
+        let until_done: Box<dyn FnOnce() + Send> = Box::new(move || {
+            let _ = turn.recv();
+            *observed.lock().unwrap() += 1;
+        });
+        let first = scope.spawn(|| {
+            let how = (
+                ProviderKind::Claude,
+                target::Phase::Idle,
+                transcript.as_path(),
+            );
+            rig.execute_until(claim, how, settled, Some(until_done))
+        });
+        let wait = async { tokio::time::timeout(Duration::from_secs(20), answer).await };
+        let answered = rig.runtime.block_on(wait);
+        let busy = rig.handoff(
+            rig.granted_front(),
+            ProviderKind::Claude,
+            target::Phase::Busy,
+            &transcript,
+        );
+        let before_end = rig.events();
+        release.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), Ok(()));
+        assert_eq!(
+            answered.map(Result::ok),
+            Ok(Some(Ok(()))),
+            "settled before the AI turn ended"
+        );
+        assert_eq!(busy, Ok(()));
+        // The fake pane still draws A's text, so B may park it first; each input is pasted once.
+        let pastes = before_end.iter().filter(|event| *event == "paste").count();
+        assert_eq!(pastes, 2, "{before_end:?}");
+        assert_eq!(before_end[..2], ["paste", "Enter"], "{before_end:?}");
+        assert!(before_end.ends_with(&["paste".to_string(), "Enter".to_string()]));
+    });
+    assert_eq!(*done.lock().unwrap(), 1, "the turn's end is observed once");
+}
+
 /// A legacy draft guard does not stop the owner's transaction: the guard is legacy state.
 #[test]
 fn legacy_guard_value_does_not_block_owner_a() {
@@ -681,6 +760,7 @@ fn prepared_before_launch(rig: &Rig) -> Registration {
         name: NAME.into(),
         clock: Arc::new(|| 10_000),
         timing: &OWNER_TIMING,
+        until_done: None,
     }
 }
 
@@ -699,7 +779,7 @@ fn created_first_prompt(rig: &Rig) -> Result<(), String> {
         prepared_before_launch(rig),
         PROMPT.into(),
         scope::Lineage::Created,
-        None,
+        (None, reply_once(None)),
     );
     let _entered = rig.runtime.enter();
     hook(scope::Lineage::Created, target, source, None, submit)
@@ -802,7 +882,7 @@ impl Rig {
             prepared_before_launch(self),
             PROMPT.into(),
             scope::Lineage::Created,
-            None,
+            (None, reply_once(None)),
         );
         let writer = writer.map(str::to_owned);
         let _hook = scope::install_launch(match writer {

@@ -34,6 +34,21 @@ pub(super) struct Registration {
     name: String,
     clock: Clock,
     timing: &'static busy_inject::Timing,
+    /// The provider's observer of the AI turn an idle submit starts; returns once that turn ends.
+    until_done: Option<Box<dyn FnOnce() + Send>>,
+}
+
+/// The drive's answer for one front: its local settlement, never its AI completion.
+pub(super) type Settled = tokio::sync::oneshot::Sender<Result<(), String>>;
+type Reply = std::sync::Arc<dyn Fn(&Result<(), String>) + Send + Sync>;
+
+fn reply_once(settled: Option<Settled>) -> Reply {
+    let slot = Mutex::new(settled);
+    std::sync::Arc::new(move |result| {
+        if let Some(settled) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = settled.send(result.clone());
+        }
+    })
 }
 
 static REGISTERED: Mutex<Vec<(u64, Registration)>> = Mutex::new(Vec::new());
@@ -63,28 +78,34 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
             .position(|(id, _)| *id == turn.channel_id)?;
         registered.remove(at).1
     };
-    take_owned(turn, None, registration)
+    take_owned(turn, None, registration, reply_once(None))
 }
 
 /// The owner's front handoff: the turn's claim on the drive's granted front, the owner's mailbox
-/// and the verified execution arrive as arguments, never through a static or task-local.
+/// and the verified execution arrive as arguments, never through a static or task-local. The
+/// drive hears `settled` once the input settled; this thread runs on with the AI turn.
 pub(super) fn execute_front(
     turn: StreamingTurn<'_>,
     sender: std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
     claim: FrontClaim,
     owner: Registration,
+    settled: Settled,
 ) -> Result<(), String> {
-    match take_owned(&turn, Some(claim), owner) {
+    let reply = reply_once(Some(settled));
+    let result = match take_owned(&turn, Some(claim), owner, reply.clone()) {
         Some(Taken::Done(result)) => result,
         Some(Taken::Launch(guard)) => guard.finish(super::drive(turn, sender)),
         None => Err("NotSent(\"not_owned\")".into()),
-    }
+    };
+    reply(&result);
+    result
 }
 
 fn take_owned(
     turn: &StreamingTurn<'_>,
     front: Option<FrontClaim>,
-    registration: Registration,
+    mut registration: Registration,
+    reply: Reply,
 ) -> Option<Taken> {
     let host = match turn.host {
         TurnHost::Tmux => "tmux",
@@ -105,12 +126,13 @@ fn take_owned(
         _ => None,
     };
     if let Some(wanted) = wanted {
-        let hook = created(registration, turn.prompt.into(), wanted, front);
+        let hook = created(registration, turn.prompt.into(), wanted, (front, reply));
         return Some(Taken::Launch(scope::install_launch(hook)));
     }
-    // An idle pane runs a new turn, so it holds the node's execution capacity through the effect;
-    // a busy pane writes into the turn that already holds it.
-    let _capacity = match route {
+    // An idle pane runs a new turn, so it holds the node's execution capacity until that AI turn
+    // ends; a busy pane writes into the turn that already holds it.
+    let until_done = registration.until_done.take();
+    let capacity = match route {
         target::Route::ClaudeIdle | target::Route::CodexIdle => {
             let cancel = std::sync::Arc::clone(&turn.cancel);
             let (pool, provider) = (turn.pool, turn.provider.as_str());
@@ -126,7 +148,14 @@ fn take_owned(
         }
         _ => None,
     };
-    Some(Taken::Done(run(turn, route, registration, front)))
+    let idle = matches!(route, target::Route::ClaudeIdle | target::Route::CodexIdle);
+    let result = run(turn, route, registration, front);
+    reply(&result);
+    if let (true, Ok(()), Some(until_done)) = (idle, &result, until_done) {
+        until_done();
+    }
+    drop(capacity);
+    Some(Taken::Done(result))
 }
 
 /// Submits on the owner's pump from the driver's blocking thread, for the granted front if any.
@@ -149,7 +178,7 @@ fn created(
     r: Registration,
     frame: String,
     wanted: scope::Lineage,
-    front: Option<FrontClaim>,
+    (front, reply): (Option<FrontClaim>, Reply),
 ) -> scope::LaunchHook {
     Box::new(move |lineage, target, source, writer, submit_created| {
         if lineage != wanted {
@@ -170,7 +199,9 @@ fn created(
             attempt,
         };
         let leaf = effect::created(submit_created, writer);
-        submit((&r.mailbox, r.clock), front, prepared, leaf)
+        let result = submit((&r.mailbox, r.clock), front, prepared, leaf);
+        reply(&result);
+        result
     })
 }
 
