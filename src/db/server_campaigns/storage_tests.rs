@@ -894,7 +894,15 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
             .await
             .unwrap()
             .pending_versions,
-        vec![version]
+        {
+            let mut pending: Vec<i64> = embedded
+                .iter()
+                .map(|m| m.version)
+                .filter(|v| *v >= version)
+                .collect();
+            pending.dedup();
+            pending
+        }
     );
 
     // Run the production migrator over real main records, without editing its journal.
