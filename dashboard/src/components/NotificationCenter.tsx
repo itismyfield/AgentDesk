@@ -128,9 +128,9 @@ export function ToastOverlay({ notifications: _notifications, onDismiss: _onDism
       toastOptions={{
         closeButtonAriaLabel: "Dismiss notification",
         classNames: {
-          toast: "agentdesk-toast",
+          toast: "agentdesk-toast !min-h-16 !pr-16",
           title: "agentdesk-toast-title",
-          closeButton: "agentdesk-toast-close",
+          closeButton: "agentdesk-toast-close !top-2 !right-2 !left-auto !m-0 !h-11 !w-11 !transform-none",
         },
       }}
       containerAriaLabel="Notifications"

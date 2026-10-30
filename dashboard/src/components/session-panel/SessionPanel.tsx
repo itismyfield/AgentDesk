@@ -144,11 +144,9 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
                           />
                         </div>
                         <div className="min-w-0 flex-1">
-                          <TooltipLabel
-                            className="min-w-0 text-sm text-th-text-muted"
-                            text={sessionDisplayName(s).label}
-                            tooltip={sessionDisplayName(s).full}
-                          />
+                          <span className="block min-w-0 truncate text-sm text-th-text-muted" title={sessionDisplayName(s).full}>
+                            {sessionDisplayName(s).label}
+                          </span>
                           <div className="mt-1 flex flex-wrap gap-2">
                             <SurfaceMetaBadge>{s.model || "unknown"}</SurfaceMetaBadge>
                             <SurfaceMetaBadge>{t({ ko: "연결 종료", en: "Disconnected" })}</SurfaceMetaBadge>

@@ -41,3 +41,7 @@ Vite의 문자열 `/api` proxy는 changeOrigin=true로 정규화되어 Host만87
 ### 상태 배지 대비 재검증
 
 라이트에서 파스텔 고정색을 쓰던 공통 상태 토큰을 테마 배경/문구 색으로 전환했다. 경고 문구 혼합 비율도 조정했다. 실제 CSS를 읽는 Playwright 팔레트 fixture(일반 화면 데이터 아님)에서 건강/칸반 19종 × 2테마의 대비를 계산해 최저 4.74:1을 확인했다. `after/status-palette-{light,dark}.png`에 결과를 남겼으며 StatusBadge/Freshness 관련 unit 16건과 production build가 통과했다.
+
+### 작은 조작·화면 경계 확인
+
+후속 오류 화면에서 Sonner 닫기가 20px인 점을 발견해 44px로 늘리고 문구 영역과 분리했다. 긴 오류 문구로 4조합 모두 버튼 44×44, 문구 교차 면적 0을 확인했다(`after/toast-*.png`). 공통 TooltipLabel도 키보드 동작이 없는 span을 native 버튼으로 바꾸고, 44px 조작·12px 도움말·화면 좌우 경계 보정을 적용했다. production preview에서 Enter로 열기/Escape로 닫기와 4조합 경계 내 배치를 확인했다(`after/tooltip-*.png`).
