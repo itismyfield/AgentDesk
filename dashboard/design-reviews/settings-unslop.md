@@ -44,7 +44,7 @@
 ## 검증
 
 - `npm --prefix dashboard run build` — 성공
-- `npm --prefix dashboard run test -- src/components/settings src/components/onboarding` — 9개 파일, 44개 통과
+- `npm --prefix dashboard run test -- settings onboarding` — 9개 파일, 44개 통과
 - `PLAYWRIGHT_PORT=5276 npm --prefix dashboard run test:e2e -- --grep 'settings' --reporter=line` — 13개 통과, desktop/mobile 전용 3개 의도된 skip
 - `git diff --check`
 
