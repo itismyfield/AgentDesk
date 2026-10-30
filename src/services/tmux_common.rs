@@ -570,9 +570,12 @@ fn lines_reconstruct_claude_tui_interrupt_chrome(first: &str, second: &str) -> b
 }
 
 fn tmux_lines_after_claude_prompt_have_interrupt_footer(lines: &[&str]) -> bool {
+    // The composer's border starts at column 0; an indented one is a draft's continuation text.
     let Some(bottom) = lines.iter().position(|line| {
-        let line = trim_prompt_line(line);
-        line.chars().count() >= 8 && line.chars().all(|ch| ch == '─')
+        let border = trim_prompt_line(line);
+        !line.starts_with(char::is_whitespace)
+            && border.chars().count() >= 8
+            && border.chars().all(|ch| ch == '─')
     }) else {
         return false;
     };

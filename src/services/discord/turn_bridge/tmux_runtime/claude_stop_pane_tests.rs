@@ -95,6 +95,30 @@ fn claude_tui_stop_rejects_quoted_interrupt_footer_above_composer() {
     }
 }
 
+// A draft's continuation rows sit two columns in, so a border and footer typed there are text;
+// the composer's own border and the idle footer under it decide.
+#[test]
+fn claude_tui_busy_ignores_indented_border_and_footer_inside_the_draft() {
+    use crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy as busy;
+    let footer = STREAMING_FOOTER.lines().last().unwrap();
+    let idle = STREAMING_FOOTER.replace(footer, "  ⏵⏵ bypass permissions on");
+    let draft = idle.replace(
+        "❯",
+        "❯ draft\n  ──────────\n  ⏵⏵ bypass permissions on · esc to interrupt",
+    );
+    assert!(!busy(&draft));
+    assert!(!crate::services::tui_input::actor::gate::submission_busy(
+        crate::services::tui_o::shadow::ShadowProvider::Claude,
+        &draft
+    ));
+    assert_eq!(
+        stop_decision(&draft),
+        ClaudeStopDeliveryDecision::SkipAmbiguous
+    );
+    assert!(busy(STREAMING_FOOTER));
+    assert!(busy(SHELL_FOOTER));
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Transcript {
     Submitted,
