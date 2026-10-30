@@ -1,19 +1,21 @@
-//! A restarted owner projects its history, then posts the notices it owes. A projection failure is
-//! logged only: it holds neither the notices nor the next input, and it confirms nothing.
+//! A restarted owner settles a head whose window passed, projects its history, then posts the
+//! notices it owes. A projection failure is logged only: it holds nothing and confirms nothing.
 use crate::services::tui_input::human_frame::history::v2::Registry;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
-/// Adopts the channel's queue file unless an owner already holds it, then projects and notifies.
+/// Adopts the channel's queue file unless its owner already holds it, then settles, projects and
+/// notifies.
 pub(crate) async fn recover(
     handle: &ChannelMailboxHandle,
     (path, namespace): (std::path::PathBuf, String),
     history: Registry,
     pool: Option<&sqlx::PgPool>,
-    (provider, channel): (&str, u64),
+    (provider, channel, now): (&str, u64, u64),
 ) -> Result<usize, String> {
-    if !super::ingress::installed(handle).await? {
-        handle.v2_adopt(path, namespace).await?;
-    }
+    handle.v2_ensure(path, namespace).await?;
+    handle
+        .v2_request(move |slot| slot.as_mut().ok_or("no input owner")?.tick(now))
+        .await?;
     let synced = handle
         .v2_request(move |slot| {
             slot.as_ref()

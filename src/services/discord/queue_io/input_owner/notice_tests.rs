@@ -106,7 +106,7 @@ async fn owed_notices_post_once_by_kind_and_a_local_submit_owes_none_pg() {
         (file, "notice".into()),
         broken,
         Some(&pool),
-        ("claude", CHANNEL),
+        ("claude", CHANNEL, 10_000),
     );
     assert_eq!(
         recovered.await,

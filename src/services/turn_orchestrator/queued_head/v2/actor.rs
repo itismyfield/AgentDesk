@@ -21,6 +21,22 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    /// Adopts the channel's queue file in one actor turn unless its owner already holds it; an
+    /// owner of another file or namespace refuses.
+    pub(crate) async fn v2_ensure(&self, path: PathBuf, namespace: String) -> Result<(), String> {
+        self.v2_request(move |slot| match slot {
+            Some(owner) if owner.path == path && owner.snapshot.namespace == Some(namespace) => {
+                Ok(())
+            }
+            Some(_) => Err("another queue file's owner holds this channel".into()),
+            None => {
+                *slot = Some(Owner::adopt(path, namespace)?);
+                Ok(())
+            }
+        })
+        .await
+    }
+
     pub(crate) async fn v2_request<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Option<Owner>) -> Result<T, String> + Send + 'static,
