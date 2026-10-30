@@ -51,10 +51,11 @@ pub(super) async fn derive_hosted_lookup(
         if let Err(error) =
             resolve_session_row_pg(pool, Some(&key), Some(provider.as_str()), Some(identity)).await
         {
-            return error.conflict_kind().map_or_else(
+            lookups.push(error.conflict_kind().map_or_else(
                 || HostedLookup::Unknown(format!("{error:?}")),
                 HostedLookup::Conflict,
-            );
+            ));
+            continue;
         }
         lookups.push(load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(&key)).await);
         let canonical = HostedLookupKey::Canonical {
