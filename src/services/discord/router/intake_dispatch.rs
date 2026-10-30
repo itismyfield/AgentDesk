@@ -242,12 +242,17 @@ pub(crate) async fn admit_text_intake(
                 };
             }
             Ok(Some(_)) => return IntakeAdmission::ConsumedToHold,
-            Err(error) => {
+            // A changed source body is permanent; an unreadable lookup is the replay retry case below.
+            Err(sqlx::Error::Protocol(detail)) => {
                 return IntakeAdmission::Blocked {
-                    reason: IntakeBlockedReason::RoutingDependencyFailed {
-                        detail: error.to_string(),
-                    },
+                    reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
                 };
+            }
+            Err(error) => {
+                tracing::warn!(%error, "[intake_dispatch] routed source lookup failed; deferring for retry");
+                return IntakeAdmission::ReplayDeferred(
+                    replay_admission::ReplayDefer::LookupFailed,
+                );
             }
             Ok(None) => {}
         }

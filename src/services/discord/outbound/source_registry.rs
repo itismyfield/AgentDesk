@@ -210,6 +210,7 @@ mod tests {
         "stall_watchdog",
         "tui_o_alarm",
         "adopt_fence_forward_notice",
+        "routing_transition",
     ];
 
     #[test]
