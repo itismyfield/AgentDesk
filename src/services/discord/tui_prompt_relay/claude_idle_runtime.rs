@@ -448,6 +448,38 @@ pub(in crate::services::discord) fn resolve_rehydrated_claude_tmux_channel_id(
     resolve_rehydrated_tmux_channel_id(&ProviderKind::Claude, tmux_session_name)
 }
 
+/// Attribute panes using existing durable, watcher, configured-name and runtime views.
+/// This observes ownership for census and reset guards without publishing a binding.
+#[cfg(unix)]
+pub(in crate::services::discord) fn resolve_known_tmux_channel_id(
+    shared: &SharedData,
+    tmux_session_name: &str,
+) -> Option<u64> {
+    let durable = crate::services::tmux_common::read_tmux_channel_binding(tmux_session_name);
+    #[cfg(test)]
+    if std::env::var("AGENTDESK_BO_MUTANT").is_ok_and(|value| value == "pane_channel_file_only") {
+        return durable;
+    }
+    durable
+        .or_else(|| {
+            shared
+                .tmux_watchers
+                .owner_channel_for_tmux_session(tmux_session_name)
+                .map(|channel| channel.get())
+        })
+        .or_else(|| {
+            let (provider, _) =
+                crate::services::provider::parse_provider_and_channel_from_tmux_name(
+                    tmux_session_name,
+                )?;
+            resolve_rehydrated_tmux_channel_id(&provider, tmux_session_name)
+        })
+        .or_else(|| {
+            crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name)
+        })
+        .filter(|channel| *channel != 0)
+}
+
 #[cfg(unix)]
 pub(super) fn resolve_rehydrated_tmux_channel_id(
     provider: &ProviderKind,
