@@ -165,6 +165,9 @@ impl ChannelMailboxState {
         let first = (next.head_injection.as_ref()).map_or(0, |head| head.members().count());
         let drained: Vec<PendingQueueItem> =
             next.items.drain(first.min(next.items.len())..).collect();
+        if first == 0 && !drained.is_empty() {
+            owner.revoke_front();
+        }
         match owner.commit(next) {
             Ok(()) => Ok(drained),
             Err(error) if owner.pending.is_some() => Err(PurgeStop::SaveUnknown(error)),

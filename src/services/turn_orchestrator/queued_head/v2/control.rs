@@ -202,6 +202,9 @@ fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult
     let (removed, persistence_error) = match found {
         None => (None, None),
         Some(at) => {
+            if at + first == 0 {
+                owner.revoke_front();
+            }
             let item = next.items.remove(at + first);
             next.unbind_item(at + first);
             match owner.commit(next) {
@@ -226,7 +229,11 @@ fn cancel(owner: &mut Owner, message_id: MessageId) -> CancelQueuedMessageResult
 /// Discards only untried items; the attempted head, retained inputs and terminals stay.
 fn clear(owner: &mut Owner) -> ClearChannelResult {
     let mut next = owner.snapshot.clone();
-    let discarded: Vec<PendingQueueItem> = next.items.drain(untried(owner)..).collect();
+    let first = untried(owner);
+    let discarded: Vec<PendingQueueItem> = next.items.drain(first..).collect();
+    if first == 0 && !discarded.is_empty() {
+        owner.revoke_front();
+    }
     let mut result = ClearChannelResult::default();
     match owner.commit(next) {
         Ok(()) => {

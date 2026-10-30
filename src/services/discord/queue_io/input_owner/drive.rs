@@ -84,14 +84,8 @@ pub(crate) fn wake(drive: Arc<Drive>) {
 async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
     loop {
         lane.again.store(false, Ordering::SeqCst);
-        let mut last = None;
-        while let Some(front) = grant(&drive).await {
-            // A front that did not move since its last handoff waits for the next wake.
-            let seen = serde_json::to_value(&front).ok();
-            if last.is_some() && last == seen {
-                break;
-            }
-            last = seen;
+        let mut stalled = false;
+        while let Some(front) = grant(&drive, stalled).await {
             let result = (drive.handoff)(front).await;
             if result == Err(format!("{:?}", Completion::NotSent(MODAL.into()))) {
                 let again = Arc::clone(&drive);
@@ -101,6 +95,7 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
                 });
                 break;
             }
+            stalled = result.is_err();
             if let Err(error) = result {
                 tracing::info!(channel_id = drive.channel, %error, "owner front not delivered");
             }
@@ -113,12 +108,16 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
     }
 }
 
-/// The owner's unattempted front, granted in the same actor turn that read it.
-async fn grant(drive: &Drive) -> Option<Front> {
+/// The owner's unattempted front, granted in the same actor turn that read it. After a failed
+/// handoff whose right the queue neither spent nor revoked the front has not moved: none is.
+async fn grant(drive: &Drive, stalled: bool) -> Option<Front> {
     let granted = drive
         .mailbox
-        .v2_request(|slot| {
+        .v2_request(move |slot| {
             let owner = slot.as_mut().ok_or("V2 not adopted")?;
+            if stalled && owner.front_outstanding() {
+                return Ok(None);
+            }
             let front = owner.front();
             if let Some(front) = &front {
                 owner.grant_front(front)?;
