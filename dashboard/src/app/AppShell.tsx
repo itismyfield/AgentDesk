@@ -64,8 +64,6 @@ const SHELL_HEADER_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 30;
 const SHELL_POPOVER_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 10;
 const SHELL_TABBAR_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 20;
 const SHELL_BOTTOM_SHEET_Z_INDEX = ROUTE_OVERLAY_BASE_Z_INDEX - 5;
-const SHELL_TOAST_Z_INDEX = 95;
-const SHELL_MODAL_Z_INDEX = 100;
 export default function AppShell({
   wsConnected,
   wsLastEventTs,
@@ -373,8 +371,7 @@ export default function AppShell({
     <div
       className="fixed inset-0 flex overflow-hidden"
       style={{
-        background:
-          "linear-gradient(180deg, color-mix(in srgb, var(--th-bg-primary) 98%, black 2%) 0%, var(--th-bg-primary) 100%)",
+        background: "var(--th-bg-primary)",
       }}
     >
       {!isMobileViewport && (
@@ -396,6 +393,7 @@ export default function AppShell({
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <AppTopBar
+          wsConnected={wsConnected}
           currentRoute={currentRoute ?? null}
             dismissNotification={dismissNotification}
             headerZIndex={SHELL_HEADER_Z_INDEX}
@@ -504,7 +502,6 @@ export default function AppShell({
           dismissNotification,
           isKo,
           locale,
-          modalZIndex: SHELL_MODAL_Z_INDEX,
           navigateToRoute,
           notifications,
           openDefaultAgentInfo,
@@ -517,7 +514,6 @@ export default function AppShell({
           setShowShortcutHelp,
           setShowTweaksPanel,
           setThemePreference,
-          shellToastZIndex: SHELL_TOAST_Z_INDEX,
           showCommandPalette,
           showShortcutHelp,
           showTweaksPanel,

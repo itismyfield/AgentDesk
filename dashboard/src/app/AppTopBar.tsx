@@ -8,6 +8,7 @@ import {
   Sparkles,
   Sun,
   X,
+  WifiOff,
 } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import type { Notification } from "../components/NotificationCenter";
@@ -18,6 +19,7 @@ import { DashboardLogout } from "./DashboardAuthGate";
 
 interface AppTopBarProps {
   currentRoute: AppRouteEntry | null;
+  wsConnected: boolean;
   dismissNotification: (id: string) => void;
   isKo: boolean;
   navigateToRoute: (path: string) => void;
@@ -45,7 +47,7 @@ function NotificationSummaryRow({
 }) {
   return (
     <div
-      className="flex items-center justify-between rounded-2xl border px-3 py-2 text-sm"
+      className="flex items-center justify-between rounded-md border px-3 py-2 text-sm"
       style={{
         borderColor: "var(--th-border-subtle)",
         background: "var(--th-overlay-subtle)",
@@ -60,6 +62,7 @@ function NotificationSummaryRow({
 }
 
 export function AppTopBar({
+  wsConnected,
   currentRoute,
   dismissNotification,
   isKo,
@@ -81,13 +84,11 @@ export function AppTopBar({
   return (
     <header
       data-testid="topbar"
-      className="relative flex min-h-16 shrink-0 items-center border-b px-4 py-2 sm:px-5"
+      className="relative flex min-h-16 shrink-0 flex-col justify-center border-b px-4 py-2 sm:px-5"
       style={{
         zIndex: headerZIndex,
         borderColor: "var(--th-border-subtle)",
-        background:
-          "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 93%, transparent) 100%)",
-        backdropFilter: "blur(14px)",
+        background: "var(--th-bg-surface)",
       }}
     >
       <div className="flex w-full flex-wrap items-center gap-2 sm:flex-nowrap">
@@ -113,7 +114,7 @@ export function AppTopBar({
 
         <label
           data-testid="topbar-search"
-          className="order-3 flex min-w-0 flex-1 items-center gap-2 rounded-2xl border px-3 py-2 text-sm sm:order-none sm:max-w-[18rem]"
+          className="order-3 flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md border px-3 text-sm sm:order-none sm:max-w-[18rem]"
           style={{
             borderColor: "var(--th-border-subtle)",
             background:
@@ -128,7 +129,7 @@ export function AppTopBar({
             onFocus={() => setShowCommandPalette(true)}
             onClick={() => setShowCommandPalette(true)}
             placeholder={tr("검색…", "Search…")}
-            className="w-full bg-transparent text-sm outline-none"
+            className="h-11 w-full min-w-0 bg-transparent text-sm outline-none"
             style={{ color: "var(--th-text-primary)" }}
             aria-label={tr("검색 열기", "Open search")}
           />
@@ -148,7 +149,7 @@ export function AppTopBar({
           <button
             type="button"
             onClick={toggleShellTheme}
-            className="flex h-9 w-9 items-center justify-center rounded-2xl border transition-colors hover:bg-white/5"
+            className="flex h-11 w-11 items-center justify-center rounded-md border transition-colors hover:bg-white/5"
             style={{ borderColor: "var(--th-border-subtle)" }}
             aria-label={tr(
               resolvedTheme === "dark" ? "라이트 테마로 전환" : "다크 테마로 전환",
@@ -171,7 +172,7 @@ export function AppTopBar({
                   return !prev;
                 })
               }
-              className="relative flex h-9 w-9 items-center justify-center rounded-2xl border transition-colors hover:bg-white/5"
+              className="relative flex h-11 w-11 items-center justify-center rounded-md border transition-colors hover:bg-white/5"
               style={{ borderColor: "var(--th-border-subtle)" }}
               aria-label={tr("알림 보기", "View notifications")}
               title={tr("알림 보기", "View notifications")}
@@ -186,12 +187,12 @@ export function AppTopBar({
 
             {showNotificationPanel && (
               <div
-                className="absolute left-0 top-12 w-[min(22rem,calc(100vw-1.5rem))] max-w-[calc(100vw-1.5rem)] rounded-3xl border p-3 shadow-2xl"
+                role="dialog" aria-label={tr("알림", "Notifications")}
+                className="fixed inset-x-4 top-24 max-h-[calc(100dvh-10rem)] overflow-auto rounded-lg border p-4 shadow-lg sm:absolute sm:inset-x-auto sm:right-0 sm:top-14 sm:w-[22rem]"
                 style={{
                   zIndex: popoverZIndex,
                   borderColor: "var(--th-border-subtle)",
-                  background:
-                    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 95%, transparent) 100%)",
+                  background: "var(--th-bg-surface)",
                 }}
               >
                 <div className="flex items-center justify-between gap-3 px-1 pb-2">
@@ -215,7 +216,7 @@ export function AppTopBar({
                   <button
                     type="button"
                     onClick={() => setShowNotificationPanel(false)}
-                    className="flex h-8 w-8 items-center justify-center rounded-xl text-[var(--th-text-muted)]"
+                    className="flex h-11 w-11 items-center justify-center rounded-xl text-[var(--th-text-muted)]"
                     aria-label={tr("알림 창 닫기", "Close notification panel")}
                   >
                     <X size={14} />
@@ -238,7 +239,7 @@ export function AppTopBar({
                 <div className="mt-3 space-y-2">
                   {recentNotifications.length === 0 ? (
                     <div
-                      className="rounded-2xl border px-3 py-4 text-sm"
+                      className="rounded-md border px-3 py-4 text-sm"
                       style={{
                         borderColor: "var(--th-border-subtle)",
                         color: "var(--th-text-muted)",
@@ -251,7 +252,7 @@ export function AppTopBar({
                     recentNotifications.map((notification) => (
                       <div
                         key={notification.id}
-                        className="rounded-2xl border px-3 py-3"
+                        className="rounded-md border px-3 py-3"
                         style={{
                           borderColor: "var(--th-border-subtle)",
                           background: "var(--th-overlay-subtle)",
@@ -279,7 +280,7 @@ export function AppTopBar({
                           <button
                             type="button"
                             onClick={() => dismissNotification(notification.id)}
-                            className="flex h-8 w-8 items-center justify-center rounded-xl text-[var(--th-text-muted)]"
+                            className="flex h-11 w-11 items-center justify-center rounded-xl text-[var(--th-text-muted)]"
                             aria-label={tr("알림 지우기", "Dismiss notification")}
                           >
                             <X size={12} />
@@ -296,7 +297,7 @@ export function AppTopBar({
                     setShowNotificationPanel(false);
                     navigateToRoute("/meetings");
                   }}
-                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl border px-3 py-2 text-sm font-medium transition-colors hover:bg-white/5"
+                  className="mt-3 flex min-h-11 w-full items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm font-medium transition-colors hover:bg-white/5"
                   style={{ borderColor: "var(--th-border-subtle)" }}
                 >
                   <Sparkles size={15} />
@@ -314,7 +315,7 @@ export function AppTopBar({
                 return !prev;
               })
             }
-            className="flex h-9 w-9 items-center justify-center rounded-2xl border transition-colors hover:bg-white/5"
+            className="flex h-11 w-11 items-center justify-center rounded-md border transition-colors hover:bg-white/5"
             style={{ borderColor: "var(--th-border-subtle)" }}
             aria-label={tr("디자인 설정 열기", "Open tweaks")}
             title={tr("디자인 설정 열기", "Open tweaks")}
@@ -323,6 +324,12 @@ export function AppTopBar({
           </button>
         </div>
       </div>
+      {!wsConnected ? (
+        <div data-testid="connection-status" role="status" className="mt-2 flex w-full items-start gap-2 border-t border-th-border-subtle pt-2 pb-1 text-xs leading-5 text-[var(--th-badge-amber-text)]">
+          <WifiOff size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
+          <span>{tr("서버 연결 끊김 · 재연결 중입니다.", "Server disconnected · Reconnecting.")}</span>
+        </div>
+      ) : null}
     </header>
   );
 }
