@@ -66,6 +66,9 @@ pub(crate) fn advance_claude_session_auth(
     from: &str,
     to: &str,
 ) -> Result<(), String> {
+    if from == to {
+        return Ok(());
+    }
     match claude_session_auth(session_name, from)? {
         Some(profile) => write_claude_session_auth(session_name, to, &profile),
         None => Ok(()),

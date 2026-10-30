@@ -77,72 +77,71 @@ fn launch_tmux(fx: &Fixture, session: Option<&str>) -> (String, String) {
     (launched, nonce.trim().to_owned())
 }
 
-// The tmux launch records its session's account, a `/clear` of that execution moves the record on
-// to the new session, and the move to Herdr resumes the new session after one `/exit`.
-#[test]
-fn f9_a_session_a_clear_moved_on_to_resumes_on_herdr_under_its_launch_account_pg() {
-    let fx = Fixture::new("resume-f9", None);
-    let logical = fx.logical().to_owned();
-    let (launched, nonce) = launch_tmux(&fx, None);
-    let (s0, account) = launched.split_once('\n').unwrap();
-    let s0 = s0.to_owned();
-    assert_eq!(
-        account,
-        crate::services::provider_auth_profile::DEFAULT_PROFILE_ID
-    );
-
-    // The same execution's `/clear`: its SessionStart names a new session with its transcript.
-    let s1 = uuid();
-    let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
-        fx.cwd.path(),
-        &s1,
-        None,
-    )
-    .unwrap();
-    append(&path, &[json!({"type": "mode", "sessionId": s1})]);
-    let s0_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
-        fx.cwd.path(),
-        &s0,
-        None,
-    )
-    .unwrap();
-    append(&s0_path, &[json!({"type": "mode", "sessionId": s0})]);
-    crate::services::tui_prompt_dedupe::register_provider_session("claude", &s0, &logical);
-    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
-        &logical,
-        claude(&s0_path, &s0),
-    );
-    let envelope = HookBindingEnvelope {
-        context: CapturedContext::Captured(execution_context("claude", &nonce).unwrap()),
+/// The launched execution's pane bound to its launch session `s0`, and its hook envelope.
+fn launched_pane(fx: &Fixture, s0: &str, nonce: &str) -> HookBindingEnvelope {
+    let logical = fx.logical();
+    let path = claude_path(fx, s0);
+    append(&path, &[json!({"type": "mode", "sessionId": s0})]);
+    crate::services::tui_prompt_dedupe::register_provider_session("claude", s0, logical);
+    let binding = claude(&path, s0);
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(logical, binding);
+    HookBindingEnvelope {
+        context: CapturedContext::Captured(execution_context("claude", nonce).unwrap()),
         observed: Default::default(),
-    };
-    let payload = json!({"session_id": s1, "source": "clear", "transcript_path": path});
-    let (status, _) = fx.ingress.send_envelope(
-        &format!("/hooks/claude/SessionStart?session_id={s0}"),
-        &payload,
-        Some(&uuid()),
-        Some(&envelope.encode().unwrap()),
-    );
-    assert_eq!(status, 202);
-    crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions();
-    let bound = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&logical);
-    assert_eq!(bound.unwrap().session_id.as_deref(), Some(s1.as_str()));
+    }
+}
 
-    // A completed turn on the new session, read through by O, then the move to Herdr.
-    let said = json!({"type": "user", "sessionId": s1, "timestamp": "2026-10-01T00:00:00Z",
+fn claude_path(fx: &Fixture, session: &str) -> PathBuf {
+    let path = crate::services::claude_tui::transcript_tail::claude_transcript_path;
+    path(fx.cwd.path(), session, None).unwrap()
+}
+
+/// The same execution's `/clear` to a new session and that session's first prompt: their hooks,
+/// under the hook command the running Claude launched with, name the new session and its
+/// transcript, which the pane adopts.
+fn clear_to_new_session(
+    fx: &Fixture,
+    envelope: &HookBindingEnvelope,
+    s0: &str,
+) -> (String, PathBuf) {
+    let session = uuid();
+    let path = claude_path(fx, &session);
+    append(&path, &[json!({"type": "mode", "sessionId": session})]);
+    let started = json!({"session_id": session, "source": "clear", "transcript_path": path});
+    let prompted = json!({"session_id": session, "prompt": "hi", "transcript_path": path});
+    for (event, payload) in [("SessionStart", started), ("UserPromptSubmit", prompted)] {
+        let (status, _) = fx.ingress.send_envelope(
+            &format!("/hooks/claude/{event}?session_id={s0}"),
+            &payload,
+            Some(&uuid()),
+            Some(&envelope.encode().unwrap()),
+        );
+        assert_eq!(status, 202, "{event}");
+        crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions();
+    }
+    let bound = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
+    assert_eq!(bound.unwrap().session_id.as_deref(), Some(session.as_str()));
+    (session, path)
+}
+
+/// A completed turn on `session`, read through by O, then the move to Herdr: one `/exit`, one
+/// launch resuming `session` and one prompt.
+fn moves_to_herdr_resuming(fx: &Fixture, session: &str, path: &Path) {
+    let said = json!({"type": "user", "sessionId": session, "timestamp": "2026-10-01T00:00:00Z",
         "message": {"role": "user", "content": "기억해: beta"}});
-    let answered = json!({"type": "assistant", "sessionId": s1,
+    let answered = json!({"type": "assistant", "sessionId": session,
         "timestamp": "2026-10-01T00:00:01Z", "message": {"role": "assistant",
         "stop_reason": "end_turn", "content": [{"type": "text", "text": "beta"}]}});
-    append(&path, &[said, answered]);
-    read_through(&path, &s1);
-    *fx.session.lock().unwrap() = Some(s1.clone());
+    append(path, &[said, answered]);
+    read_through(path, session);
+    *fx.session.lock().unwrap() = Some(session.to_owned());
     let launcher = Arc::new(Launcher::default());
     let ports = fx.ports(&launcher);
     ports.old_tmux.alive.store(true, Ordering::SeqCst);
     let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {
         if let Some(started) = fx.start_provider_as(&launcher, true, "resume") {
-            assert_eq!((&started.session, &started.path), (&s1, &path));
+            let expected = (session.to_owned(), path.to_path_buf());
+            assert_eq!((started.session.clone(), started.path.clone()), expected);
             fx.answer(&started);
         }
     });
@@ -152,9 +151,45 @@ fn f9_a_session_a_clear_moved_on_to_resumes_on_herdr_under_its_launch_account_pg
     assert_eq!(fx.rig.sends(), prompt_sends());
     assert_eq!(fx.row(), Some(HostedState::Bound));
     let script = fx.launch_script();
-    assert!(script.contains(&format!("'--resume' '{s1}'")), "{script}");
+    assert!(
+        script.contains(&format!("'--resume' '{session}'")),
+        "{script}"
+    );
     assert!(!script.contains("'--session-id'"), "{script}");
-    crate::services::tmux_common::cleanup_session_temp_files(&logical);
+}
+
+// The tmux launch records its session's account, each `/clear` of that execution moves the record
+// on to its new session, and the move to Herdr resumes the last one after one `/exit`.
+fn clears_then_moves_to_herdr(tag: &str, clears: usize) {
+    let fx = Fixture::new(tag, None);
+    let (launched, nonce) = launch_tmux(&fx, None);
+    let (s0, account) = launched.split_once('\n').unwrap();
+    assert_eq!(
+        account,
+        crate::services::provider_auth_profile::DEFAULT_PROFILE_ID
+    );
+    let envelope = launched_pane(&fx, s0, &nonce);
+    let mut last = (s0.to_owned(), claude_path(&fx, s0));
+    for _ in 0..clears {
+        last = clear_to_new_session(&fx, &envelope, s0);
+    }
+    let (session, path) = last;
+    // Only the adoptions moved the record; the test never wrote it after the launch.
+    assert_eq!(fx.session_auth(), Some(format!("{session}\n{account}")));
+    moves_to_herdr_resuming(&fx, &session, &path);
+    crate::services::tmux_common::cleanup_session_temp_files(fx.logical());
+}
+
+#[test]
+fn f9_a_session_a_clear_moved_on_to_resumes_on_herdr_under_its_launch_account_pg() {
+    clears_then_moves_to_herdr("resume-f9", 1);
+}
+
+// The running Claude keeps its launch hook command, so the second `/clear`'s hooks name the launch
+// session while the pane moves on from the first cleared one, on that session's first prompt.
+#[test]
+fn f9b_a_session_a_second_clear_moved_on_to_resumes_on_herdr_under_its_launch_account_pg() {
+    clears_then_moves_to_herdr("resume-f9b", 2);
 }
 
 // A session handed back to tmux under a named account is found in that account's own home and

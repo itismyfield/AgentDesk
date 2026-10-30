@@ -367,18 +367,22 @@ fn b5_b6_a_resume_without_cursor_account_proof_or_readable_transcript_ends_nothi
     assert_eq!(fx.run(&running()), Ok(()));
 }
 
-// A Herdr Claude its launch's session moved on from returns the new session under the launch's
+// A Herdr Claude whose launch session moved on twice returns the last one under the launch's
 // account; a move from a session the record does not name vouches for nothing.
 #[test]
 fn b7_a_session_moved_on_from_its_launch_returns_under_the_launch_account_pg() {
     let fx = Fixture::new();
-    let launched = uuid::Uuid::new_v4().to_string();
+    let (launched, cleared) = (
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
     tc::write_claude_session_auth(LOGICAL, &launched, "work").unwrap();
-    let elsewhere = uuid::Uuid::new_v4().to_string();
-    tc::advance_claude_session_auth(LOGICAL, &elsewhere, &fx.session).unwrap();
+    tc::advance_claude_session_auth(LOGICAL, &launched, &cleared).unwrap();
+    // The launch session no longer names the record once the pane moved off it.
+    tc::advance_claude_session_auth(LOGICAL, &launched, &fx.session).unwrap();
     let error = fx.run(&running()).unwrap_err();
     assert!(error.contains("recorded its account"), "{error}");
-    tc::advance_claude_session_auth(LOGICAL, &launched, &fx.session).unwrap();
+    tc::advance_claude_session_auth(LOGICAL, &cleared, &fx.session).unwrap();
     let ports = running();
     assert_eq!(fx.run(&ports), Ok(()));
     let profile = tc::session_temp_path(LOGICAL, "auth_profile");

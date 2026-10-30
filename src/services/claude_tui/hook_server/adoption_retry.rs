@@ -10,7 +10,7 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 };
 use crate::services::tui_prompt_dedupe::binding_events::HookSignal;
 use crate::services::tui_prompt_dedupe::{
-    AdoptSkip, adopt_claude_continuation_explained, claude_session_rotation_for_tmux,
+    AdoptSkip, adopt_claude_continuation_moved, claude_session_rotation_for_tmux,
     reclaim_with_current_prompt, resolve_tmux_session_name,
 };
 
@@ -309,9 +309,8 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
             queue: QueueStep::Pop,
         };
     }
-    match adopt_claude_continuation_explained(command_session_id, payload_session_id, &request.hook)
-    {
-        Ok((adopted, skip)) => {
+    match adopt_claude_continuation_moved(command_session_id, payload_session_id, &request.hook) {
+        Ok(((adopted, skip), left)) => {
             // An adopted source stays queued until its rotation settles and a recorded Pending until
             // its transcript is verified, so later hooks wait behind it; a later queued session replaces it.
             let pending = adopted.is_none() && skip.is_none();
@@ -386,14 +385,16 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
                 return SettleOutcome { http, queue };
             };
             before_artifacts(payload_session_id);
-            // The account the pane's session ran under follows it to the session it moved on to,
-            // before the artifacts that stop later hooks from naming the earlier one.
-            let persisted = crate::services::tmux_common::advance_claude_session_auth(
-                &tmux_session_name,
-                command_session_id,
-                payload_session_id,
-            )
-            .and_then(|()| {
+            // The account follows the pane from the session this hook moved it off; a later hook of
+            // the same move finds that session in the artifacts, which name it until the record moves.
+            let session =
+                crate::services::claude_tui::session::persisted_claude_continuation_session;
+            let left = left.or_else(|| session(&tmux_session_name));
+            let advanced = left.map_or(Ok(()), |from| {
+                let advance = crate::services::tmux_common::advance_claude_session_auth;
+                advance(&tmux_session_name, &from, payload_session_id)
+            });
+            let persisted = advanced.and_then(|()| {
                 crate::services::claude_tui::session::persist_claude_continuation_session(
                     &tmux_session_name,
                     payload_session_id,

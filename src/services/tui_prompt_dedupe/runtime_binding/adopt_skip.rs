@@ -72,15 +72,27 @@ pub(crate) fn adopt_claude_continuation_explained(
     payload_session_id: &str,
     hook: &HookSignal,
 ) -> Result<Explained, BindingPersistError> {
-    let (mut failure, mut skip) = (None, None);
+    adopt_claude_continuation_moved(command_session_id, payload_session_id, hook)
+        .map(|(explained, _)| explained)
+}
+
+/// As `adopt_claude_continuation_explained`, with the session the pane was bound to when this
+/// hook moved it on; `None` when the hook moved nothing, as a later hook of the same move does.
+pub(crate) fn adopt_claude_continuation_moved(
+    command_session_id: &str,
+    payload_session_id: &str,
+    hook: &HookSignal,
+) -> Result<(Explained, Option<String>), BindingPersistError> {
+    let (mut failure, mut skip, mut previous) = (None, None, None);
     let adopted = adopt_continuation(
         command_session_id,
         payload_session_id,
         hook,
         &mut failure,
         &mut skip,
+        &mut previous,
     );
-    failure.map_or(Ok((adopted, skip)), Err)
+    failure.map_or(Ok(((adopted, skip), previous)), Err)
 }
 
 /// Herdr panes by logical key: the latest installed or judged execution's nonce and whether a

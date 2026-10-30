@@ -108,6 +108,17 @@ pub(crate) fn persist_claude_continuation_session(
     Ok(changed)
 }
 
+/// The session the pane's launch script selects, as continuation persistence last left it.
+pub(crate) fn persisted_claude_continuation_session(tmux_session_name: &str) -> Option<String> {
+    let script = crate::services::tmux_common::resolve_session_temp_path(
+        tmux_session_name,
+        crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
+    )?;
+    let script = fs::read_to_string(script).ok()?;
+    let selectors = ["'--session-id' ", "'--resume' "];
+    single_artifact_session_id("Claude launch script", &script, &selectors).ok()
+}
+
 fn uuid_after(content: &str, marker: &str) -> Vec<String> {
     let mut remainder = content;
     let mut values = Vec::new();
