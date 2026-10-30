@@ -2185,6 +2185,29 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "false");
   });
 
+  test("stats: weekly chart fits and longer series support horizontal keyboard navigation", async ({ page }, testInfo) => {
+    await page.route(/\/api\/token-analytics(?:\?.*)?$/, async (route) => {
+      const period = new URL(route.request().url()).searchParams.get("period") === "30d" ? "30d" : "7d";
+      const data = buildMockTokenAnalytics(period);
+      if (period === "30d") data.daily = Array.from({ length: 30 }, (_, index) => ({ ...data.daily[index % 7], date: `2026-10-${String(index + 1).padStart(2, "0")}` }));
+      await route.fulfill({ json: data });
+    });
+    await page.goto("/stats");
+    const chart = page.getByTestId("stats-daily-token-scroll");
+    await chart.scrollIntoViewIfNeeded();
+    await expect(chart.locator("svg.recharts-surface")).toBeVisible();
+    await expect.poll(() => chart.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    await page.getByTestId("stats-range-30d").click();
+    await expect(page.getByText("날짜가 가려지면 차트를 좌우로 움직여 확인하세요.", { exact: true })).toBeVisible();
+    if (testInfo.project.name === "mobile") {
+      await expect.poll(() => chart.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+      await chart.focus();
+      await page.keyboard.press("ArrowRight");
+      await expect.poll(() => chart.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
+    }
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  });
+
   test("stats: failed analytics stops the loading placeholder without reporting zero", async ({ page }) => {
     await page.route(/\/api\/token-analytics(?:\?.*)?$/, (route) =>
       route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Aggregation unavailable" }) }),
