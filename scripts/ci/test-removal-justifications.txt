@@ -5,6 +5,7 @@
 # Unscoped rows keep the existing whole-test rules; a loss with no matching reason fails.
 # Unscoped rows absent from base and head only warn after landing; clear them in any later PR.
 agentdesk config::remote_settings_tests::settings_load_exposes_no_remote_profiles | removed | Settings remote-profile shim deleted; no session or config carries a remote profile any more
+agentdesk runtime_layout::config_merge::config_secret_tests::role_map_merge_keeps_disk_secrets | removed | JSON-to-YAML migration retired; replacement verifies setup ignores the legacy file and cannot rewrite YAML secrets
 agentdesk services::codex::remote_dispatch_gate_tests::remote_direct_is_refused_when_gate_off | removed | renamed to remote_direct_is_refused_with_retired_gate_key_on; the remote_ssh_enabled gate it was named after was deleted
 agentdesk services::codex_remote_policy::tests::prerequisites_remain_unsatisfied | removed | PREREQUISITES_SATISFIED constant and its codex_remote_policy module deleted; remote dispatch refusal is unconditional
 agentdesk services::discord::e2e_control::tests::injection_is_scoped_consumed_and_clearable | removed | renamed to injection_is_scoped_persisted_and_clearable; consume_* had no caller after the two-message recovery was deleted

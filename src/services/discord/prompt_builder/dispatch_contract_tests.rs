@@ -1684,7 +1684,6 @@ fn peer_directory_shared_keywords_are_not_voice_aliases_or_meeting_keywords() {
         loaded.config,
         loaded.path,
         loaded.existed,
-        &Default::default(),
         true,
     )
     .unwrap();
@@ -1864,7 +1863,7 @@ fn peer_directory_never_restores_legacy_sources_when_agents_are_empty() {
     let _guard = crate::config::set_agentdesk_root_for_test(root.path());
     let path = crate::runtime_layout::config_file_path(root.path());
     let org = crate::runtime_layout::org_schema_path(root.path());
-    let role_map = crate::runtime_layout::role_map_path(root.path());
+    let role_map = root.path().join("config/role_map.json");
     for file in [&path, &org, &role_map] {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     }

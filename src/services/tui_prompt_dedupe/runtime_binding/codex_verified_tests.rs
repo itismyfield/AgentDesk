@@ -331,9 +331,11 @@ fn actual_rehydration_rejects_configured_channel_mismatch_before_owner_publicati
         RuntimeHandoffKind::CodexTui,
     )
     .unwrap();
-    let role_map = h.root.path().join("config/role_map.json");
-    fs::create_dir_all(role_map.parent().unwrap()).unwrap();
-    fs::write(role_map, serde_json::to_vec(&json!({"byChannelId":{"584505":{"roleId":"test","promptFile":"/dev/null","provider":"codex"}}})).unwrap()).unwrap();
+    crate::services::discord::agentdesk_config::write_bindings_for_test(
+        h.root.path(),
+        json!([{"id": "test", "name": "Test", "provider": "codex",
+            "channels": {"codex": {"id": "584505", "prompt_file": "/dev/null"}}}]),
+    );
     let shared = crate::services::discord::make_shared_data_for_tests();
     assert_eq!(
         crate::services::discord::run_codex_rehydrate_pass_for_tests(
@@ -1514,15 +1516,17 @@ fn legacy_actual_native_read_and_restart_ignore_verified_permission() {
 
 #[test]
 fn canary_actual_rehydrate_missing_launch_evidence_never_publishes_stale_owner() {
-    for missing_nonce in [0, 1, 2] {
+    for missing_nonce in [None, Some(0), Some(1), Some(2)] {
         let h = Fixture::canary();
         h.header(ID, false);
         h.send("session-start", ID, Value::Null, None);
         h.assert_proof();
         let before = h.fold();
-        fs::remove_file(&h.canonical).unwrap();
+        if missing_nonce.is_some() {
+            fs::remove_file(&h.canonical).unwrap();
+        }
         fs::remove_file(h.marker()).unwrap();
-        if missing_nonce == 2 {
+        if missing_nonce == Some(2) {
             fs::write(
                 crate::services::tmux_common::session_temp_path(
                     &h.context.tmux_session,
@@ -1531,7 +1535,7 @@ fn canary_actual_rehydrate_missing_launch_evidence_never_publishes_stale_owner()
                 "f".repeat(32),
             )
             .unwrap();
-        } else if missing_nonce == 1 {
+        } else if missing_nonce == Some(1) {
             fs::remove_file(crate::services::tmux_common::session_temp_path(
                 &h.context.tmux_session,
                 "spawn_nonce",
@@ -1545,33 +1549,12 @@ fn canary_actual_rehydrate_missing_launch_evidence_never_publishes_stale_owner()
             RuntimeHandoffKind::CodexTui,
         )
         .unwrap();
-        let role_map = h.root.path().join("config/role_map.json");
-        fs::create_dir_all(role_map.parent().unwrap()).unwrap();
-        fs::write(
-            &role_map,
-            serde_json::to_vec(&json!({"byChannelId":{
-                "584505":{"roleId":"test", "promptFile":"/dev/null","provider":"codex"}
-            }}))
-            .unwrap(),
-        )
-        .unwrap();
-        let config_path = h.root.path().join("config/agentdesk.yaml");
-        fs::write(
-            &config_path,
-            r#"server:
-  port: 8791
-agents:
-  - id: canary-test
-    name: Canary
-    provider: codex
-    channels:
-      codex:
-        id: "584505"
-        name: "adk-codex-tui-e2e"
-"#,
-        )
-        .unwrap();
-        crate::config::load_from_path(&config_path).unwrap();
+
+        crate::services::discord::agentdesk_config::write_bindings_for_test(
+            h.root.path(),
+            json!([{"id": "canary-test", "name": "Canary", "provider": "codex",
+                "channels": {"codex": {"id": h.context.channel_id.unwrap().to_string(), "name": "adk-codex-tui-e2e"}}}]),
+        );
         let shared = crate::services::discord::make_shared_data_for_tests();
         use crate::services::codex::{CodexSourceMode, SOURCE_MODE_TEST};
         // A rollback changes new launches, not the durable pin of a lost launch.
@@ -1581,7 +1564,15 @@ agents:
             &h.context.tmux_session,
         );
         SOURCE_MODE_TEST.with(|mode| mode.set(None));
-        assert_eq!(restored, None);
+        if missing_nonce.is_none() {
+            assert_eq!(restored, Some(CANARY_CHANNEL), "healthy launch evidence");
+            assert_eq!(
+                owner_channel_for_tmux_session(&h.context.tmux_session),
+                Some(CANARY_CHANNEL)
+            );
+            continue;
+        }
+        assert_eq!(restored, None, "missing launch evidence: {missing_nonce:?}");
         assert_eq!(
             owner_channel_for_tmux_session(&h.context.tmux_session),
             None

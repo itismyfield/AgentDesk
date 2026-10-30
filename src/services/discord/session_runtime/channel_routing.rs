@@ -261,6 +261,16 @@ pub(in crate::services::discord) async fn resolve_runtime_channel_binding_status
     }
 }
 
+pub(in crate::services::discord) async fn resolve_channel_name(
+    http: &Arc<serenity::Http>,
+    channel_id: serenity::ChannelId,
+) -> Result<Option<String>, serenity::Error> {
+    Ok(match channel_id.to_channel(http).await? {
+        serenity::Channel::Guild(channel) => Some(channel.name),
+        _ => None,
+    })
+}
+
 /// If `channel_id` is a Discord thread, return the parent channel ID and name.
 /// For non-thread channels, returns `None`.
 pub(in crate::services::discord) async fn resolve_thread_parent(
@@ -274,14 +284,7 @@ pub(in crate::services::discord) async fn resolve_thread_parent(
     match gc.kind {
         kind if is_actual_thread_kind(kind) => {
             let parent_id = gc.parent_id?;
-            let parent_name = if let Ok(parent_ch) = parent_id.to_channel(http).await {
-                match parent_ch {
-                    serenity::model::channel::Channel::Guild(pg) => Some(pg.name.clone()),
-                    _ => None,
-                }
-            } else {
-                None
-            };
+            let parent_name = resolve_channel_name(http, parent_id).await.ok().flatten();
             Some((parent_id, parent_name))
         }
         _ => None,

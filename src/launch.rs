@@ -23,7 +23,6 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         crate::db::postgres::with_startup_advisory_lock(pool, || async {
             crate::db::postgres::migrate(pool).await?;
             if let Some(root) = crate::config::runtime_root().as_ref() {
-                let legacy_scan = crate::services::discord_config_audit::scan_legacy_sources(root);
                 let loaded = crate::services::discord_config_audit::load_runtime_config(root)
                     .map_err(|error| {
                         format!("Failed to reload config after PG migration: {error}")
@@ -33,7 +32,6 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
                     loaded.config,
                     loaded.path,
                     loaded.existed,
-                    &legacy_scan,
                     false,
                 )
                 .map_err(|error| {

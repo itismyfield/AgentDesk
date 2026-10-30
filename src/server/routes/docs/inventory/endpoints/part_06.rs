@@ -293,7 +293,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/discord/channels/{id}/messages",
             "discord",
-            "Read recent messages from a Discord channel or thread (proxy to Discord REST v10). The {id} accepts both regular channels and threads. A thread is allowed when either the thread itself or its parent channel is present in the role-map (agentdesk_config / org_schema / role_map.json). Unknown channels still return 403. See src/server/routes/discord.rs::channel_messages.",
+            "Read recent messages from a Discord channel or thread (proxy to Discord REST v10). The {id} accepts both regular channels and threads. A thread is allowed when either the thread itself or its parent channel is present in the role-map (agentdesk_config / org_schema). Unknown channels still return 403. See src/server/routes/discord.rs::channel_messages.",
         )
         .with_params([
             ("id", path_param("Discord channel or thread ID (snowflake)")),

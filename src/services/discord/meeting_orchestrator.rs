@@ -23,7 +23,6 @@ use super::outbound::{
     DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
     outbound_fingerprint, shared_outbound_deduper,
 };
-use super::role_map::load_meeting_config as load_meeting_config_from_role_map;
 use super::settings::{ResolvedMemorySettings, RoleBinding, load_role_prompt};
 use super::{DispatchProfile, SharedData, rate_limit_wait};
 use super::{internal_api, runtime_store};
@@ -218,7 +217,7 @@ impl SummaryAgentConfig {
     }
 }
 
-/// Meeting configuration from role_map.json "meeting" section
+/// Meeting configuration resolved from agent and organization YAML.
 #[derive(Clone, Debug)]
 pub(super) struct MeetingConfig {
     // #3034: config field carried from the org-schema/role-map meeting
