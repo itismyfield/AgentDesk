@@ -433,21 +433,12 @@ pub(super) fn blocks_claims(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
     persistence: Option<&QueuePersistenceContext>,
-    (_message, _order): (MessageId, super::TurnAdmissionOrder),
 ) -> bool {
-    // A V2 owner holds the file the V1 check cannot read: only its granted front starts, a source
-    // it holds never does, and another claim keeps V1's order behind the queue and attempted head.
+    // A V2 owner holds the file the V1 check cannot read. Until it hands an input to a turn, its
+    // attempted head (`items[0]`) and withheld queue block every claim; retained inputs do not.
     #[cfg(test)]
-    if let Some(owner) = state.queued_head.v2.as_mut() {
-        return match owner.claim_class(_message.get()) {
-            v2::ClaimClass::OwnerFront => false,
-            v2::ClaimClass::OwnerHeld => true,
-            v2::ClaimClass::NonOwner => {
-                owner.snapshot.head_injection.is_some()
-                    || (_order != super::TurnAdmissionOrder::Immediate
-                        && !owner.snapshot.items.is_empty())
-            }
-        };
+    if let Some(owner) = &state.queued_head.v2 {
+        return !owner.snapshot.items.is_empty();
     }
     if persistence.is_some_and(|p| validate_disk(state, channel_id, p).is_err()) {
         return true;

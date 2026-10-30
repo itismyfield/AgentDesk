@@ -283,6 +283,24 @@ impl Owner {
         }
     }
 
+    /// Whether this owner refuses a turn claim for `message`: its granted front starts, a source it
+    /// holds never does, and another claim keeps V1's order behind the queue and an attempted head.
+    pub(crate) fn blocks_claim(
+        &mut self,
+        message: u64,
+        order: crate::services::turn_orchestrator::TurnAdmissionOrder,
+    ) -> bool {
+        use crate::services::turn_orchestrator::TurnAdmissionOrder;
+        match self.claim_class(message) {
+            ClaimClass::OwnerFront => false,
+            ClaimClass::OwnerHeld => true,
+            ClaimClass::NonOwner => {
+                self.snapshot.head_injection.is_some()
+                    || (order != TurnAdmissionOrder::Immediate && !self.snapshot.items.is_empty())
+            }
+        }
+    }
+
     pub(crate) fn json(&self) -> Result<serde_json::Value, String> {
         serde_json::to_value(&self.snapshot).map_err(|error| error.to_string())
     }
