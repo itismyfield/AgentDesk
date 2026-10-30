@@ -336,49 +336,53 @@ pub(crate) async fn resolve_session_row_pg(
     provider: Option<&str>,
     identity: Option<CanonicalSessionIdentity<'_>>,
 ) -> Result<Option<(i64, String)>, HookSessionUpsertError> {
-    if provider.is_none()
-        || identity.is_none_or(|identity| identity.kind != SessionIdentityKind::DiscordChannel)
-    {
-        let rows = sqlx::query(
-            "SELECT id, session_key, provider, identity_kind, discord_token_hash, channel_id
-             FROM sessions WHERE session_key = $1
-                OR id IN (SELECT session_id FROM session_key_aliases WHERE session_key = $1)",
-        )
-        .bind(session_key)
-        .fetch_all(pool)
-        .await
-        .map_err(database_error)?;
-        let mut target = None;
-        for row in rows {
-            target = resolve_evidence(target, Some(decode_evidence(row)?), None, None)?;
-        }
-        return Ok(target.map(|target| (target.id, target.session_key)));
-    }
-    let mut tx = pool.begin().await.map_err(database_error)?;
-    if let Some(key) = session_key {
-        acquire_locator_lock(&mut tx, key).await?;
-    }
-    if let (Some(provider), Some(identity)) = (provider, identity) {
-        acquire_identity_lock(&mut tx, provider, identity).await?;
-    }
-    let (exact, alias) = match session_key {
-        Some(key) => (
-            load_exact_key_for_update(&mut tx, key).await?,
-            load_alias_for_update(&mut tx, key).await?,
-        ),
-        None => (None, None),
-    };
-    let canonical = match (provider, identity) {
-        (Some(provider), Some(identity))
-            if identity.kind == SessionIdentityKind::DiscordChannel =>
+    // Keep transactional resolver futures off callers' stacks.
+    Box::pin(async move {
+        if provider.is_none()
+            || identity.is_none_or(|identity| identity.kind != SessionIdentityKind::DiscordChannel)
         {
-            load_canonical_for_update(&mut tx, provider, identity).await?
+            let rows = sqlx::query(
+                "SELECT id, session_key, provider, identity_kind, discord_token_hash, channel_id
+                 FROM sessions WHERE session_key = $1
+                    OR id IN (SELECT session_id FROM session_key_aliases WHERE session_key = $1)",
+            )
+            .bind(session_key)
+            .fetch_all(pool)
+            .await
+            .map_err(database_error)?;
+            let mut target = None;
+            for row in rows {
+                target = resolve_evidence(target, Some(decode_evidence(row)?), None, None)?;
+            }
+            return Ok(target.map(|target| (target.id, target.session_key)));
         }
-        _ => None,
-    };
-    let target = resolve_evidence(exact, alias, canonical, None)?;
-    tx.commit().await.map_err(database_error)?;
-    Ok(target.map(|target| (target.id, target.session_key)))
+        let mut tx = pool.begin().await.map_err(database_error)?;
+        if let Some(key) = session_key {
+            acquire_locator_lock(&mut tx, key).await?;
+        }
+        if let (Some(provider), Some(identity)) = (provider, identity) {
+            acquire_identity_lock(&mut tx, provider, identity).await?;
+        }
+        let (exact, alias) = match session_key {
+            Some(key) => (
+                load_exact_key_for_update(&mut tx, key).await?,
+                load_alias_for_update(&mut tx, key).await?,
+            ),
+            None => (None, None),
+        };
+        let canonical = match (provider, identity) {
+            (Some(provider), Some(identity))
+                if identity.kind == SessionIdentityKind::DiscordChannel =>
+            {
+                load_canonical_for_update(&mut tx, provider, identity).await?
+            }
+            _ => None,
+        };
+        let target = resolve_evidence(exact, alias, canonical, None)?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(target.map(|target| (target.id, target.session_key)))
+    })
+    .await
 }
 
 async fn acquire_locator_lock(
