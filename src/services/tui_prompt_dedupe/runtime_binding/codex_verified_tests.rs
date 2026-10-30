@@ -1548,23 +1548,11 @@ fn canary_actual_rehydrate_missing_launch_evidence_never_publishes_stale_owner()
         )
         .unwrap();
 
-        let config_path = h.root.path().join("config/agentdesk.yaml");
-        fs::write(
-            &config_path,
-            r#"server:
-  port: 8791
-agents:
-  - id: canary-test
-    name: Canary
-    provider: codex
-    channels:
-      codex:
-        id: "584505"
-        name: "adk-codex-tui-e2e"
-"#,
-        )
-        .unwrap();
-        crate::config::load_from_path(&config_path).unwrap();
+        crate::services::discord::agentdesk_config::write_bindings_for_test(
+            h.root.path(),
+            json!([{"id": "canary-test", "name": "Canary", "provider": "codex",
+                "channels": {"codex": {"id": "584505", "name": "adk-codex-tui-e2e"}}}]),
+        );
         let shared = crate::services::discord::make_shared_data_for_tests();
         use crate::services::codex::{CodexSourceMode, SOURCE_MODE_TEST};
         // A rollback changes new launches, not the durable pin of a lost launch.

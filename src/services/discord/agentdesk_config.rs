@@ -921,7 +921,7 @@ pub(crate) fn configured_workspaces() -> Vec<String> {
 pub(crate) fn write_bindings_for_test(root: &Path, agents: serde_json::Value) {
     let mut config = Config::default();
     config.agents = serde_json::from_value(agents).expect("test agent bindings");
-    let path = crate::runtime_layout::config_file_path(root);
+    let path = crate::config::config_path::config_path_in(root);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, serde_yaml::to_string(&config).unwrap()).unwrap();
 }
