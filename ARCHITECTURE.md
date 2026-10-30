@@ -3692,6 +3692,8 @@ src/
 │   │   │   └── tool_card_switch_tests.rs
 │   │   ├── writer/
 │   │   │   ├── actor/
+│   │   │   │   ├── fixtures/
+│   │   │   │   │   └── codex_resume_companions.jsonl
 │   │   │   │   ├── automatic.rs
 │   │   │   │   ├── automatic_age.rs
 │   │   │   │   ├── automatic_age_tests.rs

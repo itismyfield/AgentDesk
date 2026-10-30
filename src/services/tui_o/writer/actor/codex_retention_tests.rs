@@ -81,6 +81,7 @@ fn fixture() -> (Snapshot, Vec<BindingEvent>) {
             }],
         },
         events,
+        &SettledCompanions::default(),
     )
 }
 fn requested(

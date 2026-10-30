@@ -7,7 +7,8 @@ use crate::services::tui_o::writer::codex_snapshot::{Observation, Snapshot};
 use crate::services::tui_o::writer::transition_cleanup::scope::codex::identity;
 use crate::services::tui_prompt_dedupe::binding_context;
 use crate::services::tui_prompt_dedupe::binding_events::{
-    BindingEvent, BindingTarget, codex::observe_channel,
+    BindingEvent, BindingTarget,
+    codex::{SettledCompanions, observe_channel},
 };
 
 pub(crate) fn for_hop(
@@ -22,7 +23,15 @@ pub(crate) fn for_hop(
     if log.tail != observed.tail || log.digest != observed.log_digest {
         return Err("codex_retention_log_changed");
     }
-    claim(observed, key, old, seq, pane, &log.events)
+    claim(
+        observed,
+        key,
+        old,
+        seq,
+        pane,
+        &log.events,
+        &log.settled_companions,
+    )
 }
 
 fn row(events: &[BindingEvent], seq: u64) -> Result<&BindingEvent, &'static str> {
@@ -76,6 +85,7 @@ fn claim(
     seq: u64,
     pane: &str,
     events: &[BindingEvent],
+    settled: &SettledCompanions,
 ) -> Result<RetentionClaimV1, &'static str> {
     let target = &observed.target;
     if key != source_key(old) || observed.held.iter().any(|held| overlaps(old, held)) {
@@ -100,6 +110,12 @@ fn claim(
     }
     let mut bindings = Vec::new();
     for event in events {
+        let companion = settled.contains(event.seq);
+        #[cfg(test)]
+        let companion = companion && !mutant("companion_unwired");
+        if companion {
+            continue;
+        }
         if matches!(
             event.new,
             BindingTarget::Source(_) | BindingTarget::Pending { .. }

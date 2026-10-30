@@ -81,7 +81,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs` |  |
 | `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex/command_streaming.rs` |  |
 | `AGENTDESK_CODEX_SHADOW_TEST_MUTATION` | `src/services/codex_tui/session/source_observation.rs`, `src/services/tui_prompt_dedupe/runtime_binding/codex_hook.rs` |  |
-| `AGENTDESK_CODEX_SNAPSHOT_MUTANT` | `src/services/tui_o/writer/actor/codex_history.rs` |  |
+| `AGENTDESK_CODEX_SNAPSHOT_MUTANT` | `src/services/tui_o/writer/actor/codex_history.rs`, `src/services/tui_prompt_dedupe/binding_events/codex/terminal.rs` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs` |  |
 | `AGENTDESK_CONFIG` | `src/config/config_path.rs`, `src/config/config_path/selection.rs`, `src/services/discord/router/intake_dispatch/queued.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` | The file `load`, `load_graceful` and the config watcher use: `$AGENTDESK_CONFIG`, the runtime root, the working directory, then `~/.adk/release`. |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs` |  |
