@@ -77,3 +77,15 @@ it("puts a blocked task in the short overview even when many other tasks are run
   expect(container.querySelector("[data-glance-id]")?.getAttribute("data-glance-id")).toBe("blocked");
   expect(container.textContent).toContain("Blocked 1");
 });
+
+
+it.each([2, 3])("offers the mobile disclosure for %i active tasks", async (count) => {
+  const onOpen = await render(Array.from({ length: count }, (_, index) => makeCampaignNode(`active-${index}`, { status: "running" })));
+  const toggle = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === `Show all ${count} active tasks`)!;
+  expect(toggle).toBeDefined();
+  expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  await act(async () => toggle.click());
+  expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  await act(async () => card(`active-${count - 1}`).click());
+  expect(onOpen).toHaveBeenCalledWith(`active-${count - 1}`);
+});

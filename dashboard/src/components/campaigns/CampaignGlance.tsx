@@ -47,6 +47,6 @@ export default function CampaignGlance({ nodes, live = {}, tr, onOpen }: { nodes
         </button>;
       })}
     </div>
-    {glance.active.length > 3 && <button type="button" className="justify-self-start" aria-expanded={showAll} onClick={() => setShowAll((value) => !value)}>{showAll ? tr("요약만 보기", "Show highlights") : tr(`${glance.blocked ? "진행·막힘" : "진행 중"} ${glance.active.length}개 모두 보기`, `Show all ${glance.active.length} active tasks`)}</button>}
+    {glance.active.length > 1 && <button type="button" className={`justify-self-start ${glance.active.length <= 3 ? "sm:hidden" : ""}`} aria-expanded={showAll} onClick={() => setShowAll((value) => !value)}>{showAll ? tr("요약만 보기", "Show highlights") : tr(`${glance.blocked ? "진행·막힘" : "진행 중"} ${glance.active.length}개 모두 보기`, `Show all ${glance.active.length} active tasks`)}</button>}
   </section>;
 }
