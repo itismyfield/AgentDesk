@@ -1223,8 +1223,20 @@ pub(super) async fn handle_text_message(
             queued_placeholder_handoff,
         )
         .await;
+        // A confirmed turn-mode channel shows its turn through O and typing, never a spinner.
+        let placeholderless = crate::services::tui_o::turn_mode::transcript_turns(channel_id.get());
         let placeholder_msg_id = if let Some(existing_notice) = reusable_busy_notice {
-            existing_notice
+            Some(existing_notice)
+        } else if placeholderless {
+            if let Some(existing) = queued_placeholder_handoff {
+                let disposition =
+                    queued_card_gate::release_or_rekey(shared, channel_id, existing, &[user_msg_id])
+                        .await;
+                if let QueuedCardDisposition::Released(teardown) = disposition {
+                    let _ = queued_card_gate::teardown_delete(http, shared, teardown).await;
+                }
+            }
+            None
         } else if let Some(existing) = queued_placeholder_handoff {
             // #3480: the queued `📬 대기 중` card is now BURIED under what the active
             // turn streamed while this message waited; reusing it as the live anchor
@@ -1292,7 +1304,7 @@ pub(super) async fn handle_text_message(
                         existing,
                         stale_disposition
                     );
-                    fresh_msg_id
+                    Some(fresh_msg_id)
                 }
                 Err(error) => {
                     // Mirror the clean-start branch: release the mailbox slot so the
@@ -1352,7 +1364,7 @@ pub(super) async fn handle_text_message(
             )
             .await
             {
-                Ok(msg_id) => msg_id,
+                Ok(msg_id) => Some(msg_id),
                 Err(error) => {
                     let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
                     let kicked = release_mailbox_after_placeholder_post_failure(
@@ -1400,7 +1412,9 @@ pub(super) async fn handle_text_message(
         let reply_context = prepared_prompt.rendered.clone();
 
         // #3813 Phase 1a: the intake placeholder POST returned a live id.
-        intake_latency.mark_placeholder_posted();
+        if placeholder_msg_id.is_some() {
+            intake_latency.mark_placeholder_posted();
+        }
         crate::services::discord::increment_global_active(shared, "intake_after_mailbox_slot");
         shared
             .turn_start_times
@@ -1973,7 +1987,7 @@ pub(super) async fn handle_text_message(
                     channel_name.clone(),
                     request_owner.get(),
                     user_msg_id.get(),
-                    placeholder_msg_id.get(),
+                    placeholder_msg_id.map_or(0, MessageId::get),
                     user_text.to_string(),
                     session_id.clone(),
                     inflight_tmux_name,
@@ -1983,6 +1997,7 @@ pub(super) async fn handle_text_message(
                 )
             });
         inflight_state.busy_followup_retry_user_msg_id = busy_followup_retry_user_msg_id.get();
+        inflight_state.anchorless_turn_mode = placeholderless && placeholder_msg_id.is_none();
         inflight_state.turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
         apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
         let (worktree_path, worktree_branch, base_commit) = {
@@ -2308,7 +2323,7 @@ pub(super) async fn handle_text_message(
                 memory_recall_usage: crate::services::memory::TokenUsage::default(),
                 context_window_tokens: model_context_window,
                 context_compact_percent: compact_percent,
-                current_msg_id: Some(placeholder_msg_id),
+                current_msg_id: placeholder_msg_id,
                 response_sent_offset: 0,
                 full_response: String::new(),
                 tmux_last_offset: Some(inflight_offset),

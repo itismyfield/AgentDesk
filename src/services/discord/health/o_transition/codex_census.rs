@@ -1,6 +1,5 @@
 //! The complete pane universe and its identity; enumeration failures never become absence.
 use crate::services::discord::SharedData;
-use crate::services::tmux_common as tc;
 use crate::services::tui_o::writer::codex_snapshot::{Pane, PaneState, Target};
 use crate::services::tui_prompt_dedupe::binding_context::{self, BindingContext};
 use crate::services::tui_prompt_dedupe::binding_events::BindingEvent;
@@ -105,8 +104,15 @@ pub(super) fn read(
             }
         }
     }
+    let mut live_channels = Vec::with_capacity(host.live.len());
     for name in &host.live {
-        match tc::read_tmux_channel_binding(name) {
+        #[cfg(unix)]
+        let channel =
+            crate::services::discord::tui_prompt_relay::resolve_known_tmux_channel_id(shared, name);
+        #[cfg(not(unix))]
+        let channel = crate::services::tmux_common::read_tmux_channel_binding(name);
+        live_channels.push((name, channel));
+        match channel {
             Some(channel) if channel == target.channel => {
                 names.insert(name.clone());
             }
@@ -133,7 +139,7 @@ pub(super) fn read(
             Pane { name, state }
         })
         .collect();
-    let bytes =
-        serde_json::to_vec(&(contexts, owners, &host.identity)).map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec(&(contexts, owners, &host.identity, live_channels))
+        .map_err(|e| e.to_string())?;
     Ok((panes, format!("sha256:{:x}", Sha256::digest(bytes))))
 }

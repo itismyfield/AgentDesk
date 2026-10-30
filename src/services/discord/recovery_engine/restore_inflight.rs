@@ -94,6 +94,8 @@ pub(in crate::services::discord) async fn restore_inflight_states(
     // for this process's lifetime. This intentional over-suppression prevents relay loss;
     // its bound is the next boot that successfully advances the epoch. An allocation-
     // provenance witness belongs to #5482.
+    #[cfg(unix)]
+    let channels: Vec<u64> = states.iter().map(|state| state.channel_id).collect();
     for mut state in states {
         #[cfg(unix)]
         if super::herdr_before_start_restart::settle_receipt(http, shared, provider, &state).await {
@@ -2353,6 +2355,8 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             },
         );
     }
+    #[cfg(unix)]
+    super::herdr_before_start_restart::reconfirm_codex_turn_mode(provider, &channels);
 }
 
 #[cfg(test)]

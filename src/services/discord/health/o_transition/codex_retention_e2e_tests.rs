@@ -114,6 +114,44 @@ fn backlog(fixture: &Fixture, count: usize) -> (Vec<SourceId>, chrono::DateTime<
     (sources, older + chrono::TimeDelta::seconds(11))
 }
 
+const MEMORY_PANE: &str = "AgentDesk-codex-observation-memory";
+const CONFIG_PANE: &str = "AgentDesk-codex-observation-config";
+
+fn mapped_live_panes(fixture: &Fixture) {
+    use std::io::Write;
+    let root = crate::config::runtime_root().unwrap();
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(root.join("config.yaml"))
+        .unwrap();
+    writeln!(config, "agents:\n  - id: observation-config\n    name: observation-config\n    provider: codex\n    channels: {{codex: {{id: '9', name: observation-config}}}}").unwrap();
+    assert!(
+        crate::services::discord::settings::list_registered_channel_bindings()
+            .iter()
+            .any(|binding| binding.channel_id == 9)
+    );
+    dedupe::register_tmux_channel(MEMORY_PANE, 8);
+    let claude = "AgentDesk-claude-observation-memory";
+    dedupe::register_tmux_channel(claude, 10);
+    let panes: [&str; 4] = [
+        &fixture.context.tmux_session,
+        MEMORY_PANE,
+        CONFIG_PANE,
+        claude,
+    ];
+    for pane in panes {
+        assert_eq!(
+            tc::read_tmux_channel_binding(pane),
+            None,
+            "no durable file for {pane}"
+        );
+    }
+    std::fs::write(fixture.bin.path().join("tmux"), format!(
+        "#!/bin/sh\n[ \"$1\" = -u ] && shift\ncase \"$1\" in list-sessions) printf '%s\\n' '{}' '{}' '{}' '{}' ;; esac\nexit 0\n",
+        panes[0], panes[1], panes[2], panes[3]
+    )).unwrap();
+}
+
 async fn assert_sweep(fixture: &Fixture, shared: Arc<SharedData>, count: usize, configured: bool) {
     let (sources, activity_at) = backlog(fixture, count);
     shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
@@ -124,11 +162,15 @@ async fn assert_sweep(fixture: &Fixture, shared: Arc<SharedData>, count: usize, 
     );
     let registry = HealthRegistry::new();
     registry.register("codex".into(), shared.clone()).await;
+    let observed_shared = shared.clone();
     let (reply, cursors, reading) = with_ready_codex_backlog(
         sources,
         fixture.context.tmux_session.clone(),
         configured,
         |ready| async move {
+            prepare(&registry, observed_shared, CHANNEL)
+                .await
+                .expect("complete live-pane channel attribution before retention");
             let first = test_support::codex_sweep_for_test(&registry, &ready, CHANNEL)
                 .await
                 .unwrap();
@@ -293,5 +335,85 @@ fn pg_codex_native_configured_herdr_sweep_retires_aged_backlog() {
     assert!(
         rig.sends().is_empty(),
         "retention never sends terminal input"
+    );
+}
+
+#[test]
+fn codex_twenty_reader_backlog_retires_after_complete_retention_evidence() {
+    let fixture = Fixture::new(false);
+    mapped_live_panes(&fixture);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(assert_sweep(&fixture, fixture.shared(None), 19, false));
+}
+
+#[test]
+fn codex_twenty_readers_survive_watcher_and_pane_census_skips() {
+    for component in ["watcher_binding", "pane_census"] {
+        let fixture = Fixture::new(false);
+        let (sources, _) = backlog(&fixture, 19);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let shared = if component == "watcher_binding" {
+                crate::services::discord::make_shared_data_for_tests_with_storage(None)
+            } else {
+                let tmux = fixture.bin.path().join("tmux");
+                std::fs::write(tmux, format!(
+                    "#!/bin/sh\n[ \"$1\" = -u ] && shift\ncase \"$1\" in list-sessions) printf '%s\\n' '{}' 'AgentDesk-unassigned-observation-test' ;; esac\nexit 0\n",
+                    fixture.context.tmux_session
+                )).unwrap();
+                fixture.shared(None)
+            };
+            shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
+            let registry = HealthRegistry::new();
+            registry.register("codex".into(), shared).await;
+            let (_, cursors, reading) = with_ready_codex_backlog(
+                sources, fixture.context.tmux_session.clone(), false,
+                |ready| async move {
+                    assert_eq!(test_support::codex_sweep_for_test(&registry, &ready, CHANNEL).await.unwrap_err(), "no Codex Inspect was sent");
+                    assert_eq!(test_support::codex_skips_for_test(), std::collections::BTreeMap::from([
+                        (format!("codex_context_unavailable:{component}"), 1)
+                    ]));
+                }
+            ).await;
+            assert_eq!(reading, Some(20), "component={component}");
+            assert_eq!(cursors.len(), 20);
+            assert!(cursors.iter().all(|cursor| !cursor.retired && cursor.transition_cleanup.is_none()), "component={component}");
+        });
+    }
+}
+
+#[test]
+fn known_live_channels_without_channel_files_form_a_complete_codex_census() {
+    let fixture = Fixture::new(false);
+    mapped_live_panes(&fixture);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let prepared = runtime
+        .block_on(prepare(
+            &HealthRegistry::new(),
+            fixture.shared(None),
+            CHANNEL,
+        ))
+        .expect("known live channels must not depend on channel files");
+    let observed = fixture.observe(&prepared).unwrap();
+    assert_eq!(
+        observed.panes,
+        [model::Pane {
+            name: fixture.context.tmux_session.clone(),
+            state: model::PaneState::Live
+        }]
+    );
+    dedupe::register_tmux_channel(MEMORY_PANE, 11);
+    assert_eq!(
+        fixture.observe(&prepared).err().as_deref(),
+        Some("Codex full-tail/census changed during observation")
     );
 }

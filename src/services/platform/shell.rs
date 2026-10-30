@@ -1,7 +1,9 @@
 //! Platform helpers: the host's short name, and git helpers re-exported for
 //! platform callers.
 
+#[cfg(any(not(unix), test))]
 use std::process::Command;
+use std::sync::OnceLock;
 
 #[allow(unused_imports)]
 pub(crate) use crate::services::git::{
@@ -19,6 +21,18 @@ pub(crate) use crate::services::git::{
 ///
 /// Equivalent to `hostname -s` on Unix. Falls back to "localhost" on failure.
 pub fn hostname_short() -> String {
+    static HOSTNAME: OnceLock<String> = OnceLock::new();
+    #[cfg(unix)]
+    let read = health_hostname_short;
+    #[cfg(not(unix))]
+    let read = hostname_command_short;
+    HOSTNAME.get_or_init(read).clone()
+}
+
+#[cfg(any(not(unix), test))]
+fn hostname_command_short() -> String {
+    #[cfg(test)]
+    HOSTNAME_SPAWNS.with(|count| count.set(count.get() + 1));
     let mut command = Command::new("hostname");
     #[cfg(unix)]
     command.arg("-s");
@@ -29,10 +43,19 @@ pub fn hostname_short() -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
+#[cfg(test)]
+thread_local! {
+    static HOSTNAME_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    #[cfg(unix)]
+    static HOSTNAME_NATIVE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The short hostname for `/health/detail`: `gethostname` instead of a `hostname -s` process per
 /// request, with the same short-name parsing and "localhost" fallback.
 #[cfg(unix)]
 pub fn health_hostname_short() -> String {
+    #[cfg(test)]
+    HOSTNAME_NATIVE_READS.with(|count| count.set(count.get() + 1));
     let mut buffer = [0u8; 256];
     // SAFETY: the pointer and length describe `buffer`, which is writable and outlives the call;
     // gethostname writes at most `len` bytes.
@@ -104,12 +127,27 @@ mod hostname_tests {
     #[cfg(unix)]
     #[test]
     fn health_hostname_native_matches_command() {
-        let command = hostname_short();
+        let command = hostname_command_short();
         assert_ne!(
             command, "localhost",
             "`hostname -s` must answer here, or two fallbacks would match"
         );
         assert_eq!(health_hostname_short(), command);
+        assert_eq!(hostname_short(), command);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_short_hostname_calls_spawn_no_children() {
+        let expected = health_hostname_short();
+        assert_eq!(hostname_short(), expected);
+        HOSTNAME_SPAWNS.with(|count| count.set(0));
+        HOSTNAME_NATIVE_READS.with(|count| count.set(0));
+        for _ in 0..100 {
+            assert_eq!(hostname_short(), expected);
+        }
+        assert_eq!(HOSTNAME_SPAWNS.with(|count| count.get()), 0);
+        assert_eq!(HOSTNAME_NATIVE_READS.with(|count| count.get()), 0);
     }
 
     #[cfg(unix)]

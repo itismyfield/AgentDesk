@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId, SourceRange, UnitKind};
@@ -530,7 +532,9 @@ async fn records_before_the_migration_lower_stay_nonretroactive_beside_a_new_sou
     let old_key = old.unit_key.clone().unwrap();
     let mut fresh = evidence("fresh", "new source", 0);
     fresh.record.source.path = "/fixture/new-source.jsonl".into();
-    fresh.origin.as_mut().unwrap().record = fresh.record.clone();
+    // The new source was bound after the freeze.
+    let origin = fresh.origin.as_mut().unwrap();
+    (origin.record, origin.binding_seq) = (fresh.record.clone(), 4);
     let fresh_key = fresh.unit_key.clone().unwrap();
     let mut writer = fixture.writer();
     writer

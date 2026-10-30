@@ -26,6 +26,23 @@ pub(super) async fn settle_receipt(
     true
 }
 
+/// A Codex channel whose boot confirmation waited on a row restore has now settled confirms as a
+/// completion would; a refusal keeps Legacy turns, and only the boot selection is ever confirmed.
+pub(super) fn reconfirm_codex_turn_mode(provider: &ProviderKind, channels: &[u64]) {
+    use crate::services::discord::tui_direct_pending_start::turn_retirement::codex;
+    if *provider != ProviderKind::Codex {
+        return;
+    }
+    for &channel in channels {
+        let Some(turn) = crate::services::tui_o::cutover::codex_turn_awaited(channel) else {
+            continue;
+        };
+        if codex::confirm_current(channel, &turn) == codex::Confirmation::Confirmed {
+            crate::services::discord::turn_presence::supervisor::register(provider, &[channel]);
+        }
+    }
+}
+
 pub(super) fn herdr_turn_held(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
@@ -135,8 +152,8 @@ impl BeforeStartRestart {
             return kept(state, "a live actor owns the channel");
         }
         let mut row = state.clone();
-        // A pending or delivered receipt without its message is never settled.
-        if row.current_msg_id == 0 {
+        // A receipt without its message settles only for a turn started anchorless in turn mode.
+        if row.current_msg_id == 0 && !row.anchorless_turn_mode {
             return kept(state, "no message to show the stop on");
         }
         if row
@@ -151,8 +168,10 @@ impl BeforeStartRestart {
                     crate::services::discord::turn_bridge::before_start_stop::reply_and_ack_stop;
                 notice(http, shared, &row).await
             } else {
+                let Some(anchor) = inflight::opt_message_id(row.current_msg_id) else {
+                    return kept(state, "no message to show the stop on");
+                };
                 let gateway = DiscordGateway::new(http.clone(), shared.clone(), provider, None);
-                let anchor = MessageId::new(row.current_msg_id);
                 let sent = gateway
                     .replace_message_with_outcome(channel, anchor, ADMITTED_ABORT_NOTICE)
                     .await;

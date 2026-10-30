@@ -12,14 +12,17 @@ const TOKEN_LEN: usize = 4;
 
 /// The frame verbatim, or in one whole paste block with Claude's measured outer separators.
 pub(crate) fn exact(body: &str, expected: &str) -> bool {
-    body == expected
-        || unwrap_paste(body) == Some(expected)
+    body == expected || pasted_inner(body) == Some(expected)
+}
+
+/// The inside of one whole paste block, bare or with Claude's measured outer separators.
+pub(crate) fn pasted_inner(body: &str) -> Option<&str> {
+    unwrap_paste(body).or_else(|| {
         // Claude writes exactly two leading LFs and one trailing LF around a folded paste.
-        || body
-            .strip_prefix("\n\n")
+        body.strip_prefix("\n\n")
             .and_then(|inner| inner.strip_suffix('\n'))
             .and_then(unwrap_paste)
-            == Some(expected)
+    })
 }
 
 /// The inside of `<pasted_content id="T">\n…\n</pasted_content id="T">` when that is the whole body.

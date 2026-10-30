@@ -9,9 +9,8 @@ use crate::services::tui_o::{
     },
     store::{InitSource, Initialized, OStore, StoreConfig},
     writer::{
-        AlarmSink, DeliveryLease, PostOutcome, SeenMessage, WriterAlarm,
-        deliver::ChannelWriter,
-        pieces::{Derived, UnitDeriver},
+        AlarmSink, DeliveryLease, PostOutcome, SeenMessage, WriterAlarm, deliver::ChannelWriter,
+        pieces::UnitDeriver,
     },
 };
 use serde_json::json;
@@ -128,7 +127,16 @@ impl Fixture {
         uncertain: u8,
         ending: Option<serde_json::Value>,
     ) -> Self {
-        Self::new_scoped(channel, provider, bodies, uncertain, ending, None, 0).await
+        Self::new_scoped(
+            channel,
+            provider,
+            bodies,
+            uncertain,
+            ending,
+            None,
+            (0, false, false),
+        )
+        .await
     }
 
     pub async fn injected_with_prefix(channel: u64, bodies: &[&str], prefix: usize) -> Self {
@@ -139,7 +147,20 @@ impl Fixture {
             0,
             None,
             Some(prefix),
+            (0, false, false),
+        )
+        .await
+    }
+
+    pub async fn continued_frame(channel: u64, large: bool, duration: bool) -> Self {
+        Self::new_scoped(
+            channel,
+            ProviderKind::Claude,
+            &["background task finished. ", "monitor followup"],
             0,
+            None,
+            Some(4096),
+            (if large { 2_426_345 } else { 0 }, true, duration),
         )
         .await
     }
@@ -151,7 +172,7 @@ impl Fixture {
         uncertain: u8,
         ending: Option<serde_json::Value>,
         prefix: Option<usize>,
-        padding: usize,
+        (padding, early_stop, duration): (usize, bool, bool),
     ) -> Self {
         let root = crate::config::runtime_root().unwrap();
         std::fs::create_dir_all(&root).unwrap();
@@ -167,12 +188,19 @@ impl Fixture {
                 values.push(json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"input"}]}})); },
             _ => panic!("native fixture provider"),
         }
-        if padding > 0 {
-            values
-                .push(json!({"type":"system","subtype":"metadata","padding":"x".repeat(padding)}));
+        for offset in (0..padding).step_by(128 * 1024) {
+            values.push(json!({"type":"system","subtype":"metadata","padding":"x".repeat((padding - offset).min(128 * 1024))}));
         }
         let mut body = String::new();
         for (index, text) in bodies.iter().enumerate() {
+            if early_stop && index == 1 {
+                values.push(json!({"type":"system","subtype":"stop_hook_summary"}));
+                if duration {
+                    values
+                        .push(json!({"type":"system","subtype":"turn_duration","durationMs":1200}));
+                }
+                values.push(json!({"type":"user","uuid":"background-input","isMeta":true,"message":{"content":"<task-notification>background task completed</task-notification>"}}));
+            }
             if !body.is_empty()
                 && crate::services::discord::semantic_boundaries::semantic_chunk_separator_needed(
                     &body, text,
@@ -233,18 +261,22 @@ impl Fixture {
         let era = store.read_era().unwrap().unwrap();
         let mut channel_store = store.open_channel(&era, channel).unwrap().unwrap();
         let mut capture = SourceCapture::open(source.clone(), delivery_start).unwrap();
-        let CaptureOutcome::Batch(batch) = capture.poll(1024 * 1024) else {
-            panic!("capture")
-        };
-        channel_store
-            .append_spool(&batch, &capture.prefix_hash())
-            .unwrap();
         let mut deriver = UnitDeriver::new(channel, manifest::provider(&provider).unwrap());
-        let work: Vec<Derived> = batch
-            .records
-            .iter()
-            .flat_map(|record| deriver.derive(record))
-            .collect();
+        let mut work = Vec::new();
+        while capture.captured_through() < raw.len() as u64 {
+            let CaptureOutcome::Batch(batch) = capture.poll(1024 * 1024) else {
+                panic!("capture")
+            };
+            channel_store
+                .append_spool(&batch, &capture.prefix_hash())
+                .unwrap();
+            work.extend(
+                batch
+                    .records
+                    .iter()
+                    .flat_map(|record| deriver.derive(record)),
+            );
+        }
         let gate = Arc::new(OwnershipGate::default());
         gate.acquired();
         let port = Arc::new(Port {
@@ -1289,7 +1321,7 @@ async fn i7441c2_frame_read_bound_and_expired_deadline_are_exact() {
             0,
             None,
             Some(prefix),
-            padding,
+            (padding, false, false),
         )
         .await;
         let query = || manifest::Query {
@@ -1542,4 +1574,47 @@ async fn i7441c3_streaming_reader_append_snapshot_and_replacement() {
         fixture_local(&f).is_none(),
         "path replacement must not keep old file candidates"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn i7441r_oversized_or_malformed_source_records_fail_closed() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    for (index, extra) in [
+        format!(
+            "{}\n",
+            json!({"type":"system","subtype":"metadata","padding":"x".repeat(2 * 1024 * 1024)})
+        ),
+        "{broken json}\n".into(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let f = Fixture::continued_frame(744520 + index as u64, true, false).await;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&f.source.path)
+            .unwrap()
+            .write_all(extra.as_bytes())
+            .unwrap();
+        let plan = manifest::build_terminal(
+            &f.root,
+            manifest::Query {
+                provider: &ProviderKind::Claude,
+                channel: f.row.channel_id,
+                path: &f.source.path,
+                file: (f.source.dev, f.source.ino),
+                range: (
+                    f.row.turn_start_offset.unwrap(),
+                    f.row.last_offset + extra.len() as u64,
+                ),
+            },
+            Instant::now() + std::time::Duration::from_secs(1),
+        );
+        assert!(
+            plan.is_none(),
+            "invalid source record cannot prove delivery"
+        );
+    }
 }
