@@ -318,18 +318,19 @@ operator terminate는 대기열을 건드리지 않으므로 Retired 뒤 남은 
 create 응답을 잃었거나 위치 기록 전에 실패해 pane이 있을 수도 있는 상태다. 그 채널의 다음 턴과 재시작 pass가 채널 전환 lease를 잡고 자동으로 해소한다. 손으로 row를 덮어쓰거나 pane을 닫지 않는다.
 
 - 판정은 launch가 끝나고 60초가 지난 뒤에만 한다. 그 채널의 label(`<logical_key>#<nonce>` 또는 표지 이전의 `<logical_key>`)을 단 workspace만 읽는다.
+- 같은 채널 label 안에 다른 실행(row가 기록하지 않은 nonce)의 provider가 binding context로 확인되면, terminate 서비스로 그 pane을 먼저 닫고 종료를 확인한다. live terminate 스위치가 꺼져 있거나 종료를 확인하지 못하면 Held다. 이때 row 쓰기·턴 정리는 하지 않는다.
 - 그 launch의 provider가 binding context로 확인되면 입양한다. 위치와 증거를 한 번에 기록한다.
 - 그 launch가 만든 손대지 않은 셸만 있으면 같은 서버에서 닫고, 종료를 확인한 뒤 retire한다. 다음 턴이 새로 launch한다.
 - 그 launch의 흔적이 없으면 retire한다.
 - 판정할 수 없으면 그대로 둔다(Held). 턴은 `has no recorded pane and is held: <사유>`로 거절되고, 로그 이벤트는 `herdr_unplaced_pending`이다. 사유는 다음과 같다.
-  - 다른 실행의 기록되지 않은 provider(`unrecorded executions`)
+  - 닫지 못했거나 닫은 뒤에도 남은 다른 실행의 provider(`orphan <nonce> not closed`, `unrecorded executions outlived a close`)
   - 사람이 손댄 표지 workspace(`residue_touched`)
   - 시점으로 가를 수 없는 표지 이전 셸(`legacy_unattributed`)
   - 읽기 실패
 - Held의 원인을 사람이 치우면 다음 턴이나 pass가 다시 판정한다.
 - 이렇게 retire된 row는 위치와 증거가 없어 tmux Return 종료 증거가 되지 않는다(`Incomplete`).
 
-근거: `src/services/herdr_launch/unplaced.rs`; `src/services/session_host/herdr_gate.rs`(residue); `src/services/discord/recovery_engine/herdr_reader.rs`.
+근거: `src/services/herdr_launch/unplaced.rs`; `src/services/session_host/herdr_gate.rs`(residue); `src/services/discord/herdr_terminate.rs`(`close_unrecorded`); `src/services/discord/recovery_engine/herdr_reader.rs`.
 
 ### 3.5 후속 필요 — 같은 채널의 명시적 전환
 

@@ -9,11 +9,13 @@ use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedOwner, HostedRecord, HostedState,
 };
+use crate::services::discord::herdr_terminate::route_tests::{current_thread, in_child, switch};
 use crate::services::discord::{UnplacedLease, make_shared_data_for_tests};
 use crate::services::herdr_launch::unplaced::{Resolution, Unplaced, resolve_unplaced};
 use crate::services::herdr_launch::{
     HerdrLaunch, HerdrLaunchCommand, HerdrLaunchOutcome, launch_herdr_session, workspace_marker,
 };
+use crate::services::session_host::herdr_registry::{self, HerdrRegistry};
 use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, PreparedIncarnation};
 use poise::serenity_prelude::ChannelId;
 
@@ -557,86 +559,133 @@ async fn a_pre_marker_launch_whose_provider_started_is_adopted_after_a_restart_p
     rig.end().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn panes_the_resolver_cannot_attribute_hold_the_row_and_are_never_written_pg() {
-    let rig = Rig::new().await;
-    let host = rig.host();
-    let n = rig.lost_create(&host).await;
-    let own = rig.state().workspaces[0].panes[0].clone();
-    let contexts = PathBuf::from(&rig.owner.runtime_root).join("runtime/binding_contexts/claude");
-    let own_context = contexts.join(format!("{n}.json"));
-    let (m, m_context) = other_execution(&rig);
-    let (orphan, earlier, person, user, split) = {
-        let mut herdr = rig.state();
-        herdr.run(&own, &own_context);
-        let orphan = herdr.workspace(&workspace_marker(KEY, &m));
-        herdr.run(&orphan, &m_context);
-        let elsewhere = herdr.workspace(&workspace_marker("AgentDesk-claude-elsewhere", &m));
-        herdr.run(&elsewhere, &m_context);
-        let earlier = herdr.workspace(&workspace_marker(
-            KEY,
-            &uuid::Uuid::new_v4().simple().to_string(),
-        ));
-        let person = herdr.workspace("notes");
-        let user = herdr.workspace(KEY);
-        let split = herdr.split(&own);
-        (orphan, earlier, person, user, split)
+/// This node's registry over the rig's server and process table, as the terminate service reads it.
+fn registry(rig: &Rig) -> HerdrRegistry {
+    let mut host = launch_host(&rig.server);
+    let (endpoint, transport) = host.endpoints.pop().unwrap();
+    let os: Arc<dyn ProcessOs> = Arc::new(RigOs(rig.herdr.clone()));
+    HerdrRegistry::with_transport(endpoint, transport).with_reads((bootstrapped_e7, os))
+}
+
+fn bootstrapped_e7(transport: &dyn HerdrTransport, endpoint: &HerdrEndpoint) -> RestoreResume {
+    read_restore_resume_with(transport, endpoint, &Bootstrapped)
+}
+
+/// Requests that named `pane`.
+fn requests_to(rig: &Rig, pane: &str) -> usize {
+    let conns = rig.server.conns.lock().unwrap();
+    let named = |request: &Option<Value>| {
+        request
+            .as_ref()
+            .is_some_and(|r| r["params"]["pane_id"] == pane)
     };
-    let pending = rig.record().await;
-    let runs = [
-        ("residue_touched", Some(split)),
-        ("legacy_unattributed", Some(user)),
-        ("unrecorded executions", None),
-    ];
-    for (why, removed) in runs {
+    conns.iter().filter(|(request, _)| named(request)).count()
+}
+
+/// The row is as it was, no pane was removed and nothing launched again.
+async fn unchanged(rig: &Rig, pending: &HostedExecution, why: &str) {
+    assert_eq!(&rig.record().await, pending, "{why}");
+    let herdr = rig.state();
+    assert!(herdr.removed.is_empty() && herdr.creates == 1, "{why}");
+}
+
+#[test]
+fn panes_the_resolver_cannot_attribute_hold_the_row_and_are_never_written_pg() {
+    let path = concat!(
+        module_path!(),
+        "::panes_the_resolver_cannot_attribute_hold_the_row_and_are_never_written_pg"
+    );
+    if !in_child(path) {
+        return;
+    }
+    switch(true);
+    current_thread().block_on(async {
+        let rig = Rig::new().await;
+        let _registry = herdr_registry::force_for_test(registry(&rig));
+        let host = rig.host();
+        let n = rig.lost_create(&host).await;
+        let own = rig.state().workspaces[0].panes[0].clone();
+        let contexts =
+            PathBuf::from(&rig.owner.runtime_root).join("runtime/binding_contexts/claude");
+        let own_context = contexts.join(format!("{n}.json"));
+        let (m, m_context) = other_execution(&rig);
+        let (orphan, elsewhere, earlier, person, user, split) = {
+            let mut herdr = rig.state();
+            herdr.run(&own, &own_context);
+            let orphan = herdr.workspace(&workspace_marker(KEY, &m));
+            herdr.run(&orphan, &m_context);
+            let elsewhere = herdr.workspace(&workspace_marker("AgentDesk-claude-elsewhere", &m));
+            herdr.run(&elsewhere, &m_context);
+            let earlier = herdr.workspace(&workspace_marker(
+                KEY,
+                &uuid::Uuid::new_v4().simple().to_string(),
+            ));
+            let person = herdr.workspace("notes");
+            let user = herdr.workspace(KEY);
+            let split = herdr.split(&own);
+            (orphan, elsewhere, earlier, person, user, split)
+        };
+        let pending = rig.record().await;
+        for (why, removed) in [("residue_touched", split), ("legacy_unattributed", user)] {
+            let held = rig.resolve(&host, &n).await;
+            assert!(
+                matches!(held, Resolution::Held(ref reason) if reason.contains(why)),
+                "{why}: {held:?}"
+            );
+            unchanged(&rig, &pending, why).await;
+            rig.state().drop_pane(&removed);
+        }
+        // A context this runtime cannot read is not someone else's: the row stays held.
+        let m_bytes = std::fs::read(&m_context).unwrap();
+        std::fs::write(&m_context, b"{").unwrap();
+        let held = rig.resolve(&host, &n).await;
+        assert!(matches!(held, Resolution::Held(_)), "{held:?}");
+        unchanged(&rig, &pending, "unreadable context").await;
+        std::fs::write(&m_context, m_bytes).unwrap();
+        // Unrecorded execution M is closed only with the switch on and its end confirmed.
+        switch(false);
         let held = rig.resolve(&host, &n).await;
         assert!(
-            matches!(held, Resolution::Held(ref reason) if reason.contains(why)),
-            "{why}: {held:?}"
+            matches!(held, Resolution::Held(ref why) if why.contains("Disabled")),
+            "{held:?}"
         );
-        assert_eq!(rig.record().await, pending, "{why}");
-        let herdr = rig.state();
-        assert!(herdr.removed.is_empty() && herdr.creates == 1, "{why}");
-        drop(herdr);
-        if let Some(pane) = removed {
-            rig.state().drop_pane(&pane);
+        unchanged(&rig, &pending, "switch off").await;
+        switch(true);
+        rig.state().ignore_removals = true;
+        let held = rig.resolve(&host, &n).await;
+        assert!(
+            matches!(held, Resolution::Held(ref why) if why.contains("not closed")),
+            "{held:?}"
+        );
+        unchanged(&rig, &pending, "close not carried out").await;
+        rig.state().ignore_removals = false;
+        assert_eq!(rig.resolve(&host, &n).await, Resolution::Adopted);
+        let adopted = rig.record().await;
+        assert_eq!(
+            adopted.location.map(|location| location.pane_id),
+            Some(own.clone())
+        );
+        {
+            let herdr = rig.state();
+            assert_eq!(
+                (&herdr.removed, herdr.creates),
+                (&vec![orphan.clone()], 1),
+                "M closed once, nothing launched"
+            );
+            let left: Vec<&String> = herdr.workspaces.iter().flat_map(|w| &w.panes).collect();
+            for kept in [&earlier, &person, &own, &elsewhere] {
+                assert!(left.contains(&kept), "{kept}: {left:?}");
+            }
         }
-    }
-    // A context this runtime cannot read is not someone else's: the row stays held.
-    std::fs::write(&m_context, b"{").unwrap();
-    let held = rig.resolve(&host, &n).await;
-    assert!(matches!(held, Resolution::Held(_)), "{held:?}");
-    assert_eq!(rig.record().await, pending);
-    rig.state().drop_pane(&orphan);
-    assert_eq!(rig.resolve(&host, &n).await, Resolution::Adopted);
-    assert!(rig.state().removed.is_empty());
-    let left: Vec<String> = rig
-        .state()
-        .workspaces
-        .iter()
-        .flat_map(|w| w.panes.clone())
-        .collect();
-    assert!(
-        left.contains(&earlier) && left.contains(&person) && left.contains(&own),
-        "{left:?}"
-    );
-    let person_reads = rig
-        .server
-        .conns
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(request, _)| {
-            request
-                .as_ref()
-                .is_some_and(|r| r["params"]["pane_id"] == person.as_str())
-        })
-        .count();
-    assert_eq!(
-        person_reads, 0,
-        "a pane outside the channel's labels is never read"
-    );
-    rig.end().await;
+        for outside in [&person, &elsewhere] {
+            assert_eq!(
+                requests_to(&rig, outside),
+                0,
+                "a pane outside the channel's labels is never read or closed"
+            );
+        }
+        rig.end().await;
+    });
 }
 
 /// Delegates to the socket host, pausing before the channel's panes are read.

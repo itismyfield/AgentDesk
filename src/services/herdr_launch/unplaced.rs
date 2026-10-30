@@ -1,5 +1,5 @@
 //! A Pending whose create outcome never came back, resolved under the channel's transition lease:
-//! adopt the launch's provider, remove its untouched shell, retire once nothing remains, else hold.
+//! close unrecorded executions, remove the launch's untouched shell, adopt its provider or retire.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,13 +10,14 @@ use sqlx::PgPool;
 
 use super::{
     EvidenceProbe, HerdrLaunchEndpoint, HerdrLaunchHost, load_row, on_blocking_thread,
-    pane_location, retire_own_unplaced,
+    pane_location, retire_own_unplaced, source_ref,
 };
 use crate::db::dispatched_sessions::hosted_execution::{
-    HostedCasOutcome, HostedOwner, HostedRecord, HostedState, ProcessStamp,
-    record_launch_evidence_pg,
+    ExpectedExecution, HostedCasOutcome, HostedExecution, HostedLocation, HostedOwner,
+    HostedRecord, HostedState, ProcessStamp, record_launch_evidence_pg,
 };
 use crate::services::discord::UnplacedLease;
+use crate::services::discord::herdr_terminate::close_unrecorded;
 use crate::services::session_host::{PaneOccupant, START_SLACK, ServerWitness};
 use crate::services::tui_prompt_dedupe::binding_context::{
     BindingContext, context_of_env_path, execution_context,
@@ -25,8 +26,8 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 /// How long after a launch's last client work, or this process's start, before it is judged.
 pub(crate) const UNPLACED_QUIET: Duration = Duration::from_secs(60);
 const ENDED_KEPT: Duration = Duration::from_secs(3_600);
-/// Reads after one removal; a removal never needs a second.
-const PASSES: usize = 2;
+/// Reads after one round of orphan closes and one residue removal; neither is ever repeated.
+const PASSES: usize = 3;
 
 /// Each launch this process started, and when its last client work ended (`None` while running).
 static IN_FLIGHT: LazyLock<Mutex<HashMap<String, Option<Instant>>>> = LazyLock::new(Mutex::default);
@@ -244,6 +245,7 @@ async fn resolve(target: &Unplaced<'_>) -> Resolution {
     {
         return Resolution::Held("another node's or runtime's launch".into());
     }
+    let mut closed = false;
     for _ in 0..PASSES {
         match unplaced(target).await {
             Ok(true) => {}
@@ -271,8 +273,16 @@ async fn resolve(target: &Unplaced<'_>) -> Resolution {
         };
         match judge(&panes, owner, nonce, created, &context_of_env_path) {
             Plan::Held(why) => return Resolution::Held(why),
+            Plan::Orphans(orphans) if closed => {
+                return Resolution::Held(format!(
+                    "unrecorded executions outlived a close {orphans:?}"
+                ));
+            }
             Plan::Orphans(orphans) => {
-                return Resolution::Held(format!("unrecorded executions {orphans:?}"));
+                if let Err(why) = close_orphans(target, &witness, orphans).await {
+                    return Resolution::Held(why);
+                }
+                closed = true;
             }
             Plan::Dispose {
                 pane_id,
@@ -361,6 +371,56 @@ async fn dispose(target: &Unplaced<'_>, residue: Residue) -> Result<(), String> 
     .unwrap_or_else(|| Err("residue removal panicked".into()))
 }
 
+/// Where execution `nonce` runs and its provider, proven by the launch's own evidence rule.
+async fn probe(
+    target: &Unplaced<'_>,
+    witness: ServerWitness,
+    pane_id: String,
+    nonce: &str,
+    created: SystemTime,
+) -> Result<(HostedLocation, ExpectedExecution), String> {
+    let location = pane_location(target.endpoint, pane_id);
+    let probe = EvidenceProbe {
+        location: location.clone(),
+        provider: target.owner.provider.clone(),
+        execution_nonce: nonce.to_owned(),
+        launched_at: created,
+        witness,
+    };
+    match on_blocking_thread(&target.host, move |host| host.launch_evidence(&probe)).await {
+        Some(Ok(expected)) => Ok((location, expected)),
+        other => Err(format!("provider of {nonce} not proven: {other:?}")),
+    }
+}
+
+/// Closes each orphan's pane through the terminate service while the row still holds; any
+/// refusal, disabled switch or unconfirmed end holds.
+async fn close_orphans(
+    target: &Unplaced<'_>,
+    witness: &ServerWitness,
+    orphans: Vec<(String, String)>,
+) -> Result<(), String> {
+    for (nonce, pane_id) in orphans {
+        let created = execution_context(&target.owner.provider, &nonce)?.created_at;
+        let (location, expected) =
+            probe(target, witness.clone(), pane_id, &nonce, created.into()).await?;
+        let orphan = HostedExecution {
+            location: Some(location),
+            expected: Some(expected),
+            ..HostedExecution::pending(
+                target.owner.clone(),
+                nonce.clone(),
+                source_ref(target.owner, &nonce),
+            )
+        };
+        let holds = async { unplaced(target).await == Ok(true) };
+        close_unrecorded(&orphan, holds)
+            .await
+            .map_err(|result| format!("orphan {nonce} not closed: {result:?}"))?;
+    }
+    Ok(())
+}
+
 /// Records the pane and its probed provider in one CAS; a failed probe writes nothing.
 async fn adopt(
     target: &Unplaced<'_>,
@@ -368,18 +428,9 @@ async fn adopt(
     pane_id: String,
     created: SystemTime,
 ) -> Resolution {
-    let location = pane_location(target.endpoint, pane_id);
-    let probe = EvidenceProbe {
-        location: location.clone(),
-        provider: target.owner.provider.clone(),
-        execution_nonce: target.nonce.to_owned(),
-        launched_at: created,
-        witness,
-    };
-    let probed = on_blocking_thread(&target.host, move |host| host.launch_evidence(&probe)).await;
-    let expected = match probed {
-        Some(Ok(expected)) => expected,
-        other => return Resolution::Held(format!("provider not proven: {other:?}")),
+    let (location, expected) = match probe(target, witness, pane_id, target.nonce, created).await {
+        Ok(found) => found,
+        Err(why) => return Resolution::Held(why),
     };
     let (pool, owner, nonce) = (target.pool, target.owner, target.nonce);
     let recorded = match load_row(pool, owner).await {
