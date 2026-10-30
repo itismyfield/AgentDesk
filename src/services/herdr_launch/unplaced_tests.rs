@@ -11,6 +11,7 @@ use crate::services::session_host::EvidenceGap;
 
 const N: &str = "0123456789abcdef0123456789abcdef";
 const M: &str = "fedcba9876543210fedcba9876543210";
+const K: &str = "00000000000000000000000000000abc";
 const KEY: &str = "AgentDesk-claude-adk";
 
 fn owner() -> HostedOwner {
@@ -120,9 +121,18 @@ fn a_verified_provider_of_the_launch_is_adopted_under_its_marker_or_a_pre_marker
             pane_id: "p1".into()
         }
     );
-    // A provider of N under another launch's marker is not where N's create put it.
-    let misplaced = [pane("p1", &marked(M), provider(N))];
-    assert!(held(&judged(&misplaced)), "{:?}", judged(&misplaced));
+    // A provider under another launch's marker, or another execution under the bare label, is not
+    // where its own create put it: neither adopted nor closed.
+    let misplaced = [
+        pane("p1", &marked(M), provider(N)),
+        pane("p1", &marked(N), provider(M)),
+        pane("p1", &marked(K), provider(M)),
+        pane("p1", KEY, provider(M)),
+    ];
+    for case in misplaced {
+        let plan = judged(std::slice::from_ref(&case));
+        assert!(held(&plan), "{case:?}: {plan:?}");
+    }
 }
 
 #[test]

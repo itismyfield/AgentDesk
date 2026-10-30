@@ -17,7 +17,6 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedRecord, HostedState, ProcessStamp, record_launch_evidence_pg,
 };
 use crate::services::discord::UnplacedLease;
-use crate::services::discord::herdr_terminate::close_unrecorded;
 use crate::services::session_host::{PaneOccupant, START_SLACK, ServerWitness};
 use crate::services::tui_prompt_dedupe::binding_context::{
     BindingContext, context_of_env_path, execution_context,
@@ -158,14 +157,16 @@ pub(crate) fn judge(
                 {
                     continue;
                 }
+                // Only N may run under the bare label; any other provider must run under its own marker.
                 match label {
-                    _ if ctx.execution_nonce != nonce => {
-                        orphans.push((ctx.execution_nonce, pane.pane_id.clone()))
-                    }
-                    Label::Marked(marked) if marked != nonce => {
+                    Label::Marked(marked) if marked != ctx.execution_nonce => {
                         return held(pane, "the provider runs under another launch's label");
                     }
-                    _ => own.push(pane),
+                    _ if ctx.execution_nonce == nonce => own.push(pane),
+                    Label::Marked(_) => orphans.push((ctx.execution_nonce, pane.pane_id.clone())),
+                    Label::Bare => {
+                        return held(pane, "an unrecorded provider under the bare label");
+                    }
                 }
             }
             PaneOccupant::LoneShell { root, root_started } => match label {
@@ -416,9 +417,27 @@ async fn close_orphans(
         let holds = async { unplaced(target).await == Ok(true) };
         close_unrecorded(&orphan, holds)
             .await
-            .map_err(|result| format!("orphan {nonce} not closed: {result:?}"))?;
+            .map_err(|why| format!("orphan {nonce} not closed: {why}"))?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+async fn close_unrecorded(
+    orphan: &HostedExecution,
+    holds: impl std::future::Future<Output = bool>,
+) -> Result<(), String> {
+    let closed = crate::services::discord::herdr_terminate::close_unrecorded(orphan, holds).await;
+    closed.map_err(|result| format!("{result:?}"))
+}
+
+/// The terminate service is Unix only; elsewhere an orphan is never closed and the row holds.
+#[cfg(not(unix))]
+async fn close_unrecorded(
+    _: &HostedExecution,
+    _: impl std::future::Future<Output = bool>,
+) -> Result<(), String> {
+    Err("unsupported on this platform".into())
 }
 
 /// Records the pane and its probed provider in one CAS; a failed probe writes nothing.

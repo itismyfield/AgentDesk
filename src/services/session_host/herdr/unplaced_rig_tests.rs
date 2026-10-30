@@ -642,6 +642,29 @@ fn panes_the_resolver_cannot_attribute_hold_the_row_and_are_never_written_pg() {
         assert!(matches!(held, Resolution::Held(_)), "{held:?}");
         unchanged(&rig, &pending, "unreadable context").await;
         std::fs::write(&m_context, m_bytes).unwrap();
+        // M under another launch's marker is not where its create put it: held, nothing closed.
+        let stray = {
+            let mut herdr = rig.state();
+            let k = uuid::Uuid::new_v4().simple().to_string();
+            let stray = herdr.workspace(&workspace_marker(KEY, &k));
+            herdr.run(&stray, &m_context);
+            stray
+        };
+        let held = rig.resolve(&host, &n).await;
+        assert!(
+            matches!(held, Resolution::Held(ref why) if why.contains("another launch's label")),
+            "{held:?}"
+        );
+        unchanged(&rig, &pending, "M under another marker").await;
+        {
+            let herdr = rig.state();
+            for pane in [&own, &orphan, &stray] {
+                let running = herdr.foreground(pane);
+                let provider = |pid: &u32| herdr.procs[pid].alive && herdr.procs[pid].parent != 1;
+                assert!(running.iter().all(provider), "{pane} lives");
+            }
+        }
+        rig.state().drop_pane(&stray);
         // Unrecorded execution M is closed only with the switch on and its end confirmed.
         switch(false);
         let held = rig.resolve(&host, &n).await;
