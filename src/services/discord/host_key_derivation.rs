@@ -43,12 +43,20 @@ pub(super) async fn derive_hosted_lookup(
     let mut lookups = Vec::with_capacity(hashes.len() * 2);
     for hash in hashes {
         let key = super::adk_session::build_namespaced_session_key(hash, provider, tmux_name);
-        lookups.push(load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(&key)).await);
         let identity = CanonicalSessionIdentity {
             kind: SessionIdentityKind::DiscordChannel,
             discord_token_hash: hash,
             channel_id: &channel,
         };
+        if let Err(error) =
+            resolve_session_row_pg(pool, Some(&key), Some(provider.as_str()), Some(identity)).await
+        {
+            return error.conflict_kind().map_or_else(
+                || HostedLookup::Unknown(format!("{error:?}")),
+                HostedLookup::Conflict,
+            );
+        }
+        lookups.push(load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(&key)).await);
         let canonical = HostedLookupKey::Canonical {
             provider: provider.as_str(),
             identity,

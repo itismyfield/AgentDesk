@@ -15,6 +15,7 @@ mod source_boundary_tests;
 #[derive(Clone, Copy, Debug)]
 enum HistoricalMarker {
     Absent,
+    ForeignIdentity,
     OwnedMemory,
     OwnedBoot,
 }
@@ -44,6 +45,16 @@ async fn absent_pin_restored_head_reaches_fresh_provider_pg() {
     );
     if isolated(test) {
         restored_head_reaches_provider(HistoricalMarker::Absent, true, true).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn disconnected_foreign_identity_queue_kickoff_starts_turn_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::disconnected_foreign_identity_queue_kickoff_starts_turn_pg"
+    )) {
+        restored_head_reaches_provider(HistoricalMarker::ForeignIdentity, true, true).await;
     }
 }
 
@@ -202,7 +213,10 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
     fixture.fake.mark_missing();
     fixture.alive.store(false, Ordering::SeqCst);
     crate::services::session_backend::remove_process_session(CANARY_TMUX);
-    if matches!(marker, HistoricalMarker::Absent) {
+    if matches!(
+        marker,
+        HistoricalMarker::Absent | HistoricalMarker::ForeignIdentity
+    ) {
         crate::services::tmux_common::cleanup_session_temp_files(CANARY_TMUX);
     } else {
         assert_eq!(
@@ -247,16 +261,40 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
         (activity.activity, activity.reason),
         (Activity::Idle, "no_session")
     );
-    let blocked = crate::services::discord::router::hosted_tui_promote_readiness_blocked(
-        &fixture.shared,
-        &ProviderKind::Codex,
-        channel,
-    )
-    .await;
-    assert!(
-        !blocked,
-        "{marker:?}: confirmed absence must pass real readiness without clear; head={identity:?}"
-    );
+    if matches!(marker, HistoricalMarker::ForeignIdentity) {
+        let pool = fixture.shared.pg_pool.as_ref().unwrap();
+        sqlx::query("UPDATE sessions SET identity_kind = NULL, discord_token_hash = NULL")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, channel_id,
+                                   identity_kind, discord_token_hash, last_heartbeat)
+             VALUES ($1, 'codex', 'disconnected', $2, 'discord_channel', $3,
+                     NOW() - INTERVAL '60 days')",
+        )
+        .bind(format!(
+            "codex/{}/old-mac-mini:{CANARY_TMUX}",
+            fixture.shared.token_hash
+        ))
+        .bind(CANARY_CHANNEL.to_string())
+        .bind(&fixture.shared.token_hash)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    if !matches!(marker, HistoricalMarker::ForeignIdentity) {
+        let blocked = crate::services::discord::router::hosted_tui_promote_readiness_blocked(
+            &fixture.shared,
+            &ProviderKind::Codex,
+            channel,
+        )
+        .await;
+        assert!(
+            !blocked,
+            "{marker:?}: confirmed absence must pass real readiness without clear; head={identity:?}"
+        );
+    }
     let (hold_tx, hold_rx) = mpsc::channel();
     *crate::services::codex_tui::verified_hold::HOLD_ENTERED_FOR_TESTS
         .lock()

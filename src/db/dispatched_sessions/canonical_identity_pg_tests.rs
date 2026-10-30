@@ -2653,3 +2653,183 @@ async fn hosted_execution_thread_gc_resolves_the_host_before_the_tmux_probe_pg()
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test]
+async fn canonical_identity_foreign_handoff_insufficient_evidence_stays_divergent_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let channel = "1490141485167808532";
+    let live = "claude/discord_0123456789abcdef/mac-book:AgentDesk-claude-current";
+    for (status, old_host, live_status) in [
+        ("idle", "mac-mini", "idle"),
+        ("disconnected", "mac-book", "idle"),
+        ("disconnected", "MAC-BOOK.local", "idle"),
+        ("disconnected", "mac-mini", "disconnected"),
+        ("disconnected", "mac-mini", ""),
+    ] {
+        sqlx::query("DELETE FROM sessions")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let old = format!("claude/discord_0123456789abcdef/{old_host}:AgentDesk-claude-old");
+        let mut old_params = params(&old, channel);
+        old_params.status = status;
+        upsert_hook_session_with_identity_pg(&pool, old_params, Some(identity(channel)))
+            .await
+            .unwrap();
+        let mut live_params = params(live, channel);
+        live_params.status = live_status;
+        super::upsert_legacy_hook_session_pg(&pool, live_params)
+            .await
+            .unwrap();
+        let before: Vec<Value> =
+            sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let read = super::resolve_session_key_with_identity_pg(
+            &pool,
+            live,
+            Some("claude"),
+            Some(identity(channel)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            read.conflict_kind(),
+            Some(SessionIdentityConflictKind::EvidenceDivergence),
+            "{status}/{old_host}/{live_status}"
+        );
+        if live_status == "idle" {
+            let nameless =
+                super::resolve_session_row_pg(&pool, None, Some("claude"), Some(identity(channel)))
+                    .await
+                    .unwrap_err();
+            assert_eq!(
+                nameless.conflict_kind(),
+                Some(SessionIdentityConflictKind::EvidenceDivergence)
+            );
+        }
+        let hook = upsert_hook_session_with_identity_pg(
+            &pool,
+            params(live, channel),
+            Some(identity(channel)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            hook.conflict_kind(),
+            Some(SessionIdentityConflictKind::EvidenceDivergence)
+        );
+        let after: Vec<Value> =
+            sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after, "refusal rolls back every column");
+    }
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_foreign_handoff_resolver_and_hook_converge_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let channel = "1490141485167808532";
+    let old = "claude/discord_0123456789abcdef/mac-mini:AgentDesk-claude-current";
+    let live = "claude/discord_0123456789abcdef/mac-book:AgentDesk-claude-current";
+    for entry in 0..4 {
+        sqlx::query("DELETE FROM sessions")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut old_params = params(old, channel);
+        old_params.status = "disconnected";
+        upsert_hook_session_with_identity_pg(&pool, old_params, Some(identity(channel)))
+            .await
+            .unwrap();
+        super::upsert_legacy_hook_session_pg(&pool, params(live, channel))
+            .await
+            .unwrap();
+        let before = actor_pin_session_snapshot(&pool, old).await;
+        if entry == 2 {
+            let live_before = actor_pin_session_snapshot(&pool, live).await;
+            let error = super::resolve_session_row_pg(
+                &pool,
+                Some(old),
+                Some("claude"),
+                Some(identity(channel)),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.conflict_kind(),
+                Some(SessionIdentityConflictKind::EvidenceDivergence)
+            );
+            assert_eq!(actor_pin_session_snapshot(&pool, old).await, before);
+            assert_eq!(actor_pin_session_snapshot(&pool, live).await, live_before);
+        }
+        if entry == 0 {
+            upsert_hook_session_with_identity_pg(
+                &pool,
+                params(live, channel),
+                Some(identity(channel)),
+            )
+            .await
+            .unwrap();
+        } else if entry == 3 {
+            let (read, hook) = tokio::join!(
+                super::resolve_session_row_pg(
+                    &pool,
+                    Some(live),
+                    Some("claude"),
+                    Some(identity(channel))
+                ),
+                upsert_hook_session_with_identity_pg(
+                    &pool,
+                    params(live, channel),
+                    Some(identity(channel))
+                ),
+            );
+            assert_eq!(read.unwrap().unwrap().1, live);
+            assert_eq!(hook.unwrap().session_key, live);
+        } else {
+            let key = (entry == 1).then_some(live);
+            let (_, resolved) =
+                super::resolve_session_row_pg(&pool, key, Some("claude"), Some(identity(channel)))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(resolved, live);
+        }
+        // Repeated tuple lookups must keep the new owner beside the released shell.
+        let again =
+            super::resolve_session_row_pg(&pool, None, Some("claude"), Some(identity(channel)))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(again.1, live);
+        let mut expected_old = before;
+        expected_old["identity_kind"] = Value::Null;
+        expected_old["discord_token_hash"] = Value::Null;
+        assert_eq!(actor_pin_session_snapshot(&pool, old).await, expected_old);
+        let current = actor_pin_session_snapshot(&pool, live).await;
+        assert_eq!(current["identity_kind"], "discord_channel");
+        assert_eq!(
+            current["discord_token_hash"],
+            identity(channel).discord_token_hash
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            2
+        );
+    }
+    test_db.drop().await;
+}
