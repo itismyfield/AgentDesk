@@ -174,7 +174,8 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
         .as_ref()
         .and_then(|path| path.to_str())
         .map(|path| (path.to_owned(), start_offset));
-    let claim = claim_tui_direct_synthetic_turn_prepared(SyntheticClaimPreparation {
+    // Heap-own the claim future before polling its nested database calls.
+    let prepared = claim_tui_direct_synthetic_turn_prepared(SyntheticClaimPreparation {
         identity: SyntheticClaimIdentity {
             shared,
             provider,
@@ -191,8 +192,8 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
         start_offset,
         relay_owner,
         relay_owner_kind,
-    })
-    .await;
+    });
+    let claim = Box::pin(prepared).await;
     (claim, source)
 }
 
