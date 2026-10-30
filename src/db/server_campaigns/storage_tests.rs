@@ -889,20 +889,18 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
             .unwrap(),
         0
     );
+    let mut pending: Vec<i64> = embedded
+        .iter()
+        .map(|m| m.version)
+        .filter(|v| *v >= version)
+        .collect();
+    pending.dedup();
     assert_eq!(
         postgres::migration_status(&pool)
             .await
             .unwrap()
             .pending_versions,
-        {
-            let mut pending: Vec<i64> = embedded
-                .iter()
-                .map(|m| m.version)
-                .filter(|v| *v >= version)
-                .collect();
-            pending.dedup();
-            pending
-        }
+        pending
     );
 
     // Run the production migrator over real main records, without editing its journal.
@@ -923,7 +921,7 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
     let migration = embedded.iter().find(|m| m.version == version).unwrap();
     assert!(added.2);
     assert_eq!(added.1.as_slice(), migration.checksum.as_ref());
-    assert_eq!(after.len(), before.len() + 1);
+    assert_eq!(after.len(), before.len() + pending.len());
     assert_eq!(
         sqlx::query_scalar::<_, i64>(TABLES)
             .fetch_one(&pool)
