@@ -33,3 +33,16 @@
 - `git diff --check`, foundation 기준 PR cap 확인.
 
 로컬 캡처는 `output/playwright/records/`의 `before/`, `final/`, `verify-records.js`, `layout-results.txt`에 있다. PNG와 스크립트는 별도 ZIP으로 전달하며 소스 PR에 넣지 않는다. 머지·배포하지 않는다.
+
+
+## 하위 분기 재감사와 추가 확인
+
+390/1440 × light/dark에서 최초 48장에 추가로 20개 하위 상태(80장)를 확인했다. 회의 생성됨/폐기됨/실패/대기 후속 이슈 각각의 본문·액션, 저장소 선택/조회 실패, 채널 ID 편집, 전문가 검색 없음/선택, 스킬 5개 카테고리, 잠긴 업적, 업적→직원, 업적/지원 섹션 없음과 API 실패를 포함한다. API 실패가 달성0처럼만 보이던 업적은 실패 안내를 표시한다.
+
+새 분기에서 발견한 회의 삭제·미리보기·저장소 select의 작은 타깃과 라이트 상태 대비를 수정했다. 회의 상세 모달은 backdrop70/content80 body portal로 맞추고 기존 Escape/포커스 동작과 provider flow SSR 계약을 유지했다. 업적의 에이전트를 누르면 기존 Drawer를 닫은 뒤 직원 상세 하나만 보이도록 수정했다.
+
+직원 상세는 agents 형제 묶음 소유다. 이 PR 단독의 기존 AgentInfoProfileSections select38px는 #7565가 44px로 바꾸므로 중복 편집하지 않았다. 이 진입의 최종 4개 캡처/터치 계측은 모든 묶음을 포함한 integration preview5298에서 별도로 확인해 가로 넘침과 44px 결함 0건을 확인했다. 업적 Drawer는 닫히고 실제 직원 dialog 하나만 남는지도 검사했다. `verify-integrated-drill.js`와 `integrated-drill-results.txt`를 동봉한다.
+
+기존 브라우저 native confirm(일감 폐기/전체 폐기/회의록 삭제)은 site CSS 대상 React 모달이 아니다. 브라우저 fixture가 confirm 메시지를 수집하고 false로 응답한 12개 경로를 검증했으며 실제 DELETE/POST는 전송하지 않았다. `verify-native-confirms.js`와 `native-confirm-results.txt`에 메시지/취소 결과를 남겼다.
+
+추가 재현은 `verify-deep-records.js`, `deep-results.txt`, `deep-final/`이다. production build, 단위 18개, 격리 production preview5276을 재사용한 E2E9 pass/3 viewport skip을 재확인했다. PNG는 기존48+하위80=128장이며 native confirm12는 시각 캡처 수에 더하지 않는다.
