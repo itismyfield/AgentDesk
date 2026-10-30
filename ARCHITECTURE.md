@@ -839,6 +839,7 @@ src/
 │   │   │   ├── ownership.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_interleave_tests.rs
+│   │   │   ├── receipt_scope_tests.rs
 │   │   │   ├── screen.rs
 │   │   │   ├── screen_identity_tests.rs
 │   │   │   ├── screen_tests.rs
@@ -1014,6 +1015,7 @@ src/
 │   │   │   ├── first_input/
 │   │   │   │   └── pg_tests.rs
 │   │   │   ├── busy.rs
+│   │   │   ├── busy_tests.rs
 │   │   │   ├── composer_tests.rs
 │   │   │   └── first_input.rs
 │   │   ├── tui_session_launch/
@@ -1748,6 +1750,7 @@ src/
 │   │   │   ├── queued_head_inject_tests.rs
 │   │   │   ├── queued_head_mend_tests.rs
 │   │   │   ├── retained_notice.rs
+│   │   │   ├── retained_notice_tests.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
@@ -3586,6 +3589,7 @@ src/
 │   │   │   │   ├── screen.rs
 │   │   │   │   ├── screen_tests.rs
 │   │   │   │   ├── v2.rs
+│   │   │   │   ├── v2_compaction_tests.rs
 │   │   │   │   └── v2_tests.rs
 │   │   │   └── history.rs
 │   │   ├── submission_tmux/
