@@ -2586,6 +2586,7 @@ test.describe("Dashboard smoke tests", () => {
   });
 
   test("settings: search feedback and user-facing copy stay stable", async ({ page }) => {
+    await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ json: { current: {}, defaults: {} } }));
     await page.goto("/settings?settingsPanel=runtime");
 
     await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
@@ -2601,6 +2602,14 @@ test.describe("Dashboard smoke tests", () => {
 
     await page.getByRole("button", { name: /검색 지우기|Clear search/ }).click();
     await expect(page.getByTestId("settings-search-summary")).toHaveCount(0);
+  });
+
+  test("settings: runtime fetch errors do not expose empty editable defaults", async ({ page }) => {
+    await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ status: 503, json: { error: "unavailable" } }));
+    await page.goto("/settings?settingsPanel=runtime");
+    const panel = page.locator("#settings-panel-content");
+    await expect(panel.getByRole("alert")).toContainText(/불러오지 못했습니다|could not be loaded/);
+    await expect(panel.locator("input, select, [role='switch']")).toHaveCount(0);
   });
 
   test("settings: mobile page remains scrollable", async ({ page }, testInfo) => {
@@ -2624,8 +2633,8 @@ test.describe("Dashboard smoke tests", () => {
           ),
         };
       });
-    expect(navMetrics.scrollWidth).toBeGreaterThan(navMetrics.clientWidth);
-    expect(navMetrics.overflowX).toMatch(/auto|scroll/);
+    expect(navMetrics.scrollWidth).toBeLessThanOrEqual(navMetrics.clientWidth + 1);
+    expect(navMetrics.maxButtonHeight).toBeGreaterThanOrEqual(44);
     expect(navMetrics.maxButtonHeight).toBeLessThan(64);
 
     const before = await settingsPage.evaluate((node) => ({
@@ -2800,7 +2809,7 @@ test.describe("Dashboard smoke tests", () => {
     const panel = page.getByTestId("settings-machine-panel");
     await expect(panel).toBeVisible();
     await expect(page.locator("#settings-tab-machine")).toHaveAttribute("aria-selected", "true");
-    await expect(page.locator("#settings-tab-machine").getByText("2", { exact: true })).toBeVisible();
+    await expect(page.locator("#settings-panel-content > div").first().getByText("2", { exact: true })).toBeVisible();
     const order = await page.getByRole("tablist", { name: /설정 패널|Settings panels/ }).getByRole("tab").evaluateAll(tabs => tabs.map(tab => tab.id));
     expect(order[order.indexOf("settings-tab-general") + 1]).toBe("settings-tab-machine");
     const runner = page.getByTestId("machine-node-runner-example");
@@ -2852,7 +2861,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(runner.getByText(/오프라인|Offline/, { exact: true })).toBeVisible();
     includeRunner = false;
     await panel.getByRole("button", { name: /상태 새로고침|Refresh status/ }).click();
-    await expect(page.locator("#settings-tab-machine").getByText("1", { exact: true })).toBeVisible();
+    await expect(page.locator("#settings-panel-content > div").first().getByText("1", { exact: true })).toBeVisible();
     enabled = false;
     await panel.getByRole("button", { name: /상태 새로고침|Refresh status/ }).click();
     await expect(panel.getByText(/단독 운영 중|runs standalone/)).toBeVisible();

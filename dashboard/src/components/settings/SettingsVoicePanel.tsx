@@ -132,7 +132,7 @@ export function SettingsVoicePanel({
         <input
           value={voiceDraft.global.lobby_channel_id ?? ""}
           onChange={(event) => updateVoiceGlobal("lobby_channel_id", event.target.value)}
-          className="w-full rounded-2xl px-3 py-2.5 text-sm"
+          className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
           style={inputStyle}
           placeholder={tr("예: 1503294653313712169", "e.g. 1503294653313712169")}
         />
@@ -157,7 +157,7 @@ export function SettingsVoicePanel({
             onChange={(event) =>
               updateVoiceGlobal("active_agent_ttl_seconds", Number(event.target.value))
             }
-            className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
+            className="h-11 min-w-0 flex-1 cursor-pointer"
             style={{ accentColor: "var(--th-accent-primary)" }}
           />
           <input
@@ -168,7 +168,7 @@ export function SettingsVoicePanel({
             onChange={(event) =>
               updateVoiceGlobal("active_agent_ttl_seconds", Number(event.target.value) || 180)
             }
-            className="w-24 rounded-xl px-2 py-1.5 text-right text-xs"
+            className="min-h-11 w-24 rounded-md px-2 py-1.5 text-right text-xs"
             style={{
               ...inputStyle,
               fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
@@ -191,7 +191,7 @@ export function SettingsVoicePanel({
           onChange={(event) =>
             updateVoiceGlobal("default_sensitivity_mode", event.target.value as VoiceSensitivityMode)
           }
-          className="w-full rounded-2xl px-3 py-2.5 text-sm"
+          className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
           style={inputStyle}
         >
           {VOICE_SENSITIVITY_OPTIONS.map((option) => (
@@ -214,16 +214,16 @@ export function SettingsVoicePanel({
       <input
         value={endpoint.base_url}
         onChange={(event) => onChange({ base_url: event.target.value })}
-        className="w-full rounded-2xl px-3 py-2.5 text-sm"
+        className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
         style={inputStyle}
         placeholder="http://127.0.0.1:8000/v1"
         aria-label={tr("서버 주소", "Server URL")}
       />
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
         <input
           value={endpoint.model}
           onChange={(event) => onChange({ model: event.target.value })}
-          className="w-full rounded-2xl px-3 py-2.5 text-sm"
+          className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
           style={inputStyle}
           placeholder={modelPlaceholder}
           aria-label={tr("모델", "Model")}
@@ -231,7 +231,7 @@ export function SettingsVoicePanel({
         <input
           value={endpoint.api_key_env}
           onChange={(event) => onChange({ api_key_env: event.target.value })}
-          className="w-full rounded-2xl px-3 py-2.5 text-sm"
+          className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
           style={inputStyle}
           placeholder={tr("API 키 변수", "API key var")}
           aria-label={tr("API 키 환경변수 이름", "API key environment variable name")}
@@ -249,11 +249,11 @@ export function SettingsVoicePanel({
           "Local whisper, or any OpenAI-compatible server (Whisper API, faster-whisper server, etc.).",
         )}
       >
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
           <select
             value={models.stt_provider}
             onChange={(event) => updateVoiceModels({ stt_provider: event.target.value as VoiceSttProvider })}
-            className="w-full rounded-2xl px-3 py-2.5 text-sm"
+            className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
             style={inputStyle}
             aria-label={tr("STT 제공자", "STT provider")}
           >
@@ -263,7 +263,7 @@ export function SettingsVoicePanel({
           <input
             value={models.language}
             onChange={(event) => updateVoiceModels({ language: event.target.value })}
-            className="w-full rounded-2xl px-3 py-2.5 text-sm"
+            className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
             style={inputStyle}
             placeholder="ko"
             aria-label={tr("언어", "Language")}
@@ -287,11 +287,11 @@ export function SettingsVoicePanel({
           "Edge voices, or any OpenAI-compatible server (OpenAI TTS, Kokoro, etc.).",
         )}
       >
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
           <select
             value={models.tts_backend}
             onChange={(event) => updateVoiceModels({ tts_backend: event.target.value as VoiceTtsBackend })}
-            className="w-full rounded-2xl px-3 py-2.5 text-sm"
+            className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
             style={inputStyle}
             aria-label={tr("TTS 제공자", "TTS provider")}
           >
@@ -302,7 +302,7 @@ export function SettingsVoicePanel({
             <input
               value={models.edge_voice}
               onChange={(event) => updateVoiceModels({ edge_voice: event.target.value })}
-              className="w-full rounded-2xl px-3 py-2.5 text-sm"
+              className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
               style={inputStyle}
               placeholder="ko-KR-SunHiNeural"
               aria-label={tr("Edge 음성", "Edge voice")}
@@ -311,7 +311,7 @@ export function SettingsVoicePanel({
             <input
               value={models.tts.voice}
               onChange={(event) => updateVoiceModels({ tts: { ...models.tts, voice: event.target.value } })}
-              className="w-full rounded-2xl px-3 py-2.5 text-sm"
+              className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
               style={inputStyle}
               placeholder="alloy"
               aria-label={tr("음성", "Voice")}
@@ -346,7 +346,7 @@ export function SettingsVoicePanel({
         <SettingsCard
           key={agent.id}
           data-testid="voice-agent-card"
-          className="rounded-2xl p-4"
+          className="rounded-lg p-4"
           style={{
             borderColor: conflictInAgent
               ? "rgba(248,113,113,0.45)"
@@ -356,11 +356,11 @@ export function SettingsVoicePanel({
         >
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+              <div className="text-sm font-semibold [overflow-wrap:anywhere]" style={{ color: "var(--th-text)" }}>
                 {displayName}
               </div>
               {secondaryName ? (
-                <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                <div className="mt-1 text-[11px] [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
                   {secondaryName}
                 </div>
               ) : null}
@@ -371,17 +371,11 @@ export function SettingsVoicePanel({
               aria-label={tr(`${displayName} 음성 사용`, `${displayName} voice enabled`)}
               aria-checked={agent.voice_enabled}
               onClick={() => updateVoiceAgent(agent.id, { voice_enabled: !agent.voice_enabled })}
-              className="relative inline-flex h-7 w-12 items-center rounded-full transition-colors"
-              style={{
-                background: agent.voice_enabled
-                  ? "var(--th-accent-primary)"
-                  : "color-mix(in srgb, var(--th-border) 80%, transparent)",
-              }}
+              className="relative inline-flex h-11 w-12 shrink-0 items-center rounded-md"
             >
-              <span
-                className="inline-block h-6 w-6 rounded-full bg-white shadow transition-transform"
-                style={{ transform: agent.voice_enabled ? "translateX(1.45rem)" : "translateX(0.13rem)" }}
-              />
+              <span className="inline-flex h-7 w-12 items-center rounded-full" style={{ background: agent.voice_enabled ? "var(--th-accent-primary)" : "var(--th-border)" }}>
+                <span className="inline-block h-6 w-6 rounded-full bg-white transition-transform" style={{ transform: agent.voice_enabled ? "translateX(1.45rem)" : "translateX(0.13rem)" }} />
+              </span>
             </button>
           </div>
 
@@ -394,7 +388,7 @@ export function SettingsVoicePanel({
                 <input
                   value={agent.wake_word}
                   onChange={(event) => updateVoiceAgent(agent.id, { wake_word: event.target.value })}
-                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
                   style={inputStyle}
                   placeholder={tr("예: 에이전트", "e.g. agent")}
                 />
@@ -410,7 +404,7 @@ export function SettingsVoicePanel({
                   onChange={(event) =>
                     updateVoiceAgent(agent.id, { sensitivity_mode: event.target.value as VoiceSensitivityMode })
                   }
-                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  className="min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
                   style={inputStyle}
                 >
                   {VOICE_SENSITIVITY_OPTIONS.map((option) => (
@@ -433,7 +427,7 @@ export function SettingsVoicePanel({
                 <textarea
                   value={agent.aliases.join("\n")}
                   onChange={(event) => updateVoiceAgent(agent.id, { aliases: splitVoiceAliases(event.target.value) })}
-                  className="min-h-[92px] w-full resize-y rounded-2xl px-3 py-2.5 text-sm"
+                  className="min-h-[92px] w-full resize-y rounded-lg px-3 py-2.5 text-sm"
                   style={inputStyle}
                 />
               </CompactFieldCard>
@@ -446,26 +440,7 @@ export function SettingsVoicePanel({
 
   return (
     <div className="space-y-5">
-      <SettingsCallout
-        action={(
-          <button
-            type="button"
-            onClick={() => void onVoiceSave()}
-            disabled={voiceSaving || !voiceDirty || Boolean(voiceAliasConflict)}
-            className={primaryActionClass}
-            style={primaryActionStyle}
-          >
-            {voiceSaving ? tr("저장 중...", "Saving...") : tr("음성 설정 저장", "Save voice")}
-          </button>
-        )}
-      >
-        <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-          {tr(
-            "음성 채널, 대화 유지 시간, 에이전트별 호출 이름을 조정합니다. 저장하면 다음 음성 입력부터 반영됩니다.",
-            "Adjust the voice channel, conversation handoff time, and each agent's spoken names. Saved changes apply to the next voice input.",
-          )}
-        </p>
-      </SettingsCallout>
+
 
       {voiceError ? (
         <SettingsEmptyState className="text-sm">{voiceError}</SettingsEmptyState>
@@ -509,7 +484,7 @@ export function SettingsVoicePanel({
       >
         <div className="grid gap-3 lg:grid-cols-[minmax(220px,0.8fr)_minmax(0,1.6fr)]">
           <SettingsCard
-            className="rounded-2xl p-4"
+            className="rounded-lg p-4"
             style={{
               borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
               background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
@@ -527,7 +502,7 @@ export function SettingsVoicePanel({
               data-testid="voice-agent-selector"
               value={selectedAgent?.id ?? ""}
               onChange={(event) => setSelectedAgentId(event.target.value || null)}
-              className="mt-3 w-full rounded-2xl px-3 py-2.5 text-sm"
+              className="mt-3 min-h-11 w-full min-w-0 rounded-md px-3 py-2.5 text-sm"
               style={inputStyle}
               disabled={visibleAgents.length === 0}
             >
@@ -551,11 +526,31 @@ export function SettingsVoicePanel({
             selectedAgentCard
           ) : (
             <SettingsEmptyState className="text-sm">
-              {tr("검색 결과가 없습니다.", "No matching agents.")}
+              {voiceDraft.agents.length ? tr("검색 결과가 없습니다.", "No matching agents.") : tr("등록된 에이전트가 없습니다. 에이전트를 추가하면 음성 설정을 조정할 수 있습니다.", "No agents yet. Add an agent to configure voice settings.")}
             </SettingsEmptyState>
           )}
         </div>
       </SettingsSubsection>
+      <SettingsCallout
+        action={(
+          <button
+            type="button"
+            onClick={() => void onVoiceSave()}
+            disabled={voiceSaving || !voiceDirty || Boolean(voiceAliasConflict)}
+            className={primaryActionClass}
+            style={primaryActionStyle}
+          >
+            {voiceSaving ? tr("저장 중...", "Saving...") : tr("음성 설정 저장", "Save voice")}
+          </button>
+        )}
+      >
+        <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+          {tr(
+            "음성 채널, 대화 유지 시간, 에이전트별 호출 이름을 조정합니다. 저장하면 다음 음성 입력부터 반영됩니다.",
+            "Adjust the voice channel, conversation handoff time, and each agent's spoken names. Saved changes apply to the next voice input.",
+          )}
+        </p>
+      </SettingsCallout>
     </div>
   );
 }
