@@ -122,7 +122,7 @@
   --th-badge-emerald-bg: color-mix(in oklch, var(--ok) 16%, var(--bg-2) 84%);
   --th-badge-emerald-text: color-mix(in oklch, var(--ok) 74%, var(--fg) 26%);
   --th-badge-amber-bg: color-mix(in oklch, var(--warn) 16%, var(--bg-2) 84%);
-  --th-badge-amber-text: color-mix(in oklch, var(--warn) 76%, var(--fg) 24%);
+  --th-badge-amber-text: color-mix(in oklch, var(--warn) 70%, var(--fg) 30%);
 }
 
 [data-theme="light"] {

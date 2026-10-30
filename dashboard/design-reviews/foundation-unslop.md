@@ -37,3 +37,7 @@ Vite의 문자열 `/api` proxy는 changeOrigin=true로 정규화되어 Host만87
 - 각 캡처에서 조작44px·가로 넘침·메뉴/본문 정렬·긴 데이터·오버레이 스크롤을 자동 계측하고 직접 이미지를 열어 확인했다. 알림 popover의 PC 오른쪽 넘침, 단축키 높이, 검색 null crash를 고친 뒤 다시 찍었다.
 
 스크린샷/재현 스크립트: worktree의 `output/playwright/unslop-foundation/{before,after}/`, `verify.js`. 이 자료는 Discord ZIP으로 전달한다. 홈 사용량 집계가 느린 시점의 `…`는 측정0을 뜻하지 않는 기존 로딩 상태다.
+
+### 상태 배지 대비 재검증
+
+라이트에서 파스텔 고정색을 쓰던 공통 상태 토큰을 테마 배경/문구 색으로 전환했다. 경고 문구 혼합 비율도 조정했다. 실제 CSS를 읽는 Playwright 팔레트 fixture(일반 화면 데이터 아님)에서 건강/칸반 19종 × 2테마의 대비를 계산해 최저 4.74:1을 확인했다. `after/status-palette-{light,dark}.png`에 결과를 남겼으며 StatusBadge/Freshness 관련 unit 16건과 production build가 통과했다.
