@@ -39,18 +39,27 @@ pub(super) async fn finalize_pinned_watcher_exit(
         };
     }
 
-    let identity =
-        crate::services::discord::inflight::InflightTurnIdentity::from_state(pinned_inflight);
+    // A stalled watcher ends the execution as failed; that receipt commits before the row goes,
+    // and a failed commit keeps the row marked while the terminal still submits.
+    let failed = crate::db::turns::TerminalOutcome::Failed;
+    let pool = shared.pg_pool.as_ref();
     let clear_outcome =
-        crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
-            provider,
-            channel_id.get(),
-            &identity,
-        );
+        crate::services::discord::receipt_settle::record_or_stamp(pool, pinned_inflight, failed)
+            .await
+            .then(|| {
+                crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
+                    provider,
+                    channel_id.get(),
+                    &crate::services::discord::inflight::InflightTurnIdentity::from_state(
+                        pinned_inflight,
+                    ),
+                )
+            });
     match clear_outcome {
-        crate::services::discord::inflight::GuardedClearOutcome::Cleared
-        | crate::services::discord::inflight::GuardedClearOutcome::Missing => {}
-        crate::services::discord::inflight::GuardedClearOutcome::IoError => {
+        None
+        | Some(crate::services::discord::inflight::GuardedClearOutcome::Cleared)
+        | Some(crate::services::discord::inflight::GuardedClearOutcome::Missing) => {}
+        Some(crate::services::discord::inflight::GuardedClearOutcome::IoError) => {
             tracing::warn!(
                 provider = %provider.as_str(),
                 channel_id = channel_id.get(),
@@ -61,7 +70,7 @@ pub(super) async fn finalize_pinned_watcher_exit(
                 "watcher exit inflight clear failed with IO error; see preceding inflight guarded-clear error detail"
             );
             return PinnedWatcherExitResult {
-                clear_outcome: Some(clear_outcome),
+                clear_outcome,
                 submitted_terminal: false,
             };
         }
@@ -76,7 +85,7 @@ pub(super) async fn finalize_pinned_watcher_exit(
                 "watcher exit inflight clear skipped because the current row no longer matches the pinned turn"
             );
             return PinnedWatcherExitResult {
-                clear_outcome: Some(clear_outcome),
+                clear_outcome,
                 submitted_terminal: false,
             };
         }
@@ -103,7 +112,7 @@ pub(super) async fn finalize_pinned_watcher_exit(
         .await;
 
     PinnedWatcherExitResult {
-        clear_outcome: Some(clear_outcome),
+        clear_outcome,
         submitted_terminal: true,
     }
 }
@@ -291,5 +300,55 @@ mod tests {
         assert_eq!(mailbox.active_user_message_id, None);
         assert!(token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+    }
+
+    /// A stalled watcher ends its turn as failed before the row goes; while that receipt
+    /// cannot commit the row stays marked, and the terminal still submits.
+    #[tokio::test]
+    async fn a_stalled_exit_keeps_an_owed_row_marked_when_its_receipt_cannot_commit() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _env = EnvGuard::set_root(temp.path());
+        let blocked = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(50))
+            .connect_lazy("postgres://agentdesk@127.0.0.1:1/blocked")
+            .unwrap();
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(blocked));
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_019_200_031);
+        let mut row = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            None,
+            1,
+            4_019_200_131,
+            4_019_200_131,
+            "stalled turn".to_string(),
+            Some("session-stall".to_string()),
+            Some("AgentDesk-claude-receipt-stall-exit".to_string()),
+            Some("/tmp/receipt-stall.jsonl".to_string()),
+            None,
+            0,
+        );
+        row.input_origin_ids = vec!["G-stall".to_string()];
+        inflight::save_inflight_state(&row).expect("save row");
+
+        let result = finalize_pinned_watcher_exit(
+            &shared,
+            &provider,
+            channel_id,
+            Some(&row),
+            "test_stall_exit",
+        )
+        .await;
+
+        assert_eq!(result.clear_outcome, None, "the row was not removed");
+        assert!(result.submitted_terminal);
+        let kept = inflight::load_inflight_state(&provider, channel_id.get()).expect("row kept");
+        assert_eq!(
+            kept.terminal_receipt.map(|mark| mark.outcome),
+            Some(crate::db::turns::TerminalOutcome::Failed)
+        );
     }
 }

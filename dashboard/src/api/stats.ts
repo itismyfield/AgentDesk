@@ -2,7 +2,7 @@ import type { DashboardStats, TokenAnalyticsResponse } from "../types";
 import {
   request,
   readCachedGet,
-  TOKEN_ANALYTICS_TIMEOUT_MS,
+  SLOW_AGGREGATE_GET,
   type CachedGetEntry,
   type RequestOptions,
 } from "./httpClient";
@@ -28,8 +28,8 @@ export async function getTokenAnalytics(
   // PR #1258 while still letting background traffic skip the ~9s scan.
   const force = opts?.forceRefresh ? "&fresh=1" : "";
   return request(`/api/token-analytics?period=${period}${force}`, {
+    ...SLOW_AGGREGATE_GET,
     signal: opts?.signal,
-    timeoutMs: TOKEN_ANALYTICS_TIMEOUT_MS,
     cache: opts?.forceRefresh ? "reload" : "default",
     suppressErrorToast: opts?.suppressErrorToast,
   });

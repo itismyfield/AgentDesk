@@ -660,10 +660,6 @@ pub(crate) async fn activate_with_bridge_pg(
     activate_with_deps_pg(&deps, body).await
 }
 
-pub(super) fn clamp_retry_limit(value: u64) -> i64 {
-    value.max(1).min(i64::MAX as u64) as i64
-}
-
 pub(super) fn load_kv_meta_value_pg(
     pool: &sqlx::PgPool,
     key: &str,
@@ -691,6 +687,7 @@ pub(super) fn load_kv_meta_value_pg(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::settings::clamp_retry_limit;
 
     #[test]
     fn clamp_retry_limit_bounds() {

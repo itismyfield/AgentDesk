@@ -53,8 +53,9 @@ where
 /// sources it has not retired yet; `None` while its store cannot be read, or for other channels.
 pub type Unsettled = watch::Sender<Option<usize>>;
 
-/// What a Herdr-configured channel's actor still owes Discord, as its last poll read it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What a Herdr-configured or turn-mode channel's actor still owes Discord, as its last poll
+/// read it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Undelivered {
     /// Derived items and pending local retries not delivered yet.
     pub owed: usize,
@@ -68,6 +69,12 @@ pub struct Undelivered {
     pub binding_pending: usize,
     /// The last read that had asked when this poll began; a read takes only a poll begun after it.
     pub asked: u64,
+    /// Verified work not delivered yet, counted apart from `owed` as the stall position counts it.
+    pub verified_work: usize,
+    /// The channel's POSTs started and not ended.
+    pub posting: usize,
+    /// Each unretired source's path and how far its bytes are captured.
+    pub captured: Vec<(std::path::PathBuf, u64)>,
 }
 
 #[derive(Debug, Default)]
@@ -323,7 +330,8 @@ where
         if actor.writer.is_stopped() {
             break;
         }
-        if !sources_resumed && actor.sources_allowed() {
+        let mut fresh = Vec::new();
+        if !sources_resumed && actor.sources_allowed() && actor.start_notice_migration() {
             let phase = actor.writer.boot.phase("resume");
             let (writer, deriver) = (&mut actor.writer, &mut actor.deriver);
             let restored = match &mut actor.verified {
@@ -343,9 +351,11 @@ where
             if !actor.writer.is_stopped() {
                 actor.boot_previous_nonce = None;
                 actor.project_operator_resumes();
+                fresh = actor.persist_notice_evidence();
                 resumed.send_replace(true);
             }
         }
+        actor.prepare_notices(&fresh).await;
         actor.observe_waiting(false);
         let drain = actor.writer.boot.first_drain();
         let serial_before = drain
@@ -382,14 +392,15 @@ where
         // Re-post runs in this same turn and only once nothing is owed, so it never sends beside
         // a piece of this channel. It holds no exact permit, so a verified channel never runs it.
         if actor.verified.is_none()
-            && actor.owed.is_empty()
+            && actor.notice_only_owed()
             && !actor.writer.has_local_retry()
             && actor.delivery_allowed()
         {
             actor.writer.repost_turn().await;
         }
         actor.collect_settled();
-        actor.read_sources();
+        let fresh = actor.read_sources();
+        actor.prepare_notices(&fresh).await;
         actor.poll_transition(sources_resumed, &unsettled).await;
         actor.observe_waiting(sources_resumed);
         progress.publish(actor.progress());
@@ -400,9 +411,14 @@ where
             break;
         }
         // Only a Herdr-configured channel's clear reads it, so other channels skip the store read.
-        if crate::config::session_hosts::herdr_endpoint(actor.writer.channel()).is_some() {
+        let channel = actor.writer.channel();
+        let herdr = crate::config::session_hosts::herdr_endpoint(channel).is_some();
+        if herdr {
             unsettled.send_replace(actor.unsettled());
-            // Read only while a drain waits on it, so a channel nobody drains adds no reads.
+        }
+        // A turn-mode carried turn closes on this read too. Read only while a reader waits on it,
+        // so a channel nobody asks about adds no reads.
+        if herdr || crate::services::tui_o::turn_mode::transcript_turns(channel) {
             let asked = owing.demand.asked();
             if owing.demand.wanted() {
                 owing.published.send_replace(actor.undelivered(asked));
@@ -457,6 +473,7 @@ where
 }
 
 mod fresh_resume;
+mod notice_work;
 #[cfg(test)]
 pub(crate) use fresh_resume::work_for_tests;
 mod automatic;
@@ -481,6 +498,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                         unit_key: piece.unit_key.clone(),
                         index: piece.piece_index,
                         payload: piece.payload.clone(),
+                        notice_origin: piece.notice_origin.clone(),
                     },
                 )
             })
@@ -655,27 +673,36 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return super::owed::deliver_owed(&mut self.writer, log, delivered).await;
         }
         let mut budget = super::replay::Budget::new();
-        while !self.owed.is_empty() {
+        let visits = self.owed.len();
+        for _ in 0..visits {
             if self.writer.stopping() || !self.delivery_allowed() {
                 return;
             }
             let Some(item) = self.owed.front() else {
                 return;
             };
-            match self.writer.deliver(item).await {
-                Step::Done => {
-                    self.writer.boot.drained();
-                    if !self.refilter_after_open() {
-                        self.owed.pop_front();
-                    }
-                    progress.publish(self.progress());
-                    if self.writer.has_local_retry() {
-                        return;
-                    }
-                    budget.yield_if_due().await;
-                }
-                Step::LeaseBusy | Step::NoGateway | Step::Stopped | Step::Withheld => return,
+            let input = matches!(item, Derived::Piece(piece) if piece.unit_key.kind == crate::services::tui_o::shadow::UnitKind::InputNotice);
+            let step = self.writer.deliver(item).await;
+            if step != Step::Done && !(input && step == Step::Withheld) {
+                return;
             }
+            let acked = !input || super::owed::acked(self.writer.store().ledger(), item);
+            if acked {
+                self.writer.boot.drained();
+            }
+            if self.refilter_after_open() {
+                return;
+            }
+            if acked {
+                self.owed.pop_front();
+            } else {
+                self.owed.rotate_left(1);
+            }
+            progress.publish(self.progress());
+            if self.writer.has_local_retry() {
+                return;
+            }
+            budget.yield_if_due().await;
         }
     }
 
@@ -692,7 +719,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return;
         }
         let open = self.writer.store().ledger().unresolved().is_some();
-        if self.writer.is_stopped() || open || !self.owed.is_empty() || self.deriver.has_unsealed()
+        if self.writer.is_stopped()
+            || open
+            || !self.notice_raw_independent()
+            || self.deriver.has_unsealed()
         {
             return;
         }
@@ -743,12 +773,13 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     fn progress(&mut self) -> super::progress::ChannelProgress {
         let verified = self.verified.as_ref().map_or(0, |log| log.work.len());
         let (retry, unsealed) = (self.writer.has_local_retry(), self.deriver.has_unsealed());
+        let owed = self.owed.len() + verified + self.notice_debt_open();
         let ledger = self.writer.store().ledger();
-        super::progress::position(self.owed.len() + verified, retry, ledger, unsealed)
+        super::progress::position(owed, retry, ledger, unsealed)
     }
 
-    /// Pieces, an open `Prepared`, unsealed units, sources read short of their end and binds not
-    /// applied, stamped `asked`; `None` when the store, checkpoint or a source length is unreadable.
+    /// Pieces, an open `Prepared`, unsealed units, sources read short of their end, binds not
+    /// applied, verified work, POSTs in flight and each source's capture, stamped `asked`; `None` when the store, checkpoint or a source length is unreadable.
     fn undelivered(&mut self, asked: u64) -> Option<Undelivered> {
         #[cfg(test)]
         UNDELIVERED_READS.with(|reads| reads.set(reads.get() + 1));
@@ -756,7 +787,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let notice = (self.notice).get_or_insert_with(|| self.bindings.subscribe(channel));
         let latest = *notice.borrow();
         let (owed, unsealed) = (
-            self.owed.len() + usize::from(self.writer.has_local_retry()),
+            self.owed.len() + usize::from(self.writer.has_local_retry()) + self.notice_debt_extra(),
             usize::from(self.deriver.has_unsealed()),
         );
         let store = self.writer.store();
@@ -764,9 +795,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let rotation = store.rotation().ok()?;
         let checkpoint = store.binding_checkpoint().ok()?;
         let mut uncaptured = 0;
+        let mut captured = Vec::new();
         for cursor in store.cursors().filter(|cursor| !cursor.retired) {
             let len = std::fs::metadata(&cursor.source.path).ok()?.len();
             uncaptured += usize::from(cursor.captured_through < len);
+            let through = match crate::services::tui_o::turn_mode::carried_close_mutant("producer")
+            {
+                true => len,
+                false => cursor.captured_through,
+            };
+            captured.push((cursor.source.path.clone(), through));
         }
         let unapplied = latest.saturating_sub(checkpoint.unwrap_or(0));
         let unapplied = usize::try_from(unapplied).unwrap_or(usize::MAX);
@@ -779,13 +817,20 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             uncaptured,
             binding_pending: unapplied.saturating_add(waiting.count()),
             asked,
+            verified_work: self.verified.as_ref().map_or(0, |log| log.work.len()),
+            // A channel no writer counted yet has started no POST in this process.
+            posting: match crate::services::tui_o::turn_mode::carried_close_mutant("posting_zero") {
+                true => 0,
+                false => super::deliver::posts_in_flight(channel).unwrap_or(0),
+            },
+            captured,
         })
     }
 
     /// Applies new binds first, so a bound source is read in the same poll as its predecessor.
-    fn read_sources(&mut self) {
+    fn read_sources(&mut self) -> Vec<UnitKey> {
         if self.writer.is_stopped() || !self.sources_allowed() {
-            return;
+            return Vec::new();
         }
         let (writer, deriver) = (&mut self.writer, &mut self.deriver);
         let read = (self.sources.follow(writer))
@@ -797,6 +842,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         if let Err(alarm) = read {
             self.writer.stop(alarm);
         }
+        self.persist_notice_evidence()
     }
 }
 

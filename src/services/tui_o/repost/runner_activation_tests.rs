@@ -64,6 +64,7 @@ impl Writer {
         let serial = self.store.ledger().next_serial();
         self.store
             .append_ledger(LedgerEntry::Prepared {
+                notice_origin: None,
                 local_retry: None,
                 serial,
                 unit_key: unit(native),
@@ -546,6 +547,7 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
             let dir = tempfile::tempdir().unwrap();
             let io = Arc::new(Io::new());
             let record = PieceRecord {
+                notice_origin: None,
                 local_retry: None,
                 outcome_at: None,
                 unit_key: unit("fresh"),
@@ -597,6 +599,7 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
                 // Reopening cuts the failed append and writes the same key's durable intent.
                 turn.sidecar = dir.path().join("provenance.jsonl");
                 let retry = PieceRecord {
+                    notice_origin: None,
                     local_retry: None,
                     outcome_at: None,
                     unit_key: unit("fresh"),
@@ -644,6 +647,7 @@ async fn d4act_unsupported_original_uses_local_owner_when_sidecar_is_unavailable
         blocked.join("provenance.jsonl"),
     );
     let record = PieceRecord {
+        notice_origin: None,
         local_retry: None,
         outcome_at: None,
         unit_key: unit("unsupported"),

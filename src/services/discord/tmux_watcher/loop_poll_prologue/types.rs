@@ -75,6 +75,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct LoopPollState<'a> {
         &'a mut WatcherCompletionFooterIdleState,
     pub(in crate::services::discord::tmux::tmux_watcher) last_activity_heartbeat_at:
         &'a mut Option<std::time::Instant>,
+    pub(in crate::services::discord::tmux::tmux_watcher) tmux_death: &'a mut Option<bool>,
 }
 
 pub(in crate::services::discord::tmux::tmux_watcher) struct PostTerminalState<'a> {

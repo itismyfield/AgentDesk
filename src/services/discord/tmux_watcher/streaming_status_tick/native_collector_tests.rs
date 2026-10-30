@@ -639,6 +639,7 @@ fn native_collector_case(test_name: &str, mode: u8) {
                 TerminalRelayPlanLocals {
                     current_offset: offset,
                     data_start_offset: 0,
+                    turn_data_start_offset: 0,
                     all_data: &buffer,
                     full_response: &turn.full_response,
                     current_response: &turn.full_response,

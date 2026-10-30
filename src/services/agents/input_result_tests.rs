@@ -59,3 +59,19 @@ fn only_a_carried_origin_names_one() {
         assert_eq!(metadata_origin_id(metadata.as_ref()), None, "{metadata:?}");
     }
 }
+
+/// The contract's bound is 256 bytes on both the start body and the metadata it carries; the
+/// literals pin it independently of the constant.
+#[test]
+fn an_origin_of_256_bytes_is_carried_and_257_is_refused() {
+    let edge = "x".repeat(256);
+    let over = "x".repeat(257);
+    let placed = start_metadata_with_origin(None, Some(&edge)).unwrap();
+    assert_eq!(metadata_origin_id(placed.as_ref()), Some(edge.clone()));
+    assert_eq!(
+        start_metadata_with_origin(None, Some(&over)),
+        Err("origin_id_too_long")
+    );
+    let carried = json!({"human_input": {"origin_id": over}});
+    assert_eq!(metadata_origin_id(Some(&carried)), None);
+}

@@ -103,17 +103,16 @@ pub(crate) async fn load_auto_queue_cleanup_backlog_pg(
     })
 }
 
-pub(super) async fn load_health_kv_meta(probed: ProbedPool<'_>) -> HealthKvMeta {
+/// `None` when the read failed, so an unknown override is not mistaken for an absent one.
+pub(super) async fn load_health_kv_meta(probed: ProbedPool<'_>) -> Option<HealthKvMeta> {
     let keys = [CONFIG_AUDIT_KEY, PIPELINE_OVERRIDE_KEY, RUNTIME_CONFIG_KEY];
-    let Ok(rows) = probed
+    let rows = probed
         .probe(
             |pool| sqlx::query(HEALTH_KV_QUERY).bind(&keys[..]).fetch_all(pool),
             Result::is_ok,
         )
         .await
-    else {
-        return HealthKvMeta::default();
-    };
+        .ok()?;
     let mut values = HashMap::new();
     for row in rows {
         if let (Ok(key), Ok(Some(raw))) = (
@@ -128,11 +127,11 @@ pub(super) async fn load_health_kv_meta(probed: ProbedPool<'_>) -> HealthKvMeta 
             .get(key)
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
     };
-    HealthKvMeta {
+    Some(HealthKvMeta {
         config_audit: parsed(CONFIG_AUDIT_KEY),
         pipeline_overrides: parsed(PIPELINE_OVERRIDE_KEY),
         runtime_config: parsed(RUNTIME_CONFIG_KEY),
-    }
+    })
 }
 
 pub(super) async fn load_channel_session_states(

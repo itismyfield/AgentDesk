@@ -4,6 +4,7 @@ use crate::services::tui_o::writer::local_retry;
 
 fn prepared(serial: u64, mark: Option<LocalRetryMark>) -> LedgerEntry {
     LedgerEntry::Prepared {
+        notice_origin: None,
         serial,
         unit_key: UnitKey {
             channel_id: 7,

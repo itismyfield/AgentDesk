@@ -624,6 +624,7 @@ fn only_posted_or_legitimate_excluded_anchor_and_all_pieces_count() {
                 e.writer
                     .store()
                     .append_ledger(LedgerEntry::Prepared {
+                        notice_origin: None,
                         serial: 0,
                         unit_key: p.unit_key.clone(),
                         piece_index: 0,
@@ -865,6 +866,7 @@ fn multipart_anchor_needs_every_piece_posted() {
             e.writer
                 .store()
                 .append_ledger(LedgerEntry::Prepared {
+                    notice_origin: None,
                     serial: i as u64,
                     unit_key: p.unit_key.clone(),
                     piece_index: p.index,
@@ -891,6 +893,7 @@ fn multipart_anchor_needs_every_piece_posted() {
         e.writer
             .store()
             .append_ledger(LedgerEntry::Prepared {
+                notice_origin: None,
                 serial,
                 unit_key: last.unit_key.clone(),
                 piece_index: last.index,

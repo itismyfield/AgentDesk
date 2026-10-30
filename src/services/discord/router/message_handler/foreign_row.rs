@@ -6,9 +6,9 @@ use std::sync::Arc;
 use poise::serenity_prelude::ChannelId;
 
 use super::HeadlessTurnStartError;
-use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{CreateNewInflightError, InflightTurnState};
 use crate::services::discord::live_bridge::defer_unstarted_turn;
+use crate::services::discord::{SharedData, receipt_settle};
 use crate::services::provider::{CancelToken, ProviderKind};
 
 /// Logs the create outcome; true when another turn's durable row holds the channel.
@@ -33,13 +33,19 @@ fn held_by_another_turn(
 }
 
 /// Headless start: unwinds this turn's claim and answers Conflict, so the caller keeps the input.
+/// A row kept marked for its receipt is recorded and removed first, then the create retried.
 pub(super) async fn admit_headless(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &InflightTurnState,
     cancel_token: &Arc<CancelToken>,
-    created: Result<(), CreateNewInflightError>,
+    mut created: Result<(), CreateNewInflightError>,
 ) -> Result<(), HeadlessTurnStartError> {
+    if matches!(created, Err(CreateNewInflightError::AlreadyExists))
+        && receipt_settle::settle_marked_row(shared, provider, state.channel_id).await
+    {
+        created = crate::services::discord::inflight::save_inflight_state_create_new(state);
+    }
     if !held_by_another_turn(created, provider, state) {
         return Ok(());
     }
@@ -52,8 +58,8 @@ pub(super) async fn admit_headless(
     )))
 }
 
-/// Intake turn: on a foreign row, releases the claim and front-requeues the prompt behind the
-/// slow backstop, so it starts once after the row clears. `Ok(false)` stops before any spawn.
+/// Intake turn: a marked row is recorded and removed first; on a foreign row, releases the claim
+/// and front-requeues the prompt to start once after it clears. `Ok(false)` stops before spawn.
 pub(super) async fn admit(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -64,6 +70,7 @@ pub(super) async fn admit(
     if !held_by_another_turn(created, provider, state) {
         return Ok(true);
     }
+    receipt_settle::settle_marked_row(shared, provider, state.channel_id).await;
     let reason = "foreign_row_start_deferred";
     if defer_unstarted_turn(shared, provider, state, cancel_token, true, reason).await {
         return Ok(false);

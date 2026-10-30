@@ -1380,6 +1380,7 @@ fn f4r_the_marker_names_the_channel_and_is_the_same_on_every_node_and_slot() {
     };
     assert_ne!(nonce(&here), nonce(&there));
     let record = |epoch, anchor_id| PieceRecord {
+        notice_origin: None,
         local_retry: None,
         outcome_at: None,
         unit_key: unit(CHANNEL),

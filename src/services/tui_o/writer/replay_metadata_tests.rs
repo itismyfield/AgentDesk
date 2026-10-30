@@ -131,6 +131,7 @@ async fn restart_replay_verified_waits_for_origin_before_settling_and_refilters_
         .writer
         .store()
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             serial,
             unit_key: UnitKey {
                 channel_id: channel,
