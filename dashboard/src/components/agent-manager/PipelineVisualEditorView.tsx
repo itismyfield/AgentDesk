@@ -17,7 +17,8 @@ export default function PipelineVisualEditorView({ ctx, actions }: Props) {
 
   return (
     <section
-      className="[&_button]:min-h-11 [&_button]:min-w-11 [&_select]:min-h-11 min-w-0 overflow-hidden rounded-lg border p-4 sm:p-5 space-y-5"
+      data-testid="pipeline-editor"
+      className="[&_button]:min-h-11 [&_button]:min-w-11 [&_select]:min-h-11 [&_input:not([type=checkbox])]:min-h-11 [&_label:has(input[type=checkbox])]:min-h-11 min-w-0 overflow-hidden rounded-lg border p-4 sm:p-5 space-y-5"
       style={SECTION_STYLE}
     >
       <button

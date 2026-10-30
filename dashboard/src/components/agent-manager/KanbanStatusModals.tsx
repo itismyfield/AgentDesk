@@ -34,6 +34,7 @@ export default function KanbanStatusModals({ ctx }: KanbanStatusModalsProps) {
             <h3 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>{tr("담당자 할당", "Assign Agent")}</h3>
             <p className="text-sm" style={{ color: "var(--th-text-secondary)" }}>{tr("준비됨 상태로 이동하려면 담당자를 지정해야 합니다.", "Assign an agent before moving to ready.")}</p>
             <select
+              aria-label={tr("담당 에이전트", "Assigned agent")}
               value={assignBeforeReady.agentId}
               onChange={(e) => setAssignBeforeReady((prev: any) => prev ? { ...prev, agentId: e.target.value } : null)}
               className="min-h-11 w-full rounded-md border px-3 py-2 text-sm"

@@ -86,7 +86,7 @@ export default function KanbanHeaderSurface({ ctx }: KanbanHeaderSurfaceProps) {
           <div className="flex items-center justify-between gap-3">
             <div>
               <h1 className="text-2xl font-semibold tracking-tight text-th-text-heading">{tr("칸반", "Kanban")}</h1>
-              <p className="mt-1 text-xs text-th-text-muted">{initialLoading ? tr("작업 불러오는 중…", "Loading work…") : tr(`현재 작업 ${openCount}건`, `${openCount} open tasks`)}</p>
+              <p className="mt-1 text-xs text-th-text-muted">{initialLoading && openCount === 0 ? tr("작업 불러오는 중…", "Loading work…") : tr(`현재 작업 ${openCount}건`, `${openCount} open tasks`)}</p>
             </div>
             <button type="button" data-testid="kanban-header-expand" onClick={() => setHeaderOpen(true)} className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-md border border-th-border-subtle bg-th-bg-surface px-3 text-xs font-medium text-th-text-primary hover:bg-surface-hover" aria-label={tr("칸반 헤더 펼치기", "Expand kanban header")}>
               {tr("검색·필터", "Search & filters")} <span aria-hidden="true">⌄</span>

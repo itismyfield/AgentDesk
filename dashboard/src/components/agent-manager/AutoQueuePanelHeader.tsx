@@ -83,8 +83,8 @@ export default function AutoQueuePanelHeader({ ctx }: { ctx: AutoQueuePanelCtx }
               className="min-h-11 text-xs px-2.5 py-1 rounded-lg border font-medium"
               style={{
                 borderColor: "rgba(245,158,11,0.4)",
-                color: "#fbbf24",
-                backgroundColor: "rgba(245,158,11,0.1)",
+                color: "var(--th-text-primary)",
+                backgroundColor: "var(--th-overlay-subtle)",
               }}
             >
               {activating ? "..." : startActionLabel}
@@ -103,10 +103,10 @@ export default function AutoQueuePanelHeader({ ctx }: { ctx: AutoQueuePanelCtx }
                   borderColor: disabled
                     ? "rgba(148,163,184,0.2)"
                     : "rgba(16,185,129,0.4)",
-                  color: disabled ? "var(--th-text-muted)" : "#10b981",
+                  color: disabled ? "var(--th-text-muted)" : "var(--th-text-primary)",
                   backgroundColor: disabled
                     ? "rgba(148,163,184,0.05)"
-                    : "rgba(16,185,129,0.1)",
+                    : "var(--th-overlay-subtle)",
                   cursor: disabled ? "not-allowed" : undefined,
                 }}
                 title={
@@ -131,7 +131,7 @@ export default function AutoQueuePanelHeader({ ctx }: { ctx: AutoQueuePanelCtx }
               className="min-h-11 text-[11px] px-2 py-1 rounded-lg border"
               style={{
                 borderColor: "rgba(248,113,113,0.3)",
-                color: "#f87171",
+                color: "var(--th-accent-danger)",
                 backgroundColor: "rgba(248,113,113,0.08)",
               }}
             >
@@ -154,7 +154,7 @@ export default function AutoQueuePanelHeader({ ctx }: { ctx: AutoQueuePanelCtx }
             <button
               onClick={() => void handleRunAction(run, "resume")}
               className="min-h-11 text-xs px-2 py-1 rounded-lg border"
-              style={{ borderColor: "rgba(16,185,129,0.3)", color: "#10b981" }}
+              style={{ borderColor: "rgba(16,185,129,0.3)", color: "var(--th-text-primary)" }}
             >
               {tr("재개", "Resume")}
             </button>
@@ -167,8 +167,8 @@ export default function AutoQueuePanelHeader({ ctx }: { ctx: AutoQueuePanelCtx }
           className="rounded-lg px-3 py-2 text-xs border"
           style={{
             borderColor: "rgba(248,113,113,0.4)",
-            color: "#fecaca",
-            backgroundColor: "rgba(127,29,29,0.2)",
+            color: "var(--th-accent-danger)",
+            backgroundColor: "color-mix(in srgb, var(--th-accent-danger) 8%, var(--th-bg-surface))",
           }}
         >
           {error}
@@ -198,7 +198,7 @@ export default function AutoQueuePanelHeader({ ctx }: { ctx: AutoQueuePanelCtx }
         >
           <div className="flex items-center gap-2">
             <span className="animate-pulse text-lg">...</span>
-            <span className="text-sm font-medium" style={{ color: "#7dd3fc" }}>
+            <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
               {tr("PMD 순서 분석 대기 중", "Awaiting PMD order analysis")}
             </span>
           </div>

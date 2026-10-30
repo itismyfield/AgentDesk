@@ -33,7 +33,7 @@ function FsmTransitionPanel({ ctx, actions }: Props) {
   const selectedTransition = ctx.selectedTransition;
 
   return (
-    <div className="rounded-[20px] border p-4 space-y-4" style={FSM_DETAIL_PANEL_STYLE}>
+    <div className="rounded-lg border p-4 space-y-4" style={FSM_DETAIL_PANEL_STYLE}>
       <div className="flex items-start justify-between gap-3">
         <div>
           <h5
@@ -147,7 +147,7 @@ function AdvancedTransitionPanel({ ctx, actions }: Props) {
         <GateToggleList ctx={ctx} actions={actions} />
       </div>
 
-      <div className="rounded-[20px] border p-4 space-y-3" style={PANEL_SOFT_STYLE}>
+      <div className="rounded-lg border p-4 space-y-3" style={PANEL_SOFT_STYLE}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h5 className="text-xs font-semibold uppercase tracking-wider" style={MUTED_TEXT_STYLE}>

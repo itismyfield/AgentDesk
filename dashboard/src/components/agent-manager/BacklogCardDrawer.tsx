@@ -107,9 +107,9 @@ export default function BacklogCardDrawer({
               <span
                 className="rounded-full border px-2 py-1 text-[11px] font-medium"
                 style={{
-                  borderColor: "rgba(244,114,182,0.22)",
-                  background: "rgba(244,114,182,0.12)",
-                  color: "#f9a8d4",
+                  borderColor: "var(--th-border-subtle)",
+                  background: "var(--th-overlay-subtle)",
+                  color: "var(--th-text-secondary)",
                 }}
               >
                 {priorityLabel(card.priority, tr)}
@@ -117,24 +117,15 @@ export default function BacklogCardDrawer({
               <span
                 className="rounded-full border px-2 py-1 text-[11px] font-medium"
                 style={{
-                  borderColor: providerMeta.border,
-                  background: providerMeta.bg,
-                  color: providerMeta.color,
+                  borderColor: "var(--th-border-subtle)",
+                  background: "transparent",
+                  color: "var(--th-text-secondary)",
                 }}
               >
                 {providerMeta.label}
               </span>
             </div>
-            <h3
-              className="mt-3 text-xl font-semibold tracking-tight"
-              style={{ color: "var(--th-text-heading)" }}
-            >
-              {card.title}
-            </h3>
           </div>
-          <SurfaceActionButton onClick={onClose} tone="neutral">
-            {tr("닫기", "Close")}
-          </SurfaceActionButton>
         </div>
 
         <div className="mt-5 grid gap-3 md:grid-cols-3">

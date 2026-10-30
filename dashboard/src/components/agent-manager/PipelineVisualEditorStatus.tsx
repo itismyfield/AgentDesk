@@ -37,7 +37,7 @@ export default function PipelineVisualEditorStatus({ ctx }: Props) {
       {ctx.loading && ctx.pipelineDraft && ctx.graph && (
         <div
           data-testid="pipeline-refresh-indicator"
-          className="flex items-center gap-2 rounded-[20px] border px-3.5 py-2 text-xs sm:text-sm"
+          className="flex items-center gap-2 rounded-lg border px-3.5 py-2 text-xs sm:text-sm"
           style={STATUS_INFO_STYLE}
         >
           <span

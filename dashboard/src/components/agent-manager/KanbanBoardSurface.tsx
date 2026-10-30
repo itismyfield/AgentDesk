@@ -188,7 +188,7 @@ export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
                         style={{
                           borderColor: mobileColumnStatus === column.status ? "var(--th-text-secondary)" : "var(--th-border-subtle)",
                           backgroundColor: mobileColumnStatus === column.status ? "var(--th-overlay-medium)" : "var(--th-bg-surface)",
-                          color: mobileColumnStatus === column.status ? "white" : "var(--th-text-secondary)",
+                          color: mobileColumnStatus === column.status ? "var(--th-text-primary)" : "var(--th-text-secondary)",
                         }}
                       >
                         <div className="text-[11px] font-semibold uppercase" style={{ color: mobileColumnStatus === column.status ? "var(--th-text-primary)" : "var(--th-text-muted)" }}>
