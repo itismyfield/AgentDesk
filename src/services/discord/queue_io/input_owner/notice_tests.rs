@@ -87,7 +87,7 @@ async fn owed_notices_post_once_by_kind_and_a_local_submit_owes_none_pg() {
         "{posted:?}"
     );
     assert!(
-        posted[1].0.contains("전달되지 않은 것을 확인해"),
+        posted[1].0.contains("필요한 새 부분을 따로 보내 주세요"),
         "{posted:?}"
     );
     assert_eq!(
