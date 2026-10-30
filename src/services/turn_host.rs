@@ -256,13 +256,18 @@ async fn configured_turn(
     if !o_writer_ready(channel_id, kind) {
         return Err(HerdrRefusal::OWriterNotReady);
     }
-    let endpoint = HerdrLaunchEndpoint {
+    let endpoint = launch_endpoint(endpoint);
+    Ok(HerdrTurnPlan { endpoint, row })
+}
+
+/// The launch endpoint a channel's configured Herdr endpoint names.
+pub(crate) fn launch_endpoint(endpoint: ChannelEndpoint) -> HerdrLaunchEndpoint {
+    HerdrLaunchEndpoint {
         execution_node: endpoint.execution_node,
         config_key: endpoint.key,
         socket_addr: endpoint.socket_path.display().to_string(),
         herdr_session: endpoint.herdr_session,
-    };
-    Ok(HerdrTurnPlan { endpoint, row })
+    }
 }
 
 #[cfg(test)]

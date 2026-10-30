@@ -1082,7 +1082,9 @@ pub(crate) struct SharedData {
     readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger, // #4370
 }
 
-pub(crate) use session_transition::{SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy};
+pub(crate) use session_transition::{
+    SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy, UnplacedLease,
+};
 
 impl SharedData {
     pub(super) fn has_runtime_storage(&self) -> bool {

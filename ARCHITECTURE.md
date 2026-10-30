@@ -3168,7 +3168,9 @@ src/
 │   │   ├── policy.rs
 │   │   ├── policy_tests.rs
 │   │   ├── prepared.rs
-│   │   └── retired_hold.rs
+│   │   ├── retired_hold.rs
+│   │   ├── unplaced.rs
+│   │   └── unplaced_tests.rs
 │   ├── herdr_launch_tests/
 │   │   └── retired_hold_tests.rs
 │   ├── imsg_reply/
@@ -3469,6 +3471,7 @@ src/
 │   │   │   ├── provenance_tests.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── transport_tests.rs
+│   │   │   ├── unplaced_rig_tests.rs
 │   │   │   └── wire.rs
 │   │   ├── herdr_gate/
 │   │   │   ├── legacy_return.rs

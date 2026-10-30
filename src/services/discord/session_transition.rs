@@ -67,6 +67,56 @@ impl<'a> SessionTransitionLease<'a> {
     }
 }
 
+/// The channel's transition lock held for one unplaced-launch resolution, by the bot whose rows it
+/// may resolve.
+pub(crate) struct UnplacedLease {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    token_hash: String,
+    channel: ChannelId,
+}
+
+impl UnplacedLease {
+    /// Waits as long as any transition claim does.
+    pub(crate) async fn acquire(
+        shared: &SharedData,
+        channel: ChannelId,
+    ) -> Result<Self, SessionTransitionBusy> {
+        let guard = shared.acquire_session_transition(channel).await?;
+        Ok(Self::held(shared, channel, guard))
+    }
+
+    pub(crate) fn try_acquire(
+        shared: &SharedData,
+        channel: ChannelId,
+    ) -> Result<Self, SessionTransitionBusy> {
+        let guard = shared
+            .session_transition_lock(channel)
+            .try_lock_owned()
+            .map_err(|_| SessionTransitionBusy)?;
+        Ok(Self::held(shared, channel, guard))
+    }
+
+    fn held(
+        shared: &SharedData,
+        channel: ChannelId,
+        guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Self {
+        Self {
+            _guard: guard,
+            token_hash: shared.token_hash.clone(),
+            channel,
+        }
+    }
+
+    /// Whether the row `owner` names is this bot's row of this channel.
+    pub(crate) fn covers(
+        &self,
+        owner: &crate::db::dispatched_sessions::hosted_execution::HostedOwner,
+    ) -> bool {
+        owner.discord_token_hash == self.token_hash && owner.channel_id == self.channel.to_string()
+    }
+}
+
 impl SharedData {
     pub(crate) fn session_transition_lock(
         &self,
