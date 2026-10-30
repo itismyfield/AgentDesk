@@ -1141,10 +1141,10 @@ pub fn start_hot_reload(
             // has already been dropped — making it safe for the engine to
             // drop the QuickJS runtime next.
             let ctx = ctx;
-            // Debounce: wait for events to settle
+            use std::sync::mpsc::RecvTimeoutError;
             use std::time::{Duration, Instant};
             let debounce = Duration::from_millis(500);
-            let mut last_reload = Instant::now() - debounce;
+            let max_wait = debounce * 4;
 
             loop {
                 if stop_worker.load(Ordering::Acquire) {
@@ -1155,15 +1155,35 @@ pub fn start_hot_reload(
                         if stop_worker.load(Ordering::Acquire) {
                             break;
                         }
-                        crate::config::reload_classes::warn_restart_files(&event.paths);
-                        // Debounce: skip if we reloaded recently
-                        if last_reload.elapsed() < debounce {
-                            // Drain remaining events in the debounce window
-                            while rx.try_recv().is_ok() {}
-                            continue;
+                        // One save is often several events (truncate, then write): reload once the
+                        // directory has been quiet for `debounce`, so the last event is never dropped.
+                        let mut paths = event.paths;
+                        let burst = Instant::now();
+                        let mut quiet_since = burst;
+                        let mut disconnected = false;
+                        while !stop_worker.load(Ordering::Acquire) {
+                            // A tree that never goes quiet still reloads every `max_wait`.
+                            let wait = debounce
+                                .saturating_sub(quiet_since.elapsed())
+                                .min(max_wait.saturating_sub(burst.elapsed()));
+                            match rx.recv_timeout(wait) {
+                                Ok(event) => {
+                                    paths.extend(event.paths);
+                                    quiet_since = Instant::now();
+                                }
+                                Err(RecvTimeoutError::Timeout) => break,
+                                Err(RecvTimeoutError::Disconnected) => {
+                                    disconnected = true;
+                                    break;
+                                }
+                            }
                         }
-
-                        while rx.try_recv().is_ok() {}
+                        if disconnected || stop_worker.load(Ordering::Acquire) {
+                            break;
+                        }
+                        paths.sort();
+                        paths.dedup();
+                        crate::config::reload_classes::warn_restart_files(&paths);
 
                         tracing::info!("Policy file change detected, pre-validating...");
                         // Hot-reload pre-validation (#1079): syntax/eval check
@@ -1196,10 +1216,9 @@ pub fn start_hot_reload(
                                 );
                             }
                         }
-                        last_reload = Instant::now();
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => {
                         tracing::info!("Policy hot-reload watcher shutting down");
                         break;
                     }
@@ -1785,6 +1804,94 @@ mod tests {
         // Calling shutdown explicitly then dropping must not panic, even
         // when the implicit Drop runs a second shutdown.
         guard.shutdown();
+        drop(guard);
+        drop(runtime);
+    }
+
+    /// A save that lands soon after a reload is still applied, not dropped as a repeat of the
+    /// save before it.
+    #[test]
+    fn hot_reload_applies_a_change_saved_soon_after_the_previous_reload() {
+        let (runtime, ctx) = policy_test_context();
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("policy.js");
+        let names = || {
+            let policies = store.lock().unwrap();
+            policies
+                .iter()
+                .map(|policy| policy.name.clone())
+                .collect::<Vec<_>>()
+        };
+        let reloaded_to = |name: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while names() != [name] {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            true
+        };
+        let guard = start_hot_reload(
+            tmp.path().to_path_buf(),
+            ctx,
+            store.clone(),
+            new_eval_deadline_slot(),
+        )
+        .expect("start hot reload");
+
+        std::fs::write(&file, "agentdesk.registerPolicy({ name: 'first' });").unwrap();
+        assert!(
+            reloaded_to("first"),
+            "the first save reloads: {:?}",
+            names()
+        );
+        // Saved within 500ms of the previous reload.
+        std::fs::write(&file, "agentdesk.registerPolicy({ name: 'second' });").unwrap();
+        assert!(
+            reloaded_to("second"),
+            "the next save reloads too: {:?}",
+            names()
+        );
+        drop(guard);
+        drop(runtime);
+    }
+
+    /// A policy saved while other files in the tree keep changing is applied within the bounded
+    /// wait, not only after the churn stops.
+    #[test]
+    fn hot_reload_applies_a_change_while_other_files_keep_changing() {
+        let (runtime, ctx) = policy_test_context();
+        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let guard = start_hot_reload(
+            tmp.path().to_path_buf(),
+            ctx,
+            store.clone(),
+            new_eval_deadline_slot(),
+        )
+        .expect("start hot reload");
+
+        let policy = "agentdesk.registerPolicy({ name: 'first' });";
+        std::fs::write(tmp.path().join("policy.js"), policy).unwrap();
+        // A file the loader ignores changes every 100ms, so the tree is never quiet for 500ms.
+        let noise = tmp.path().join("notes.txt");
+        let churn_until = Instant::now() + Duration::from_secs(5);
+        let mut applied = false;
+        while !applied && Instant::now() < churn_until {
+            std::fs::write(&noise, format!("{:?}", Instant::now())).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            applied = store
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|policy| policy.name == "first");
+        }
+        assert!(
+            applied,
+            "the saved policy reloads while other files keep changing"
+        );
         drop(guard);
         drop(runtime);
     }
