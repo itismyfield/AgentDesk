@@ -156,8 +156,10 @@ async fn a_front_that_moved_after_its_grant_is_never_reserved() {
     ] {
         let mailbox = owner(&registry, channel, 2).await;
         let ran = Arc::new(Mutex::new(Vec::new()));
-        let (m, r) = (mailbox.clone(), ran.clone());
+        let handed = Arc::new(AtomicUsize::new(0));
+        let (m, r, h) = (mailbox.clone(), ran.clone(), handed.clone());
         let before = move |front: &Front| {
+            h.fetch_add(1, Ordering::SeqCst);
             let (m, first) = (m.clone(), front.1.text == "input 0");
             let id = match how {
                 "tail" => original(channel, 1).message_id,
@@ -199,6 +201,12 @@ async fn a_front_that_moved_after_its_grant_is_never_reserved() {
             _ => &[],
         };
         assert_eq!(*ran.lock().unwrap(), expected, "{how}");
+        let handoffs = if how == "cancel" { 2 } else { 1 };
+        assert_eq!(
+            handed.load(Ordering::SeqCst),
+            handoffs,
+            "{how}: one handoff per front"
+        );
     }
 }
 
