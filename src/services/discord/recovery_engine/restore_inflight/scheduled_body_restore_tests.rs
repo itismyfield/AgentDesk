@@ -143,3 +143,93 @@ async fn each_direct_body_restore_records_before_its_visible_completion_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// A recovered turn that ended with no answer text ends empty: its receipt names the origin
+/// under the execution id before the restore drops the row, so no later pass records failed.
+#[tokio::test]
+async fn an_answerless_recovered_turn_records_empty_before_its_row_goes_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let shared = shared_on(&pool).await;
+    let provider = ProviderKind::Claude;
+    let transcripts = tempfile::tempdir().unwrap();
+    let mut probes = Vec::new();
+    let mut cases = Vec::new();
+    for (n, path) in [
+        BodyPath::CompletedDuringDowntime,
+        BodyPath::OutputTerminalSuccess,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let channel = 1_479_742_100_000_000_010 + n as u64;
+        let name = provider.build_tmux_session_name(&format!("i7340-empty-{n}"));
+        seed(
+            &pool,
+            &channel_key(&shared, &name),
+            &name,
+            channel,
+            Stored::Legacy,
+        )
+        .await;
+        let session = HostSessionRef::tmux(&name);
+        probes.push((
+            InjectedLivenessGuard::set(session, HostLiveness::DeadOrAbsent),
+            InjectedPresenceGuard::set(session, HostPresence::Missing),
+        ));
+        let output = transcripts.path().join(format!("{n}.jsonl"));
+        let result = serde_json::json!({"type": "result", "subtype": "success", "result": ""});
+        std::fs::write(&output, format!("{result}\n")).unwrap();
+        let mut state = inflight::InflightTurnState::new(
+            provider.clone(),
+            channel,
+            None,
+            7,
+            channel + 1,
+            channel + 2,
+            "prompt".into(),
+            Some("empty-provider-session".into()),
+            Some(name),
+            Some(output.display().to_string()),
+            None,
+            0,
+        );
+        state.born_generation = 0;
+        state.turn_start_offset = Some(0);
+        state.input_origin_ids = vec![format!("G-empty-{n}")];
+        if path == BodyPath::CompletedDuringDowntime {
+            let context = RestartReportContext::from_bridge(provider.clone(), channel, None, None);
+            restart_report::announce_restart(&context).expect("restart report");
+        }
+        inflight::save_inflight_state_create_new(&state).unwrap();
+        cases.push((path, state));
+    }
+    let discord = o_cut_recorder::start(cases[0].1.channel_id).await;
+
+    restore_inflight_turns(&discord.http, &shared, &provider).await;
+
+    for (path, state) in &cases {
+        assert!(
+            inflight::load_inflight_state(&provider, state.channel_id).is_none(),
+            "{path:?} dropped its row"
+        );
+        let receipt: Option<(Vec<String>, String)> = sqlx::query_as(
+            "SELECT consumed_origin_ids, terminal_outcome FROM turns
+             WHERE turn_id = $1 AND terminal_outcome IS NOT NULL",
+        )
+        .bind(format!(
+            "discord:{}:{}",
+            state.channel_id, state.user_msg_id
+        ))
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        let empty = (state.input_origin_ids.clone(), "empty".to_string());
+        assert_eq!(receipt, Some(empty), "{path:?}");
+    }
+    drop(probes);
+    pool.close().await;
+    db.drop().await;
+}

@@ -1,64 +1,39 @@
 use super::*;
 
-pub(crate) fn merge_card_label_metadata(existing_metadata: Option<&str>, label: &str) -> String {
-    let mut metadata = existing_metadata
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
-
-    let mut labels = metadata
-        .get("labels")
-        .and_then(|value| value.as_str())
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if !labels.iter().any(|existing| existing == label) {
-        labels.push(label.to_string());
-    }
-    metadata.insert(
-        "labels".to_string(),
-        serde_json::Value::String(labels.join(",")),
-    );
-
-    serde_json::Value::Object(metadata).to_string()
-}
-
 pub(crate) async fn update_card_ready_failure_marker_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
     reason: &str,
 ) -> Result<bool, String> {
-    let existing_metadata = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT metadata::text FROM kanban_cards WHERE id = $1",
-    )
-    .bind(card_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("load postgres card metadata for {card_id}: {error}"))?
-    .flatten();
-    let metadata_json =
-        merge_card_label_metadata(existing_metadata.as_deref(), READY_FOR_INPUT_STUCK_LABEL);
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres ready marker for {card_id}: {error}"))?;
     let updated = sqlx::query(
         "UPDATE kanban_cards
-         SET metadata = $1::jsonb,
-             blocked_reason = $2,
+         SET blocked_reason = $1,
              updated_at = NOW()
-         WHERE id = $3",
+         WHERE id = $2",
     )
-    .bind(metadata_json)
     .bind(reason)
     .bind(card_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|error| format!("update postgres ready marker for {card_id}: {error}"))?
     .rows_affected();
-    Ok(updated > 0)
+    if updated == 0 {
+        return Ok(false);
+    }
+    crate::db::kanban::set_card_labels_pg(
+        &mut *tx,
+        card_id,
+        crate::db::kanban::CardLabelsUpdate::Append(READY_FOR_INPUT_STUCK_LABEL),
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres ready marker for {card_id}: {error}"))?;
+    Ok(true)
 }
 
 pub(crate) fn load_dispatch_card_id(shared: &SharedData, dispatch_id: &str) -> Option<String> {
@@ -130,3 +105,7 @@ pub(in crate::services::discord) async fn fail_dispatch_for_ready_for_input_stal
         card_marked,
     })
 }
+
+#[cfg(test)]
+#[path = "ready_failure_pg_tests.rs"]
+mod ready_failure_pg_tests;

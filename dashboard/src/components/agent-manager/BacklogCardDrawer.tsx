@@ -1,3 +1,4 @@
+import { Drawer } from "../common/overlay/Drawer";
 import type { Agent, KanbanCard, UiLanguage } from "../../types";
 import { localeName } from "../../i18n";
 import { getProviderMeta } from "../../app/providerTheme";
@@ -88,24 +89,8 @@ export default function BacklogCardDrawer({
   ];
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 sm:items-center sm:p-4"
-      onClick={onClose}
-    >
-      <div
-        data-testid="agents-backlog-drawer"
-        role="dialog"
-        aria-modal="true"
-        aria-label={card.title}
-        onClick={(event) => event.stopPropagation()}
-        className="max-h-[88svh] w-full max-w-4xl overflow-y-auto rounded-t-[32px] border p-5 sm:max-h-[90vh] sm:rounded-[32px] sm:p-6"
-        style={{
-          background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-          borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
-          paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))",
-        }}
-      >
+    <Drawer open onClose={onClose} title={card.title} width="min(820px, 100vw)" closeButtonClassName="min-h-11 min-w-11">
+      <div data-testid="agents-backlog-drawer" className="min-w-0 space-y-5 pb-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -122,9 +107,9 @@ export default function BacklogCardDrawer({
               <span
                 className="rounded-full border px-2 py-1 text-[11px] font-medium"
                 style={{
-                  borderColor: "rgba(244,114,182,0.22)",
-                  background: "rgba(244,114,182,0.12)",
-                  color: "#f9a8d4",
+                  borderColor: "var(--th-border-subtle)",
+                  background: "var(--th-overlay-subtle)",
+                  color: "var(--th-text-secondary)",
                 }}
               >
                 {priorityLabel(card.priority, tr)}
@@ -132,27 +117,18 @@ export default function BacklogCardDrawer({
               <span
                 className="rounded-full border px-2 py-1 text-[11px] font-medium"
                 style={{
-                  borderColor: providerMeta.border,
-                  background: providerMeta.bg,
-                  color: providerMeta.color,
+                  borderColor: "var(--th-border-subtle)",
+                  background: "transparent",
+                  color: "var(--th-text-secondary)",
                 }}
               >
                 {providerMeta.label}
               </span>
             </div>
-            <h3
-              className="mt-3 text-xl font-semibold tracking-tight"
-              style={{ color: "var(--th-text-heading)" }}
-            >
-              {card.title}
-            </h3>
           </div>
-          <SurfaceActionButton onClick={onClose} tone="neutral">
-            {tr("닫기", "Close")}
-          </SurfaceActionButton>
         </div>
 
-        <div className="mt-5 grid gap-3 md:grid-cols-3">
+        <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3">
           {infoItems.map((item) => (
             <SurfaceCard
               key={item.label}
@@ -165,7 +141,7 @@ export default function BacklogCardDrawer({
               <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
                 {item.label}
               </div>
-              <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
+              <div className="text-sm [overflow-wrap:anywhere]" style={{ color: "var(--th-text-primary)" }}>
                 {item.value}
               </div>
             </SurfaceCard>
@@ -305,6 +281,6 @@ export default function BacklogCardDrawer({
           </div>
         </div>
       </div>
-    </div>
+    </Drawer>
   );
 }

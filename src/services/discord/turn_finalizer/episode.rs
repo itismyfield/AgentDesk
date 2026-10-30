@@ -58,10 +58,11 @@ pub(super) async fn claim_episode(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     key: TurnKey,
-    clear_inflight: bool,
+    clear_inflight: impl crate::services::discord::receipt_settle::ClaimClear,
     expected_actor: Option<Arc<crate::services::provider::CancelToken>>,
     drift: Option<RuntimeWitness<'_>>,
 ) -> Result<Option<CapturedFinish>, ()> {
+    let (clear_inflight, receipt) = clear_inflight.split();
     if key.episode.is_none() {
         return Ok(None);
     }
@@ -125,7 +126,10 @@ pub(super) async fn claim_episode(
     // Only the separately gated reconciler may release that residual anchor.
     // Row cleanup is independently authorized by the captured row identity;
     // the lock-held recheck still preserves any successor that replaced it.
-    if clear_inflight && let Some(row) = row {
+    if clear_inflight
+        && let Some(row) = row
+        && receipt.record_before_clear(shared, row).await
+    {
         let outcome = super::super::inflight::clear_inflight_state_for_captured_episode(
             provider,
             key.channel_id.get(),

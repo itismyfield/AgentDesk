@@ -230,6 +230,53 @@ async fn slot_missed_during_startup_grace_runs_exactly_once_after_it_pg() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn logged_unicode_object_completion_and_next_due_run_persist_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let temp = tempfile::tempdir().unwrap();
+    let loader = RoutineScriptLoader::new().unwrap();
+    let store = store(&pool);
+    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let dirs = [temp.path().to_path_buf()];
+    for name in ["unicode-result", "next-result"] {
+        let script_path = temp.path().join(format!("{name}.js"));
+        std::fs::write(
+            &script_path,
+            r#"agentdesk.routines.register({
+              name: "Object result",
+              tick(ctx) { return { action: "complete", result: {
+                summary: {text: "한".repeat(30)}, status: {text: "🙂".repeat(30)}
+              }}; }
+            });"#,
+        )
+        .unwrap();
+        let mut routine = new_routine(name, None, None);
+        routine.script_ref = loader.load_script(temp.path(), &script_path).unwrap();
+        let routine = store.attach_routine(routine).await.unwrap();
+        let outcomes = run_due_tick(&store, &loader, &dirs, None, Some(&logger), 1, false)
+            .await
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].routine_id, routine.id);
+        assert_eq!(outcomes[0].status, "succeeded");
+        let (status, _, result) = run_row(&pool, &outcomes[0].run_id).await;
+        assert_eq!(status, "succeeded");
+        let result = result.unwrap();
+        assert_eq!(result["summary"]["text"], "한".repeat(30));
+        assert_eq!(result["status"]["text"], "🙂".repeat(30));
+        let finished: bool =
+            sqlx::query_scalar("SELECT finished_at IS NOT NULL FROM routine_runs WHERE id = $1")
+                .bind(&outcomes[0].run_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(finished);
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn consecutive_failure_alert_fires_once_per_streak_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;

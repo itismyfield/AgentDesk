@@ -28,6 +28,19 @@ pub(crate) fn transcript_turns(channel: u64) -> bool {
     })
 }
 
+/// Test mutant switch of the carried-turn close (`ADK_CARRIED_CLOSE_MUTANT`); constant false outside tests.
+pub(crate) fn carried_close_mutant(name: &str) -> bool {
+    cfg!(test) && std::env::var("ADK_CARRIED_CLOSE_MUTANT").is_ok_and(|value| value == name)
+}
+
+/// The channels confirmed for turn mode in this process.
+pub(crate) fn confirmed_channels() -> Vec<u64> {
+    CONFIRMED.get().map_or_else(Vec::new, |channels| {
+        let channels = channels.read().unwrap_or_else(|e| e.into_inner());
+        channels.iter().copied().collect()
+    })
+}
+
 // Dormant effect gate: execute only the synchronous first HTTP poll under the confirmation lock.
 // Await the remaining HTTP work after this function returns.
 #[cfg(test)]

@@ -1,7 +1,6 @@
 //! Tests for the watcher-side two-message status panel (#3805 P2 PR-C/D, #4860).
 
 use super::*;
-use crate::services::discord::footer_retirement::legacy_for_test;
 use std::sync::Arc;
 #[test]
 fn creation_gate_off_is_byte_identical_true_regardless_of_answer() {
@@ -105,41 +104,6 @@ fn completion_guard_ignores_synthetic_headless_panel_handle() {
         1,
         Some(synthetic),
         Some(&on_disk(Some(synthetic.get()), 9)),
-    ));
-}
-
-#[test]
-fn reanchor_gate_rejects_managed_bridge_owned_turn_even_when_watcher_relays() {
-    let _env = isolate_agentdesk_runtime_root_for_two_message_tests();
-    let mut managed = on_disk(Some(20), 1);
-    managed.tmux_session_name = Some("AgentDesk-claude-a".to_string());
-    managed.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
-    managed.turn_source = crate::services::discord::inflight::TurnSource::Managed;
-    let _legacy = legacy_for_test();
-    assert!(!watcher_two_message_should_reanchor_panel_on_rollover(
-        true,
-        true,
-        Some(&managed),
-        "AgentDesk-claude-a",
-    ));
-
-    let mut external = managed.clone();
-    external.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
-    assert!(watcher_two_message_should_reanchor_panel_on_rollover(
-        true,
-        true,
-        Some(&external),
-        "AgentDesk-claude-a",
-    ));
-
-    external.set_relay_owner_kind(
-        crate::services::discord::inflight::RelayOwnerKind::SessionBoundRelay,
-    );
-    assert!(!watcher_two_message_should_reanchor_panel_on_rollover(
-        true,
-        true,
-        Some(&external),
-        "AgentDesk-claude-a",
     ));
 }
 

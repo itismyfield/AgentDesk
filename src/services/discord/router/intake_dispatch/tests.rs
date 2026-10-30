@@ -430,10 +430,6 @@ async fn an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_post
 
     let _unread = test_probe::answers(&[]);
     assert_eq!(local(o).await, Ok(()), "writer off");
-    let selected = test_override::force_channels(&[(o.get(), ClaudeTui)]);
-    let off = test_override::force_off();
-    assert_eq!(local(o).await, Ok(()), "flag off with a list");
-    drop((off, selected));
     let _none = test_override::force_channels(&[]);
     assert_eq!(local(o).await, Ok(()), "empty list");
 

@@ -10,7 +10,16 @@ use sqlx::Row;
 
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
+mod resolve;
 mod runtime_config_put;
+#[cfg(test)]
+pub use resolve::clamp_retry_limit;
+pub use resolve::{
+    CONTEXT_COMPACT_LOWER_BOUND_TOKENS, CONTEXT_COMPACT_PERCENT, CONTEXT_COMPACT_PERCENT_CLAUDE,
+    CONTEXT_COMPACT_PERCENT_CODEX, DISPATCH_GATE_DANGER_PCT, DISPATCH_GATE_ENABLED,
+    RATE_LIMIT_STALE_SEC, Resolved, RowSetting, RuntimeSetting, SettingSource, max_entry_retries,
+    policy_kv_rows, policy_value, resolve_row, resolve_with_kv, runtime_config_field,
+};
 use runtime_config_put::with_explicit_runtime_config_keys;
 
 const RETIRED_SETTINGS_JSON_KEYS: &[&str] = &[
@@ -838,10 +847,6 @@ fn runtime_config_defaults_map(config: &crate::config::Config) -> Map<String, Va
         defaults.insert(key, value);
     }
     defaults
-}
-
-pub fn runtime_config_defaults(config: &crate::config::Config) -> Value {
-    Value::Object(runtime_config_defaults_map(config))
 }
 
 pub(crate) fn explicit_runtime_config_keys(values: &Map<String, Value>) -> HashSet<String> {

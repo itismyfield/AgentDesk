@@ -61,6 +61,7 @@ pub use stop_result::{
     InflightDisposition, RuntimeTurnStopResult, TOKEN_SUPERSEDED_PATH,
 };
 
+mod carried_turn_close;
 mod channel_runtime;
 mod inflight_repair;
 mod runtime_lookup;
@@ -2750,7 +2751,6 @@ mod stall_watchdog_auto_heal_tests {
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
                 cleared: false,
-                remote_profile_name: None,
                 channel_id: Some(channel.get()),
                 channel_name: None,
                 category_name: None,

@@ -1663,8 +1663,11 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   });
 
-  test("command palette searches routes and closes accessibly", async ({ page }, testInfo) => {
+  test("command palette searches with missing localized labels and closes accessibly", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "mobile", "Desktop keyboard shortcut coverage");
+    await page.route("**/api/agents", (route) => route.fulfill({
+      json: { agents: MOCK_AGENTS.map(agent => ({ ...agent, name_ko: null })) },
+    }));
     await page.goto("/home");
 
     await page.getByLabel(/검색 열기|Open search/).click();
@@ -1694,8 +1697,8 @@ test.describe("Dashboard smoke tests", () => {
     const sidebar = page.getByTestId("app-sidebar-nav");
     await expect(sidebar).toBeVisible();
     const box = await sidebar.boundingBox();
-    expect(box?.width).toBeGreaterThan(230);
-    expect(box?.width).toBeLessThan(250);
+    expect(box?.width).toBeGreaterThan(210);
+    expect(box?.width).toBeLessThan(225);
   });
 
   test("responsive: 900px switches from mobile tab bar to desktop sidebar", async ({ page }, testInfo) => {
@@ -1785,14 +1788,12 @@ test.describe("Dashboard smoke tests", () => {
     expect(shellStyles.marginBottom).toContain("env(safe-area-inset-bottom)");
 
     const tabbarStyles = await bottomNav.evaluate((element) => {
-      // Padding lives in AppMobileNavigation.css, not in the inline style.
-      // Inspect active matching rules so moving a declaration between an
-      // inline style and a stylesheet does not turn this contract into a lie.
+      // Inspect matching utility rules as well as inline safe-area styles.
       const declarations: CSSStyleDeclaration[] = [];
       const visit = (rules: CSSRuleList) => {
         for (const rule of Array.from(rules)) {
           if (rule instanceof CSSMediaRule && !matchMedia(rule.conditionText).matches) continue;
-          if (rule instanceof CSSStyleRule && rule.selectorText.split(",").some((selector) => selector.trim() === ".adk-mobile-tabbar")) declarations.push(rule.style);
+          if (rule instanceof CSSStyleRule && Array.from(element.classList).some((name) => rule.selectorText === `.${CSS.escape(name)}`)) declarations.push(rule.style);
           if ("cssRules" in rule) visit((rule as CSSGroupingRule).cssRules);
         }
       };
@@ -1858,7 +1859,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(shortcutHelpModal).toBeVisible();
 
     const modalZIndex = await shortcutHelpModal.evaluate((element) =>
-      Number(window.getComputedStyle(element as HTMLElement).zIndex),
+      Number(window.getComputedStyle(element.closest('[role="dialog"]') as HTMLElement).zIndex),
     );
     expect(modalZIndex).toBeGreaterThan(tabbarZIndex);
   });
@@ -1993,7 +1994,7 @@ test.describe("Dashboard smoke tests", () => {
     );
   });
 
-  test("home: mobile stacks widgets and disables edit affordance", async ({ page }, testInfo) => {
+  test("home: mobile pairs usage metrics and disables edit affordance", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
 
     await page.goto("/home");
@@ -2010,7 +2011,9 @@ test.describe("Dashboard smoke tests", () => {
 
     expect(tokensBox).not.toBeNull();
     expect(costBox).not.toBeNull();
-    expect(costBox!.y).toBeGreaterThan(tokensBox!.y + tokensBox!.height - 1);
+    expect(Math.abs(costBox!.y - tokensBox!.y)).toBeLessThanOrEqual(1);
+    expect(costBox!.x).toBeGreaterThan(tokensBox!.x + tokensBox!.width);
+    await expectNoHorizontalOverflow(page);
   });
 
   test("achievements: dedicated page renders sections and shared gamification blocks", async ({ page }) => {
@@ -2182,7 +2185,41 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("stats-range-7d")).toHaveAttribute("aria-pressed", "false");
   });
 
-  test("stats: mobile stacks summary cards vertically", async ({ page }, testInfo) => {
+  test("stats: weekly chart fits and longer series support horizontal keyboard navigation", async ({ page }, testInfo) => {
+    await page.route(/\/api\/token-analytics(?:\?.*)?$/, async (route) => {
+      const period = new URL(route.request().url()).searchParams.get("period") === "30d" ? "30d" : "7d";
+      const data = buildMockTokenAnalytics(period);
+      if (period === "30d") data.daily = Array.from({ length: 30 }, (_, index) => ({ ...data.daily[index % 7], date: `2026-10-${String(index + 1).padStart(2, "0")}` }));
+      await route.fulfill({ json: data });
+    });
+    await page.goto("/stats");
+    const chart = page.getByTestId("stats-daily-token-scroll");
+    await chart.scrollIntoViewIfNeeded();
+    await expect(chart.locator("svg.recharts-surface")).toBeVisible();
+    await expect.poll(() => chart.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    await page.getByTestId("stats-range-30d").click();
+    await expect(page.getByText("날짜가 가려지면 차트를 좌우로 움직여 확인하세요.", { exact: true })).toBeVisible();
+    if (testInfo.project.name === "mobile") {
+      await expect.poll(() => chart.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+      await chart.focus();
+      await page.keyboard.press("ArrowRight");
+      await expect.poll(() => chart.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
+    }
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  });
+
+  test("stats: failed analytics stops the loading placeholder without reporting zero", async ({ page }) => {
+    await page.route(/\/api\/token-analytics(?:\?.*)?$/, (route) =>
+      route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Aggregation unavailable" }) }),
+    );
+    await page.goto("/stats");
+    await expect(page.getByText("일부 통계를 불러오지 못했습니다.", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("stats-summary-total-tokens")).toContainText("—");
+    await expect(page.getByTestId("stats-summary-total-tokens")).not.toContainText("…");
+    await expect(page.getByTestId("stats-summary-api-spend")).toContainText("데이터 확인 불가");
+  });
+
+  test("stats: mobile pairs summary cards without horizontal overflow", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
     await page.goto("/stats");
 
@@ -2200,7 +2237,9 @@ test.describe("Dashboard smoke tests", () => {
 
     expect(firstBox).not.toBeNull();
     expect(secondBox).not.toBeNull();
-    expect(secondBox!.y).toBeGreaterThan(firstBox!.y + firstBox!.height - 1);
+    expect(Math.abs(secondBox!.y - firstBox!.y)).toBeLessThanOrEqual(1);
+    expect(secondBox!.x).toBeGreaterThan(firstBox!.x + firstBox!.width);
+    await expectNoHorizontalOverflow(page);
   });
 
   test("dashboard: routines timeline lists registered jobs chronologically", async ({ page }) => {
@@ -2583,6 +2622,7 @@ test.describe("Dashboard smoke tests", () => {
   });
 
   test("settings: search feedback and user-facing copy stay stable", async ({ page }) => {
+    await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ json: { current: {}, defaults: {} } }));
     await page.goto("/settings?settingsPanel=runtime");
 
     await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
@@ -2598,6 +2638,14 @@ test.describe("Dashboard smoke tests", () => {
 
     await page.getByRole("button", { name: /검색 지우기|Clear search/ }).click();
     await expect(page.getByTestId("settings-search-summary")).toHaveCount(0);
+  });
+
+  test("settings: runtime fetch errors do not expose empty editable defaults", async ({ page }) => {
+    await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ status: 503, json: { error: "unavailable" } }));
+    await page.goto("/settings?settingsPanel=runtime");
+    const panel = page.locator("#settings-panel-content");
+    await expect(panel.getByRole("alert")).toContainText(/불러오지 못했습니다|could not be loaded/);
+    await expect(panel.locator("input, select, [role='switch']")).toHaveCount(0);
   });
 
   test("settings: mobile page remains scrollable", async ({ page }, testInfo) => {
@@ -2621,8 +2669,8 @@ test.describe("Dashboard smoke tests", () => {
           ),
         };
       });
-    expect(navMetrics.scrollWidth).toBeGreaterThan(navMetrics.clientWidth);
-    expect(navMetrics.overflowX).toMatch(/auto|scroll/);
+    expect(navMetrics.scrollWidth).toBeLessThanOrEqual(navMetrics.clientWidth + 1);
+    expect(navMetrics.maxButtonHeight).toBeGreaterThanOrEqual(44);
     expect(navMetrics.maxButtonHeight).toBeLessThan(64);
 
     const before = await settingsPage.evaluate((node) => ({
@@ -2797,7 +2845,7 @@ test.describe("Dashboard smoke tests", () => {
     const panel = page.getByTestId("settings-machine-panel");
     await expect(panel).toBeVisible();
     await expect(page.locator("#settings-tab-machine")).toHaveAttribute("aria-selected", "true");
-    await expect(page.locator("#settings-tab-machine").getByText("2", { exact: true })).toBeVisible();
+    await expect(page.locator("#settings-panel-content > div").first().getByText("2", { exact: true })).toBeVisible();
     const order = await page.getByRole("tablist", { name: /설정 패널|Settings panels/ }).getByRole("tab").evaluateAll(tabs => tabs.map(tab => tab.id));
     expect(order[order.indexOf("settings-tab-general") + 1]).toBe("settings-tab-machine");
     const runner = page.getByTestId("machine-node-runner-example");
@@ -2849,7 +2897,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(runner.getByText(/오프라인|Offline/, { exact: true })).toBeVisible();
     includeRunner = false;
     await panel.getByRole("button", { name: /상태 새로고침|Refresh status/ }).click();
-    await expect(page.locator("#settings-tab-machine").getByText("1", { exact: true })).toBeVisible();
+    await expect(page.locator("#settings-panel-content > div").first().getByText("1", { exact: true })).toBeVisible();
     enabled = false;
     await panel.getByRole("button", { name: /상태 새로고침|Refresh status/ }).click();
     await expect(panel.getByText(/단독 운영 중|runs standalone/)).toBeVisible();

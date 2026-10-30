@@ -103,8 +103,8 @@ use dispatch_assignment_command::*;
 use dispatch_command::*;
 use dispatch_query::*;
 use fsm::{
-    apply_restore_state_changes_pg, attempt_restore_dispatch, clamp_retry_limit,
-    finalize_restore_run_pg, load_kv_meta_value_pg,
+    apply_restore_state_changes_pg, attempt_restore_dispatch, finalize_restore_run_pg,
+    load_kv_meta_value_pg,
 };
 use phase_gate::*;
 use planning::*;

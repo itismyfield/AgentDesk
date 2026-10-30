@@ -322,6 +322,13 @@ pub(in crate::services::discord) async fn attach_restarted_herdr_source(
         withhold_herdr_execution(logical, Some(&nonce));
         return HerdrSourceAttach::NotPublished;
     }
+    // A new process holds no fence for this execution until a target is built, which a notice
+    // admission of the restored source must not wait for.
+    if let HostedLookup::Found(found) = &observed
+        && let HostedRecord::Known(stored) = &found.record
+    {
+        crate::services::session_host::restore_execution_fence(stored);
+    }
     admit_herdr_execution(logical, &nonce);
     HerdrSourceAttach::Published {
         bound: true,

@@ -140,6 +140,7 @@ async fn compact_summary_owned_tail_split_and_rewind_preserve_unreceipted_range(
                         utf8_decoder: &mut decoder,
                         completion_footer_idle: &mut WatcherCompletionFooterIdleState::default(),
                         last_activity_heartbeat_at: &mut activity,
+                        tmux_death: &mut None,
                     },
                     &mut PostTerminalState {
                         turn_result_relayed: false,

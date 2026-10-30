@@ -54,6 +54,7 @@ async fn durable_retry_approval_and_open_prepared_hold_a_valid_fresh_scope() {
             key.provider = ShadowProvider::Codex;
             store
                 .append_ledger(LedgerEntry::Prepared {
+                    notice_origin: None,
                     serial: 0,
                     unit_key: key,
                     piece_index: 0,

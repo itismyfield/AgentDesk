@@ -5,6 +5,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use super::{DiscordPort, SeenMessage};
+use crate::services::tui_o::store::ledger::input_notices::{MigrationHistory, NoticeState};
 
 /// First look after the request ended or the process restarted.
 pub const FIRST_LOOK: Duration = Duration::from_secs(10);
@@ -79,7 +80,18 @@ async fn scan<P: DiscordPort>(
     channel: u64,
     anchor: u64,
     payload: &str,
+    notices: Option<&NoticeState>,
 ) -> Result<Seen, String> {
+    let allowed = |id| {
+        notices.is_none_or(|state| {
+            !state.reserved_ids.contains(&id)
+                && !state.imported.values().any(|reserved| *reserved == id)
+                && !matches!(
+                    state.migration.as_ref().map(|snapshot| &snapshot.history),
+                    Some(MigrationHistory::Fixed { lower, upper }) if *lower < id && id <= *upper
+                )
+        })
+    };
     let (mut after, mut seen) = (anchor, Seen::default());
     for _ in 0..MAX_PAGES {
         let mut page = bounded(port.history_after(channel, after))
@@ -87,7 +99,10 @@ async fn scan<P: DiscordPort>(
             .map_err(|error| format!("history read failed: {error}"))?;
         page.sort_by_key(|message| message.id);
         seen.listed |= !page.is_empty();
-        for message in page.iter().filter(|m| m.author_id == port.bot_id()) {
+        for message in page
+            .iter()
+            .filter(|m| m.author_id == port.bot_id() && allowed(m.id))
+        {
             if message.content == payload {
                 seen.exact.push(message.id);
             } else {
@@ -132,15 +147,36 @@ pub async fn settle<P: DiscordPort>(
     earlier_same_payload: bool,
     proof_ids: &[u64],
 ) -> Verdict {
+    settle_filtered(
+        port,
+        channel,
+        anchor,
+        payload,
+        earlier_same_payload,
+        proof_ids,
+        None,
+    )
+    .await
+}
+
+async fn settle_filtered<P: DiscordPort>(
+    port: &P,
+    channel: u64,
+    anchor: u64,
+    payload: &str,
+    earlier_same_payload: bool,
+    proof_ids: &[u64],
+    notices: Option<&NoticeState>,
+) -> Verdict {
     let looks = async {
         tokio::time::sleep(FIRST_LOOK).await;
-        if let Ok(seen) = scan(port, channel, anchor, payload).await
+        if let Ok(seen) = scan(port, channel, anchor, payload, notices).await
             && let Some(verdict) = judge(&seen.exact, earlier_same_payload)
         {
             return verdict;
         }
         tokio::time::sleep(LAST_LOOK - FIRST_LOOK).await;
-        match scan(port, channel, anchor, payload).await {
+        match scan(port, channel, anchor, payload, notices).await {
             Err(reason) => Verdict::Unresolved(reason),
             Ok(seen) => match judge(&seen.exact, earlier_same_payload) {
                 Some(verdict) => verdict,
@@ -152,4 +188,31 @@ pub async fn settle<P: DiscordPort>(
     tokio::time::timeout(SETTLE_DEADLINE, looks)
         .await
         .unwrap_or_else(late)
+}
+
+pub(super) async fn settle_notice<P: DiscordPort>(
+    port: &P,
+    channel: u64,
+    anchor: u64,
+    payload: &str,
+    earlier_same_payload: bool,
+    proof_ids: &[u64],
+    notices: &NoticeState,
+) -> Verdict {
+    if !matches!(
+        notices.migration.as_ref().map(|snapshot| &snapshot.history),
+        Some(MigrationHistory::Fixed { .. })
+    ) {
+        return Verdict::Unresolved("legacy notice history is unavailable".into());
+    }
+    settle_filtered(
+        port,
+        channel,
+        anchor,
+        payload,
+        earlier_same_payload,
+        proof_ids,
+        Some(notices),
+    )
+    .await
 }

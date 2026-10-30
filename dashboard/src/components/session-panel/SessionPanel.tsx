@@ -41,7 +41,7 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
   const isKo = language === "ko";
 
   return (
-    <div className="space-y-4 min-w-0">
+    <div data-testid="agents-sessions" className="space-y-4 min-w-0 [overflow-wrap:anywhere]">
       <div className="flex flex-wrap items-center gap-2 sm:gap-3">
         <Monitor className="shrink-0" size={24} style={{ color: "var(--th-accent-primary)" }} />
         <h1 className="text-xl sm:text-2xl font-bold truncate">{t({ ko: "파견 인력", en: "Dispatched Sessions" })}</h1>
@@ -144,11 +144,9 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
                           />
                         </div>
                         <div className="min-w-0 flex-1">
-                          <TooltipLabel
-                            className="min-w-0 text-sm text-th-text-muted"
-                            text={sessionDisplayName(s).label}
-                            tooltip={sessionDisplayName(s).full}
-                          />
+                          <span className="block min-w-0 truncate text-sm text-th-text-muted" title={sessionDisplayName(s).full}>
+                            {sessionDisplayName(s).label}
+                          </span>
                           <div className="mt-1 flex flex-wrap gap-2">
                             <SurfaceMetaBadge>{s.model || "unknown"}</SurfaceMetaBadge>
                             <SurfaceMetaBadge>{t({ ko: "연결 종료", en: "Disconnected" })}</SurfaceMetaBadge>
@@ -219,7 +217,7 @@ function SessionCard({
 
   return (
     <SurfaceCard
-      className="rounded-2xl p-3 sm:p-4"
+      className="rounded-lg p-3 sm:p-4"
       style={{
         borderColor: staleIdle
           ? "color-mix(in srgb, var(--th-accent-warn) 24%, var(--th-border) 76%)"
@@ -235,7 +233,7 @@ function SessionCard({
     >
       <div className="flex items-start gap-3">
         {/* Avatar + status */}
-        <button type="button" className="relative shrink-0" onClick={onSelect}>
+        <button type="button" className="relative min-h-11 min-w-11 shrink-0" onClick={onSelect}>
           <div className="w-10 h-10 rounded-xl overflow-hidden bg-th-card-bg">
             <img
               src={`/sprites/${sessionSpriteNum(s)}-D-1.png`}
@@ -253,7 +251,7 @@ function SessionCard({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 min-w-0">
             <TooltipLabel
-              className="font-medium transition-opacity hover:opacity-80"
+              className="min-w-0 flex-1 font-medium transition-opacity hover:opacity-80 [&_button]:min-h-11"
               text={sessionDisplayName(s).label}
               tooltip={sessionDisplayName(s).full}
               onClick={onSelect}
@@ -311,7 +309,7 @@ function SessionCard({
         <select
           value={selectedDept}
           onChange={(e) => setSelectedDept(e.target.value)}
-          className="min-w-[148px] flex-1 rounded-xl border px-3 py-2 text-sm text-th-text-primary"
+          className="min-h-11 min-w-[148px] flex-1 rounded-md border px-3 py-2 text-sm text-th-text-primary"
           style={{
             borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
             background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",

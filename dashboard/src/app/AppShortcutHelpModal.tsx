@@ -1,102 +1,30 @@
-import { X } from "lucide-react";
+import { Modal } from "../components/common/overlay/Modal";
 import { PRIMARY_ROUTES } from "./routes";
 
 interface AppShortcutHelpModalProps {
   isKo: boolean;
-  modalZIndex: number;
   onClose: () => void;
 }
 
-export function AppShortcutHelpModal({
-  isKo,
-  modalZIndex,
-  onClose,
-}: AppShortcutHelpModalProps) {
+export function AppShortcutHelpModal({ isKo, onClose }: AppShortcutHelpModalProps) {
+  const rows = [
+    { label: isKo ? "명령 팔레트" : "Command palette", combo: "⌘K" },
+    { label: isKo ? "도움말" : "Help", combo: "?" },
+    ...PRIMARY_ROUTES.map(route => ({
+      label: isKo ? route.labelKo : route.labelEn,
+      combo: `Alt+${route.shortcutKey}`,
+    })),
+  ];
   return (
-    <div
-      data-testid="shortcut-help-modal"
-      className="fixed inset-0 flex items-center justify-center px-4"
-      style={{ zIndex: modalZIndex }}
-      onClick={onClose}
-    >
-      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="shortcut-modal-title"
-        aria-describedby="shortcut-modal-desc"
-        className="relative w-full max-w-md rounded-[2rem] border p-6 shadow-2xl"
-        style={{
-          borderColor: "var(--th-border-subtle)",
-          background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 95%, transparent) 100%)",
-        }}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="flex items-center justify-between">
-          <div>
-            <h2
-              id="shortcut-modal-title"
-              className="text-lg font-semibold"
-              style={{ color: "var(--th-text-heading)" }}
-            >
-              {isKo ? "키보드 단축키" : "Keyboard Shortcuts"}
-            </h2>
-            <div
-              id="shortcut-modal-desc"
-              className="mt-1 text-sm"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {isKo
-                ? "자주 쓰는 조작을 빠르게 확인하세요"
-                : "Quick access to the controls you use most"}
-            </div>
+    <Modal open onClose={onClose} title={isKo ? "키보드 단축키" : "Keyboard Shortcuts"} description={isKo ? "자주 쓰는 조작을 빠르게 확인하세요" : "Quick access to common controls"}>
+      <div data-testid="shortcut-help-modal" className="divide-y divide-th-border-subtle">
+        {rows.map(row => (
+          <div key={row.combo} className="flex min-h-11 items-center justify-between gap-3 py-2 text-sm text-th-text-secondary">
+            <span>{row.label}</span>
+            <kbd className="rounded border border-th-border-subtle px-2 py-1 text-xs text-th-text-primary">{row.combo}</kbd>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={isKo ? "닫기" : "Close"}
-            className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--th-text-muted)]"
-          >
-            <X size={16} />
-          </button>
-        </div>
-
-        <div className="mt-5 space-y-3 text-sm">
-          <ShortcutRow
-            label={isKo ? "명령 팔레트" : "Command palette"}
-            combo="⌘K"
-          />
-          <ShortcutRow label={isKo ? "도움말" : "Help"} combo="?" />
-          {PRIMARY_ROUTES.map((route) => (
-            <ShortcutRow
-              key={route.id}
-              label={isKo ? route.labelKo : route.labelEn}
-              combo={`Alt+${route.shortcutKey}`}
-            />
-          ))}
-        </div>
+        ))}
       </div>
-    </div>
-  );
-}
-
-function ShortcutRow({ label, combo }: { label: string; combo: string }) {
-  return (
-    <div
-      className="flex items-center justify-between rounded-2xl border px-3 py-2"
-      style={{ borderColor: "var(--th-border-subtle)" }}
-    >
-      <span style={{ color: "var(--th-text-secondary)" }}>{label}</span>
-      <kbd
-        className="rounded-lg px-2 py-1 text-xs"
-        style={{
-          background: "var(--th-overlay-subtle)",
-          color: "var(--th-text-primary)",
-        }}
-      >
-        {combo}
-      </kbd>
-    </div>
+    </Modal>
   );
 }

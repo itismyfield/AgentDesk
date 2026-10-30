@@ -64,7 +64,6 @@ async fn status_shows_complete_session_cwd_and_missing_transcript() {
             history: Vec::new(),
             pending_uploads: Vec::new(),
             cleared: false,
-            remote_profile_name: None,
             channel_id: Some(channel.get()),
             channel_name: None,
             category_name: None,

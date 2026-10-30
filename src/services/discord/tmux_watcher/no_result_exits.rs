@@ -56,6 +56,7 @@ pub(super) struct NoResultExitState<'a> {
     pub(super) monitor_auto_turn_finished: &'a mut bool,
     pub(super) monitor_auto_turn_synthetic_msg_id: &'a mut Option<serenity::MessageId>,
     pub(super) monitor_auto_turn_ledger_generation: &'a mut Option<u64>,
+    pub(super) tmux_death: &'a mut Option<bool>,
 }
 
 pub(super) async fn handle_no_result_exits(
@@ -422,7 +423,26 @@ pub(super) async fn handle_no_result_exits(
                     let pinned_clear_turn_nonce = pinned_pre_cleanup_inflight
                         .as_ref()
                         .and_then(|state| state.turn_nonce.as_deref());
-                    if let Some(pinned_clear_identity) = pinned_clear_identity.as_ref() {
+                    // This finalize ends the execution; its receipt commits before the row goes.
+                    let receipt_kept = match pinned_pre_cleanup_inflight.as_ref() {
+                        Some(row) => {
+                            !crate::services::discord::receipt_settle::record_or_stamp(
+                                shared.pg_pool.as_ref(),
+                                row,
+                                crate::services::discord::receipt_settle::body_outcome(
+                                    full_response,
+                                ),
+                            )
+                            .await
+                        }
+                        None => false,
+                    };
+                    if receipt_kept {
+                        tracing::warn!(
+                            channel_id = channel_id.get(),
+                            "watcher fresh idle kept the inflight row marked: its receipt is not committed"
+                        );
+                    } else if let Some(pinned_clear_identity) = pinned_clear_identity.as_ref() {
                         let clear_outcome =
                                 crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
                                     &watcher_provider,
@@ -535,7 +555,7 @@ pub(super) async fn handle_no_result_exits(
         }
 
         if tmux_death_observed {
-            handle_tmux_watcher_observed_death(
+            let stopped = handle_tmux_watcher_observed_death(
                 channel_id,
                 &http,
                 &shared,
@@ -549,6 +569,7 @@ pub(super) async fn handle_no_result_exits(
                 ),
             )
             .await;
+            *state.tmux_death = Some(stopped);
             finish_monitor_auto_turn_if_claimed(
                 &shared,
                 &watcher_provider,

@@ -40,7 +40,6 @@ use crate::services::provider_runtime::{
     LineStreamEvent, SharedAllowedToolKind, resolve_shared_allowed_tool_compat,
     spawn_line_stream_reader,
 };
-use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
     ReadOutputFailure, StreamLineState, insert_process_session, process_session_is_alive,
     process_session_probe, process_stream_line, remove_process_session, send_process_session_input,
@@ -321,7 +320,6 @@ pub fn execute_command_streaming(
     system_prompt: Option<&str>,
     allowed_tools: Option<&[String]>,
     cancel_token: Option<Arc<CancelToken>>,
-    remote_profile: Option<&RemoteProfile>,
     tmux_session_name: Option<&str>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
@@ -329,10 +327,6 @@ pub fn execute_command_streaming(
     _compact_percent: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
-    if remote_profile.is_some() {
-        return Err(remote_profile_not_supported_message());
-    }
-
     let allowed_core_tools = resolve_allowed_core_tools(allowed_tools)?;
     let prompt = compose_qwen_prompt(prompt, system_prompt, allowed_tools);
     let resolution = resolve_qwen_binary();
@@ -1150,10 +1144,6 @@ fn is_cancelled(token: Option<&CancelToken>) -> bool {
     token
         .map(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed))
         .unwrap_or(false)
-}
-
-fn remote_profile_not_supported_message() -> String {
-    "NotSupported: Qwen provider does not support remote execution yet. Remove `remote_profile` or use a provider with remote support.".to_string()
 }
 
 fn compose_qwen_prompt(

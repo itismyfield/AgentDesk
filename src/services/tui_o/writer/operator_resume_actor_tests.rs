@@ -8,6 +8,7 @@ fn seed_approval(harness: &Harness, provider: ShadowProvider) {
     key.provider = provider;
     channel
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             local_retry: None,
             serial: 0,
             unit_key: key,
@@ -189,7 +190,7 @@ async fn operator_resume_lease_wait_preserves_readiness_and_drain_owing() {
         *readiness.borrow(),
         "source recovery still makes the actor ready while approval waits"
     );
-    let pending = projection.borrow().unwrap();
+    let pending = projection.borrow().clone().unwrap();
     assert_eq!((pending.owed, pending.prepared), (1, 0));
     assert!(
         harness
@@ -203,7 +204,7 @@ async fn operator_resume_lease_wait_preserves_readiness_and_drain_owing() {
     harness.lease.busy.store(false, Ordering::SeqCst);
     polls(2).await;
     assert_eq!(harness.port.posts(), ["ledger-only payload"]);
-    assert_eq!(projection.borrow().unwrap().owed, 0);
+    assert_eq!(projection.borrow().clone().unwrap().owed, 0);
     halt(stop, task).await;
 }
 
@@ -216,6 +217,7 @@ async fn operator_resume_open_consumed_retry_without_raw_work_settles_before_fol
     let original = channel.ledger().piece(0).unwrap().clone();
     channel
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             local_retry: None,
             serial: 1,
             unit_key: original.unit_key,

@@ -77,12 +77,8 @@ pub(crate) fn peek_o_owns_tui_output_for_channel_quiet(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
-    let enabled = super::writer_enabled();
-    if !enabled {
-        return Ok(false);
-    }
     super::test_override::with_channels(|snapshot| {
-        decide_with_snapshot(enabled, snapshot, channel_id, Use::Peek, None, || kind)
+        decide_with_snapshot(snapshot, channel_id, Use::Peek, None, || kind)
     })
     .map(|peeked| peeked.owned)
 }
@@ -249,12 +245,8 @@ fn decide_from(
     origin: Option<&'static std::panic::Location<'static>>,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<BodyClaimed, IdentityError> {
-    let enabled = super::writer_enabled();
-    if !enabled {
-        return Ok(legacy());
-    }
     let evaluate = |snapshot: Option<&BootChannels>| {
-        decide_with_snapshot(enabled, snapshot, channel_id, usage, origin, resolve_kind)
+        decide_with_snapshot(snapshot, channel_id, usage, origin, resolve_kind)
     };
     #[cfg(test)]
     let result = super::test_override::with_channels(evaluate);
@@ -283,7 +275,6 @@ fn legacy() -> BodyClaimed {
 }
 
 fn decide_with_snapshot(
-    enabled: bool,
     snapshot: Option<&BootChannels>,
     channel_id: u64,
     usage: Use,
@@ -310,8 +301,7 @@ fn decide_with_snapshot(
             actual: kind,
         });
     }
-    let selected =
-        channel_policy::owns_output(enabled, snapshot.channels(), channel_id, Some(kind));
+    let selected = channel_policy::owns_output(snapshot.channels(), channel_id, Some(kind));
     let candidate = snapshot.candidate(channel_id);
     // The body and its host share both state and sends.
     let Some(candidate) = candidate.filter(|_| selected) else {

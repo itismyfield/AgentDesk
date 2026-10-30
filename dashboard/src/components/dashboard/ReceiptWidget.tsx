@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { onCredentialChange } from "../../api/authState";
-import { request, TOKEN_ANALYTICS_TIMEOUT_MS } from "../../api/httpClient";
+import { request, SLOW_AGGREGATE_GET } from "../../api/httpClient";
 import type { TFunction } from "./model";
 import {
   SurfaceActionButton,
@@ -62,8 +62,14 @@ interface CachedReceiptEntry {
 }
 
 const receiptCache = new Map<Period, CachedReceiptEntry>();
+// A failed load may leave the server still aggregating; polls wait out its longest run first.
+const receiptFailedAt = new Map<Period, number>();
+const RECEIPT_RETRY_AFTER_FAILURE_MS = 3 * 60_000;
 // Receipts fetched under a previous credential must not render after re-login.
-onCredentialChange(() => receiptCache.clear());
+onCredentialChange(() => {
+  receiptCache.clear();
+  receiptFailedAt.clear();
+});
 const RECEIPT_CACHE_TTL: Record<Period, number> = {
   today: 30 * 60_000,
   week: 210 * 60_000,
@@ -133,12 +139,26 @@ function deriveReceiptView(data: ReceiptData | null, selectedProvider: string): 
   };
 }
 
+// Seconds since the load named by `key` started (null: none), so a minute-long aggregation reads as progress.
+function useElapsedSeconds(key: string | null): number {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    setElapsed(0);
+    if (key === null) return;
+    const startedAt = Date.now();
+    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [key]);
+  return elapsed;
+}
+
 export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
   const [data, setData] = useState<ReceiptData | null>(null);
   const [period, setPeriod] = useState<Period>("month");
   const [selectedProvider, setSelectedProvider] = useState("all");
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
+  const loadingSeconds = useElapsedSeconds(loading ? period : null);
 
   useEffect(() => {
     let mounted = true;
@@ -151,7 +171,8 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
       if (cached && mounted) {
         setData(cached.data);
       }
-      if (fresh) {
+      const failedAt = receiptFailedAt.get(period);
+      if (fresh || (failedAt !== undefined && Date.now() - failedAt < RECEIPT_RETRY_AFTER_FAILURE_MS)) {
         if (mounted) setLoading(false);
         return;
       }
@@ -159,13 +180,16 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
       if (mounted) setLoading(true);
       try {
         const json = await request<ReceiptData>(`/api/receipt?period=${period}`, {
+          ...SLOW_AGGREGATE_GET,
           suppressErrorToast: true,
-          timeoutMs: TOKEN_ANALYTICS_TIMEOUT_MS,
         });
         receiptCache.set(period, { data: json, fetchedAt: Date.now() });
+        receiptFailedAt.delete(period);
         if (mounted) setData(json);
-      } catch {
-        // request() hands 401 to the shared re-login flow; keep cached data on other failures
+      } catch (error) {
+        // request() hands 401 to the shared re-login flow; keep cached data on other failures.
+        // A credential change aborts the request; that is no server failure to wait out.
+        if (!(error instanceof Error && error.name === "AbortError")) receiptFailedAt.set(period, Date.now());
       } finally {
         if (mounted) setLoading(false);
       }
@@ -215,7 +239,12 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
       >
         <div className="mt-4 py-6 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
           {loading
-            ? t({ ko: "영수증 데이터를 불러오는 중...", en: "Loading receipt data...", ja: "レシートデータ読み込み中...", zh: "加载收据数据中..." })
+            ? `${t({
+              ko: "서버가 영수증을 집계하는 중입니다. 1분 넘게 걸릴 수 있습니다",
+              en: "The server is aggregating the receipt; this can take over a minute",
+              ja: "サーバーがレシートを集計中です。1分以上かかる場合があります",
+              zh: "服务器正在汇总收据，可能需要一分钟以上",
+            })} · ${loadingSeconds}s`
             : t({ ko: "영수증 데이터를 불러올 수 없습니다.", en: "Could not load receipt data.", ja: "レシートデータを読み込めません。", zh: "无法加载收据数据。" })}
         </div>
       </SurfaceSection>
@@ -230,14 +259,14 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
         <div className="flex items-center gap-2">
           {loading && (
             <span
-              className="rounded-full border px-2 py-1 text-[10px] font-medium"
+              className="rounded-full border px-2 py-1 text-xs font-medium"
               style={{
                 color: "var(--th-accent-warn)",
                 background: "color-mix(in srgb, var(--th-badge-amber-bg) 82%, transparent)",
                 borderColor: "color-mix(in srgb, var(--th-accent-warn) 28%, var(--th-border) 72%)",
               }}
             >
-              {t({ ko: "갱신 중", en: "SYNCING", ja: "更新中", zh: "更新中" })}
+              {t({ ko: "갱신 중", en: "SYNCING", ja: "更新中", zh: "更新中" })} · {loadingSeconds}s
             </span>
           )}
           <SurfaceActionButton
@@ -254,8 +283,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
       className="relative overflow-hidden"
       style={{
         borderColor: "color-mix(in srgb, var(--th-accent-warn) 22%, var(--th-border) 78%)",
-        background:
-          "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-amber-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 97%, transparent) 100%)",
+        background: "var(--th-bg-surface)",
       }}
     >
       <div className="mt-4 flex flex-wrap gap-2">
@@ -272,7 +300,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
       </div>
 
       {providerOptions.length > 1 && (
-        <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+        <div className="mt-3 flex flex-wrap gap-2">
           <SurfaceSegmentButton
             tone="warn"
             active={selectedProvider === "all"}
@@ -354,41 +382,40 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
 
       {expanded && (
         <SurfaceCard
-          className="mt-4 rounded-3xl p-2 sm:p-3"
+          className="mt-4 rounded-lg p-2 sm:p-3"
           style={{
             background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
             borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
           }}
         >
           <div
-            className="mx-auto w-full max-w-[440px] min-w-0 rounded-2xl p-3 font-mono text-xs sm:p-4 sm:text-xs"
+            className="mx-auto w-full min-w-0 p-2 text-xs leading-5 sm:p-3"
             style={{
-              background: "#fefdf8",
-              color: "#1a1a1a",
+              background: "var(--th-bg-surface)",
+              color: "var(--th-text-primary)",
             }}
           >
-            <div className="text-center font-bold text-[13px] tracking-widest mb-0.5">AI TOKEN RECEIPT</div>
-            <div className="text-center text-[9px]" style={{ color: "#666" }}>
+            <div className="text-center font-semibold text-[13px] tracking-normal mb-0.5">{t({ko:"비용 명세",en:"Cost breakdown",ja:"費用明細",zh:"费用明细"})}</div>
+            <div className="text-center text-xs" style={{ color: "var(--th-text-muted)" }}>
               {viewData.period_start} ~ {viewData.period_end}
             </div>
             {selectedProvider !== "all" && (
-              <div className="text-center text-[9px] mt-0.5" style={{ color: "#a16207" }}>
+              <div className="text-center text-xs mt-0.5" style={{ color: "var(--th-badge-amber-text)" }}>
                 {viewData.providers[0]?.provider ?? selectedProvider}
               </div>
             )}
-            <hr style={{ border: "none", borderTop: "2px double #bbb", margin: "8px 0", opacity: 0.6 }} />
+            <hr style={{ border: "none", borderTop: "1px solid var(--th-border-subtle)", margin: "8px 0", opacity: 0.6 }} />
 
-            <div className="flex justify-between text-[9px] font-bold mb-1" style={{ color: "#888", letterSpacing: 1 }}>
+            <div className="grid grid-cols-[minmax(0,1fr)_4rem_4.5rem] gap-2 text-xs font-medium mb-1" style={{ color: "var(--th-text-muted)", letterSpacing: 1 }}>
               <span className="flex-1">MODEL</span>
               <span style={{ width: 60, textAlign: "right" }}>TOKENS</span>
               <span style={{ width: 70, textAlign: "right" }}>COST</span>
             </div>
 
             {viewData.models.map((model) => (
-              <div key={`${model.provider}-${model.model}`} className="flex items-baseline mb-0.5">
-                <span className="font-semibold shrink-0">{model.display_name}</span>
-                <span className="flex-1 mx-1" style={{ borderBottom: "1px dotted #ccc", height: 10 }} />
-                <span className="shrink-0 text-[10px]" style={{ width: 60, textAlign: "right", color: "#555" }}>
+              <div key={`${model.provider}-${model.model}`} className="grid min-w-0 grid-cols-[minmax(0,1fr)_4rem_4.5rem] items-start gap-2 border-b border-th-border-subtle py-2">
+                <span className="min-w-0 font-medium [overflow-wrap:anywhere]">{model.display_name}</span>
+                <span className="shrink-0 text-xs" style={{ width: 60, textAlign: "right", color: "var(--th-text-secondary)" }}>
                   {formatTokens(model.total_tokens)}
                 </span>
                 <span className="shrink-0 font-semibold" style={{ width: 70, textAlign: "right" }}>
@@ -397,40 +424,40 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
               </div>
             ))}
 
-            <hr style={{ border: "none", borderTop: "1px dashed #bbb", margin: "8px 0", opacity: 0.6 }} />
+            <hr style={{ border: "none", borderTop: "1px solid var(--th-border-subtle)", margin: "8px 0", opacity: 0.6 }} />
 
-            <div className="flex justify-between font-bold">
+            <div className="flex justify-between font-semibold">
               <span>SUBTOTAL</span>
               <span>{formatCost(viewData.subtotal)}</span>
             </div>
             {viewData.cache_discount > 0.001 && (
-              <div className="flex justify-between font-semibold" style={{ color: "#059669" }}>
+              <div className="flex justify-between font-semibold" style={{ color: "var(--th-badge-emerald-text)" }}>
                 <span>CACHE DISCOUNT</span>
                 <span>-{formatCost(viewData.cache_discount)}</span>
               </div>
             )}
 
-            <hr style={{ border: "none", borderTop: "2px double #bbb", margin: "8px 0", opacity: 0.6 }} />
+            <hr style={{ border: "none", borderTop: "1px solid var(--th-border-subtle)", margin: "8px 0", opacity: 0.6 }} />
 
-            <div className="flex justify-between font-bold text-[14px]">
+            <div className="flex justify-between font-semibold text-[14px]">
               <span>TOTAL</span>
               <span>{formatCost(viewData.total)}</span>
             </div>
 
-            <hr style={{ border: "none", borderTop: "2px double #bbb", margin: "8px 0", opacity: 0.6 }} />
+            <hr style={{ border: "none", borderTop: "1px solid var(--th-border-subtle)", margin: "8px 0", opacity: 0.6 }} />
 
-            <div className="text-[10px] font-bold mb-1" style={{ color: "#444" }}>STATISTICS</div>
-            <div className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+            <div className="text-xs font-semibold mb-1" style={{ color: "var(--th-text-secondary)" }}>STATISTICS</div>
+            <div className="flex justify-between text-xs" style={{ color: "var(--th-text-secondary)" }}>
               <span>Tokens</span>
               <span>{formatTokens(totalTokens)}</span>
             </div>
             {selectedProvider === "all" && (
               <>
-                <div className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+                <div className="flex justify-between text-xs" style={{ color: "var(--th-text-secondary)" }}>
                   <span>Messages</span>
                   <span>{viewData.stats.total_messages.toLocaleString()}</span>
                 </div>
-                <div className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+                <div className="flex justify-between text-xs" style={{ color: "var(--th-text-secondary)" }}>
                   <span>Sessions</span>
                   <span>{viewData.stats.total_sessions.toLocaleString()}</span>
                 </div>
@@ -439,9 +466,9 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
 
             {selectedProvider === "all" && viewData.agents.length > 0 && (
               <>
-                <div className="text-[9px] font-bold mt-2 mb-0.5" style={{ color: "#666" }}>AGENT USAGE</div>
+                <div className="text-xs font-semibold mt-2 mb-0.5" style={{ color: "var(--th-text-muted)" }}>AGENT USAGE</div>
                 {viewData.agents.filter((agent) => agent.percentage >= 0.1).map((agent) => (
-                  <div key={agent.agent} className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+                  <div key={agent.agent} className="flex justify-between text-xs" style={{ color: "var(--th-text-secondary)" }}>
                     <span>{agent.agent}</span>
                     <span>{agent.percentage.toFixed(0)}%</span>
                   </div>
@@ -449,19 +476,16 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
               </>
             )}
 
-            <div className="text-[9px] font-bold mt-2 mb-0.5" style={{ color: "#666" }}>PROVIDER USAGE</div>
+            <div className="text-xs font-semibold mt-2 mb-0.5" style={{ color: "var(--th-text-muted)" }}>PROVIDER USAGE</div>
             {viewData.providers.map((provider) => (
-              <div key={provider.provider} className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+              <div key={provider.provider} className="flex justify-between text-xs" style={{ color: "var(--th-text-secondary)" }}>
                 <span>{provider.provider}</span>
                 <span>{provider.percentage.toFixed(0)}%</span>
               </div>
             ))}
 
-            <hr style={{ border: "none", borderTop: "1px dashed #bbb", margin: "8px 0", opacity: 0.6 }} />
-            <div className="text-center text-xs" style={{ color: "#888" }}>Thank you for using AgentDesk!</div>
-            <div className="text-center text-[12px] mt-1" style={{ color: "#1a1a1a", opacity: 0.2, letterSpacing: 1 }}>
-              ||||| || ||| || |||| || ||| | |||| ||| ||
-            </div>
+            <hr style={{ border: "none", borderTop: "1px solid var(--th-border-subtle)", margin: "8px 0", opacity: 0.6 }} />
+
           </div>
         </SurfaceCard>
       )}

@@ -63,14 +63,17 @@ pub(super) fn recovered_transcript_turn_id(
     }
 }
 
-/// Settles the scheduled delivery of a recovered answer the caller relayed.
-/// Callers run it before the visible completion, which may drop the row.
+/// Records the execution's receipt and settles the scheduled delivery of the recovered answer
+/// the caller relayed. Callers run it before the visible completion, which may drop the row.
 pub(super) async fn settle_recovered_answer(
     pg_pool: Option<&sqlx::PgPool>,
     state: &inflight::InflightTurnState,
     relayed_answer: &str,
 ) -> Option<crate::services::discord::scheduled_turn::Settlement> {
     let relayed_answer = relayed_answer.trim();
+    // The recovered answer, empty or not, ends the execution; its receipt precedes the row's drop.
+    let ended = super::receipt_settle::body_outcome(relayed_answer);
+    super::receipt_settle::record(pg_pool, state, ended, chrono::Utc::now()).await;
     if relayed_answer.is_empty() {
         return None;
     }

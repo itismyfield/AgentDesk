@@ -64,6 +64,14 @@ fn other_inflight(
     }
 }
 
+/// Claude logs its launch binding before the session id is known and never re-logs it once the
+/// id fills in, so an unnamed source is that session's only when its transcript is named after it.
+fn names_native(source: &crate::services::tui_o::shadow::SourceId, native: &str) -> bool {
+    source.session_id == native
+        || (source.session_id.is_empty()
+            && source.path.file_stem().and_then(|stem| stem.to_str()) == Some(native))
+}
+
 impl Proof {
     pub(super) fn sequence_current(&self) -> bool {
         *self.sequence.borrow() == self.seq
@@ -174,7 +182,7 @@ pub(super) async fn collect(
                     | BindingRecord::Resolved { source, .. } => source,
                     _ => continue,
                 };
-                if source.session_id != row.native
+                if !names_native(source, &row.native)
                     || row.native.trim().is_empty()
                     || binding.execution_nonce.trim().is_empty()
                     || binding.committed_at < row.launched

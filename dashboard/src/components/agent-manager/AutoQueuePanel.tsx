@@ -45,7 +45,7 @@ export default function AutoQueuePanel({
   readyEntries = [],
 }: Props) {
   const [status, setStatus] = useState<AutoQueueStatus | null>(null);
-  const [expanded, setExpanded] = useLocalStorage<boolean>(STORAGE_KEYS.kanbanAutoQueueOpen, true);
+  const [expanded, setExpanded] = useLocalStorage<boolean>(STORAGE_KEYS.kanbanAutoQueueOpen, false);
   const [generating, setGenerating] = useState(false);
   const [activating, setActivating] = useState(false);
   const [error, setError] = useState<string | null>(null);

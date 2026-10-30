@@ -449,7 +449,6 @@ fn replacement_after_adoption_before_claim_is_untouched() {
                         history: Vec::new(),
                         pending_uploads: Vec::new(),
                         cleared: false,
-                        remote_profile_name: None,
                         channel_id: Some(channel_id),
                         channel_name: Some("episode-b".to_string()),
                         category_name: None,

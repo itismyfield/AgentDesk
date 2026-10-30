@@ -6,9 +6,9 @@ import type { FsmEdgeBinding, Selection } from "./pipeline-visual-editor-model";
 import type { PipelineVisualEditorProps } from "./pipeline-visual-editor-types";
 
 export const INPUT_CLASS =
-  "w-full rounded-xl border bg-transparent px-3 py-2 text-sm outline-none";
+  "min-h-11 w-full rounded-md border bg-transparent px-3 py-2 text-sm outline-none";
 export const TEXTAREA_CLASS =
-  "w-full rounded-xl border bg-transparent px-3 py-2 text-sm outline-none resize-y";
+  "min-h-24 w-full rounded-md border bg-transparent px-3 py-2 text-sm outline-none resize-y";
 
 export const INPUT_STYLE = {
   borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
@@ -19,21 +19,21 @@ export const INPUT_STYLE = {
 export const FSM_INPUT_STYLE = {
   borderColor: "color-mix(in srgb, var(--th-border) 80%, transparent)",
   color: "var(--th-text-primary)",
-  backgroundColor: "#11141b",
+  backgroundColor: "var(--th-bg-surface)",
 } as const;
 
 export const MUTED_TEXT_STYLE = { color: "var(--th-text-muted)" } as const;
 
 export const SECTION_STYLE: CSSProperties = {
-  borderColor: "color-mix(in srgb, var(--th-accent-primary) 24%, var(--th-border) 76%)",
+  borderColor: "var(--th-border-subtle)",
   background:
-    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 97%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+    "var(--th-bg-surface)",
 };
 
 export const PANEL_STYLE: CSSProperties = {
   borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
   background:
-    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+    "var(--th-bg-surface)",
 };
 
 export const PANEL_SOFT_STYLE: CSSProperties = {
@@ -94,18 +94,18 @@ export const BUTTON_DANGER_STYLE: CSSProperties = {
 export const FSM_PANEL_STYLE: CSSProperties = {
   borderColor: "color-mix(in srgb, var(--th-border) 78%, transparent)",
   background:
-    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 97%, #090b0f 3%) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, #05070a 2%) 100%)",
+    "var(--th-bg-surface)",
 };
 
 export const FSM_INSPECTOR_STYLE: CSSProperties = {
   borderColor: "color-mix(in srgb, var(--th-accent-primary) 40%, var(--th-border) 60%)",
   background:
-    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, #0b0d10 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, #080a0d 2%) 100%)",
+    "var(--th-bg-surface)",
 };
 
 export const FSM_DETAIL_PANEL_STYLE: CSSProperties = {
   borderColor: "color-mix(in srgb, var(--th-border) 82%, transparent)",
-  background: "#11141b",
+  background: "var(--th-bg-surface)",
 };
 
 export const FSM_EDGE_BINDINGS_KEY = "fsm_edge_bindings";

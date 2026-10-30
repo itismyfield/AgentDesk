@@ -2,7 +2,12 @@ import { credentialScope, onCredentialChange, requireAuthentication } from "./au
 
 const BASE = "";
 const REQUEST_TIMEOUT_MS = 15_000;
-export const TOKEN_ANALYTICS_TIMEOUT_MS = 60_000;
+// Receipt and token-analytics GETs aggregate on the server for up to ~80s. A retry would only
+// start the same aggregation again, so these wait once, long enough, and never retry.
+export const SLOW_AGGREGATE_GET: Readonly<Pick<RequestOptions, "timeoutMs" | "maxRetries">> = {
+  timeoutMs: 120_000,
+  maxRetries: 0,
+};
 // #2050 P3 finding 15 — mutations hitting GitHub/Discord can exceed 15s
 // under rate-limit pressure; a longer ceiling prevents client-side timeouts
 // for requests the server is still happily processing.

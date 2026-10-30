@@ -9,10 +9,14 @@ pub(crate) mod codex_provenance;
 #[cfg(unix)]
 pub(crate) mod delivery_evidence;
 mod durable;
+pub(crate) mod input_notice_floor;
 pub mod ledger;
 pub mod rotation;
 pub mod spool;
 pub(crate) mod tool_card_switch;
+
+#[cfg(all(test, unix))]
+mod input_notice_store_tests;
 
 use std::collections::BTreeMap;
 use std::io;
@@ -474,6 +478,17 @@ impl ChannelStore {
 
     fn write_ledger(&mut self, entry: LedgerEntry) -> Result<(), StoreError> {
         let at = Utc::now();
+        let notice_format = matches!(&entry, LedgerEntry::InputNotice { .. })
+            || matches!(&entry, LedgerEntry::Prepared { unit_key, notice_origin, .. }
+                if unit_key.kind == super::shadow::UnitKind::InputNotice || notice_origin.is_some())
+            || matches!(&entry, LedgerEntry::Excluded { unit_key, .. }
+                if unit_key.kind == super::shadow::UnitKind::InputNotice);
+        if notice_format {
+            input_notice_floor::before_append(
+                self.dir.parent().expect("channel has store root"),
+                true,
+            )?;
+        }
         ledger::append(&self.dir.join(LEDGER_FILE), at, &entry)?;
         self.ledger.apply(at, entry);
         Ok(())
@@ -628,6 +643,7 @@ mod tests {
     fn prepared(serial: u64, anchor_id: u64) -> LedgerEntry {
         let (unit_key, payload) = (unit(&format!("m{serial}")), format!("piece {serial}"));
         LedgerEntry::Prepared {
+            notice_origin: None,
             local_retry: None,
             serial,
             unit_key,

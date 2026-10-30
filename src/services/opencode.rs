@@ -25,7 +25,6 @@ use sha2::{Digest, Sha256};
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::process::{configure_child_process_group, kill_pid_tree};
 use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
-use crate::services::remote::RemoteProfile;
 
 #[allow(clippy::too_many_arguments)]
 mod streaming_entry;
@@ -603,7 +602,6 @@ pub fn execute_command_simple_cancellable(
         None,
         None,
         None,
-        None,
     )?;
 
     let mut done_result: Option<String> = None;
@@ -645,20 +643,12 @@ fn execute_command_streaming_inner(
     system_prompt: Option<&str>,
     allowed_tools: Option<&[String]>,
     cancel_token: Option<&CancelToken>,
-    remote_profile: Option<&RemoteProfile>,
     _tmux_session_name: Option<&str>,
     _report_channel_id: Option<u64>,
     _report_provider: Option<ProviderKind>,
     model: Option<&str>,
     _compact_percent: Option<u64>,
 ) -> Result<(), String> {
-    if remote_profile.is_some() {
-        return send_error(
-            &sender,
-            "OpenCode does not support remote profiles".to_string(),
-        );
-    }
-
     let model_override = parse_model_override(model)?;
 
     let resolution = resolve_opencode_binary();

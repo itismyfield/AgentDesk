@@ -31,7 +31,7 @@ export function AchievementsSections({
         <section key={section.key} data-testid={`achievements-section-${section.key}`}>
           <div className="mb-3 flex items-center justify-between gap-3">
             <div
-              className="text-[13px] font-semibold"
+              className="text-base font-semibold"
               style={{ color: "var(--th-text-heading, var(--fg))" }}
             >
               {section.title}{" "}
@@ -42,7 +42,7 @@ export function AchievementsSections({
           </div>
           {section.items.length === 0 ? (
             <div
-              className="rounded-[1.15rem] border px-4 py-5 text-sm"
+              className="rounded-lg border px-4 py-5 text-sm"
               style={{
                 borderColor: "var(--th-border-subtle, var(--line))",
                 color: "var(--th-text-muted, var(--fg-muted))",
@@ -62,7 +62,7 @@ export function AchievementsSections({
                     : "No locked milestones remain."}
             </div>
           ) : (
-            <div className="achievements-grid" data-testid={`achievements-grid-${section.key}`}>
+            <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3" data-testid={`achievements-grid-${section.key}`}>
               {section.items.map((item) => (
                 <AchievementCard
                   key={item.id}
