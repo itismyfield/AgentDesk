@@ -630,8 +630,24 @@ async fn a_source_pending_at_the_freeze_and_resolved_after_it_announces_its_inpu
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn legacy_discord_frames_in_the_frozen_tail_stay_unannounced_beside_terminal_input() {
+/// A frame in one whole paste block as Claude records a folded paste, optionally with its outer LFs.
+fn in_paste(frame: &str, outer: bool) -> String {
+    let block = format!("<pasted_content id=\"a733\">\n{frame}\n</pasted_content id=\"a733\">");
+    if outer {
+        format!("\n\n{block}\n")
+    } else {
+        block
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Recorded {
+    Bare,
+    Pasted,
+    PastedWithOuterLf,
+}
+
+async fn legacy_frames_in_the_frozen_tail(recorded: Recorded) {
     let _turns = TURNS.lock().await;
     let _guard = crate::config::TestRuntimeRootGuard::new();
     let runtime = tempfile::tempdir().unwrap();
@@ -645,39 +661,72 @@ async fn legacy_discord_frames_in_the_frozen_tail_stay_unannounced_beside_termin
     let port = Arc::new(Port::default());
     legacy(&port, "old input");
     old_build(&o, &port).await;
-    // The frozen tail holds Discord input in the old frame and one input typed at the terminal.
+    let as_recorded = |frame: String| match recorded {
+        Recorded::Bare => frame,
+        Recorded::Pasted => in_paste(&frame, false),
+        Recorded::PastedWithOuterLf => in_paste(&frame, true),
+    };
+    // The frozen tail holds Discord input in the old frame, one input typed at the terminal, and
+    // a terminal sentence typed beside a pasted frame, which stays a terminal input.
+    let beside = format!(
+        "{}\ntyped beside the paste",
+        in_paste(&pasted("bbf58a6f", "pasted discord input"), false)
+    );
     append(
         &path,
-        &row("frame-1", &pasted("59c597ef", "first discord input")),
+        &row(
+            "frame-1",
+            &as_recorded(pasted("59c597ef", "first discord input")),
+        ),
     );
     append(&path, &row("typed", "silent gap input"));
     append(
         &path,
-        &row("frame-2", &pasted("4ddea31c", "second discord input")),
+        &row(
+            "frame-2",
+            &as_recorded(pasted("4ddea31c", "second discord input")),
+        ),
     );
+    append(&path, &row("beside", &beside));
     append(&path, &body("gap-body", "gap answer"));
 
     let _confirmed = TestConfirmation::new(CHANNEL);
     let run = spawn(&o, port.clone());
-    settle(&port, 3).await;
-    append(&path, &row("after", "input after activation"));
     settle(&port, 4).await;
+    append(&path, &row("after", "input after activation"));
+    settle(&port, 5).await;
     finish(run).await;
     let posted = port.posts.lock().unwrap().clone();
-    assert_eq!(posted.len(), 4, "{posted:?}");
+    assert_eq!(posted.len(), 5, "{posted:?}");
     for expected in [
         notice("silent gap input"),
+        notice(&beside),
         "gap answer".into(),
         notice("input after activation"),
     ] {
         assert_eq!(posted.iter().filter(|p| **p == expected).count(), 1);
     }
     let again = spawn(&o, port.clone());
-    settle(&port, 5).await;
+    settle(&port, 6).await;
     finish(again).await;
     assert_eq!(
         port.posts.lock().unwrap().len(),
-        4,
+        5,
         "a restart posts nothing"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn legacy_discord_frames_in_the_frozen_tail_stay_unannounced_beside_terminal_input() {
+    legacy_frames_in_the_frozen_tail(Recorded::Bare).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn pasted_legacy_discord_frames_in_the_frozen_tail_stay_unannounced() {
+    legacy_frames_in_the_frozen_tail(Recorded::Pasted).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn pasted_legacy_discord_frames_with_outer_lfs_stay_unannounced() {
+    legacy_frames_in_the_frozen_tail(Recorded::PastedWithOuterLf).await;
 }

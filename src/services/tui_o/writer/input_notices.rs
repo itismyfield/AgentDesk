@@ -56,10 +56,12 @@ fn handed_over(channel: u64) -> bool {
     found
 }
 
-/// Discord input by its frame, the pre-v1 `[📱 …]` inject frame included; nothing announces it.
+/// Discord input by its frame, the pre-v1 `[📱 …]` inject frame included even inside the one paste
+/// block Claude may record it in; only this classification looks through the block.
 pub(crate) fn discord_input(prompt: &str) -> bool {
+    let framed = crate::services::claude_tui::busy_inject::pasted_inner(prompt).unwrap_or(prompt);
     tui_prompt_dedupe::is_discord_relayed_user_prompt(prompt)
-        || crate::services::tui_input::human_frame::opens_legacy_inject(prompt)
+        || crate::services::tui_input::human_frame::opens_legacy_inject(framed)
 }
 
 /// A native user row always carries the JSON string `"user"`, so other rows skip the parse.

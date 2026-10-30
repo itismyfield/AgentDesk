@@ -475,3 +475,46 @@ async fn a_retry_debt_below_the_migration_floor_is_excluded_and_never_posted() {
     assert_eq!(writer.retry_local(Utc::now()).await, Step::Done);
     assert_eq!(harness.port.posts(), [fresh.payload]);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_pasted_legacy_discord_frame_left_as_retry_debt_is_excluded_by_its_source() {
+    let _guard = crate::config::TestRuntimeRootGuard::new();
+    let harness = Harness::new();
+    harness.gate.acquired();
+    harness.port.say(BOT + 1, "readable");
+    let frame = crate::services::tui_input::human_frame::legacy_inject(
+        "discord",
+        "1479017284805722200",
+        "59c597ef",
+        "old discord input",
+    );
+    let prompt = format!("<pasted_content id=\"a733\">\n{frame}\n</pasted_content id=\"a733\">");
+    // Bound after the freeze, so only its source judgment can keep it unannounced.
+    let (_old, item) =
+        super::input_notice_transport_tests::materialized_notice(&harness, "pasted", &prompt);
+    let mut store = harness.channel();
+    for entry in [
+        LedgerEntry::Prepared {
+            notice_origin: item.notice_origin.clone(),
+            serial: 0,
+            unit_key: item.unit_key.clone(),
+            piece_index: 0,
+            payload: item.payload.clone(),
+            anchor_id: store.ledger().anchor(),
+            epoch: 1,
+            local_retry: Some(LocalRetryMark::Budget),
+        },
+        LedgerEntry::NotFound { serial: 0 },
+    ] {
+        store.append_ledger(entry).unwrap();
+    }
+    drop(store);
+    let mut writer = harness.writer();
+    let pending = local_retry::pending(writer.store().ledger()).expect("saved retry debt");
+    assert_eq!(writer.retry_local(pending.due).await, Step::Done);
+    assert!(harness.port.posts().is_empty());
+    assert_eq!(
+        writer.store().ledger().excluded(&item.unit_key),
+        Some("input_notice_source")
+    );
+}
