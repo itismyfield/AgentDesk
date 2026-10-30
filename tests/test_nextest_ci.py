@@ -860,6 +860,7 @@ class BaseDiff(Fixture):
 
     def test_platform_scope_rejects_unknown_malformed_and_overlapping_rows(self):
         self.same_plans()
+        source = source_losses(removed={"windows": ["m::native"]}, present={"macos": ["m::native"]})
         for rows in (self.scoped_row("windwos"), self.scoped_row("windows,macos"),
                      self.scoped_row().replace("platform=", "platform=="),
                      self.scoped_row().replace("] Unix coverage retained", "]"),
@@ -867,7 +868,7 @@ class BaseDiff(Fixture):
                      self.scoped_row() + f"{BIN} m::native | removed | ambiguous legacy row\n",
                      self.scoped_row().replace(" | removed |", " | runnable->ignored |")):
             with self.subTest(rows=rows):
-                self.assertEqual(self.diff(SHA, rows=rows)[0], 1)
+                self.assertEqual(self.diff(SHA, rows=rows, source=source)[0], 1)
 
 
 class NativePlan(Fixture):
