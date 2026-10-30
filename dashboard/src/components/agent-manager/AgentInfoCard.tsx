@@ -30,6 +30,7 @@ import { AgentInfoProfileSections } from "./AgentInfoProfileSections";
 import { AgentInfoRoutingSections } from "./AgentInfoRoutingSections";
 import { AgentExecutionNodeSelect } from "./AgentExecutionNodeSelect";
 import { inferBindingSource } from "./AgentInfoCardModel";
+import { getSystemHealthTone } from "../../theme/statusTokens";
 import { isDiscordSnowflake } from "./discord-routing";
 import { catalogLabel, getProviderAuthProfiles, useProviderCatalog } from "../../api/providers";
 import type { ProviderAuthProvider } from "../settings/SettingsProvidersModel";
@@ -73,6 +74,7 @@ export default function AgentInfoCard({
   const [loadingBindings, setLoadingBindings] = useState(true);
   const [auditLogs, setAuditLogs] = useState<Array<{ id: string; action: string; ts: number; detail?: string; summary?: string; created_at?: number }>>([]);
   const [loadingAudit, setLoadingAudit] = useState(true);
+  const [auditError, setAuditError] = useState(false);
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasValue, setAliasValue] = useState(agent.alias ?? "");
   const [savingAlias, setSavingAlias] = useState(false);
@@ -265,6 +267,13 @@ export default function AgentInfoCard({
         setTimeline([]);
         setLoadingTimeline(false);
       });
+
+    setLoadingAudit(true);
+    setAuditError(false);
+    api.getAuditLogs(20, { agentId: agent.id })
+      .then((logs) => setAuditLogs(logs.map((log) => ({ ...log, ts: log.created_at }))))
+      .catch(() => { setAuditLogs([]); setAuditError(true); })
+      .finally(() => setLoadingAudit(false));
   }, [agent.id]);
 
   useEffect(() => {
@@ -337,6 +346,7 @@ export default function AgentInfoCard({
     break: { ko: "휴식", en: "Break" },
     offline: { ko: "오프라인", en: "Offline" },
   };
+  const statusTone = getSystemHealthTone(agent.status === "working" ? "healthy" : agent.status === "break" ? "warning" : agent.status === "offline" ? "critical" : "idle");
 
   const sourceLabel =
     agent.activity_source === "agentdesk"
@@ -453,7 +463,7 @@ export default function AgentInfoCard({
                       onBlur={saveAlias}
                       disabled={savingAlias}
                       placeholder={tr("별명 입력", "Enter alias")}
-                      className="rounded-xl border px-2 py-1 text-xs outline-none"
+                      className="min-h-11 rounded-md border px-2 py-1 text-xs outline-none"
                       style={{
                         background: "var(--th-bg-surface)",
                         borderColor: "var(--th-input-border)",
@@ -474,14 +484,8 @@ export default function AgentInfoCard({
                   <span
                     className="rounded-full px-2 py-0.5 text-xs font-medium"
                     style={{
-                      background: agent.status === "working" ? "rgba(16,185,129,0.15)" :
-                        agent.status === "break" ? "rgba(245,158,11,0.15)" :
-                        agent.status === "offline" ? "rgba(239,68,68,0.15)" :
-                        "rgba(100,116,139,0.15)",
-                      color: agent.status === "working" ? "#34d399" :
-                        agent.status === "break" ? "#fbbf24" :
-                        agent.status === "offline" ? "#f87171" :
-                        "#94a3b8",
+                      background: statusTone.bg,
+                      color: statusTone.text,
                     }}
                   >
                     {isKo ? statusLabel[agent.status]?.ko : statusLabel[agent.status]?.en}
@@ -583,6 +587,7 @@ export default function AgentInfoCard({
               loadingCron={loadingCron}
               auditLogs={auditLogs}
               loadingAudit={loadingAudit}
+              auditError={auditError}
               agentSkills={agentSkills}
               sharedSkills={sharedSkills}
               loadingSkills={loadingSkills}

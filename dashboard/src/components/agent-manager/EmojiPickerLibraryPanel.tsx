@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import EmojiPickerReact, {
   EmojiStyle,
   Theme,
@@ -19,6 +19,13 @@ export default function EmojiPickerLibraryPanel({
   value,
 }: EmojiPickerLibraryPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [theme, setTheme] = useState(() => document.documentElement.dataset.theme === "light" ? Theme.LIGHT : Theme.DARK);
+
+  useEffect(() => {
+    const observer = new MutationObserver(() => setTheme(document.documentElement.dataset.theme === "light" ? Theme.LIGHT : Theme.DARK));
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, []);
 
   const handleEmojiClick = (emojiData: EmojiClickData) => {
     onSelect(emojiData.emoji);
@@ -54,19 +61,20 @@ export default function EmojiPickerLibraryPanel({
   }, [value]);
 
   return (
-    <div ref={containerRef}>
+    <div ref={containerRef} className="[&_button]:min-h-11 [&_button]:min-w-11 [&_.epr-category-nav]:flex-wrap [&_.epr-category-nav]:gap-1 [&_.epr-cat-btn]:shrink-0" style={{ width: `min(${width}px, calc(100vw - 2rem))` }}>
       <EmojiPickerReact
         autoFocusSearch
         emojiStyle={EmojiStyle.NATIVE}
-        height={height}
+        height={Math.min(height, window.innerHeight - 64)}
         lazyLoadEmojis
         onEmojiClick={handleEmojiClick}
         previewConfig={{ showPreview: false }}
         searchClearButtonLabel="Clear emoji search"
         searchPlaceholder="Search emoji"
         skinTonesDisabled={false}
-        theme={Theme.DARK}
-        width={width}
+        theme={theme}
+        width="100%"
+        style={{ "--epr-emoji-size": "32px", "--epr-emoji-padding": "6px", "--epr-search-input-height": "44px", "--epr-category-navigation-button-size": "44px" } as CSSProperties}
       />
     </div>
   );
