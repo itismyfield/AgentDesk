@@ -585,10 +585,6 @@ pub fn normalize_dispatch_profile(value: Option<String>) -> Option<String> {
     }
 }
 
-pub fn is_valid_dispatch_profile(value: &str) -> bool {
-    normalize_dispatch_profile(Some(value.to_string())).is_some()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AgentChannelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
