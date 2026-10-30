@@ -91,15 +91,15 @@ export default function AgentSetupWizard({
         role="dialog"
         aria-modal="true"
         aria-label={tr("에이전트 설정 마법사", "Agent setup wizard")}
-        className="w-full max-w-5xl overflow-hidden rounded-lg border shadow-2xl"
+        className="flex w-full max-w-5xl flex-col overflow-hidden rounded-lg border shadow-2xl"
         style={{
           maxHeight: "min(92vh, 860px)",
           background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 97%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+            "var(--th-bg-surface)",
           borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
         }}
       >
-        <div className="flex items-center justify-between gap-3 border-b px-5 py-4" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b px-5 py-4" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
           <div className="min-w-0">
             <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
               {mode === "duplicate"
@@ -117,7 +117,7 @@ export default function AgentSetupWizard({
           </SurfaceActionButton>
         </div>
 
-        <div className="grid min-h-0 grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)]">
+        <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto md:grid-cols-[220px_minmax(0,1fr)]">
           <aside className="border-b p-4 md:border-b-0 md:border-r" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-1">
               {steps.map((step, index) => (
@@ -147,7 +147,7 @@ export default function AgentSetupWizard({
             </div>
           </aside>
 
-          <main className="min-h-0 overflow-y-auto p-5" style={{ maxHeight: "calc(min(92vh, 860px) - 73px)" }}>
+          <main className="min-w-0 p-4 sm:p-5">
             <div className="space-y-4">
               {currentStep === "role" && (
                 <SurfaceSubsection

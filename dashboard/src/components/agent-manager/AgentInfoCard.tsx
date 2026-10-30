@@ -418,7 +418,7 @@ export default function AgentInfoCard({
         style={{
           borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
           background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+            "var(--th-bg-surface)",
           WebkitOverflowScrolling: "touch",
           touchAction: "pan-y",
         }}
@@ -435,7 +435,7 @@ export default function AgentInfoCard({
             )}
           >
             <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-start">
-              <div className="relative shrink-0">
+              <div className="relative w-fit shrink-0">
                 <AgentAvatar agent={agent} spriteMap={spriteMap} size={64} rounded="xl" />
                 <div
                   className={`absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full border-2 ${STATUS_DOT[agent.status] ?? STATUS_DOT.idle}`}

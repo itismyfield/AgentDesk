@@ -113,6 +113,7 @@ export function AgentsGridView({
           </div>
 
           <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-th-text-muted">
+            <span>{agent.status === "working" ? tr("근무 중", "Working") : agent.status === "offline" ? tr("오프라인", "Offline") : agent.status === "break" ? tr("휴식", "Break") : tr("대기", "Idle")}</span>
             {department ? (
               <span
                 className="text-xs leading-5"
@@ -147,7 +148,7 @@ export function AgentsGridView({
   </div>
 
   {selectedAgent ? (
-    <SurfaceCard className="min-w-0 p-4 sm:p-5 xl:sticky xl:top-0">
+    <SurfaceCard data-testid="agents-selection-panel" className="order-first min-w-0 p-4 sm:p-5 xl:order-none xl:sticky xl:top-0">
       {(() => {
         const department = departments.find((candidate) => candidate.id === selectedAgent.department_id);
         const providerMeta = getProviderMeta(selectedAgent.cli_provider);
@@ -169,6 +170,7 @@ export function AgentsGridView({
                   {agentSecondaryLine(selectedAgent, locale)} · {providerMeta.label}
                 </div>
               </div>
+              <SurfaceActionButton tone="neutral" compact onClick={() => setSelectedAgentId(null)} aria-label={tr("선택 닫기", "Close selection")}>×</SurfaceActionButton>
               <SurfaceActionButton tone="neutral" compact onClick={() => onOpenAgent(selectedAgent)}>
                 {tr("상세", "Open")}
               </SurfaceActionButton>
