@@ -127,7 +127,7 @@ async fn plan<P: DiscordPort>(
         .evidence
         .iter()
         .filter(|(id, input)| {
-            !before_migration_floor(state, &input.record)
+            !before_migration_floor(state, &input.record, input.origin.as_deref())
                 && !state.unresolved.contains_key(*id)
                 && input
                     .unit_key

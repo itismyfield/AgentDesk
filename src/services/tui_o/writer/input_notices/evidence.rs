@@ -59,14 +59,17 @@ impl Projection {
     }
 }
 
+/// Below a frozen source's lower, or on a source bound by the freeze that the snapshot left out:
+/// that one held no live tail then, so everything it replays predates the writer's ownership.
 pub(crate) fn before_migration_floor(
     state: &crate::services::tui_o::store::ledger::input_notices::NoticeState,
     record: &SourceRange,
+    origin: Option<&NoticeOrigin>,
 ) -> bool {
     state.migration.as_ref().is_some_and(|snapshot| {
-        snapshot
-            .sources
-            .iter()
-            .any(|source| source.source == record.source && record.start < source.lower)
+        match snapshot.sources.iter().find(|s| s.source == record.source) {
+            Some(source) => record.start < source.lower,
+            None => origin.is_some_and(|origin| origin.binding_seq <= snapshot.binding_checkpoint),
+        }
     })
 }

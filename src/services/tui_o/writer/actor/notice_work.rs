@@ -56,8 +56,9 @@ fn snowflake_ceiling(at: chrono::DateTime<chrono::Utc>) -> u64 {
     let ms = u64::try_from(at.timestamp_millis() - DISCORD_EPOCH_MS).unwrap_or(0);
     (ms << 22) | ((1 << 22) - 1)
 }
-/// The live cursors and every source the durable binding log bound past the checkpoint, each to
-/// its current file end, with the legacy history bounds.
+/// Every attached cursor and every source the durable binding log bound past the checkpoint, with
+/// the legacy history bounds. A live source freezes to its file end; a retired one, proven stopped,
+/// only to its cursor, so its retained spool stays below the floor.
 fn frozen_cohort(
     store: &crate::services::tui_o::store::ChannelStore,
     bound: &[super::super::binding::BindingEvent],
@@ -67,11 +68,10 @@ fn frozen_cohort(
     let checkpoint = (store.binding_checkpoint())
         .map_err(|error| format!("input notice migration checkpoint: {error:?}"))?
         .unwrap_or(0);
-    let mut frozen: Vec<(SourceId, u64, String)> = (store.cursors())
-        .filter(|cursor| !cursor.retired)
+    let mut frozen: Vec<(SourceId, u64, String, bool)> = (store.cursors())
         .map(|cursor| {
             let at = (cursor.captured_through, cursor.prefix_hash.clone());
-            (cursor.source.clone(), at.0, at.1)
+            (cursor.source.clone(), at.0, at.1, cursor.retired)
         })
         .collect();
     // A source bound before the freeze but not attached yet starts where its attach will start.
@@ -87,18 +87,23 @@ fn frozen_cohort(
         if frozen.iter().any(|(known, ..)| known == source) {
             continue;
         }
-        let at = match store.cursor(source) {
-            Some(cursor) => (cursor.captured_through, cursor.prefix_hash.clone()),
-            None => (0, hex::encode(sha2::Sha256::digest(b""))),
-        };
-        frozen.push((source.clone(), at.0, at.1));
+        frozen.push((
+            source.clone(),
+            0,
+            hex::encode(sha2::Sha256::digest(b"")),
+            false,
+        ));
     }
     let mut sources = Vec::new();
-    for (source, lower, prefix_hash) in frozen {
-        let upper = match std::fs::metadata(&source.path) {
-            Ok(meta) => meta.len().max(lower),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => lower,
-            Err(error) => return Err(format!("input notice migration source: {error}")),
+    for (source, lower, prefix_hash, retired) in frozen {
+        let upper = if retired {
+            lower
+        } else {
+            match std::fs::metadata(&source.path) {
+                Ok(meta) => meta.len().max(lower),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => lower,
+                Err(error) => return Err(format!("input notice migration source: {error}")),
+            }
         };
         sources.push(MigrationSource {
             source,
@@ -171,6 +176,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             if super::super::input_notices::evidence::before_migration_floor(
                 self.writer.store().ledger().input_notices(),
                 &evidence.record,
+                evidence.origin.as_deref(),
             ) {
                 continue;
             }

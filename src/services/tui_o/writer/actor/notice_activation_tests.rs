@@ -419,3 +419,104 @@ async fn frozen_pending_ownership_is_excluded_after_its_receipt_without_a_migrat
 async fn frozen_pending_ownership_withdrawn_takes_the_ordinary_legacy_judgment() {
     pending_in_frozen_cohort(true).await;
 }
+
+/// The old build follows a new transcript and retires the drained one, keeping its spool; with
+/// `released`, the released build already froze a cohort that left the retired source out.
+async fn retired_before_the_deploy(released: bool) {
+    let _turns = TURNS.lock().await;
+    let _guard = crate::config::TestRuntimeRootGuard::new();
+    let runtime = tempfile::tempdir().unwrap();
+    let path = runtime.path().join("native.jsonl");
+    // A Discord input pasted into a running turn in the legacy frame, which no hook announced.
+    let pasted = crate::services::tui_input::human_frame::legacy_inject(
+        "discord",
+        "1479017284805722200",
+        "59c597ef",
+        "old discord input",
+    );
+    std::fs::write(
+        &path,
+        [row("old", &pasted), body("old-body", "old answer")].concat(),
+    )
+    .unwrap();
+    let (o, _binding) = begin(runtime.path(), &path, "retired-pane");
+    let port = Arc::new(Port::default());
+    old_build(&o, &port).await;
+    let next = runtime.path().join("next.jsonl");
+    std::fs::write(&next, b"").unwrap();
+    let _next_binding = bind(
+        runtime.path(),
+        CHANNEL,
+        &source_of(&next),
+        "retired-pane-next",
+        "73320000000000000000000000000097",
+    );
+    let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
+    actor.deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
+    resume(&mut actor);
+    actor.read_sources();
+    (actor.writer.store())
+        .set_retired(&source_of(&path), true)
+        .unwrap();
+    if released {
+        let snapshot = MigrationSnapshot {
+            sources: vec![MigrationSource {
+                source: source_of(&next),
+                lower: 0,
+                upper: 0,
+                prefix_hash: hex::encode(Sha256::digest(b"")),
+            }],
+            binding_checkpoint: 2,
+            history: MigrationHistory::Fixed {
+                lower: 10,
+                upper: 10,
+            },
+        };
+        let entry = Box::new(NoticeEntry::MigrationStarted { snapshot });
+        actor
+            .writer
+            .record(LedgerEntry::InputNotice { entry })
+            .unwrap();
+    }
+    drop(actor);
+
+    let _confirmed = TestConfirmation::new(CHANNEL);
+    let run = spawn(&o, port.clone());
+    settle(&port, 1).await;
+    append(&next, &row("after", "terminal input after the deploy"));
+    settle(&port, 2).await;
+    let mut expected = vec![
+        "old answer".to_string(),
+        notice("terminal input after the deploy"),
+    ];
+    if !released {
+        append(&path, &row("regrown", "input on the regrown transcript"));
+        settle(&port, 3).await;
+        expected.push(notice("input on the regrown transcript"));
+    }
+    finish(run).await;
+    assert_eq!(
+        *port.posts.lock().unwrap(),
+        expected,
+        "a retired source's retained input is not announced again"
+    );
+
+    let again = spawn(&o, port.clone());
+    settle(&port, expected.len() + 1).await;
+    finish(again).await;
+    assert_eq!(
+        *port.posts.lock().unwrap(),
+        expected,
+        "a restart posts nothing"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_source_the_old_build_retired_never_backfills_its_retained_inputs_as_notices() {
+    retired_before_the_deploy(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cohort_the_released_build_froze_without_a_retired_source_still_floors_it() {
+    retired_before_the_deploy(true).await;
+}
