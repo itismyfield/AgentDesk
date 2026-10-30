@@ -35,8 +35,6 @@ pub struct SessionData {
     pub discord_channel_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discord_category_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_profile_name: Option<String>,
     #[serde(default)]
     pub born_generation: u64,
 }

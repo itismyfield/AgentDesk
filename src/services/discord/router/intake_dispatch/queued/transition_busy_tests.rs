@@ -89,7 +89,6 @@ fn session(path: &std::path::Path) -> DiscordSession {
         history: Vec::new(),
         pending_uploads: vec!["U".into()],
         cleared: false,
-        remote_profile_name: None,
         channel_id: None,
         channel_name: Some("r1-test".into()),
         category_name: None,

@@ -19,11 +19,6 @@ const GROK_READ_TOOLS: &[(&str, &str)] = &[
 ];
 
 pub fn execute(request: ProviderTurnRequest, sender: Sender<StreamMessage>) -> Result<(), String> {
-    if request.remote_profile.is_some() {
-        return Err(
-            "NotSupported: Grok provider does not support remote execution yet.".to_string(),
-        );
-    }
     let prepared = prepare(&request)?;
     run_prepared(prepared, sender, request.timeout, request.cancel)
 }
@@ -204,7 +199,6 @@ mod tests {
             reasoning_effort: None,
             working_directory: PathBuf::from("/tmp"),
             session: None,
-            remote_profile: None,
             timeout: Duration::from_secs(60),
             cancel: None,
             auth_overlay: crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(

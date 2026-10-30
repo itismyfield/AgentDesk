@@ -128,7 +128,7 @@ fn footer_mode_skips_recovery_status_panel_completion_for_stale_persisted_id() {
     persisted.status_message_id = Some(4004);
 
     let target =
-        recovery_status_panel::completion_target_for_flags(true, true, &snapshot, Some(&persisted));
+        recovery_status_panel::completion_target_for_flags(true, &snapshot, Some(&persisted));
 
     assert_eq!(
         target,
@@ -138,27 +138,10 @@ fn footer_mode_skips_recovery_status_panel_completion_for_stale_persisted_id() {
 }
 
 #[test]
-fn flag_off_recovery_status_panel_completion_keeps_original_target() {
-    let mut snapshot = state_for_recovery(9101);
-    snapshot.status_message_id = Some(3003);
-    let mut persisted = state_for_recovery(9101);
-    persisted.status_message_id = Some(4004);
-
-    let target = recovery_status_panel::completion_target_for_flags(
-        false,
-        true,
-        &snapshot,
-        Some(&persisted),
-    );
-
-    assert_eq!(target, Some(Some(super::MessageId::new(4004))));
-}
-
-#[test]
 fn flag_off_recovery_none_target_still_requests_send_fallback() {
     let snapshot = state_for_recovery(9101);
 
-    let target = recovery_status_panel::completion_target_for_flags(false, true, &snapshot, None);
+    let target = recovery_status_panel::completion_target_for_flags(true, &snapshot, None);
 
     assert_eq!(
         target, None,

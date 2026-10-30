@@ -215,7 +215,6 @@ pub(crate) async fn running_session(
         history: Vec::new(),
         pending_uploads: Vec::new(),
         cleared: false,
-        remote_profile_name: None,
         channel_id: Some(channel_id.get()),
         channel_name: Some(base.to_string()),
         category_name: None,

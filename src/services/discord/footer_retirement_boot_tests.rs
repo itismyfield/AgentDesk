@@ -114,15 +114,3 @@ fn boot_retirement_keeps_binding_when_orphan_queue_cannot_be_written() {
     assert_eq!(enqueue_completed_singletons(&provider, "mine"), 0);
     assert!(binding.exists());
 }
-
-#[test]
-fn legacy_override_does_not_queue_completed_singletons_at_boot() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let _legacy = legacy_for_test();
-    seed(&ProviderKind::Claude, "mine", 586_311, 111);
-    assert_eq!(
-        enqueue_completed_singletons(&ProviderKind::Claude, "mine"),
-        0
-    );
-    assert!(orphans::load_pending(&ProviderKind::Claude, "mine").is_empty());
-}
