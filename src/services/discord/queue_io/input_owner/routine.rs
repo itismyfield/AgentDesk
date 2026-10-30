@@ -133,6 +133,26 @@ impl OwnerInput {
         ))
     }
 
+    /// The owner's armed or settled attempt an unbound observer connects to, if any.
+    pub(crate) async fn unbound_attempt(
+        &self,
+        handle: &ChannelMailboxHandle,
+    ) -> Result<Option<(String, Option<Value>)>, String> {
+        if self.bind.is_some() {
+            return Ok(None);
+        }
+        self.check_address(handle).await?;
+        let original = serde_json::from_value(self.original.clone())
+            .map_err(|e| format!("stored original: {e}"))?;
+        let ticket = AdmissionTicket::stored(&self.ticket);
+        Ok(
+            match admission::exact_turn(handle, &ticket, &original).await? {
+                TurnBind::Armed(turn) | TurnBind::Settled(turn) => Some((turn.attempt, turn.turn)),
+                _ => None,
+            },
+        )
+    }
+
     /// The existing observer supplies its logical turn and exact attempt before completion is read.
     pub(crate) async fn bind_observer(
         &mut self,

@@ -53,8 +53,8 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
         assert!(turn_completion::record(&pool,&turn,turn_completion::ScheduledTurnOutcome::Delivered).await.unwrap().is_evidence());
         assert!(!poll_agent_delivery(&pool,running.clone()).await,"recorded output alone cannot bypass the owner bind");
         handle.v2_arm_head_for_tests("actual-scheduled-attempt").await.unwrap();
-        assert!(owner_input::bind_observer(&pool,&running,&handle,"stale-attempt",None).await.is_err());
-        assert!(owner_input::bind_observer(&pool,&running,&handle,"actual-scheduled-attempt",None).await.unwrap());
+        assert!(owner_input::bind_observer(&mut *pool.acquire().await.unwrap(),&running,&handle,"stale-attempt",None).await.is_err());
+        assert!(owner_input::bind_observer(&mut *pool.acquire().await.unwrap(),&running,&handle,"actual-scheduled-attempt",None).await.unwrap());
         assert!(!poll_agent_delivery(&pool,running.clone()).await,"a listing from before the observer bind cannot start its timeout clock");
         let running=db::list_running_agent_deliveries_pg(&pool,"owner-poller",LEASE_SECS,10).await.unwrap().pop().unwrap();
         handle.v2_request(|slot|{let owner=slot.as_mut().ok_or("owner absent")?;let key=owner.active_attempt()?;owner.settle(&key,true,1000)}).await.unwrap();

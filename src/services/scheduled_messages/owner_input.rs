@@ -120,6 +120,16 @@ pub(super) async fn may_observe(
         let handle = OWNER
             .try_with(Clone::clone)
             .map_err(|_| anyhow::anyhow!("scheduled owner unavailable"))?;
+        // The observer connects to the owner's exact attempt first; a failed projection is
+        // repaired under the same ticket on the next poll.
+        if let Some((attempt, source)) = input
+            .unbound_attempt(&handle)
+            .await
+            .map_err(anyhow::Error::msg)?
+        {
+            bind_observer(connection, delivery, &handle, &attempt, source).await?;
+            return Ok(false);
+        }
         let bound = input
             .may_observe(&handle, started.is_none())
             .await
@@ -218,14 +228,14 @@ pub(super) async fn start_owned(
 
 #[cfg(test)]
 pub(super) async fn bind_observer(
-    pool: &PgPool,
+    connection: &mut sqlx::PgConnection,
     delivery: &RunningAgentDelivery,
     handle: &crate::services::turn_orchestrator::ChannelMailboxHandle,
     attempt: &str,
     source: Option<serde_json::Value>,
 ) -> anyhow::Result<bool> {
     use crate::services::turn_orchestrator::ChannelMailboxHandle;
-    let mut tx = pool.begin().await?;
+    let mut tx = sqlx::Connection::begin(connection).await?;
     if !db::lock_active_delivery_tx(
         &mut tx,
         &delivery.scheduled_message_id,

@@ -282,6 +282,16 @@ pub(super) mod custody {
             return Err(anyhow!("routine owner run/turn mismatch"));
         }
         let handle = handle(executor, &input.provider, input.channel).await?;
+        // The observer connects to the owner's exact attempt first; a failed projection is
+        // repaired under the same ticket on the next poll.
+        if let Some((attempt, source)) = input
+            .unbound_attempt(&handle)
+            .await
+            .map_err(anyhow::Error::msg)?
+        {
+            bind_observer(store, run, &handle, &attempt, source).await?;
+            return Ok(false);
+        }
         let may_observe = input
             .may_observe(&handle, result["status"] == "input_pending")
             .await
