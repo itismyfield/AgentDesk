@@ -1,6 +1,7 @@
 //! The owner's front and its grant: the front names the ticket bound to its own slot, and only an
 //! owner claim presenting that exact front spends the grant, once.
 use super::*;
+use crate::config::TestRuntimeRootGuard;
 
 fn s3b() -> crate::services::turn_orchestrator::QueuePersistenceContext {
     let claude = crate::services::provider::ProviderKind::Claude;
