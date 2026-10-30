@@ -945,7 +945,7 @@ async fn start_reserved_headless_turn_admitted(
             .await,
     );
     let ctx_thresholds =
-        super::super::super::adk_session::fetch_context_thresholds(shared.api_port).await;
+        super::super::super::adk_session::fetch_context_thresholds(shared.pg_pool.as_ref()).await;
     let compact_percent = ctx_thresholds.compact_pct_for(&provider);
     let model_context_window = provider.resolve_context_window(model_for_turn.as_deref());
     let compact_percent_for_claude = Some(ctx_thresholds.compact_pct_for(&provider));
