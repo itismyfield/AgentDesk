@@ -128,7 +128,7 @@ export default function BacklogCardDrawer({
           </div>
         </div>
 
-        <div className="mt-5 grid gap-3 md:grid-cols-3">
+        <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3">
           {infoItems.map((item) => (
             <SurfaceCard
               key={item.label}
@@ -141,7 +141,7 @@ export default function BacklogCardDrawer({
               <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
                 {item.label}
               </div>
-              <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
+              <div className="text-sm [overflow-wrap:anywhere]" style={{ color: "var(--th-text-primary)" }}>
                 {item.value}
               </div>
             </SurfaceCard>
