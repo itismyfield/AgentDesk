@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -1085,6 +1086,54 @@ impl Drop for HotReloadGuard {
     }
 }
 
+fn process_hot_reload_events(
+    stop: &AtomicBool,
+    mut receive: impl FnMut(Duration) -> std::result::Result<notify::Event, RecvTimeoutError>,
+    now: impl Fn() -> Instant,
+    mut reload: impl FnMut(&[PathBuf]),
+) {
+    let debounce = Duration::from_millis(500);
+    let max_wait = debounce * 4;
+    while !stop.load(Ordering::Acquire) {
+        let event = match receive(Duration::from_millis(250)) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        let mut paths = event.paths;
+        let burst = now();
+        let mut quiet_since = burst;
+        let mut disconnected = false;
+        while !stop.load(Ordering::Acquire) {
+            let elapsed = now();
+            let wait = debounce
+                .saturating_sub(elapsed.duration_since(quiet_since))
+                .min(max_wait.saturating_sub(elapsed.duration_since(burst)));
+            // A queued event can be received even with a zero timeout; close this batch first.
+            if wait.is_zero() {
+                break;
+            }
+            match receive(wait) {
+                Ok(event) => {
+                    paths.extend(event.paths);
+                    quiet_since = now();
+                }
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        if disconnected || stop.load(Ordering::Acquire) {
+            break;
+        }
+        paths.sort();
+        paths.dedup();
+        reload(&paths);
+    }
+}
+
 /// Start watching the policies directory for changes.
 /// Returns a guard that must be kept alive for the lifetime of the engine
 /// and that joins the worker thread on drop.
@@ -1141,89 +1190,38 @@ pub fn start_hot_reload(
             // has already been dropped — making it safe for the engine to
             // drop the QuickJS runtime next.
             let ctx = ctx;
-            use std::sync::mpsc::RecvTimeoutError;
-            use std::time::{Duration, Instant};
-            let debounce = Duration::from_millis(500);
-            let max_wait = debounce * 4;
+            process_hot_reload_events(
+                &stop_worker,
+                |wait| rx.recv_timeout(wait),
+                Instant::now,
+                |paths| {
+                    crate::config::reload_classes::warn_restart_files(paths);
 
-            loop {
-                if stop_worker.load(Ordering::Acquire) {
-                    break;
-                }
-                match rx.recv_timeout(Duration::from_millis(250)) {
-                    Ok(event) => {
-                        if stop_worker.load(Ordering::Acquire) {
-                            break;
-                        }
-                        // One save is often several events (truncate, then write): reload once the
-                        // directory has been quiet for `debounce`, so the last event is never dropped.
-                        let mut paths = event.paths;
-                        let burst = Instant::now();
-                        let mut quiet_since = burst;
-                        let mut disconnected = false;
-                        while !stop_worker.load(Ordering::Acquire) {
-                            // A tree that never goes quiet still reloads every `max_wait`.
-                            let wait = debounce
-                                .saturating_sub(quiet_since.elapsed())
-                                .min(max_wait.saturating_sub(burst.elapsed()));
-                            match rx.recv_timeout(wait) {
-                                Ok(event) => {
-                                    paths.extend(event.paths);
-                                    quiet_since = Instant::now();
-                                }
-                                Err(RecvTimeoutError::Timeout) => break,
-                                Err(RecvTimeoutError::Disconnected) => {
-                                    disconnected = true;
-                                    break;
-                                }
+                    tracing::info!("Policy file change detected, pre-validating...");
+                    // Validate before replacing policies; arm eval deadlines only while holding
+                    // the runtime lock, so waiting for that lock cannot interrupt live hooks.
+                    match load_policies_from_dir_validated_inner(
+                        &ctx,
+                        &dir,
+                        Some(&eval_deadline_worker),
+                    ) {
+                        Ok(new_policies) => {
+                            let count = new_policies.len();
+                            if let Ok(mut guard) = store.lock() {
+                                *guard = new_policies;
                             }
+                            tracing::info!("Reloaded {count} policies");
                         }
-                        if disconnected || stop_worker.load(Ordering::Acquire) {
-                            break;
-                        }
-                        paths.sort();
-                        paths.dedup();
-                        crate::config::reload_classes::warn_restart_files(&paths);
-
-                        tracing::info!("Policy file change detected, pre-validating...");
-                        // Hot-reload pre-validation (#1079): syntax/eval check
-                        // plus hook orchestration conflict check. If either
-                        // fails we keep the currently loaded version.
-                        //
-                        // #2372: pass the shared deadline slot through so the
-                        // per-policy eval inside `load_single_policy_with_deadline`
-                        // can arm a wall-clock interrupt *after* it holds the
-                        // runtime lock. Arming here would let the deadline
-                        // expire while waiting for the lock and interrupt an
-                        // unrelated live hook — see #2372 round-3 review.
-                        match load_policies_from_dir_validated_inner(
-                            &ctx,
-                            &dir,
-                            Some(&eval_deadline_worker),
-                        ) {
-                            Ok(new_policies) => {
-                                let count = new_policies.len();
-                                if let Ok(mut guard) = store.lock() {
-                                    *guard = new_policies;
-                                }
-                                tracing::info!("Reloaded {count} policies");
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    policies_dir = %dir.display(),
-                                    error = %e,
-                                    "hot-reload pre-validation failed; keeping previously loaded policies"
-                                );
-                            }
+                        Err(e) => {
+                            tracing::warn!(
+                                policies_dir = %dir.display(),
+                                error = %e,
+                                "hot-reload pre-validation failed; keeping previously loaded policies"
+                            );
                         }
                     }
-                    Err(RecvTimeoutError::Timeout) => continue,
-                    Err(RecvTimeoutError::Disconnected) => {
-                        tracing::info!("Policy hot-reload watcher shutting down");
-                        break;
-                    }
-                }
-            }
+                },
+            );
             // `ctx` is dropped here as the closure returns; the join() in
             // HotReloadGuard::shutdown is what guarantees this completes
             // before the engine drops the underlying QuickJS runtime.
@@ -1808,92 +1806,110 @@ mod tests {
         drop(runtime);
     }
 
-    /// A save that lands soon after a reload is still applied, not dropped as a repeat of the
-    /// save before it.
     #[test]
     fn hot_reload_applies_a_change_saved_soon_after_the_previous_reload() {
-        let (runtime, ctx) = policy_test_context();
-        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let file = tmp.path().join("policy.js");
-        let names = || {
-            let policies = store.lock().unwrap();
-            policies
-                .iter()
-                .map(|policy| policy.name.clone())
-                .collect::<Vec<_>>()
-        };
-        let reloaded_to = |name: &str| {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while names() != [name] {
-                if Instant::now() >= deadline {
-                    return false;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            true
-        };
-        let guard = start_hot_reload(
-            tmp.path().to_path_buf(),
-            ctx,
-            store.clone(),
-            new_eval_deadline_slot(),
-        )
-        .expect("start hot reload");
+        use std::cell::Cell;
+        use std::sync::mpsc::{RecvTimeoutError, channel};
 
-        std::fs::write(&file, "agentdesk.registerPolicy({ name: 'first' });").unwrap();
-        assert!(
-            reloaded_to("first"),
-            "the first save reloads: {:?}",
-            names()
-        );
-        // Saved within 500ms of the previous reload.
-        std::fs::write(&file, "agentdesk.registerPolicy({ name: 'second' });").unwrap();
-        assert!(
-            reloaded_to("second"),
-            "the next save reloads too: {:?}",
-            names()
-        );
-        drop(guard);
-        drop(runtime);
+        for incomplete in [false, true] {
+            let (runtime, ctx) = policy_test_context();
+            let tmp = tempfile::tempdir().unwrap();
+            let file = tmp.path().join("policy.js");
+            std::fs::write(&file, "agentdesk.registerPolicy({ name: 'first' });").unwrap();
+            let mut policies = load_policies_from_dir_validated(&ctx, tmp.path()).unwrap();
+            if incomplete {
+                std::fs::write(&file, "").unwrap();
+            }
+            let (tx, rx) = channel();
+            let event = || notify::Event::new(notify::EventKind::Any).add_path(file.clone());
+            tx.send(event()).unwrap();
+            let clock = Cell::new(Instant::now());
+            let stop = AtomicBool::new(false);
+            let mut attempts = Vec::new();
+            process_hot_reload_events(
+                &stop,
+                |wait| match rx.try_recv() {
+                    Ok(event) => Ok(event),
+                    Err(_) if wait == Duration::from_millis(250) => {
+                        Err(RecvTimeoutError::Disconnected)
+                    }
+                    Err(_) => {
+                        clock.set(clock.get() + wait);
+                        Err(RecvTimeoutError::Timeout)
+                    }
+                },
+                || clock.get(),
+                |_| {
+                    let result = load_policies_from_dir_validated(&ctx, tmp.path());
+                    attempts.push(result.is_ok());
+                    if let Ok(loaded) = result {
+                        policies = loaded;
+                    }
+                    if attempts.len() == 1 {
+                        // The completed save arrives 1ms after the previous validation, even if it failed.
+                        std::fs::write(&file, "agentdesk.registerPolicy({ name: 'last' });")
+                            .unwrap();
+                        clock.set(clock.get() + Duration::from_millis(1));
+                        tx.send(event()).unwrap();
+                    } else {
+                        stop.store(true, Ordering::Release);
+                    }
+                },
+            );
+            assert_eq!(attempts, [!incomplete, true], "last save must be validated");
+            assert_eq!(policies[0].name, "last", "last save must be applied");
+            drop(policies);
+            drop(ctx);
+            drop(runtime);
+        }
     }
 
-    /// A policy saved while other files in the tree keep changing is applied within the bounded
-    /// wait, not only after the churn stops.
     #[test]
     fn hot_reload_applies_a_change_while_other_files_keep_changing() {
-        let (runtime, ctx) = policy_test_context();
-        let store: PolicyStore = Arc::new(Mutex::new(Vec::new()));
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let guard = start_hot_reload(
-            tmp.path().to_path_buf(),
-            ctx,
-            store.clone(),
-            new_eval_deadline_slot(),
-        )
-        .expect("start hot reload");
+        use std::cell::Cell;
+        use std::sync::mpsc::channel;
 
-        let policy = "agentdesk.registerPolicy({ name: 'first' });";
-        std::fs::write(tmp.path().join("policy.js"), policy).unwrap();
-        // A file the loader ignores changes every 100ms, so the tree is never quiet for 500ms.
-        let noise = tmp.path().join("notes.txt");
-        let churn_until = Instant::now() + Duration::from_secs(5);
-        let mut applied = false;
-        while !applied && Instant::now() < churn_until {
-            std::fs::write(&noise, format!("{:?}", Instant::now())).unwrap();
-            std::thread::sleep(Duration::from_millis(100));
-            applied = store
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|policy| policy.name == "first");
-        }
-        assert!(
-            applied,
-            "the saved policy reloads while other files keep changing"
+        let (tx, rx) = channel();
+        let event = |id: usize| {
+            notify::Event::new(notify::EventKind::Any).add_path(PathBuf::from(id.to_string()))
+        };
+        tx.send(event(0)).unwrap();
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        let stop = AtomicBool::new(false);
+        let mut received = 0;
+        let mut batches = Vec::new();
+        process_hot_reload_events(
+            &stop,
+            |_| {
+                assert!(received < 32, "a busy queue must not starve reloads");
+                let pending = rx.try_recv().expect("the event queue stays nonempty");
+                if received > 0 {
+                    clock.set(clock.get() + Duration::from_millis(400));
+                }
+                received += 1;
+                tx.send(event(received)).unwrap();
+                Ok(pending)
+            },
+            || clock.get(),
+            |paths| {
+                batches.push(paths.to_vec());
+                let expected = if batches.len() == 1 { 2000 } else { 4400 };
+                assert_eq!(clock.get() - start, Duration::from_millis(expected));
+                if batches.len() == 2 {
+                    stop.store(true, Ordering::Release);
+                }
+            },
         );
-        drop(guard);
-        drop(runtime);
+        for (batch, range) in batches.iter().zip([0..6, 6..12]) {
+            let mut expected: Vec<_> = range.map(|id| PathBuf::from(id.to_string())).collect();
+            expected.sort();
+            assert_eq!(
+                batch, &expected,
+                "unreceived events belong to the next batch"
+            );
+        }
+        assert_eq!(rx.try_recv().unwrap().paths, [PathBuf::from("12")]);
     }
 
     /// #2378: synchronous native bridge ops must observe the bridge-op
