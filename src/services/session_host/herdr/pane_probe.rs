@@ -16,7 +16,7 @@ use crate::services::tui_prompt_dedupe::binding_context::context_names_execution
 pub(crate) const PROVIDER_WINDOW: Duration = Duration::from_secs(15);
 pub(crate) const PROVIDER_POLL: Duration = Duration::from_millis(200);
 /// A Linux start reads up to a second early.
-const START_SLACK: Duration = Duration::from_secs(1);
+pub(crate) const START_SLACK: Duration = Duration::from_secs(1);
 const CONTEXT_ENV: &str = "AGENTDESK_BINDING_CONTEXT=";
 
 /// Why a pane reading is not launch evidence; nothing is stored for any of them.
@@ -150,6 +150,77 @@ pub(crate) fn start_text(start: StartIdentity) -> String {
     }
 }
 
+/// What one reading of a pane runs, before anyone judges whose it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PaneOccupant {
+    /// The root shell alone in the foreground.
+    LoneShell {
+        root: ProcessStamp,
+        root_started: SystemTime,
+    },
+    /// The one foreground child of the root shell, whose environment names one binding context.
+    Provider {
+        root: ProcessStamp,
+        root_started: SystemTime,
+        context: std::path::PathBuf,
+    },
+    Unreadable(String),
+}
+
+/// The pane's occupant from one reading `witness`'s server gave; nothing is written.
+pub(crate) fn occupant(
+    reading: PaneProcesses,
+    os: &dyn ProcessOs,
+    witness: &ServerWitness,
+) -> PaneOccupant {
+    let unreadable = |why: &dyn std::fmt::Debug| PaneOccupant::Unreadable(format!("{why:?}"));
+    let (root, listed) = match from_server(reading, witness) {
+        Ok(read) => read,
+        Err(gap) => return unreadable(&gap),
+    };
+    let started = match os.start(root) {
+        Ok(start) => start,
+        Err(why) => return unreadable(&why),
+    };
+    let stamp = ProcessStamp {
+        pid: root,
+        start: start_text(started.identity),
+    };
+    if !listed.is_empty() && listed.iter().all(|pid| *pid == root) {
+        return PaneOccupant::LoneShell {
+            root: stamp,
+            root_started: started.wall_clock,
+        };
+    }
+    let provider = match root_child(root, listed, os) {
+        Ok(provider) => provider,
+        Err(gap) => return unreadable(&gap),
+    };
+    let Some(environ) = os
+        .environ(provider)
+        .ok()
+        .filter(|entries| !entries.is_empty())
+    else {
+        return unreadable(&EvidenceGap::EnvUnreadable);
+    };
+    if let Some(entry) = environ.iter().find(|entry| entry.starts_with("HERDR_")) {
+        return unreadable(&EvidenceGap::HerdrEnvPresent(entry.clone()));
+    }
+    let contexts: Vec<&str> = environ
+        .iter()
+        .filter_map(|entry| entry.strip_prefix(CONTEXT_ENV))
+        .collect();
+    match contexts.as_slice() {
+        [context] => PaneOccupant::Provider {
+            root: stamp,
+            root_started: started.wall_clock,
+            context: context.into(),
+        },
+        [] => unreadable(&EvidenceGap::NonceMissing),
+        _ => unreadable(&"several binding contexts"),
+    }
+}
+
 /// Root shell and provider of the pane `read` reports, as launch evidence, or why not. Each
 /// attempt is the whole proof; a gap a shell-startup child can cause is read again in the window.
 pub(crate) fn probe(
@@ -219,6 +290,11 @@ fn candidate(
     witness: &ServerWitness,
 ) -> Result<(u32, u32), EvidenceGap> {
     let (root, listed) = from_server(reading, witness)?;
+    root_child(root, listed, os).map(|provider| (root, provider))
+}
+
+/// The one foreground process whose OS parent is `root`.
+fn root_child(root: u32, listed: Vec<u32>, os: &dyn ProcessOs) -> Result<u32, EvidenceGap> {
     let mut children = Vec::new();
     let mut unreadable = None;
     for pid in listed.into_iter().filter(|pid| *pid != root) {
@@ -230,7 +306,7 @@ fn candidate(
     }
     match (children.as_slice(), unreadable) {
         ([_, _, ..], _) => Err(EvidenceGap::Ambiguous(children)),
-        ([provider], None) => Ok((root, *provider)),
+        ([provider], None) => Ok(*provider),
         (_, Some(pid)) => Err(EvidenceGap::ProcessUnreadable(pid)),
         ([], None) => Err(EvidenceGap::NoneYet),
     }

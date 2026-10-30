@@ -57,7 +57,6 @@ fn seed_restart_handoff_session_metadata(
             history: Vec::new(),
             pending_uploads: Vec::new(),
             cleared: false,
-            remote_profile_name: None,
             channel_id: Some(channel_id.get()),
             channel_name: None,
             category_name: None,

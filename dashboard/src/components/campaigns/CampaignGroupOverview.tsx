@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Background, Controls, MarkerType, Position, ReactFlow, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { CampaignNode } from "../../api/campaigns";
+import { NO_TIES, campaignRawEdges, routeEdges, type GraphViewSettings } from "./campaignGraphRouting";
 import { campaignGroup, groupCampaignNodes } from "./campaignModel";
 
 type Props = {
@@ -10,37 +11,27 @@ type Props = {
   tr: (ko: string, en: string) => string;
 };
 
+/** The group key, not its sort position, names a group, so adding a group renames nothing. */
+const groupNodeId = (key: string) => `campaign-group:${encodeURIComponent(key)}`;
+
 /** A group projection can contain cycles even when the underlying task graph is a DAG. */
-export function buildCampaignGroupOverview(nodes: CampaignNode[]) {
+export function buildCampaignGroupOverview(nodes: CampaignNode[], settings: GraphViewSettings = NO_TIES) {
   const groups = groupCampaignNodes(nodes).map((group, index) => ({
     ...group,
-    id: `campaign-group-${index}`,
+    id: groupNodeId(group.key),
     position: { x: (index % 3) * 310, y: Math.floor(index / 3) * 210 },
     internalDependencies: 0,
   }));
-  const groupsByKey = new Map(groups.map((group) => [group.key, group]));
-  const nodesById = new Map(nodes.map((node) => [node.id, node]));
-  const connections = new Map<string, { source: string; target: string; count: number }>();
-  for (const node of nodes) {
-    const target = groupsByKey.get(campaignGroup(node))!;
-    for (const dependency of node.dependencies) {
-      const dependencyNode = nodesById.get(dependency);
-      if (!dependencyNode) continue;
-      const source = groupsByKey.get(campaignGroup(dependencyNode))!;
-      if (source.id === target.id) {
-        target.internalDependencies++;
-        continue;
-      }
-      const key = `${source.id}:${target.id}`;
-      const connection = connections.get(key) ?? { source: source.id, target: target.id, count: 0 };
-      connection.count++;
-      connections.set(key, connection);
-    }
-  }
+  const groupsById = new Map(groups.map((group) => [group.id, group]));
+  const displayOf = new Map(nodes.map((node) => [node.id, groupNodeId(campaignGroup(node))]));
+  const routed = routeEdges({ edges: campaignRawEdges(nodes), displayOf }, settings);
+  for (const [, target] of routed.internal) groupsById.get(displayOf.get(target)!)!.internalDependencies++;
   return {
     groups,
-    connections: [...connections.values()].sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target)),
-    internalDependencies: groups.reduce((total, group) => total + group.internalDependencies, 0),
+    connections: routed.display
+      .map((line) => ({ ...line, count: line.edges.length }))
+      .sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target)),
+    internalDependencies: routed.internal.length,
   };
 }
 
@@ -69,9 +60,10 @@ export default function CampaignGroupOverview({ nodes, onSelectGroup, tr }: Prop
     };
   });
   const edges: Edge[] = overview.connections.map((connection) => ({
-    id: `${connection.source}:${connection.target}`,
+    id: connection.id,
     source: connection.source,
     target: connection.target,
+    data: { edges: connection.edges },
     type: "smoothstep",
     label: String(connection.count),
     ariaLabel: tr(`그룹 간 의존성 ${connection.count}개`, `${connection.count} dependencies between groups`),
@@ -87,7 +79,7 @@ export default function CampaignGroupOverview({ nodes, onSelectGroup, tr }: Prop
     <div className="campaign-row"><strong>{tr("그룹별 전체 관계", "All campaign group relationships")}</strong><span>{tr(`그룹 ${overview.groups.length}개 · 작업 ${nodes.length}개`, `${overview.groups.length} groups · ${nodes.length} tasks`)}</span></div>
     <p className="campaign-muted">{tr("전체 작업의 그룹 관계입니다. 화살표는 선행 그룹 → 후속 그룹, 숫자는 연결된 의존성 수입니다. 그룹을 선택하면 해당 작업 목록으로 이동합니다.", "Groups across all tasks. Arrows point from dependency to dependent; numbers count the connecting dependencies. Select a group to open its task list.")}</p>
     {nodes.length === 0 ? <p>{tr("표시할 작업이 없습니다.", "No tasks to display.")}</p> : <>
-      <div className="campaign-graph-scroll"><div className="campaign-graph" style={{ height: Math.min(580, Math.max(300, Math.ceil(overview.groups.length / 3) * 210)) }}>
+      <div className="campaign-graph-scroll"><div className="campaign-graph [&_.react-flow\_\_controls]:shadow-none [&_.react-flow\_\_controls-button]:!bg-th-bg-surface [&_.react-flow\_\_controls-button]:!text-th-text-primary [&_.react-flow\_\_controls-button]:!border-th-border-subtle [&_.react-flow\_\_attribution]:!bg-th-bg-surface [&_.react-flow\_\_attribution_a]:!text-th-text-muted" style={{ height: Math.min(580, Math.max(300, Math.ceil(overview.groups.length / 3) * 210)) }}>
         <ReactFlow nodes={graphNodes} edges={edges} fitView fitViewOptions={{ padding: 0.18, minZoom: 0.65, maxZoom: 1 }} minZoom={0.65} maxZoom={1.4}
           nodesDraggable={false} nodesConnectable={false} panOnScroll zoomOnScroll={false}
           onNodeClick={(_, node) => onSelectGroup(String(node.data.group))}>

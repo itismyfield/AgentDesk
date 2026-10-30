@@ -410,19 +410,30 @@ pub(super) async fn establish_bridge_entry_authority(
     let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(
         runtime.inflight_state,
     );
-    if !ensure_bridge_current_message_anchor(
-        ctx.bridge.gateway.as_ref(),
-        &ctx.bridge.provider,
-        &ctx.shared.token_hash,
-        ctx.bridge.channel_id,
-        &identity,
-        ctx.captured_nonce,
-        runtime.current_msg_id,
-        ctx.bridge_created_placeholder,
-        runtime.inflight_state,
-        anchor_text,
-    )
-    .await
+    // A turn-mode TUI turn, whose body O posts, runs without a response anchor; any other keeps one.
+    let placeholderless = anchor_was_absent
+        && crate::services::tui_o::turn_mode::transcript_turns(ctx.bridge.channel_id.get())
+        && matches!(
+            runtime.inflight_state.runtime_kind,
+            Some(
+                crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+                    | crate::services::agent_protocol::RuntimeHandoffKind::CodexTui
+            )
+        );
+    if !placeholderless
+        && !ensure_bridge_current_message_anchor(
+            ctx.bridge.gateway.as_ref(),
+            &ctx.bridge.provider,
+            &ctx.shared.token_hash,
+            ctx.bridge.channel_id,
+            &identity,
+            ctx.captured_nonce,
+            runtime.current_msg_id,
+            ctx.bridge_created_placeholder,
+            runtime.inflight_state,
+            anchor_text,
+        )
+        .await
     {
         signal_bridge_entry_abort_completion(&mut ctx.bridge.completion_tx);
         return Err(None);
@@ -507,15 +518,24 @@ fn capture_entry_abort_notice(
     })
 }
 
-/// Unwinds the refused turn exactly as before, then starts its notice; nothing awaits the send.
+/// Unwinds the refused turn, then starts its notice unawaited. A row still solely its own ends
+/// failed once the unwind released its own claim; a row another owner holds is that owner's.
 pub(super) async fn unwind_and_notify(
     shared: &std::sync::Arc<SharedData>,
     channel_id: ChannelId,
     cancel: &std::sync::Arc<crate::services::provider::CancelToken>,
     notice: Option<EntryAbortNotice>,
 ) {
-    crate::services::discord::mailbox_finish::unwind_unstarted_turn(shared, channel_id, cancel)
+    if crate::services::discord::mailbox_finish::unwind_unstarted_turn(shared, channel_id, cancel)
+        .await
+    {
+        crate::services::discord::receipt_settle::entry_aborted(
+            shared,
+            channel_id,
+            cancel.turn_nonce(),
+        )
         .await;
+    }
     spawn_entry_abort_notice(notice);
 }
 
@@ -1197,6 +1217,7 @@ mod tests {
     }
 
     mod source_guard_tests;
+    mod turn_mode_entry_tests;
 
     #[test]
     fn bridge_entry_failure_gate_precedes_emit_stream_and_finalize() {

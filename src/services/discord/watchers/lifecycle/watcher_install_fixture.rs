@@ -188,10 +188,6 @@ pub(in crate::services::discord) fn isolated(module: &str, name: &str) -> bool {
         .env("PATH", format!("{}:/usr/bin:/bin", path.display()))
         .env("AGENTDESK_STATUS_INTERVAL_SECS", "0")
         .env(
-            crate::services::tui_o::cutover::test_override::CHILD_ENV,
-            "1",
-        )
-        .env(
             crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
             "[]",
         )

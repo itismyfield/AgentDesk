@@ -26,7 +26,7 @@ pub(super) fn register_config_ops<'js>(
                 if let Some(reads) = reads.as_ref() {
                     return config_get_raw_pg(reads, &key);
                 }
-                "null".to_string()
+                config_get_without_kv(&key)
             }),
         )?,
     )?;
@@ -57,10 +57,26 @@ fn config_get_raw_pg(reads: &ReadBridge, key: &str) -> String {
         .read(ReadCommand::Config(ConfigRead {
             key: key.to_string(),
         }))
-        .unwrap_or_else(|_error| "null".to_string())
+        .unwrap_or_else(|_error| config_get_without_kv(key))
 }
 
-/// The fixed `config.get` read run on the read bridge: the scalar, then the allowlisted blob.
+/// A key-table key still resolves from YAML or its default when kv is unreadable.
+fn config_get_without_kv(key: &str) -> String {
+    resolved_config_value(key, &std::collections::HashMap::new())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn resolved_config_value(
+    key: &str,
+    rows: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let live = crate::config_live_reload::current();
+    crate::services::settings::policy_value(key, rows, live.as_deref())
+        .map(|value| value.to_string())
+}
+
+/// The fixed `config.get` read run on the read bridge: a key-table key's rows, else the
+/// scalar and then the allowlisted blob.
 pub(super) struct ConfigRead {
     pub(super) key: String,
 }
@@ -72,6 +88,24 @@ impl ConfigRead {
     ) -> BoxFuture<'c, Result<String, String>> {
         let key = self.key.as_str();
         Box::pin(async move {
+            if let Some(row_keys) = crate::services::settings::policy_kv_rows(key) {
+                let mut rows = std::collections::HashMap::new();
+                for row_key in row_keys {
+                    let value = sqlx::query_scalar::<_, Option<String>>(
+                        "SELECT value FROM kv_meta WHERE key = $1",
+                    )
+                    .bind(row_key)
+                    .fetch_optional(&mut *connection)
+                    .await
+                    .map_err(|error| {
+                        format!("load postgres kv_meta {row_key} for {key}: {error}")
+                    })?;
+                    if let Some(value) = value.flatten() {
+                        rows.insert(row_key.to_string(), value);
+                    }
+                }
+                return Ok(resolved_config_value(key, &rows).unwrap_or_else(|| "null".into()));
+            }
             let scalar =
                 sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
                     .bind(key)
@@ -115,12 +149,11 @@ fn resolve_config_get_raw(key: &str, scalar: Option<&str>, runtime_config: Optio
         return "null".to_string();
     }
 
+    // Keys outside the key table: the raw kv layer only, `null` when it has no value.
     runtime_config
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| {
-            value
-                .as_object()
-                .and_then(|values| values.get(key))
+        .and_then(|blob| {
+            crate::services::settings::runtime_config_field(&blob, key)
                 .and_then(|value| serde_json::to_string(value).ok())
         })
         .unwrap_or_else(|| "null".to_string())
@@ -172,15 +205,15 @@ mod tests {
 
     #[test]
     fn config_get_raw_queries_runtime_blob_only_for_allowlisted_scalar_misses() {
-        assert!(!should_load_runtime_config("maxEntryRetries", Some("9")));
-        assert!(should_load_runtime_config("maxEntryRetries", None));
+        assert!(!should_load_runtime_config("maxRetries", Some("9")));
+        assert!(should_load_runtime_config("maxRetries", None));
         assert!(!should_load_runtime_config(RUNTIME_CONFIG_BLOB_KEY, None));
         assert!(!should_load_runtime_config("privateBlobField", None));
     }
 
     #[test]
     fn config_get_raw_never_exposes_the_reserved_runtime_blob_key() {
-        let runtime_blob = r#"{"maxEntryRetries":7}"#;
+        let runtime_blob = r#"{"maxRetries":7}"#;
 
         assert_eq!(
             resolve_config_get_raw(
@@ -194,7 +227,7 @@ mod tests {
 
     #[test]
     fn config_get_raw_keeps_scalar_string_semantics_and_precedence() {
-        let runtime_blob = r#"{"review_enabled":true,"maxEntryRetries":7}"#;
+        let runtime_blob = r#"{"review_enabled":true,"maxRetries":7}"#;
 
         assert_eq!(
             resolve_config_get_raw("review_enabled", Some("false"), Some(runtime_blob)),
@@ -202,7 +235,7 @@ mod tests {
             "existing CONFIG_KEYS scalars must still reach JS as strings"
         );
         assert_eq!(
-            resolve_config_get_raw("maxEntryRetries", Some("9"), Some(runtime_blob)),
+            resolve_config_get_raw("maxRetries", Some("9"), Some(runtime_blob)),
             r#""9""#,
             "a legacy runtime scalar must win over the blob"
         );
@@ -212,7 +245,7 @@ mod tests {
     fn config_get_raw_preserves_runtime_blob_json_types() {
         let runtime_blob = r#"{
             "staleDispatchedRecoverNullDispatch": false,
-            "maxEntryRetries": 7,
+            "maxRetries": 7,
             "staleDispatchedTerminalStatuses": "failed,expired"
         }"#;
         let array_blob = r#"{
@@ -228,7 +261,7 @@ mod tests {
             "false"
         );
         assert_eq!(
-            resolve_config_get_raw("maxEntryRetries", None, Some(runtime_blob)),
+            resolve_config_get_raw("maxRetries", None, Some(runtime_blob)),
             "7"
         );
         assert_eq!(
@@ -252,21 +285,113 @@ mod tests {
             "null"
         );
         assert_eq!(
-            resolve_config_get_raw("maxEntryRetries", None, Some("not-json")),
+            resolve_config_get_raw("maxRetries", None, Some("not-json")),
             "null"
         );
         assert_eq!(
-            resolve_config_get_raw("maxEntryRetries", None, Some("[]")),
+            resolve_config_get_raw("maxRetries", None, Some("[]")),
             "null"
         );
         assert_eq!(
-            resolve_config_get_raw("maxEntryRetries", None, Some("{}")),
+            resolve_config_get_raw("maxRetries", None, Some("{}")),
             "null"
         );
+        assert_eq!(resolve_config_get_raw("maxRetries", None, None), "null");
+    }
+
+    async fn eval_json(engine: &crate::engine::PolicyEngine, script: &str) -> serde_json::Value {
+        let raw: String = engine.eval_js(script).expect("evaluate config get");
+        serde_json::from_str(&raw).expect("parse config get result")
+    }
+
+    /// Key-table keys reach policies as the resolver's typed value, floored and never `null`,
+    /// even without a readable kv layer; other keys keep the raw contract.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn policy_config_get_returns_the_resolved_value_for_key_table_keys() {
+        let database = TestDatabase::create().await;
+        let pool =
+            crate::db::postgres::connect_test_pool(&database.database_url, "config ops pg tests")
+                .await
+                .expect("connect config ops postgres test db");
+        sqlx::query("CREATE TABLE kv_meta (key TEXT PRIMARY KEY, value TEXT)")
+            .execute(&pool)
+            .await
+            .expect("create config ops kv_meta table");
+        for (key, value) in [
+            (
+                RUNTIME_CONFIG_BLOB_KEY,
+                r#"{"maxEntryRetries":0,"rateLimitStaleSec":"300"}"#,
+            ),
+            ("maxEntryRetries", "9"),
+            ("requested_timeout_min", "0"),
+            ("in_progress_stale_min", "abc"),
+            ("review_enabled", "false"),
+        ] {
+            sqlx::query("INSERT INTO kv_meta (key, value) VALUES ($1, $2)")
+                .bind(key)
+                .bind(value)
+                .execute(&pool)
+                .await
+                .expect("seed config ops kv_meta");
+        }
+        let mut config = crate::config::Config::default();
+        config.policies.dir = std::path::PathBuf::from("/nonexistent");
+        config.policies.hot_reload = false;
+        let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
+            .expect("build config ops PolicyEngine");
+        let read = r#"JSON.stringify({
+            retries: agentdesk.config.get("maxEntryRetries"),
+            staleSec: agentdesk.config.get("rateLimitStaleSec"),
+            requested: agentdesk.config.get("requested_timeout_min"),
+            inProgress: agentdesk.config.get("in_progress_stale_min"),
+            compact: agentdesk.config.get("context_compact_percent"),
+            scalar: agentdesk.config.get("review_enabled"),
+            miss: agentdesk.config.get("rateLimitWarningPct")
+        })"#;
         assert_eq!(
-            resolve_config_get_raw("maxEntryRetries", None, None),
-            "null"
+            eval_json(&engine, read).await,
+            serde_json::json!({
+                "retries": 1, "staleSec": 600, "requested": 1, "inProgress": 120,
+                "compact": 60, "scalar": "false", "miss": null
+            }),
+            "zero floors to 1, the legacy scalar is ignored, bad values fall through"
         );
+
+        for blob in [
+            r#"{"maxEntryRetries":"7"}"#,
+            r#"{"maxEntryRetries":7.5}"#,
+            "{}",
+            "not-json",
+            "[]",
+        ] {
+            sqlx::query("UPDATE kv_meta SET value = $1 WHERE key = $2")
+                .bind(blob)
+                .bind(RUNTIME_CONFIG_BLOB_KEY)
+                .execute(&pool)
+                .await
+                .expect("rewrite runtime-config");
+            assert_eq!(
+                eval_json(
+                    &engine,
+                    r#"JSON.stringify(agentdesk.config.get("maxEntryRetries"))"#
+                )
+                .await,
+                serde_json::json!(3),
+                "{blob}"
+            );
+        }
+
+        pool.close().await;
+        database.drop().await;
+        assert_eq!(
+            eval_json(&engine, read).await,
+            serde_json::json!({
+                "retries": 3, "staleSec": 600, "requested": 45, "inProgress": 120,
+                "compact": 60, "scalar": null, "miss": null
+            }),
+            "an unreadable kv layer falls back to YAML or the default only for key-table keys"
+        );
+        drop(engine);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -356,7 +481,7 @@ mod tests {
                     "maxRetries": 6,
                     "staleDispatchedTerminalStatuses": "failed,expired",
                     "staleDispatchedRecoverNullDispatch": false,
-                    "rateLimitStaleSec": null,
+                    "staleDispatchedGraceMin": null,
                     "privateBlobField": "secret"
                 }"#,
             )
@@ -382,7 +507,7 @@ mod tests {
                     boolValue: agentdesk.config.get("staleDispatchedRecoverNullDispatch"),
                     intValue: agentdesk.config.get("maxRetries"),
                     stringValue: agentdesk.config.get("staleDispatchedTerminalStatuses"),
-                    nullValue: agentdesk.config.get("rateLimitStaleSec"),
+                    nullValue: agentdesk.config.get("staleDispatchedGraceMin"),
                     miss: agentdesk.config.get("rateLimitWarningPct"),
                     unknown: agentdesk.config.get("privateBlobField"),
                     reserved: agentdesk.config.get("runtime-config")
@@ -395,7 +520,7 @@ mod tests {
             initial,
             serde_json::json!({
                 "scalar": "false",
-                "precedence": "9",
+                "precedence": 7,
                 "boolValue": false,
                 "intValue": 6,
                 "stringValue": "failed,expired",
@@ -448,7 +573,7 @@ mod tests {
             engine
                 .eval_js::<String>(
                     r#"JSON.stringify({
-                        known: agentdesk.config.get("maxEntryRetries"),
+                        known: agentdesk.config.get("maxRetries"),
                         scalar: agentdesk.config.get("review_enabled"),
                         reserved: agentdesk.config.get("runtime-config")
                     })"#
@@ -464,19 +589,19 @@ mod tests {
             .expect("write non-object runtime-config");
         assert!(
             engine
-                .eval_js::<bool>(r#"agentdesk.config.get("maxEntryRetries") === null"#)
+                .eval_js::<bool>(r#"agentdesk.config.get("maxRetries") === null"#)
                 .expect("evaluate non-object blob through PolicyEngine")
         );
 
         sqlx::query("UPDATE kv_meta SET value = $1 WHERE key = $2")
-            .bind(r#"{"maxEntryRetries":55}"#)
+            .bind(r#"{"maxRetries":55}"#)
             .bind(RUNTIME_CONFIG_BLOB_KEY)
             .execute(&pool)
             .await
             .expect("restore valid runtime-config before query error check");
         assert!(
             engine
-                .eval_js::<bool>(r#"agentdesk.config.get("maxEntryRetries") === 55"#)
+                .eval_js::<bool>(r#"agentdesk.config.get("maxRetries") === 55"#)
                 .expect("evaluate pre-error runtime-config through PolicyEngine"),
             "the pre-error query must prove the configured value is readable"
         );
@@ -484,7 +609,7 @@ mod tests {
         database.drop().await;
         assert!(
             engine
-                .eval_js::<bool>(r#"agentdesk.config.get("maxEntryRetries") === null"#)
+                .eval_js::<bool>(r#"agentdesk.config.get("maxRetries") === null"#)
                 .expect("evaluate closed-pool query through PolicyEngine"),
             "database errors must preserve the fail-closed JS contract"
         );

@@ -23,13 +23,13 @@ CI_RUNNER_HARDENING_SHA256 = re.search(
 ).group(1)
 NESTED_CHECKER_STUB = "import sys\nassert sys.argv[1:] == ['check'], 'nested checker must receive check'\n"
 
-MIRROR_IF = "${{ !cancelled() }}"
+MIRROR_IF = "${{ !github.event.pull_request.draft && !cancelled() }}"
 JUDGE_IF = "${{ always() }}"
 JUDGE_IF_LINE = f"    if: {JUDGE_IF}\n"
-RUST_REQUIRED_IF = "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
+RUST_REQUIRED_IF = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
 _LINT_FILTER = (
-    "needs.changes.outputs.rust_or_policy == 'true' || "
-    "needs.changes.outputs.relay_contract == 'true'"
+    "${{ !github.event.pull_request.draft && (needs.changes.outputs.rust_or_policy == 'true' || "
+    "needs.changes.outputs.relay_contract == 'true') }}"
 )
 FILTER_BLOCK_HEADER = re.compile(r"^            \w+:$", re.M)
 CROSS_OS_CONSUMER_SCRIPT = REPO_ROOT / "scripts/cross_os_consumer_paths.py"
@@ -252,6 +252,60 @@ def just_recipe_commands(justfile: str, recipe_name: str) -> tuple[str, ...]:
 
 
 class FastCheckCiWiringTests(unittest.TestCase):
+    def test_draft_pr_defers_every_runner_except_the_required_judge(self) -> None:
+        document = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))
+        self.assertEqual(document[True]["pull_request"], {
+            "types": ["opened", "synchronize", "reopened", "ready_for_review"],
+        })
+        for job_id, job in document["jobs"].items():
+            if job_id == "required_contexts":
+                continue
+            condition = job["if"]
+            self.assertTrue(condition.startswith("${{ !github.event.pull_request.draft"), job_id)
+            for cancelled in (False, True):
+                for output in ("true", "false", ""):
+                    context = {name: output for name in re.findall(r"needs\.changes\.outputs\.\w+", condition)}
+                    context.update({"cancelled()": cancelled, "needs.rust_build.result": "success",
+                                    "github.event.pull_request.draft": True})
+                    self.assertFalse(eval_step_if(condition, context), job_id)
+                    context["github.event.pull_request.draft"] = False
+                    original = condition[3:-2].strip().removeprefix("!github.event.pull_request.draft")
+                    original = original.removeprefix(" && ") or "true"
+                    self.assertEqual(eval_step_if(condition, context), eval_step_if(original, context), job_id)
+
+    def test_draft_judge_fails_before_checkout_and_leaves_ready_judgment_intact(self) -> None:
+        judge = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["required_contexts"]
+        self.assertEqual(judge["if"], JUDGE_IF)
+        draft, checkout = judge["steps"][:2]
+        self.assertEqual(draft["name"], "Reject draft PR")
+        self.assertEqual(draft["if"], "github.event.pull_request.draft")
+        self.assertEqual(checkout, {"uses": "actions/checkout@v4"})
+        self.assertNotIn("continue-on-error", draft)
+        for is_draft in (True, False):
+            self.assertEqual(eval_step_if(draft["if"], {"github.event.pull_request.draft": is_draft}), is_draft)
+        result = subprocess.run(["bash", "-e", "-c", draft["run"]], capture_output=True, text=True,
+                                env={**os.environ, **draft["env"]})
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "draft PR: CI runs when the PR is marked ready for review\n")
+
+    def test_hardening_rejects_missing_draft_job_guard_and_draft_failure(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        baseline = self.run_hardening_fixture(workflow)
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        jobs = yaml.safe_load(workflow)["jobs"]
+        for job_id in jobs:
+            job = job_block(workflow, job_id)
+            if job_id == "required_contexts":
+                changed = job.replace(step_block(job, "Reject draft PR"), "", 1)
+            else:
+                changed = job.replace("!github.event.pull_request.draft && ", "", 1)
+                if changed == job:
+                    changed = job.replace("    if: ${{ !github.event.pull_request.draft }}\n", "", 1)
+            with self.subTest(job=job_id):
+                self.assertNotEqual(job, changed)
+                result = self.run_hardening_fixture(workflow.replace(job, changed, 1))
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+
     def test_large_file_guard_uses_nul_delimited_tracked_paths(self) -> None:
         scripts_job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "scripts")
         guard = scripts_job.split("- name: Large file guard", 1)[1].split(
@@ -280,7 +334,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 self.assertEqual(jobs[name]["if"], RUST_REQUIRED_IF)
                 for skip in ("true", "false", "", None):
                     self.assertEqual(eval_step_if(jobs[name]["if"], {
-                        "cancelled()": False, "needs.changes.outputs.rust_tests_skip": skip,
+                        "cancelled()": False, "github.event.pull_request.draft": False, "needs.changes.outputs.rust_tests_skip": skip,
                     }), skip != "true")
 
     def test_rust_comment_skip_retains_compile_and_lint_checks(self) -> None:
@@ -333,11 +387,11 @@ class FastCheckCiWiringTests(unittest.TestCase):
         baseline = self.run_hardening_fixture(workflow)
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
         mutants = (
-            ("rust_build", "if: ${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}", "if: ${{ !cancelled() }}", "required needs closure"),
+            ("rust_build", "if: ${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}", "if: ${{ !github.event.pull_request.draft && !cancelled() }}", "required needs closure"),
             ("rust_build", "          python3 scripts/ci/nextest_ci.py selector-audit --plan \"$NEXTEST_DIR/plan/plan.json\"\n", "", "exact cargo/test command list"),
             ("rust_build", "python3 scripts/ci/rust_test_sources.py compare --platform linux", "true", "exact cargo/test command list"),
             ("rust_build", "          name: nextest-plan\n", "          name: nextest-plan-copy\n", "artifact uploads"),
-            ("rust_tests", "if: ${{ !cancelled() && needs.rust_build.result == 'success' }}", "if: success()", "required needs closure"),
+            ("rust_tests", "if: ${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}", "if: success()", "required needs closure"),
             ("rust_tests", " --profile ci --no-tests fail", " --profile ci", "exact cargo/test command list"),
             ("rust_tests", "fail-fast: false", "fail-fast: true", "matrix"),
             ("rust_tests", "worker: [0, 1, 2, 3, 4, 5]", "worker: [0, 1, 2, 3, 4]", "matrix"),
@@ -418,7 +472,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             for job_id in ("pg15_owner_proof", "rust_build"):
                 with self.subTest(job=job_id, rust_tests=rust_tests):
                     condition = jobs[job_id]["if"].replace("!cancelled()", "true")
-                    self.assertEqual(eval_step_if(condition, {"needs.changes.outputs.rust_tests": rust_tests}), rust_tests == "true")
+                    self.assertEqual(eval_step_if(condition, {"github.event.pull_request.draft": False, "needs.changes.outputs.rust_tests": rust_tests}), rust_tests == "true")
 
     def test_fast_targeted_context_fails_closed_on_each_pg15_outcome_its_gate_forbids(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
@@ -505,7 +559,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(check["strategy"], {"fail-fast": False, "matrix": {"os": ["windows-latest"]}})
         self.assertEqual(
             check["if"],
-            "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
+            "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}",
         )
         setup = [step.get("name", step.get("uses")) for step in check["steps"]]
         setup = setup[: setup.index("Cache Cargo dependencies") + 1]
@@ -707,8 +761,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 self.assertFalse(selects(commented, owner_path))
         self.assertEqual(
             cross_os["if"],
-            "needs.changes.outputs.rust_compile == 'true' && "
-            "needs.changes.outputs.cross_os_rust == 'true'",
+            "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && "
+            "needs.changes.outputs.cross_os_rust == 'true' }}",
         )
         self.assertEqual(cross_os["strategy"]["matrix"]["os"], ["windows-latest"])
         # The judge reads both Windows runners for the cross-OS context.
@@ -1105,8 +1159,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 1,
             ),
             "runs-on": workflow.replace(
-                "  scripts:\n    name: Script checks runner\n    needs: changes\n    if: ${{ !cancelled() }}\n    runs-on: ubuntu-latest\n",
-                "  scripts:\n    name: Script checks runner\n    needs: changes\n    if: ${{ !cancelled() }}\n    runs-on: macos-latest\n",
+                "  scripts:\n    name: Script checks runner\n    needs: changes\n    if: ${{ !github.event.pull_request.draft && !cancelled() }}\n    runs-on: ubuntu-latest\n",
+                "  scripts:\n    name: Script checks runner\n    needs: changes\n    if: ${{ !github.event.pull_request.draft && !cancelled() }}\n    runs-on: macos-latest\n",
                 1,
             ),
         }
@@ -1191,7 +1245,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "evidence dependency deleted": (judge.replace("      - test_evidence\n", "", 1), None),
             "job if deleted": (judge.replace(JUDGE_IF_LINE, "", 1), closure_if),
             "job if success": (judge.replace(JUDGE_IF_LINE, "    if: success()\n", 1), closure_if),
-            "job if not cancelled": (judge.replace(JUDGE_IF_LINE, "    if: ${{ !cancelled() }}\n", 1), closure_if),
+            "job if not cancelled": (judge.replace(JUDGE_IF_LINE, "    if: ${{ !github.event.pull_request.draft && !cancelled() }}\n", 1), closure_if),
             "job if event": (judge.replace(JUDGE_IF_LINE, "    if: ${{ github.event_name == 'push' }}\n", 1), closure_if),
             "job continue-on-error injected": (judge.replace("    runs-on: ubuntu-latest\n", "    continue-on-error: true\n    runs-on: ubuntu-latest\n", 1), closure_if),
             "checkout provenance": (judge.replace("      - uses: actions/checkout@v4\n", "      - uses: actions/checkout@v4\n        with:\n          repository: attacker/green-judge\n", 1), None),
@@ -1259,7 +1313,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         mutations = (
             (judge, judge.replace("      - check_fast_cross_os_targets\n", "", 1), "required needs closure changed"),
             (targets, targets.replace("    runs-on:", "    continue-on-error: true\n    runs-on:", 1), 'required needs closure job "check_fast_cross_os_targets" must exist with its exact if'),
-            (targets, targets.replace("    if: needs.changes.outputs.rust_compile == 'true' && ", "    if: ", 1), 'required needs closure job "check_fast_cross_os_targets" must exist with its exact if'),
+            (targets, targets.replace(" && needs.changes.outputs.rust_compile == 'true'", "", 1), 'required needs closure job "check_fast_cross_os_targets" must exist with its exact if'),
             (targets, targets.replace(writer, "", 1), 'must retain exactly one "Writer namespace exact Windows targets" step'),
         )
         for original, changed, diagnostic in mutations:
@@ -1272,14 +1326,14 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_required_job_needs_closure_has_role_specific_scheduling_policy(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         jobs = yaml.safe_load(workflow)["jobs"]
-        n_gate = "${{ !cancelled() && needs.rust_build.result == 'success' }}"
-        rust_gate = "${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
-        cross_os = "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'"
+        n_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.rust_build.result == 'success' }}"
+        rust_gate = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests == 'true' }}"
+        cross_os = "${{ !github.event.pull_request.draft && needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true' }}"
         expected_if = {
-            "changes": None, "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": MIRROR_IF, "scripts_contracts": MIRROR_IF,
+            "changes": "${{ !github.event.pull_request.draft }}", "required_contexts": JUDGE_IF, "scripts": MIRROR_IF, "scripts_guards": MIRROR_IF, "scripts_contracts": MIRROR_IF,
             "rust_build": rust_gate, "pg15_owner_proof": rust_gate, "rust_tests": n_gate, "test_evidence": n_gate,
             "relay_authority_mutations": RUST_REQUIRED_IF,
-            "lint": _LINT_FILTER, "dashboard": "needs.changes.outputs.dashboard == 'true'",
+            "lint": _LINT_FILTER, "dashboard": "${{ !github.event.pull_request.draft && needs.changes.outputs.dashboard == 'true' }}",
             "check_fast_cross_os": cross_os, "check_fast_cross_os_targets": cross_os,
         }
         closure: set[str] = set()
@@ -2406,7 +2460,7 @@ jobs:
                 )
         quoted = workflow.replace(
             "  required_contexts:\n",
-            '  "yes":\n    name: quoted-key probe\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n\n  required_contexts:\n',
+            '  "yes":\n    name: quoted-key probe\n    if: ${{ !github.event.pull_request.draft }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n\n  required_contexts:\n',
             1,
         )
         self.assertEqual(self.run_hardening_fixture(quoted).returncode, 0)

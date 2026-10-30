@@ -5,9 +5,8 @@ use super::{
     migrate_separate_status_panel_to_footer, should_open_long_running_placeholder_controller,
     status_panel_completion_action, status_panel_completion_edit_aliases_newer_turn,
     status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
-    status_panel_wip_inflight_for_completion,
+    status_panel_message_missing_error, status_panel_wip_inflight_for_completion,
 };
-use crate::services::discord::footer_retirement::legacy_for_test;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
 use crate::services::discord::gateway::TurnGateway;
 use crate::services::discord::inflight::{
@@ -48,15 +47,6 @@ impl Drop for ChildFixture {
     fn drop(&mut self) {
         std::fs::write(&self.path, b"child cleanup").unwrap();
         let _ = self.disposed.take().unwrap().send(());
-    }
-}
-
-impl StatusPanelFallbackGateway {
-    fn with_edit_error(error: &str) -> Self {
-        Self {
-            edit_error: Some(error.to_string()),
-            ..Self::default()
-        }
     }
 }
 
@@ -271,10 +261,44 @@ async fn actual_bridge_children_run_through_cleanup_and_retry_completion() {
     }
 }
 
+/// A synthetic id's edit error reads as the panel's message being gone.
+#[test]
+fn a_synthetic_id_edit_error_reads_as_a_missing_message() {
+    assert!(status_panel_message_missing_error(
+        crate::services::discord::gateway::SYNTHETIC_MESSAGE_EDIT_ERROR
+    ));
+}
+
 #[test]
 fn status_panel_v2_disables_long_running_placeholder_controller() {
-    assert!(!should_open_long_running_placeholder_controller(true));
-    assert!(should_open_long_running_placeholder_controller(false));
+    let anchored = (ChannelId::new(7_507_501), MessageId::new(42));
+    assert!(!should_open_long_running_placeholder_controller(
+        true, anchored
+    ));
+    assert!(should_open_long_running_placeholder_controller(
+        false, anchored
+    ));
+}
+
+/// A turn-mode turn without an anchor opens no long-running card; any other turn still may.
+#[test]
+fn a_turn_mode_turn_without_an_anchor_opens_no_long_running_card() {
+    let channel = ChannelId::new(7_507_502);
+    let sentinel =
+        crate::services::discord::turn_bridge::current_message_anchor::detached_current_msg_id_from_durable(0);
+    assert!(should_open_long_running_placeholder_controller(
+        false,
+        (channel, sentinel)
+    ));
+    let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(channel.get());
+    assert!(!should_open_long_running_placeholder_controller(
+        false,
+        (channel, sentinel)
+    ));
+    assert!(should_open_long_running_placeholder_controller(
+        false,
+        (channel, MessageId::new(42))
+    ));
 }
 
 fn make_status_panel_v2_shared_for_tests() -> Arc<crate::services::discord::SharedData> {
@@ -671,72 +695,6 @@ fn status_panel_completion_waits_for_visible_terminal_body() {
 }
 
 #[tokio::test]
-async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
-    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
-    let shared = make_status_panel_v2_shared_for_tests();
-    let gateway = StatusPanelFallbackGateway::default();
-    let provider = ProviderKind::Claude;
-    let channel_id = ChannelId::new(1509350490461180105);
-    let mut last_status_panel_text = String::new();
-    let _legacy = legacy_for_test();
-    if status_panel_completion_ready_after_terminal_body(true, false, false) {
-        let _ = complete_status_panel_v2(
-            shared.as_ref(),
-            &gateway,
-            channel_id,
-            Some(MessageId::new(9_100_000_000_000_000_123)),
-            &provider,
-            1_700_000_000,
-            &mut last_status_panel_text,
-            false,
-            false,
-            "test_completion_before_body",
-            1510319194921504929,
-            true,
-            false,
-        )
-        .await;
-    }
-
-    assert!(
-        gateway
-            .sent_messages
-            .lock()
-            .expect("sent messages lock")
-            .is_empty(),
-        "fallback completion must not send before the terminal body is visible"
-    );
-
-    if status_panel_completion_ready_after_terminal_body(true, true, false) {
-        let committed = complete_status_panel_v2(
-            shared.as_ref(),
-            &gateway,
-            channel_id,
-            Some(MessageId::new(9_100_000_000_000_000_123)),
-            &provider,
-            1_700_000_000,
-            &mut last_status_panel_text,
-            false,
-            false,
-            "test_completion_after_body",
-            1510319194921504929,
-            true,
-            false,
-        )
-        .await;
-        assert!(committed);
-    }
-
-    let sent_messages = gateway
-        .sent_messages
-        .lock()
-        .expect("sent messages lock")
-        .clone();
-    assert_eq!(sent_messages.len(), 1);
-    assert!(sent_messages[0].contains("완료"));
-}
-
-#[tokio::test]
 async fn bridge_status_panel_completion_emits_background_agent_pending_payload() {
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
     let shared = make_status_panel_v2_shared_for_tests();
@@ -1008,79 +966,6 @@ async fn bridge_status_panel_completion_producer_threads_sniffed_background_agen
 }
 
 #[tokio::test]
-async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
-    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
-    let shared = make_status_panel_v2_shared_for_tests();
-    let gateway = StatusPanelFallbackGateway::default();
-    let provider = ProviderKind::Claude;
-    let channel_id = ChannelId::new(1509350490461180105);
-    let mut last_status_panel_text = String::new();
-    let _legacy = legacy_for_test();
-    let committed = complete_status_panel_v2(
-        shared.as_ref(),
-        &gateway,
-        channel_id,
-        Some(MessageId::new(9_100_000_000_000_000_123)),
-        &provider,
-        1_700_000_000,
-        &mut last_status_panel_text,
-        false,
-        false,
-        "test_synthetic_status_panel_id",
-        1510319194921504929,
-        true,
-        false,
-    )
-    .await;
-
-    assert!(committed);
-    assert!(
-        gateway
-            .edited_message_ids
-            .lock()
-            .expect("edited ids lock")
-            .is_empty(),
-        "synthetic status-panel ids must not be edited through Discord"
-    );
-    let sent_messages = gateway
-        .sent_messages
-        .lock()
-        .expect("sent messages lock")
-        .clone();
-    assert_eq!(sent_messages.len(), 1);
-    assert!(sent_messages[0].contains("완료"));
-    assert_eq!(last_status_panel_text, sent_messages[0]);
-
-    let committed = complete_status_panel_v2(
-        shared.as_ref(),
-        &gateway,
-        channel_id,
-        Some(MessageId::new(9_100_000_000_000_000_123)),
-        &provider,
-        1_700_000_000,
-        &mut last_status_panel_text,
-        false,
-        false,
-        "test_synthetic_status_panel_id_retry",
-        1510319194921504929,
-        true,
-        false,
-    )
-    .await;
-
-    assert!(committed);
-    assert_eq!(
-        gateway
-            .sent_messages
-            .lock()
-            .expect("sent messages lock")
-            .len(),
-        1,
-        "same completed panel text must not send duplicate fallback panels"
-    );
-}
-
-#[tokio::test]
 async fn status_panel_completion_merges_korean_wip_warning_into_completion_surface() {
     let Some(worktree) = init_git_repo_for_wip_warning() else {
         return;
@@ -1088,12 +973,12 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
     fs::write(worktree.path().join("untracked.txt"), "untracked\n").expect("write untracked file");
 
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
-    let _legacy = legacy_for_test();
     let shared = make_status_panel_v2_shared_for_tests();
     let gateway = StatusPanelFallbackGateway::default();
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(3_792_000);
     let user_msg_id = 3_792_001;
+    let panel_id = MessageId::new(3_792_002);
     save_inflight_state(&wip_warning_inflight_state(
         &provider,
         channel_id.get(),
@@ -1107,7 +992,7 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
         shared.as_ref(),
         &gateway,
         channel_id,
-        None,
+        Some(panel_id),
         &provider,
         1_700_000_000,
         &mut last_status_panel_text,
@@ -1121,11 +1006,8 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
     .await;
 
     assert!(committed);
-    let sent_messages = gateway
-        .sent_messages
-        .lock()
-        .expect("sent messages lock")
-        .clone();
+    let sent_messages = gateway.edited_bodies.lock().unwrap().clone();
+    assert!(gateway.sent_messages.lock().unwrap().is_empty());
     assert_eq!(sent_messages.len(), 1);
     assert!(sent_messages[0].contains("완료"));
     assert!(sent_messages[0].contains("커밋되지 않은 변경사항"));
@@ -1140,7 +1022,7 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
         shared.as_ref(),
         &gateway,
         channel_id,
-        None,
+        Some(panel_id),
         &provider,
         1_700_000_000,
         &mut last_status_panel_text,
@@ -1155,11 +1037,7 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
 
     assert!(committed_retry);
     assert_eq!(
-        gateway
-            .sent_messages
-            .lock()
-            .expect("sent messages lock")
-            .len(),
+        gateway.edited_bodies.lock().unwrap().len(),
         1,
         "already-committed completion retries must not duplicate WIP warnings"
     );
@@ -1171,7 +1049,6 @@ async fn multiple_completion_paths_render_wip_warning_exactly_once() {
         return;
     };
     fs::write(worktree.path().join("untracked.txt"), "untracked\n").expect("write untracked file");
-    let _legacy = legacy_for_test();
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
     let shared = make_status_panel_v2_shared_for_tests();
     let gateway = StatusPanelFallbackGateway::default();
@@ -1216,7 +1093,7 @@ async fn multiple_completion_paths_render_wip_warning_exactly_once() {
             shared.as_ref(),
             &gateway,
             channel_id,
-            None,
+            Some(MessageId::new(3_792_033)),
             &provider,
             1_700_000_000,
             &mut last_status_panel_text,
@@ -1231,11 +1108,8 @@ async fn multiple_completion_paths_render_wip_warning_exactly_once() {
     );
 
     let footer_edits = footer_sink.edits();
-    let status_messages = gateway
-        .sent_messages
-        .lock()
-        .expect("sent messages lock")
-        .clone();
+    let status_messages = gateway.edited_bodies.lock().unwrap().clone();
+    assert!(gateway.sent_messages.lock().unwrap().is_empty());
     assert_eq!(footer_edits.len(), 1);
     assert_eq!(status_messages.len(), 1);
     assert!(footer_edits[0].text.contains("Final answer"));
@@ -1400,52 +1274,6 @@ fn status_panel_wip_completion_uses_preloaded_recovery_snapshot_after_cleanup() 
     assert_eq!(selected.as_inflight().user_msg_id, user_msg_id);
     assert_eq!(selected.as_inflight().channel_id, channel_id.get());
     assert_eq!(selected.as_inflight().worktree_path, state.worktree_path);
-}
-
-#[tokio::test]
-async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
-    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
-    let shared = make_status_panel_v2_shared_for_tests();
-    let gateway = StatusPanelFallbackGateway::with_edit_error("Unknown Message");
-    let provider = ProviderKind::Claude;
-    let channel_id = ChannelId::new(1509350490461180105);
-    let stale_status_msg_id = MessageId::new(1_500_000_000_000_111);
-    let mut last_status_panel_text = String::new();
-    let _legacy = legacy_for_test();
-    let committed = complete_status_panel_v2(
-        shared.as_ref(),
-        &gateway,
-        channel_id,
-        Some(stale_status_msg_id),
-        &provider,
-        1_700_000_000,
-        &mut last_status_panel_text,
-        false,
-        false,
-        "test_unknown_status_panel_id",
-        1510319194921504929,
-        true,
-        false,
-    )
-    .await;
-
-    assert!(committed);
-    assert_eq!(
-        gateway
-            .edited_message_ids
-            .lock()
-            .expect("edited ids lock")
-            .as_slice(),
-        &[stale_status_msg_id]
-    );
-    let sent_messages = gateway
-        .sent_messages
-        .lock()
-        .expect("sent messages lock")
-        .clone();
-    assert_eq!(sent_messages.len(), 1);
-    assert!(sent_messages[0].contains("완료"));
-    assert_eq!(last_status_panel_text, sent_messages[0]);
 }
 
 #[tokio::test]

@@ -123,25 +123,56 @@ impl Drop for MutationPermit {
     }
 }
 
+type FenceKey = (String, String, String, String, String, String);
+
+fn execution_fences() -> &'static Mutex<HashMap<FenceKey, Arc<ExecutionFence>>> {
+    static FENCES: OnceLock<Mutex<HashMap<FenceKey, Arc<ExecutionFence>>>> = OnceLock::new();
+    FENCES.get_or_init(Default::default)
+}
+
 fn execution_fence(endpoint: &HerdrEndpoint, pane: &str, nonce: &str) -> Arc<ExecutionFence> {
-    type Key = (String, String, String, String, String, String);
-    static FENCES: OnceLock<Mutex<HashMap<Key, Arc<ExecutionFence>>>> = OnceLock::new();
-    let key = (
+    fence_at((
         endpoint.execution_node().to_string(),
         endpoint.config_key().to_string(),
         endpoint.socket_path().to_string_lossy().into_owned(),
         endpoint.herdr_session().to_string(),
         pane.to_string(),
         nonce.to_string(),
-    );
+    ))
+}
+
+fn fence_at(key: FenceKey) -> Arc<ExecutionFence> {
     // Closing tombstones must outlive targets so a fresh target cannot reuse an uncertain nonce.
-    FENCES
-        .get_or_init(Default::default)
+    execution_fences()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .entry(key)
         .or_default()
         .clone()
+}
+
+/// Restores the fence a restart lost for a Bound execution a reconnect matched exactly, so a
+/// notice admission finds it; an existing entry keeps its closing tombstone.
+pub(crate) fn restore_execution_fence(stored: &HostedExecution) -> bool {
+    let (Some(location), Some(expected)) = (&stored.location, &stored.expected) else {
+        return false;
+    };
+    if !matches!(stored.state, HostedState::Bound)
+        || expected.binding_nonce != stored.execution_nonce
+    {
+        return false;
+    }
+    fence_at((
+        location.execution_node.clone(),
+        location.endpoint_config_key.clone(),
+        std::path::Path::new(&location.socket_addr)
+            .to_string_lossy()
+            .into_owned(),
+        location.named_session.clone(),
+        location.pane_id.clone(),
+        stored.execution_nonce.clone(),
+    ));
+    true
 }
 
 impl ExecutionFence {
@@ -158,6 +189,46 @@ impl ExecutionFence {
             fence: self.clone(),
         })
     }
+}
+
+pub(crate) fn try_notice_fence<R>(
+    endpoint: &crate::config::session_hosts::ChannelEndpoint,
+    nonce: &str,
+    start: impl FnOnce() -> R,
+) -> Result<R, HerdrGateRefusal> {
+    let fences = execution_fences()
+        .try_lock()
+        .map_err(|_| HerdrGateRefusal::NoStoredExecution)?;
+    let mut candidates = fences
+        .iter()
+        .filter(|((node, key, socket, session, _, execution), _)| {
+            node == &endpoint.execution_node
+                && key == &endpoint.key
+                && std::path::Path::new(socket) == endpoint.socket_path
+                && session == &endpoint.herdr_session
+                && execution == nonce
+        });
+    let fence = candidates
+        .next()
+        .map(|(_, fence)| fence.clone())
+        .ok_or(HerdrGateRefusal::NoStoredExecution)?;
+    if candidates.next().is_some() {
+        return Err(HerdrGateRefusal::NoStoredExecution);
+    }
+    drop(fences);
+    let state = fence.state.try_lock().map_err(|error| match error {
+        std::sync::TryLockError::WouldBlock => HerdrGateRefusal::MutationBusy,
+        std::sync::TryLockError::Poisoned(_) => HerdrGateRefusal::NoStoredExecution,
+    })?;
+    if state.1 {
+        return Err(HerdrGateRefusal::ExecutionClosing);
+    }
+    if state.0 {
+        return Err(HerdrGateRefusal::MutationBusy);
+    }
+    let result = start();
+    drop(state);
+    Ok(result)
 }
 
 pub(crate) struct TerminationFence(MutationPermit, bool);
@@ -387,13 +458,10 @@ impl HerdrTarget {
         let Some(judged) = judged else {
             return CloseEffect::NotSent("herdr_close_without_gate_judgment".into());
         };
-        let request = HerdrRequest::PaneClose {
-            pane_id: self.0.pane.clone(),
-        };
-        if !request_matches(judged.mutation, &request) {
+        let call = close_call(&self.0.next_id, &self.0.pane);
+        if !request_matches(judged.mutation, &call.request) {
             return CloseEffect::NotSent("herdr_close_without_terminate_judgment".into());
         }
-        let call = self.0.call(request);
         if !crate::config_live_reload::current()
             .is_some_and(|config| config.runtime.herdr_terminate_enabled == Some(true))
         {
@@ -403,8 +471,7 @@ impl HerdrTarget {
         if self.0.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault {
             super::herdr::policy::permit::EVENTS.with(|events| events.borrow_mut().push("Close"));
         }
-        let outcome = self.0.transport.call_with_witness(&call, &judged.witness);
-        let result = contract::close_result(&call, outcome);
+        let result = deliver_close(self.0.transport.as_ref(), &judged.witness, &call);
         if matches!(
             result,
             CloseEffect::Acknowledged | CloseEffect::Indeterminate(_)
@@ -546,6 +613,26 @@ impl HerdrTarget {
         }
         confirmed.is_ok()
     }
+}
+
+/// The close of `pane`; every close this gate sends is built here.
+fn close_call(next_id: &AtomicU64, pane: &str) -> HerdrCall {
+    next_call(
+        next_id,
+        HerdrRequest::PaneClose {
+            pane_id: pane.to_string(),
+        },
+    )
+}
+
+/// Sends a close only on a connection to `witness`'s server.
+fn deliver_close(
+    transport: &dyn HerdrTransport,
+    witness: &ServerWitness,
+    call: &HerdrCall,
+) -> CloseEffect {
+    let outcome = transport.call_with_witness(call, witness);
+    contract::close_result(call, outcome)
 }
 
 fn next_call(next_id: &AtomicU64, request: HerdrRequest) -> HerdrCall {
@@ -900,6 +987,111 @@ impl From<CloseEffect>
             CloseEffect::Indeterminate(why) => Self::Indeterminate(why),
             CloseEffect::ConfirmationRequired => Self::ConfirmationRequired,
         }
+    }
+}
+
+/// The bare shell a create left when its reply was lost: removed only while it is still the
+/// untouched workspace the create made, and only on the server it was made on.
+#[cfg(unix)]
+pub(crate) mod residue {
+    use std::sync::atomic::AtomicU64;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::super::herdr::contract::{self, CloseEffect, HerdrTransport, ServerWitness};
+    use super::super::herdr::model::{HerdrRequest, HerdrSnapshot};
+    use super::super::herdr::pane_probe::{self, PaneOccupant, ProcessOs, RecordedProcess};
+    use super::{close_call, deliver_close, next_call};
+    use crate::db::dispatched_sessions::hosted_execution::ProcessStamp;
+
+    const GONE_POLLS: u32 = 15;
+    const GONE_POLL: Duration = Duration::from_millis(200);
+
+    /// The shell a create left: its pane, the workspace label the create gave it, and its root.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct CreateResidue {
+        pub pane_id: String,
+        pub label: String,
+        pub root: ProcessStamp,
+    }
+
+    /// Reads the residue again on `witness`'s server, closes it, and returns once the pane and its
+    /// root shell are both gone; any other reading closes nothing.
+    pub(crate) fn dispose_create_residue(
+        transport: &dyn HerdrTransport,
+        os: &dyn ProcessOs,
+        witness: &ServerWitness,
+        next_id: &AtomicU64,
+        residue: &CreateResidue,
+    ) -> Result<(), String> {
+        let snapshot = snapshot_on(transport, witness, next_id)?;
+        if !untouched(&snapshot, residue) {
+            return Err("the residue workspace changed".into());
+        }
+        let call = next_call(
+            next_id,
+            HerdrRequest::PaneProcessInfo {
+                pane_id: residue.pane_id.clone(),
+            },
+        );
+        let (outcome, answered) = transport.call(&call);
+        let read = contract::foreground_result(&call, outcome, &residue.pane_id);
+        let reading = (read.map_err(|error| format!("{error:?}")), answered);
+        match pane_probe::occupant(reading, os, witness) {
+            PaneOccupant::LoneShell { root, .. } if root == residue.root => {}
+            other => return Err(format!("the residue pane now reads {other:?}")),
+        }
+        let closed = deliver_close(transport, witness, &close_call(next_id, &residue.pane_id));
+        if let CloseEffect::NotSent(detail) = &closed {
+            return Err(format!("close not sent: {detail}"));
+        }
+        for _ in 0..GONE_POLLS {
+            let snapshot = snapshot_on(transport, witness, next_id)?;
+            let pane_gone = !snapshot
+                .panes
+                .iter()
+                .any(|pane| pane.pane_id == residue.pane_id);
+            if pane_gone
+                && pane_probe::recorded_process(os, &residue.root) == RecordedProcess::ProvenAbsent
+            {
+                return Ok(());
+            }
+            thread::sleep(GONE_POLL);
+        }
+        Err(format!("residue not confirmed gone after {closed:?}"))
+    }
+
+    /// A labeled snapshot that `witness`'s server answered.
+    pub(crate) fn snapshot_on(
+        transport: &dyn HerdrTransport,
+        witness: &ServerWitness,
+        next_id: &AtomicU64,
+    ) -> Result<HerdrSnapshot, String> {
+        let call = next_call(next_id, HerdrRequest::SessionSnapshot {});
+        let (outcome, answered) = transport.call(&call);
+        if answered.as_ref() != Ok(witness) {
+            return Err(format!("snapshot answered by {answered:?}"));
+        }
+        contract::labeled_snapshot(&call, outcome)
+    }
+
+    /// Exactly one workspace carries the label, with one tab and one pane, and that pane is the residue.
+    fn untouched(snapshot: &HerdrSnapshot, residue: &CreateResidue) -> bool {
+        let Some(workspaces) = &snapshot.workspaces else {
+            return false;
+        };
+        let labeled: Vec<_> = workspaces
+            .iter()
+            .filter(|workspace| workspace.label == residue.label)
+            .collect();
+        let [workspace] = labeled.as_slice() else {
+            return false;
+        };
+        workspace.pane_count == 1
+            && workspace.tab_count == 1
+            && snapshot.panes.iter().any(|pane| {
+                pane.pane_id == residue.pane_id && pane.workspace_id == workspace.workspace_id
+            })
     }
 }
 

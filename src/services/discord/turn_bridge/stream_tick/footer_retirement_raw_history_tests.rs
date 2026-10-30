@@ -1,6 +1,5 @@
 use super::super::provider_output_guard_tests::CapturingGateway;
 use super::*;
-use crate::services::discord::footer_retirement::legacy_for_test;
 use crate::services::discord::inflight::{InflightTurnIdentity, save_inflight_state};
 use crate::services::discord::placeholder_live_events::footer_activity_tests::{
     START, six_tool_fixture,
@@ -163,7 +162,6 @@ async fn retired_bridge_rollover_raw_history_uses_minimal_anchor_with_legacy_bud
             let shared = six_tool_fixture(crate::config::ToolActivityDisplay::Summary, channel);
             let body = unit.repeat(1990 / unit.encode_utf16().count());
             let old_plan = {
-                let _legacy = legacy_for_test();
                 let budget = build_bridge_single_message_panel_status_block(
                     &shared, channel, &provider, START, "⠋", None, None, &body,
                 );

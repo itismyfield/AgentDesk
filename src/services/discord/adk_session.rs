@@ -757,9 +757,68 @@ mod compact_threshold_tests {
         assert!(thresholds.compact_pct_for(&ProviderKind::Claude) > 0);
     }
 
+    /// Rows come straight from `kv_meta`; an unreadable kv layer still resolves from YAML
+    /// and the defaults, and each outage is reported once rather than on every turn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn context_thresholds_read_kv_rows_and_report_each_outage_once() {
+        use std::sync::atomic::AtomicBool;
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_context_thresholds",
+            "context thresholds",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        for (key, value) in [
+            ("context_compact_percent", "70"),
+            ("context_compact_percent_claude", "bad"),
+            ("context_compact_lower_bound_tokens", "200000"),
+        ] {
+            sqlx::query("INSERT INTO kv_meta (key, value) VALUES ($1, $2)")
+                .bind(key)
+                .bind(value)
+                .execute(&pool)
+                .await
+                .expect("seed context threshold rows");
+        }
+        let values = |t: &ContextThresholds| {
+            let lower = t.compact_lower_bound_tokens;
+            (
+                t.compact_pct,
+                t.compact_pct_codex,
+                t.compact_pct_claude,
+                lower,
+            )
+        };
+        let read = super::fetch_context_thresholds(Some(&pool)).await;
+        assert_eq!(values(&read), (70, 100, 70, 200_000));
+
+        pool.close().await;
+        let closed = super::load_context_threshold_rows(Some(&pool)).await;
+        assert!(closed.is_err());
+        let mut yaml = crate::config::Config::default();
+        yaml.runtime.context_compact_percent_codex = Some(90);
+        let failing = AtomicBool::new(false);
+        let turns: Vec<_> = (0..3)
+            .map(|_| super::resolve_context_thresholds(&closed, Some(&yaml), &failing))
+            .collect();
+        assert_eq!(values(&turns[2].0), (60, 90, 60, 300_000));
+        let (failed, message) = turns[0]
+            .1
+            .clone()
+            .expect("the first failed read is reported");
+        assert!(failed && message.contains("context_compact_percent_codex=90 (Yaml)"));
+        assert!(
+            message.contains("context_compact_percent=60 (Default)"),
+            "{message}"
+        );
+        assert!(turns[1].1.is_none() && turns[2].1.is_none());
+        let recovered = super::resolve_context_thresholds(&Ok(Default::default()), None, &failing);
+        assert_eq!(recovered.1.map(|(failed, _)| failed), Some(false));
+        assert!(super::load_context_threshold_rows(None).await.is_err());
+        db.drop().await;
+    }
+
     /// When only the generic threshold is configured, Claude inherits it.
-    /// `fetch_context_thresholds` defaults `compact_pct_claude` to the generic
-    /// `compact_pct`, so this mirrors the runtime fallback behaviour.
     #[test]
     fn compact_pct_for_claude_falls_back_to_generic() {
         let thresholds = ContextThresholds {
@@ -773,34 +832,17 @@ mod compact_threshold_tests {
     }
 }
 
-/// Context window management thresholds.
-/// Single source of truth used by Rust turn-end compact logic.
-/// Provider-specific overrides: `context_compact_percent_codex`, `context_compact_percent_claude`, etc.
+/// Context window management thresholds, resolved through the settings key table.
+/// Provider-specific overrides: `context_compact_percent_codex`, `context_compact_percent_claude`.
 pub(super) struct ContextThresholds {
     pub compact_pct: u64,
-    /// Provider-specific override (if set). Falls back to compact_pct.
     pub compact_pct_codex: u64,
-    /// Claude-specific override (if set). Falls back to compact_pct.
+    /// Falls back to `compact_pct` when no Claude-specific value is set.
     pub compact_pct_claude: u64,
     /// Provider-neutral minimum occupancy before compacting. Claude applies it
-    /// to its model-aware context window; unset settings default to 300k.
+    /// to its model-aware context window.
     pub compact_lower_bound_tokens: u64,
     pub context_window: u64,
-}
-
-impl Default for ContextThresholds {
-    fn default() -> Self {
-        Self {
-            compact_pct: 60,
-            compact_pct_codex: 100,
-            // Default to the generic compact_pct default so Claude inherits the
-            // shared threshold unless `context_compact_percent_claude` is set.
-            compact_pct_claude: 60,
-            compact_lower_bound_tokens:
-                crate::services::claude_compact_context::DEFAULT_CONTEXT_COMPACT_LOWER_BOUND_TOKENS,
-            context_window: 1_000_000,
-        }
-    }
 }
 
 impl ContextThresholds {
@@ -814,46 +856,107 @@ impl ContextThresholds {
     }
 }
 
-/// Fetch context thresholds from the ADK config API (individual kv_meta keys).
-/// Falls back to defaults on any error.
-/// Supports provider-specific overrides: `context_compact_percent_codex`, etc.
-pub(super) async fn fetch_context_thresholds(_api_port: u16) -> ContextThresholds {
-    let defaults = ContextThresholds::default();
-    let body = match super::internal_api::get_config_entries().await {
-        Ok(body) => body,
-        Err(_) => return defaults,
-    };
-    let entries = body.get("entries").and_then(|v| v.as_array());
+const CONTEXT_THRESHOLD_KEYS: [&crate::services::settings::RowSetting; 4] = [
+    &crate::services::settings::CONTEXT_COMPACT_PERCENT,
+    &crate::services::settings::CONTEXT_COMPACT_PERCENT_CODEX,
+    &crate::services::settings::CONTEXT_COMPACT_PERCENT_CLAUDE,
+    &crate::services::settings::CONTEXT_COMPACT_LOWER_BOUND_TOKENS,
+];
 
-    let find_u64 = |key: &str| -> Option<u64> {
-        entries
-            .and_then(|arr| {
-                arr.iter()
-                    .find(|e| e.get("key").and_then(|k| k.as_str()) == Some(key))
+const CONTEXT_KV_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether the last context-threshold kv read failed, so the warning fires once per outage.
+static CONTEXT_KV_READ_FAILING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Context thresholds from the `kv_meta` rows, else the live YAML snapshot, else the defaults.
+/// An unreadable kv layer never blocks the turn; it is logged with the fallback sources.
+pub(super) async fn fetch_context_thresholds(pg_pool: Option<&sqlx::PgPool>) -> ContextThresholds {
+    let read = load_context_threshold_rows(pg_pool).await;
+    let live = crate::config_live_reload::current();
+    let (thresholds, notice) =
+        resolve_context_thresholds(&read, live.as_deref(), &CONTEXT_KV_READ_FAILING);
+    match notice {
+        Some((true, message)) => tracing::warn!("{message}"),
+        Some((false, message)) => tracing::info!("{message}"),
+        None => {}
+    }
+    thresholds
+}
+
+type ContextRows = std::collections::HashMap<String, String>;
+
+/// The thresholds plus a `(failing, message)` notice when the kv read state just changed.
+fn resolve_context_thresholds(
+    read: &Result<ContextRows, String>,
+    yaml: Option<&crate::config::Config>,
+    failing: &std::sync::atomic::AtomicBool,
+) -> (ContextThresholds, Option<(bool, String)>) {
+    let empty = ContextRows::new();
+    let rows = read.as_ref().unwrap_or(&empty);
+    let resolved =
+        CONTEXT_THRESHOLD_KEYS.map(|key| crate::services::settings::resolve_row(key, rows, yaml));
+    let changed =
+        failing.swap(read.is_err(), std::sync::atomic::Ordering::Relaxed) != read.is_err();
+    let notice = changed.then(|| {
+        let sources = CONTEXT_THRESHOLD_KEYS
+            .iter()
+            .zip(&resolved)
+            .map(|(key, setting)| {
+                format!("{}={} ({:?})", key.kv_key(), setting.value, setting.source)
             })
-            .and_then(|e| e.get("value"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<u64>().ok())
-    };
-
-    let compact_pct = find_u64("context_compact_percent").unwrap_or(defaults.compact_pct);
-    let compact_pct_codex =
-        find_u64("context_compact_percent_codex").unwrap_or(defaults.compact_pct_codex);
-    // #3097: read the Claude-specific override. Fall back to the *generic*
-    // `compact_pct` (not a fixed default) so a user who only sets the generic
-    // value still applies it to Claude, while `context_compact_percent_claude`
-    // takes precedence when present.
-    let compact_pct_claude = find_u64("context_compact_percent_claude").unwrap_or(compact_pct);
-    let compact_lower_bound_tokens = find_u64("context_compact_lower_bound_tokens")
-        .unwrap_or(defaults.compact_lower_bound_tokens);
-
-    ContextThresholds {
+            .collect::<Vec<_>>()
+            .join(", ");
+        match read {
+            Err(error) => (
+                true,
+                format!(
+                    "context thresholds: kv_meta unreadable ({error}); falling back to {sources}"
+                ),
+            ),
+            Ok(_) => (
+                false,
+                format!("context thresholds: kv_meta readable again: {sources}"),
+            ),
+        }
+    });
+    let [
         compact_pct,
         compact_pct_codex,
         compact_pct_claude,
         compact_lower_bound_tokens,
-        context_window: defaults.context_window,
-    }
+    ] = resolved.map(|setting| setting.value);
+    let thresholds = ContextThresholds {
+        compact_pct,
+        compact_pct_codex,
+        compact_pct_claude,
+        compact_lower_bound_tokens,
+        context_window: 1_000_000,
+    };
+    (thresholds, notice)
+}
+
+async fn load_context_threshold_rows(
+    pg_pool: Option<&sqlx::PgPool>,
+) -> Result<ContextRows, String> {
+    let pool = pg_pool.ok_or_else(|| "no postgres pool".to_string())?;
+    let keys: Vec<&str> = CONTEXT_THRESHOLD_KEYS
+        .iter()
+        .flat_map(|key| key.row_keys())
+        .collect();
+    let query = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT key, value FROM kv_meta WHERE key = ANY($1)",
+    )
+    .bind(keys)
+    .fetch_all(pool);
+    let rows = tokio::time::timeout(CONTEXT_KV_READ_TIMEOUT, query)
+        .await
+        .map_err(|_| format!("timed out after {CONTEXT_KV_READ_TIMEOUT:?}"))?
+        .map_err(|error| error.to_string())?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(key, value)| Some((key, value?)))
+        .collect())
 }
 
 /// #2849 + #3262: at a watcher-completed turn boundary (pane idle), backfill the
@@ -901,7 +1004,7 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
     let compact_window_source = claude_trigger_window
         .map(|_| crate::services::claude_compact_trigger::CompactWindowSource::FallbackMax);
     let context_window = provider.resolve_context_window(state.last_model.as_deref());
-    let ctx_cfg = fetch_context_thresholds(shared.api_port).await;
+    let ctx_cfg = fetch_context_thresholds(shared.pg_pool.as_ref()).await;
     let compact_pct = ctx_cfg.compact_pct_for(provider);
 
     // v2-gated panel backfill: the Context line write legitimately needs a real

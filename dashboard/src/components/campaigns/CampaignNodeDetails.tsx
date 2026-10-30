@@ -71,7 +71,7 @@ export default function CampaignNodeDetails({
           <p className="campaign-muted">
             {tr("다른 작업으로 이동하거나 상세를 닫아도 이 초안은 유지됩니다.", "This draft stays available when you switch tasks or close details.")}
           </p>
-          <div className="campaign-edit-grid">
+          <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
             <label>
               {tr("상태", "Status")}
               <select
@@ -186,7 +186,7 @@ export default function CampaignNodeDetails({
           {live && (
             <div className="campaign-live-detail">
               <h4>{tr("실제 실행 상태", "Live execution")}</h4>
-              <dl className="campaign-detail-grid">
+              <dl className="campaign-detail-grid grid grid-cols-1 gap-4 text-sm sm:grid-cols-2 [&_dt]:mb-1 [&_dt]:text-xs [&_dd]:[overflow-wrap:anywhere]">
                 <div>
                   <dt>{tr("보드 칸", "Board column")}</dt>
                   <dd>{cardStatusLabel(live.card_status, tr)}</dd>
@@ -208,7 +208,7 @@ export default function CampaignNodeDetails({
               </dl>
             </div>
           )}
-          <dl className="campaign-detail-grid">
+          <dl className="campaign-detail-grid grid grid-cols-1 gap-4 text-sm sm:grid-cols-2 [&_dt]:mb-1 [&_dt]:text-xs [&_dd]:[overflow-wrap:anywhere]">
             <div>
               <dt>{tr("단계 · 라운드", "Stage · round")}</dt>
               <dd>

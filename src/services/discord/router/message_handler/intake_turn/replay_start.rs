@@ -13,7 +13,6 @@ pub(in crate::services::discord::router::message_handler) mod common;
 /// What the turn's start registers besides the inflight request itself.
 pub(super) struct StartRequest<'a> {
     pub(super) provider: &'a ProviderKind,
-    pub(super) remote: bool,
     pub(super) channel_id: ChannelId,
     pub(super) agent_id: Option<&'a str>,
     pub(super) reply_context: Option<&'a str>,
@@ -90,7 +89,6 @@ async fn admit(
     let scope = super::super::provider_dispatch::replay_scope::selected(
         request.provider,
         request.channel_id.get(),
-        request.remote,
         inflight.tmux_session_name.as_deref(),
     );
     common::begin(

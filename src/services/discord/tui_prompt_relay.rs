@@ -46,6 +46,13 @@ use self::observed_prompt_decision::{
     RelayObservedPromptInjectionDecision, relay_observed_prompt_injected_prompt_decision,
 };
 
+/// Shares the live human-only policy and renderer with transcript projections.
+pub(crate) fn input_notice_content(prompt: &str) -> Option<String> {
+    let decision = relay_observed_prompt_injected_prompt_decision(prompt);
+    (decision.injected_class.is_human_active_turn() && !decision.local_only_slash)
+        .then(|| format_ssh_direct_prompt_notification("claude", "", prompt))
+}
+
 mod idle_tail_state;
 pub(in crate::services::discord) use self::idle_tail_state::claude_idle_tail_running;
 mod idle_transcript_scan;
@@ -180,6 +187,8 @@ use self::claude_idle_bridge::{
     tui_idle_tail_should_commit_runtime_binding_offset,
     tui_idle_tail_stream_should_commit_runtime_binding_offset,
 };
+#[cfg(unix)]
+pub(super) use self::claude_idle_runtime::resolve_known_tmux_channel_id;
 #[cfg(unix)]
 pub(super) use self::claude_idle_runtime::resolve_rehydrated_claude_tmux_channel_id;
 #[cfg(unix)]
@@ -843,3 +852,5 @@ mod local_model_queue_wake_e2e;
 pub(in crate::services::discord) mod relay_e2e;
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, unix))]
+mod writer_notice_owner_tests;

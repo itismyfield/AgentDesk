@@ -17,7 +17,6 @@ fn isolated(name: &str, mode: &str) -> bool {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name.split_once("::").unwrap().1, "--nocapture"])
         .env(CHILD, name)
-        .env(test_override::CHILD_ENV, "1")
         .env(
             test_override::CHANNELS_ENV,
             serde_json::to_string(&channels).unwrap(),
@@ -379,7 +378,6 @@ async fn crash_then_restore() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", qualified, "--nocapture"])
         .env(CHILD, name)
-        .env(test_override::CHILD_ENV, "1")
         .env(test_override::CHANNELS_ENV, &channels)
         .env("ADK_7453_CRASH_CHANNEL", CHANNEL.to_string())
         .env("ADK_7453_CRASH_ROOT", root.path())
@@ -395,7 +393,6 @@ async fn crash_then_restore() {
     let outcome = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", qualified, "--nocapture"])
         .env(CHILD, name)
-        .env(test_override::CHILD_ENV, "1")
         .env(test_override::CHANNELS_ENV, channels)
         .env("ADK_7453_RESTORE_ROOT", root.path())
         .env("ADK_7453_RESTORE_AHEAD", "true")

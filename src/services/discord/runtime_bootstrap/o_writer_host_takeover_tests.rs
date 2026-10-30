@@ -157,7 +157,7 @@ fn reserve(channels: &[u64]) -> test_override::ChannelsGuard {
     .unwrap();
     let states: BTreeMap<_, _> = channels.iter().map(|&c| (c, Adoption::Pending)).collect();
     let boot = BootChannels::validate(&config).unwrap();
-    test_override::force_boot(boot.seeded(true, &config, |_, _| Ok(states)).unwrap())
+    test_override::force_boot(boot.seeded(&config, |_, _| Ok(states)).unwrap())
 }
 
 fn candidate(channel: u64) -> Candidate {

@@ -29,6 +29,8 @@ enum ParkedRace {
     Rotation,
     PendingRotation,
     RotationSteer,
+    /// `Rotation` whose post-rotation answer reaches Discord as a streaming edit before Done.
+    RotationStreamed,
     ReceiptLimit,
     DirectPending,
     ReceiptFailure,
@@ -70,6 +72,7 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
         Some(ParkedRace::Rotation) => 16,
         Some(ParkedRace::PendingRotation) => 17,
         Some(ParkedRace::RotationSteer) => 18,
+        Some(ParkedRace::RotationStreamed) => 19,
         Some(ParkedRace::ReceiptLimit) => 101,
         Some(ParkedRace::DirectPending) => 102,
         Some(ParkedRace::ReceiptFailure) => 103,
@@ -404,6 +407,7 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
                         | ParkedRace::NextAnswer
                         | ParkedRace::Rotation
                         | ParkedRace::RotationSteer
+                        | ParkedRace::RotationStreamed
                         | ParkedRace::ReceiptLimit
                         | ParkedRace::DirectPending,
                     )
@@ -587,7 +591,12 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
     }
     if matches!(
         race,
-        Some(ParkedRace::Rotation | ParkedRace::RotationSteer | ParkedRace::ReceiptLimit)
+        Some(
+            ParkedRace::Rotation
+                | ParkedRace::RotationSteer
+                | ParkedRace::RotationStreamed
+                | ParkedRace::ReceiptLimit
+        )
     ) {
         let prior_receipts = native_receipts(fx.codex.channel.get()).len();
         let old = fx.codex.rollout.clone();
@@ -614,10 +623,15 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
         assert_eq!(fresh.output_path, next.display().to_string());
         assert_eq!(fresh.session_id.as_deref(), Some("rotation-6903"));
         fx.codex.rollout = next;
-        fx.append(
-            &(opening(&turn(72), "AFTER_ROTATION_6903")
-                + &answer_for(&turn(72), "AFTER_ROTATION_6903_ANSWER")),
-        );
+        let streamed = matches!(race, Some(ParkedRace::RotationStreamed));
+        let answer = answer_for(&turn(72), "AFTER_ROTATION_6903_ANSWER");
+        // The text record and its Done split at the first record end.
+        let (text, done) = answer.split_at(answer.find('\n').unwrap() + 1);
+        if streamed {
+            fx.append(&opening(&turn(72), "AFTER_ROTATION_6903"));
+        } else {
+            fx.append(&(opening(&turn(72), "AFTER_ROTATION_6903") + &answer));
+        }
         let event = loop {
             let event = tokio::time::timeout(Duration::from_secs(5), fx.observed.recv())
                 .await
@@ -628,9 +642,23 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
             }
         };
         super::super::super::super::relay_observed_prompt(&fx.shared, event).await;
+        if streamed {
+            // Without Done only the streaming relay can edit; the terminal replace follows it.
+            fx.append(text);
+            assert!(fx.delivered("AFTER_ROTATION_6903_ANSWER").await);
+            fx.append(done);
+            assert!(
+                wait_for(Duration::from_secs(15), || fx
+                    .sent("AFTER_ROTATION_6903_ANSWER")
+                    .len()
+                    > 1)
+                .await,
+                "the terminal replace never followed the streaming edit"
+            );
+        }
         assert!(fx.delivered("AFTER_ROTATION_6903_ANSWER").await);
         fx.polls(3).await;
-        assert_eq!(fx.sent("AFTER_ROTATION_6903_ANSWER").len(), 1);
+        // One message: a streaming edit and the terminal replace both PATCH the same anchor.
         fx.assert_answer(
             "AFTER_ROTATION_6903_ANSWER",
             fx.anchor_of("AFTER_ROTATION_6903_ANSWER"),
@@ -2203,6 +2231,17 @@ fn codex_6903_completed_parked_owner_also_releases_its_held_steer_on_rotation() 
             root,
             true,
             Some(ParkedRace::RotationSteer),
+        ))
+    });
+}
+
+#[test]
+fn codex_6903_rotation_answer_streamed_before_done_is_one_message() {
+    run(|root| {
+        Box::pin(restored_historical_answer(
+            root,
+            true,
+            Some(ParkedRace::RotationStreamed),
         ))
     });
 }

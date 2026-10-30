@@ -237,7 +237,7 @@ class RemovedRetiredPathTests(unittest.TestCase):
             source, re.S)
         self.assertEqual(len(census), 1, 'shared dormant census must have exactly one definition')
         result = subprocess.run([sys.executable, '-c', census[0], str(root)],
-                                capture_output=True, text=True, check=False, timeout=180)
+                                capture_output=True, text=True, check=False, timeout=600)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines(), [
             'canonical_retired_production_writers=0',

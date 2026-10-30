@@ -1172,12 +1172,15 @@ async fn delivered(close: &Close) {
 async fn p10_fin_delivered_reentry_skips_the_notice_but_not_the_message_check() {
     let close = Close::open(5_340_981, |_| {}).await;
     delivered(&close).await;
-    let zeroed = {
-        let mut row = close.durable().unwrap();
-        row.current_msg_id = 0;
-        row
-    };
-    discord::inflight::save_inflight_state(&zeroed).unwrap();
+    // The ack also records the actual notice ID, which general writers carry;
+    // "without its message" is the old row shape with neither that ID nor a response anchor.
+    assert!(close.durable().unwrap().stop_notice_message_id.is_some());
+    let mut raw: serde_json::Value = serde_json::from_slice(&close.bytes().unwrap()).unwrap();
+    raw["current_msg_id"] = 0.into();
+    raw.as_object_mut()
+        .unwrap()
+        .remove("stop_notice_message_id");
+    std::fs::write(close.path(), serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
     let zeroed = close.durable().unwrap();
     let before = close.bytes();
     let submitted = test_hooks::submitted();

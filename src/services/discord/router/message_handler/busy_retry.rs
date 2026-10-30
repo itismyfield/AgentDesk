@@ -17,7 +17,7 @@ pub(super) struct FinalizeEnqueueContext<'a> {
     pub(super) provider: &'a crate::services::provider::ProviderKind,
     pub(super) channel_id: ChannelId,
     pub(super) user_msg_id: MessageId,
-    pub(super) placeholder_msg_id: MessageId,
+    pub(super) placeholder_msg_id: Option<MessageId>,
     pub(super) turn_start_attempt:
         Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
     pub(super) session_retry_context:
@@ -53,7 +53,9 @@ pub(super) async fn finalize_enqueue(
             turn_start_attempt,
         )
         .await;
-        let _ = channel_id.delete_message(http, placeholder_msg_id).await;
+        if let Some(placeholder_msg_id) = placeholder_msg_id {
+            let _ = channel_id.delete_message(http, placeholder_msg_id).await;
+        }
     } else if accepted {
         tracing::info!(
             channel_id = channel_id.get(),
@@ -64,14 +66,15 @@ pub(super) async fn finalize_enqueue(
                 .unwrap_or("none"),
             "claude_tui follow-up retry already queued or in progress"
         );
-        let _ = channel_id.delete_message(http, placeholder_msg_id).await;
+        if let Some(placeholder_msg_id) = placeholder_msg_id {
+            let _ = channel_id.delete_message(http, placeholder_msg_id).await;
+        }
     } else {
         super::tui_followup::apply_tui_busy_enqueue_refusal(
             shared,
             http,
             provider,
-            channel_id,
-            placeholder_msg_id,
+            (channel_id, user_msg_id, placeholder_msg_id),
             session_retry_context,
             feedback_reminder,
             wip_warning,

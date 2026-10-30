@@ -67,6 +67,19 @@ impl HerdrLaunchHost for Launcher {
         }
     }
 
+    fn unplaced_witness(&self, _: &HerdrLaunchEndpoint, _: &str) -> Result<ServerWitness, String> {
+        Ok(ServerWitness::for_test(1))
+    }
+
+    fn channel_panes(
+        &self,
+        _: &HerdrLaunchEndpoint,
+        _: &str,
+        _: &ServerWitness,
+    ) -> Result<Vec<crate::services::herdr_launch::unplaced::ChannelPane>, String> {
+        Ok(Vec::new())
+    }
+
     fn create(&self, _request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         self.creates.fetch_add(1, Ordering::SeqCst);
         if let Some(failed) = self.create_fails.lock().unwrap().take() {
@@ -132,6 +145,8 @@ struct Ports<'a> {
     /// The turn is cancelled once its attach returns, before its prompt.
     cancel_after_attach: bool,
     cancel: &'a Mutex<Arc<CancelToken>>,
+    /// The bot whose channel lease an unplaced launch's resolution takes.
+    lease: Option<&'a Arc<crate::services::discord::SharedData>>,
 }
 
 impl HerdrTurnPorts for Ports<'_> {
@@ -161,6 +176,16 @@ impl HerdrTurnPorts for Ports<'_> {
         target: &crate::services::session_host::HerdrTarget,
     ) -> Result<(), String> {
         self.boot.confirm_bound(owner, record, target)
+    }
+
+    fn unplaced_lease(
+        &self,
+        _: &HostedOwner,
+    ) -> Result<crate::services::discord::UnplacedLease, String> {
+        let shared = self.lease.ok_or("no channel lease")?;
+        let channel = poise::serenity_prelude::ChannelId::new(CHANNEL);
+        crate::services::discord::UnplacedLease::try_acquire(shared, channel)
+            .map_err(|_| "transition_busy".to_string())
     }
 }
 
@@ -207,7 +232,7 @@ impl Fixture {
             channel_id: CHANNEL.to_string(),
             logical_key: format!("AgentDesk-claude-p9b3b-{tag}"),
             owner_node: NODE.into(),
-            runtime_root: "/adk/runtime".into(),
+            runtime_root: crate::config::runtime_root().unwrap().display().to_string(),
         };
         let (db, pool) = rt.block_on(async {
             let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -331,6 +356,7 @@ impl Fixture {
             boot: BootPorts {
                 pool: &self.pool,
                 channel_id: CHANNEL,
+                shared: None,
             },
             launcher: launcher.clone(),
             hooks: Mutex::new(Some(self.ingress.state.subscribe())),
@@ -339,6 +365,7 @@ impl Fixture {
             attaches: Mutex::default(),
             cancel_after_attach: false,
             cancel: &self.cancel,
+            lease: None,
         }
     }
 
@@ -481,6 +508,7 @@ impl Fixture {
                 );
                 let _registry = rig.registry_on_this_thread();
                 let _admission = open_admission();
+                crate::services::herdr_launch::unplaced::QUIET.with(|quiet| quiet.set(Some(Duration::ZERO)));
                 let (sender, receiver) = std::sync::mpsc::channel();
                 let owner_for_strict = owner.logical_key.clone();
                 let turn = HerdrTurn {
@@ -1010,10 +1038,10 @@ fn a_launch_that_never_sent_its_create_leaves_the_next_turn_free_to_launch_pg() 
     assert_eq!(fx.row(), Some(HostedState::Bound));
 }
 
-// A create whose reply was lost after the write may have made a pane no row names: that Pending is
-// kept through the next turn and out of the restart pass, and the refusal says so.
+// A create whose reply was lost after the write may have made a pane no row names: the next turn
+// holds the channel's lease, finds nothing of the launch on the server, retires it and launches once.
 #[test]
-fn a_lost_create_reply_keeps_its_pending_through_the_next_turn_and_restart_pg() {
+fn a_lost_create_reply_is_resolved_by_the_next_turn_which_launches_once_pg() {
     let fx = Fixture::new("create-lost", None);
     let launcher = Arc::new(Launcher::default());
     *launcher.create_fails.lock().unwrap() = Some(HerdrCreateOutcome::Indeterminate(
@@ -1029,30 +1057,28 @@ fn a_lost_create_reply_keeps_its_pending_through_the_next_turn_and_restart_pg() 
         (pending.state, &pending.location),
         (HostedState::Pending, &None)
     );
-    let (second, _) = fx.turn(&kept, &fx.ports(&launcher), || {});
+    // Without the channel's lease nothing is read or written and the turn says why.
+    let (held, _) = fx.turn(&kept, &fx.ports(&launcher), || {});
+    let held = held.unwrap_err();
+    assert!(held.contains("no recorded pane and is held"), "{held}");
     assert_eq!(fx.record(), kept);
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
-    assert!(
-        fx.rig.requests().is_empty(),
-        "nothing reached the pane's server"
-    );
-    let listed = fx.rt.block_on(
-        crate::db::dispatched_sessions::hosted_execution::list_local_herdr_rows_pg(
-            &fx.pool,
-            NODE,
-            crate::db::dispatched_sessions::hosted_execution::LIVE,
-        ),
-    );
-    assert!(
-        listed.unwrap().is_empty(),
-        "the restart pass never reads it"
-    );
-    let second = second.unwrap_err();
-    assert!(second.contains("no logged start"), "{second}");
-    assert!(
-        second.contains("no pane was recorded") && second.contains("kept"),
-        "{second}"
-    );
+    let mut ports = fx.ports(&launcher);
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().token_hash = TOKEN.into();
+    ports.lease = Some(&shared);
+    let (second, _) = fx.turn(&kept, &ports, || {
+        if let Some(started) = fx.start_provider(&launcher, true) {
+            fx.answer(&started);
+        }
+    });
+    assert_eq!(second, Ok(()));
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 2);
+    assert_eq!(fx.row(), Some(HostedState::Bound));
+    let HostedRecord::Known(fresh) = fx.record() else {
+        panic!("no stored execution");
+    };
+    assert_ne!(fresh.execution_nonce, pending.execution_nonce);
 }
 
 // A Pending execution attached after its SessionStart, whose first prompt was cancelled before
@@ -1248,6 +1274,7 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
     let provider = ProviderKind::Claude;
     let turn = StreamingTurn {
         pool: None,
+        shared: None,
         provider: &provider,
         prompt: "question",
         session_id: None,
@@ -1256,7 +1283,6 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
         allowed_tools: &[],
         cancel: Arc::new(CancelToken::new()),
         codex_observation: None,
-        remote_profile: None,
         tmux_session_name: Some("AgentDesk-claude-dash"),
         teardown: None,
         host: &host,

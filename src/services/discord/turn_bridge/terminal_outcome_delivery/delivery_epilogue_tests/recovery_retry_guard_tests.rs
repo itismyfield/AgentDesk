@@ -14,6 +14,7 @@ use crate::services::discord::inflight::seed_session_row;
 use crate::services::provider::CancelToken;
 
 mod replay_turn_tests;
+mod turn_mode_retry_tests;
 
 pub(super) fn assert_completed_summary(summary: &str) {
     let shape =
@@ -152,7 +153,6 @@ fn resumable_session() -> crate::services::discord::DiscordSession {
         history: Vec::new(),
         pending_uploads: Vec::new(),
         cleared: false,
-        remote_profile_name: None,
         channel_id: None,
         channel_name: None,
         category_name: None,

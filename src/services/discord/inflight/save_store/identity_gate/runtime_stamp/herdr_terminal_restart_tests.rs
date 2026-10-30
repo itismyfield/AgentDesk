@@ -292,14 +292,14 @@ async fn a_restart_settles_admitted_kinds_and_leaves_other_turns_as_before_pg() 
     phase.close(RESTART_CASES).await;
 }
 
-const RESTART_CASES: usize = 15;
+const RESTART_CASES: usize = 16;
 
 #[cfg(test)]
 async fn restart_cases(phase: &Phase) {
     use NativeTerminalKind::{Aborted, Completed};
     let stored_body = |n| -> &'static str { Box::leak(stored(n).into_boxed_str()) };
-    // (kind, expectation): 3 Aborted, 4 Completed with a stored body, 7 a recorded delivery,
-    // 8 a completion with no stored body, 9 a drain restart's body, 10 an un-anchored Aborted.
+    // (kind, expectation): 3/10 Aborted (10 un-anchored), 4 a stored body, 7 a recorded delivery,
+    // 8 no stored body, 9 a drain restart's body, 15 a hot swap's handoff (row kept, no receipt).
     let cases = [
         (None, Expect::Legacy),
         (None, Expect::Legacy),
@@ -316,6 +316,7 @@ async fn restart_cases(phase: &Phase) {
         (None, Expect::Legacy), // Source inode replaced after persistence.
         (None, Expect::Legacy), // No source baseline was admitted.
         (None, Expect::Legacy), // Source absent and mailbox not reconstructed.
+        (Some(Completed), Expect::Kept),
     ];
     assert_eq!(cases.len(), RESTART_CASES);
     let (mut guards, mut warm) = (Vec::new(), Vec::new());
@@ -336,6 +337,14 @@ async fn restart_cases(phase: &Phase) {
                     row.tui_terminal_kind = kind;
                     if kind.is_some() && n != 8 {
                         row.full_response = stored(n);
+                    }
+                    if kind.is_some() {
+                        row.input_origin_ids = vec![format!("G-act7-{n}")];
+                    }
+                    if n == 15 {
+                        row.set_restart_mode(
+                            crate::services::discord::InflightRestartMode::HotSwapHandoff,
+                        );
                     }
                     // Case 7 stopped after its delivery was recorded, before its row was cleared.
                     row.terminal_delivery_committed = n == 7;
@@ -485,6 +494,23 @@ async fn restart_cases(phase: &Phase) {
                     );
                 }
             }
+            // A settled terminal records its own end under the execution id; a kept row none.
+            let seeded: InflightTurnState = serde_json::from_slice(&before).unwrap();
+            let ended = match (expect, kind) {
+                (Expect::Kept, _) => None,
+                (_, Some(Aborted)) => Some("cancelled".to_string()),
+                _ => Some("completed".to_string()),
+            };
+            let receipt: Option<(Vec<String>, String)> = sqlx::query_as(
+                "SELECT consumed_origin_ids, terminal_outcome FROM turns
+                 WHERE turn_id = $1 AND terminal_outcome IS NOT NULL",
+            )
+            .bind(format!("discord:{}:{}", channel.get(), seeded.user_msg_id))
+            .fetch_optional(&phase.pool)
+            .await
+            .unwrap();
+            let origins = seeded.input_origin_ids;
+            assert_eq!(receipt, ended.map(|end| (origins, end)), "{case}");
             let source = phase.root.join(format!("{}.jsonl", channel.get()));
             let source_before = phase.root.join(format!("{n}.source-before"));
             assert_eq!(

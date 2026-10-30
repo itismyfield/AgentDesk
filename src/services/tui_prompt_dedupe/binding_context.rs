@@ -230,6 +230,25 @@ pub(crate) fn context_names_execution(
     execution_context(provider, nonce)
 }
 
+/// Whose context a provider's environment path names: this runtime's (checked as
+/// [`context_names_execution`]), or another runtime's, which this one never judges.
+pub(crate) fn context_of_env_path(env_path: &Path) -> Result<Option<BindingContext>, String> {
+    let root = crate::config::runtime_root().ok_or("runtime root unavailable")?;
+    let contexts = root.join("runtime/binding_contexts");
+    let Ok(rest) = env_path.strip_prefix(&contexts) else {
+        return Ok(None);
+    };
+    let mut parts = rest.iter().map(|part| part.to_str());
+    let (Some(Some(provider)), Some(Some(file)), None) = (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(format!("{} is no context path", env_path.display()));
+    };
+    let nonce = file
+        .strip_suffix(".json")
+        .ok_or_else(|| format!("{} is no context path", env_path.display()))?;
+    context_names_execution(provider, nonce, env_path).map(Some)
+}
+
 /// A candidate must retain both the canonical launch snapshot and its current nonce.
 #[allow(dead_code)]
 pub(crate) fn codex_context_candidate(

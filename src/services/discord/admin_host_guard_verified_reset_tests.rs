@@ -120,7 +120,6 @@ pub(crate) async fn seed_reset_race_session(
             }],
             pending_uploads: vec![upload.to_string_lossy().into_owned().into()],
             cleared: false,
-            remote_profile_name: None,
             channel_id: Some(channel.get()),
             channel_name: Some(name.into()),
             category_name: None,
@@ -258,7 +257,6 @@ impl Fixture {
                         .into(),
                 ],
                 cleared: false,
-                remote_profile_name: None,
                 channel_id: Some(self.channel.get()),
                 channel_name: Some(self.name.clone()),
                 category_name: None,
@@ -497,6 +495,18 @@ fn verified_startup_reset_hold_is_limited_to_the_exact_trial_target() {
             "an alternate legacy tmux on the trial channel remains admitted"
         );
         shared.core.lock().await.sessions.remove(&channel);
+        dedupe::reset_state_for_tests();
+        dedupe::register_tmux_channel(CANARY_TMUX, CANARY_CHANNEL);
+        assert_eq!(
+            crate::services::tmux_common::read_tmux_channel_binding(CANARY_TMUX),
+            None
+        );
+        assert!(
+            guard(&shared, &ProviderKind::Codex, channel, None)
+                .await
+                .is_some(),
+            "a registered normal channel holds the legacy trial after its session row is lost"
+        );
         dedupe::reset_state_for_tests();
         assert!(
             guard(&shared, &ProviderKind::Codex, channel, Some(CANARY_TMUX))

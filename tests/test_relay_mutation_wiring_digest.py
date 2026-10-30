@@ -128,7 +128,7 @@ class WiringDigestTests(unittest.TestCase):
         for old, new in (
             ("  CARGO_TERM_COLOR: always", "  CARGO_TERM_COLOR: never"),
             # PyYAML loads the bare `on:` key as True; a trigger edit must still count.
-            ("  pull_request:", "  pull_request:\n    types: [opened]"),
+            ("    types: [opened, synchronize, reopened, ready_for_review]", "    types: [opened]"),
         ):
             with self.subTest(edit=old.strip()):
                 self.setUp()

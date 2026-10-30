@@ -251,7 +251,6 @@ async fn start_reserved_headless_turn_admitted(
                     cleared: false,
                     channel_name: resolved_channel_name_for_session.clone(),
                     category_name: None,
-                    remote_profile_name: None,
                     channel_id: Some(channel_id.get()),
                     last_active: tokio::time::Instant::now(),
                     worktree: None,
@@ -742,23 +741,8 @@ async fn start_reserved_headless_turn_admitted(
         session_id.is_some(),
     );
 
-    let remote_profile = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|session| session.remote_profile_name.as_ref())
-            .and_then(|name| {
-                let settings = crate::config::Settings::load();
-                settings
-                    .remote_profiles
-                    .iter()
-                    .find(|profile| profile.name == *name)
-                    .cloned()
-            })
-    };
     let prelaunch_runtime_kind = prelaunch_runtime_kind_for_managed_session(
         &provider,
-        remote_profile.is_none(),
         tmux_session_name.is_some(),
         Some(channel_id.get()),
     );
@@ -815,7 +799,6 @@ async fn start_reserved_headless_turn_admitted(
     let (inflight_tmux_name, inflight_output_path, inflight_input_fifo, inflight_offset) =
         prelaunch_inflight_runtime_seed_without_codex_raw(
             &provider,
-            remote_profile.is_none(),
             tmux_session_name.as_deref(),
             prelaunch_runtime_kind,
         );
@@ -863,7 +846,6 @@ async fn start_reserved_headless_turn_admitted(
         reply: reply_context.as_deref(),
         uploads: &pending_uploads,
         session_key: adk_session_key.as_deref(),
-        remote: remote_profile.is_some(),
         tmux: tmux_session_name.as_deref(),
     };
     let replay_start = match replay_request
@@ -963,7 +945,7 @@ async fn start_reserved_headless_turn_admitted(
             .await,
     );
     let ctx_thresholds =
-        super::super::super::adk_session::fetch_context_thresholds(shared.api_port).await;
+        super::super::super::adk_session::fetch_context_thresholds(shared.pg_pool.as_ref()).await;
     let compact_percent = ctx_thresholds.compact_pct_for(&provider);
     let model_context_window = provider.resolve_context_window(model_for_turn.as_deref());
     let compact_percent_for_claude = Some(ctx_thresholds.compact_pct_for(&provider));
@@ -990,13 +972,13 @@ async fn start_reserved_headless_turn_admitted(
     let prompt_owned = prompt.to_string();
     let provider_for_blocking = provider.clone();
     let execution_pool = shared.pg_pool.clone();
+    let turn_shared = shared.clone();
     let producer_registration = original_registration.clone();
     let producer = {
         let codex_observation = super::provider_dispatch::observe_codex_turn(
             &provider,
             channel_id.get(),
             tmux_session_name.as_deref(),
-            remote_profile.is_some(),
             &turn_host,
             &cancel_token,
         )
@@ -1019,6 +1001,7 @@ async fn start_reserved_headless_turn_admitted(
                         super::provider_dispatch::execute(
                             super::provider_dispatch::StreamingTurn {
                                 pool: execution_pool.as_ref(),
+                                shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,
                                 prompt: &context_prompt,
                                 session_id: session_id_clone.as_deref(),
@@ -1027,7 +1010,6 @@ async fn start_reserved_headless_turn_admitted(
                                 allowed_tools: &allowed_tools,
                                 cancel: cancel_token_clone,
                                 codex_observation: codex_observation.as_ref(),
-                                remote_profile: remote_profile.as_ref(),
                                 tmux_session_name: tmux_session_name.as_deref(),
                                 teardown: teardown_clearance.as_ref(),
                                 host: &turn_host,

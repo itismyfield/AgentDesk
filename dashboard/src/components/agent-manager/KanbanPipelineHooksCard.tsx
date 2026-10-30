@@ -12,11 +12,11 @@ export default function KanbanPipelineHooksCard({ ctx }: KanbanPipelineHooksCard
       {selectedRepo && pipelineHookEntries.length > 0 && (
         <SurfaceCard
           data-testid="kanban-pipeline-hooks"
-          className="rounded-[24px] p-4"
+          className="rounded-lg p-4"
           style={{
             borderColor: "color-mix(in srgb, var(--th-accent-info) 16%, var(--th-border) 84%)",
             background:
-              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+              "var(--th-bg-surface)",
           }}
         >
           <div className="flex flex-wrap items-start gap-3">
@@ -58,7 +58,7 @@ export default function KanbanPipelineHooksCard({ ctx }: KanbanPipelineHooksCard
                 className="rounded-full border px-2 py-1 text-xs"
                 style={{
                   ...SURFACE_CHIP_STYLE,
-                  color: entry.phase === "on_enter" ? "#93c5fd" : "#fbbf24",
+                  color: "var(--th-text-secondary)",
                 }}
               >
                 {entry.state} · {entry.phase === "on_enter" ? tr("진입", "Enter") : tr("이탈", "Exit")} · {entry.hook}

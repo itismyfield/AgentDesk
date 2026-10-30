@@ -120,11 +120,10 @@ enum End {
 async fn watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg() {
     let channels = o_channels();
     let o = crate::services::tui_o::cutover::test_override::CHANNELS_ENV;
-    let flag = crate::services::tui_o::cutover::test_override::CHILD_ENV;
     if !isolated_in(
         "post_stream_exit_host_tests",
         "watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg",
-        &[(flag, "1"), (o, &channels)],
+        &[(o, &channels)],
     ) {
         return;
     }
@@ -221,11 +220,10 @@ async fn collector_death_keeps_a_turn_bound_to_another_host() {
 async fn terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead() {
     let channels = o_channels();
     let o = crate::services::tui_o::cutover::test_override::CHANNELS_ENV;
-    let flag = crate::services::tui_o::cutover::test_override::CHILD_ENV;
     if !isolated_in(
         "post_stream_exit_host_tests",
         "terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead",
-        &[(flag, "1"), (o, &channels)],
+        &[(o, &channels)],
     ) {
         return;
     }
@@ -362,7 +360,6 @@ async fn a_configured_channel_keeps_its_session_through_the_watcher_abort_exits_
         history: Vec::new(),
         pending_uploads: Vec::new(),
         cleared: false,
-        remote_profile_name: None,
         channel_id: None,
         channel_name: None,
         category_name: None,

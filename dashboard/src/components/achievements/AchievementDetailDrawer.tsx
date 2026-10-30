@@ -35,15 +35,16 @@ export function AchievementDetailDrawer({
       onClose={onClose}
       title={selectedCard?.name}
       width="min(520px, 100vw)"
+      closeButtonClassName="min-h-11 min-w-11"
     >
       {selectedCard ? (
         <div className="space-y-5" data-testid="achievements-drawer">
           <div
-            className="rounded-[1.25rem] border p-4"
+            className="rounded-lg border p-4"
             style={{
               borderColor: getRarityTheme(selectedCard.rarity).border,
               background:
-                "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+                "var(--th-bg-surface)",
             }}
           >
             <div className="flex items-start gap-3">
@@ -86,13 +87,14 @@ export function AchievementDetailDrawer({
                 {selectedCard.agentName ? (
                   <button
                     type="button"
-                    className="mt-4 inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/5"
+                    className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/5"
                     style={{
                       borderColor: "var(--th-border-subtle, var(--line))",
                       color: "var(--th-text-primary, var(--fg))",
                     }}
                     onClick={() => {
                       if (selectedCard.agent && onSelectAgent) {
+                        onClose();
                         onSelectAgent(selectedCard.agent);
                       }
                     }}
@@ -144,7 +146,7 @@ export function AchievementDetailDrawer({
             ].map((metric) => (
               <div
                 key={metric.label}
-                className="rounded-2xl border px-3 py-3"
+                className="rounded-lg border px-3 py-3"
                 style={{
                   borderColor: "var(--th-border-subtle, var(--line))",
                   background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
@@ -205,7 +207,7 @@ export function AchievementDetailDrawer({
                 {selectedCard.detailLines.map((line) => (
                   <div
                     key={line}
-                    className="rounded-2xl border px-3 py-3 text-sm"
+                    className="rounded-lg border px-3 py-3 text-sm"
                     style={{
                       borderColor: "var(--th-border-subtle, var(--line))",
                       color: "var(--th-text-secondary, var(--fg-muted))",
@@ -229,7 +231,7 @@ export function AchievementDetailDrawer({
                 {selectedCard.timelineLines.map((line, index) => (
                   <div
                     key={`${line}-${index}`}
-                    className="flex items-start gap-3 rounded-2xl border px-3 py-3"
+                    className="flex items-start gap-3 rounded-lg border px-3 py-3"
                     style={{
                       borderColor: "var(--th-border-subtle, var(--line))",
                       background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",

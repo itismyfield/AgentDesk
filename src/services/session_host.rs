@@ -50,6 +50,7 @@ pub(crate) use herdr::managed_config;
 pub(crate) use herdr::model::HerdrEndpoint;
 pub(crate) use herdr::policy;
 pub(crate) use herdr_gate::legacy_return;
+pub(crate) use herdr_gate::{restore_execution_fence, try_notice_fence};
 // The unix Herdr turn executor, behind its off-by-default switch, builds targets here.
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr_gate::{
@@ -63,7 +64,7 @@ pub(crate) use herdr_registry::registry as herdr_endpoints;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr::launch_host::SocketHerdrLaunchHost;
 pub(crate) use herdr::observe::{RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified};
-pub(crate) use herdr::pane_probe::EvidenceGap;
+pub(crate) use herdr::pane_probe::{EvidenceGap, PaneOccupant, START_SLACK};
 pub(crate) use model::{
     HostCapabilities, HostError, HostKey, HostKind, HostKindResolution, HostKindSource,
     HostLiveness, HostMutation, HostPresence, HostRefusal, HostSessionRef, HostedRuntimeLocator,

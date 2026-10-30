@@ -1,3 +1,4 @@
+pub mod adk_observe;
 pub mod adk_profile;
 pub mod adk_resources;
 pub mod adk_workspace;
@@ -8,6 +9,7 @@ pub mod evidence;
 pub mod evidence_gate;
 pub mod execution_pin;
 pub mod failure_budget;
+pub mod main_integration;
 pub mod model;
 pub mod profile;
 pub mod review_gate;

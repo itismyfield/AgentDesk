@@ -114,12 +114,7 @@ fn build_streaming_placeholder_snapshot(current_portion: &str, status_block: &st
         return super::super::footer_retirement::visible_anchor(&footer).to_string();
     }
     let normalized = normalize_empty_lines(current_portion);
-    let body = tail_with_ellipsis_discord_units(&normalized, body_budget);
-    if super::super::footer_retirement::retired() {
-        body
-    } else {
-        format!("{}{}", body, footer)
-    }
+    tail_with_ellipsis_discord_units(&normalized, body_budget)
 }
 
 pub(in crate::services::discord) fn plan_streaming_rollover(

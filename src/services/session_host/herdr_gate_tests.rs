@@ -2,6 +2,9 @@
 //! in-process server that, like Herdr, answers the one request a connection carries and closes.
 #![cfg(unix)]
 
+#[path = "herdr_gate/notice_fence_tests.rs"]
+mod notice_fence_tests;
+
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
@@ -2462,10 +2465,6 @@ pub(crate) mod p11 {
             .env("HERDR_CONFIG_PATH", &config)
             .env("XDG_CONFIG_HOME", home.join("xdg"))
             .env_remove(crate::services::herdr_admission::ADMISSION_ENV)
-            .env(
-                crate::services::tui_o::cutover::test_override::CHILD_ENV,
-                "1",
-            )
             .env(
                 crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
                 format!("[[{channel},\"claude_tui\"]]"),

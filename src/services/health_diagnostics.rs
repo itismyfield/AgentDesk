@@ -113,12 +113,12 @@ pub async fn probe_server_up(pg_pool: Option<&PgPool>) -> bool {
         .is_ok()
 }
 
-/// The config audit, pipeline override and runtime-config rows in one read; no pool or a
-/// failed read gives every value `None`.
-pub(crate) async fn load_health_kv_meta(pg_pool: Option<&PgPool>) -> HealthKvMeta {
+/// The config audit, pipeline override and runtime-config rows in one read; no pool gives
+/// every value `None`, and a failed read gives `None` itself.
+pub(crate) async fn load_health_kv_meta(pg_pool: Option<&PgPool>) -> Option<HealthKvMeta> {
     match ProbedPool::wrap(pg_pool) {
         Some(pg_pool) => request_batch::load_health_kv_meta(pg_pool).await,
-        None => HealthKvMeta::default(),
+        None => Some(HealthKvMeta::default()),
     }
 }
 

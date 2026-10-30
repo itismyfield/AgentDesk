@@ -76,7 +76,7 @@ export default function EmojiPicker({
     };
   }, [open]);
 
-  const btnSize = size === "sm" ? "w-10 h-10 text-lg" : "w-14 h-10 text-xl";
+  const btnSize = size === "sm" ? "w-11 h-11 text-lg" : "w-14 h-11 text-xl";
   const pickerWidth = size === "sm" ? 300 : 336;
   const pickerHeight = size === "sm" ? 360 : 420;
   const handleEmojiSelect = (emoji: string) => {
@@ -109,12 +109,7 @@ export default function EmojiPicker({
         <div
           role="dialog"
           aria-label={dialogLabel || tr({ ko: "아이콘 선택", en: "Choose an icon" })}
-          className="absolute left-0 top-full z-[60] mt-1 overflow-hidden rounded-xl shadow-2xl"
-          style={{
-            background:
-              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-            border: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)",
-          }}
+          className="fixed left-1/2 top-1/2 z-[60] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface shadow-xl"
         >
           <Suspense
             fallback={(

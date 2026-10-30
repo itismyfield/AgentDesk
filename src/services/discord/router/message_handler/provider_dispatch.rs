@@ -11,7 +11,6 @@ use crate::services::discord::replay_policy::permit::EffectTarget;
 use crate::services::discord::router::intake_dispatch::replay_admission::ReplayStart;
 use crate::services::provider::{CancelToken, LegacyDispatchKind, ProviderKind};
 use crate::services::provider_teardown::TeardownClearance;
-use crate::services::remote::RemoteProfile;
 use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
 };
@@ -22,6 +21,8 @@ pub(super) mod replay_scope;
 
 pub(super) struct StreamingTurn<'a> {
     pub pool: Option<&'a sqlx::PgPool>,
+    /// The bot whose channel lease a Herdr turn takes to resolve an unplaced launch.
+    pub shared: Option<&'a Arc<crate::services::discord::SharedData>>,
     pub provider: &'a ProviderKind,
     pub prompt: &'a str,
     pub session_id: Option<&'a str>,
@@ -30,7 +31,6 @@ pub(super) struct StreamingTurn<'a> {
     pub allowed_tools: &'a [String],
     pub cancel: Arc<CancelToken>,
     pub codex_observation: Option<&'a InflightObs>,
-    pub remote_profile: Option<&'a RemoteProfile>,
     pub tmux_session_name: Option<&'a str>,
     /// Host-guard verdict for the turn's tmux teardowns, judged before spawn.
     pub teardown: Option<&'a TeardownClearance>,
@@ -54,11 +54,10 @@ pub(super) async fn observe_codex_turn(
     provider: &ProviderKind,
     channel: u64,
     tmux: Option<&str>,
-    remote: bool,
     host: &TurnHost,
     token: &Arc<CancelToken>,
 ) -> Option<InflightObs> {
-    if !matches!(provider, ProviderKind::Codex) || remote || !matches!(host, TurnHost::Tmux) {
+    if !matches!(provider, ProviderKind::Codex) || !matches!(host, TurnHost::Tmux) {
         return None;
     }
     crate::services::discord::codex_absence::observe_turn(channel, tmux?, token).await
@@ -243,12 +242,7 @@ pub(super) fn execute(
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
     let start = if start.receipt_id().is_some() {
-        let scope = replay_scope::selected(
-            turn.provider,
-            turn.channel_id,
-            turn.remote_profile.is_some(),
-            turn.tmux_session_name,
-        );
+        let scope = replay_scope::selected(turn.provider, turn.channel_id, turn.tmux_session_name);
         start
             .in_scope(scope.driver.as_str(), scope.runtime)
             .map_err(|error| format!("replay driver scope changed: {error:?}"))?
@@ -337,7 +331,6 @@ pub(super) fn execute(
                             turn.system_prompt,
                             Some(turn.allowed_tools),
                             Some(turn.cancel),
-                            turn.remote_profile,
                             turn.tmux_session_name,
                             turn.teardown,
                             Some(turn.channel_id),
@@ -362,7 +355,7 @@ pub(super) fn execute(
                 system_prompt: turn.system_prompt,
                 allowed_tools: Some(turn.allowed_tools),
                 cancel_token: Some(turn.cancel),
-                remote_profile: turn.remote_profile,
+                remote_profile: None,
                 tmux_session_name: turn.tmux_session_name,
                 teardown: turn.teardown,
                 report_channel_id: Some(turn.channel_id),
@@ -383,7 +376,6 @@ pub(super) fn execute(
             turn.system_prompt,
             Some(turn.allowed_tools),
             Some(turn.cancel),
-            turn.remote_profile,
             turn.tmux_session_name,
             Some(turn.channel_id),
             Some(turn.provider.clone()),
@@ -398,7 +390,6 @@ pub(super) fn execute(
             turn.system_prompt,
             Some(turn.allowed_tools),
             Some(turn.cancel),
-            turn.remote_profile,
             turn.tmux_session_name,
             Some(turn.channel_id),
             Some(turn.provider.clone()),
@@ -414,7 +405,6 @@ pub(super) fn execute(
             turn.system_prompt,
             Some(turn.allowed_tools),
             Some(turn.cancel),
-            turn.remote_profile,
             turn.tmux_session_name,
             Some(turn.channel_id),
             Some(turn.provider.clone()),
@@ -467,6 +457,7 @@ mod herdr {
     use crate::services::claude::herdr_turn::{self, AttachRequest, HerdrTurn, HerdrTurnPorts};
     use crate::services::claude_tui::hook_server::{HookEvent, subscribe_hook_events};
     use crate::services::codex::herdr_turn::{CodexHerdrPorts, CodexHerdrTurn};
+    use crate::services::discord::UnplacedLease;
     use crate::services::discord::recovery_engine::host_reconcile::{
         HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
         reconcile_hosted_session_pg,
@@ -495,6 +486,7 @@ mod herdr {
         let ports = BootPorts {
             pool,
             channel_id: turn.channel_id,
+            shared: turn.shared,
         };
         if *turn.provider == ProviderKind::Codex {
             let codex = CodexHerdrTurn {
@@ -558,6 +550,7 @@ mod herdr {
     pub(super) struct BootPorts<'a> {
         pub(super) pool: &'a PgPool,
         pub(super) channel_id: u64,
+        pub(super) shared: Option<&'a Arc<crate::services::discord::SharedData>>,
     }
 
     impl CodexHerdrPorts for BootPorts<'_> {
@@ -595,6 +588,10 @@ mod herdr {
         ) -> Result<(), String> {
             self.confirmed(owner, record, target)
         }
+
+        fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {
+            self.lease()
+        }
     }
 
     impl HerdrTurnPorts for BootPorts<'_> {
@@ -631,9 +628,22 @@ mod herdr {
         ) -> Result<(), String> {
             self.confirmed(owner, record, target)
         }
+
+        fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {
+            self.lease()
+        }
     }
 
     impl BootPorts<'_> {
+        /// Waits on the channel's transition lease as any transition claim does.
+        fn lease(&self) -> Result<UnplacedLease, String> {
+            let shared = self.shared.ok_or("no channel lease")?;
+            let channel = crate::services::discord::ChannelId::new(self.channel_id);
+            Handle::current()
+                .block_on(UnplacedLease::acquire(shared, channel))
+                .map_err(|_| "transition_busy".to_string())
+        }
+
         /// `Ok` only while the reconcile reads the Bound execution as a match.
         fn confirmed(
             &self,
@@ -714,7 +724,6 @@ fn stream_json_request(turn: &StreamingTurn<'_>) -> Result<ProviderTurnRequest, 
         turn.working_dir.into(),
         turn.session_id,
         turn.force_fresh,
-        turn.remote_profile.cloned(),
         Duration::from_secs(300),
         Some(Arc::clone(&turn.cancel)),
         Some(turn.channel_id),
@@ -793,6 +802,7 @@ pub(super) mod tests {
         let tools = vec!["Read".to_string()];
         let mut turn = StreamingTurn {
             pool: None,
+            shared: None,
             provider: &provider,
             prompt: "question",
             session_id: Some("conversation"),
@@ -801,7 +811,6 @@ pub(super) mod tests {
             allowed_tools: &tools,
             cancel: Arc::clone(&cancel),
             codex_observation: None,
-            remote_profile: None,
             tmux_session_name: None,
             teardown: None,
             host: &TurnHost::Tmux,
@@ -888,6 +897,7 @@ pub(super) mod tests {
             let (sender, _receiver) = std::sync::mpsc::channel();
             let turn = StreamingTurn {
                 pool: Some(&pool),
+                shared: None,
                 provider: &provider,
                 prompt: "question",
                 session_id: None,
@@ -896,7 +906,6 @@ pub(super) mod tests {
                 allowed_tools: &[],
                 cancel: Arc::new(CancelToken::new()),
                 codex_observation: None,
-                remote_profile: None,
                 tmux_session_name: Some("AgentDesk-claude-dash"),
                 teardown: None,
                 host: &host,

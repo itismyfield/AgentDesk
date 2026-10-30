@@ -97,6 +97,8 @@ mod recovery_paths;
 mod restart_mode;
 // Scheduled-delivery isolation mark and outcome settlement for inflight turns.
 mod scheduled_turn;
+// Execution receipts of every row-removing ending, and settlement of rows kept marked.
+mod receipt_settle;
 // #1074: session identity parsing SSoT (legacy + namespaced session_key forms).
 pub(crate) mod restart_report;
 mod role_map;
@@ -186,6 +188,7 @@ mod tui_prompt_relay;
 pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
+pub(crate) use tui_prompt_relay::input_notice_content;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
 pub(crate) mod replay_policy;
@@ -1079,7 +1082,9 @@ pub(crate) struct SharedData {
     readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger, // #4370
 }
 
-pub(crate) use session_transition::{SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy};
+pub(crate) use session_transition::{
+    SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy, UnplacedLease,
+};
 
 impl SharedData {
     pub(super) fn has_runtime_storage(&self) -> bool {

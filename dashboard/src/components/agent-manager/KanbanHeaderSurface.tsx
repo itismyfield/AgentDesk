@@ -1,7 +1,6 @@
 import { localeName } from "../../i18n";
 import {
   SurfaceActionButton,
-  SurfaceMetricPill,
   SurfaceNotice,
   SurfaceSection,
   SurfaceSegmentButton,
@@ -83,101 +82,43 @@ export default function KanbanHeaderSurface({ ctx }: KanbanHeaderSurfaceProps) {
   return (
     <>
       {!headerOpen && (
-        <div
-          data-testid="kanban-header-collapsed"
-          className="flex items-center gap-2 rounded-2xl border px-3 py-2 min-w-0"
-          style={{
-            borderColor: "color-mix(in srgb, var(--th-accent-info) 16%, var(--th-border) 84%)",
-            background: "color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-info) 4%)",
-          }}
-        >
-          <div className="-mx-1 flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto px-1">
-            {repoSources.length === 0 ? (
-              <span
-                className="rounded-full border border-dashed px-3 py-1 text-xs shrink-0"
-                style={{ color: "var(--th-text-muted)", borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)" }}
-              >
-                {tr("repo 없음", "No repo")}
-              </span>
-            ) : (
-              repoSources.map((source: any) => {
-                const active = selectedRepo === source.repo;
-                return (
-                  <button
-                    key={source.id}
-                    type="button"
-                    onClick={() => setSelectedRepo(source.repo)}
-                    className="max-w-[160px] truncate rounded-full border px-2.5 py-1 text-xs shrink-0"
-                    style={{
-                      borderColor: active
-                        ? "color-mix(in srgb, var(--th-accent-info) 32%, var(--th-border) 68%)"
-                        : "color-mix(in srgb, var(--th-border) 72%, transparent)",
-                      background: active
-                        ? "color-mix(in srgb, var(--th-badge-sky-bg) 72%, var(--th-card-bg) 28%)"
-                        : "transparent",
-                      color: active ? "var(--th-accent-info)" : "var(--th-text-primary)",
-                    }}
-                    title={source.repo}
-                  >
-                    {source.repo.split("/")[1] ?? source.repo}
-                  </button>
-                );
-              })
-            )}
+        <section data-testid="kanban-header-collapsed" className="min-w-0 space-y-4 border-b border-th-border-subtle pb-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight text-th-text-heading">{tr("칸반", "Kanban")}</h1>
+              <p className="mt-1 text-xs text-th-text-muted">{initialLoading && openCount === 0 ? tr("작업 불러오는 중…", "Loading work…") : tr(`현재 작업 ${openCount}건`, `${openCount} open tasks`)}</p>
+            </div>
+            <button type="button" data-testid="kanban-header-expand" onClick={() => setHeaderOpen(true)} className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-md border border-th-border-subtle bg-th-bg-surface px-3 text-xs font-medium text-th-text-primary hover:bg-surface-hover" aria-label={tr("칸반 헤더 펼치기", "Expand kanban header")}>
+              {tr("검색·필터", "Search & filters")} <span aria-hidden="true">⌄</span>
+            </button>
           </div>
-          <span className="text-[11px] shrink-0" style={{ color: "var(--th-text-muted)" }}>
-            {tr(`${openCount}건`, `${openCount}`)}
-          </span>
-          <button
-            type="button"
-            data-testid="kanban-header-expand"
-            onClick={() => setHeaderOpen(true)}
-            className="rounded-lg border px-2 py-1 text-xs shrink-0"
-            style={{
-              borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-              color: "var(--th-text-secondary)",
-            }}
-            aria-label={tr("칸반 헤더 펼치기", "Expand kanban header")}
-          >
-            ▼
-          </button>
-        </div>
+          <div className="flex min-w-0 flex-wrap gap-1" aria-label={tr("저장소", "Repositories")}>
+            {repoSources.length === 0 ? <span className="py-3 text-xs text-th-text-muted">{initialLoading ? tr("저장소 확인 중…", "Loading repositories…") : tr("등록된 저장소 없음", "No repositories")}</span> : repoSources.map((source: any) => (
+              <button key={source.id} type="button" onClick={() => setSelectedRepo(source.repo)} aria-pressed={selectedRepo === source.repo} className={`min-h-11 min-w-0 max-w-full border-b-2 px-3 text-sm font-medium [overflow-wrap:anywhere] ${selectedRepo === source.repo ? "border-th-text-primary text-th-text-primary" : "border-transparent text-th-text-muted hover:text-th-text-primary"}`} title={source.repo}>
+                {source.repo.split("/")[1] ?? source.repo}
+              </button>
+            ))}
+          </div>
+        </section>
       )}
       {headerOpen && (
       <SurfaceSection
-        eyebrow={tr("워크 오케스트레이션", "Work orchestration")}
         title={tr("칸반", "Kanban")}
         description={tr(
-          "Repo intake, backlog triage, dispatch, review 흐름을 한 표면에서 다룹니다.",
-          "Handle repo intake, backlog triage, dispatch, and review flow from one surface.",
+          "저장소별 작업을 분류하고 진행 상태를 확인합니다.",
+          "Triage repository work and follow its progress.",
         )}
         badge={tr(`${openCount}건 진행`, `${openCount} active`)}
-        className="rounded-[30px] p-4 sm:p-5"
+        className="rounded-lg p-4 sm:p-5"
         style={{
-          borderColor: "color-mix(in srgb, var(--th-accent-info) 16%, var(--th-border) 84%)",
-          background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-info) 4%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+          borderColor: "var(--th-border-subtle)",
+          background: "var(--th-bg-surface)",
         }}
       >
-        <div className="mt-4 grid gap-2 sm:grid-cols-3">
-          <SurfaceMetricPill
-            tone="info"
-            label={tr("가시 범위", "Visible scope")}
-            value={initialLoading ? "…" : `${totalVisible}${tr("건", " items")}`}
-            className="w-full"
-          />
-          <SurfaceMetricPill
-            tone="accent"
-            label={tr("Repo 초점", "Repo focus")}
-            value={selectedRepoLabel}
-            className="w-full"
-          />
-          <SurfaceMetricPill
-            tone="neutral"
-            label={tr("담당 범위", "Agent scope")}
-            value={selectedAgentScopeLabel}
-            className="w-full"
-          />
+        <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-th-text-muted">
+          <span>{tr("표시", "Visible")} <strong className="ml-1 font-medium text-th-text-primary">{initialLoading ? "…" : `${totalVisible}${tr("건", " items")}`}</strong></span>
+          <span>{tr("저장소", "Repository")} <strong className="ml-1 font-medium text-th-text-primary">{selectedRepoLabel}</strong></span>
+          <span>{tr("담당", "Agent")} <strong className="ml-1 font-medium text-th-text-primary">{selectedAgentScopeLabel}</strong></span>
         </div>
 
         {/* #1253: Controls toolbar — search + agent filter chips inline,
@@ -192,34 +133,17 @@ export default function KanbanHeaderSurface({ ctx }: KanbanHeaderSurfaceProps) {
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder={tr("제목 / 설명 / 담당자 검색", "Search title / description / assignee")}
-            className="min-w-0 rounded-xl border px-3 py-2 text-sm lg:w-[260px] lg:flex-none"
+            className="h-11 min-w-0 rounded-md border px-3 py-2 text-sm lg:w-[260px] lg:flex-none"
             style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
           />
 
-          <div
-            data-testid="kanban-toolbar-agent-chips"
-            className="-mx-1 flex min-w-0 flex-1 items-center gap-2 overflow-x-auto px-1 pb-1 lg:pb-0"
-          >
-            <SurfaceSegmentButton
-              onClick={() => setAgentFilter("all")}
-              active={agentFilter === "all"}
-              tone="accent"
-              className="shrink-0"
-            >
-              {tr("전체 에이전트", "All agents")}
-            </SurfaceSegmentButton>
-            {agents.map((agent: any) => (
-              <SurfaceSegmentButton
-                key={agent.id}
-                onClick={() => setAgentFilter(agent.id)}
-                active={agentFilter === agent.id}
-                tone="accent"
-                className="max-w-[180px] shrink-0 truncate"
-              >
-                {getAgentLabel(agent.id)}
-              </SurfaceSegmentButton>
-            ))}
-          </div>
+          <label data-testid="kanban-toolbar-agent-chips" className="flex min-w-0 items-center gap-2 text-xs text-th-text-muted lg:max-w-64">
+            <span className="shrink-0">{tr("담당", "Agent")}</span>
+            <select value={agentFilter} onChange={event => setAgentFilter(event.target.value)} aria-label={tr("담당 에이전트", "Assigned agent")} className="h-11 min-w-0 w-full rounded-md border border-th-border-subtle bg-th-bg-surface px-3 text-sm text-th-text-primary">
+              <option value="all">{tr("전체 에이전트", "All agents")}</option>
+              {agents.map((agent: any) => <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>)}
+            </select>
+          </label>
 
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             {stalledCards.length > 0 && (
@@ -270,7 +194,7 @@ export default function KanbanHeaderSurface({ ctx }: KanbanHeaderSurfaceProps) {
               {advancedFiltersOpen && (
                 <div
                   data-testid="kanban-toolbar-advanced-menu"
-                  className="absolute right-0 top-full z-30 mt-2 w-72 space-y-2 rounded-2xl border p-3 shadow-xl"
+                  className="absolute right-0 top-full z-30 mt-2 w-72 max-w-[calc(100vw-3rem)] space-y-3 rounded-lg border p-4 shadow-lg"
                   style={SURFACE_PANEL_STYLE}
                   onMouseDown={(event) => event.stopPropagation()}
                 >
@@ -281,7 +205,7 @@ export default function KanbanHeaderSurface({ ctx }: KanbanHeaderSurfaceProps) {
                     <select
                       value={deptFilter}
                       onChange={(event) => setDeptFilter(event.target.value)}
-                      className="w-full rounded-xl border px-3 py-2 text-sm"
+                      className="h-11 w-full rounded-md border px-3 py-2 text-sm"
                       style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                     >
                       <option value="all">{tr("전체 부서", "All departments")}</option>
@@ -297,7 +221,7 @@ export default function KanbanHeaderSurface({ ctx }: KanbanHeaderSurfaceProps) {
                     <select
                       value={cardTypeFilter}
                       onChange={(event) => setCardTypeFilter(event.target.value as KanbanCardTypeFilter)}
-                      className="w-full rounded-xl border px-3 py-2 text-sm"
+                      className="h-11 w-full rounded-md border px-3 py-2 text-sm"
                       style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                     >
                       <option value="all">{tr("전체 카드", "All cards")}</option>
@@ -312,7 +236,7 @@ export default function KanbanHeaderSurface({ ctx }: KanbanHeaderSurfaceProps) {
                     <select
                       value={signalStatusFilter}
                       onChange={(event) => setSignalStatusFilter(event.target.value as KanbanSignalStatusFilter)}
-                      className="w-full rounded-xl border px-3 py-2 text-sm"
+                      className="h-11 w-full rounded-md border px-3 py-2 text-sm"
                       style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                     >
                       <option value="all">{tr("대시보드 신호 전체", "All dashboard signals")}</option>

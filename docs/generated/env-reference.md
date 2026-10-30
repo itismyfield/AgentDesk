@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 138
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 139
 - Platform and third-party variables: 30
 
 ## AgentDesk variables
@@ -26,6 +26,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_BUSY_INJECT_DISCORD_CHANNELS` | `src/services/discord/router/intake_gate/busy_inject.rs` | `ADK_BUSY_INJECT_DISCORD_CHANNELS` opens busy-turn injection of admitted Discord text, read once per process: `*` or channel ids split by commas or spaces, thr… |
 | `ADK_BUSY_INJECT_STASH_CHANNELS` | `src/services/claude_tui/busy_inject.rs` | Channel ids whose panes may take the stash path, comma-separated and read once; unset is none. |
 | `ADK_CAMPAIGN_PHASE_NONCE` | `src/services/campaign_execution/verification_runner.rs` | Set on every phase child so a later observation can match the exact process, not just its PID. |
+| `ADK_CARRIED_CLOSE_MUTANT` | `src/services/tui_o/turn_mode.rs` | Test mutant switch of the carried-turn close (`ADK_CARRIED_CLOSE_MUTANT`); constant false outside tests. |
 | `ADK_CLEAR_END_MUTANT` | `src/services/tui_o/store/clear_end.rs` | Test-only switch arming one named mutant of the clear-end contract. |
 | `ADK_CODEX_END_MUTANT` | `src/services/codex_tui/execution_end/mod.rs` | Test-only fault injection; release builds never consult the environment. |
 | `ADK_CODEX_OBSERVATION_MUTANT` | `src/services/session_host/herdr_registry.rs`, `src/services/tui_prompt_dedupe/binding_context/inventory.rs`, `src/services/tui_prompt_dedupe/binding_events/codex/observation.rs` | Reads whole registered endpoints. |
@@ -65,7 +66,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_API_URL` | `src/cli/client.rs`, `src/cli/monitoring.rs` | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
 | `AGENTDESK_BA_MUTANT` | `src/services/tui_o/writer/actor/codex_age.rs`, `src/services/tui_o/writer/actor/codex_retention.rs` |  |
 | `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs` | Hook capture reads this value without consulting mutable markers. |
-| `AGENTDESK_BO_MUTANT` | `src/services/discord/health/o_transition/automatic.rs`, `src/services/tui_o/writer/deliver.rs` |  |
+| `AGENTDESK_BO_MUTANT` | `src/services/discord/health/o_transition/automatic.rs`, `src/services/discord/tui_prompt_relay/claude_idle_runtime.rs`, `src/services/tui_o/writer/deliver.rs` | Attribute panes using existing durable, watcher, configured-name and runtime views. |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs` |  |
 | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` | `src/services/discord/catch_up.rs` | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables — used by tests and by operators who want the old unthrottled behaviour). |
 | `AGENTDESK_CLAUDE_LIVE_BRIDGE_GUARD` | `src/services/discord/live_bridge.rs` | `0` lets watcher respawn take over a live Claude original again. |

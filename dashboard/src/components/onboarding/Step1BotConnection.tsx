@@ -85,10 +85,10 @@ export function Step1BotConnection({
   return (
     <div className={stepBox} style={{ borderColor: borderLight }}>
       <div>
-        <h2 ref={stepHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
+        <h2 ref={stepHeadingRef} tabIndex={-1} className="text-base font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
           {tr("Discord 봇 연결", "Connect Discord Bots")}
         </h2>
-        <p className="text-sm mt-1" style={{ color: "var(--th-text-muted)" }}>
+        <p className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
           {tr(
             "AgentDesk는 Discord 봇을 통해 AI 에이전트를 운영합니다. 각 봇의 역할이 다르므로 최소 2개(실행 봇 + 통신 봇)가 필요합니다.",
             "AgentDesk runs AI agents through Discord bots. You need at least 2 bots (Command + Communication).",
@@ -97,10 +97,10 @@ export function Step1BotConnection({
       </div>
 
       <div
-        className="rounded-xl p-4 text-sm space-y-2"
+        className="rounded-lg p-4 text-sm space-y-2"
         style={{
-          background: "color-mix(in srgb, var(--th-accent-primary-soft) 72%, transparent)",
-          border: "1px solid color-mix(in srgb, var(--th-accent-primary) 24%, var(--th-border) 76%)",
+          background: "var(--th-overlay-subtle)",
+          border: "1px solid var(--th-border-subtle)",
         }}
       >
         <div className="font-medium" style={{ color: "var(--th-text-primary)" }}>
@@ -108,7 +108,7 @@ export function Step1BotConnection({
         </div>
         <ol className="list-decimal list-inside space-y-1" style={{ color: "var(--th-text-secondary)" }}>
           <li>
-            <a href="https://discord.com/developers/applications" target="_blank" rel="noopener noreferrer" className="text-emerald-300 hover:text-emerald-200 underline">
+            <a href="https://discord.com/developers/applications" target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center text-th-text-primary underline underline-offset-4">
               Discord Developer Portal
             </a>
             {tr("에서 New Application 클릭", " -> Click New Application")}
@@ -142,12 +142,12 @@ export function Step1BotConnection({
         </div>
 
         {commandBots.map((bot, i) => (
-          <div key={i} className="rounded-xl p-4 border space-y-2" style={{ borderColor: borderLight }}>
+          <div key={i} className="rounded-lg p-4 border space-y-2" style={{ borderColor: borderLight }}>
             <div className="flex items-center gap-3">
               <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                 {tr(`실행 봇 ${i + 1}`, `Command Bot ${i + 1}`)}
               </span>
-              <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+              <div className="flex min-w-0 flex-wrap gap-1 rounded-md border" style={{ borderColor: "var(--th-border-subtle)" }}>
                 {COMMAND_PROVIDERS.map((p) => (
                   <button type="button"
                     key={p}
@@ -158,7 +158,7 @@ export function Step1BotConnection({
                         return copy;
                       });
                     }}
-                    className="px-3 py-1 text-xs transition-colors"
+                    className="min-h-11 min-w-11 px-3 py-1 text-xs transition-colors"
                     style={{
                       backgroundColor: bot.provider === p ? "color-mix(in srgb, var(--th-accent-primary-soft) 84%, transparent)" : "transparent",
                       color: bot.provider === p ? "var(--th-text-primary)" : "var(--th-text-muted)",
@@ -171,7 +171,7 @@ export function Step1BotConnection({
               {commandBots.length > 1 && (
                 <button type="button"
                   onClick={() => setCommandBots((prev) => prev.filter((_, j) => j !== i))}
-                  className="ml-auto text-xs text-red-400 hover:text-red-300"
+                  className="ml-auto min-h-11 min-w-11 rounded-md px-2 text-xs text-[var(--th-accent-danger)]"
                 >
                   {tr("제거", "Remove")}
                 </button>
@@ -200,7 +200,7 @@ export function Step1BotConnection({
                   href={makeInviteUrl(bot.botInfo.bot_id!, permissions.command)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs px-2 py-0.5 rounded-md border transition-colors hover:opacity-100"
+                  className="min-h-11 min-w-11 text-xs px-2 py-2 rounded-md border transition-colors hover:opacity-100"
                   style={{
                     borderColor: "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)",
                     background: "color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent)",
@@ -228,7 +228,7 @@ export function Step1BotConnection({
               setCommandBots((prev) => [...prev, { provider: other, token: "", botInfo: null }]);
             }}
             className={btnSmall}
-            style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-secondary)" }}
+            style={{ borderColor: "var(--th-border-subtle)", color: "var(--th-text-secondary)" }}
           >
             + {tr("두 번째 실행 봇 추가 (듀얼 프로바이더)", "Add second command bot (dual provider)")}
           </button>
@@ -265,7 +265,7 @@ export function Step1BotConnection({
               href={makeInviteUrl(announceBotInfo.bot_id!, permissions.announce)}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-xs px-2 py-0.5 rounded-md border transition-colors hover:opacity-100"
+              className="min-h-11 min-w-11 text-xs px-2 py-2 rounded-md border transition-colors hover:opacity-100"
               style={{
                 borderColor: "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)",
                 background: "color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent)",
@@ -320,7 +320,7 @@ export function Step1BotConnection({
               href={makeInviteUrl(notifyBotInfo.bot_id!, permissions.notify)}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-xs px-2 py-0.5 rounded-md border transition-colors hover:opacity-100"
+              className="min-h-11 min-w-11 text-xs px-2 py-2 rounded-md border transition-colors hover:opacity-100"
               style={{
                 borderColor: "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)",
                 background: "color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent)",
@@ -355,13 +355,13 @@ export function Step1BotConnection({
             {tr("다음", "Next")}
           </button>
         ) : (
-          <button type="button" onClick={() => goToStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+          <button type="button" onClick={() => goToStep(2)} className={btnSecondary} style={{ borderColor: "var(--th-border-subtle)" }}>
             {tr("나중에 입력", "Skip for now")}
           </button>
         )}
       </div>
       {!commandBotsReady || !announceReady ? (
-        <p className="text-xs leading-5" style={{ color: "#fde68a" }}>
+        <p className="text-xs leading-5" style={{ color: "var(--th-badge-amber-text)" }}>
           {tr(
             "이 단계 검증을 건너뛰면 Step 5에서 완료가 막힙니다. 최소한 실행 봇과 통신 봇 검증, 서버 초대까지 끝내는 편이 안전합니다.",
             "Skipping validation here will block completion in Step 5. It is safer to finish command/communication bot validation and server invites first.",

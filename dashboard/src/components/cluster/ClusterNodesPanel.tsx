@@ -37,18 +37,18 @@ export default function ClusterNodesPanel({ isKo }: { isKo: boolean }) {
     void queryClient.invalidateQueries({ queryKey: ["cluster-node-sessions"] });
   } });
 
-  return <section className="card mb-5 min-w-0" aria-label={tr("실행 장비", "Execution devices")} data-testid="cluster-nodes-panel">
-    <div className="card-head flex flex-wrap items-center justify-between gap-3">
-      <div><h2 className="card-title">{tr("실행 장비", "Execution devices")}</h2>
+  return <section className="min-w-0 rounded-lg border border-th-border-subtle bg-th-bg-surface [overflow-wrap:anywhere]" aria-label={tr("실행 장비", "Execution devices")} data-testid="cluster-nodes-panel">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-th-border-subtle px-4 py-4 sm:px-5">
+      <div><h2 className="text-sm font-semibold text-th-text-primary">{tr("실행 장비", "Execution devices")}</h2>
         <p className="mt-1 text-xs text-th-text-muted">{tr("장비 연결과 실행 준비 상태를 따로 확인합니다. 5초마다 갱신합니다.", "Connectivity and execution readiness are separate. Refreshes every 5 seconds.")}</p></div>
       <FreshnessIndicator timestamp={nodes.dataUpdatedAt || null} staleAfterSeconds={15} criticalAfterSeconds={30} compact />
     </div>
-    <div className="card-body space-y-3 min-w-0">
+    <div className="min-w-0 space-y-4 p-4 sm:p-5">
       {nodes.isPending && <p>{tr("노드 불러오는 중…", "Loading nodes…")}</p>}
-      {nodes.isError && <p role="alert" className="text-amber-400">{tr("노드 갱신 실패. 마지막 정보를 표시하며 제어를 잠시 중단합니다.", "Node refresh failed. Showing the last snapshot; controls are disabled.")}</p>}
+      {nodes.isError && <p role="alert" className="text-[var(--th-badge-amber-text)]">{tr("노드 갱신 실패. 마지막 정보를 표시하며 제어를 잠시 중단합니다.", "Node refresh failed. Showing the last snapshot; controls are disabled.")}</p>}
       {nodes.data && !nodes.data.cluster.enabled && <p className="text-th-text-muted">{tr("이 컴퓨터 · 단독 운영", "This computer · Standalone")}</p>}
       {nodes.data?.cluster.enabled && nodes.data.nodes.length === 0 && <p>{tr("등록된 노드가 없습니다.", "No registered nodes.")}</p>}
-      <div className="grid gap-3 md:grid-cols-2">
+      <div className="grid min-w-0 gap-4 xl:grid-cols-2">
         {nodes.data?.cluster.enabled && nodes.data.nodes.map(node => {
           const probe = node.capabilities.execution_readiness;
           const reports = Object.entries(node.execution_readiness?.providers ?? {});
@@ -57,45 +57,45 @@ export default function ClusterNodesPanel({ isKo }: { isKo: boolean }) {
           const capacityAvailable = slots === undefined || (node.execution_occupied ?? slots) < slots;
           const controlReason = nodeControlUnavailable(node, nodes.data.cluster.local_instance_id, stale);
           const owned = sessions.data?.sessions.filter(s => s.instance_id === node.instance_id) ?? [];
-          return <article key={node.instance_id} className="rounded-lg border border-th-border p-3 min-w-0 space-y-2">
+          return <article key={node.instance_id} className="min-w-0 space-y-2 border-b border-th-border-subtle pb-4 last:border-b-0 xl:border-b-0 xl:pb-0 xl:even:border-l xl:even:border-th-border-subtle xl:even:pl-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="font-semibold break-all">{node.hostname || node.instance_id}</h3>
+              <h3 className="text-sm font-semibold [overflow-wrap:anywhere]">{node.hostname || node.instance_id}</h3>
               <StatusBadge tone={!stale && node.status === "online" ? "healthy" : "warning"}>{stale ? "STALE" : node.status ?? "unknown"}</StatusBadge>
             </div>
             {node.hostname && node.hostname !== node.instance_id && <p className="text-xs text-th-text-muted break-all">{node.instance_id}</p>}
             <p className="text-xs text-th-text-muted">{tr("현재 역할", "Current role")}: {nodeRoleLabel(node.effective_role, tr)} · {tr("기능 모드", "Feature mode")}: {runtimeModeLabel(probe?.runtime_profile, tr)}</p>
             <p className="text-xs text-th-text-muted">{probe ? `${nodePlatformLabel(probe.os, tr)} / ${probe.arch}` : tr("실행 정보 대기", "Awaiting execution evidence")}</p>
             <p className="text-xs">{tr("지원 backend", "Available backends")}: {probe?.backends.join(", ") || "—"}</p>
-            {reports.length === 0 && <p className="text-xs text-amber-400">{tr("Provider 준비 상태 미확인", "Provider readiness unknown")}</p>}
+            {reports.length === 0 && <p className="text-xs text-[var(--th-badge-amber-text)]">{tr("Provider 준비 상태 미확인", "Provider readiness unknown")}</p>}
             {reports.map(([provider, report]) => <div key={provider} className="text-xs flex flex-wrap gap-2 items-center">
               <strong>{provider}</strong><StatusBadge tone={report.eligible && !expired && capacityAvailable ? "healthy" : "warning"}>{report.eligible && !expired ? capacityAvailable ? tr("신규 실행 가능", "Ready for new work") : tr("실행 용량 대기", "Waiting for capacity") : tr("실행 보류", "Not ready")}</StatusBadge>
               <span>{(expired ? ["execution_evidence_stale"] : report.reasons).map(reason => reasons[reason]?.[isKo ? 0 : 1] ?? reason).join(" · ")}</span>
             </div>)}
             <p className="text-xs text-th-text-muted">{tr("계정의 원격 인증·quota는 미검증입니다.", "Remote account authentication and quota are unverified.")}</p>
             <p className="text-xs">{tr("중앙 제어", "Central control")}: {node.instance_id === nodes.data.cluster.local_instance_id ? tr("현재 노드", "Local node") : !controlReason ? tr("인증·노드 식별 확인", "Authentication and node identity verified") : node.forwarding_diagnostics?.configured ? tr("전달 연결 확인 필요", "Forwarding connection requires verification") : tr("전달 설정 필요", "Forwarding configuration required")}</p>
-            {node.forwarding_diagnostics?.configured && controlReason === "unreachable" && <p className="text-xs text-amber-400">{node.forwarding_diagnostics.reachability_status}</p>}
+            {node.forwarding_diagnostics?.configured && controlReason === "unreachable" && <p className="text-xs text-[var(--th-badge-amber-text)]">{node.forwarding_diagnostics.reachability_status}</p>}
             <p className="text-xs text-th-text-muted">{tr("전달 처리 중 dispatch", "Dispatch deliveries in progress")}: {node.active_dispatch_count ?? "—"}</p>
             <p className="text-xs">{tr("실행 중", "Executing")}: {node.execution_active ?? "—"} · {tr("예약 포함 점유 / 용량", "Occupied including reservations / capacity")}: {node.execution_occupied ?? "—"} / {node.capabilities.execution_capacity?.slots ?? "—"}</p>
-            {sessions.isError && <p className="text-xs text-amber-400">{tr("세션 소유권 갱신 실패", "Session ownership refresh failed")}</p>}
+            {sessions.isError && <p className="text-xs text-[var(--th-badge-amber-text)]">{tr("세션 소유권 갱신 실패", "Session ownership refresh failed")}</p>}
             {owned.slice(0, 20).map(session => <div key={session.id} className="border-t border-th-border pt-2 space-y-2">
               <p className="text-xs break-all">{session.name || session.session_key} · {session.provider} · {session.status}</p>
               <div className="flex flex-wrap gap-2">
-                <button className="btn sm" type="button" disabled={Boolean(controlReason) || sessions.isError} onClick={() => setSelected(session)}>{tr("출력 보기", "View output")}</button>
-                <button className="btn sm" type="button" disabled={Boolean(controlReason) || sessions.isError || stop.isPending} onClick={() => setConfirmStop(session.session_key)}>{tr("실행 중지", "Stop execution")}</button>
+                <button className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md border border-th-border px-3 py-2 text-xs text-th-text-secondary hover:bg-surface-subtle disabled:opacity-50" type="button" disabled={Boolean(controlReason) || sessions.isError} onClick={() => setSelected(session)}>{tr("출력 보기", "View output")}</button>
+                <button className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md border border-th-border px-3 py-2 text-xs text-th-text-secondary hover:bg-surface-subtle disabled:opacity-50" type="button" disabled={Boolean(controlReason) || sessions.isError || stop.isPending} onClick={() => setConfirmStop(session.session_key)}>{tr("실행 중지", "Stop execution")}</button>
                 {confirmStop === session.session_key && <><span className="text-xs self-center">{tr("이 세션의 실행을 중지합니다.", "Stop this session's execution.")}</span>
-                  <button className="btn sm" type="button" disabled={Boolean(controlReason) || sessions.isError || stop.isPending} onClick={() => stop.mutate(session.session_key)}>{tr("중지 확인", "Confirm stop")}</button>
-                  <button className="btn sm" type="button" onClick={() => setConfirmStop(null)}>{tr("닫기", "Dismiss")}</button></>}
+                  <button className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md border border-th-border px-3 py-2 text-xs text-th-text-secondary hover:bg-surface-subtle disabled:opacity-50" type="button" disabled={Boolean(controlReason) || sessions.isError || stop.isPending} onClick={() => stop.mutate(session.session_key)}>{tr("중지 확인", "Confirm stop")}</button>
+                  <button className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md border border-th-border px-3 py-2 text-xs text-th-text-secondary hover:bg-surface-subtle disabled:opacity-50" type="button" onClick={() => setConfirmStop(null)}>{tr("닫기", "Dismiss")}</button></>}
               </div>
-              {controlReason && <p className="text-xs text-amber-400">{controlReason === "stale" ? tr("최신 노드 상태 확인 후 제어할 수 있습니다.", "Controls require a fresh node snapshot.") : controlReason === "offline" ? tr("오프라인 노드입니다.", "Node is offline.") : controlReason === "unreachable" ? tr("전달 경로의 인증과 대상 노드 확인이 필요합니다.", "Forwarding authentication and target identity must be verified.") : tr("신뢰할 전달 주소를 먼저 설정해야 합니다.", "Configure a trusted forwarding origin first.")}</p>}
+              {controlReason && <p className="text-xs text-[var(--th-badge-amber-text)]">{controlReason === "stale" ? tr("최신 노드 상태 확인 후 제어할 수 있습니다.", "Controls require a fresh node snapshot.") : controlReason === "offline" ? tr("오프라인 노드입니다.", "Node is offline.") : controlReason === "unreachable" ? tr("전달 경로의 인증과 대상 노드 확인이 필요합니다.", "Forwarding authentication and target identity must be verified.") : tr("신뢰할 전달 주소를 먼저 설정해야 합니다.", "Configure a trusted forwarding origin first.")}</p>}
             </div>)}
           </article>;
         })}
       </div>
-      {stop.isError && <p role="alert" className="text-amber-400">{stop.error.message}</p>}
-      {selected && <div className="rounded-lg border border-th-border p-3 min-w-0 space-y-2" aria-label={tr("세션 출력", "Session output")}>
-        <div className="flex flex-wrap items-center justify-between gap-2"><strong className="break-all">{selected.name || selected.session_key}</strong><button className="btn sm" type="button" onClick={() => setSelected(null)}>{tr("출력 닫기", "Close output")}</button></div>
+      {stop.isError && <p role="alert" className="text-[var(--th-badge-amber-text)]">{stop.error.message}</p>}
+      {selected && <div className="min-w-0 space-y-3 rounded-md border border-th-border-subtle bg-th-input-bg p-4" aria-label={tr("세션 출력", "Session output")}>
+        <div className="flex flex-wrap items-center justify-between gap-2"><strong className="break-all">{selected.name || selected.session_key}</strong><button className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md border border-th-border px-3 py-2 text-xs text-th-text-secondary hover:bg-surface-subtle disabled:opacity-50" type="button" onClick={() => setSelected(null)}>{tr("출력 닫기", "Close output")}</button></div>
         {!canControlSelected && <p role="status">{tr("소유 노드 상태를 다시 확인해야 합니다.", "Owner node status must be refreshed.")}</p>}
-        {output.isError && <p role="alert" className="text-amber-400">{output.error.message}</p>}
+        {output.isError && <p role="alert" className="text-[var(--th-badge-amber-text)]">{output.error.message}</p>}
         {output.isFetching && !output.data && <p>{tr("출력 불러오는 중…", "Loading output…")}</p>}
         {output.data && <><p className="text-xs text-th-text-muted">{output.data.backend} · {output.data.output_format} · {new Date(output.data.captured_at_ms).toLocaleTimeString()}</p>
           {!output.data.available && <p>{output.data.unavailable_reason || tr("출력에 연결할 수 없습니다.", "Output is unavailable.")}</p>}

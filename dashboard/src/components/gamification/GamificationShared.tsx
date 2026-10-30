@@ -153,14 +153,14 @@ export function StreakCounter({
         borderRadius: 20,
         border: "1px solid var(--th-border-subtle, color-mix(in srgb, var(--line) 70%, transparent))",
         background:
-          "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 94%, transparent) 100%)",
+          "var(--th-bg-surface)",
         ...style,
       }}
     >
       <div className="flex items-center justify-between gap-3 px-4 py-4">
         <div className="flex min-w-0 items-center gap-3">
           <div
-            className="flex h-11 w-11 items-center justify-center rounded-2xl border"
+            className="flex h-11 w-11 items-center justify-center rounded-lg border"
             style={{
               borderColor: "color-mix(in srgb, var(--th-border-subtle) 72%, transparent)",
               background: "color-mix(in srgb, var(--th-bg-surface) 88%, transparent)",
@@ -238,7 +238,7 @@ export function DailyMissionList({
     <div className={className} style={style}>
       {missions.length === 0 ? (
         <div
-          className="rounded-2xl border px-4 py-6 text-sm"
+          className="rounded-lg border px-4 py-6 text-sm"
           style={{
             borderColor: "var(--th-border-subtle, color-mix(in srgb, var(--line) 70%, transparent))",
             color: "var(--th-text-muted, var(--fg-muted))",
@@ -257,7 +257,7 @@ export function DailyMissionList({
                 data-testid={
                   itemTestIdPrefix ? `${itemTestIdPrefix}-${mission.id}` : undefined
                 }
-                className="rounded-2xl border px-3 py-3"
+                className="rounded-lg border px-3 py-3"
                 style={{
                   borderColor: "var(--th-border-subtle, color-mix(in srgb, var(--line) 70%, transparent))",
                   background:

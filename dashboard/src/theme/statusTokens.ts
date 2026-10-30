@@ -4,46 +4,37 @@ export interface StatusTone {
   text: string;
 }
 
-/**
- * Semantic system-health tones. Used by generic surfaces (StatusBadge,
- * HealthDot, FreshnessIndicator) so the dashboard speaks one visual language
- * for "healthy / warning / critical / idle / info / unknown" regardless of
- * which domain the value comes from (WS health, agent status, queue health…).
- *
- * Color values are kept literal here on purpose so consumers can `style={{}}`
- * inline without depending on the global theme cascade. If the theme grows
- * `--th-status-*` CSS custom properties later, switch these to `var()` calls.
- */
+// Labels follow the active theme; fixed accents remain usable for alpha borders and dots.
 export const SYSTEM_HEALTH_TONES = {
   healthy: {
     accent: "#22c55e",
-    bg: "rgba(34,197,94,0.16)",
-    text: "#4ade80",
+    bg: "var(--th-badge-emerald-bg)",
+    text: "var(--th-badge-emerald-text)",
   },
   warning: {
     accent: "#f59e0b",
-    bg: "rgba(245,158,11,0.18)",
-    text: "#fbbf24",
+    bg: "var(--th-badge-amber-bg)",
+    text: "var(--th-badge-amber-text)",
   },
   critical: {
     accent: "#ef4444",
-    bg: "rgba(239,68,68,0.18)",
-    text: "#f87171",
+    bg: "color-mix(in oklch, var(--err) 14%, var(--th-bg-surface) 86%)",
+    text: "color-mix(in oklch, var(--err) 70%, var(--th-text-primary) 30%)",
   },
   idle: {
     accent: "#64748b",
-    bg: "rgba(100,116,139,0.18)",
-    text: "#94a3b8",
+    bg: "var(--th-overlay-medium)",
+    text: "var(--th-text-secondary)",
   },
   info: {
     accent: "#0ea5e9",
-    bg: "rgba(14,165,233,0.18)",
-    text: "#38bdf8",
+    bg: "var(--th-badge-sky-bg)",
+    text: "var(--th-badge-sky-text)",
   },
   unknown: {
     accent: "#6b7280",
-    bg: "rgba(107,114,128,0.18)",
-    text: "#9ca3af",
+    bg: "var(--th-overlay-medium)",
+    text: "var(--th-text-secondary)",
   },
 } satisfies Record<string, StatusTone>;
 
@@ -59,85 +50,85 @@ export function getSystemHealthTone(tone: SystemHealthTone | string): StatusTone
 export const KANBAN_STATUS_TONES = {
   backlog: {
     accent: "#64748b",
-    bg: "rgba(100,116,139,0.18)",
-    text: "#94a3b8",
+    bg: "var(--th-overlay-medium)",
+    text: "var(--th-text-secondary)",
   },
   ready: {
     accent: "#0ea5e9",
-    bg: "rgba(14,165,233,0.18)",
-    text: "#38bdf8",
+    bg: "var(--th-badge-sky-bg)",
+    text: "var(--th-badge-sky-text)",
   },
   requested: {
     accent: "#10b981",
-    bg: "rgba(16,185,129,0.18)",
-    text: "#10b981",
+    bg: "var(--th-badge-emerald-bg)",
+    text: "var(--th-badge-emerald-text)",
   },
   failed: {
     accent: "#f97316",
-    bg: "rgba(249,115,22,0.18)",
-    text: "#fb923c",
+    bg: "var(--th-badge-amber-bg)",
+    text: "var(--th-badge-amber-text)",
   },
   in_progress: {
     accent: "#f59e0b",
-    bg: "rgba(245,158,11,0.18)",
-    text: "#fbbf24",
+    bg: "var(--th-badge-amber-bg)",
+    text: "var(--th-badge-amber-text)",
   },
   review: {
     accent: "#14b8a6",
-    bg: "rgba(20,184,166,0.18)",
-    text: "#2dd4bf",
+    bg: "var(--th-badge-blue-bg)",
+    text: "var(--th-badge-blue-text)",
   },
   done: {
     accent: "#22c55e",
-    bg: "rgba(34,197,94,0.22)",
-    text: "#4ade80",
+    bg: "var(--th-badge-emerald-bg)",
+    text: "var(--th-badge-emerald-text)",
   },
   blocked: {
     accent: "#ef4444",
-    bg: "rgba(239,68,68,0.18)",
-    text: "#f87171",
+    bg: "color-mix(in oklch, var(--err) 14%, var(--th-bg-surface) 86%)",
+    text: "color-mix(in oklch, var(--err) 70%, var(--th-text-primary) 30%)",
   },
   cancelled: {
     accent: "#6b7280",
-    bg: "rgba(107,114,128,0.18)",
-    text: "#9ca3af",
+    bg: "var(--th-overlay-medium)",
+    text: "var(--th-text-secondary)",
   },
   qa_pending: {
     accent: "#06b6d4",
-    bg: "rgba(6,182,212,0.18)",
-    text: "#06b6d4",
+    bg: "var(--th-badge-sky-bg)",
+    text: "var(--th-badge-sky-text)",
   },
   qa_in_progress: {
     accent: "#3b82f6",
-    bg: "rgba(59,130,246,0.18)",
-    text: "#3b82f6",
+    bg: "var(--th-badge-blue-bg)",
+    text: "var(--th-badge-blue-text)",
   },
   qa_failed: {
     accent: "#fb7185",
-    bg: "rgba(251,113,133,0.18)",
-    text: "#fb7185",
+    bg: "color-mix(in oklch, var(--err) 14%, var(--th-bg-surface) 86%)",
+    text: "color-mix(in oklch, var(--err) 70%, var(--th-text-primary) 30%)",
   },
   pending_decision: {
     accent: "#f97316",
-    bg: "rgba(249,115,22,0.18)",
-    text: "#f97316",
+    bg: "var(--th-badge-amber-bg)",
+    text: "var(--th-badge-amber-text)",
   },
 } satisfies Record<string, StatusTone>;
 
 export const TIMELINE_KIND_TONES = {
-  review: { bg: "rgba(20,184,166,0.16)", text: KANBAN_STATUS_TONES.review.text },
-  pm: { bg: "rgba(249,115,22,0.16)", text: "#fdba74" },
-  work: { bg: "rgba(96,165,250,0.16)", text: "#93c5fd" },
-  general: { bg: "rgba(148,163,184,0.10)", text: "#94a3b8" },
+  review: { bg: KANBAN_STATUS_TONES.review.bg, text: KANBAN_STATUS_TONES.review.text },
+  pm: { bg: KANBAN_STATUS_TONES.pending_decision.bg, text: KANBAN_STATUS_TONES.pending_decision.text },
+  work: { bg: KANBAN_STATUS_TONES.ready.bg, text: KANBAN_STATUS_TONES.ready.text },
+  general: { bg: SYSTEM_HEALTH_TONES.idle.bg, text: SYSTEM_HEALTH_TONES.idle.text },
 } satisfies Record<string, Pick<StatusTone, "bg" | "text">>;
 
 export const TIMELINE_STATUS_TONES = {
   reviewing: TIMELINE_KIND_TONES.review,
-  changes_requested: { bg: "rgba(251,113,133,0.16)", text: "#fda4af" },
-  passed: { bg: "rgba(34,197,94,0.18)", text: "#86efac" },
+  changes_requested: { bg: KANBAN_STATUS_TONES.qa_failed.bg, text: KANBAN_STATUS_TONES.qa_failed.text },
+  passed: { bg: SYSTEM_HEALTH_TONES.healthy.bg, text: SYSTEM_HEALTH_TONES.healthy.text },
   decision: TIMELINE_KIND_TONES.pm,
   completed: TIMELINE_KIND_TONES.work,
-  comment: { bg: "rgba(148,163,184,0.12)", text: "#94a3b8" },
+  comment: TIMELINE_KIND_TONES.general,
 } satisfies Record<string, Pick<StatusTone, "bg" | "text">>;
 
 export const QUEUE_ENTRY_STATUS_TONES = {

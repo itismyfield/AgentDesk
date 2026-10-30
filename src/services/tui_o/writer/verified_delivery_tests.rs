@@ -263,6 +263,7 @@ async fn not_found_work_stays_owed_and_holds_its_episode_while_posted_and_exclud
     };
     let ledger = verified.writer.store().ledger();
     let prepared = LedgerEntry::Prepared {
+        notice_origin: None,
         local_retry: None,
         serial: ledger.next_serial(),
         unit_key: first.unit_key.clone(),

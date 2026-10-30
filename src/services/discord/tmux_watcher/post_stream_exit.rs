@@ -19,6 +19,8 @@ pub(super) struct PostStreamExitContext {
         Option<crate::services::discord::inflight::InflightTurnIdentity>,
     pub(super) watcher_instance_id: u64,
     pub(super) host: Arc<HostSnapshot>,
+    /// Whether the pane death this watcher judged followed a recent stop; None when it judged none.
+    pub(super) tmux_death: Option<bool>,
     #[cfg(test)]
     pub(super) watcher_provider: ProviderKind,
 }
@@ -38,6 +40,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         watcher_turn_identity,
         watcher_instance_id,
         host,
+        tmux_death,
         ..
     } = ctx;
 
@@ -149,6 +152,27 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         // `start_claude` respawn of a fresh same-named session does not
         // get its inflight wiped.
         {
+            // The pane both probes found dead ended the pinned turn; its receipt commits before
+            // the row goes, and a failed commit keeps the row marked instead.
+            let pane_dead = {
+                let (sess, provider, host) =
+                    (tmux_session_name.clone(), provider.clone(), host.clone());
+                tokio::task::spawn_blocking(move || {
+                    host_gate::tmux_pane_dead(&provider, channel_id, &sess, &host)
+                })
+                .await
+                .unwrap_or(false)
+            };
+            let receipt_kept = pane_dead
+                && !crate::services::discord::receipt_settle::pane_dead(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    &tmux_session_name,
+                    watcher_turn_identity.as_ref(),
+                    tmux_death,
+                )
+                .await;
             let sess_for_inflight = tmux_session_name.clone();
             let provider_for_inflight = provider.clone();
             let channel_id_inflight = channel_id;
@@ -157,12 +181,15 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
             let cleanup = cleanup.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 let _cleanup = cleanup;
-                if !host_gate::tmux_pane_dead(
-                    &provider_for_inflight,
-                    channel_id_inflight,
-                    &sess_for_inflight,
-                    &host,
-                ) {
+                if receipt_kept
+                    || !pane_dead
+                    || !host_gate::tmux_pane_dead(
+                        &provider_for_inflight,
+                        channel_id_inflight,
+                        &sess_for_inflight,
+                        &host,
+                    )
+                {
                     // Pane resurrected (e.g. start_claude respawn race) or not
                     // confirmed dead — do not touch its inflight.
                     return;

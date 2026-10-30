@@ -17,10 +17,6 @@ fn isolated(test: &str) -> bool {
         .args(["--exact", test, "--nocapture", "--test-threads=1"])
         .env(CHILD, test)
         .env(
-            crate::services::tui_o::cutover::test_override::CHILD_ENV,
-            "1",
-        )
-        .env(
             crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
             "[]",
         )

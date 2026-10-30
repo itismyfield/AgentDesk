@@ -196,17 +196,6 @@ impl<G: TurnGateway + ?Sized> StatusPanelSurface<'_, G> {
                 .map_err(|error| error.to_string()),
         }
     }
-
-    async fn send(&self, channel_id: ChannelId, text: &str) -> Result<MessageId, String> {
-        match self {
-            Self::Gateway(shared, gateway) => {
-                send_status_panel_v2_completion_fallback(shared, *gateway, channel_id, text).await
-            }
-            Self::Http(_, http) => {
-                send_status_panel_v2_completion_fallback_http(http, channel_id, text).await
-            }
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -277,54 +266,24 @@ async fn complete_status_panel_v2_on_surface<G: TurnGateway + ?Sized>(
             }
         }
     };
-    if send_fallback && super::super::footer_retirement::retired() {
+    // A retired completion never sends a replacement panel.
+    if send_fallback {
         return true;
     }
-    let completed_id = if send_fallback {
-        match surface.send(channel_id, &panel_text).await {
-            Ok(id) => {
-                persist_status_panel_completion_fallback_message_id(
-                    provider,
-                    channel_id,
-                    expected_user_msg_id,
-                    id,
-                    source,
-                );
-                Some(id)
-            }
-            Err(error) => {
-                tracing::warn!(%channel_id, %source, %error, "failed to send fallback status-panel-v2 completion");
-                return false;
-            }
-        }
-    } else {
-        status_panel_msg_id
-    };
+    let completed_id = status_panel_msg_id;
     if let Some(warning) = wip_warning {
         warning.commit();
     }
     singleton::commit_completed_binding(shared, provider, channel_id, completed_id);
     *last_status_panel_text = panel_text;
-    if !send_fallback {
-        purge_pending_bind_for_completed_status_panel(shared, provider, channel_id, completed_id);
-        purge_terminal_reconcile_for_completed_status_panel(
-            shared,
-            provider,
-            channel_id,
-            completed_id,
-        );
-    }
+    purge_pending_bind_for_completed_status_panel(shared, provider, channel_id, completed_id);
+    purge_terminal_reconcile_for_completed_status_panel(shared, provider, channel_id, completed_id);
     true
 }
 
-mod fallback;
 pub(super) mod provider_failure;
 mod purge;
 mod singleton;
-use fallback::{
-    persist_status_panel_completion_fallback_message_id, send_status_panel_v2_completion_fallback,
-    send_status_panel_v2_completion_fallback_http,
-};
 use purge::{
     purge_pending_bind_for_completed_status_panel,
     purge_terminal_reconcile_for_completed_status_panel,
@@ -428,10 +387,13 @@ fn status_panel_message_missing_error(error: &str) -> bool {
     normalized.contains("unknown message") || normalized.contains("10008")
 }
 
+/// A turn-mode turn without an anchor has no card to show a long-running tool on.
 pub(super) fn should_open_long_running_placeholder_controller(
     status_panel_v2_enabled: bool,
+    (channel_id, current_msg_id): (ChannelId, MessageId),
 ) -> bool {
     !status_panel_v2_enabled
+        && !super::current_message_anchor::turn_mode_anchorless(channel_id, current_msg_id)
 }
 
 pub(super) fn status_panel_message_id_for_turn(

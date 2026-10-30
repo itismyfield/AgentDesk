@@ -97,6 +97,13 @@ fn synthetic_finalizer_turn_id(
         + SYNTHETIC_FINALIZER_TURN_ID_FLOOR
 }
 
+/// The terminal outcome and instant an execution confirmed before its receipt commit failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(in crate::services::discord) struct TerminalReceiptStamp {
+    pub outcome: crate::db::turns::TerminalOutcome,
+    pub confirmed_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(in crate::services::discord) struct InflightTurnState {
     pub version: u32,
@@ -130,6 +137,10 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Omitted while empty, so a row without one keeps its earlier bytes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_origin_ids: Vec<String>,
+    /// A terminal this execution confirmed but could not commit; the row stays until boot or
+    /// the next admission on its channel records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_receipt: Option<TerminalReceiptStamp>,
     /// Primary key of the `intake_outbox` row that produced this turn. Worker
     /// turns carry `Some`; leader-local and legacy turns carry `None`. Production
     /// construction sets it through `adopt_intake_outbox`; serde deserialization
@@ -238,6 +249,13 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// The policy receipt of a stop before input started; `None` on every other turn.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "super::save_store::identity_gate::runtime_stamp::before_start_stop_admission::deserialize_receipt")]
     pub(in crate::services::discord) herdr_before_start_stop: Option<super::save_store::identity_gate::runtime_stamp::before_start_stop_admission::BeforeStartReceipt>,
+    /// Actual stop notice, independent of an optional response anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::services::discord) stop_notice_message_id: Option<u64>,
+    /// Started without a response anchor because its channel was in confirmed turn mode then;
+    /// survives restart, when the in-memory confirmation is empty again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(in crate::services::discord) anchorless_turn_mode: bool,
     #[serde(default)]
     pub current_tool_line: Option<String>,
     #[serde(default)]
@@ -1050,6 +1068,7 @@ impl InflightTurnState {
             user_msg_id,
             source_message_ids: Vec::new(),
             input_origin_ids: Vec::new(),
+            terminal_receipt: None,
             intake_outbox_id: None,
             managed_submission: None,
             managed_submission_capability: None,
@@ -1083,6 +1102,8 @@ impl InflightTurnState {
             tui_terminal_generation_mtime_ns: None,
             tui_terminal_kind: None,
             herdr_before_start_stop: None,
+            stop_notice_message_id: None,
+            anchorless_turn_mode: false,
             current_tool_line: None,
             last_tool_name: None,
             last_tool_summary: None,

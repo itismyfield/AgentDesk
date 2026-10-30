@@ -52,6 +52,7 @@ async fn d4b_two_hosted_channels_repost_by_default_with_wire_controls_pg() {
         let mut ledger = store.open_channel(&era, channel).unwrap().unwrap();
         ledger
             .append_ledger(LedgerEntry::Prepared {
+                notice_origin: None,
                 local_retry: None,
                 serial: 0,
                 unit_key: unit("proof"),

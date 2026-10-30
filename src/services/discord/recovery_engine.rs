@@ -36,8 +36,6 @@ pub(in crate::services::discord) use idle_captured_response::recover_idle_partia
 
 #[path = "recovery_engine/status_panel.rs"]
 mod recovery_status_panel;
-#[path = "recovery_engine/two_message_panel.rs"]
-mod recovery_two_message_panel;
 #[path = "recovery_engine/status_panel_completion_producer.rs"]
 mod status_panel_completion_producer;
 use self::status_panel_completion_producer::*;
@@ -126,6 +124,9 @@ mod herdr_before_start_restart;
 #[cfg(unix)]
 #[path = "recovery_engine/herdr_row_end.rs"]
 pub(in crate::services::discord) mod herdr_row_end;
+#[cfg(all(test, unix))]
+#[path = "recovery_engine/turn_mode_restart_tests.rs"]
+mod turn_mode_restart_tests;
 // Unix only, like the `tmux::execution_identity` comparison it calls.
 #[cfg(unix)]
 #[path = "recovery_engine/herdr_reader.rs"]

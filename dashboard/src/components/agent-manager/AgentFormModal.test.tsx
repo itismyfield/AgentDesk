@@ -33,7 +33,7 @@ it.each([null, 20, 30, 39, 40])("keeps button and keyboard portrait selection in
       form={{ ...BLANK, sprite_number: initial }} departments={[]} isEdit={false}
       saving={false} onSave={() => {}} onClose={() => {}} />);
   });
-  const picker = container.querySelector<HTMLElement>('[role="spinbutton"]')!;
+  const picker = document.body.querySelector<HTMLElement>('[role="spinbutton"]')!;
   const shipped = readdirSync("public/sprites")
     .filter((name) => /^\d+-D-1\.png$/.test(name)).map((name) => Number(name.split("-")[0]));
   expect(picker.getAttribute("aria-valuemax")).toBe(String(Math.max(...shipped)));
@@ -43,7 +43,7 @@ it.each([null, 20, 30, 39, 40])("keeps button and keyboard portrait selection in
   const afterKey = Math.min(40, (initial ?? 0) + 1);
   expect(picker.getAttribute("aria-valuenow")).toBe(String(afterKey));
   await act(async () => {
-    container.querySelector<HTMLButtonElement>('button[aria-label="Next Sprite"]')!.click();
+    document.body.querySelector<HTMLButtonElement>('button[aria-label="Next Sprite"]')!.click();
   });
   expect(picker.getAttribute("aria-valuenow")).toBe(String(Math.min(40, afterKey + 1)));
 });

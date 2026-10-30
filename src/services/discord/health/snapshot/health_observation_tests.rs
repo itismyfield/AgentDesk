@@ -169,8 +169,12 @@ fn health_snapshot_parallel_actors_keep_other_channels() {
         (&codex, "codex", channel(6_871_310_000, 5)),
     ];
     main.block_on(async {
+        // Each answering actor reads nothing after its first answer: tokio polls a timed-out read
+        // before its deadline, so a fast actor could still answer a reconfirm started past it.
+        let mut barriers = Vec::new();
         for (shared, _, channel) in answering {
             nameless_turn(shared, channel).await;
+            barriers.push(shared.mailboxes.install_health_barrier_for_test(channel));
         }
         let (json, elapsed) = detail(&registry).await;
         assert!(elapsed < BUDGET, "detail snapshot took {elapsed:?}");
@@ -185,8 +189,8 @@ fn health_snapshot_parallel_actors_keep_other_channels() {
                 "a stalled actor must not become an idle entry"
             );
         }
-        // The stalled first reads hold the deadline, so the answering turns' reconfirms find
-        // no time left: named as unanswered, never as a failed snapshot.
+        // The stalled first reads hold the deadline and the held reconfirms end at that same
+        // deadline: named as unanswered, never as a failed snapshot.
         let mut expected: Vec<_> = stalled
             .iter()
             .map(|stalled| failed("claude", *stalled, "snapshot"))
@@ -208,6 +212,7 @@ fn health_snapshot_parallel_actors_keep_other_channels() {
         assert!(reasons(&json).contains(&"mailbox_snapshot_unavailable".to_string()));
         assert_ne!(json["status"], "healthy");
         assert_eq!(json["fully_recovered"], false);
+        barriers.iter_mut().for_each(|barrier| barrier.release());
 
         let started = Instant::now();
         let public = build_public_health_snapshot(&registry).await;

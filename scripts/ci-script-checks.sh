@@ -441,6 +441,11 @@ if run_check guards "Dead-code suppression ratchet"; then
 "$PYTHON" -m unittest tests.test_dead_code_allow_ratchet
 fi
 
+if run_check guards "Const bool switch ratchet"; then
+"$PYTHON" scripts/check_const_bool_switch_ratchet.py
+"$PYTHON" -m unittest tests.test_const_bool_switch_ratchet
+fi
+
 if run_check guards "Discord log field-key drift guard (#4218)"; then
 "$PYTHON" scripts/check_log_key_drift.py
 "$PYTHON" -m unittest tests.test_log_key_drift

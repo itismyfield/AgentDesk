@@ -206,13 +206,17 @@ fn append_replaced_or_truncated_source_and_other_session_cannot_bind() {
     f.register("A", None, false);
     let (start, record) = f.record("row-a", &f.frame);
     assert!(bind_record("another-session", &f.path, start, &record).is_none());
-    let old = f.path.with_extension("old");
-    std::fs::rename(&f.path, &old).unwrap();
-    std::fs::write(&f.path, format!("{record}\n")).unwrap();
-    assert!(bind_record(&f.session, &f.path, start, &record).is_none());
-    assert!(projection("codex", &f.session, "A").is_none());
-    std::fs::remove_file(&f.path).unwrap();
-    std::fs::rename(old, &f.path).unwrap();
+    // Telling a replaced path from the registered file needs Unix device/inode identity.
+    #[cfg(unix)]
+    {
+        let old = f.path.with_extension("old");
+        std::fs::rename(&f.path, &old).unwrap();
+        std::fs::write(&f.path, format!("{record}\n")).unwrap();
+        assert!(bind_record(&f.session, &f.path, start, &record).is_none());
+        assert!(projection("codex", &f.session, "A").is_none());
+        std::fs::remove_file(&f.path).unwrap();
+        std::fs::rename(old, &f.path).unwrap();
+    }
     f.bind(start, &record);
     f.register("B", Some(2), true);
     std::fs::write(&f.path, "").unwrap();
@@ -316,6 +320,8 @@ fn append_open_file_binder_requires_one_current_source_owner() {
     assert!(bind_open_record(&file, start, &record).is_none());
 }
 
+// Telling a replaced path from the registered file needs Unix device/inode identity.
+#[cfg(unix)]
 #[test]
 fn append_open_file_binder_rejects_an_atomically_replaced_registered_path() {
     let f = Fixture::new();

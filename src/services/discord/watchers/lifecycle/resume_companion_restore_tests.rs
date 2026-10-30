@@ -740,7 +740,7 @@ impl LegacyQueued {
         // reuses the pane; the compact limit is derived as intake derives it on this host.
         let codex = ProviderKind::Codex;
         let thresholds = crate::services::discord::adk_session::fetch_context_thresholds(
-            install.shared.api_port,
+            install.shared.pg_pool.as_ref(),
         )
         .await;
         let compact_limit = codex
@@ -779,7 +779,6 @@ impl LegacyQueued {
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
                 cleared: false,
-                remote_profile_name: None,
                 channel_id: Some(channel),
                 channel_name: Some(channel_name),
                 category_name: None,

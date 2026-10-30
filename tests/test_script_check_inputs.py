@@ -141,7 +141,7 @@ class ScriptCheckInputSelection(unittest.TestCase):
         for job_id in ("scripts", "scripts_guards", "scripts_contracts"):
             job = jobs[job_id]
             self.assertEqual(job["needs"], "changes")
-            self.assertEqual(job["if"], "${{ !cancelled() }}")
+            self.assertEqual(job["if"], "${{ !github.event.pull_request.draft && !cancelled() }}")
             run = next(step for step in job["steps"] if step.get("name") == "Run script checks")
             self.assertNotIn("if", run)
             self.assertEqual(run["env"]["SCRIPT_CHECK_CHANGES_RESULT"], "${{ needs.changes.result }}")
