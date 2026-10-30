@@ -47,134 +47,30 @@ export default function OpsConnectionPanel({
   tr,
 }: OpsConnectionPanelProps) {
   return (
-    <div className="card">
-      <div className="card-head">
-        <div className="min-w-0 flex-1">
-          <div className="card-title">{tr("Connection & Delivery", "Connection & Delivery")}</div>
-          <div className="mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
-            {tr(
-              "연결 상태와 전달 흐름의 건강도를 한눈에 확인합니다.",
-              "Track connectivity and delivery health at a glance.",
-            )}
-          </div>
-        </div>
-        <FreshnessIndicator
-          timestamp={lastHealthAt ?? null}
-          compact
-          staleAfterSeconds={20}
-          criticalAfterSeconds={60}
-        />
+    <section className="min-w-0 self-start rounded-lg border border-th-border-subtle bg-th-bg-surface" aria-labelledby="ops-connection-title">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-th-border-subtle px-4 py-4 sm:px-5">
+        <div className="min-w-0"><h2 id="ops-connection-title" className="text-sm font-semibold text-th-text-primary">{tr("연결과 전달", "Connection & Delivery")}</h2><p className="mt-1 text-xs leading-5 text-th-text-muted">{tr("연결 상태, 전달 대기와 프롬프트 보관 정책입니다.", "Connectivity, delivery queues and prompt retention policy.")}</p></div>
+        <FreshnessIndicator timestamp={lastHealthAt ?? null} compact staleAfterSeconds={20} criticalAfterSeconds={60} />
       </div>
-      <div data-testid="ops-connection-panel" className="card-body space-y-3">
-        <div
-          data-testid="ops-websocket-card"
-          className="card ops-mini-card"
-          style={{
-            borderColor: wsConnected
-              ? "color-mix(in srgb, var(--color-info) 18%, var(--th-border-subtle) 82%)"
-              : "color-mix(in srgb, var(--color-danger) 18%, var(--th-border-subtle) 82%)",
-            background:
-              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-          }}
-        >
-          <div className="card-body">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-                  websocket
-                </div>
-                <div className="mt-2 text-lg font-semibold" style={{ color: "var(--th-text-primary)" }}>
-                  {wsConnected ? tr("실시간 연결됨", "Connected live") : tr("연결 끊김", "Disconnected")}
-                </div>
-                <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
-                  {wsConnected
-                    ? tr("pcd-ws-event 수신 시 health refresh를 즉시 재스케줄합니다.", "Incoming pcd-ws-event messages reschedule health refreshes immediately.")
-                    : tr("WS가 복구될 때까지 내부 polling으로 health를 유지합니다.", "Internal polling keeps health current until WS recovers.")}
-                </div>
-              </div>
-              <StatusBadge
-                tone={wsConnected ? "healthy" : "critical"}
-                size="sm"
-                pulse={wsConnected}
-                title={wsConnected ? tr("WS 연결 정상", "WS connection healthy") : tr("WS 끊김", "WS disconnected")}
-              >
-                {wsConnected ? "LIVE" : "DISCONNECTED"}
-              </StatusBadge>
-            </div>
-          </div>
+      <div data-testid="ops-connection-panel" className="divide-y divide-th-border-subtle px-4 sm:px-5">
+        <div data-testid="ops-websocket-card" className="flex min-w-0 items-start justify-between gap-3 py-4">
+          <div className="min-w-0"><h3 className="text-xs text-th-text-muted">{tr("실시간 이벤트", "WebSocket")}</h3><p className="mt-2 text-xs leading-5 text-th-text-secondary">{wsConnected ? tr("이벤트를 수신하면 운영 상태를 새로 확인합니다.", "Health refreshes when an event arrives.") : tr("연결을 복구하는 동안 주기적으로 상태를 확인합니다.", "Health is polled while the connection recovers.")}</p></div>
+          <StatusBadge tone={wsConnected ? "healthy" : "critical"} size="sm" pulse={wsConnected} title={wsConnected ? tr("WS 연결 정상", "WS connection healthy") : tr("WS 끊김", "WS disconnected")}>{wsConnected ? "LIVE" : "DISCONNECTED"}</StatusBadge>
         </div>
-
-        <div className="grid sm:grid-cols-2">
-          <div data-testid="ops-dispatch-outbox-card" className="card ops-mini-card">
-            <div className="card-body">
-              <div className="metric-label">
-                dispatch_outbox
-              </div>
-              <div className="metric-value" style={{ marginTop: 8, fontSize: 22, color: "var(--th-text-primary)" }}>
-                {formatNumber(health?.dispatch_outbox?.pending ?? 0)}
-              </div>
-              <div className="metric-sub" style={{ marginTop: 6, fontSize: 12 }}>
-                {tr(
-                  `retry ${formatNumber(health?.dispatch_outbox?.retrying ?? 0)} · fail ${formatNumber(health?.dispatch_outbox?.permanent_failures ?? 0)}`,
-                  `retry ${formatNumber(health?.dispatch_outbox?.retrying ?? 0)} · fail ${formatNumber(health?.dispatch_outbox?.permanent_failures ?? 0)}`,
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div data-testid="ops-providers-card" className="card ops-mini-card">
-            <div className="card-body">
-              <div className="metric-label">
-                providers
-              </div>
-              <div className="metric-value" style={{ marginTop: 8, fontSize: 22, color: "var(--th-text-primary)" }}>
-                {connectedProviders}/{providerCount}
-              </div>
-              <div className="metric-sub" style={{ marginTop: 6, fontSize: 12 }}>
-                {tr(
-                  `disconnect ${formatNumber(disconnectedProviders)} · restart ${formatNumber(restartPendingProviders)}`,
-                  `disconnect ${formatNumber(disconnectedProviders)} · restart ${formatNumber(restartPendingProviders)}`,
-                )}
-              </div>
-            </div>
-          </div>
+        <div className="grid grid-cols-2 divide-x divide-th-border-subtle">
+          <div data-testid="ops-dispatch-outbox-card" className="min-w-0 py-4 pr-4"><h3 className="text-xs text-th-text-muted">{tr("전달 대기", "Dispatch outbox")}</h3><p className="mt-2 text-xl font-semibold tabular-nums text-th-text-primary">{health ? formatNumber(health.dispatch_outbox?.pending ?? 0) : "—"}</p><p className="mt-1 text-xs leading-5 text-th-text-muted">{tr(`재시도 ${formatNumber(health?.dispatch_outbox?.retrying ?? 0)} · 실패 ${formatNumber(health?.dispatch_outbox?.permanent_failures ?? 0)}`, `retry ${formatNumber(health?.dispatch_outbox?.retrying ?? 0)} · fail ${formatNumber(health?.dispatch_outbox?.permanent_failures ?? 0)}`)}</p></div>
+          <div data-testid="ops-providers-card" className="min-w-0 py-4 pl-4"><h3 className="text-xs text-th-text-muted">{tr("프로바이더", "Providers")}</h3><p className="mt-2 text-xl font-semibold tabular-nums text-th-text-primary">{health ? `${connectedProviders}/${providerCount}` : "—"}</p><p className="mt-1 text-xs leading-5 text-th-text-muted">{tr(`연결 끊김 ${formatNumber(disconnectedProviders)} · 재시작 ${formatNumber(restartPendingProviders)}`, `disconnect ${formatNumber(disconnectedProviders)} · restart ${formatNumber(restartPendingProviders)}`)}</p></div>
         </div>
-
-        <div data-testid="ops-prompt-retention-card" className="card ops-mini-card">
-          <div className="card-body">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="metric-label">
-                  <Database size={12} />
-                  prompt_manifest_retention
-                </div>
-                <div className="metric-value" style={{ marginTop: 8, fontSize: 22, color: "var(--th-text-primary)" }}>
-                  {promptRetentionValue}
-                </div>
-                <div className="metric-sub" style={{ marginTop: 6, fontSize: 12 }}>
-                  {promptRetentionConfigNote}
-                </div>
-                <div className="metric-sub" style={{ marginTop: 4, fontSize: 12 }}>
-                  {promptRetentionStorageNote}
-                </div>
-              </div>
-              <StatusBadge tone={opsToneToHealth(promptRetentionTone)} size="sm">
-                {promptRetention?.hot_reload ? "HOT" : promptRetention?.config_applied_at?.toUpperCase() ?? "BOOT"}
-              </StatusBadge>
-            </div>
-            {promptRetention?.config_source ? (
-              <div className="mt-3 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
-                {promptRetention.config_source}
-              </div>
-            ) : null}
-            {promptRetentionError ? (
-              <div className="mt-2 text-[11px] leading-5" style={{ color: "var(--color-warning)" }}>
-                {promptRetentionError}
-              </div>
-            ) : null}
+        <div data-testid="ops-prompt-retention-card" className="min-w-0 py-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0"><h3 className="flex items-center gap-2 text-xs text-th-text-muted"><Database size={14} />{tr("프롬프트 보관", "Prompt manifest retention")}</h3><p className="mt-2 text-xl font-semibold tabular-nums text-th-text-primary">{promptRetentionValue}</p></div>
+            <StatusBadge tone={opsToneToHealth(promptRetentionTone)} size="sm">{promptRetention ? promptRetention.hot_reload ? "HOT" : promptRetention.config_applied_at?.toUpperCase() ?? "BOOT" : tr("미확인", "Unknown")}</StatusBadge>
           </div>
+          <p className="mt-2 text-xs leading-5 text-th-text-muted">{promptRetentionConfigNote}</p><p className="mt-1 text-xs leading-5 text-th-text-muted">{promptRetentionStorageNote}</p>
+          {promptRetention?.config_source ? <p className="mt-2 text-xs leading-5 text-th-text-muted">{promptRetention.config_source}</p> : null}
+          {promptRetentionError ? <p role="status" className="mt-2 text-xs leading-5 text-[var(--th-badge-amber-text)]">{promptRetentionError}</p> : null}
         </div>
       </div>
-    </div>
+    </section>
   );
 }
