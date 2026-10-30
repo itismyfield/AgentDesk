@@ -79,7 +79,7 @@ fn projection_history_read_failure_blocks_plain_native_input() {
     for bytes in [
         b"{broken".as_slice(),
         br#"{"version":3,"live":[],"passive":[]}"#,
-        br#"{"version":2,"live":[],"passive":[]}"#,
+        br#"{"version":2,"live":7,"passive":[]}"#,
     ] {
         std::fs::write(&file, bytes).unwrap();
         assert!(
