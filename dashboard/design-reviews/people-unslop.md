@@ -28,7 +28,7 @@ PR #7562 홈의 정보 위계를 에이전트 관리 화면에 적용했다. 기
 - `npm run build` 성공.
 - `PLAYWRIGHT_PORT=5275 npm run test:e2e -- --grep 'agents:' --reporter=line`: 4 passed, 2 viewport-specific skips.
 - AgentFormModal 단위 시험 통과.
-- Playwright CLI `verify-agents.js`: 모든 기본/폼/마법사/세션 상태를 캡처하고 DOM 폭을 확인했다. 비활성 tooltip과 Vaul의 숨은 hit area는 실제 표시와 구분한다.
+- Playwright CLI `verify-agents.js`: 68개 상태에서 폭 검사 실패 0건. 모든 기본/폼/마법사/세션 상태를 캡처하고 DOM 폭을 확인했다. 비활성 tooltip과 Vaul의 숨은 hit area는 실제 표시와 구분한다.
 - `git diff --check`와 foundation 기준 PR cap 확인.
 
 로컬 증거는 `output/playwright/people/`의 `before/`, `final/`, `verify-agents.js`, `layout-results.txt`다. 캡처와 검증 스크립트는 별도 ZIP으로 전달하며 저장소에 PNG를 넣지 않는다. 머지·배포하지 않는다.
