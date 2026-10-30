@@ -887,9 +887,8 @@ pub(super) fn append_store(path: &Path) -> Result<Option<Store>, String> {
     }))
 }
 
-/// A V1 append mutation on a V2 history under its lock: only migrated append entries may change,
-/// and their encodings are invalidated; any other change, or a first native event a same-frame V2
-/// registration could still own, refuses the whole transaction.
+/// A V1 append mutation under the V2 lock: only migrated append entries change; any other change,
+/// or a first native event a same-frame V2 registration could own, refuses the transaction.
 pub(super) fn update_migrated<T>(
     path: &Path,
     apply: impl FnOnce(&mut Store) -> Result<T, String>,

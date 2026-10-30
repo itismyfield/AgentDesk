@@ -869,9 +869,8 @@ fn migrated_rival(case: &str) -> [(Option<String>, Option<bool>, bool); 2] {
     [first, round()]
 }
 
-/// A migrated V1 append and a same-frame V2 attempt leave their shared row unowned in either
-/// query order and after a restart; a different frame, an owner's re-read or an abandoned rival
-/// still bind.
+/// A migrated append and a same-frame V2 attempt leave their row unowned in either order and after
+/// a restart; another frame, an owner's re-read or an abandoned rival still bind.
 #[cfg(unix)]
 #[test]
 fn a_migrated_append_and_a_same_frame_v2_attempt_leave_their_row_unowned() {
