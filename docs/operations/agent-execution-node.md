@@ -52,7 +52,7 @@ OS·도구·저장소 조건은 별도의 `execution-requirements` API에 유지
 
 직접 에이전트에 연결된 채널은 자신의 설정을 사용한다. 직접 연결이 없는 Discord
 스레드는 실제 Discord metadata에서 확인한 부모 채널의 정책을 사용한다. 일반 채널의
-category를 부모 에이전트로 취급하지 않으며, 기존 `threadInherit: false`는 유지한다.
+category를 부모 에이전트로 취급하지 않으며, `agents[].channels.<provider>.thread_inherit: false`로 부모 상속을 끈다.
 부모 정책을 확인하지 못하면 정책이 없는 것으로 간주해 실행하지 않는다.
 소유권·중복 방지·응답 대상은 항상 실제 스레드 ID를 사용한다.
 

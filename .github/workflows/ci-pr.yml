@@ -274,6 +274,8 @@ jobs:
               - 'src/services/api_friction/**'
               - 'src/services/auto_queue/**'
               - 'src/services/automation_candidate_materializer/**'
+              # The campaign phase runner signals its process group behind cfg(unix) with a Windows fallback.
+              - 'src/services/campaign_execution/**'
               - 'src/services/claude/**'
               - 'src/services/claude_e/**'
               - 'src/services/claude_tui/**'

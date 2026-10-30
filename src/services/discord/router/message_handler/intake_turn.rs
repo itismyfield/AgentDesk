@@ -1027,7 +1027,8 @@ pub(super) async fn handle_text_message(
         memento_context_loaded = runtime.2;
         session_strategy_reason = runtime.3;
         let (channel_name, tmux_session_name) = (runtime.4, runtime.5);
-        let adk_session_key = build_adk_session_key(shared, channel_id, &provider, None).await;
+        let adk_session_key = super::super::super::adk_session::turn_session_key;
+        let adk_session_key = adk_session_key(shared, channel_id, &provider).await;
         let pre_admission_control::PreAdmission::Continue(turn_goal_kind) =
             pre_admission_control::resolve(
                 (http, shared, &provider, !pending_uploads.is_empty()),
@@ -2207,6 +2208,7 @@ pub(super) async fn handle_text_message(
         }
         let provider_for_blocking = provider.clone();
         let execution_pool = shared.pg_pool.clone();
+        let turn_shared = shared.clone();
         let producer_registration = original_registration.clone();
         let codex_observation = super::provider_dispatch::observe_codex_turn(
             &provider,
@@ -2235,6 +2237,7 @@ pub(super) async fn handle_text_message(
                         super::provider_dispatch::execute(
                             super::provider_dispatch::StreamingTurn {
                                 pool: execution_pool.as_ref(),
+                                shared: Some(&turn_shared),
                                 provider: &provider_for_blocking,
                                 prompt: &context_prompt,
                                 session_id: session_id_clone.as_deref(),

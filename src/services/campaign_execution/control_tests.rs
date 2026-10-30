@@ -82,12 +82,16 @@ pub(crate) fn running() -> CampaignState {
                 binding,
                 started: true,
                 outcome: None,
+                execution: None,
             },
         )]
         .into_iter()
         .collect(),
         actions: BTreeMap::new(),
         sessions: Vec::new(),
+        verifications: BTreeMap::new(),
+        prerequisites: BTreeMap::new(),
+        fences: BTreeMap::new(),
     });
     state
 }

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId, SourceRange, UnitKind};

@@ -704,55 +704,7 @@ async fn clear_all_dispatch_threads(pg_pool: Option<&PgPool>, card_id: &str) -> 
 
 /// Resolve a channel name alias (e.g. "adk-cc") to a numeric channel ID.
 pub(crate) fn resolve_channel_alias(alias: &str) -> Option<u64> {
-    if let Some(channel_id) =
-        crate::services::discord::agentdesk_config::resolve_channel_alias(alias)
-    {
-        return Some(channel_id);
-    }
-
-    let root = crate::cli::agentdesk_runtime_root()?;
-    let path = root.join("config/role_map.json");
-    let content = std::fs::read_to_string(&path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    let by_name = json.get("byChannelName")?.as_object()?;
-    if let Some(entry) = by_name.get(alias) {
-        if let Some(id) = entry.get("channelId").and_then(|value| value.as_str()) {
-            return id.parse().ok();
-        }
-        if let Some(id) = entry.get("channelId").and_then(|value| value.as_u64()) {
-            return Some(id);
-        }
-    }
-
-    let by_id = json.get("byChannelId")?.as_object()?;
-    for (channel_id, entry) in by_id {
-        if entry.get("channelName").and_then(|value| value.as_str()) == Some(alias) {
-            return channel_id.parse().ok();
-        }
-    }
-
-    if let Some(entry) = by_name.get(alias) {
-        let role_id = entry.get("roleId").and_then(|value| value.as_str())?;
-        let provider = entry.get("provider").and_then(|value| value.as_str());
-        for (channel_id, channel_entry) in by_id {
-            let entry_role = channel_entry.get("roleId").and_then(|value| value.as_str());
-            let entry_provider = channel_entry
-                .get("provider")
-                .and_then(|value| value.as_str());
-            if entry_role == Some(role_id) {
-                if let (Some(expected), Some(actual)) = (provider, entry_provider) {
-                    if expected == actual {
-                        return channel_id.parse().ok();
-                    }
-                } else {
-                    return channel_id.parse().ok();
-                }
-            }
-        }
-    }
-
-    None
+    crate::services::discord::agentdesk_config::resolve_channel_alias(alias)
 }
 
 pub(crate) fn parse_channel_id(channel: &str) -> Option<u64> {
@@ -1282,5 +1234,25 @@ mod tests {
         assert!(message.contains("한 줄 지시: 이 이슈를 구현"));
         assert!(message.contains("(auto-queue)"));
         assert!(message.chars().count() <= DISPATCH_MESSAGE_HARD_LIMIT);
+    }
+}
+
+#[cfg(test)]
+mod role_map_retirement_tests {
+    use super::*;
+
+    #[test]
+    fn alias_resolution_uses_yaml_and_ignores_legacy_json() {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        std::fs::create_dir_all(root.path().join("config")).unwrap();
+        std::fs::write(root.path().join("config/role_map.json"),
+            r#"{"byChannelId":{"73490009":{"roleId":"legacy","channelName":"only-json"}},"byChannelName":{"only-json":{"channelId":"73490009"}}}"#).unwrap();
+        assert_eq!(resolve_channel_alias("only-json"), None);
+        crate::services::discord::agentdesk_config::write_bindings_for_test(
+            root.path(),
+            serde_json::json!([{"id":"yaml-agent","name":"YAML Agent","provider":"codex","channels":{"codex":{"id":"73490001","name":"only-json"}}}]),
+        );
+        assert_eq!(resolve_channel_alias("only-json"), Some(73490001));
     }
 }

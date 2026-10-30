@@ -1,5 +1,6 @@
 //! A person's draft and every unreadable or busy composer stay untouched.
-use crate::services::claude_tui::busy_inject::{ComposerOwner, composer_owner};
+use crate::services::claude_tui::busy_inject::{ComposerOwner, composer_owner, draft_sighting};
+use crate::services::claude_tui::composer_lock::DraftSighting;
 use crate::services::claude_tui::host_input::{InputRefusal, InputRun, run_herdr};
 use crate::services::claude_tui::input::{
     PromptReadinessSnapshot, TuiInputAction, final_prompt_ready,
@@ -46,7 +47,7 @@ pub(crate) fn wait_for<T>(
     }
 }
 
-fn observation(capture: Option<&str>) -> ControlFlow<bool> {
+fn observation(capture: Option<&str>, exit: bool) -> ControlFlow<bool> {
     let Some(pane) = capture else {
         return ControlFlow::Continue(());
     };
@@ -70,22 +71,61 @@ fn observation(capture: Option<&str>) -> ControlFlow<bool> {
         pane_tail: plain.clone(),
     };
     if final_prompt_ready(&snapshot) {
-        ControlFlow::Break(true)
+        // An `/exit` also leaves a draft stashed under an empty composer behind.
+        ControlFlow::Break(!exit || draft_sighting(pane) == DraftSighting::Settled)
     } else {
         ControlFlow::Continue(())
     }
 }
 
 /// The capture precedes the gated paste; it never clears a draft or confirms a dialog.
-pub(super) fn run(
+pub(crate) fn run(
     target: &HerdrTarget,
     plan: &[TuiInputAction],
     cancel: Option<&CancelToken>,
 ) -> InputRun {
+    when_ready(
+        || target.capture_ansi(-80),
+        cancel,
+        || run_herdr(target, plan, cancel),
+    )
+}
+
+/// [`run`] for an `/exit`, which also sends nothing while a draft is stashed.
+pub(crate) fn run_exit(target: &HerdrTarget, plan: &[TuiInputAction]) -> InputRun {
+    let capture = || target.capture_ansi(-80);
+    when_ready_to_exit(capture, None, || run_herdr(target, plan, None))
+}
+
+/// Runs `send` once an ANSI `capture` shows an empty ready Claude composer; a person's draft, a
+/// dialog or a busy screen sends nothing, on any host.
+pub(crate) fn when_ready(
+    capture: impl FnMut() -> Option<String>,
+    cancel: Option<&CancelToken>,
+    send: impl FnOnce() -> InputRun,
+) -> InputRun {
+    ready_then(capture, cancel, false, send)
+}
+
+/// [`when_ready`] for an `/exit`, which also sends nothing while a draft is stashed.
+pub(crate) fn when_ready_to_exit(
+    capture: impl FnMut() -> Option<String>,
+    cancel: Option<&CancelToken>,
+    send: impl FnOnce() -> InputRun,
+) -> InputRun {
+    ready_then(capture, cancel, true, send)
+}
+
+fn ready_then(
+    mut capture: impl FnMut() -> Option<String>,
+    cancel: Option<&CancelToken>,
+    exit: bool,
+    send: impl FnOnce() -> InputRun,
+) -> InputRun {
     match wait_for(cancel, COMPOSER_READY_WAIT, || {
-        observation(target.capture_ansi(-80).as_deref())
+        observation(capture().as_deref(), exit)
     }) {
-        Ok(true) => run_herdr(target, plan, cancel),
+        Ok(true) => send(),
         Err(WaitStop::Cancelled) => InputRun::Cancelled { confirmed: 0 },
         Ok(false) | Err(WaitStop::TimedOut) => InputRun::Refused(InputRefusal::Unknown),
     }

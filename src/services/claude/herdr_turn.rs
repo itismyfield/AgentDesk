@@ -22,14 +22,17 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::agent_protocol::{
     NativeTerminalKind, RuntimeHandoff, RuntimeHandoffKind, StreamMessage,
 };
+use crate::services::claude::session_handoff::{self, EarlierExecution, LegacyTmux};
 use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
 use crate::services::claude_tui::host_input::InputRun;
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
 use crate::services::claude_tui::transcript_tail::claude_transcript_path;
 use crate::services::cluster::stream_relay::SourceFileIdentity;
+use crate::services::discord::UnplacedLease;
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchEndpoint,
     HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
+    unplaced::{self, Resolution, Unplaced},
 };
 use crate::services::provider::cancel_token_claude_interrupt::{
     HerdrTurnStart, herdr_stop_settlement_available,
@@ -41,6 +44,7 @@ use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, cancel_requested, herdr_provider_terminal_only,
     poll_output_file_until_result,
 };
+use crate::services::provider_auth_profile::ProviderAuthOverlay;
 use crate::services::session_backend::{
     StreamLineState, process_claude_transcript_line,
     read_claude_tui_output_file_until_result_with_harvest as read_output_file_until_result_with_harvest,
@@ -97,6 +101,29 @@ impl HerdrLaunchHost for Boot<'_> {
     fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
         self.0.launch_evidence(probe)
     }
+    fn unplaced_witness(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+        nonce: &str,
+    ) -> Result<crate::services::session_host::ServerWitness, String> {
+        self.0.unplaced_witness(endpoint, nonce)
+    }
+    fn channel_panes(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+        logical_key: &str,
+        witness: &crate::services::session_host::ServerWitness,
+    ) -> Result<Vec<unplaced::ChannelPane>, String> {
+        self.0.channel_panes(endpoint, logical_key, witness)
+    }
+    fn dispose_residue(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+        nonce: &str,
+        residue: &unplaced::Residue,
+    ) -> Result<(), String> {
+        self.0.dispose_residue(endpoint, nonce, residue)
+    }
 }
 
 /// The boot registry's launch host, on its endpoints only.
@@ -114,6 +141,9 @@ pub(crate) struct HerdrTurn<'a> {
     pub row: Option<&'a HostedRecord>,
     pub prompt: &'a str,
     pub working_dir: &'a str,
+    /// The channel's provider session a launch resumes; `force_fresh` or none starts a new one.
+    pub session_id: Option<&'a str>,
+    pub force_fresh: bool,
     pub system_prompt: Option<&'a str>,
     pub model: Option<&'a str>,
     /// The hook receiver a launch reports to; only a launch needs it.
@@ -143,6 +173,21 @@ pub(crate) trait HerdrTurnPorts {
         record: &HostedExecution,
         target: &HerdrTarget,
     ) -> Result<(), String>;
+    /// The legacy tmux execution a resume ends before its launch.
+    fn earlier_tmux<'a>(&self, logical: &'a str) -> Box<dyn EarlierExecution + 'a> {
+        Box::new(LegacyTmux(logical))
+    }
+    /// The account and home a launch on `logical` runs under.
+    fn auth_overlay(&self, logical: &str) -> Result<ProviderAuthOverlay, String> {
+        crate::services::discord::org_schema::overlay_from_tmux_session(
+            ProviderKind::Claude,
+            logical,
+        )
+    }
+    /// The channel's transition lease for resolving `owner`'s unplaced Pending.
+    fn unplaced_lease(&self, _owner: &HostedOwner) -> Result<UnplacedLease, String> {
+        Err("no channel lease".into())
+    }
 }
 
 /// The source a prompt goes to.
@@ -286,7 +331,9 @@ fn cleared_source(
     awaited: AwaitedClear,
 ) -> Result<Attached, String> {
     let session_id = awaited.session_id;
-    let transcript = claude_transcript_path(Path::new(turn.working_dir), &session_id, None)?;
+    let home = launch_home(&record.execution_nonce)?;
+    let working_dir = Path::new(turn.working_dir);
+    let transcript = claude_transcript_path(working_dir, &session_id, home.as_deref())?;
     if awaited.transcript.as_deref().map(Path::new) != Some(transcript.as_path()) {
         return Err(format!(
             "herdr turn: the clear Pending of {session_id} names another transcript than {}",
@@ -313,6 +360,10 @@ fn pending_source(
     record: &HostedExecution,
 ) -> Result<Attached, String> {
     let nonce = &record.execution_nonce;
+    let adopted = record.location.is_none() && record.expected.is_none();
+    if adopted && unplaced_resolved(turn, runtime, ports, nonce)? == Resolution::Retired {
+        return launched_source(turn, runtime, ports);
+    }
     let session_id = execution_context("claude", nonce)?
         .expected_native_session_id
         .ok_or("herdr turn: the pending launch named no session")?;
@@ -320,14 +371,39 @@ fn pending_source(
         event.execution_nonce.as_deref() == Some(nonce.as_str())
             && logged_session(&event.new) == Some(session_id.as_str())
     });
+    if !started && adopted {
+        return Err(format!(
+            "herdr turn: pending execution {nonce} took its launched pane; no start of \
+             {session_id} is logged yet"
+        ));
+    }
     if !started {
         let refused = never_attached::refusal(turn, runtime, ports, record, &session_id);
         return Err(refused);
     }
-    if record.expected.is_none() {
+    if record.expected.is_none() && !adopted {
         never_attached::probe_again(turn, runtime, ports)?;
     }
     attach(turn, runtime, ports, nonce, &session_id)
+}
+
+/// The turn's resolution of its unplaced Pending `nonce`: adopted, or retired for a fresh launch.
+fn unplaced_resolved(
+    turn: &HerdrTurn<'_>,
+    runtime: &Handle,
+    ports: &dyn HerdrTurnPorts,
+    nonce: &str,
+) -> Result<Resolution, String> {
+    let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
+    let target = Unplaced {
+        pool: turn.pool,
+        owner: &turn.owner,
+        nonce,
+        endpoint: &turn.endpoint,
+        host,
+        quiet: unplaced::quiet(),
+    };
+    unplaced::resolve_for_turn(runtime, ports.unplaced_lease(&turn.owner), target)
 }
 
 /// The pane's latest logged record that moved it; refusal audits do not.
@@ -472,7 +548,37 @@ fn composer_settled(run: &InputRun) -> bool {
     )
 }
 
+/// The session a launch resumes: the turn's own one while it last ran under the overlay's account,
+/// its transcript exists under the overlay's home and O reads that file; otherwise a new one.
+fn resumed_session(
+    turn: &HerdrTurn<'_>,
+    overlay: &ProviderAuthOverlay,
+) -> Result<Option<String>, String> {
+    let Some(session) = turn.session_id.filter(|_| !turn.force_fresh) else {
+        return Ok(None);
+    };
+    // As on tmux, a session of another account is never continued under this one.
+    let logical = &turn.owner.logical_key;
+    let profile = &overlay.profile_id;
+    if !crate::services::tmux_common::claude_session_auth_matches(logical, session, profile)? {
+        return Ok(None);
+    }
+    let working_dir = Path::new(turn.working_dir);
+    let home = overlay.home.as_deref();
+    let Some(source) = session_handoff::transcript_file(working_dir, session, home)? else {
+        return Ok(None);
+    };
+    if !session_handoff::o_reads(turn.channel_id, &source)? {
+        return Err(format!(
+            "herdr turn: O reads no cursor on {}, so a resume would post it again",
+            source.path.display()
+        ));
+    }
+    Ok(Some(session.to_owned()))
+}
+
 /// A new execution: create, evidence, SessionStart, then attach; no prompt before the attach.
+/// A resume first ends the legacy tmux execution of the same session by its own `/exit`.
 fn launched_source(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
@@ -480,21 +586,29 @@ fn launched_source(
 ) -> Result<Attached, String> {
     let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
     let working_dir = Path::new(turn.working_dir);
-    let fresh = super::fresh_claude_tui_session_resolution(working_dir, None)?;
     let hook_endpoint = turn
         .hook_endpoint
         .clone()
         .ok_or("herdr turn: no hook endpoint")?;
     let logical = &turn.owner.logical_key;
-    let overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
-        ProviderKind::Claude,
-        logical,
-    )?;
+    let overlay = ports.auth_overlay(logical)?;
     let auth = crate::services::provider_auth_profile::overlay_shell_env_lines(&overlay);
+    let resumed = resumed_session(turn, &overlay)?;
+    let home = overlay.home.as_deref();
+    let session_id = match &resumed {
+        Some(session) => session.clone(),
+        None => super::fresh_claude_tui_session_resolution(working_dir, home)?.session_id,
+    };
+    if resumed.is_some() {
+        session_handoff::end_by_exit(
+            &mut *ports.earlier_tmux(logical),
+            session_handoff::EXIT_WAIT,
+        )?;
+    }
     let prepare = |prepared: &PreparedIncarnation| {
         let (system, model) = (turn.system_prompt, turn.model);
-        let (session, hooks) = (fresh.session_id.as_str(), hook_endpoint.clone());
-        super::tui_session_launch::prepare_claude_herdr_launch(
+        let (session, hooks) = (session_id.as_str(), hook_endpoint.clone());
+        let command = super::tui_session_launch::prepare_claude_herdr_launch(
             prepared,
             working_dir,
             session,
@@ -502,29 +616,31 @@ fn launched_source(
             model,
             hooks,
             &auth,
-        )
+        )?;
+        // The account this session runs under, which a later resume of it checks.
+        let profile = &overlay.profile_id;
+        crate::services::tmux_common::write_claude_session_auth(logical, session, profile)?;
+        Ok(command)
     };
     // Subscribed before the create, so the launch's SessionStart cannot pass unseen.
     let mut hooks = ports.hook_events();
-    let launch = launch(turn, Some(fresh.session_id.clone()));
+    let mut launch = launch(turn, Some(session_id.clone()), resumed.is_some());
+    launch.provider_root = home.map(|home| home.join("projects"));
     let outcome = runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host));
     let nonce = launched(outcome)?;
-    session_started(
-        runtime,
-        &mut hooks,
-        &fresh.session_id,
-        turn.cancel.as_deref(),
-    )?;
-    attach(turn, runtime, ports, &nonce, &fresh.session_id)
+    let resume = resumed.is_some().then_some(nonce.as_str());
+    let cancel = turn.cancel.as_deref();
+    session_started(runtime, &mut hooks, (&session_id, resume), cancel)?;
+    attach(turn, runtime, ports, &nonce, &session_id)
 }
 
-fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>) -> HerdrLaunch {
+fn launch(turn: &HerdrTurn<'_>, session_id: Option<String>, resume: bool) -> HerdrLaunch {
     HerdrLaunch {
         endpoint: Some(turn.endpoint.clone()),
         owner: turn.owner.clone(),
         channel_id: Some(turn.channel_id),
         expected_native_session_id: session_id,
-        resume: false,
+        resume,
         provider_root: None,
     }
 }
@@ -543,11 +659,12 @@ pub(crate) fn launched(
     }
 }
 
-/// Waits for the launched session's SessionStart: its provider and hooks are up.
+/// Waits for the launched session's SessionStart: its provider and hooks are up. A resume waits
+/// for its own execution's `source=resume` start, never for another start of the same session.
 fn session_started(
     runtime: &Handle,
     hooks: &mut broadcast::Receiver<HookEvent>,
-    session_id: &str,
+    (session_id, resume): (&str, Option<&str>),
     cancel: Option<&CancelToken>,
 ) -> Result<(), String> {
     let deadline = Instant::now() + SESSION_START_WAIT;
@@ -561,7 +678,10 @@ fn session_started(
             Ok(Ok(event))
                 if event.provider == "claude"
                     && event.kind == HookEventKind::SessionStart
-                    && event.session_id == session_id =>
+                    && event.session_id == session_id
+                    && resume.is_none_or(|nonce| {
+                        session_handoff::resumed_start(&event, session_id, nonce)
+                    }) =>
             {
                 return Ok(());
             }
@@ -604,7 +724,9 @@ fn attach(
         other => return Err(format!("herdr turn: row unreadable: {other:?}")),
     };
     let target = gate(&record)?;
-    let transcript = claude_transcript_path(Path::new(turn.working_dir), session_id, None)?;
+    let home = launch_home(nonce)?;
+    let transcript =
+        claude_transcript_path(Path::new(turn.working_dir), session_id, home.as_deref())?;
     let request = AttachRequest {
         owner: &turn.owner,
         record: &record,
@@ -620,6 +742,12 @@ fn attach(
         target,
         bound,
     })
+}
+
+/// The Claude home execution `nonce`'s launch wrote its transcripts under.
+fn launch_home(nonce: &str) -> Result<Option<PathBuf>, String> {
+    let root = execution_context("claude", nonce)?.provider_root;
+    Ok(root.and_then(|root| root.parent().map(Path::to_path_buf)))
 }
 
 /// One gated paste and Enter, then the transcript until the turn ends, then the watcher handoff.

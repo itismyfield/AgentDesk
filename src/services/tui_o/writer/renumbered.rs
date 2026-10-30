@@ -38,6 +38,34 @@ pub(super) fn unique<'a>(cursors: impl Iterator<Item = &'a Cursor>) -> Result<()
     Ok(())
 }
 
+/// Same path and inode, with sessions equal or one of them empty.
+fn loosely_same(stored: &SourceId, source: &SourceId) -> bool {
+    let (one, other) = (&stored.session_id, &source.session_id);
+    let sessions = one == other || one.is_empty() || other.is_empty();
+    stored.path == source.path && stored.ino == source.ino && sessions
+}
+
+/// Whether a Claude bind of `source` would continue one of `cursors` rather than read the file
+/// anew: its exact stored name, else the only loosely same one. Two candidates are refused.
+pub(crate) fn claude_cursor_continues(
+    cursors: &[Cursor],
+    source: &SourceId,
+) -> Result<bool, String> {
+    let exact = canonical(cursors.iter(), source)?;
+    if cursors.iter().any(|cursor| cursor.source == exact) {
+        return Ok(true);
+    }
+    match cursors
+        .iter()
+        .filter(|c| loosely_same(&c.source, source))
+        .count()
+    {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(ambiguous(source)),
+    }
+}
+
 fn ambiguous(source: &SourceId) -> String {
     let path = source.path.display();
     format!("source {path} names more than one stored source")
@@ -153,13 +181,10 @@ impl Names {
         }
     }
 
-    /// Same path and inode, sessions equal or one empty, and not a source taken for another one.
+    /// Loosely the same file, and not a source taken for another session.
     fn compatible(&self, stored: &SourceId, source: &SourceId) -> bool {
-        let (path, ino) = (stored.path == source.path, stored.ino == source.ino);
-        let (one, other) = (&stored.session_id, &source.session_id);
-        let sessions = one == other || one.is_empty() || other.is_empty();
         let taken = self.confirmed.get(&source_key(stored));
-        path && ino && sessions && taken.is_none_or(|taken| taken == other)
+        loosely_same(stored, source) && taken.is_none_or(|taken| *taken == source.session_id)
     }
 
     fn confirm(&mut self, stored: &SourceId, source: &SourceId) {

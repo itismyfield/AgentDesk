@@ -13,6 +13,7 @@ use tokio::sync::watch;
 
 use super::TuiRuntimeBinding;
 use super::binding_context::{SpawnNonceMarker, launch_mode, observe_spawn_nonce_marker};
+mod herdr_resume;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 #[cfg(test)]
 use crate::services::claude_tui::source_verify::n2b_mutant;
@@ -22,12 +23,15 @@ use crate::services::claude_tui::source_verify::{
 use crate::services::discord::runtime_store::fsync_parent_dir;
 pub(crate) use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
+use herdr_resume::resumes_under_new_execution;
+pub(crate) use herdr_resume::{herdr_resume_launch, logged_by};
 pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
 mod claude_fold;
 use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
 pub(crate) mod codex;
 mod log_record;
+mod read_cache;
 use log_record::{Logged, LoggedRef};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,7 +44,8 @@ pub(crate) enum BindingCause {
     Fork,
     Unknown,
 }
-/// `Resolved` completes the `Pending` record `pending_seq`; `Rejected` is audit only.
+/// `Resolved` completes the named Pending; bare `Rejected` is audit only.
+/// Codex typed ownership can name the exact Pending a rejection closes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BindingTarget {
@@ -236,6 +241,7 @@ fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
     Ok(events_dir()?.map(|dir| dir.join(format!("{channel_id}.log"))))
 }
 
+#[derive(Clone)]
 struct LogRead<T = BindingEvent> {
     records: Vec<T>,
     lines: u64,
@@ -244,7 +250,11 @@ struct LogRead<T = BindingEvent> {
 }
 
 /// Complete lines only: a torn tail is left out, and a corrupt line is skipped with a warning.
-fn read_log<T: DeserializeOwned>(path: &Path) -> io::Result<LogRead<T>> {
+fn read_log<T: DeserializeOwned + Clone + Send + 'static>(path: &Path) -> io::Result<LogRead<T>> {
+    read_cache::read(path, || parse_log(path))
+}
+
+fn parse_log<T: DeserializeOwned>(path: &Path) -> io::Result<LogRead<T>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -610,6 +620,7 @@ impl Writer {
             let file = OpenOptions::new().write(true).open(path)?;
             if read.complete_len < read.total_len {
                 // A crash mid-append left a line that was never published; drop it before appending.
+                read_cache::invalidate(path);
                 file.set_len(read.complete_len)?;
             }
             // Lines read back after a restart may predate their fsync, so make them durable before use.
@@ -813,6 +824,7 @@ impl Writer {
             .is_some_and(|current| same_source(current, session, p.path, file))
             && !unsettled
             && !reclaim
+            && !resumes_under_new_execution(p, pane.nonce.as_deref())
         {
             return Planned::Keep(Committed::Unchanged);
         } else {
@@ -916,6 +928,7 @@ impl Writer {
         published_at: Option<DateTime<Utc>>,
         codex_ownership: Option<&codex::Ownership>,
     ) -> io::Result<()> {
+        read_cache::invalidate(path);
         let logged = LoggedRef {
             event: record,
             verified,
@@ -985,7 +998,9 @@ pub(crate) fn set_test_root(root: Option<&Path>) {
 #[cfg(test)]
 pub(crate) fn forget_channel_for_tests(channel_id: u64) {
     if let Ok(Some(path)) = log_path(channel_id) {
-        lock_logs().remove(&path);
+        let mut logs = lock_logs();
+        logs.remove(&path);
+        read_cache::invalidate(&path);
     }
 }
 
@@ -994,6 +1009,9 @@ mod lane_tests;
 
 #[cfg(test)]
 mod codex_claim_tests;
+
+#[cfg(test)]
+mod cache_tests;
 
 #[cfg(all(test, unix))]
 mod admission_tests;

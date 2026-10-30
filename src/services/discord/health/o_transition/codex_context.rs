@@ -288,6 +288,7 @@ impl Observer for Read {
             context: self.context.clone(),
             current: self.current.clone(),
             events: log.events,
+            settled_companions: log.settled_companions,
             tail: log.tail,
             log_digest: log.digest,
             census_digest: digest,

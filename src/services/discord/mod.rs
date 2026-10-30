@@ -101,8 +101,6 @@ mod scheduled_turn;
 mod receipt_settle;
 // #1074: session identity parsing SSoT (legacy + namespaced session_key forms).
 pub(crate) mod restart_report;
-mod role_map;
-mod role_map_enrichment;
 mod router;
 mod runtime_bootstrap;
 pub(in crate::services::discord) mod semantic_boundaries;
@@ -319,7 +317,6 @@ use queue_dispatch::{
 };
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
-use role_map_enrichment::enrich_role_map_with_channel_ids;
 use router::handle_event;
 use serenity::{ChannelId, MessageId, UserId};
 #[cfg(test)]
@@ -1082,7 +1079,9 @@ pub(crate) struct SharedData {
     readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger, // #4370
 }
 
-pub(crate) use session_transition::{SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy};
+pub(crate) use session_transition::{
+    SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy, UnplacedLease,
+};
 
 impl SharedData {
     pub(super) fn has_runtime_storage(&self) -> bool {

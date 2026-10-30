@@ -99,6 +99,9 @@ pub(crate) enum HostWitness {
     NoRow,
     /// Sessions record only: the key matched diverging rows or a foreign owner.
     RowConflict(String),
+    /// Sessions record only: a retired Herdr record, read as the Herdr witness it holds unless
+    /// the host marker shows its session came back to tmux.
+    Retired(Box<HostWitness>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,9 +240,10 @@ pub(crate) fn resolve_session_target(
     input: SessionTargetInput,
     source: &dyn SessionTargetEvidenceSource,
 ) -> ResolvedSessionTarget {
-    let evidence = source.read_evidence(&input);
-    // Every tmux or process answer needs a found row with no hosted record, whatever the
-    // input and whichever witness named the host.
+    let mut evidence = source.read_evidence(&input);
+    evidence.session_record = settled_record(&evidence);
+    // Every tmux or process answer needs a found legacy row (no hosted record, or a settled
+    // returned one), whatever the input and whichever witness named the host.
     let host = match resolve_target_host(&evidence) {
         TargetHost::Known {
             kind: HostKind::Tmux | HostKind::Process,
@@ -253,6 +257,25 @@ pub(crate) fn resolve_session_target(
         input,
         host,
         session_key: evidence.session_key,
+    }
+}
+
+/// A retired Herdr record whose session returned to tmux reads as a legacy row once the marker
+/// names tmux; any other retired record keeps the row off tmux as before.
+fn settled_record(evidence: &SessionTargetEvidence) -> HostWitness {
+    let tmux = |w: &HostWitness| {
+        matches!(
+            w,
+            HostWitness::Known {
+                kind: HostKind::Tmux,
+                ..
+            }
+        )
+    };
+    match &evidence.session_record {
+        HostWitness::Retired(_) if tmux(&evidence.host_marker) => HostWitness::LegacyRow,
+        HostWitness::Retired(herdr) => (**herdr).clone(),
+        other => other.clone(),
     }
 }
 
@@ -289,6 +312,10 @@ fn witnessed_host(evidence: &SessionTargetEvidence) -> TargetHost {
             }
             HostWitness::Unrecognized(detail) | HostWitness::ReadFailed(detail) => {
                 let detail = detail.clone();
+                return TargetHost::Unknown(UnknownHost::Unreadable { source, detail });
+            }
+            HostWitness::Retired(_) => {
+                let detail = "unsettled retired record".to_string();
                 return TargetHost::Unknown(UnknownHost::Unreadable { source, detail });
             }
         }
@@ -769,6 +796,45 @@ mod tests {
                 resolve(key("claude/h/mac-mini:x"), herdr_without_pane).host,
                 TargetHost::Unknown(UnknownHost::MissingTarget(HostKind::Herdr)),
                 "{pane:?}: a Herdr target never borrows the tmux session name"
+            );
+        }
+    }
+
+    // A retired Herdr record reads as a legacy row only once the marker names tmux, which a
+    // return writes after the execution ended; otherwise it stays the Herdr witness it holds.
+    #[test]
+    fn a_retired_herdr_record_is_a_legacy_row_only_once_its_marker_names_tmux() {
+        let retired = |host_marker| SessionTargetEvidence {
+            session_name: Some(TUI_NAME.to_string()),
+            session_record: HostWitness::Retired(Box::new(witness(HostKind::Herdr, Some("w1-1")))),
+            durable_runtime_kind: Some(R::ClaudeTui),
+            host_marker,
+            ..absent()
+        };
+        let returned = resolve(
+            key("claude/h/mac-mini:x"),
+            retired(witness(HostKind::Tmux, None)),
+        );
+        assert_eq!(
+            returned.host,
+            target(HostKind::Tmux, TargetSource::HostMarker, TUI_NAME)
+        );
+        for marker in [
+            witness(HostKind::Herdr, Some("w1-1")),
+            HostWitness::Absent,
+            HostWitness::ReadFailed("unread".into()),
+        ] {
+            let kept = resolve(key("claude/h/mac-mini:x"), retired(marker.clone()));
+            assert!(
+                !matches!(
+                    kept.host,
+                    TargetHost::Known {
+                        kind: HostKind::Tmux,
+                        ..
+                    }
+                ),
+                "{marker:?}: {:?}",
+                kept.host
             );
         }
     }

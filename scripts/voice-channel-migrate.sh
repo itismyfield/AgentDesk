@@ -2,7 +2,6 @@
 set -euo pipefail
 
 CONFIG_PATH="${AGENTDESK_CONFIG:-$HOME/.adk/release/config/agentdesk.yaml}"
-ROLE_MAP_PATH="${AGENTDESK_ROLE_MAP:-$HOME/.adk/release/config/role_map.json}"
 MODE="dry-run"
 AGENT_FILTER=""
 PROVIDER_FILTER=""
@@ -30,7 +29,6 @@ Usage:
 
 Options:
   --config PATH              Runtime agentdesk.yaml. Default: ~/.adk/release/config/agentdesk.yaml
-  --role-map PATH            Legacy role_map.json path. Default: ~/.adk/release/config/role_map.json
   --agent ID                 Limit to one agent id.
   --provider PROVIDER        Limit to one provider key such as claude or codex.
   --old-channel ID           Limit to one existing text channel id.
@@ -58,7 +56,6 @@ while [[ $# -gt 0 ]]; do
     --apply) MODE="apply" ;;
     --rollback) ROLLBACK="true" ;;
     --config) CONFIG_PATH="$2"; shift ;;
-    --role-map) ROLE_MAP_PATH="$2"; shift ;;
     --agent) AGENT_FILTER="$2"; shift ;;
     --provider) PROVIDER_FILTER="$2"; shift ;;
     --old-channel) OLD_CHANNEL_ID="$2"; shift ;;
@@ -189,7 +186,6 @@ print_plan() {
       echo "- create one GUILD_VOICE channel with the old channel name and parent category"
     fi
     echo "- replace matching agentdesk.yaml channel ids"
-    echo "- replace legacy role_map.json string occurrences when the file exists"
     echo "- replace old channel ids in release agent prompts, memories, and skills"
     echo "- update agents.discord_channel_* DB materialization"
     if [[ "$SKIP_ARCHIVE" == "true" ]]; then
@@ -288,37 +284,6 @@ replace_config_ids() {
     File.write(path, YAML.dump(cfg))
     warn "updated #{count} YAML channel id(s); backup: #{backup}"
   ' "$CONFIG_PATH" "$from_id" "$to_id"
-}
-
-replace_role_map_ids() {
-  local from_id="$1"
-  local to_id="$2"
-  if [[ ! -f "$ROLE_MAP_PATH" ]]; then
-    return 0
-  fi
-  ruby -rjson -e '
-    def replace(value, from_id, to_id)
-      case value
-      when Hash
-        value.transform_values { |v| replace(v, from_id, to_id) }
-      when Array
-        value.map { |v| replace(v, from_id, to_id) }
-      when String
-        value == from_id ? to_id : value
-      else
-        value
-      end
-    end
-    path, from_id, to_id = ARGV
-    raw = File.read(path)
-    updated = replace(JSON.parse(raw), from_id, to_id)
-    if JSON.generate(updated) != JSON.generate(JSON.parse(raw))
-      backup = "#{path}.bak.#{Time.now.utc.strftime("%Y%m%d%H%M%S")}"
-      File.write(backup, raw)
-      File.write(path, JSON.pretty_generate(updated) + "\n")
-      warn "updated legacy role_map; backup: #{backup}"
-    end
-  ' "$ROLE_MAP_PATH" "$from_id" "$to_id"
 }
 
 hardcoded_roots() {
@@ -526,7 +491,6 @@ else
 fi
 
 replace_config_ids "$from_id" "$to_id"
-replace_role_map_ids "$from_id" "$to_id"
 replace_hardcoded_ids "$from_id" "$to_id"
 update_db_ids "$from_id" "$to_id"
 

@@ -5,7 +5,7 @@ use sqlx::PgPool;
 
 use crate::config::session_hosts::{self, ChannelEndpoint};
 use crate::db::dispatched_sessions::hosted_execution::{
-    HostedLookup, HostedLookupKey, HostedObservation, HostedRecord, HostedState,
+    HostedExecution, HostedLookup, HostedLookupKey, HostedObservation, HostedRecord, HostedState,
     load_hosted_execution_pg,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -18,7 +18,16 @@ pub(crate) enum TurnHost {
     /// The existing path, unchanged.
     Tmux,
     Herdr(Box<HerdrTurnPlan>),
+    /// The channel left Herdr while its local Claude execution still holds the row, or has not
+    /// finished moving back: that execution ends and its session returns to tmux first.
+    Return(Box<ReturnPlan>),
     Refused(HerdrRefusal),
+}
+
+#[derive(Debug)]
+pub(crate) struct ReturnPlan {
+    pub row: HostedObservation,
+    pub record: HostedExecution,
 }
 
 #[derive(Debug)]
@@ -88,6 +97,43 @@ fn herdr_trace(row: &RowRead) -> Option<Option<HostedState>> {
     }
 }
 
+/// A Bound Claude execution on this node, or a retired one whose move back is unfinished: its
+/// marker still names Herdr or this process still lists it there. Pending rows are not.
+fn return_plan(provider: &ProviderKind, row: &RowRead) -> Option<ReturnPlan> {
+    let Ok(Some(observed)) = row else {
+        return None;
+    };
+    let HostedRecord::Known(record) = &observed.record else {
+        return None;
+    };
+    let local = session_hosts::local_node();
+    let at = record.location.as_ref()?;
+    let ours = *provider == ProviderKind::Claude
+        && record.owner.provider == "claude"
+        && local.as_deref() == Some(at.execution_node.as_str());
+    let due = match record.state {
+        HostedState::Bound => true,
+        HostedState::Retired => !returned(&record.owner.logical_key, &record.execution_nonce),
+        HostedState::Pending => false,
+    };
+    let (row, record) = (observed.clone(), record.clone());
+    (ours && due).then_some(ReturnPlan { row, record })
+}
+
+/// Whether execution `nonce`'s session finished moving back: its marker names tmux and this
+/// process no longer lists it as a Herdr pane.
+#[cfg(unix)]
+pub(crate) fn returned(logical: &str, nonce: &str) -> bool {
+    crate::services::claude::host_gate::tmux_marked(logical)
+        && crate::services::tui_prompt_dedupe::herdr_listed_execution(logical).as_deref()
+            != Some(nonce)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn returned(_logical: &str, _nonce: &str) -> bool {
+    true
+}
+
 async fn read_row(pool: Option<&PgPool>, session_key: Option<&str>) -> RowRead {
     let (Some(pool), Some(session_key)) = (pool, session_key) else {
         return Err("no database or session key".into());
@@ -109,8 +155,13 @@ pub(crate) async fn for_turn(
     session_key: Option<&str>,
 ) -> TurnHost {
     let Some(endpoint) = session_hosts::herdr_endpoint(channel_id) else {
-        // An unconfigured channel's unreadable row keeps the existing path; a Herdr row refuses.
-        return match herdr_trace(&read_row(pool, session_key).await) {
+        // An unconfigured channel's unreadable row keeps the existing path; a Herdr row returns
+        // to tmux when it is this node's Claude execution, and refuses otherwise.
+        let row = read_row(pool, session_key).await;
+        if let Some(plan) = return_plan(provider, &row) {
+            return TurnHost::Return(Box::new(plan));
+        }
+        return match herdr_trace(&row) {
             Some(state) => TurnHost::Refused(HerdrRefusal::HostedHerdrUnconfigured { state }),
             None => TurnHost::Tmux,
         };
@@ -138,6 +189,7 @@ where
         TurnHost::Tmux => None,
         TurnHost::Refused(refusal) => Some(refusal),
         TurnHost::Herdr(_) => Some(HerdrRefusal::ExecutorNotWired),
+        TurnHost::Return(_) => None,
     }
 }
 
@@ -256,13 +308,18 @@ async fn configured_turn(
     if !o_writer_ready(channel_id, kind) {
         return Err(HerdrRefusal::OWriterNotReady);
     }
-    let endpoint = HerdrLaunchEndpoint {
+    let endpoint = launch_endpoint(endpoint);
+    Ok(HerdrTurnPlan { endpoint, row })
+}
+
+/// The launch endpoint a channel's configured Herdr endpoint names.
+pub(crate) fn launch_endpoint(endpoint: ChannelEndpoint) -> HerdrLaunchEndpoint {
+    HerdrLaunchEndpoint {
         execution_node: endpoint.execution_node,
         config_key: endpoint.key,
         socket_addr: endpoint.socket_path.display().to_string(),
         herdr_session: endpoint.herdr_session,
-    };
-    Ok(HerdrTurnPlan { endpoint, row })
+    }
 }
 
 #[cfg(test)]

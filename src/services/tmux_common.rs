@@ -2,8 +2,13 @@ pub(crate) mod claude_footer;
 pub(crate) mod host_marker;
 mod session_markers;
 pub(crate) use session_markers::{
-    resolve_tmux_runtime_kind_marker, tmux_session_auth_profile_matches,
-    write_tmux_runtime_kind_marker, write_tmux_session_auth_profile,
+    advance_claude_session_auth, resolve_tmux_runtime_kind_marker,
+    tmux_session_auth_profile_matches, write_tmux_runtime_kind_marker,
+    write_tmux_session_auth_profile,
+};
+#[cfg(unix)]
+pub(crate) use session_markers::{
+    claude_session_auth, claude_session_auth_matches, write_claude_session_auth,
 };
 
 use sha2::{Digest, Sha256};
@@ -570,9 +575,12 @@ fn lines_reconstruct_claude_tui_interrupt_chrome(first: &str, second: &str) -> b
 }
 
 fn tmux_lines_after_claude_prompt_have_interrupt_footer(lines: &[&str]) -> bool {
+    // The composer's border starts at column 0; an indented one is a draft's continuation text.
     let Some(bottom) = lines.iter().position(|line| {
-        let line = trim_prompt_line(line);
-        line.chars().count() >= 8 && line.chars().all(|ch| ch == '─')
+        let border = trim_prompt_line(line);
+        !line.starts_with(char::is_whitespace)
+            && border.chars().count() >= 8
+            && border.chars().all(|ch| ch == '─')
     }) else {
         return false;
     };
@@ -1168,6 +1176,7 @@ pub fn resolve_session_temp_path(session_name: &str, extension: &str) -> Option<
 }
 
 const TMUX_AUTH_PROFILE_TEMP_EXT: &str = "auth_profile";
+const CLAUDE_SESSION_AUTH_TEMP_EXT: &str = "auth_session";
 
 /// Delete all known session temp files for the given tmux session.
 /// Idempotent — missing files are not errors. Hits both the new persistent
@@ -1199,6 +1208,7 @@ pub(crate) fn cleanup_session_temp_files_under_source_authority(
         "sh",
         "generation",
         TMUX_AUTH_PROFILE_TEMP_EXT,
+        CLAUDE_SESSION_AUTH_TEMP_EXT,
         // Remove the old spawn nonce so a failed respawn cannot inherit its instance key.
         "spawn_nonce",
         "exit_reason",

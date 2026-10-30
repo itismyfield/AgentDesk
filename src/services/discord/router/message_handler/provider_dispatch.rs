@@ -14,13 +14,15 @@ use crate::services::provider_teardown::TeardownClearance;
 use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
 };
-use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, TurnHost};
+use crate::services::turn_host::{HerdrRefusal, HerdrTurnPlan, ReturnPlan, TurnHost};
 use crate::services::{claude, claude_tui, codex, gemini, opencode, qwen};
 
 pub(super) mod replay_scope;
 
 pub(super) struct StreamingTurn<'a> {
     pub pool: Option<&'a sqlx::PgPool>,
+    /// The bot whose channel lease a Herdr turn takes to resolve an unplaced launch.
+    pub shared: Option<&'a Arc<crate::services::discord::SharedData>>,
     pub provider: &'a ProviderKind,
     pub prompt: &'a str,
     pub session_id: Option<&'a str>,
@@ -264,7 +266,18 @@ pub(super) fn execute(
                 herdr_turn(&turn, plan, sender)
             });
         }
+        // The session comes back from Herdr, then runs on tmux under a clearance that tears
+        // nothing down.
+        TurnHost::Return(plan) => return_to_tmux(&turn, plan)?,
     }
+    let returned = TeardownClearance::Returned;
+    let turn = match turn.host {
+        TurnHost::Return(_) => StreamingTurn {
+            teardown: Some(&returned),
+            ..turn
+        },
+        _ => turn,
+    };
     #[cfg(test)]
     count_dispatch(turn.channel_id)?;
     #[cfg(test)]
@@ -424,6 +437,32 @@ pub(super) fn execute(
     }
 }
 
+/// Hands the channel's Herdr execution back to tmux before its tmux turn runs.
+#[cfg(unix)]
+fn return_to_tmux(turn: &StreamingTurn<'_>, plan: &ReturnPlan) -> Result<(), String> {
+    use crate::services::claude::herdr_return::{ProductionPorts, ReturnTurn, execute};
+    let pool = turn.pool.ok_or("herdr return: no database")?;
+    let back = ReturnTurn {
+        pool,
+        channel_id: turn.channel_id,
+        working_dir: turn.working_dir,
+        session_id: turn.session_id,
+        force_fresh: turn.force_fresh,
+    };
+    execute(
+        &back,
+        plan,
+        &tokio::runtime::Handle::current(),
+        &ProductionPorts,
+    )
+}
+
+#[cfg(not(unix))]
+fn return_to_tmux(_turn: &StreamingTurn<'_>, plan: &ReturnPlan) -> Result<(), String> {
+    let _ = (&plan.row, &plan.record);
+    Err("herdr return: unix only".into())
+}
+
 /// The switch is read first; off, the turn is refused before any I/O.
 #[cfg_attr(not(unix), allow(unused_variables))]
 fn herdr_turn(
@@ -455,6 +494,7 @@ mod herdr {
     use crate::services::claude::herdr_turn::{self, AttachRequest, HerdrTurn, HerdrTurnPorts};
     use crate::services::claude_tui::hook_server::{HookEvent, subscribe_hook_events};
     use crate::services::codex::herdr_turn::{CodexHerdrPorts, CodexHerdrTurn};
+    use crate::services::discord::UnplacedLease;
     use crate::services::discord::recovery_engine::host_reconcile::{
         HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
         reconcile_hosted_session_pg,
@@ -483,6 +523,7 @@ mod herdr {
         let ports = BootPorts {
             pool,
             channel_id: turn.channel_id,
+            shared: turn.shared,
         };
         if *turn.provider == ProviderKind::Codex {
             let codex = CodexHerdrTurn {
@@ -511,6 +552,8 @@ mod herdr {
             row: plan.row.as_ref().map(|observed| &observed.record),
             prompt: turn.prompt,
             working_dir: turn.working_dir,
+            session_id: turn.session_id,
+            force_fresh: turn.force_fresh,
             system_prompt: turn.system_prompt.filter(|prompt| !prompt.is_empty()),
             model: turn.model,
             hook_endpoint: crate::services::claude_tui::hook_server::current_hook_endpoint(),
@@ -546,6 +589,7 @@ mod herdr {
     pub(super) struct BootPorts<'a> {
         pub(super) pool: &'a PgPool,
         pub(super) channel_id: u64,
+        pub(super) shared: Option<&'a Arc<crate::services::discord::SharedData>>,
     }
 
     impl CodexHerdrPorts for BootPorts<'_> {
@@ -583,6 +627,10 @@ mod herdr {
         ) -> Result<(), String> {
             self.confirmed(owner, record, target)
         }
+
+        fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {
+            self.lease()
+        }
     }
 
     impl HerdrTurnPorts for BootPorts<'_> {
@@ -619,9 +667,22 @@ mod herdr {
         ) -> Result<(), String> {
             self.confirmed(owner, record, target)
         }
+
+        fn unplaced_lease(&self, _: &HostedOwner) -> Result<UnplacedLease, String> {
+            self.lease()
+        }
     }
 
     impl BootPorts<'_> {
+        /// Waits on the channel's transition lease as any transition claim does.
+        fn lease(&self) -> Result<UnplacedLease, String> {
+            let shared = self.shared.ok_or("no channel lease")?;
+            let channel = crate::services::discord::ChannelId::new(self.channel_id);
+            Handle::current()
+                .block_on(UnplacedLease::acquire(shared, channel))
+                .map_err(|_| "transition_busy".to_string())
+        }
+
         /// `Ok` only while the reconcile reads the Bound execution as a match.
         fn confirmed(
             &self,
@@ -780,6 +841,7 @@ pub(super) mod tests {
         let tools = vec!["Read".to_string()];
         let mut turn = StreamingTurn {
             pool: None,
+            shared: None,
             provider: &provider,
             prompt: "question",
             session_id: Some("conversation"),
@@ -874,6 +936,7 @@ pub(super) mod tests {
             let (sender, _receiver) = std::sync::mpsc::channel();
             let turn = StreamingTurn {
                 pool: Some(&pool),
+                shared: None,
                 provider: &provider,
                 prompt: "question",
                 session_id: None,

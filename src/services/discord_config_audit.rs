@@ -22,13 +22,6 @@ use legacy_bot::*;
 
 const CONFIG_AUDIT_KV_KEY: &str = "config_audit_report";
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct LegacySourceScan {
-    role_map_json: Option<Value>,
-    role_map_path: Option<PathBuf>,
-    warnings: Vec<String>,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct LoadedRuntimeConfig {
     pub config: Config,
@@ -47,8 +40,6 @@ pub(crate) struct AuditRunOutcome {
 pub(crate) struct ConfigAuditSources {
     pub yaml_path: String,
     pub yaml_present: bool,
-    pub role_map_path: Option<String>,
-    pub role_map_present: bool,
     pub bot_settings_path: Option<String>,
     pub bot_settings_present: bool,
 }
@@ -139,30 +130,6 @@ impl LegacyBotEntry {
     }
 }
 
-pub(crate) fn scan_legacy_sources(root: &Path) -> LegacySourceScan {
-    let mut scan = LegacySourceScan::default();
-    let role_map_path = runtime_layout::role_map_path(root);
-    if !role_map_path.is_file() {
-        return scan;
-    }
-
-    scan.role_map_path = Some(role_map_path.clone());
-    match fs::read_to_string(&role_map_path) {
-        Ok(content) => match serde_json::from_str::<Value>(&content) {
-            Ok(json) => scan.role_map_json = Some(json),
-            Err(err) => scan.warnings.push(format!(
-                "Failed to parse legacy role map '{}': {err}",
-                role_map_path.display()
-            )),
-        },
-        Err(err) => scan.warnings.push(format!(
-            "Failed to read legacy role map '{}': {err}",
-            role_map_path.display()
-        )),
-    }
-    scan
-}
-
 pub(crate) fn load_runtime_config(root: &Path) -> Result<LoadedRuntimeConfig, String> {
     let path = crate::config::config_path::config_path_in(root);
     let loaded = crate::config::config_path::load_config_file(&path)
@@ -232,7 +199,6 @@ pub(crate) fn audit_and_reconcile_config_only(
     mut config: Config,
     yaml_path: PathBuf,
     yaml_present: bool,
-    legacy_scan: &LegacySourceScan,
     dry_run: bool,
 ) -> Result<AuditRunOutcome, String> {
     let bot_settings_path = runtime_layout::config_dir(root).join("bot_settings.json");
@@ -242,20 +208,11 @@ pub(crate) fn audit_and_reconcile_config_only(
         sources: ConfigAuditSources {
             yaml_path: yaml_path.display().to_string(),
             yaml_present,
-            role_map_path: legacy_scan
-                .role_map_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            role_map_present: legacy_scan.role_map_json.is_some(),
             bot_settings_path: Some(bot_settings_path.display().to_string()),
             bot_settings_present: bot_settings_path.is_file(),
         },
         ..ConfigAuditReport::default()
     };
-
-    report.warnings.extend(legacy_scan.warnings.iter().cloned());
-
-    audit_role_map(&config, legacy_scan, dry_run, &mut report);
 
     let config_changed = audit_bot_settings(root, &mut config, dry_run, &mut report);
     if config_changed && !dry_run {
@@ -364,12 +321,6 @@ fn write_runtime_config(root: &Path, config: &Config) -> Result<(), String> {
     let path = crate::config::config_path::config_path_in(root);
     crate::config::save_to_path(&path, config)
         .map_err(|err| format!("Failed to write config '{}': {err}", path.display()))
-}
-
-fn compare_agents(yaml_agent: &AgentDef, legacy_agent: &AgentDef) -> Vec<&'static str> {
-    let left = ComparableAgent::from_yaml(yaml_agent);
-    let right = ComparableAgent::from_yaml(legacy_agent);
-    compare_comparable_agents(&left, &right)
 }
 
 fn compare_comparable_agents(left: &ComparableAgent, right: &ComparableAgent) -> Vec<&'static str> {
@@ -639,6 +590,7 @@ mod voice_alias_precheck_tests {
                 model: None,
                 reasoning_effort: None,
                 peer_agents: None,
+                thread_inherit: true,
                 quality_feedback_injection: None,
                 dispatch_profile: None,
                 isolate_override: None,
@@ -778,5 +730,18 @@ mod config_secret_write_tests {
         assert_secrets_on_disk(&path);
         let saved = crate::config::load_from_path(&path).unwrap();
         assert_eq!(saved.discord.owner_id, Some(123_456_789_012_345_678));
+    }
+}
+
+#[cfg(test)]
+mod role_map_retirement_tests {
+    use super::*;
+
+    #[test]
+    fn audit_report_omits_retired_role_map_sources() {
+        let report = serde_json::to_value(ConfigAuditReport::default()).unwrap();
+        assert!(report["sources"].get("role_map_path").is_none());
+        assert!(report["sources"].get("role_map_present").is_none());
+        assert!(report["sources"].get("bot_settings_path").is_some());
     }
 }

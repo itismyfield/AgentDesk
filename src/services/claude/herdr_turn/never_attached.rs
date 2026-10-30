@@ -20,7 +20,7 @@ pub(super) fn probe_again(
     };
     launched(runtime.block_on(launch_herdr_session(
         turn.pool,
-        launch(turn, None),
+        launch(turn, None, false),
         never,
         host,
     )))
@@ -69,8 +69,8 @@ pub(super) fn refusal(
              `agentdesk herdr retire {}` frees the channel",
             turn.channel_id
         ),
-        (Err(_), None) => "no pane was recorded and its create outcome is unknown, so it is \
-             kept; nothing here ends it"
+        (Err(_), None) => "no pane was recorded and its create outcome is unknown; it awaits \
+             automatic resolution by a later turn or the restart pass"
             .to_string(),
     };
     format!(

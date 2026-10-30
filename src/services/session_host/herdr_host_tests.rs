@@ -3205,9 +3205,9 @@ fn m0_close_variant_closed_world() {
         3,
         "constructor and two request checks"
     );
-    let leaf = &gate[fn_body(&gate, "fn send_close_pinned(")];
+    let leaf = &gate[fn_body(&gate, "fn deliver_close(")];
     assert_eq!(word_uses(leaf, "call_with_witness").len(), 1);
-    assert!(leaf.contains("let request = HerdrRequest::PaneClose"));
+    assert!(gate[fn_body(&gate, "fn close_call(")].contains("HerdrRequest::PaneClose"));
     let owner =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(CLOSE_OWNER)).unwrap();
     let owner = code_tokens(&owner);
@@ -3340,6 +3340,7 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
                     (HERDR_CLI, 1),
                     (TERMINATE_SERVICE, 1),
                     ("src/services/herdr_launch.rs", 1),
+                    ("src/services/claude/herdr_return.rs", 1),
                 ],
             ),
             (

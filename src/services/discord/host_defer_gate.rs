@@ -6,7 +6,7 @@ use sqlx::PgPool;
 
 use super::SharedData;
 use super::host_key_derivation::{
-    derive_channel_session_name, derive_hosted_lookup, merge_lookups,
+    derive_channel_session_key, derive_channel_session_name, derive_hosted_lookup, merge_lookups,
 };
 use super::inflight::{KeyedTeardown, keyed_teardown, teardown_for_lookup};
 use crate::db::dispatched_sessions::hosted_execution::{
@@ -112,6 +112,21 @@ pub(super) async fn nameless_channel_deferred(
         );
     }
     held
+}
+
+/// The key of the channel's one row, found through its canonical identity, while that row is this
+/// node's Claude execution returning to tmux; any other row or lookup gives none.
+pub(super) async fn returning_session_key(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<String> {
+    let pool = shared.pg_pool.as_ref()?;
+    let hashes = provider_hashes(shared, provider).await;
+    let key = derive_channel_session_key(pool, &hashes, provider, channel_id).await;
+    let key = key.ok()?;
+    let host = crate::services::turn_host::for_turn(Some(pool), provider, channel_id, Some(&key));
+    matches!(host.await, crate::services::turn_host::TurnHost::Return(_)).then_some(key)
 }
 
 /// No registered fallback name lets a turn build the channel's session key, so its turns

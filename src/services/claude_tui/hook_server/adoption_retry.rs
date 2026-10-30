@@ -10,7 +10,7 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 };
 use crate::services::tui_prompt_dedupe::binding_events::HookSignal;
 use crate::services::tui_prompt_dedupe::{
-    AdoptSkip, adopt_claude_continuation_explained, claude_session_rotation_for_tmux,
+    AdoptSkip, adopt_claude_continuation_moved, claude_session_rotation_for_tmux,
     reclaim_with_current_prompt, resolve_tmux_session_name,
 };
 
@@ -309,9 +309,8 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
             queue: QueueStep::Pop,
         };
     }
-    match adopt_claude_continuation_explained(command_session_id, payload_session_id, &request.hook)
-    {
-        Ok((adopted, skip)) => {
+    match adopt_claude_continuation_moved(command_session_id, payload_session_id, &request.hook) {
+        Ok(((adopted, skip), left)) => {
             // An adopted source stays queued until its rotation settles and a recorded Pending until
             // its transcript is verified, so later hooks wait behind it; a later queued session replaces it.
             let pending = adopted.is_none() && skip.is_none();
@@ -386,10 +385,19 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
                 return SettleOutcome { http, queue };
             };
             before_artifacts(payload_session_id);
-            match crate::services::claude_tui::session::persist_claude_continuation_session(
-                &tmux_session_name,
-                payload_session_id,
-            ) {
+            // The account follows the pane only from the session this hook moved it off; a hook that
+            // moved nothing carries it nowhere, whatever another launch left in the artifacts.
+            let advanced = left.map_or(Ok(()), |from| {
+                let advance = crate::services::tmux_common::advance_claude_session_auth;
+                advance(&tmux_session_name, &from, payload_session_id)
+            });
+            let persisted = advanced.and_then(|()| {
+                crate::services::claude_tui::session::persist_claude_continuation_session(
+                    &tmux_session_name,
+                    payload_session_id,
+                )
+            });
+            match persisted {
                 // Only the in-memory binding moved here; the rotation ledger carries the rest,
                 // so the message must not read as end-to-end delivery.
                 Ok(changed) => tracing::warn!(

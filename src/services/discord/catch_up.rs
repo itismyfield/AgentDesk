@@ -1479,24 +1479,11 @@ mod catch_up_recovery_tests {
         let channel_id = ChannelId::new(1479671298497183835);
         let author_id = 343742347365974026;
         let capped_id = recent_message_id(1);
-        let config_dir = root.path().join("config");
-        std::fs::create_dir_all(&config_dir).expect("create config dir");
-        std::fs::write(
-            config_dir.join("role_map.json"),
-            format!(
-                r#"{{
-  "byChannelId": {{
-    "{}": {{
-      "roleId": "adk-cc",
-      "promptFile": "prompt.md",
-      "provider": "claude"
-    }}
-  }}
-}}"#,
-                channel_id.get()
-            ),
-        )
-        .expect("write role map");
+        super::agentdesk_config::write_bindings_for_test(
+            root.path(),
+            serde_json::json!([{"id": "adk-cc", "name": "Catch up", "provider": "claude",
+                "channels": {"claude": {"id": channel_id.to_string(), "prompt_file": "prompt.md"}}}]),
+        );
 
         for index in 0..MAX_INTERVENTIONS_PER_CHANNEL {
             let message_id = recent_message_id(100 + index as u64);

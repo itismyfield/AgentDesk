@@ -8,11 +8,6 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
     crate::logging::init_tracing()?;
 
     let runtime_root = crate::config::runtime_root();
-    let legacy_scan = runtime_root
-        .as_ref()
-        .map(|root| crate::services::discord_config_audit::scan_legacy_sources(root))
-        .unwrap_or_default();
-
     if let Some(root) = runtime_root.as_ref() {
         crate::runtime_layout::ensure_runtime_layout(root)
             .map_err(|error| anyhow::anyhow!("Failed to prepare runtime layout: {error}"))?;
@@ -36,7 +31,6 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
             loaded.config,
             loaded.path,
             loaded.existed,
-            &legacy_scan,
             false,
         )
         .map_err(|error| anyhow::anyhow!("Failed to audit runtime config: {error}"))?
