@@ -856,12 +856,12 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
     let main = Migrator::with_migrations(
         embedded
             .iter()
-            .filter(|m| m.version != version)
+            .filter(|m| m.version < version)
             .cloned()
             .collect(),
     );
     let main_max = main.iter().map(|m| m.version).max().unwrap();
-    assert_eq!(main_max, 156);
+    assert_eq!(main_max, 160);
     assert!(version > main_max);
     main.run(&pool).await.unwrap();
     let input = serde_json::from_value(serde_json::json!({
