@@ -363,7 +363,6 @@ pub(super) mod pre_admission_control_tests {
             history: Vec::new(),
             pending_uploads: uploads.iter().map(|u| (*u).into()).collect(),
             cleared,
-            remote_profile_name: None,
             channel_id: None,
             channel_name: None,
             category_name: None,

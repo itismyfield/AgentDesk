@@ -779,7 +779,6 @@ impl LegacyQueued {
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
                 cleared: false,
-                remote_profile_name: None,
                 channel_id: Some(channel),
                 channel_name: Some(channel_name),
                 category_name: None,

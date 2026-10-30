@@ -758,7 +758,6 @@ fn in_child(name: &str) -> bool {
         .env(NEIGHBOUR_CHILD, "1")
         .env("AGENTDESK_ROOT_DIR", root.path())
         .env("TMPDIR", root.path())
-        .env_remove(crate::services::tui_o::cutover::test_override::CHILD_ENV)
         .env_remove("DATABASE_URL")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

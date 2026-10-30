@@ -78,11 +78,6 @@ async fn an_o_channel_is_placed_only_on_its_ready_gateway_pg() {
     assert!(forwarded_to_runner(&legacy), "{legacy:?}");
     drop(ready);
 
-    let _unread = test_probe::answers(&[]);
-    let _off = test_override::force_off();
-    let off = route(IntakeRoutingMode::Enforce, O).await;
-    assert!(forwarded_to_runner(&off), "writer off: {off:?}");
-
     pool.close().await;
     fixture.drop().await;
 }

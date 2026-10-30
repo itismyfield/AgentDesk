@@ -1426,55 +1426,17 @@ async fn o_channel_cancel_uses_destination_and_holds_unknown_kind() {
             a,
             b,
             true,
-            true,
             Some(ClaudeTui),
             0,
             false,
         ),
-        (
-            "selected_owner_only",
-            b,
-            a,
-            true,
-            true,
-            Some(ClaudeTui),
-            1,
-            false,
-        ),
-        (
-            "empty_membership",
-            a,
-            b,
-            false,
-            true,
-            Some(ClaudeTui),
-            1,
-            false,
-        ),
-        ("selected_unknown_kind", a, b, true, true, None, 0, true),
-        ("outside_unknown_kind", b, a, true, true, None, 1, false),
-        (
-            "selected_changed_kind",
-            a,
-            b,
-            true,
-            true,
-            Some(CodexTui),
-            0,
-            true,
-        ),
-        (
-            "flag_off_selected",
-            a,
-            b,
-            true,
-            false,
-            Some(ClaudeTui),
-            1,
-            false,
-        ),
+        ("selected_owner_only", b, a, true, Some(ClaudeTui), 1, false),
+        ("empty_membership", a, b, false, Some(ClaudeTui), 1, false),
+        ("selected_unknown_kind", a, b, true, None, 0, true),
+        ("outside_unknown_kind", b, a, true, None, 1, false),
+        ("selected_changed_kind", a, b, true, Some(CodexTui), 0, true),
     ];
-    for (name, destination, owner, selected, enabled, kind, writes, held) in cases {
+    for (name, destination, owner, selected, kind, writes, held) in cases {
         buffer.lock().unwrap().clear();
         let body = format!("writer cancellation body for {name}");
         let driver =
@@ -1496,7 +1458,6 @@ async fn o_channel_cancel_uses_destination_and_holds_unknown_kind() {
             Vec::new()
         };
         let _o = crate::services::tui_o::cutover::test_override::force_channels(&channels);
-        let _disabled = (!enabled).then(crate::services::tui_o::cutover::test_override::force_off);
 
         let output =
             tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))

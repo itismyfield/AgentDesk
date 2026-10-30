@@ -878,7 +878,7 @@ fn a_late_reserved_channel_is_not_o_owned_for_a_herdr_turn() {
     .unwrap();
     let snapshot = BootChannels::validate(&config)
         .unwrap()
-        .seeded(true, &config, |channels, _| {
+        .seeded(&config, |channels, _| {
             Ok(channel_policy::stored(Some(root.path()), channels))
         })
         .unwrap();

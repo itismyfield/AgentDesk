@@ -36,7 +36,6 @@ async fn map_channel(shared: &SharedData, channel: ChannelId, channel_name: &str
         history: Vec::new(),
         pending_uploads: Vec::new(),
         cleared: false,
-        remote_profile_name: None,
         channel_id: Some(channel.get()),
         channel_name: Some(channel_name.to_string()),
         category_name: None,
@@ -470,10 +469,6 @@ esac
         .env("HTTP_PROXY", "http://127.0.0.1:9")
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("NO_PROXY", "127.0.0.1,localhost")
-        .env(
-            crate::services::tui_o::cutover::test_override::CHILD_ENV,
-            "1",
-        )
         .env(
             crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
             "[]",

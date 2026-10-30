@@ -446,7 +446,6 @@ pub(super) fn tui_busy_followup_diagnostic(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     tmux_session_name: Option<&str>,
-    remote_profile_present: bool,
     current_path: Option<&str>,
     session_id: Option<&str>,
 ) -> Option<ClaudeTuiBusyFollowupDiagnostic> {
@@ -454,12 +453,7 @@ pub(super) fn tui_busy_followup_diagnostic(
         return None;
     }
     let tmux_session_name = tmux_session_name?;
-    if nameless_gate::named_blocked(
-        provider,
-        channel_id,
-        tmux_session_name,
-        remote_profile_present,
-    ) {
+    if nameless_gate::named_blocked(provider, channel_id, tmux_session_name) {
         return Some(ClaudeTuiBusyFollowupDiagnostic {
             tmux_session_name: tmux_session_name.to_owned(),
             prompt_marker_detected: false,
@@ -473,9 +467,6 @@ pub(super) fn tui_busy_followup_diagnostic(
             transcript_turn_state: crate::services::tui_turn_state::TuiTurnState::Unknown,
             pane_tail: "<waiting for verified source and delivery permission>".to_owned(),
         });
-    }
-    if remote_profile_present {
-        return None;
     }
     let selection =
         crate::services::provider_hosting::resolve_provider_session_selection_with_channel(

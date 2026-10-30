@@ -1097,7 +1097,6 @@ async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_
                 allowed_tools: &[],
                 cancel: Arc::new(CancelToken::new()),
                 codex_observation: None,
-                remote_profile: None,
                 tmux_session_name: Some("AgentDesk-dash"),
                 teardown: None,
                 host: &host,

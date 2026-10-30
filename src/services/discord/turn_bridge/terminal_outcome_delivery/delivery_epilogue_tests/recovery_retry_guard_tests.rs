@@ -153,7 +153,6 @@ fn resumable_session() -> crate::services::discord::DiscordSession {
         history: Vec::new(),
         pending_uploads: Vec::new(),
         cleared: false,
-        remote_profile_name: None,
         channel_id: None,
         channel_name: None,
         category_name: None,

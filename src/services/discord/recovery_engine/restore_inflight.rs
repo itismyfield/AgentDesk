@@ -730,7 +730,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                                 history: Vec::new(),
                                 pending_uploads: Vec::new(),
                                 cleared: false,
-                                remote_profile_name: None,
                                 channel_id: Some(state.channel_id),
                                 channel_name: effective_channel_name.clone(),
                                 category_name: None,
@@ -746,10 +745,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     restore_recovered_session_worktree(session, &state);
                 }
 
-                super::recovery_two_message_panel::recover_two_message_panel(
-                    http, shared, provider, &mut state,
-                )
-                .await;
                 let finish_mailbox_on_completion =
                     reregister_active_turn_from_inflight(shared, &state).await;
 
@@ -1780,10 +1775,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             recovery_phase_after_tmux_probe(true, Some(pane_alive)),
             RecoveryPhase::WatcherReattach
         ) {
-            super::recovery_two_message_panel::recover_two_message_panel(
-                http, shared, provider, &mut state,
-            )
-            .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ↻ inflight recovery: pane alive for channel {}, spawning watcher immediately",
@@ -1894,7 +1885,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                         history: Vec::new(),
                         pending_uploads: Vec::new(),
                         cleared: false,
-                        remote_profile_name: None,
                         channel_id: Some(channel_id.get()),
                         channel_name: effective_channel_name.clone(),
                         category_name: None,
@@ -1913,10 +1903,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                 restore_recovered_session_worktree(session, &state);
             }
 
-            super::recovery_two_message_panel::recover_two_message_panel(
-                http, shared, provider, &mut state,
-            )
-            .await;
             let finish_mailbox_on_completion =
                 reregister_active_turn_from_inflight(shared, &state).await;
 
@@ -2171,7 +2157,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
                     history: Vec::new(),
                     pending_uploads: Vec::new(),
                     cleared: false,
-                    remote_profile_name: None,
                     channel_id: Some(channel_id.get()),
                     channel_name: channel_name.clone(),
                     category_name: None,
@@ -2188,7 +2173,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
             if session.channel_name.is_none() {
                 session.channel_name = channel_name.clone();
             }
-            session.remote_profile_name = None;
             restore_recovered_session_worktree(session, &state);
         }
 

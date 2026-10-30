@@ -36,8 +36,6 @@ pub(in crate::services::discord) use idle_captured_response::recover_idle_partia
 
 #[path = "recovery_engine/status_panel.rs"]
 mod recovery_status_panel;
-#[path = "recovery_engine/two_message_panel.rs"]
-mod recovery_two_message_panel;
 #[path = "recovery_engine/status_panel_completion_producer.rs"]
 mod status_panel_completion_producer;
 use self::status_panel_completion_producer::*;

@@ -43,7 +43,7 @@ fn booted(
     }))
     .unwrap();
     let boot = BootChannels::validate(&config).unwrap();
-    boot.seeded(true, &config, stored).unwrap()
+    boot.seeded(&config, stored).unwrap()
 }
 
 /// A first turn's opener and prompt.

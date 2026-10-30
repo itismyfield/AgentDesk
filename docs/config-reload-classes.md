@@ -36,7 +36,7 @@ seconds with content comparison, independently of native filesystem notification
 | `discord.dm_default_agent` | live | `src/services/discord/agentdesk_config.rs` resolve_dm_default_agent (validated snapshot per DM) |
 | `discord.owner_id` | restart | `src/services/discord/settings/read.rs` load_bot_settings (owner_user_id into SharedData.settings) |
 | `discord.scheduled_message_required_mention_user_ids` | restart | `src/server/routes/scheduled_messages/discord_mentions.rs` required_from_state (AppState.config) |
-| `providers` | restart | `src/services/provider_hosting.rs` install_provider_hosting_config (process-global map); remote_ssh_enabled gated in `src/bootstrap.rs` initialize |
+| `providers` | restart | `src/services/provider_hosting.rs` install_provider_hosting_config (process-global map) |
 | `voice.enabled` | restart | `src/services/discord/voice_barge_in/runtime_lifecycle.rs` VoiceBargeInRuntime::from_voice_config (runtime_bootstrap.rs:run_bot) |
 | `voice.verbose_progress` | restart | `src/services/discord/voice_barge_in/runtime_lifecycle.rs` VoiceBargeInRuntime::from_voice_config (AtomicBool) |
 | `voice.audio.recordings_dir` | restart | `src/voice/receiver.rs` VoiceReceiverConfig::from_voice_config (runtime_bootstrap/voice.rs:run_bot_init_voice_workers) |

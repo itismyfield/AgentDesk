@@ -47,7 +47,6 @@ pub(super) async fn seed_session(shared: &Arc<SharedData>, channel_id: ChannelId
             history: Vec::new(),
             pending_uploads: Vec::new(),
             cleared: false,
-            remote_profile_name: None,
             channel_id: Some(channel_id.get()),
             // A resolvable channel name keeps session-key lookup off Discord.
             channel_name: Some(CHANNEL_NAME.to_string()),

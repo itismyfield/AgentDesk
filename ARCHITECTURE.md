@@ -547,6 +547,8 @@ src/
 │   │   │   └── unread_tail_attribution_tests.rs
 │   │   ├── kanban/
 │   │   │   └── card_delete.rs
+│   │   ├── receipt/
+│   │   │   └── single_flight.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
@@ -1822,8 +1824,7 @@ src/
 │   │   │   ├── terminal_watcher.rs
 │   │   │   ├── tmux_probe.rs
 │   │   │   ├── turn_mode_restart_tests.rs
-│   │   │   ├── turn_summary_recovery_tests.rs
-│   │   │   └── two_message_panel.rs
+│   │   │   └── turn_summary_recovery_tests.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── controller_cutover.rs
 │   │   │   ├── mod.rs
@@ -2595,7 +2596,6 @@ src/
 │   │   │   │   ├── tests.rs
 │   │   │   │   └── watcher_handoff.rs
 │   │   │   ├── status_panel/
-│   │   │   │   ├── fallback.rs
 │   │   │   │   ├── provider_failure.rs
 │   │   │   │   ├── purge.rs
 │   │   │   │   └── singleton.rs
@@ -4093,7 +4093,6 @@ src/
 │   ├── claude_compact_context.rs
 │   ├── claude_compact_trigger.rs
 │   ├── codex.rs
-│   ├── codex_remote_policy.rs
 │   ├── codex_tmux_wrapper.rs
 │   ├── cswap.rs
 │   ├── discord_config_audit.rs

@@ -27,7 +27,6 @@ fn isolated(name: &str) -> bool {
         .env("AGENTDESK_RECOVERY_ANCHOR_REPOST", "1")
         .env("AGENTDESK_ROOT_DIR", root.path())
         .env("TMPDIR", root.path())
-        .env_remove(crate::services::tui_o::cutover::test_override::CHILD_ENV)
         .env_remove("DATABASE_URL")
         .output()
         .unwrap();
