@@ -85,6 +85,22 @@ async fn load(
     .map(|v| v.0))
 }
 
+// The seal row a BeginReview must match; any other record under that ID is not a seal.
+pub async fn sealed(
+    tx: &mut Transaction<'_, Postgres>,
+    campaign_id: &str,
+    run_id: &str,
+    seal_id: &str,
+) -> Result<Option<CandidateSeal>> {
+    Ok(load(tx, campaign_id, run_id, seal_id)
+        .await?
+        .and_then(|v| serde_json::from_value::<StoredEvidence>(v).ok())
+        .and_then(|stored| match stored {
+            StoredEvidence::Seal { seal } => Some(*seal),
+            StoredEvidence::Evidence { .. } => None,
+        }))
+}
+
 // Insert-or-compare under the row key: concurrent or repeated submissions keep the first record.
 pub async fn record(
     tx: &mut Transaction<'_, Postgres>,

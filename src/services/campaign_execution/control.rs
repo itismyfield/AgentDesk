@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use super::{
     definition::{self, DefinitionInput, WORKFLOW_VERSION},
     model::*,
+    stage_fsm,
 };
 
 type DecisionResult<T> = Result<T, Rejection>;
@@ -374,6 +375,11 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
                 .chain(run.sessions.iter().map(|s| s.identity.gate.clone()))
                 .chain(run.stop.iter().flat_map(|s| s.targets.iter().cloned()))
                 .collect();
+            let finish_grants = if *mode == StopMode::FinishStage {
+                stage_fsm::finish_grants(state, run)
+            } else {
+                Vec::new()
+            };
             let finish_attempts = run
                 .attempts
                 .iter()
@@ -387,9 +393,19 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
                 acknowledgements: Vec::new(),
                 finish_attempts,
                 confirmed_event: None,
+                finish_grants,
             });
+            // FinishStage keeps only the frozen V phases; Immediate and escalation cancel them too.
+            let stop = run.stop.as_ref().expect("set above");
+            let granted: std::collections::BTreeSet<_> = stop
+                .finish_grants
+                .iter()
+                .flat_map(|g| g.phase_actions.iter().cloned())
+                .collect();
             for action in run.actions.values_mut() {
-                if matches!(action.state, ActionState::Planned | ActionState::Claimed) {
+                if matches!(action.state, ActionState::Planned | ActionState::Claimed)
+                    && !granted.contains(&action.id)
+                {
                     action.state = ActionState::Cancelled;
                 }
             }
@@ -422,7 +438,9 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
         }
         Command::PlanAction { action } => {
             validate_new_start(state, &action.binding)?;
-            if action.id.trim().is_empty()
+            // Verification phases exist only as pre-registered slots of their V.
+            if action.kind == ActionKind::VerificationPhase
+                || action.id.trim().is_empty()
                 || action.target.host.is_empty()
                 || action.target.gate.is_empty()
                 || action.target.incarnation.is_empty()
@@ -449,6 +467,9 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
         } => {
             validate_new_start(state, binding)?;
             let action = action_mut(&mut next, action_id, binding)?;
+            if action.kind == ActionKind::VerificationPhase {
+                return Err(reject(RejectionCode::InvalidState));
+            }
             if !matches!(
                 (action.state, phase),
                 (ActionState::Planned, ActionState::Claimed)
@@ -587,6 +608,86 @@ pub fn decide(state: &CampaignState, envelope: &CommandEnvelope) -> DecisionResu
             next.control = CampaignControl::Stopped;
             EventKind::RunStopped
         }
+        Command::AssignWork {
+            binding,
+            assignment,
+            launch,
+        } => match stage_fsm::assign_work(
+            &mut next,
+            binding,
+            assignment,
+            launch,
+            envelope.observed_at,
+        )? {
+            Some(event) => event,
+            None => return Ok(unchanged(state)),
+        },
+        Command::BeginReview {
+            node_id,
+            expected_epoch,
+            seal,
+            review,
+            launch,
+        } => match stage_fsm::begin_review(
+            &mut next,
+            node_id,
+            *expected_epoch,
+            seal,
+            review,
+            launch,
+        )? {
+            Some(event) => event,
+            None => return Ok(unchanged(state)),
+        },
+        Command::AdvanceVerificationPhase {
+            execution_id,
+            phase_id,
+            consumer,
+            state: phase,
+        } => match stage_fsm::advance_verification_phase(
+            &mut next,
+            execution_id,
+            phase_id,
+            consumer,
+            *phase,
+        )? {
+            Some(event) => event,
+            None => return Ok(unchanged(state)),
+        },
+        Command::InterruptNode {
+            expected_run,
+            node_id,
+            expected_epoch,
+            session,
+            reason,
+        } => match stage_fsm::interrupt_node(
+            &mut next,
+            expected_run,
+            node_id,
+            *expected_epoch,
+            session,
+            reason,
+            envelope.observed_at,
+        )? {
+            Some(event) => event,
+            None => return Ok(unchanged(state)),
+        },
+        Command::AcceptStageResult {
+            node_id,
+            expected_epoch,
+            attempt_id,
+            review,
+        } => match stage_fsm::accept_stage_result(
+            &mut next,
+            node_id,
+            *expected_epoch,
+            attempt_id,
+            review.as_deref(),
+            envelope.observed_at,
+        )? {
+            Some(event) => event,
+            None => return Ok(unchanged(state)),
+        },
     };
     Ok(finish(
         next,
@@ -641,11 +742,16 @@ fn observe_action(
         .actions
         .get(id)
         .ok_or_else(|| reject(RejectionCode::StaleBinding))?;
+    // A frozen FinishPlan phase may still start after its gate applied the stop fence.
     let gate_fenced = current.stop.as_ref().is_some_and(|s| {
-        s.confirmed_event.is_some()
+        (s.confirmed_event.is_some()
             || s.acknowledgements.iter().any(|ack| {
                 ack.target == recorded.target && ack.control_version == current.control_version
-            })
+            }))
+            && !s
+                .finish_grants
+                .iter()
+                .any(|g| g.phase_actions.contains(&recorded.id))
     });
     let action = action_mut(state, id, binding)?;
     match observation {
