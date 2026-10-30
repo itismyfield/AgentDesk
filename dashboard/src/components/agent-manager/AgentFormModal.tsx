@@ -151,7 +151,7 @@ export default function AgentFormModal({
             <div className="space-y-4">
             {/* ── 스프라이트 얼굴 미리보기 + 위/아래 변경 ── */}
             <div
-              className="flex items-center gap-3 rounded"
+              className="flex min-h-11 items-center gap-3 rounded"
               role="group"
               aria-label={tr("스프라이트 번호", "Sprite Number")}
             >

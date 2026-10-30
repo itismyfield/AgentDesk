@@ -91,7 +91,7 @@ export default function AgentSetupWizard({
         role="dialog"
         aria-modal="true"
         aria-label={tr("에이전트 설정 마법사", "Agent setup wizard")}
-        className="flex w-full max-w-5xl flex-col overflow-hidden rounded-lg border shadow-2xl"
+        className="flex w-full max-w-5xl flex-col overflow-hidden [overflow-wrap:anywhere] rounded-lg border shadow-2xl"
         style={{
           maxHeight: "min(92vh, 860px)",
           background:
@@ -260,7 +260,7 @@ export default function AgentSetupWizard({
                         onChange={(promptContent) => setDraft({ ...draft, promptContent })}
                         minHeight={320}
                       />
-                      <SurfaceCard className="rounded-[24px] p-4">
+                      <SurfaceCard className="rounded-lg p-4">
                         <div className="text-xs font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
                           {tr("_shared 병합 미리보기", "_shared merge preview")}
                         </div>
@@ -316,7 +316,7 @@ export default function AgentSetupWizard({
                         style={inputStyle}
                       />
                     </label>
-                    <SurfaceCard className="rounded-[24px] p-4">
+                    <SurfaceCard className="rounded-lg p-4">
                       <div className="text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
                         {tr("작업공간", "Workspace")}
                       </div>
@@ -324,7 +324,7 @@ export default function AgentSetupWizard({
                         ~/.adk/release/config/agents/{draft.agentId || "{role_id}"}
                       </div>
                     </SurfaceCard>
-                    <SurfaceCard className="rounded-[24px] p-4">
+                    <SurfaceCard className="rounded-lg p-4">
                       <div className="text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
                         MCP
                       </div>
@@ -342,7 +342,7 @@ export default function AgentSetupWizard({
                   description={tr("선택 항목입니다. 일정 연결은 관리 화면에서 이어서 조정합니다.", "Optional. Schedule wiring can be adjusted from management later.")}
                 >
                   <div className="space-y-4">
-                    <label className="flex items-center gap-3 text-sm" style={{ color: "var(--th-text-primary)" }}>
+                    <label className="flex min-h-11 items-center gap-3 text-sm" style={{ color: "var(--th-text-primary)" }}>
                       <input
                         type="checkbox"
                         checked={draft.cronEnabled}
@@ -366,7 +366,7 @@ export default function AgentSetupWizard({
                   description={tr("dry-run으로 파일/설정 변경을 확인한 뒤 생성합니다. 실패 시 setup rollback 결과를 확인하고 같은 화면에서 재시도합니다.", "Dry-run the file/config changes before creation. On failure, review rollback output and retry here.")}
                 >
                   <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)]">
-                    <SurfaceCard className="rounded-[24px] p-4">
+                    <SurfaceCard className="rounded-lg p-4">
                       <div className="grid gap-2 text-xs" style={{ color: "var(--th-text-secondary)" }}>
                         <div>role_id: <span style={{ color: "var(--th-text-primary)" }}>{draft.agentId}</span></div>
                         <div>channel_id: <span style={{ color: "var(--th-text-primary)" }}>{draft.channelId || "--"}</span></div>
@@ -387,7 +387,7 @@ export default function AgentSetupWizard({
                         </div>
                       </div>
                     </SurfaceCard>
-                    <SurfaceCard className="max-h-80 overflow-auto rounded-[24px] p-4">
+                    <SurfaceCard className="max-h-80 overflow-auto rounded-lg p-4">
                       <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
                         {tr("Dry-run 결과", "Dry-run result")}
                       </div>
@@ -475,7 +475,7 @@ export default function AgentSetupWizard({
           </main>
         </div>
 
-        <div className="flex flex-col gap-2 border-t px-5 py-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
+        <div className="flex shrink-0 flex-col gap-2 border-t px-5 py-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)" }}>
           <div className="flex flex-wrap gap-2">
             {steps.map((step, index) => (
               <SurfaceSegmentButton
