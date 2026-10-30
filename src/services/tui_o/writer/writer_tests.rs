@@ -421,6 +421,7 @@ fn piece(native_key: &str, payload: &str) -> Derived {
         unit_key: unit(native_key),
         index: 0,
         payload: payload.into(),
+        notice_origin: None,
     })
 }
 
@@ -674,6 +675,7 @@ async fn a_prepared_left_by_a_crash_is_settled_before_the_next_post() {
         let (unit_key, payload) = (unit(&format!("c{serial}")), payload.to_string());
         let anchor_id = channel.ledger().anchor();
         let prepared = LedgerEntry::Prepared {
+            notice_origin: None,
             local_retry: None,
             serial,
             unit_key,
@@ -1017,8 +1019,12 @@ async fn a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_po
         assert_eq!(harness.port.posts(), ["a"]);
     }
 }
+#[path = "input_notice_transport_tests.rs"]
+mod input_notice_transport_tests;
 #[path = "local_retry_tests.rs"]
 mod local_retry_tests;
+#[path = "notice_retry_tests.rs"]
+mod notice_retry_tests;
 #[path = "tool_card_replay_tests.rs"]
 mod tool_card_replay;
 

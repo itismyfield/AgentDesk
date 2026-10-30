@@ -30,6 +30,8 @@ pub(super) struct TerminalRelayPlanContext<'a> {
 pub(super) struct TerminalRelayPlanLocals<'a> {
     pub(super) current_offset: u64,
     pub(super) data_start_offset: u64,
+    /// Where `full_response` began; a leftover-buffer turn starts before its read batch.
+    pub(super) turn_data_start_offset: u64,
     pub(super) all_data: &'a String,
     pub(super) full_response: &'a String,
     pub(super) current_response: &'a str,
@@ -145,6 +147,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
     let TerminalRelayPlanLocals {
         current_offset,
         data_start_offset,
+        turn_data_start_offset,
         all_data,
         full_response,
         current_response,
@@ -299,7 +302,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                     path: std::path::Path::new(output_path),
                     file,
                     range: (
-                        data_start_offset,
+                        turn_data_start_offset,
                         terminal_event_consumed_offset(current_offset, all_data),
                     ),
                     body: full_response,

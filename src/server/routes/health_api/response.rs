@@ -99,7 +99,7 @@ async fn assemble(
             "dead_lettered": backlog.dead_lettered,
         })
     });
-    let kv = initial.kv.ok();
+    let kv = initial.kv.ok().flatten();
     let config_audit_report = kv.as_ref().and_then(|kv| kv.config_audit.clone());
     let pipeline_override_report = kv.as_ref().and_then(|kv| kv.pipeline_overrides.clone());
     if let Some((registry, (mut status, mut json, late))) = snapshot {
@@ -247,10 +247,16 @@ async fn assemble(
                 gate_danger_override,
             ))
             .unwrap_or_else(|_| serde_json::json!({}));
-        // A cut kv read leaves the persisted overrides unknown, so no fallback is shown as effective.
+        // A cut or failed kv read leaves the overrides unknown, so no fallback is shown as effective.
         if let (None, Some(gate)) = (&kv, gate.as_object_mut()) {
-            gate.remove("enabled");
-            gate.remove("danger_pct");
+            for field in [
+                "enabled",
+                "enabled_source",
+                "danger_pct",
+                "danger_pct_source",
+            ] {
+                gate.remove(field);
+            }
         }
         json["rate_limit_dispatch_gate"] = gate;
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();

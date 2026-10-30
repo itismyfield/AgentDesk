@@ -30,6 +30,7 @@ pub enum UnitKind {
     Body,
     Tool,
     ToolResult,
+    InputNotice,
 }
 
 /// Unit identity; session id is deliberately absent so forked sources inherit keys.

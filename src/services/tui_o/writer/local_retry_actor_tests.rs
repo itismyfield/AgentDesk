@@ -158,6 +158,7 @@ async fn local_retry_actor_stop_during_delay_posts_zero_and_next_lifecycle_resum
     let mut store = harness.channel();
     store
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             serial: 0,
             unit_key: unit("root"),
             piece_index: 0,

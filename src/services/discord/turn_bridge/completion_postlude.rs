@@ -861,19 +861,23 @@ pub(super) async fn run_completion_postlude(
             "inflight clear must only run when neither preserving for retry nor delegating output"
         );
         // Only this clearing branch ends the execution; the receipt commits before the row goes.
-        if let Some(outcome) = turn_analytics::terminal_receipt_outcome(primary_turn_outcome)
+        // A failed commit keeps the row marked instead, for boot or the next admission.
+        let receipt_kept = match turn_analytics::terminal_receipt_outcome(primary_turn_outcome)
             .filter(|_| !input_runs_again)
         {
-            turn_analytics::record_terminal_receipt(
-                shared_owned.pg_pool.as_ref(),
-                (&provider, channel_id, user_msg_id),
-                role_binding.as_ref(),
-                adk_session_key.as_deref(),
-                &inflight_state,
-                outcome,
-            )
-            .await;
-        }
+            Some(outcome) => {
+                !turn_analytics::record_terminal_receipt(
+                    shared_owned.pg_pool.as_ref(),
+                    (&provider, channel_id, user_msg_id),
+                    role_binding.as_ref(),
+                    adk_session_key.as_deref(),
+                    &inflight_state,
+                    outcome,
+                )
+                .await
+            }
+            None => false,
+        };
         // #2838 (relay-stability P0-1): detect the missing-answer vector
         // (root causes #1b / #4). We are about to clear inflight (not
         // preserving, no delegated owner). If a non-empty full_response was
@@ -911,7 +915,14 @@ pub(super) async fn run_completion_postlude(
         // nonce through the atomic clear. Legacy rows without a source boundary
         // retain the existing zero-owned compatibility path below.
         let this_turn_user_msg_id = user_msg_id.map(|id| id.get()).unwrap_or(0);
-        if bridge_epilogue_identity_guards_inflight_clear(this_turn_user_msg_id)
+        if receipt_kept {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                this_turn_user_msg_id,
+                "turn bridge epilogue kept the inflight row marked: its receipt is not committed"
+            );
+        } else if bridge_epilogue_identity_guards_inflight_clear(this_turn_user_msg_id)
             || inflight_state.turn_start_offset.is_some()
         {
             use super::super::inflight::GuardedClearOutcome;

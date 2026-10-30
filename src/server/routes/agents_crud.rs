@@ -303,7 +303,9 @@ async fn run_prompt_auto_commit(
     tokio::task::spawn_blocking(move || {
         GitCommand::new()
             .repo(&add_repo)
+            .arg("--literal-pathspecs")
             .arg("add")
+            .arg("--")
             .arg(&add_path)
             .run_output()
     })
@@ -318,12 +320,17 @@ async fn run_prompt_auto_commit(
 
     let commit_repo = repo_dir.to_path_buf();
     let commit_message = message.clone();
+    let commit_path = prompt_path.to_path_buf();
     let commit = tokio::task::spawn_blocking(move || {
         GitCommand::new()
             .repo(&commit_repo)
+            .arg("--literal-pathspecs")
             .arg("commit")
             .arg("-m")
             .arg(&commit_message)
+            .arg("--only")
+            .arg("--")
+            .arg(&commit_path)
             .run_output()
     })
     .await
@@ -350,7 +357,16 @@ async fn write_prompt_if_changed(
 ) -> Result<Value, String> {
     let prompt_path = resolve_agent_prompt_path(agent_id, provider)
         .ok_or_else(|| "AGENTDESK runtime root could not be resolved".to_string())?;
-    let existing = std::fs::read_to_string(&prompt_path).ok();
+    write_prompt_at_path_if_changed(&prompt_path, content, auto_commit, commit_message).await
+}
+
+async fn write_prompt_at_path_if_changed(
+    prompt_path: &FsPath,
+    content: &str,
+    auto_commit: bool,
+    commit_message: Option<&str>,
+) -> Result<Value, String> {
+    let existing = std::fs::read_to_string(prompt_path).ok();
     if existing.as_deref() == Some(content) {
         return Ok(json!({
             "changed": false,
@@ -362,10 +378,10 @@ async fn write_prompt_if_changed(
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create prompt dir '{}': {error}", parent.display()))?;
     }
-    std::fs::write(&prompt_path, content)
+    std::fs::write(prompt_path, content)
         .map_err(|error| format!("write prompt '{}': {error}", prompt_path.display()))?;
     let auto_commit_result = if auto_commit {
-        match run_prompt_auto_commit(&prompt_path, commit_message).await {
+        match run_prompt_auto_commit(prompt_path, commit_message).await {
             Ok(value) => value,
             Err(error) => json!({ "error": error }),
         }
@@ -1037,5 +1053,154 @@ mod config_secret_tests {
         assert_secrets_on_disk(&path);
         let saved = crate::config::load_from_path(&path).unwrap();
         assert_eq!(saved.agents[0].name, "Renamed");
+    }
+}
+
+#[cfg(test)]
+mod prompt_auto_commit_tests {
+    use std::path::Path;
+
+    fn git(repo: &Path, args: &[&str]) -> Vec<u8> {
+        let output = super::GitCommand::new()
+            .repo(repo)
+            .args(args)
+            .run_output()
+            .unwrap();
+        output.stdout
+    }
+
+    fn fixture(prompt: &str, tracked: bool) -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        git(repo, &["init", "-q"]);
+        git(repo, &["config", "user.name", "Prompt test"]);
+        git(
+            repo,
+            &["config", "user.email", "prompt-test@example.invalid"],
+        );
+        git(repo, &["config", "commit.gpgsign", "false"]);
+        git(repo, &["config", "core.hooksPath", ".git/no-hooks"]);
+        std::fs::write(repo.join("unrelated.txt"), "base\n").unwrap();
+        std::fs::write(repo.join("worktree.txt"), "base\n").unwrap();
+        std::fs::write(repo.join("prompta.md"), "base\n").unwrap();
+        if tracked {
+            std::fs::write(repo.join(prompt), "old prompt\n").unwrap();
+        }
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-qm", "Initial"]);
+        std::fs::write(repo.join("unrelated.txt"), "staged\n").unwrap();
+        std::fs::write(repo.join("prompta.md"), "staged\n").unwrap();
+        git(repo, &["add", "unrelated.txt", "prompta.md"]);
+        std::fs::write(repo.join("unrelated.txt"), "staged plus unstaged\n").unwrap();
+        std::fs::write(repo.join("worktree.txt"), "unstaged\n").unwrap();
+        std::fs::write(repo.join(prompt), "new prompt\n").unwrap();
+        temp
+    }
+
+    fn unrelated_state(repo: &Path) -> Vec<Vec<u8>> {
+        vec![
+            git(
+                repo,
+                &[
+                    "diff",
+                    "--cached",
+                    "--binary",
+                    "--",
+                    "unrelated.txt",
+                    "worktree.txt",
+                    "prompta.md",
+                ],
+            ),
+            git(
+                repo,
+                &[
+                    "diff",
+                    "--binary",
+                    "--",
+                    "unrelated.txt",
+                    "worktree.txt",
+                    "prompta.md",
+                ],
+            ),
+            git(
+                repo,
+                &[
+                    "ls-files",
+                    "--stage",
+                    "--",
+                    "unrelated.txt",
+                    "worktree.txt",
+                    "prompta.md",
+                ],
+            ),
+            std::fs::read(repo.join("unrelated.txt")).unwrap(),
+            std::fs::read(repo.join("worktree.txt")).unwrap(),
+            std::fs::read(repo.join("prompta.md")).unwrap(),
+        ]
+    }
+
+    #[tokio::test]
+    async fn prompt_auto_commit_only_commits_requested_path_and_preserves_other_changes() {
+        for (prompt, tracked) in [
+            ("prompt.md", true),
+            ("-prompt[ab].md", true),
+            ("prompt[ab].md", true),
+            ("new prompt.md", false),
+        ] {
+            let temp = fixture(prompt, tracked);
+            let repo = temp.path();
+            let before = unrelated_state(repo);
+            let result = super::run_prompt_auto_commit(&repo.join(prompt), Some("Prompt only"))
+                .await
+                .unwrap();
+            assert_eq!(result["message"], "Prompt only");
+            assert_eq!(
+                git(
+                    repo,
+                    &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]
+                ),
+                format!("{prompt}\n").into_bytes()
+            );
+            assert_eq!(
+                git(repo, &["show", &format!("HEAD:{prompt}")]),
+                b"new prompt\n"
+            );
+            assert_eq!(unrelated_state(repo), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_auto_commit_failure_preserves_unrelated_index_and_worktree() {
+        let temp = fixture("prompt.md", true);
+        let repo = temp.path();
+        let before = unrelated_state(repo);
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["config", "commit.gpgsign", "true"]);
+        git(repo, &["config", "gpg.format", "openpgp"]);
+        git(
+            repo,
+            &[
+                "config",
+                "gpg.program",
+                repo.join("missing-signing-program").to_str().unwrap(),
+            ],
+        );
+        let response = super::write_prompt_at_path_if_changed(
+            &repo.join("prompt.md"),
+            "api prompt\n",
+            true,
+            None,
+        )
+        .await
+        .expect("a commit failure is reported in the response, not as an error");
+        assert_eq!(response["changed"], true);
+        let error = response["auto_commit"]["error"].as_str().unwrap();
+        assert!(error.starts_with("git commit prompt failed:"), "{error}");
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(unrelated_state(repo), before);
+        assert_eq!(
+            std::fs::read(repo.join("prompt.md")).unwrap(),
+            b"api prompt\n"
+        );
     }
 }

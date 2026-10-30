@@ -87,7 +87,7 @@ pub(super) async fn do_finalize_with_probe(
             shared,
             &provider,
             key,
-            ctx.clear_inflight,
+            crate::services::discord::receipt_settle::FinalizerClear::new(event, ctx),
             expected_actor,
             Some(witness),
         )

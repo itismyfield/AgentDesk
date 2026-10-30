@@ -3,7 +3,10 @@ use sqlx::PgPool;
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::db::kanban::{IssueCardUpsert, upsert_card_from_issue_pg};
+use crate::db::kanban::{
+    IssueCardUpsert, card_labels_csv, upsert_card_from_issue_pg,
+    upsert_card_from_issue_with_labels_pg,
+};
 use crate::github::{self, CreatedIssue};
 use crate::services::issue_announcements::{
     IssueAnnouncementCreate, IssueAnnouncementCreated, IssueCompletionEvent, IssueCompletionKind,
@@ -148,6 +151,9 @@ impl KanbanCardSync {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KanbanCardSyncOptions {
     pub agent_id: Option<String>,
+    /// Card labels, written through the shared labels writer; `None` leaves them unchanged
+    /// and an empty list clears them. Keep labels out of `metadata_json`.
+    pub labels: Option<Vec<String>>,
     pub metadata_json: Option<String>,
     pub status_on_create: Option<String>,
 }
@@ -359,22 +365,25 @@ async fn sync_kanban_card(
         }
     };
 
-    match upsert_card_from_issue_pg(
-        pool,
-        IssueCardUpsert {
-            repo_id: request.repo.clone(),
-            issue_number: issue.number,
-            issue_url: Some(issue.url.clone()),
-            title: request.title.clone(),
-            description: Some(request.body.clone()),
-            priority: None,
-            assigned_agent_id,
-            metadata_json: options.metadata_json.clone(),
-            status_on_create: options.status_on_create.clone(),
-        },
-    )
-    .await
-    {
+    let params = IssueCardUpsert {
+        repo_id: request.repo.clone(),
+        issue_number: issue.number,
+        issue_url: Some(issue.url.clone()),
+        title: request.title.clone(),
+        description: Some(request.body.clone()),
+        priority: None,
+        assigned_agent_id,
+        metadata_json: options.metadata_json.clone(),
+        status_on_create: options.status_on_create.clone(),
+    };
+    let upserted = match options.labels.as_deref() {
+        Some(labels) => {
+            let labels = card_labels_csv(labels.iter().map(String::as_str));
+            upsert_card_from_issue_with_labels_pg(pool, params, &labels).await
+        }
+        None => upsert_card_from_issue_pg(pool, params).await,
+    };
+    match upserted {
         Ok(upserted) => KanbanCardSyncOutcome::synced(upserted),
         Err(error) => {
             tracing::error!(
@@ -579,6 +588,7 @@ mod tests {
         .with_labels(vec![" agent:td ".to_string(), String::new()])
         .with_kanban(KanbanCardSync::enabled(KanbanCardSyncOptions {
             agent_id: Some("td".to_string()),
+            labels: Some(vec!["agent:td".to_string()]),
             metadata_json: Some(r#"{"depends_on":[1]}"#.to_string()),
             status_on_create: Some("backlog".to_string()),
         }))
@@ -678,5 +688,72 @@ mod tests {
             .expect_err("gh create failure must map to the shared GitHub error");
 
         assert_eq!(error, IssueCreationError::GitHub("boom".to_string()));
+    }
+
+    fn labeled_request(
+        labels: Option<Vec<&str>>,
+        metadata: Option<&str>,
+    ) -> GitHubIssueCreateRequest {
+        GitHubIssueCreateRequest::new(
+            "api_github_issues_create",
+            "itismyfield/AgentDesk",
+            "Labels",
+            "body",
+        )
+        .with_kanban(KanbanCardSync::enabled(KanbanCardSyncOptions {
+            labels: labels.map(|labels| labels.into_iter().map(str::to_string).collect()),
+            metadata_json: metadata.map(str::to_string),
+            ..Default::default()
+        }))
+    }
+
+    #[tokio::test]
+    async fn issue_creation_writes_labels_through_shared_writer_and_keeps_metadata_pg() {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let card_metadata = |pool: PgPool| async move {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT metadata FROM kanban_cards WHERE repo_id = 'itismyfield/AgentDesk' AND github_issue_number = 3742",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let cases = [
+            (
+                Some(vec![" agent:td ", ""]),
+                Some(r#"{"depends_on":[1]}"#),
+                serde_json::json!({"labels": "agent:td", "depends_on": [1]}),
+            ),
+            (
+                Some(vec!["bug"]),
+                None,
+                serde_json::json!({"labels": "bug", "depends_on": [1]}),
+            ),
+            (
+                None,
+                Some(r#"{"scope":"x"}"#),
+                serde_json::json!({"labels": "bug", "depends_on": [1], "scope": "x"}),
+            ),
+            (
+                Some(vec![]),
+                None,
+                serde_json::json!({"labels": "", "depends_on": [1], "scope": "x"}),
+            ),
+        ];
+        for (index, (labels, metadata, expected)) in cases.into_iter().enumerate() {
+            let result = create_github_issue_with_creator(
+                Some(&pool),
+                labeled_request(labels, metadata),
+                &fake_creator(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.kanban.error, None);
+            assert_eq!(result.kanban.created, Some(index == 0), "case {index}");
+            assert_eq!(card_metadata(pool.clone()).await, expected, "case {index}");
+        }
+        pool.close().await;
+        db.drop().await;
     }
 }

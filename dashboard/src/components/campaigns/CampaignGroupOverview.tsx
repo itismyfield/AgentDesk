@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Background, Controls, MarkerType, Position, ReactFlow, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { CampaignNode } from "../../api/campaigns";
+import { NO_TIES, campaignRawEdges, routeEdges, type GraphViewSettings } from "./campaignGraphRouting";
 import { campaignGroup, groupCampaignNodes } from "./campaignModel";
 
 type Props = {
@@ -10,37 +11,27 @@ type Props = {
   tr: (ko: string, en: string) => string;
 };
 
+/** The group key, not its sort position, names a group, so adding a group renames nothing. */
+const groupNodeId = (key: string) => `campaign-group:${encodeURIComponent(key)}`;
+
 /** A group projection can contain cycles even when the underlying task graph is a DAG. */
-export function buildCampaignGroupOverview(nodes: CampaignNode[]) {
+export function buildCampaignGroupOverview(nodes: CampaignNode[], settings: GraphViewSettings = NO_TIES) {
   const groups = groupCampaignNodes(nodes).map((group, index) => ({
     ...group,
-    id: `campaign-group-${index}`,
+    id: groupNodeId(group.key),
     position: { x: (index % 3) * 310, y: Math.floor(index / 3) * 210 },
     internalDependencies: 0,
   }));
-  const groupsByKey = new Map(groups.map((group) => [group.key, group]));
-  const nodesById = new Map(nodes.map((node) => [node.id, node]));
-  const connections = new Map<string, { source: string; target: string; count: number }>();
-  for (const node of nodes) {
-    const target = groupsByKey.get(campaignGroup(node))!;
-    for (const dependency of node.dependencies) {
-      const dependencyNode = nodesById.get(dependency);
-      if (!dependencyNode) continue;
-      const source = groupsByKey.get(campaignGroup(dependencyNode))!;
-      if (source.id === target.id) {
-        target.internalDependencies++;
-        continue;
-      }
-      const key = `${source.id}:${target.id}`;
-      const connection = connections.get(key) ?? { source: source.id, target: target.id, count: 0 };
-      connection.count++;
-      connections.set(key, connection);
-    }
-  }
+  const groupsById = new Map(groups.map((group) => [group.id, group]));
+  const displayOf = new Map(nodes.map((node) => [node.id, groupNodeId(campaignGroup(node))]));
+  const routed = routeEdges({ edges: campaignRawEdges(nodes), displayOf }, settings);
+  for (const [, target] of routed.internal) groupsById.get(displayOf.get(target)!)!.internalDependencies++;
   return {
     groups,
-    connections: [...connections.values()].sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target)),
-    internalDependencies: groups.reduce((total, group) => total + group.internalDependencies, 0),
+    connections: routed.display
+      .map((line) => ({ ...line, count: line.edges.length }))
+      .sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target)),
+    internalDependencies: routed.internal.length,
   };
 }
 
@@ -69,9 +60,10 @@ export default function CampaignGroupOverview({ nodes, onSelectGroup, tr }: Prop
     };
   });
   const edges: Edge[] = overview.connections.map((connection) => ({
-    id: `${connection.source}:${connection.target}`,
+    id: connection.id,
     source: connection.source,
     target: connection.target,
+    data: { edges: connection.edges },
     type: "smoothstep",
     label: String(connection.count),
     ariaLabel: tr(`그룹 간 의존성 ${connection.count}개`, `${connection.count} dependencies between groups`),
