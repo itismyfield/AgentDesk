@@ -506,6 +506,19 @@ async fn failed_required_check_outranks_a_missing_or_running_one() {
         let observed = ci.observe().await;
         let evidence = observed.observed_evidence().expect("observed failure");
         assert_eq!(
+            evidence.required.contexts(),
+            Ok(vec!["A required".to_owned(), "CI required".to_owned()]),
+            "{others:?}"
+        );
+        let earlier = evidence.checks.iter().find(|c| c.context == "A required");
+        if others.is_empty() {
+            assert!(earlier.is_none(), "{others:?}");
+        } else {
+            let earlier = earlier.expect("running required check");
+            assert_eq!(earlier.status, "in_progress");
+            assert_eq!(earlier.conclusion, None);
+        }
+        assert_eq!(
             evidence.verdict(),
             CiVerdict::Failed {
                 contexts: vec!["CI required".into()]
