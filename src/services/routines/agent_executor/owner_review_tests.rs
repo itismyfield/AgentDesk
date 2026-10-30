@@ -259,3 +259,42 @@ async fn owner_review_p2_accepted_missing_owner_never_readmits_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// The poll's observer binds the owner's armed attempt itself before it reads completion, so no
+/// caller supplies the bind: the first poll only binds, the next one completes.
+#[tokio::test]
+async fn owner_observer_binds_the_armed_attempt_on_its_own_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool, store, executor, run, handle) = accepted_fixture().await;
+    let turn = run.turn_id.as_deref().unwrap();
+    handle.v2_arm_head_for_tests("own-attempt").await.unwrap();
+    sqlx::query(
+        "INSERT INTO session_transcripts(turn_id,assistant_message) VALUES($1,'owned answer')",
+    )
+    .bind(turn)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let first = OWNER
+        .scope(handle.clone(), executor.poll_agent_runs(&store, 10, false))
+        .await
+        .unwrap();
+    assert!(first.is_empty(), "the first poll only binds");
+    let result: Value = sqlx::query_scalar("SELECT result_json FROM routine_runs WHERE id=$1")
+        .bind(&run.run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        result["owner_input"]["bind"]["attempt"], "own-attempt",
+        "{result}"
+    );
+    let outcomes = OWNER
+        .scope(handle, executor.poll_agent_runs(&store, 10, false))
+        .await
+        .unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, "succeeded");
+    pool.close().await;
+    db.drop().await;
+}

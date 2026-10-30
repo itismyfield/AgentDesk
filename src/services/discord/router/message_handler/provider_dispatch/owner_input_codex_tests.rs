@@ -211,6 +211,19 @@ fn after_the_codex_paste_only_a_replaced_pane_stops_the_enter() {
 fn owner_idle_codex_pastes_and_enters_once_without_a_later_read() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let rig = codex_rig_on("oc-idle", 7_272_525, true);
+    // Every tmux call from here on, the composer snapshot's own included, lands in one log.
+    let shim = rig.f.root.path().join("tmux");
+    let inner = rig.f.root.path().join("tmux-inner");
+    fs::rename(&shim, &inner).unwrap();
+    let log = rig.f.root.path().join("oc-idle-calls");
+    let wrapper = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+        log.display(),
+        inner.display()
+    );
+    fs::write(&shim, wrapper).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
     let result = rig.dispatch(ProviderKind::Codex, target::Phase::Idle, &rig.transcript());
     assert_eq!(result, Ok(()));
     assert_eq!(rig.events(), ["paste", "Enter"]);
@@ -228,4 +241,94 @@ fn owner_idle_codex_pastes_and_enters_once_without_a_later_read() {
     );
     let last = trace.lines().last().unwrap_or_default();
     assert!(last.contains("send-keys"), "no read after Enter: {trace}");
+    let calls = fs::read_to_string(&log).unwrap();
+    let calls: Vec<&str> = calls.lines().collect();
+    let pasted = (calls.iter().position(|c| c.contains("paste-buffer"))).expect("one paste");
+    let reads: Vec<usize> = (0..calls.len())
+        .filter(|&i| calls[i].contains("capture-pane"))
+        .collect();
+    assert_eq!(reads.len(), 1, "one composer read: {calls:#?}");
+    assert!(reads[0] < pasted, "read before the paste: {calls:#?}");
+    let count = |key: &str| calls.iter().filter(|c| c.contains(key)).count();
+    assert_eq!(
+        (count("paste-buffer"), count("Enter")),
+        (1, 1),
+        "{calls:#?}"
+    );
+}
+
+/// An idle pane's owner effect needs the node's execution capacity first: a refused capacity sends
+/// no key and reserves nothing, so the handoff never returns ahead of the capacity it runs under.
+#[test]
+fn an_idle_owner_front_needs_execution_capacity_before_any_key() {
+    let path = module_path!().split_once("::").unwrap().1;
+    let test = format!("{path}::an_idle_owner_front_needs_execution_capacity_before_any_key");
+    if !crate::services::discord::admin_host_guard::tests::api_child(&test) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let data = tempfile::tempdir().unwrap();
+    let mut config = crate::config::Config::default();
+    config.data.dir = data.path().to_path_buf();
+    config.cluster.enabled = true;
+    config.cluster.execution_slots = Some(1);
+    crate::config_live_reload::install(config);
+    let rig = codex_rig_on("oc-capacity", 7_272_527, true);
+    let front = rig.granted_front();
+    let result = rig.handoff(
+        front,
+        ProviderKind::Codex,
+        target::Phase::Idle,
+        &rig.transcript(),
+    );
+    assert_eq!(
+        result,
+        Err("NotSent(\"execution capacity requires PostgreSQL\")".into())
+    );
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+    let snapshot = rig.snapshot();
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
+}
+
+/// The first pinned paste held by a pane replaced just before it ran proves the attempt not sent
+/// through the owner's settlement: no content or Enter, no head, one known_not_sent original with
+/// its notice. A pane replaced after the paste holds only the Enter, a write that may have landed.
+#[test]
+fn an_idle_codex_paste_held_before_it_ran_settles_not_sent() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = codex_rig_on("oc-held", 7_272_528, true);
+    let pane = rig.f.tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        &format!("={}:", rig.name),
+        "#{pane_id}",
+    ]);
+    let swap = format!(
+        "'{}' -L '{}' -f /dev/null respawn-pane -k -t '{pane}'\n",
+        rig.f.real.display(),
+        rig.f.socket
+    );
+    rig.mark("before-paste", &swap);
+    let result = rig.dispatch(ProviderKind::Codex, target::Phase::Idle, &rig.transcript());
+    assert_eq!(result, Err("NotSent(\"pane_moved\")".into()));
+    wait("held-pane-ready", || rig.renderer.join("ready").exists());
+    rig.held_not_sent("pane_moved");
+    let snapshot = rig.snapshot();
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    let notice = &snapshot["retained_inputs"][0]["notice"];
+    assert_eq!(notice["kind"], "retained_retry_required", "{snapshot}");
+
+    let after = codex_rig_on("oc-held-enter", 7_272_529, true);
+    after.mark("swap-after", "paste");
+    let result = after.dispatch(
+        ProviderKind::Codex,
+        target::Phase::Idle,
+        &after.transcript(),
+    );
+    assert_eq!(result, Err("WriteUncertain(\"enter_failed\")".into()));
+    wait("enter-pane-ready", || after.renderer.join("ready").exists());
+    assert_eq!(after.events(), ["paste"]);
+    after.uncertain();
 }

@@ -47,3 +47,7 @@ pub(crate) async fn admit_synthetic(
         },
     )
 }
+
+#[cfg(test)]
+#[path = "start_tests.rs"]
+mod tests;

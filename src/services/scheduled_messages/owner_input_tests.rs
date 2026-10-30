@@ -53,6 +53,9 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
         assert!(turn_completion::record(&pool,&turn,turn_completion::ScheduledTurnOutcome::Delivered).await.unwrap().is_evidence());
         assert!(!poll_agent_delivery(&pool,running.clone()).await,"recorded output alone cannot bypass the owner bind");
         handle.v2_arm_head_for_tests("actual-scheduled-attempt").await.unwrap();
+        assert!(!poll_agent_delivery(&pool,running.clone()).await,"the observer binds the armed attempt before it reads");
+        let error:String=sqlx::query_scalar("SELECT error FROM scheduled_message_deliveries WHERE id=$1").bind(&fire.delivery_id).fetch_one(&pool).await.unwrap();
+        assert!(error.contains("actual-scheduled-attempt"),"{error}");
         assert!(owner_input::bind_observer(&mut *pool.acquire().await.unwrap(),&running,&handle,"stale-attempt",None).await.is_err());
         assert!(owner_input::bind_observer(&mut *pool.acquire().await.unwrap(),&running,&handle,"actual-scheduled-attempt",None).await.unwrap());
         assert!(!poll_agent_delivery(&pool,running.clone()).await,"a listing from before the observer bind cannot start its timeout clock");

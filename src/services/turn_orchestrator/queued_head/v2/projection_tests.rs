@@ -786,3 +786,46 @@ fn a_v2_checked_purge_keeps_every_member_of_a_reserved_unit() {
         assert_eq!(queued(&handle).await, (vec![100, 200], true));
     });
 }
+
+/// Ensure adopts a channel's queue file once: a second ensure of the same file and namespace keeps
+/// the owner it adopted, in-memory grant included, and an owner of another file or namespace
+/// refuses.
+#[test]
+fn ensure_adopts_once_and_refuses_another_identity() {
+    let _root = TestRuntimeRootGuard::new();
+    run(async {
+        let registry = ChannelMailboxRegistry::default();
+        let channel = 7_272_646;
+        let handle = registry.handle(ChannelId::new(channel));
+        let file = path(channel);
+        let (first, second) = tokio::join!(
+            handle.v2_ensure(file.clone(), NAMESPACE.into()),
+            handle.v2_ensure(file.clone(), NAMESPACE.into())
+        );
+        assert_eq!((first, second), (Ok(()), Ok(())));
+        handle
+            .v2_request(|slot| {
+                let owner = slot.as_mut().ok_or("no owner")?;
+                owner
+                    .enqueue_fixture(&item(100))
+                    .map_err(|e| format!("{e:?}"))?;
+                let front = owner.front().ok_or("no front")?;
+                owner.grant_front(&front)
+            })
+            .await
+            .unwrap();
+        handle
+            .v2_ensure(file.clone(), NAMESPACE.into())
+            .await
+            .unwrap();
+        let claimed = handle.v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let front = owner.front().ok_or("no front")?;
+            Ok(owner.claim_front(&front))
+        });
+        assert!(claimed.await.unwrap(), "the same owner, its grant kept");
+        let elsewhere = file.with_file_name("7272646-other.json");
+        assert!(handle.v2_ensure(elsewhere, NAMESPACE.into()).await.is_err());
+        assert!(handle.v2_ensure(file, "other".into()).await.is_err());
+    });
+}

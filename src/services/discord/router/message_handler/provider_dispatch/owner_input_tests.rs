@@ -77,6 +77,7 @@ pub(super) fn owned(
     let script = format!(
         "#!/bin/sh\nd='{dir}'\nprintf '%s\\n' \"$*\" >> \"$d/trace\"\n\
          case \"$*\" in *load-buffer*) [ ! -f \"$d/fail-load\" ] || exit 1 ;; esac\n\
+         case \"$*\" in *paste-buffer*) [ ! -f \"$d/before-paste\" ] || {{ sh \"$d/before-paste\"; rm \"$d/before-paste\"; }} ;; esac\n\
          '{shim}' \"$@\"; rc=$?\ncase \"$*\" in *load-buffer*) step=load ;; *paste-buffer*) step=paste ;; *C-s*) step=C-s ;; *) step= ;; esac\n\
          if [ -n \"$step\" ] && [ \"$(cat \"$d/swap-after\" 2>/dev/null)\" = \"$step\" ]; then\n\
            rm \"$d/swap-after\"; '{real}' -L '{socket}' -f /dev/null respawn-pane -k -t '{pane}'\nfi\n\
@@ -175,6 +176,52 @@ impl Rig {
         execution: Execution,
         pane: Option<&str>,
     ) -> Result<(), String> {
+        register(
+            self.channel,
+            self.registration(&provider, phase, transcript, execution),
+        );
+        self.with_turn(&provider, pane, |turn, sender| {
+            let start =
+                crate::services::discord::router::intake_dispatch::replay_admission::dormant_start(
+                    "test",
+                )
+                .unwrap();
+            execute(turn, start, sender)
+        })
+    }
+
+    /// The owner's front through the drive's handoff entry, the owner passed as its argument.
+    pub(super) fn handoff(
+        &self,
+        front: Front,
+        provider: ProviderKind,
+        phase: target::Phase,
+        transcript: &Path,
+    ) -> Result<(), String> {
+        let owner = self.registration(&provider, phase, transcript, Execution::LocalTui);
+        self.with_turn(&provider, Some(&self.name), |turn, sender| {
+            execute_front(turn, sender, front, owner)
+        })
+    }
+
+    /// The owner's unattempted front, granted in the actor turn that read it.
+    pub(super) fn granted_front(&self) -> Front {
+        let granted = self.mailbox.v2_request(|slot| {
+            let owner = slot.as_mut().ok_or("no owner")?;
+            let front = owner.front().ok_or("no front")?;
+            owner.grant_front(&front)?;
+            Ok(front)
+        });
+        self.runtime.block_on(granted).unwrap()
+    }
+
+    fn registration(
+        &self,
+        provider: &ProviderKind,
+        phase: target::Phase,
+        transcript: &Path,
+        execution: Execution,
+    ) -> Registration {
         let root = crate::services::tmux_common::current_tmux_owner_marker();
         // A live pane's attempt names the transcript it was observed on.
         let source = if phase == target::Phase::Busy {
@@ -187,30 +234,38 @@ impl Rig {
             json!({"kind":"pre_source","expected_session_id":null,
                 "expected_transcript":null,"binding_watermark":null})
         };
-        register(
-            self.channel,
-            Registration {
-                mailbox: self.mailbox.clone(),
-                execution,
-                origin: InputOrigin::Discord,
-                phase,
-                attempt: json!({"nonce":self.nonce,"provider":provider.as_str(),
-                    "target":{"host":"tmux","owner":self.name,"root":root,"execution_nonce":self.nonce},
-                    "source":source}),
-                sources: vec![self.original.message_id.to_string()],
-                transcript: transcript.to_path_buf(),
-                program: self.program.clone(),
-                herdr: None,
-                author: AUTHOR.into(),
-                name: NAME.into(),
-                clock: Arc::new(|| 10_000),
-                timing: &OWNER_TIMING,
-            },
-        );
+        Registration {
+            mailbox: self.mailbox.clone(),
+            execution,
+            origin: InputOrigin::Discord,
+            phase,
+            attempt: json!({"nonce":self.nonce,"provider":provider.as_str(),
+                "target":{"host":"tmux","owner":self.name,"root":root,"execution_nonce":self.nonce},
+                "source":source}),
+            sources: vec![self.original.message_id.to_string()],
+            transcript: transcript.to_path_buf(),
+            program: self.program.clone(),
+            herdr: None,
+            author: AUTHOR.into(),
+            name: NAME.into(),
+            clock: Arc::new(|| 10_000),
+            timing: &OWNER_TIMING,
+        }
+    }
+
+    fn with_turn(
+        &self,
+        provider: &ProviderKind,
+        pane: Option<&str>,
+        run: impl FnOnce(
+            StreamingTurn<'_>,
+            std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
+        ) -> Result<(), String>,
+    ) -> Result<(), String> {
         let host = TurnHost::Tmux;
         let turn = StreamingTurn {
             pool: None,
-            provider: &provider,
+            provider,
             prompt: PROMPT,
             session_id: None,
             working_dir: "/tmp",
@@ -235,12 +290,7 @@ impl Rig {
         };
         let (sender, _receiver) = std::sync::mpsc::channel();
         let _entered = self.runtime.enter();
-        let start =
-            crate::services::discord::router::intake_dispatch::replay_admission::dormant_start(
-                "test",
-            )
-            .unwrap();
-        execute(turn, start, sender)
+        run(turn, sender)
     }
 
     pub(super) fn transcript(&self) -> std::path::PathBuf {
@@ -300,26 +350,36 @@ impl Rig {
     }
 }
 
-/// A listed channel's busy pane parks a visible draft once, pastes once and enters once, and an
-/// empty composer gets no C-s; a modal gets no key and the original goes back to custody.
+/// A busy pane parks a visible draft once, listed channel or not, pastes once and enters once, and
+/// an empty composer gets no C-s; a modal gets no key and the original stays at the queue front,
+/// unretained.
 #[test]
-fn owner_busy_claude_submits_once_and_hands_back_on_veto() {
+fn owner_busy_claude_submits_once_and_holds_a_modal_front() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    for (name, channel, before, expected) in [
+    for (name, channel, before, listed, expected) in [
         (
             "ob-draft",
             7_272_501,
             view("js", false),
+            true,
+            vec!["C-s", "paste", "Enter"],
+        ),
+        (
+            "ob-unlisted",
+            7_272_509,
+            view("js", false),
+            false,
             vec!["C-s", "paste", "Enter"],
         ),
         (
             "ob-empty",
             7_272_502,
             view("", false),
+            true,
             vec!["paste", "Enter"],
         ),
     ] {
-        let _listed = StashChannelGuard::new(channel);
+        let _listed = listed.then(|| StashChannelGuard::new(channel));
         let rig = rig(name, channel, "normal", before, BUSY);
         let result = rig.dispatch(ProviderKind::Claude, target::Phase::Busy, &rig.transcript());
         assert_eq!(result, Ok(()), "{name}");
@@ -337,8 +397,65 @@ fn owner_busy_claude_submits_once_and_hands_back_on_veto() {
     let rig = rig("ob-modal", 7_272_503, "normal", modal.into(), BUSY);
     let result = rig.dispatch(ProviderKind::Claude, target::Phase::Busy, &rig.transcript());
     assert_eq!(result, Err("NotSent(\"Modal\")".into()));
-    rig.held_not_sent("vetoed: Modal");
+    let snapshot = rig.snapshot();
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    assert_eq!(
+        snapshot["retained_inputs"],
+        json!([]),
+        "held, not retained: {snapshot}"
+    );
+    assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
+    assert!(rig.events().is_empty(), "no key: {:?}", rig.events());
     assert_eq!(rig.bind(), TurnBind::NotArmed);
+}
+
+/// The drive's handoff runs the owner's front from its arguments alone, with nothing registered
+/// for the channel: a front it was not granted reserves nothing, the granted one is delivered.
+#[test]
+fn the_front_handoff_runs_from_its_arguments_and_never_an_ungranted_front() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let rig = rig("of-front", 7_272_510, "normal", view("", false), BUSY);
+    let front = rig.granted_front();
+    assert_eq!(front.0.as_deref(), Some(rig.ticket.as_str()));
+    let mut other = front.clone();
+    other.0 = Some("another-ticket".into());
+    let transcript = rig.transcript();
+    let refused = rig.handoff(
+        other,
+        ProviderKind::Claude,
+        target::Phase::Busy,
+        &transcript,
+    );
+    assert_eq!(refused, Err("NotSent(\"front_not_granted\")".into()));
+    assert!(rig.events().is_empty(), "{:?}", rig.events());
+    assert!(rig.snapshot()["head_injection"].is_null());
+    let ungranted = rig.handoff(
+        front.clone(),
+        ProviderKind::Claude,
+        target::Phase::Busy,
+        &transcript,
+    );
+    assert_eq!(
+        ungranted,
+        Err("NotSent(\"front_not_granted\")".into()),
+        "the grant was spent"
+    );
+    let front = rig.granted_front();
+    let registered = REGISTERED
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(id, _)| *id == rig.channel);
+    assert!(!registered, "nothing travels through the static");
+    let result = rig.handoff(
+        front,
+        ProviderKind::Claude,
+        target::Phase::Busy,
+        &transcript,
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(rig.events(), ["paste", "Enter"]);
+    rig.delivered();
 }
 
 /// A legacy draft guard does not stop the owner's transaction: the guard is legacy state.
@@ -354,45 +471,31 @@ fn legacy_guard_value_does_not_block_owner_a() {
     rig.delivered();
 }
 
-/// A swallowed Enter gets main's one finishing Enter and no second paste, and is delivered seen or
-/// not; an unseen receipt is one observation, and nothing is retained past the deadline.
+/// Enter ends the owner's transaction: a swallowed Enter gets no finishing Enter and no second
+/// paste, the head is delivered whether or not the receipt shows, and no alert follows.
 #[test]
-fn owner_busy_claude_enter_delivers_with_or_without_receipt() {
+fn owner_busy_claude_enter_ends_the_transaction_with_or_without_receipt() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let rig_seen = rig("oc-seen", 7_272_505, "swallow", view("", false), BUSY);
-    let result = rig_seen.dispatch(
-        ProviderKind::Claude,
-        target::Phase::Busy,
-        &rig_seen.transcript(),
-    );
-    assert_eq!(result, Ok(()));
-    assert_eq!(rig_seen.events(), ["paste", "Enter", "Enter"]);
-    rig_seen.delivered();
-
     let rig = rig("oc-missing", 7_272_506, "swallow", view("", false), BUSY);
     let elsewhere = rig.f.root.path().join("oc-missing-unwritten.jsonl");
     fs::write(&elsewhere, BUSY).unwrap();
     let result = rig.dispatch(ProviderKind::Claude, target::Phase::Busy, &elsewhere);
     assert_eq!(result, Ok(()));
-    assert_eq!(
-        rig.events(),
-        ["paste", "Enter", "Enter"],
-        "one paste, one finishing Enter"
-    );
+    assert_eq!(rig.events(), ["paste", "Enter"], "one paste, one Enter");
     rig.delivered();
     let past_deadline = rig
         .mailbox
         .v2_request(|s| s.as_mut().unwrap().tick(10_000 + 31_000));
     rig.runtime.block_on(past_deadline).unwrap();
     rig.delivered();
+    std::thread::sleep(OWNER_TIMING.confirm_window);
     let alerts: Vec<_> = crate::services::observability::events::recent(usize::MAX)
         .into_iter()
         .filter(|event| {
             event.event_type == "busy_inject_unconfirmed" && event.channel_id == Some(rig.channel)
         })
-        .map(|event| event.payload["detail"].clone())
         .collect();
-    assert_eq!(alerts, [json!("not_observed")]);
+    assert!(alerts.is_empty(), "{alerts:?}");
 }
 
 /// A load that never became a buffer sends nothing and proves it: the original and its ticket
@@ -532,6 +635,7 @@ fn created_first_prompt(rig: &Rig) -> Result<(), String> {
         prepared_before_launch(rig),
         PROMPT.into(),
         scope::Lineage::Created,
+        None,
     );
     let _entered = rig.runtime.enter();
     hook(scope::Lineage::Created, target, source, None, submit)
@@ -634,6 +738,7 @@ impl Rig {
             prepared_before_launch(self),
             PROMPT.into(),
             scope::Lineage::Created,
+            None,
         );
         let writer = writer.map(str::to_owned);
         let _hook = scope::install_launch(match writer {

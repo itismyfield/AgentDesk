@@ -105,3 +105,7 @@ async fn grant(drive: &Drive) -> Option<Front> {
         None
     })
 }
+
+#[cfg(test)]
+#[path = "drive_tests.rs"]
+mod tests;

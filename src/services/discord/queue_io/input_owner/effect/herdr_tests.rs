@@ -19,10 +19,19 @@ const BUSY: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\
 
 /// The busy Claude screen with an empty composer, as Herdr reads the pane.
 fn busy_screen() -> Value {
+    draft_screen("")
+}
+
+/// The busy Claude screen with `draft` typed in its composer.
+fn draft_screen(draft: &str) -> Value {
     let border = "─".repeat(60);
     let text = format!(
-        "⏺ Working on it.\n\n✻ Thinking… (12s · esc to interrupt)\n\n{border}\n❯\u{00a0}\n{border}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+        "⏺ Working on it.\n\n✻ Thinking… (12s · esc to interrupt)\n\n{border}\n❯\u{00a0}{draft}\n{border}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
     );
+    read(&text)
+}
+
+fn read(text: &str) -> Value {
     json!({"type": "pane_read", "read": {
         "pane_id": PANE, "workspace_id": "w1", "tab_id": "w1:1", "source": "recent_unwrapped",
         "format": "text", "text": text, "revision": 3, "truncated": false
@@ -65,13 +74,19 @@ fn bound(rig: &HerdrRig, channel: u64, logical: &str, nonce: &str) -> HostedExec
     }
 }
 
-/// One owner attempt on a busy Herdr pane whose logical session is not its pane id; `logged`
-/// makes Claude record the pasted frame on Enter, and `writer` is the pane the owner binds.
-fn attempt(
-    channel: u64,
-    logged: bool,
-    writer: Option<&str>,
-) -> (HerdrRig, Completion, Value, String) {
+/// What one owner attempt left: the rig, the completion, the owner's snapshot, the nonce, and
+/// the head as it stood when ctrl+s reached the pane.
+type Attempted = (
+    HerdrRig,
+    Completion,
+    Value,
+    String,
+    Arc<std::sync::Mutex<Option<Value>>>,
+);
+
+/// One owner attempt on a Herdr pane showing `screen` whose logical session is not its pane id;
+/// `logged` makes Claude record the pasted frame on Enter, and `writer` is the pane the owner binds.
+fn attempt(channel: u64, logged: bool, writer: Option<&str>, screen: Value) -> Attempted {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(channel, NODE)]);
     let rig = HerdrRig::start();
@@ -85,14 +100,27 @@ fn attempt(
     let target =
         crate::services::claude::herdr_turn::gate(&bound(&rig, channel, &logical, &execution))
             .unwrap();
-    rig.answer("pane.read", busy_screen());
+    rig.answer("pane.read", screen);
     let dir = tempfile::tempdir().unwrap();
     let transcript = dir.path().join("busy.jsonl");
     std::fs::write(&transcript, BUSY).unwrap();
-    if logged {
+    let queue = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("claude/input-owner-herdr");
+    let stashed = Arc::new(std::sync::Mutex::new(None));
+    {
         let path = transcript.clone();
         let mut pasted = String::new();
+        let (file, stash) = (queue.join(format!("{channel}.json")), stashed.clone());
         rig.on_send(move |params| {
+            if params["keys"] == json!(["ctrl+s"]) {
+                let raw = std::fs::read_to_string(&file).unwrap_or_default();
+                let owner: Value = serde_json::from_str(&raw).unwrap_or_default();
+                *stash.lock().unwrap() = Some(owner["head_injection"].clone());
+            }
+            if !logged {
+                return;
+            }
             if let Some(text) = params["text"].as_str() {
                 let text = text.trim_start_matches("\u{1b}[200~");
                 pasted = text.trim_end_matches("\u{1b}[201~").to_string();
@@ -159,9 +187,6 @@ fn attempt(
     }
     .leaf();
     let completion = runtime.block_on(async {
-        let queue = crate::services::discord::runtime_store::discord_pending_queue_root()
-            .unwrap()
-            .join("claude/input-owner-herdr");
         std::fs::create_dir_all(&queue).unwrap();
         mailbox
             .v2_adopt(queue.join(format!("{channel}.json")), "input-owner".into())
@@ -181,7 +206,7 @@ fn attempt(
     let snapshot = runtime
         .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
         .unwrap();
-    (rig, completion.unwrap(), snapshot, nonce)
+    (rig, completion.unwrap(), snapshot, nonce, stashed)
 }
 
 fn alerts(nonce: &str) -> usize {
@@ -195,7 +220,7 @@ fn alerts(nonce: &str) -> usize {
 /// registration names the logical session, and the delivered head leaves custody.
 #[test]
 fn owner_herdr_busy_claude_writes_the_bound_pane_once() {
-    let (rig, completion, snapshot, nonce) = attempt(7_272_531, true, None);
+    let (rig, completion, snapshot, nonce, _) = attempt(7_272_531, true, None, busy_screen());
     assert_eq!(completion, Completion::Submitted, "{snapshot}");
     let sends = rig.sends();
     assert_eq!(sends.len(), 2, "{sends:?}");
@@ -207,22 +232,25 @@ fn owner_herdr_busy_claude_writes_the_bound_pane_once() {
 }
 
 /// An applied paste and Enter that Claude never records is still delivered: the head settles and
-/// nothing is retained, with only health's one observation and no second send.
+/// nothing is retained, with no alert, no second send and no read after the first key.
 #[test]
 fn owner_herdr_enter_without_receipt_is_delivered_once() {
-    let (rig, completion, snapshot, nonce) = attempt(7_272_532, false, None);
+    let (rig, completion, snapshot, nonce, _) = attempt(7_272_532, false, None, busy_screen());
     assert_eq!(completion, Completion::Submitted, "{snapshot}");
     assert_eq!(rig.sends().len(), 2, "{:?}", rig.sends());
-    assert_eq!(alerts(&nonce), 1);
+    assert_eq!(reads_after_first_key(&rig), 0);
+    std::thread::sleep(busy_inject::TIMING.confirm_window);
+    assert_eq!(alerts(&nonce), 0);
     assert!(snapshot["head_injection"].is_null(), "{snapshot}");
     assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
 }
 
-/// An owner bound to another pane gets no byte in: health reads the fence's refusal as a failed
-/// paste, so the head stays Unknown with health's one alert and nothing is sent again.
+/// An owner bound to another pane gets no byte in: the fence's refusal after the payload started
+/// is a failed paste, so the head stays Unknown with one alert and nothing is sent again.
 #[test]
 fn owner_herdr_foreign_pane_gets_no_content() {
-    let (rig, completion, snapshot, nonce) = attempt(7_272_533, true, Some("/elsewhere#w1-9"));
+    let foreign = Some("/elsewhere#w1-9");
+    let (rig, completion, snapshot, nonce, _) = attempt(7_272_533, true, foreign, busy_screen());
     assert_eq!(
         completion,
         Completion::WriteUncertain("paste_failed".into())
@@ -231,4 +259,58 @@ fn owner_herdr_foreign_pane_gets_no_content() {
     assert_eq!(alerts(&nonce), 1);
     assert_eq!(snapshot["head_injection"]["phase"], "unknown", "{snapshot}");
     assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+}
+
+/// Pane reads that reached the server after its first write.
+fn reads_after_first_key(rig: &HerdrRig) -> usize {
+    let requests = rig.requests();
+    let method = |r: &Value| r["method"].as_str().unwrap_or_default().to_string();
+    let first = requests
+        .iter()
+        .position(|r| method(r).starts_with("pane.send"));
+    first.map_or(0, |at| {
+        (requests[at..].iter())
+            .filter(|r| method(r) == "pane.read")
+            .count()
+    })
+}
+
+/// A visible draft is parked with Herdr's ctrl+s before the payload starts, whichever channel the
+/// input names; one paste and one Enter follow, and nothing reads the pane after the first key.
+#[test]
+fn owner_herdr_parks_a_visible_draft_before_the_payload_starts() {
+    let (rig, completion, snapshot, nonce, stashed) =
+        attempt(7_272_534, true, None, draft_screen("half typed"));
+    assert_eq!(completion, Completion::Submitted, "{snapshot}");
+    let sends = rig.sends();
+    assert_eq!(sends.len(), 3, "{sends:?}");
+    assert_eq!(sends[0]["keys"], json!(["ctrl+s"]));
+    let frame = busy_inject::frame("discord", "7", "tester", &nonce, PROMPT);
+    assert_eq!(sends[1]["text"], format!("\u{1b}[200~{frame}\u{1b}[201~"));
+    assert_eq!(sends[2]["keys"], json!(["enter"]));
+    let at_stash = stashed
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("ctrl+s reached the pane");
+    assert_eq!(
+        at_stash["payload_window"]["kind"], "bootstrap",
+        "start after C-s: {at_stash}"
+    );
+    assert_eq!(reads_after_first_key(&rig), 0);
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+}
+
+/// A modal on the pane gets no key: the front is held, unretained, for the release wake.
+#[test]
+fn owner_herdr_modal_holds_the_front_without_a_key() {
+    let modal =
+        read("Do you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to select · Esc to cancel\n");
+    let (rig, completion, snapshot, _, stashed) = attempt(7_272_535, true, None, modal);
+    assert_eq!(completion, Completion::NotSent(MODAL.into()), "{snapshot}");
+    assert!(rig.sends().is_empty(), "{:?}", rig.sends());
+    assert!(stashed.lock().unwrap().is_none());
+    assert!(snapshot["head_injection"].is_null(), "{snapshot}");
+    assert_eq!(snapshot["retained_inputs"], json!([]), "{snapshot}");
+    assert_eq!(snapshot["items"][0]["text"], PROMPT, "{snapshot}");
 }
