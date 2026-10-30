@@ -257,10 +257,18 @@ impl Owner {
         }
     }
 
-    /// Spends the grant, in the caller's actor turn, only on the exact front it named.
+    /// Spends the grant, in the caller's actor turn, only on the exact front it named; a refused
+    /// claim leaves it for the front it was granted to.
     pub(crate) fn claim_front(&mut self, front: &Front) -> bool {
-        let granted = self.front_grant.take().is_some_and(|g| is_front(&g, front));
-        granted && self.front().is_some_and(|now| is_front(&now, front))
+        let granted = self
+            .front_grant
+            .as_ref()
+            .is_some_and(|g| is_front(g, front))
+            && self.front().is_some_and(|now| is_front(&now, front));
+        if granted {
+            self.front_grant = None;
+        }
+        granted
     }
 
     /// Whether any source the owner holds, queued, attempted, retained or settled, is `message`.

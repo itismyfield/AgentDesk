@@ -409,7 +409,7 @@ fn owner_busy_claude_submits_once_and_holds_a_modal_front() {
 }
 
 /// The drive's handoff runs the owner's front from its arguments alone, with nothing registered
-/// for the channel: a front it was not granted reserves nothing, the granted one is delivered.
+/// for the channel: a front it was not granted reserves nothing, the granted one is delivered once.
 #[test]
 fn the_front_handoff_runs_from_its_arguments_and_never_an_ungranted_front() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -428,18 +428,6 @@ fn the_front_handoff_runs_from_its_arguments_and_never_an_ungranted_front() {
     assert_eq!(refused, Err("NotSent(\"front_not_granted\")".into()));
     assert!(rig.events().is_empty(), "{:?}", rig.events());
     assert!(rig.snapshot()["head_injection"].is_null());
-    let ungranted = rig.handoff(
-        front.clone(),
-        ProviderKind::Claude,
-        target::Phase::Busy,
-        &transcript,
-    );
-    assert_eq!(
-        ungranted,
-        Err("NotSent(\"front_not_granted\")".into()),
-        "the grant was spent"
-    );
-    let front = rig.granted_front();
     let registered = REGISTERED
         .lock()
         .unwrap()
@@ -447,12 +435,19 @@ fn the_front_handoff_runs_from_its_arguments_and_never_an_ungranted_front() {
         .any(|(id, _)| *id == rig.channel);
     assert!(!registered, "nothing travels through the static");
     let result = rig.handoff(
+        front.clone(),
+        ProviderKind::Claude,
+        target::Phase::Busy,
+        &transcript,
+    );
+    assert_eq!(result, Ok(()), "the refused front left the grant in place");
+    let again = rig.handoff(
         front,
         ProviderKind::Claude,
         target::Phase::Busy,
         &transcript,
     );
-    assert_eq!(result, Ok(()));
+    assert_eq!(again, Err("NotSent(\"front_not_granted\")".into()));
     assert_eq!(rig.events(), ["paste", "Enter"]);
     rig.delivered();
 }
