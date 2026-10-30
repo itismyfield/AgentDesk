@@ -70,6 +70,7 @@ async fn owner_repost_real_http_revocation_preserves_unresolved_and_stops_pg() {
         .unwrap();
     opened
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             serial: 0,
             unit_key: UnitKey {
                 channel_id: 73369490,

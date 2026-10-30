@@ -489,6 +489,7 @@ async fn output_origin_o_request_keeps_guard_after_writer_waiter_aborts_pg() {
     use crate::services::tui_o::store::ledger::{LedgerEntry, LocalRetryMark, PieceOutcome};
     legacy
         .append_ledger(LedgerEntry::Prepared {
+            notice_origin: None,
             serial: 0,
             unit_key: UnitKey {
                 channel_id: channel,

@@ -49,6 +49,7 @@ pub(super) fn materialized_notice(
         execution_nonce: nonce.into(),
     });
     let item = PieceWork {
+        output_origin: None,
         unit_key: UnitKey {
             kind: UnitKind::InputNotice,
             ..unit(native_key)
