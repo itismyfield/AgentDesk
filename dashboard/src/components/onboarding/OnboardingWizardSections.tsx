@@ -47,7 +47,6 @@ export function ChecklistPanel({
   return (
     <div
       className="min-w-0 border-t border-th-border-subtle pt-4"
-
     >
       <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
         {title}
@@ -56,7 +55,6 @@ export function ChecklistPanel({
         <div
           key={item.key}
           className="border-b border-th-border-subtle py-3 text-xs last:border-b-0"
-
         >
           <div className="flex items-center gap-2">
             <span style={{ color: item.ok ? "var(--th-text-muted)" : "var(--th-badge-amber-text)" }}>{item.ok ? "✓" : "!"}</span>

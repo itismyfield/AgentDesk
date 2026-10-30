@@ -129,10 +129,10 @@ function ConnectorRow({
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+          <div className="text-sm font-semibold [overflow-wrap:anywhere]" style={{ color: "var(--th-text)" }}>
             {connector.name}
           </div>
-          <div className="mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+          <div className="mt-1 text-xs leading-5 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
             {connector.capabilities.join(", ")}
           </div>
         </div>
@@ -225,21 +225,21 @@ function isSetupState(state: ConnectorDisplayState): boolean {
 function connectorTone(state: ConnectorDisplayState | "invalid") {
   if (state === "ready") {
     return {
-      bg: "rgba(34, 197, 94, 0.13)",
-      fg: "rgba(187, 247, 208, 0.95)",
-      border: "rgba(34, 197, 94, 0.36)",
+      bg: "var(--th-badge-emerald-bg)",
+      fg: "var(--th-badge-emerald-text)",
+      border: "var(--th-border-subtle)",
     };
   }
   if (state === "invalid" || state === "missing_path" || state === "missing_provider" || state === "invalid_config") {
     return {
-      bg: "rgba(251, 191, 36, 0.14)",
-      fg: "rgba(253, 230, 138, 0.95)",
-      border: "rgba(251, 191, 36, 0.38)",
+      bg: "var(--th-badge-amber-bg)",
+      fg: "var(--th-badge-amber-text)",
+      border: "var(--th-border-subtle)",
     };
   }
   return {
-    bg: "rgba(148, 163, 184, 0.14)",
-    fg: "rgba(226, 232, 240, 0.86)",
-    border: "rgba(148, 163, 184, 0.32)",
+    bg: "var(--th-overlay-subtle)",
+    fg: "var(--th-text-muted)",
+    border: "var(--th-border-subtle)",
   };
 }

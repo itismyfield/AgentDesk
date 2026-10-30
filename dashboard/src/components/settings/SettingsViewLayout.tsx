@@ -65,6 +65,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
     primaryActionStyle,
     rcDirty,
     rcLoaded,
+    rcError,
     rcSaving,
     removingProviderAccountKey,
     renderSettingGroupCard,
@@ -115,6 +116,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
             primaryActionStyle={primaryActionStyle}
             rcDirty={rcDirty}
             rcLoaded={rcLoaded}
+            rcError={rcError}
             rcSaving={rcSaving}
             renderSettingRow={renderSettingRow}
             runtimeMetas={runtimeMetas}
@@ -391,10 +393,8 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
               </div>
               {activeNavItem.count ? (
                 <span
-                  className="inline-flex items-center text-xs tabular-nums bg-transparent!"
+                  className="inline-flex items-center shrink-0 whitespace-nowrap px-1 text-xs tabular-nums"
                   style={{
-                    borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-                    background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
                     color: "var(--th-text-muted)",
                   }}
                 >

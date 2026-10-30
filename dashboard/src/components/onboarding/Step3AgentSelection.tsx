@@ -133,27 +133,17 @@ export function Step3AgentSelection({
           </div>
           {agents.map((agent) => (
             <div key={agent.id} className="rounded-lg border overflow-hidden" style={{ borderColor: borderLight }}>
-              <div
-                className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-surface-subtle"
-                onClick={() => setExpandedAgent(expandedAgent === agent.id ? null : agent.id)}
-              >
-                <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
-                  {tr(agent.name, agent.nameEn || agent.name)}
-                </span>
-                <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                  {tr(agent.description, agent.descriptionEn || agent.description)}
-                </span>
-                <span className="ml-auto text-xs" style={{ color: "var(--th-text-muted)" }}>
-                  {expandedAgent === agent.id ? "▲" : "▼"}
-                </span>
-                {agent.custom && (
-                  <button type="button"
-                    onClick={(event) => { event.stopPropagation(); removeAgent(agent.id); }}
-                    className="min-h-11 min-w-11 px-2 text-xs text-[var(--th-accent-danger)]"
-                  >
-                    {tr("삭제", "Del")}
-                  </button>
-                )}
+              <div className="flex min-w-0 items-start gap-2 px-3 py-2">
+                <button type="button" aria-expanded={expandedAgent === agent.id}
+                  onClick={() => setExpandedAgent(expandedAgent === agent.id ? null : agent.id)}
+                  className="flex min-h-11 min-w-0 flex-1 items-center justify-between gap-3 rounded-md px-1 py-2 text-left hover:bg-surface-subtle">
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium text-th-text-primary [overflow-wrap:anywhere]">{tr(agent.name, agent.nameEn || agent.name)}</span>
+                    <span className="mt-1 block text-xs leading-5 text-th-text-muted [overflow-wrap:anywhere]">{tr(agent.description, agent.descriptionEn || agent.description)}</span>
+                  </span>
+                  <span className="shrink-0 text-xs text-th-text-muted" aria-hidden="true">{expandedAgent === agent.id ? "▲" : "▼"}</span>
+                </button>
+                {agent.custom ? <button type="button" onClick={() => removeAgent(agent.id)} className="min-h-11 min-w-11 shrink-0 rounded-md px-2 text-xs text-[var(--th-accent-danger)]">{tr("삭제", "Del")}</button> : null}
               </div>
               {expandedAgent === agent.id && (
                 <div className="px-4 pb-3 space-y-2 border-t" style={{ borderColor: borderLight }}>
@@ -241,7 +231,7 @@ export function Step3AgentSelection({
           <button type="button"
             onClick={addCustomAgent}
             disabled={!customName.trim()}
-            className="w-full sm:w-auto px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors whitespace-nowrap"
+            className="min-h-11 w-full sm:w-auto px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors whitespace-nowrap"
           >
             + {tr("추가", "Add")}
           </button>

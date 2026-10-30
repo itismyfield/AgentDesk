@@ -168,7 +168,7 @@ export function SettingsVoicePanel({
             onChange={(event) =>
               updateVoiceGlobal("active_agent_ttl_seconds", Number(event.target.value) || 180)
             }
-            className="w-24 rounded-md px-2 py-1.5 text-right text-xs"
+            className="min-h-11 w-24 rounded-md px-2 py-1.5 text-right text-xs"
             style={{
               ...inputStyle,
               fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",

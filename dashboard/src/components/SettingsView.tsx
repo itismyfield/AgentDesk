@@ -63,6 +63,7 @@ export default function SettingsView({
   const [rcDefaults, setRcDefaults] = useState<RuntimeConfigMap>({});
   const [rcExplicitKeys, setRcExplicitKeys] = useState<Set<string>>(() => new Set());
   const [rcLoaded, setRcLoaded] = useState(false);
+  const [rcError, setRcError] = useState(false);
   const [rcSaving, setRcSaving] = useState(false);
   const [rcDirty, setRcDirty] = useState(false);
 
@@ -290,6 +291,7 @@ export default function SettingsView({
         setRcLoaded(true);
       })
       .catch(() => {
+        setRcError(true);
         setRcLoaded(true);
       });
 
@@ -670,10 +672,8 @@ export default function SettingsView({
               </div>
             </div>
             <span
-              className="inline-flex shrink-0 items-center text-xs tabular-nums bg-transparent!"
+              className="inline-flex shrink-0 items-center whitespace-nowrap px-1 text-xs tabular-nums"
               style={{
-                borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
                 color: "var(--th-text-muted)",
               }}
             >
@@ -710,7 +710,7 @@ export default function SettingsView({
         pendingProviderLogin, providerAuthError, providerAuthLoading, providerAuthProviders,
         pendingDangerousConfigSave, pipelineAgents, pipelineMetas, pipelineRepos,
         pipelineSelectorError, pipelineSelectorLoading, primaryActionClass,
-        primaryActionStyle, rcDirty, rcLoaded, rcSaving, renderSettingGroupCard,
+        primaryActionStyle, rcDirty, rcLoaded, rcError, rcSaving, renderSettingGroupCard,
         renderSettingRow, runtimeMetas, saving, secondaryActionClass,
         secondaryActionStyle, selectedPipelineAgentId, selectedPipelineRepo,
         setActiveRuntimeCategoryId, setPanelQuery, setPendingDangerousConfigSave,

@@ -27,6 +27,7 @@ interface SettingsRuntimePanelProps extends Pick<
   panelQueryNormalized: string;
   rcDirty: boolean;
   rcLoaded: boolean;
+  rcError: boolean;
   rcSaving: boolean;
   renderSettingRow: RenderSettingRow;
   runtimeMetas: SettingRowMeta[];
@@ -45,6 +46,7 @@ export function SettingsRuntimePanel({
   primaryActionStyle,
   rcDirty,
   rcLoaded,
+  rcError,
   rcSaving,
   renderSettingRow,
   runtimeMetas,
@@ -54,7 +56,11 @@ export function SettingsRuntimePanel({
 }: SettingsRuntimePanelProps) {
   return (
     <div className="space-y-4">
-      {!rcLoaded ? (
+      {rcError ? (
+        <p role="alert" className="rounded-md border border-th-border-subtle px-4 py-5 text-sm leading-6 text-th-text-secondary">
+          {tr("런타임 설정을 불러오지 못했습니다. 페이지를 새로고침해 다시 확인해 주세요.", "Runtime settings could not be loaded. Refresh the page to try again.")}
+        </p>
+      ) : !rcLoaded ? (
         <SettingsEmptyState className="text-sm">
           {tr("런타임 설정을 불러오는 중...", "Loading runtime config...")}
         </SettingsEmptyState>
@@ -171,10 +177,8 @@ export function SettingsRuntimePanel({
                       </span>
                       <span className="flex shrink-0 items-center gap-2">
                         <span
-                          className="inline-flex text-xs tabular-nums bg-transparent!"
+                          className="inline-flex shrink-0 whitespace-nowrap px-1 text-xs tabular-nums"
                           style={{
-                            borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
-                            background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
                             color: "var(--th-text-muted)",
                           }}
                         >

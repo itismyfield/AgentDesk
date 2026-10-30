@@ -2586,6 +2586,7 @@ test.describe("Dashboard smoke tests", () => {
   });
 
   test("settings: search feedback and user-facing copy stay stable", async ({ page }) => {
+    await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ json: { current: {}, defaults: {} } }));
     await page.goto("/settings?settingsPanel=runtime");
 
     await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
@@ -2601,6 +2602,14 @@ test.describe("Dashboard smoke tests", () => {
 
     await page.getByRole("button", { name: /검색 지우기|Clear search/ }).click();
     await expect(page.getByTestId("settings-search-summary")).toHaveCount(0);
+  });
+
+  test("settings: runtime fetch errors do not expose empty editable defaults", async ({ page }) => {
+    await page.route(/\/api\/settings\/runtime-config$/, route => route.fulfill({ status: 503, json: { error: "unavailable" } }));
+    await page.goto("/settings?settingsPanel=runtime");
+    const panel = page.locator("#settings-panel-content");
+    await expect(panel.getByRole("alert")).toContainText(/불러오지 못했습니다|could not be loaded/);
+    await expect(panel.locator("input, select, [role='switch']")).toHaveCount(0);
   });
 
   test("settings: mobile page remains scrollable", async ({ page }, testInfo) => {
@@ -2852,7 +2861,7 @@ test.describe("Dashboard smoke tests", () => {
     await expect(runner.getByText(/오프라인|Offline/, { exact: true })).toBeVisible();
     includeRunner = false;
     await panel.getByRole("button", { name: /상태 새로고침|Refresh status/ }).click();
-    await expect(page.locator("#settings-tab-machine").getByText("1", { exact: true })).toBeVisible();
+    await expect(page.locator("#settings-panel-content > div").first().getByText("1", { exact: true })).toBeVisible();
     enabled = false;
     await panel.getByRole("button", { name: /상태 새로고침|Refresh status/ }).click();
     await expect(panel.getByText(/단독 운영 중|runs standalone/)).toBeVisible();

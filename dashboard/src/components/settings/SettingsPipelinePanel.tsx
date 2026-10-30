@@ -175,7 +175,7 @@ export function SettingsPipelinePanel({
                 </div>
 
                 {selectedPipelineRepo ? (
-                  <div className="space-y-4">
+                  <div className="space-y-4" data-testid="settings-pipeline-editor">
                     <Suspense
                       fallback={(
                         <SettingsEmptyState className="text-sm">

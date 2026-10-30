@@ -205,7 +205,7 @@ function ProviderCard({
           <div className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
             {provider.id}
           </div>
-          <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+          <div className="mt-1 text-[11px] [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
             {tr("시스템 기본", "System default")}: {provider.default_home}
           </div>
         </div>
@@ -265,7 +265,7 @@ function AccountRow({
       }}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
+        <div className="min-w-0 text-sm font-medium [overflow-wrap:anywhere]" style={{ color: "var(--th-text)" }}>
           {isDefault ? tr("시스템 기본", "System default") : account.id}
         </div>
         {isDefault ? null : (
@@ -273,7 +273,7 @@ function AccountRow({
             type="button"
             onClick={onRemove}
             disabled={removing}
-            className="rounded-lg p-1 disabled:opacity-50"
+            className="flex h-11 w-11 items-center justify-center rounded-md disabled:opacity-50"
             style={{ color: "var(--th-text-muted)" }}
             title={tr("연결 해제 (자격 증명은 유지)", "Unlink (keep credentials)")}
             aria-label={tr("계정 연결 해제", "Unlink account")}
@@ -285,7 +285,7 @@ function AccountRow({
           type="button"
           onClick={onSetPrimary}
           disabled={isPrimary}
-          className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] disabled:opacity-70"
+          className="inline-flex min-h-11 min-w-11 items-center justify-center gap-1 rounded-md border px-2 py-1 text-xs disabled:opacity-70"
           style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
           title={tr("이 provider의 기본 계정으로 사용", "Use as this provider's primary account")}
         >
@@ -298,16 +298,16 @@ function AccountRow({
           </span>
         ) : null}
       </div>
-      <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+      <div className="mt-1 text-[11px] [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
         {account.home}
       </div>
       {(account.bound_agents ?? []).length > 0 ? (
-        <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+        <div className="mt-1 text-[11px] [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
           {tr("연결된 에이전트", "Bound agents")}: {(account.bound_agents ?? []).join(", ")}
         </div>
       ) : null}
       {(account.bound_channels ?? []).length > 0 ? (
-        <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+        <div className="mt-1 text-[11px] [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
           {tr("채널 override", "Channel overrides")}: {(account.bound_channels ?? []).join(", ")}
         </div>
       ) : null}
