@@ -12,8 +12,8 @@ def validate(document):
     job = document["jobs"]["scripts"]
     steps = job["steps"]
     caps = [s for s in steps if s.get("name") == STEP["name"]]
-    # Cancellation alone may skip this job; producer failure must still run the cap.
-    active = "if" not in job or job["if"] == "${{ !cancelled() }}"
+    # Drafts and cancellation skip this job; producer failure still runs the cap.
+    active = job.get("if") == "${{ !github.event.pull_request.draft && !cancelled() }}"
     return caps == [STEP] and active and "continue-on-error" not in job and steps.index(STEP) == next(i for i, s in enumerate(steps) if s.get("name") == "Run script checks") + 1
 
 
@@ -43,10 +43,10 @@ class CapWiringTest(unittest.TestCase):
         steps.insert(steps.index(STEP), {"run": 'echo PR_CAP_CI=0 >> "$GITHUB_ENV"'})
         self.assertFalse(validate(document))
 
-    def test_unconditional_job_is_accepted(self):
+    def test_unconditional_job_is_rejected(self):
         document = copy.deepcopy(self.document)
         document["jobs"]["scripts"].pop("if", None)
-        self.assertTrue(validate(document))
+        self.assertFalse(validate(document))
 
     def test_other_job_conditions_fail(self):
         for condition in (
