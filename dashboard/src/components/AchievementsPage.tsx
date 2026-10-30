@@ -455,7 +455,7 @@ export default function AchievementsPage({
               <div className="space-y-2">
                 {leaderboardSnapshot.length === 0 ? (
                   <div
-                    className="rounded-2xl border px-4 py-5 text-sm"
+                    className="rounded-lg border px-4 py-5 text-sm"
                     style={{
                       borderColor: "var(--th-border-subtle, var(--line))",
                       color: "var(--th-text-muted, var(--fg-muted))",
@@ -473,7 +473,7 @@ export default function AchievementsPage({
                       <button
                         key={entry.id}
                         type="button"
-                        className="flex w-full items-center gap-3 rounded-2xl border px-3 py-3 text-left transition-colors hover:bg-white/5"
+                        className="flex w-full items-center gap-3 rounded-lg border px-3 py-3 text-left transition-colors hover:bg-white/5"
                         style={{
                           borderColor: "var(--th-border-subtle, var(--line))",
                           background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
