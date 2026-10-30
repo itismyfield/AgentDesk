@@ -68,6 +68,14 @@ pub(super) struct State {
     decision: Option<Decision>,
 }
 
+impl State {
+    /// Where the bound native row starts, once one is bound.
+    #[cfg(test)]
+    pub(super) fn receipt_start(&self) -> Option<u64> {
+        self.receipt.as_ref().map(|r| r.start)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Projection {
     pub id: String,

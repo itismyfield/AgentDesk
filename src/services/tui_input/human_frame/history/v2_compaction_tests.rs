@@ -479,7 +479,8 @@ fn measure(scenario: Scenario) {
             (0, 0),
             "{scenario:?}/{n}: a V1 append bind parses no V2 file without migrated appends"
         );
-        // Emptying only text no reader matches saves about a sixth; measured 0.826-0.831.
+        // Accepted contract: emptying only text no reader matches keeps at most 84% of the bytes;
+        // measured 0.826-0.831.
         if n > 0 {
             assert!(
                 ratio <= 0.84,

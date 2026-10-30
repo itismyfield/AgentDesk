@@ -888,7 +888,8 @@ pub(super) fn append_store(path: &Path) -> Result<Option<Store>, String> {
 }
 
 /// A V1 append mutation on a V2 history under its lock: only migrated append entries may change,
-/// and their encodings are invalidated; any other change refuses the whole transaction.
+/// and their encodings are invalidated; any other change, or a first native event a same-frame V2
+/// registration could still own, refuses the whole transaction.
 pub(super) fn update_migrated<T>(
     path: &Path,
     apply: impl FnOnce(&mut Store) -> Result<T, String>,
@@ -899,7 +900,10 @@ pub(super) fn update_migrated<T>(
             .iter()
             .map(|(entry, _)| serde_json::to_string(entry).map_err(|e| e.to_string()))
             .collect::<Result<_, _>>()?;
-        let slots: Vec<_> = owned.iter().map(|(_, slot)| *slot).collect();
+        let slots: Vec<_> = owned
+            .iter()
+            .map(|(entry, slot)| (*slot, entry.events.len()))
+            .collect();
         let mut store = Store {
             entries: owned.into_iter().map(|(entry, _)| entry).collect(),
         };
@@ -907,11 +911,19 @@ pub(super) fn update_migrated<T>(
         if store.entries.len() != slots.len() {
             return Err("a V2 history adds and removes no entry for a V1 append".into());
         }
-        for ((entry, slot), before) in store.entries.into_iter().zip(slots).zip(before) {
+        for ((entry, (slot, events)), before) in store.entries.into_iter().zip(slots).zip(before) {
             if serde_json::to_string(&entry).map_err(|e| e.to_string())? == before {
                 continue;
             }
             let at = slot.ok_or("only a migrated V1 append entry changes in a V2 history")?;
+            let start = (entry.append.as_ref())
+                .and_then(append::State::receipt_start)
+                .unwrap_or(u64::MAX);
+            if (entry.events.iter().skip(events))
+                .any(|event| collision::contests_migrated(state, &entry, &event.kind, start))
+            {
+                return Err("a same-frame V2 registration may own this native row".into());
+            }
             let passive = &mut state.passive[at];
             passive.entry = Some(entry);
             passive.encoded = None;

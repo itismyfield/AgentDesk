@@ -147,8 +147,8 @@ fn update_append<T>(apply: impl FnOnce(&mut Store) -> Result<T, String>) -> Resu
     update(apply)
 }
 
-/// The exact history attempt a diagnostic receipt thread records into; no pane write right
-/// travels with it, and outside an owner's attempt it carries nothing.
+/// The attempt a diagnostic receipt thread records into, with no pane write right. A receipt is
+/// evidence that the native record was observed, not that the provider ran the input.
 pub(crate) struct ReceiptScope {
     #[cfg(test)]
     context: Option<v2::ReceiptContext>,
