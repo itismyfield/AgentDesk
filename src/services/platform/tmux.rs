@@ -171,6 +171,7 @@ pub fn create_session(
 
 /// Starts `shell_command` again in the dead pane of `session_name`. Without `-k` tmux refuses a
 /// pane still running, so nothing live is replaced.
+#[cfg(unix)]
 pub fn respawn_dead_pane(
     session_name: &str,
     working_dir: Option<&str>,

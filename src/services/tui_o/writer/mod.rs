@@ -216,6 +216,7 @@ pub trait AlarmSink: Send + Sync {
 mod historical_hops;
 mod past_bind;
 mod renumbered;
+#[cfg(unix)]
 pub(crate) use renumbered::claude_cursor_continues;
 mod transition_cleanup;
 /// Only the periodic retention sweep sends production cleanup requests.

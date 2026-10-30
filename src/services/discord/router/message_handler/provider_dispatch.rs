@@ -468,7 +468,8 @@ fn return_to_tmux(turn: &StreamingTurn<'_>, plan: &ReturnPlan) -> Result<(), Str
 }
 
 #[cfg(not(unix))]
-fn return_to_tmux(_turn: &StreamingTurn<'_>, _plan: &ReturnPlan) -> Result<(), String> {
+fn return_to_tmux(_turn: &StreamingTurn<'_>, plan: &ReturnPlan) -> Result<(), String> {
+    let _ = (&plan.row, &plan.record);
     Err("herdr return: unix only".into())
 }
 
