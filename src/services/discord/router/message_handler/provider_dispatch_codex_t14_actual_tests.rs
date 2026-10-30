@@ -706,7 +706,7 @@ impl ActualWriter {
         tokio::time::timeout(ACTUAL_WAIT, async {
             loop {
                 published.changed().await.expect("O actor remains running");
-                if published.borrow_and_update().is_some_and(|poll| {
+                if published.borrow_and_update().as_ref().is_some_and(|poll| {
                     poll.asked >= wanting.asked()
                         && poll.owed == 0
                         && poll.prepared == 0

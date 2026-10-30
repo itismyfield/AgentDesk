@@ -40,11 +40,6 @@ pub(super) struct DiscordSession {
     pub(super) pending_uploads:
         crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     pub(super) cleared: bool,
-    /// Legacy remote profile name slot.
-    ///
-    /// Remote SSH is disabled by policy (#2193), so restored/persisted profile
-    /// names must not influence routing, path validation, or dispatch.
-    pub(super) remote_profile_name: Option<String>,
     pub(super) channel_id: Option<u64>,
     pub(super) channel_name: Option<String>,
     pub(super) category_name: Option<String>,
@@ -137,7 +132,6 @@ pub(in crate::services::discord) async fn rebind_channel_session(
             channel_id: Some(channel_id.get()),
             channel_name: None,
             category_name: None,
-            remote_profile_name: None,
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: runtime_store::process_generation(),
@@ -229,7 +223,6 @@ mod resume_launch_binding_tests {
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
                 cleared: false,
-                remote_profile_name: None,
                 channel_id: Some(4_794_002),
                 channel_name: None,
                 category_name: None,
@@ -448,7 +441,6 @@ pub(super) async fn auto_restore_session_force(
         session.last_active = tokio::time::Instant::now();
         session.channel_name = restore_ch_name.clone();
         session.category_name = cat_name.clone();
-        session.remote_profile_name = None;
         if session.current_path.is_some() || last_path.is_none() {
             // A pre-existing session (e.g. inserted by restart watcher
             // registration with `current_path` from `sessions.cwd` but
@@ -487,7 +479,6 @@ pub(super) async fn auto_restore_session_force(
                 channel_id: Some(channel_id.get()),
                 channel_name: restore_ch_name.clone(),
                 category_name: cat_name.clone(),
-                remote_profile_name: None,
                 last_active: tokio::time::Instant::now(),
                 worktree: None,
                 born_generation: runtime_store::process_generation(),
@@ -496,7 +487,6 @@ pub(super) async fn auto_restore_session_force(
         session.last_active = tokio::time::Instant::now();
         session.channel_name = restore_ch_name.clone();
         session.category_name = cat_name.clone();
-        session.remote_profile_name = None;
         session.current_path = Some(last_path.clone());
         reconstruct_managed_worktree_metadata(session, &provider, channel_id, &last_path);
         drop(data);
@@ -554,7 +544,6 @@ pub(super) async fn bootstrap_thread_session(
             channel_id: Some(thread_channel_id.get()),
             channel_name: ch_name,
             category_name: cat_name,
-            remote_profile_name: None,
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: runtime_store::process_generation(),

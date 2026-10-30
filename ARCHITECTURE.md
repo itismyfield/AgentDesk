@@ -547,6 +547,8 @@ src/
 │   │   │   └── unread_tail_attribution_tests.rs
 │   │   ├── kanban/
 │   │   │   └── card_delete.rs
+│   │   ├── receipt/
+│   │   │   └── single_flight.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
@@ -1324,6 +1326,8 @@ src/
 │   │   │   │   ├── watchdog_pass/
 │   │   │   │   │   ├── o_stall_tests.rs
 │   │   │   │   │   └── tick_tests.rs
+│   │   │   │   ├── carried_turn_close.rs
+│   │   │   │   ├── carried_turn_close_tests.rs
 │   │   │   │   ├── channel_runtime.rs
 │   │   │   │   ├── inflight_repair.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
@@ -1819,8 +1823,7 @@ src/
 │   │   │   ├── terminal_text_idempotency.rs
 │   │   │   ├── terminal_watcher.rs
 │   │   │   ├── tmux_probe.rs
-│   │   │   ├── turn_summary_recovery_tests.rs
-│   │   │   └── two_message_panel.rs
+│   │   │   └── turn_summary_recovery_tests.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── controller_cutover.rs
 │   │   │   ├── mod.rs
@@ -2590,7 +2593,6 @@ src/
 │   │   │   │   ├── tests.rs
 │   │   │   │   └── watcher_handoff.rs
 │   │   │   ├── status_panel/
-│   │   │   │   ├── fallback.rs
 │   │   │   │   ├── provider_failure.rs
 │   │   │   │   ├── purge.rs
 │   │   │   │   └── singleton.rs
@@ -2830,6 +2832,7 @@ src/
 │   │   │   │   │   ├── superseded_measurement_tests.rs
 │   │   │   │   │   ├── unit_tests.rs
 │   │   │   │   │   └── watcher_runtime_tests.rs
+│   │   │   │   ├── closed_boundary.rs
 │   │   │   │   ├── effect_reads.rs
 │   │   │   │   ├── effect_reads_tests.rs
 │   │   │   │   ├── notice_identity.rs
@@ -3698,7 +3701,9 @@ src/
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
 │   │   │   │   ├── observation_tests.rs
+│   │   │   │   ├── queued.rs
 │   │   │   │   ├── reactions.rs
+│   │   │   │   ├── receipt_tests.rs
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── input_notices/
@@ -4083,7 +4088,6 @@ src/
 │   ├── claude_compact_context.rs
 │   ├── claude_compact_trigger.rs
 │   ├── codex.rs
-│   ├── codex_remote_policy.rs
 │   ├── codex_tmux_wrapper.rs
 │   ├── cswap.rs
 │   ├── discord_config_audit.rs

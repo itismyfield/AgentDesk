@@ -30,7 +30,6 @@ fn isolated(name: &str, owned: bool) -> bool {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name.split_once("::").unwrap().1, "--nocapture"])
         .env(CHILD, name)
-        .env(test_override::CHILD_ENV, "1")
         .env(
             test_override::CHANNELS_ENV,
             serde_json::to_string(&channels).unwrap(),

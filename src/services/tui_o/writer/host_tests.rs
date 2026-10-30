@@ -396,11 +396,6 @@ async fn f6_every_hosted_actor_runs_the_hosts_repost_turn() {
 fn nothing_is_hosted_while_the_writer_is_off_or_selects_no_channel() {
     let unprepared =
         || -> HostParts<TestIo> { panic!("nothing is owned, yet host parts were built") };
-    let selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
-    let off = test_override::force_off();
-    assert!(start(ShadowProvider::Claude, true, unprepared).is_empty());
-    drop(off);
-    drop(selected);
     let empty = test_override::force_channels(&[]);
     assert!(start(ShadowProvider::Claude, true, unprepared).is_empty());
     drop(empty);

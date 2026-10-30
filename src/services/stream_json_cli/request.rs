@@ -7,7 +7,6 @@ use std::time::Duration;
 use crate::services::provider::CancelToken;
 use crate::services::provider::ProviderKind;
 use crate::services::provider_auth_profile::ProviderAuthOverlay;
-use crate::services::remote::RemoteProfile;
 
 use super::policy::ConfiguredToolPolicy;
 use super::session::ProviderSessionToken;
@@ -23,7 +22,6 @@ pub struct ProviderTurnRequest {
     pub reasoning_effort: Option<String>,
     pub working_directory: PathBuf,
     pub session: Option<ProviderSessionToken>,
-    pub remote_profile: Option<RemoteProfile>,
     pub timeout: Duration,
     pub cancel: Option<Arc<CancelToken>>,
     pub auth_overlay: ProviderAuthOverlay,
@@ -40,7 +38,6 @@ impl ProviderTurnRequest {
         working_directory: PathBuf,
         session_raw: Option<&str>,
         force_fresh: bool,
-        remote_profile: Option<RemoteProfile>,
         timeout: Duration,
         cancel: Option<Arc<CancelToken>>,
         channel_id: Option<u64>,
@@ -65,7 +62,6 @@ impl ProviderTurnRequest {
             reasoning_effort,
             working_directory,
             session,
-            remote_profile,
             timeout,
             cancel,
             auth_overlay,

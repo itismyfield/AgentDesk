@@ -1714,41 +1714,6 @@ fn paused_first_branch_anchor_gate() {
     ));
 }
 
-#[test]
-fn watcher_creates_status_panel_for_external_input_when_v2_on_and_panel_absent() {
-    // #3003: pure TUI-direct (ExternalInput) turn with v2 enabled and no panel
-    // yet must proactively create one.
-    assert!(watcher_should_create_external_input_status_panel(
-        true,  // status_panel_v2_enabled
-        false, // status_panel_present
-        true,  // inflight_represents_external_input
-    ));
-}
-
-#[test]
-fn watcher_skips_status_panel_creation_when_panel_already_present() {
-    // An adopted/existing panel must never be duplicated.
-    assert!(!watcher_should_create_external_input_status_panel(
-        true, true, true
-    ));
-}
-
-#[test]
-fn watcher_skips_status_panel_creation_for_non_external_input_turns() {
-    // Discord-intake (Managed) turns are owned by turn_bridge, which creates
-    // the panel itself — the watcher must not create a second one.
-    assert!(!watcher_should_create_external_input_status_panel(
-        true, false, false
-    ));
-}
-
-#[test]
-fn watcher_skips_status_panel_creation_when_v2_disabled() {
-    assert!(!watcher_should_create_external_input_status_panel(
-        false, false, true
-    ));
-}
-
 // #3099: a TUI-injected task-notification turn completes with an inflight
 // whose `user_msg_id == 0`; the `⏳ → ✅` reaction block skips it (no real
 // anchored user message), so it must route to the anchor-lifecycle cleanup

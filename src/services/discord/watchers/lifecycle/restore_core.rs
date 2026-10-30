@@ -48,7 +48,6 @@ pub(super) async fn register_restored_core(
                     cleared: false,
                     channel_name: Some(channel_name.clone()),
                     category_name: None,
-                    remote_profile_name: None,
                     channel_id: Some(channel_id.get()),
 
                     last_active: tokio::time::Instant::now(),

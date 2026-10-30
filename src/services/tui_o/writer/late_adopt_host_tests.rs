@@ -32,7 +32,7 @@ pub(super) fn seed(harness: &Harness, foreign: bool) -> test_override::ChannelsG
     let config = config(foreign);
     let snapshot = BootChannels::validate(&config)
         .unwrap()
-        .seeded(true, &config, |channels, _| {
+        .seeded(&config, |channels, _| {
             Ok(channel_policy::stored(
                 Some(harness._runtime.path()),
                 channels,

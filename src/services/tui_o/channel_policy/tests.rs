@@ -5,21 +5,16 @@ use super::*;
 #[test]
 fn ownership_uses_flag_membership_and_tui_kind_together() {
     let channels = BTreeSet::from([41]);
-    for enabled in [false, true] {
-        for (channel, selected) in [(41, true), (42, false)] {
-            for (kind, tui) in [
-                (Some(RuntimeHandoffKind::ClaudeTui), true),
-                (Some(RuntimeHandoffKind::CodexTui), true),
-                (Some(RuntimeHandoffKind::LegacyTmuxWrapper), false),
-                (Some(RuntimeHandoffKind::ProcessBackend), false),
-                (None, false),
-            ] {
-                assert_eq!(
-                    owns_output(enabled, &channels, channel, kind),
-                    enabled && selected && tui
-                );
-                assert!(!owns_output(enabled, &BTreeSet::new(), channel, kind));
-            }
+    for (channel, selected) in [(41, true), (42, false)] {
+        for (kind, tui) in [
+            (Some(RuntimeHandoffKind::ClaudeTui), true),
+            (Some(RuntimeHandoffKind::CodexTui), true),
+            (Some(RuntimeHandoffKind::LegacyTmuxWrapper), false),
+            (Some(RuntimeHandoffKind::ProcessBackend), false),
+            (None, false),
+        ] {
+            assert_eq!(owns_output(&channels, channel, kind), selected && tui);
+            assert!(!owns_output(&BTreeSet::new(), channel, kind));
         }
     }
 }
@@ -62,13 +57,11 @@ fn boot_membership_survives_reload_until_restart() {
         );
         let snapshot = boot().unwrap();
         assert!(owns_output(
-            true,
             snapshot.channels(),
             41,
             Some(RuntimeHandoffKind::ClaudeTui)
         ));
         assert!(!owns_output(
-            true,
             snapshot.channels(),
             42,
             Some(RuntimeHandoffKind::CodexTui)
@@ -85,7 +78,6 @@ fn boot_membership_survives_reload_until_restart() {
         crate::config_live_reload::ReloadOutcome::Rejected { .. }
     ));
     assert!(owns_output(
-        true,
         boot().unwrap().channels(),
         41,
         Some(RuntimeHandoffKind::ClaudeTui)
@@ -186,17 +178,14 @@ fn only_an_enabled_home_with_a_list_reads_the_store_and_adopts() {
         |channels: &[u64], cluster| BootChannels::validate(&writer_config(channels, cluster));
     fn seed(
         boot: Result<BootChannels>,
-        enabled: bool,
         stored: impl FnOnce(&BTreeSet<u64>, bool) -> Stored,
     ) -> BootChannels {
         let config = writer_config(&[41], serde_json::json!({}));
-        boot.unwrap().seeded(enabled, &config, stored).unwrap()
+        boot.unwrap().seeded(&config, stored).unwrap()
     }
-    let seeded = seed(boot(&[41], off.clone()), false, untouched);
-    assert!(seeded.candidate(41).is_none(), "writer off");
-    let seeded = seed(boot(&[], off.clone()), true, untouched);
+    let seeded = seed(boot(&[], off.clone()), untouched);
     assert!(seeded.candidate(41).is_none(), "empty list");
-    let seeded = seed(boot(&[41], off), true, found);
+    let seeded = seed(boot(&[41], off), found);
     assert_eq!(
         seeded.candidate(41).map(Candidate::peek),
         Some(Adoption::Committed)
@@ -213,7 +202,7 @@ fn only_an_enabled_home_with_a_list_reads_the_store_and_adopts() {
     let foreign = boot(&[41], foreign).unwrap();
     assert_eq!(foreign.site(), &Site::Foreign { home: "a".into() });
     assert!(
-        seed(Ok(foreign), true, found).candidate(41).is_none(),
+        seed(Ok(foreign), found).candidate(41).is_none(),
         "a non-home node adopts nothing"
     );
     for unnamed in [

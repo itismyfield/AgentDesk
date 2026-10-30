@@ -808,7 +808,7 @@ impl RestartOrphanEvidence {
     }
 }
 
-pub(super) fn inflight_generation_precedes_current(
+pub(in crate::services::discord) fn inflight_generation_precedes_current(
     state: &inflight::InflightTurnState,
     current_generation: u64,
 ) -> bool {

@@ -33,7 +33,7 @@ fn restart_warning_sticks_to_installed_boot_capability_across_reload() {
             let root = tempfile::tempdir().unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "config_live_reload::late_live_reload_tests::restart_warning_sticks_to_installed_boot_capability_across_reload", "--nocapture"])
-                .env(CHILD, role).env("ADK_TEST_O_TUI_WRITER", "1")
+                .env(CHILD, role)
                 .env("AGENTDESK_ROOT_DIR", root.path()).output().unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(

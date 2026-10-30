@@ -1503,7 +1503,6 @@ fn import_sessions(
             discord_channel_id: session.channel.as_deref().and_then(parse_u64_str),
             discord_channel_name: session.channel.clone(),
             discord_category_name: None,
-            remote_profile_name: None,
             born_generation: 0,
         };
         let rendered = serde_json::to_string_pretty(&session_data)
