@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::services::claude_tui::busy_inject::{self, Outcome, Receipt, WriteFailure};
+use crate::services::claude_tui::busy_inject::{self, Outcome, WriteFailure};
 use crate::services::claude_tui::owner_input;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
@@ -79,7 +79,7 @@ pub(super) fn parse<T: serde::de::DeserializeOwned>(value: serde_json::Value) ->
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
-/// A busy Claude tmux pane: main's busy transaction and its one confirm, mapped as main maps them.
+/// A busy Claude tmux pane: main's busy transaction, any visible draft parked, ending at Enter.
 pub(crate) struct BusyClaude {
     pub(crate) pane: busy_inject::Pane,
     pub(crate) session: String,
@@ -112,15 +112,11 @@ impl BusyClaude {
                 nonce: &self.nonce,
                 text: &self.text,
             };
+            // Enter ends the transaction: the receipt is only recorded off this thread.
             let inject = || {
-                let report = busy_inject::inject_report(
-                    &self.pane,
-                    &request,
-                    Some(self.channel),
-                    self.timing,
-                );
-                let receipt = busy_inject::confirm(&self.pane, &request, &report, self.timing);
-                (report.outcome, receipt)
+                let report = busy_inject::inject_owned(&self.pane, &request, self.timing);
+                busy_inject::collect_receipt(&request, &report, self.timing);
+                report.outcome
             };
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));
             let alert = |detail: &str| {
@@ -128,25 +124,19 @@ impl BusyClaude {
                 detail.to_string()
             };
             Ok(match outcome {
-                Ok((Outcome::NotSent(veto), _)) => {
+                Ok(Outcome::NotSent(veto)) => {
                     let reason = format!("{veto:?}");
                     owner_input::vetoed(&reason);
                     Completion::NotSent(reason)
                 }
-                // Paste and Enter went: a receipt neither window saw is only observed, and the
-                // attempt is delivered without a deadline or retention.
-                Ok((Outcome::Injected, Some(Receipt::Missing { .. }))) => {
-                    self.unconfirmed("not_observed");
-                    Completion::Submitted
-                }
-                Ok((Outcome::Injected, _)) => Completion::Submitted,
-                Ok((Outcome::Failed(WriteFailure::Stash), _)) => {
+                Ok(Outcome::Injected) => Completion::Submitted,
+                Ok(Outcome::Failed(WriteFailure::Stash)) => {
                     Completion::Failed(alert("stash_failed"))
                 }
-                Ok((Outcome::Failed(WriteFailure::Paste), _)) => {
+                Ok(Outcome::Failed(WriteFailure::Paste)) => {
                     Completion::WriteUncertain(alert("paste_failed"))
                 }
-                Ok((Outcome::Failed(WriteFailure::Enter), _)) => {
+                Ok(Outcome::Failed(WriteFailure::Enter)) => {
                     Completion::WriteUncertain(alert("enter_failed"))
                 }
                 Err(_) => Completion::WriteUncertain(alert("executor_failed")),

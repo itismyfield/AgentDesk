@@ -25,6 +25,12 @@ pub(crate) fn inject_report_any_turn(
     report(pane, request, channel, timing, TurnGate::AnyTurn)
 }
 
+/// The input owner's busy entry: a visible draft is parked whichever channel the input names.
+#[cfg(all(test, unix))]
+pub(crate) fn inject_owned(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Report {
+    inject_gated_with(pane, request, timing, true, TurnGate::BusyOnly)
+}
+
 fn report(
     pane: &Pane,
     request: &Request<'_>,
