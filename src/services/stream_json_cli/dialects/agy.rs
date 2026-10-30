@@ -13,11 +13,6 @@ use crate::services::stream_json_cli::runner::{PreparedCommand, run_prepared};
 use crate::services::stream_json_cli::session::parse_strict_uuid;
 
 pub fn execute(request: ProviderTurnRequest, sender: Sender<StreamMessage>) -> Result<(), String> {
-    if request.remote_profile.is_some() {
-        return Err(
-            "NotSupported: Antigravity provider does not support remote execution yet.".to_string(),
-        );
-    }
     match request.tool_policy.effective_for_stream_json() {
         ToolPolicy::ProviderDefault => {}
         ToolPolicy::ReadOnly | ToolPolicy::AllowListed(_) => {
@@ -140,7 +135,6 @@ mod tests {
             reasoning_effort: None,
             working_directory: PathBuf::from("/tmp"),
             session: None,
-            remote_profile: None,
             timeout: Duration::from_secs(120),
             cancel: None,
             auth_overlay: crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(

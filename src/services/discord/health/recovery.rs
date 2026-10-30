@@ -2751,7 +2751,6 @@ mod stall_watchdog_auto_heal_tests {
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
                 cleared: false,
-                remote_profile_name: None,
                 channel_id: Some(channel.get()),
                 channel_name: None,
                 category_name: None,

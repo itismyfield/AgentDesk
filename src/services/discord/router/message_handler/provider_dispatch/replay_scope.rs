@@ -10,11 +10,10 @@ pub(in crate::services::discord::router::message_handler) struct Scope {
 pub(in crate::services::discord::router::message_handler) fn selected(
     provider: &ProviderKind,
     channel: u64,
-    remote: bool,
     tmux: Option<&str>,
 ) -> Scope {
     #[cfg(unix)]
-    let capable = !remote && tmux.is_some() && crate::services::claude::is_tmux_available();
+    let capable = tmux.is_some() && crate::services::claude::is_tmux_available();
     #[cfg(not(unix))]
     let capable = false;
     let driver = provider_hosting::resolve_provider_session_selection_with_channel(
@@ -25,8 +24,7 @@ pub(in crate::services::discord::router::message_handler) fn selected(
     .driver;
     // The execution stub owns a direct effect; native runtime capability still uses the real path.
     #[cfg(test)]
-    if !remote
-        && driver == ProviderSessionDriver::LegacyPrompt
+    if driver == ProviderSessionDriver::LegacyPrompt
         && super::INPUT_EFFECT_PROBE
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -38,9 +36,7 @@ pub(in crate::services::discord::router::message_handler) fn selected(
             runtime: "owned_direct",
         };
     }
-    let runtime = if remote {
-        "remote"
-    } else if tmux.is_none() {
+    let runtime = if tmux.is_none() {
         "owned_direct"
     } else if !capable {
         "process_backend"

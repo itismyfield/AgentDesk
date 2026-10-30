@@ -7,11 +7,9 @@ function sendDeadlockAlert(message) {
 // Shared constant used by sections [A] and [J]
 var MAX_DISPATCH_RETRIES = 10;
 
-// Helper: read timeout config as SQL interval string
-function getTimeoutInterval(key, fallbackMinutes) {
-  var val = parseInt(agentdesk.config.get(key), 10);
-  if (!val || val <= 0) val = fallbackMinutes;
-  return "-" + val + " minutes";
+// Helper: read timeout config as SQL interval string; config.get resolves YAML, default and floor.
+function getTimeoutInterval(key) {
+  return "-" + agentdesk.config.get(key) + " minutes";
 }
 
 // PG GREATEST skips NULLs, so a card without a dispatch still compares on its own timestamps.

@@ -50,7 +50,7 @@ export function SettingsMachineCard({ node, localId, leaseTtlSeconds, stale, ses
   const unknown = tr("미확인", "Unknown");
   const DeviceIcon = role === "Hub" ? Server : Monitor;
 
-  return <article className="min-w-0 rounded-2xl border border-th-border bg-th-bg-surface p-4 sm:p-5"
+  return <article className="min-w-0 rounded-lg border border-th-border bg-th-bg-surface p-4 sm:p-5"
     data-testid={`machine-node-${node.instance_id}`} aria-label={node.hostname || node.instance_id}>
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="flex min-w-0 items-start gap-3">
@@ -74,8 +74,8 @@ export function SettingsMachineCard({ node, localId, leaseTtlSeconds, stale, ses
       "저장된 이력을 불러오지 못했습니다. 다음 갱신 때 다시 시도합니다.",
       "Saved history is unavailable. It will be retried on the next refresh.",
     )}</p>}
-    <details className="mt-4 rounded-xl border border-th-border p-3">
-      <summary className="cursor-pointer text-xs font-medium">{tr("장치 및 연결 상세", "Device and connection details")}</summary>
+    <details className="mt-4 rounded-md border border-th-border p-3">
+      <summary className="flex min-h-11 cursor-pointer items-center text-xs font-medium">{tr("장치 및 연결 상세", "Device and connection details")}</summary>
     <dl className="mt-3 grid min-w-0 grid-cols-1 gap-x-5 gap-y-3 sm:grid-cols-2">
       <Detail label={tr("장치 ID", "Device ID")}>{node.instance_id}</Detail>
       <Detail label={tr("등록된 API 주소", "Advertised API address")}>{origin || tr("등록 안 됨", "Not advertised")}</Detail>

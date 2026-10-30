@@ -118,7 +118,7 @@ fn taken_over(restarted: bool) -> test_override::ChannelsGuard {
     let state = [Adoption::Pending, Adoption::Committed][usize::from(restarted)];
     let seeded = |_: &_, _| Ok(std::collections::BTreeMap::from([(CHANNEL, state)]));
     let boot = BootChannels::validate(&config).unwrap();
-    let boot = boot.seeded(true, &config, seeded).unwrap();
+    let boot = boot.seeded(&config, seeded).unwrap();
     let candidate = boot.candidate(CHANNEL).unwrap();
     assert_eq!(candidate.late_adopt_origin(), !restarted);
     *candidate.lock() = Adoption::Committed;

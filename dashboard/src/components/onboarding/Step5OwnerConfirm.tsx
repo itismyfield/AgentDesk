@@ -93,12 +93,12 @@ export function Step5OwnerConfirm({
   return (
     <div className={stepBox} style={{ borderColor: borderLight }}>
       <div>
-        <h2 ref={stepHeadingRef} tabIndex={-1} className="text-lg font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
+        <h2 ref={stepHeadingRef} tabIndex={-1} className="text-base font-semibold outline-none" style={{ color: "var(--th-text-heading)" }}>
           {tr("소유자 설정 및 확인", "Owner Setup & Confirm")}
         </h2>
       </div>
 
-      <div className="rounded-xl p-4 border space-y-3" style={{ borderColor: borderLight }}>
+      <div className="rounded-lg p-4 border space-y-3" style={{ borderColor: borderLight }}>
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
             {tr("Discord 소유자 ID", "Discord Owner ID")}
@@ -147,7 +147,7 @@ export function Step5OwnerConfirm({
         </div>
       </div>
 
-      <div className="rounded-xl p-4 border space-y-3" style={{ borderColor: borderLight }}>
+      <div className="rounded-lg p-4 border space-y-3" style={{ borderColor: borderLight }}>
         <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
           {tr("설정 요약", "Setup Summary")}
         </div>
@@ -189,7 +189,7 @@ export function Step5OwnerConfirm({
         </div>
       </div>
 
-      <div className="rounded-xl p-4 border space-y-3" style={{ borderColor: borderLight }}>
+      <div className="rounded-lg p-4 border space-y-3" style={{ borderColor: borderLight }}>
         <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
           {tr("완료 시 실제로 적용되는 항목", "What completion actually applies")}
         </div>
@@ -198,7 +198,7 @@ export function Step5OwnerConfirm({
             <div
               key={item.key}
               className="rounded-lg border px-3 py-2"
-              style={{ borderColor: "rgba(148,163,184,0.16)", backgroundColor: "rgba(15,23,42,0.28)" }}
+              style={{ borderColor: "var(--th-border-subtle)", backgroundColor: "var(--th-overlay-subtle)" }}
             >
               <div className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
                 {item.label}
@@ -213,10 +213,10 @@ export function Step5OwnerConfirm({
 
       {hasExistingSetup && (
         <div
-          className="rounded-xl border p-4 space-y-3"
+          className="rounded-lg border p-4 space-y-3"
           style={{ borderColor: "rgba(251,191,36,0.24)", backgroundColor: "rgba(251,191,36,0.08)" }}
         >
-          <div className="text-sm font-medium" style={{ color: "#fde68a" }}>
+          <div className="text-sm font-medium" style={{ color: "var(--th-badge-amber-text)" }}>
             {tr("기존 구성이 감지된 상태에서 다시 실행 중입니다.", "You are re-running onboarding on top of an existing setup.")}
           </div>
           <p className="text-xs leading-5" style={{ color: "var(--th-text-secondary)" }}>
@@ -225,7 +225,7 @@ export function Step5OwnerConfirm({
               "The current API does not prefill the existing agent/channel layout in this screen. Re-applying the same role IDs can update existing agent rows and channel mappings, so review the summary before running completion.",
             )}
           </p>
-          <label className="flex items-start gap-3 text-sm" style={{ color: "var(--th-text-primary)" }}>
+          <label className="flex min-h-11 items-start gap-3 py-2 text-sm" style={{ color: "var(--th-text-primary)" }}>
             <input
               type="checkbox"
               checked={confirmRerunOverwrite}
@@ -252,7 +252,7 @@ export function Step5OwnerConfirm({
       />
 
       {completionChecklist && (
-        <div className="text-xs leading-5" style={{ color: "#86efac" }}>
+        <div className="text-xs leading-5" style={{ color: "var(--th-accent-success)" }}>
           {tr(
             "설정이 실제로 저장되었습니다. 체크리스트를 검토한 뒤 직접 대시보드로 돌아가면 됩니다.",
             "Setup has been applied. Review the checklist, then return to the dashboard when you are ready.",
@@ -273,7 +273,7 @@ export function Step5OwnerConfirm({
           </button>
         ) : (
           <>
-            <button type="button" onClick={() => goToStep(4)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+            <button type="button" onClick={() => goToStep(4)} className={btnSecondary} style={{ borderColor: "var(--th-border-subtle)" }}>
               {tr("이전", "Back")}
             </button>
             <button type="button" onClick={() => void handleComplete()} disabled={completing || !completionReady} className={btnPrimary}>

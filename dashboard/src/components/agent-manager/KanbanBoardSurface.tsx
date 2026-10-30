@@ -76,7 +76,7 @@ export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
               className="rounded-[24px] px-4 py-10 text-center text-sm"
               style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-muted)" }}
             >
-              {tr("repo를 추가하면 repo별 backlog와 칸반을 볼 수 있습니다.", "Add a repo to view its backlog and board.")}
+              {initialLoading ? tr("저장소와 작업을 불러오는 중입니다.", "Loading repositories and work.") : tr("저장소를 추가하면 백로그와 작업 보드가 여기에 표시됩니다.", "Add a repository to see its backlog and board here.")}
             </SurfaceEmptyState>
           ) : (
             <div className="space-y-3">
@@ -87,15 +87,15 @@ export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
                 const pageCards = recentDoneCards.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
                 return (
                   <SurfaceCard
-                    className="rounded-[24px] px-4 py-3"
+                    className="rounded-lg px-4 py-1"
                     style={{
-                      borderColor: "color-mix(in srgb, var(--th-accent-primary) 16%, var(--th-border) 84%)",
-                      background: "color-mix(in srgb, var(--th-badge-emerald-bg) 56%, var(--th-card-bg) 44%)",
+                      borderColor: "var(--th-border-subtle)",
+                      background: "var(--th-bg-surface)",
                     }}
                   >
                     <button
                       onClick={() => setRecentDoneOpen((v: boolean) => !v)}
-                      className="flex w-full items-center gap-2 text-left"
+                      className="flex min-h-11 w-full items-center gap-2 text-left"
                     >
                       <span className="text-xs font-semibold uppercase" style={{ color: "var(--th-text-muted)" }}>
                         {tr("최근 완료", "Recent Completions")}
@@ -142,7 +142,7 @@ export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
                             <button
                               disabled={page === 0}
                               onClick={() => setRecentDonePage((p: number) => Math.max(0, p - 1))}
-                              className="rounded px-2 py-0.5 text-xs disabled:opacity-30"
+                              className="min-h-11 min-w-11 rounded-md px-3 text-xs disabled:opacity-30"
                               style={{ color: "var(--th-text-muted)" }}
                             >
                               ← {tr("이전", "Prev")}
@@ -153,7 +153,7 @@ export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
                             <button
                               disabled={page >= totalPages - 1}
                               onClick={() => setRecentDonePage((p: number) => Math.min(totalPages - 1, p + 1))}
-                              className="rounded px-2 py-0.5 text-xs disabled:opacity-30"
+                              className="min-h-11 min-w-11 rounded-md px-3 text-xs disabled:opacity-30"
                               style={{ color: "var(--th-text-muted)" }}
                             >
                               {tr("다음", "Next")} →
@@ -184,14 +184,14 @@ export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
                         type="button"
                         data-testid={`kanban-mobile-summary-${column.status}`}
                         onClick={() => focusMobileColumn(column.status, false)}
-                        className="min-w-[6.5rem] rounded-2xl border px-3 py-2 text-left"
+                        className="min-h-11 min-w-[5.5rem] rounded-md border px-3 py-2 text-left"
                         style={{
-                          borderColor: mobileColumnStatus === column.status ? `${column.accent}88` : "rgba(148,163,184,0.24)",
-                          backgroundColor: mobileColumnStatus === column.status ? `${column.accent}22` : "rgba(255,255,255,0.04)",
-                          color: mobileColumnStatus === column.status ? "white" : "var(--th-text-secondary)",
+                          borderColor: mobileColumnStatus === column.status ? "var(--th-text-secondary)" : "var(--th-border-subtle)",
+                          backgroundColor: mobileColumnStatus === column.status ? "var(--th-overlay-medium)" : "var(--th-bg-surface)",
+                          color: mobileColumnStatus === column.status ? "var(--th-text-primary)" : "var(--th-text-secondary)",
                         }}
                       >
-                        <div className="text-[11px] font-semibold uppercase" style={{ color: mobileColumnStatus === column.status ? "white" : "var(--th-text-muted)" }}>
+                        <div className="text-[11px] font-semibold uppercase" style={{ color: mobileColumnStatus === column.status ? "var(--th-text-primary)" : "var(--th-text-muted)" }}>
                           {tr(column.labelKo, column.labelEn)}
                         </div>
                         <div className="mt-1 text-lg font-semibold">{count}</div>
@@ -199,8 +199,8 @@ export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
                     ))}
                   </div>
                   <div
-                    className="rounded-xl border px-3 py-2 text-xs"
-                    style={{ borderColor: "rgba(148,163,184,0.18)", color: "var(--th-text-muted)", backgroundColor: "rgba(15,23,42,0.35)" }}
+                    className="px-1 py-1 text-xs"
+                    style={{ borderColor: "rgba(148,163,184,0.18)", color: "var(--th-text-muted)", backgroundColor: "transparent" }}
                   >
                     {focusedMobileSummary
                       ? tr(
@@ -266,7 +266,7 @@ export default function KanbanBoardSurface({ ctx }: KanbanBoardSurfaceProps) {
                   <div
                     className="grid items-start gap-3"
                     style={{
-                      gridTemplateColumns: `repeat(${visibleColumns.length}, minmax(0, 1fr))`,
+                      gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 14rem), 1fr))",
                     }}
                   >
                     {visibleColumns.map((column: any) => {

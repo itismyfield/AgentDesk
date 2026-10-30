@@ -70,7 +70,7 @@ export function AgentExecutionNodeSelect({ agentId, provider, tr, onSaved }: {
     <label htmlFor={id} className="mb-1 block text-xs">{tr("우선 실행 장비", "Preferred execution device")}</label>
     <div className="flex flex-wrap items-center gap-2">
       <select id={id} value={selected} disabled={!ready || loading || saving}
-        className="w-full min-w-0 rounded border px-2 py-2 text-sm sm:w-auto sm:flex-1"
+        className="min-h-11 w-full min-w-0 rounded border px-2 py-2 text-sm sm:w-auto sm:flex-1"
         style={{ background: "var(--th-bg-surface)", borderColor: "var(--th-border)", color: "var(--th-text-primary)" }}
         onChange={(event) => { setSelected(event.target.value); setSuccess(false); }}>
         <option value="">{tr("기본 정책 사용", "Use default policy")}</option>

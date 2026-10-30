@@ -28,17 +28,13 @@ async fn finished_turn(case: u64, delegated: bool) -> (Harness, u64, u64) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn o_delegated_watcher_turn_shows_no_body_and_records_no_frontier() {
-    let flag = crate::services::tui_o::cutover::test_override::CHILD_ENV;
     if !isolated_in(
         "o_delegated_watcher_tests",
         "o_delegated_watcher_turn_shows_no_body_and_records_no_frontier",
-        &[
-            (flag, "1"),
-            (
-                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
-                "[[6284122,\"claude_tui\"]]",
-            ),
-        ],
+        &[(
+            crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+            "[[6284122,\"claude_tui\"]]",
+        )],
     ) {
         return;
     }
@@ -130,17 +126,13 @@ async fn response_claimed(h: &Harness, key: &str) -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn o_delegated_task_notification_turn_promotes_card_without_body_or_claim() {
-    let flag = crate::services::tui_o::cutover::test_override::CHILD_ENV;
     if !isolated_in(
         "o_delegated_watcher_tests",
         "o_delegated_task_notification_turn_promotes_card_without_body_or_claim",
-        &[
-            (flag, "1"),
-            (
-                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
-                "[[6284124,\"claude_tui\"]]",
-            ),
-        ],
+        &[(
+            crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+            "[[6284124,\"claude_tui\"]]",
+        )],
     ) {
         return;
     }
@@ -167,17 +159,13 @@ async fn o_delegated_task_notification_turn_promotes_card_without_body_or_claim(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn o_delegated_task_card_post_failure_retries_before_consuming_turn() {
-    let flag = crate::services::tui_o::cutover::test_override::CHILD_ENV;
     if !isolated_in(
         "o_delegated_watcher_tests",
         "o_delegated_task_card_post_failure_retries_before_consuming_turn",
-        &[
-            (flag, "1"),
-            (
-                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
-                "[[6284126,\"claude_tui\"]]",
-            ),
-        ],
+        &[(
+            crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+            "[[6284126,\"claude_tui\"]]",
+        )],
     ) {
         return;
     }
@@ -283,17 +271,13 @@ async fn streamed_then_delegated_turn(case: u64) -> Harness {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn o_delegated_mid_turn_cutover_shows_no_post_cutover_body() {
-    let flag = crate::services::tui_o::cutover::test_override::CHILD_ENV;
     if !isolated_in(
         "o_delegated_watcher_tests",
         "o_delegated_mid_turn_cutover_shows_no_post_cutover_body",
-        &[
-            (flag, "1"),
-            (
-                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
-                "[[6284125,\"claude_tui\"]]",
-            ),
-        ],
+        &[(
+            crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+            "[[6284125,\"claude_tui\"]]",
+        )],
     ) {
         return;
     }

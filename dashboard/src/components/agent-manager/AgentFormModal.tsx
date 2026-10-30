@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useRef } from "react";
 import { useForm } from "react-hook-form";
@@ -89,7 +90,7 @@ export default function AgentFormModal({
   }, [form, reset]);
 
   const inputCls =
-    "w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors";
+    "w-full min-h-11 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors";
   const inputStyle = {
     background: "var(--th-input-bg)",
     borderColor: "var(--th-input-border)",
@@ -102,12 +103,13 @@ export default function AgentFormModal({
     });
   });
 
-  return (
+  return createPortal(
+    <>
+    <div aria-hidden="true" className="fixed inset-0 z-[70]" style={{ background: "var(--th-modal-overlay)" }} />
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
+      className="fixed inset-0 z-[80] flex items-start justify-center overflow-hidden px-3 py-4 sm:items-center sm:p-4"
       style={{
-        background: "var(--th-modal-overlay)",
         paddingTop: "max(1rem, calc(env(safe-area-inset-top) + 0.75rem))",
         paddingBottom: "max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem))",
       }}
@@ -120,10 +122,10 @@ export default function AgentFormModal({
         aria-modal="true"
         aria-labelledby="agent-modal-title"
         onSubmit={handleSave}
-        className="w-full self-start max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem)] max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-[28px] border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-5xl sm:p-6"
+        className="w-full self-start max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem)] max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-lg border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-5xl sm:p-6"
         style={{
           background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+            "var(--th-bg-surface)",
           borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
           paddingBottom: "max(1.25rem, calc(1.25rem + env(safe-area-inset-bottom)))",
           WebkitOverflowScrolling: "touch",
@@ -151,7 +153,7 @@ export default function AgentFormModal({
             <div className="space-y-4">
             {/* ── 스프라이트 얼굴 미리보기 + 위/아래 변경 ── */}
             <div
-              className="flex items-center gap-3 rounded"
+              className="flex min-h-11 items-center gap-3 rounded"
               role="group"
               aria-label={tr("스프라이트 번호", "Sprite Number")}
             >
@@ -160,7 +162,7 @@ export default function AgentFormModal({
                   type="button"
                   aria-label={tr("다음 스프라이트", "Next Sprite")}
                   tabIndex={-1}
-                  className="w-6 h-6 rounded flex items-center justify-center text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--th-accent-primary)] focus:ring-offset-1 focus:ring-offset-[var(--th-bg-surface)]"
+                  className="min-w-11 min-h-11 rounded flex items-center justify-center text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--th-accent-primary)] focus:ring-offset-1 focus:ring-offset-[var(--th-bg-surface)]"
                   style={{
                     color: "var(--th-text-muted)",
                     border: "1px solid var(--th-input-border)",
@@ -219,7 +221,7 @@ export default function AgentFormModal({
                   type="button"
                   aria-label={tr("이전 스프라이트", "Previous Sprite")}
                   tabIndex={-1}
-                  className="w-6 h-6 rounded flex items-center justify-center text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--th-accent-primary)] focus:ring-offset-1 focus:ring-offset-[var(--th-bg-surface)]"
+                  className="min-w-11 min-h-11 rounded flex items-center justify-center text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--th-accent-primary)] focus:ring-offset-1 focus:ring-offset-[var(--th-bg-surface)]"
                   style={{
                     color: "var(--th-text-muted)",
                     border: "1px solid var(--th-input-border)",
@@ -450,5 +452,7 @@ export default function AgentFormModal({
         </div>
       </form>
     </div>
+    </>,
+    document.body,
   );
 }

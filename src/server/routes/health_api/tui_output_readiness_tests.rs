@@ -99,18 +99,14 @@ async fn public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate(
         return;
     }
     let reason = "provider:claude:tui_output_requires_gateway";
-    // With the switch on, an empty writer list reports exactly what the switch off does.
-    let dormant = {
-        let _off = test_override::force_off();
-        public_body(false, None).await
-    };
+    // An empty writer list carries no gateway reason.
     let empty = public_body(false, Some(&[])).await;
-    for (label, body) in [("switch off", &dormant), ("empty writer list", &empty)] {
-        assert!(body.get("tui_output_gateway_channels").is_none(), "{body}");
-        assert!(!reasons(body).contains(&reason), "{body}");
-        assert_ready(label, &body.to_string(), true);
-    }
-    assert_eq!(reasons(&dormant), reasons(&empty));
+    assert!(
+        empty.get("tui_output_gateway_channels").is_none(),
+        "{empty}"
+    );
+    assert!(!reasons(&empty).contains(&reason), "{empty}");
+    assert_ready("empty writer list", &empty.to_string(), true);
 
     let worker = public_body(false, Some(CHANNELS)).await;
     assert!(reasons(&worker).contains(&reason), "{worker}");

@@ -1,3 +1,4 @@
+import { Drawer } from "../common/overlay/Drawer";
 import type {
   CardAuditLogEntry,
   GitHubComment,
@@ -242,52 +243,19 @@ export default function KanbanCardDetail({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-0 sm:p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }} onClick={onClose}>
-      <div
-        data-testid="kanban-card-drawer"
-        onClick={(e) => e.stopPropagation()}
-        className="mb-[-20px] w-full max-w-3xl min-h-[calc(100svh-5.25rem)] max-h-[90svh] overflow-y-auto rounded-t-3xl border p-5 sm:mb-0 sm:min-h-0 sm:max-h-[90vh] sm:rounded-3xl sm:p-6 space-y-4"
-        style={{
-          background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-          borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-          minHeight: "calc(100svh - 5.25rem)",
-          maxHeight: "90svh",
-          paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))",
-        }}
-        role="dialog" aria-modal="true" aria-label="Card details"
-      >
+    <Drawer open onClose={onClose} title={tr("카드 상세", "Card details")} ariaLabel={tr("카드 상세", "Card details")} width="min(820px, 100vw)" closeButtonClassName="min-h-11 min-w-11">
+      <div data-testid="kanban-card-drawer" className="min-w-0 space-y-5 pb-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap gap-2">
-              <SurfaceMetricPill
-                label={tr("상태", "Status")}
-                value={labelForStatus(selectedCard.status, tr)}
-                tone="info"
-                className="min-w-[120px]"
-              />
-              <SurfaceMetricPill
-                label={tr("우선순위", "Priority")}
-                value={priorityLabel(selectedCard.priority, tr)}
-                tone="warn"
-                className="min-w-[120px]"
-              />
-              {selectedCard.github_repo && (
-                <SurfaceMetricPill
-                  label="GitHub"
-                  value={selectedCard.github_repo}
-                  tone="neutral"
-                  className="min-w-[140px]"
-                />
-              )}
+            <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-th-text-muted">
+              <span>{tr("상태", "Status")} <strong className="ml-1 font-medium text-th-text-primary">{labelForStatus(selectedCard.status, tr)}</strong></span>
+              <span>{tr("우선순위", "Priority")} <strong className="ml-1 font-medium text-th-text-primary">{priorityLabel(selectedCard.priority, tr)}</strong></span>
+              {selectedCard.github_repo ? <span className="[overflow-wrap:anywhere]">{selectedCard.github_repo}</span> : null}
             </div>
-            <h3 className="mt-2 text-xl font-semibold" style={{ color: "var(--th-text-heading)" }}>
+            <h3 className="mt-3 text-xl font-semibold leading-7 [overflow-wrap:anywhere]" style={{ color: "var(--th-text-heading)" }}>
               {selectedCard.title}
             </h3>
           </div>
-          <SurfaceActionButton onClick={onClose} tone="neutral" className="shrink-0 whitespace-nowrap">
-            {tr("닫기", "Close")}
-          </SurfaceActionButton>
         </div>
 
         {/* Pipeline progress - removed with PipelineConfigView */}
@@ -307,7 +275,7 @@ export default function KanbanCardDetail({
             <input
               value={editor.title}
               onChange={(event) => setEditor((prev) => ({ ...prev, title: event.target.value }))}
-              className="w-full rounded-xl px-3 py-2 text-sm bg-surface-light border"
+              className="min-h-11 w-full rounded-md border border-th-border-subtle bg-th-bg-surface px-3 py-2 text-sm"
               style={inputChrome}
             />
           </label>
@@ -342,7 +310,7 @@ export default function KanbanCardDetail({
                         setSavingCard(false);
                       }
                     }}
-                    className="rounded-lg px-3 py-1.5 text-xs font-medium border transition-opacity hover:opacity-80 disabled:opacity-40"
+                    className="min-h-11 rounded-md border px-3 py-2 text-xs font-medium transition-opacity hover:opacity-80 disabled:opacity-40"
                     style={{
                       backgroundColor: style.bg,
                       borderColor: style.text,
@@ -363,7 +331,7 @@ export default function KanbanCardDetail({
             <select
               value={editor.assignee_agent_id}
               onChange={(event) => setEditor((prev) => ({ ...prev, assignee_agent_id: event.target.value }))}
-              className="w-full rounded-xl px-3 py-2 text-sm bg-surface-light border"
+              className="min-h-11 w-full rounded-md border border-th-border-subtle bg-th-bg-surface px-3 py-2 text-sm"
               style={inputChrome}
             >
               <option value="">{tr("없음", "None")}</option>
@@ -377,7 +345,7 @@ export default function KanbanCardDetail({
             <select
               value={editor.priority}
               onChange={(event) => setEditor((prev) => ({ ...prev, priority: event.target.value as KanbanCardPriority }))}
-              className="w-full rounded-xl px-3 py-2 text-sm bg-surface-light border"
+              className="min-h-11 w-full rounded-md border border-th-border-subtle bg-th-bg-surface px-3 py-2 text-sm"
               style={inputChrome}
             >
               {PRIORITY_OPTIONS.map((priority) => (
@@ -468,7 +436,7 @@ export default function KanbanCardDetail({
                 placeholder={tr("사유 (선택)", "Reason (optional)")}
                 value={redispatchReason}
                 onChange={(e) => setRedispatchReason(e.target.value)}
-                className="w-full rounded-xl px-3 py-2 text-sm bg-surface-light border"
+                className="min-h-11 w-full rounded-md border border-th-border-subtle bg-th-bg-surface px-3 py-2 text-sm"
                 style={inputChrome}
               />
               <SurfaceActionButton
@@ -498,7 +466,7 @@ export default function KanbanCardDetail({
               <select
                 value={retryAssigneeId}
                 onChange={(event) => setRetryAssigneeId(event.target.value)}
-                className="w-full rounded-xl px-3 py-2 text-sm bg-surface-light border"
+                className="min-h-11 w-full rounded-md border border-th-border-subtle bg-th-bg-surface px-3 py-2 text-sm"
                 style={inputChrome}
               >
                 {agents.map((agent) => (
@@ -579,13 +547,13 @@ export default function KanbanCardDetail({
               disabled={savingCard || !editor.title.trim()}
               tone="info"
               className="text-sm"
-              style={{ color: "#dbeafe" }}
+              style={{ color: "var(--th-text-primary)" }}
             >
               {savingCard ? tr("저장 중", "Saving") : tr("저장", "Save")}
             </SurfaceActionButton>
           </div>
         </div>
       </div>
-    </div>
+    </Drawer>
   );
 }

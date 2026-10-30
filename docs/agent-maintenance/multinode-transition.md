@@ -1029,7 +1029,7 @@ redeploy leaves the old values live in the plist.
   failures fall back to the existing durable status-panel orphan store (also
   worker-local). OFF path is byte-identical.
 - #4488 two-message restart recovery + E2E: the restart inflight scan delegates
-  panel repair to `recovery_engine/two_message_panel.rs` before watcher/bridge
+  panel repair to `recovery_engine/two_message_panel.rs` (removed) before watcher/bridge
   reattachment. The helper treats Discord message existence and snowflake order
   only as repair evidence, then authorizes the replacement exclusively through
   the existing full `InflightTurnIdentity` CAS and in-lock generation bump. A

@@ -1,0 +1,76 @@
+---
+title: "AgentDesk channel session on tmux, across one server restart"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Normal
+    lg1: Restart
+    lg2: Stuck
+    lg3: Breaks NoDeadlock or RowNamesSession or RowOnlyWithTurn
+    lg4: Breaks NoDeadlock in some cases
+    lg5: Path to the NoDeadlock or RowNamesSession or RowOnlyWithTurn bug
+  }
+  class lg0 blue
+  class lg1 yellow
+  class lg2 pink
+  class lg3 breaks
+  class lg4 mayBreak
+  class lg5 bugPath
+  s0: Idle
+  s1: Server down
+  s2: Restarting, no turn row
+  s3: Turn starting
+  s4: Server down, turn row on disk
+  s5: Turn running
+  s6: Restarting, turn row not picked up
+  s7: Turn running, session died
+  s8: Stop: session killed, row still on disk
+  s9: Starting a fresh session for the turn
+  s10: Writing the prompt into the live session
+  s11: Open, a turn row names a missing session
+  s12: Open, a turn row with no running turn
+  [*] --> s0
+  s0 --> s1: the server crashes
+  s0 --> s0: a message arrives
+  s1 --> s2: the server boots
+  s0 --> s3: a message starts a turn
+  s3 --> s4: the server crashes
+  s3 --> s5: a new session starts with the prompt [no live session]
+  s4 --> s6: the server boots
+  s5 --> s4: the server crashes
+  s5 --> s7: Claude exits in the session
+  s5 --> s0: the answer is posted
+  s5 --> s8: you stop the turn
+  s6 --> s2: recovery posts a notice and clears the row [session gone]
+  s6 --> s6: the recovery probe fails, so the row is left or watcher restore has nothing to do or a message arrives
+  s2 --> s0: intake opens
+  s7 --> s0: the watcher posts a died notice
+  s8 --> s0: the turn row is cleared
+  s6 --> s5: recovery reattaches [session live] or watcher restore adopts the live session
+  s6 --> s9: recovery retries the turn [pane dead]
+  s6 --> s11: intake opens
+  s3 --> s10: the session is live, so the turn reuses it
+  s9 --> s5: a new session starts with the prompt
+  s6 --> s12: intake opens
+  s10 --> s5: the prompt reaches the session
+  s10 --> s9: the prompt write fails, so the turn recreates
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 blue
+  class s0 bugPath
+  class s1 yellow
+  class s2 yellow
+  class s3 blue
+  class s3 bugPath
+  class s4 yellow
+  class s4 bugPath
+  class s6 yellow
+  class s6 bugPath
+  class s8 blue
+  class s10 blue
+  class s10 mayBreak
+  class s11 pink
+  class s11 breaks
+  class s11 bugPath
+  class s12 pink
+  class s12 breaks

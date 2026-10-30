@@ -48,21 +48,19 @@ function SidebarRouteButton({
     <button
       type="button"
       onClick={onNavigate}
-      className="group relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors"
+      className="group relative flex min-h-11 w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors"
       style={{
         background: active
-          ? "color-mix(in srgb, var(--th-accent-primary-soft) 80%, transparent)"
+          ? "var(--th-overlay-medium)"
           : "transparent",
         color: active ? "var(--th-text-primary)" : "var(--th-text-secondary)",
       }}
       title={isKo ? route.labelKo : route.labelEn}
     >
       <span
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
+        className="flex h-6 w-6 shrink-0 items-center justify-center"
         style={{
-          background: active
-            ? "color-mix(in srgb, var(--th-accent-primary) 18%, transparent)"
-            : "var(--th-overlay-subtle)",
+          color: active ? "var(--th-text-primary)" : "var(--th-text-muted)",
         }}
       >
         <Icon size={18} />
@@ -100,11 +98,10 @@ export function AppSidebar({
   return (
     <aside
       data-testid="app-sidebar-nav"
-      className="flex w-[236px] shrink-0 flex-col border-r"
+      className="flex w-[216px] shrink-0 flex-col border-r"
       style={{
         borderColor: "var(--th-border-subtle)",
-        background:
-          "linear-gradient(180deg, color-mix(in srgb, var(--th-nav-bg) 98%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 92%, transparent) 100%)",
+        background: "var(--th-bg-surface)",
       }}
     >
       <div
@@ -142,14 +139,14 @@ export function AppSidebar({
         {sections.map((section) => {
           const sectionRoutes = routes.filter((route) => route.section === section.id);
           return (
-            <div key={section.id} className="mb-5">
+            <div key={section.id} className="mb-4">
               <div
-                className="px-3 pb-2 text-[11px] font-semibold uppercase tracking-[0.18em]"
+                className="px-3 pb-2 text-xs font-medium"
                 style={{ color: "var(--th-text-muted)" }}
               >
                 {isKo ? section.labelKo : section.labelEn}
               </div>
-              <div className="space-y-1">
+              <div className="space-y-0.5">
                 {sectionRoutes.map((route) => (
                   <SidebarRouteButton
                     key={route.id}
@@ -178,7 +175,7 @@ export function AppSidebar({
       >
         <div className="space-y-2">
           <div
-            className="flex items-center gap-2 rounded-2xl border px-3 py-2"
+            className="flex items-center gap-2 rounded-md border px-3 py-2"
             style={{
               borderColor: "var(--th-border-subtle)",
               background: "var(--th-overlay-subtle)",
@@ -195,13 +192,13 @@ export function AppSidebar({
             />
             <span className="font-mono text-[11px]">
               {wsConnected
-                ? tr("2/2 providers", "2/2 providers")
-                : tr("0/2 providers", "0/2 providers")}
+                ? tr("실시간 연결됨", "Live connection")
+                : tr("연결 끊김", "Disconnected")}
             </span>
           </div>
 
           <div
-            className="flex items-center gap-3 rounded-2xl border px-3 py-3"
+            className="flex items-center gap-3 rounded-md border px-3 py-3"
             style={{
               borderColor: "var(--th-border-subtle)",
               background:

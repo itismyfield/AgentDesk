@@ -42,7 +42,7 @@ function DailyTokenTooltip({
 
   return (
     <div
-      className="rounded-xl border px-3 py-2 text-[11px] shadow-xl"
+      className="rounded-md border px-3 py-2 text-xs shadow-md"
       style={{
         background: "var(--th-card-bg)",
         borderColor: "var(--th-border-subtle)",
@@ -87,10 +87,12 @@ export default function DailyTokenCompositionChart({
     fullDate: formatDateLabel(day.date, localeTag),
     label: formatCompactDate(day.date),
   }));
-  const chartMinWidth = Math.max(420, daily.length * 34);
+  const chartMinWidth = daily.length > 7 ? daily.length * 34 : 0;
 
   return (
-    <div className="overflow-x-auto overflow-y-hidden">
+    <>
+    {daily.length > 7 && <p className="mb-2 text-xs leading-5 text-th-text-muted">{t(msg("날짜가 가려지면 차트를 좌우로 움직여 확인하세요.", "Scroll horizontally to see dates outside the view."))}</p>}
+    <div data-testid="stats-daily-token-scroll" role="region" aria-label={t(msg("일별 토큰 차트 탐색", "Daily token chart navigation"))} tabIndex={daily.length > 7 ? 0 : undefined} className="overflow-x-auto overflow-y-hidden focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)]">
       <div
         className="h-[246px] pb-1"
         role="img"
@@ -144,5 +146,6 @@ export default function DailyTokenCompositionChart({
         </ResponsiveContainer>
       </div>
     </div>
+    </>
   );
 }

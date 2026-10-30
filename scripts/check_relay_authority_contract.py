@@ -27,7 +27,7 @@ JUDGE_NEEDS = ("changes", "rust_build", "rust_tests", "test_evidence", RELAY_AUT
 FLOOR_COMMAND = 'python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"'
 CONDITION3_MUTATION_SCRIPT = Path("scripts/run_relay_authority_mutations.sh")
 CONDITION3_MUTATION_COMMAND = f"bash {CONDITION3_MUTATION_SCRIPT}"
-RUST_REQUIRED_IF = "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
+RUST_REQUIRED_IF = "${{ !github.event.pull_request.draft && !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
 VERIFIED_RUST_SKIP = ("${{ steps.comment_only.outcome == 'success' && "
                       "steps.comment_only.outputs.comment_only == 'true' && "
                       "steps.comment_only.outputs.rust_tests_skip == 'true' && 'true' || 'false' }}")

@@ -51,8 +51,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": `http://${defaults.loopback}:${defaults.port}`,
-      "/ws": { target: `ws://${defaults.loopback}:${defaults.port}`, ws: true },
+      "/api": { target: `http://${defaults.loopback}:${defaults.port}`, changeOrigin: false },
+      "/ws": { target: `ws://${defaults.loopback}:${defaults.port}`, ws: true, changeOrigin: false },
     },
   },
   build: {

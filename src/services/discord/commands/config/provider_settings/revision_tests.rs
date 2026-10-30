@@ -120,7 +120,6 @@ fn truthful_shared_feature_reset_is_consumed_by_the_first_parent_or_thread_turn(
                             history: Vec::new(),
                             pending_uploads: Vec::new(),
                             cleared: false,
-                            remote_profile_name: None,
                             channel_id: Some(channel.get()),
                             channel_name: None,
                             category_name: None,

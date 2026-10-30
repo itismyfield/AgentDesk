@@ -306,15 +306,15 @@ export default function CampaignsPanel({ language }: { language: string }) {
     {/* The selection must match an option, or the browser shows another campaign as chosen and it cannot be picked. */}
     {mode === "server" && serverSelected && !serverDoc && <option value={`${SERVER_OPTION}${serverSelected}`}>{serverSelected}</option>}
   </select></label>;
-  return <section className="campaigns-panel">
-    <header className="campaign-row"><div><h2>{tr("캠페인", "Campaigns")}</h2><p>{tr("그룹별 작업을 살펴보고, 선택한 작업의 다음 행동부터 이어가세요.", "Browse tasks by group and pick up the next action.")}</p></div><div className="campaign-actions"><button disabled={serverDown} onClick={() => openDraft(NEW_DRAFT, () => createDraft(null))}>{tr("새 서버 캠페인", "New server campaign")}</button><button disabled={loading} onClick={() => refreshAll()}>{loading ? tr("불러오는 중…", "Refreshing…") : tr("새로고침", "Refresh")}</button></div></header>
+  return <section className="campaigns-panel [&_[data-widget-state]]:!rounded-lg min-w-0 gap-6 text-th-text-primary [&_button]:min-h-11 [&_button]:min-w-11 [&_input:not([type=checkbox])]:min-h-11 [&_select]:min-h-11 [&_summary]:min-h-11 [&_summary]:py-3 [&_label:has(input[type=checkbox])]:min-h-11 [&_h2]:text-2xl [&_h2]:font-semibold [&_h2]:tracking-tight [&_h3]:font-semibold [&_h4]:text-xs [&_h4]:font-medium [&_a]:inline-flex [&_a]:min-h-11 [&_a]:max-w-full [&_a]:items-center [&_a]:py-2 [&_a]:[overflow-wrap:anywhere]">
+    <header className="campaign-row items-start gap-4 border-b border-th-border-subtle pb-5"><div><h2>{tr("캠페인", "Campaigns")}</h2><p>{tr("그룹별 작업을 살펴보고, 선택한 작업의 다음 행동부터 이어가세요.", "Browse tasks by group and pick up the next action.")}</p></div><div className="campaign-actions"><button disabled={serverDown} onClick={() => openDraft(NEW_DRAFT, () => createDraft(null))}>{tr("새 서버 캠페인", "New server campaign")}</button><button disabled={loading} onClick={() => refreshAll()}>{loading ? tr("불러오는 중…", "Refreshing…") : tr("새로고침", "Refresh")}</button></div></header>
     {error && <WidgetState kind={campaigns.length ? "stale" : "error"} title={tr("캠페인을 갱신하지 못했습니다.", "Could not refresh campaigns.")} description={error + (campaigns.length ? tr(" · 이전 내용을 표시 중입니다.", " · Showing the previous snapshot.") : "")} action={<button onClick={() => void refresh()}>{tr("다시 시도", "Retry")}</button>} />}
     {serverDown && <WidgetState kind={serverDocs.length ? "stale" : "error"} title={tr("서버 캠페인을 갱신하지 못했습니다.", "Could not refresh server campaigns.")} description={(serverError ?? tr("서버가 응답하지 않습니다", "The server is not answering")) + (serverDocs.length ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
     {/* Nothing is called empty until both lists have answered without an error. */}
     {!campaigns.length && !serverDocs.length && !error && !serverDown && <WidgetState kind={loading || !serverLoaded ? "loading" : "empty"} title={loading || !serverLoaded ? tr("캠페인을 불러오고 있습니다.", "Loading campaigns.") : tr("등록된 캠페인이 없습니다.", "No campaigns yet.")} description={loading || !serverLoaded ? undefined : tr("캠페인이 등록되면 작업 흐름과 진행 상황이 여기에 표시됩니다.", "Registered campaigns and their progress will appear here.")} />}
     {renderForm(NEW_DRAFT, serverDown)}
     {serverDocs.length > 0 && <ServerCampaignList documents={serverDocs} selectedId={mode === "server" ? serverSelected : null} onSelect={selectServer} tr={tr} />}
-    {mode === "legacy" && campaign && progress && <div className="campaign-main">
+    {mode === "legacy" && campaign && progress && <div className="campaign-main gap-5 rounded-lg p-4 sm:p-5">
       <div className="campaign-row campaign-summary-header">
         {selector}
         <Badge status={campaign.status} tr={tr} />
@@ -324,11 +324,11 @@ export default function CampaignsPanel({ language }: { language: string }) {
         {refreshedAt && <span className="campaign-freshness">{tr("확인", "Checked")} {new Date(refreshedAt).toLocaleTimeString(language)}</span>}
         <CampaignAutoQueueToggle key={campaign.id} campaign={campaign} tr={tr} onSaved={onSaved} checkedRead={checkedRead} />
       </div>
-      {campaign.description && <p className="campaign-description" title={campaign.description}>{campaign.description}</p>}
+      {campaign.description && <details className="text-xs text-th-text-muted"><summary className="cursor-pointer">{tr("캠페인 설명", "Campaign description")}</summary><p className="campaign-description mt-2">{campaign.description}</p></details>}
       <progress className="campaign-progress" max={100} value={progress.percent} aria-label={tr("작업 완료율", "Task completion")} />
       {campaign.nodes.length ? <CampaignExplorer key={campaign.id} campaign={campaign} live={live[campaign.id] ?? NO_LIVE} tr={tr} onSaved={onSaved} drafts={drafts} onDraftChange={onDraftChange} initialSelectedId={node} onSelectedChange={setNode} /> : <WidgetState kind="empty" title={tr("아직 작업이 없습니다.", "No tasks yet.")} />}
     </div>}
-    {mode === "server" && serverSelected && <div className="campaign-main">
+    {mode === "server" && serverSelected && <div className="campaign-main gap-5 rounded-lg p-4 sm:p-5">
       <div className="campaign-row campaign-summary-header">{selector}</div>
       {detail?.error && <WidgetState kind={serverDoc ? "stale" : "error"} title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error + (serverDoc ? tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.") : "")} />}
       {serverDoc ? <>
