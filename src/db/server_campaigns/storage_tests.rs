@@ -842,6 +842,84 @@ async fn execution_stays_unavailable_and_legacy_crud_cas_issue_sync_unchanged_pg
     h.close().await;
 }
 
+/// A production database that already ran main through 0161 takes only this branch's later files.
+#[tokio::test]
+async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
+    use crate::db::postgres;
+    use sqlx::migrate::Migrator;
+
+    type MigrationRow = (i64, Vec<u8>, bool, DateTime<Utc>, i64);
+    const RECORDS: &str = "SELECT version, checksum, success, installed_on, execution_time FROM _sqlx_migrations ORDER BY version";
+    let fixture = TestPostgresDb::create().await;
+    let pool = postgres::connect_test_pool(&fixture.database_url, "main at 0161 upgrade")
+        .await
+        .unwrap();
+    let embedded = sqlx::migrate!("./migrations/postgres");
+    let campaigns = 161;
+    let main = Migrator::with_migrations(
+        embedded
+            .iter()
+            .filter(|m| m.version <= campaigns)
+            .cloned()
+            .collect(),
+    );
+    main.run(&pool).await.unwrap();
+    let before = sqlx::query_as::<_, MigrationRow>(RECORDS)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(before.last().unwrap().0, campaigns);
+    let mut later: Vec<i64> = embedded
+        .iter()
+        .map(|m| m.version)
+        .filter(|v| *v > campaigns)
+        .collect();
+    later.dedup();
+    assert!(!later.is_empty());
+    assert_eq!(
+        postgres::migration_status(&pool)
+            .await
+            .unwrap()
+            .pending_versions,
+        later
+    );
+
+    postgres::migrate(&pool).await.unwrap();
+    let after = sqlx::query_as::<_, MigrationRow>(RECORDS)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        after[..before.len()],
+        before[..],
+        "main's journal stays as it was"
+    );
+    let appended: Vec<i64> = after[before.len()..].iter().map(|row| row.0).collect();
+    assert_eq!(appended, later, "later files apply after 0161, in order");
+    for row in &after[before.len()..] {
+        let migration = embedded.iter().find(|m| m.version == row.0).unwrap();
+        assert!(row.2);
+        assert_eq!(row.1.as_slice(), migration.checksum.as_ref());
+    }
+    let schema: bool = sqlx::query_scalar(
+        "SELECT to_regclass('channel_home_preferences') IS NOT NULL
+            AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='intake_outbox' AND column_name='routing_plan')
+            AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='intake_session_owners' AND column_name='routing_notice_outbox_id')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        schema,
+        "the later files' schema must exist after the upgrade"
+    );
+    let status = postgres::migration_status(&pool).await.unwrap();
+    assert!(status.pending_versions.is_empty());
+    assert!(status.missing_from_resolved.is_empty());
+    pool.close().await;
+    fixture.drop().await;
+}
+
 #[tokio::test]
 async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
     use crate::db::{campaigns as legacy, postgres};
@@ -861,7 +939,7 @@ async fn migration_upgrades_main_schema_and_preserves_legacy_records_pg() {
             .collect(),
     );
     let main_max = main.iter().map(|m| m.version).max().unwrap();
-    assert_eq!(main_max, 160);
+    assert_eq!(main_max, 156);
     assert!(version > main_max);
     main.run(&pool).await.unwrap();
     let input = serde_json::from_value(serde_json::json!({
