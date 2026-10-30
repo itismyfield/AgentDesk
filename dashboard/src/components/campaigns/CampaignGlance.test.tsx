@@ -34,7 +34,7 @@ it("emphasizes a blocker only on the cards that record one and falls back when g
   expect(container.textContent).not.toContain("cargo test passed");
   expect(card("bare").querySelector(".campaign-glance-blocker")).toBeNull();
   expect(card("bare").textContent).toContain("shard script checks");
-  expect(card("bare").textContent).toContain("No benefit recorded");
+  expect(card("bare").querySelector(".campaign-glance-benefit")).toBeNull();
   expect(card("bare").querySelector(".campaign-glance-raw")?.textContent).toBe("부분 완료 · 잔여 확인");
 });
 
@@ -56,4 +56,24 @@ it("counts waiting, done and skipped work and lists each status only when opened
   expect(onOpen).toHaveBeenCalledWith("wait-2");
   await act(async () => chips[0].click());
   expect(container.querySelector(".campaign-glance-list")).toBeNull();
+});
+
+
+it("keeps a short initial overview while every active task remains reachable", async () => {
+  const onOpen = await render(Array.from({ length: 8 }, (_, index) => makeCampaignNode(`active-${index}`, { status: "running" })));
+  expect(container.querySelectorAll("[data-glance-id]")).toHaveLength(3);
+  const toggle = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "Show all 8 active tasks")!;
+  await act(async () => toggle.click());
+  expect(container.querySelectorAll("[data-glance-id]")).toHaveLength(8);
+  await act(async () => card("active-7").click());
+  expect(onOpen).toHaveBeenCalledWith("active-7");
+  await act(async () => toggle.click());
+  expect(container.querySelectorAll("[data-glance-id]")).toHaveLength(3);
+});
+
+
+it("puts a blocked task in the short overview even when many other tasks are running", async () => {
+  await render([...Array.from({ length: 8 }, (_, index) => makeCampaignNode(`running-${index}`, { status: "running" })), makeCampaignNode("blocked", { status: "blocked", blocker: "A dependency needs attention" })]);
+  expect(container.querySelector("[data-glance-id]")?.getAttribute("data-glance-id")).toBe("blocked");
+  expect(container.textContent).toContain("Blocked 1");
 });
