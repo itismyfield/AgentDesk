@@ -331,7 +331,8 @@ pub(in crate::services::discord) async fn reading_now(
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> Reading {
-    read_now(shared, provider, channel, false).await
+    // Bound callers' future sizes as the observation's database paths grow.
+    Box::pin(read_now(shared, provider, channel, false)).await
 }
 
 async fn read_now(
