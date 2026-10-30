@@ -191,6 +191,67 @@ fn f9b_a_session_a_second_clear_moved_on_to_resumes_on_herdr_under_its_launch_ac
     clears_then_moves_to_herdr("resume-f9b", 2);
 }
 
+// A fresh launch under another account writes its session and account into the launch artifacts
+// and fails before its spawn marker; the running tmux Claude's next hook keeps S1's account.
+#[test]
+fn a_failed_launch_under_another_account_never_moves_the_running_session_s_account_pg() {
+    let fx = Fixture::new("resume-f10", None);
+    let (launched, nonce) = launch_tmux(&fx, None);
+    let (s0, account) = launched.split_once('\n').unwrap();
+    let envelope = launched_pane(&fx, s0, &nonce);
+    let (s1, path) = clear_to_new_session(&fx, &envelope, s0);
+    assert_eq!(fx.session_auth(), Some(format!("{s1}\n{account}")));
+    let mut work =
+        ProviderAuthOverlay::default_for(crate::services::provider::ProviderKind::Claude);
+    work.profile_id = "work".into();
+    *fx.overlay.lock().unwrap() = Some(work);
+    *fx.session.lock().unwrap() = Some(s1.clone());
+    // The fresh launch's Pending install fails once, after its prepare and before its markers.
+    let refuse = "CREATE FUNCTION refuse_pending() RETURNS trigger LANGUAGE plpgsql AS \
+        $$ BEGIN RAISE EXCEPTION 'pending install refused'; END $$; \
+        CREATE TRIGGER refuse_pending BEFORE UPDATE OF hosted_execution ON sessions \
+        FOR EACH ROW EXECUTE FUNCTION refuse_pending()";
+    fx.rt
+        .block_on(sqlx::raw_sql(refuse).execute(&fx.pool))
+        .unwrap();
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    ports.old_tmux.alive.store(true, Ordering::SeqCst);
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &ports, || {});
+    let lift = "DROP TRIGGER refuse_pending ON sessions";
+    fx.rt
+        .block_on(sqlx::raw_sql(lift).execute(&fx.pool))
+        .unwrap();
+    let error = result.unwrap_err();
+    assert!(error.contains("pending install refused"), "{error}");
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 0);
+    assert_eq!(ports.old_tmux.exits.load(Ordering::SeqCst), 0);
+    let recorded = fx.session_auth().unwrap();
+    let (fresh, profile) = recorded.split_once('\n').unwrap();
+    assert_eq!(profile, "work");
+    assert_ne!(fresh, s1);
+    let script = fx.launch_script();
+    assert!(script.contains(&format!("'{fresh}'")), "{script}");
+    let spawn = crate::services::tmux_common::session_temp_path(fx.logical(), "spawn_nonce");
+    assert_eq!(std::fs::read_to_string(spawn).unwrap().trim(), nonce);
+    // The running tmux Claude's next prompt, under its launch hook command and execution.
+    let prompted = json!({"session_id": s1, "prompt": "hi", "transcript_path": path});
+    let (status, _) = fx.ingress.send_envelope(
+        &format!("/hooks/claude/UserPromptSubmit?session_id={s0}"),
+        &prompted,
+        Some(&uuid()),
+        Some(&envelope.encode().unwrap()),
+    );
+    assert_eq!(status, 202);
+    crate::services::claude_tui::hook_server::retry_deferred_claude_adoptions();
+    assert_eq!(fx.session_auth(), Some(recorded));
+    let matches = crate::services::tmux_common::claude_session_auth_matches;
+    assert!(!matches(fx.logical(), &s1, "work").unwrap());
+    let bound = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical());
+    assert_eq!(bound.unwrap().session_id.as_deref(), Some(s1.as_str()));
+    crate::services::tmux_common::cleanup_session_temp_files(fx.logical());
+}
+
 // A session handed back to tmux under a named account is found in that account's own home and
 // resumed there, its launch context naming that home; in the daemon's home only it starts anew.
 #[test]

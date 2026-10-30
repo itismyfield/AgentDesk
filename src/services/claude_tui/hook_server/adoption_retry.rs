@@ -385,11 +385,8 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
                 return SettleOutcome { http, queue };
             };
             before_artifacts(payload_session_id);
-            // The account follows the pane from the session this hook moved it off; a later hook of
-            // the same move finds that session in the artifacts, which name it until the record moves.
-            let session =
-                crate::services::claude_tui::session::persisted_claude_continuation_session;
-            let left = left.or_else(|| session(&tmux_session_name));
+            // The account follows the pane only from the session this hook moved it off; a hook that
+            // moved nothing carries it nowhere, whatever another launch left in the artifacts.
             let advanced = left.map_or(Ok(()), |from| {
                 let advance = crate::services::tmux_common::advance_claude_session_auth;
                 advance(&tmux_session_name, &from, payload_session_id)
