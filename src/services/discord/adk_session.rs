@@ -89,6 +89,22 @@ pub(super) async fn build_adk_session_key(
     ))
 }
 
+/// [`build_adk_session_key`] for a turn; a channel with no name takes the key of its row returning
+/// to tmux, so the queue gate and the turn judge the same row.
+pub(super) async fn turn_session_key(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+) -> Option<String> {
+    match build_adk_session_key(shared, channel_id, provider, None).await {
+        Some(key) => Some(key),
+        None => {
+            let returning = super::host_defer_gate::returning_session_key;
+            returning(shared, provider, channel_id.get()).await
+        }
+    }
+}
+
 /// #4658 session-isolation guard: choose the session-key basis. When a
 /// scheduled-snapshot override is present it always wins over the channel name,
 /// so the derived `sessions.session_key` can never collide with the channel's

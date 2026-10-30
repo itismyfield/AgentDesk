@@ -700,12 +700,14 @@ pub(crate) fn adopt_claude_continuation_session(
 
 /// `failure` is set only when the adoption was decided but its binding event could not be persisted.
 /// `skip` names why nothing was adopted or logged; each check below sets it before it can return.
+/// `previous` is the session the pane was bound to when this hook moved it on.
 fn adopt_continuation(
     command_session_id: &str,
     payload_session_id: &str,
     hook: &HookSignal,
     failure: &mut Option<BindingPersistError>,
     skip: &mut Option<AdoptSkip>,
+    previous: &mut Option<String>,
 ) -> Option<(String, String)> {
     let command_session_id = command_session_id.trim();
     let payload_session_id = payload_session_id.trim();
@@ -825,7 +827,10 @@ fn adopt_continuation(
     );
     binding.value.output_path = new_output_path.clone();
     binding.value.relay_output_path = None;
-    binding.value.session_id = Some(payload_session_id.to_string());
+    *previous = binding
+        .value
+        .session_id
+        .replace(payload_session_id.to_string());
     // Start conservatively at the new transcript head. Stable prompt-entry
     // identities suppress replay; starting at EOF would silently skip the
     // continuation boundary that taught us the new UUID.

@@ -35,6 +35,31 @@ pub(super) fn tmux_turn_admitted(tmux_session_name: &str) -> Result<(), String> 
     }
 }
 
+/// Whether the `.host_kind` marker beside `name` names tmux; absent or unreadable is not.
+#[cfg(unix)]
+pub(crate) fn tmux_marked(name: &str) -> bool {
+    read_host_kind_marker(name) == HostKindMarker::Known(HostKind::Tmux)
+}
+
+/// Whether a returned session's tmux pane is the dead one its own provider's exit left, to start
+/// again in place; a live or unread pane stops the turn, as nothing tears a returned one down.
+#[cfg(unix)]
+pub(super) fn returned_dead_pane(
+    name: &str,
+    teardown: Option<&crate::services::provider_teardown::TeardownClearance>,
+) -> Result<bool, String> {
+    use crate::services::platform::tmux::{PaneLiveness, pane_liveness};
+    use crate::services::provider_teardown::TeardownClearance;
+    if !matches!(teardown, Some(TeardownClearance::Returned)) {
+        return Ok(false);
+    }
+    match pane_liveness(name) {
+        PaneLiveness::DeadOrAbsent => Ok(true),
+        PaneLiveness::Live => Err(format!("returned tmux session {name} runs a pane")),
+        PaneLiveness::ProbeError => Err(format!("returned tmux session {name} is unobserved")),
+    }
+}
+
 /// A test turn's pane would run the test binary and die, so it reaches only a fake tmux under
 /// the temp dir or an isolated socket, even when it outlives the fixture that set either.
 #[cfg(all(unix, test))]

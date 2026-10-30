@@ -32,6 +32,61 @@ pub(crate) fn write_tmux_session_auth_profile(
     .map_err(|error| format!("write tmux auth profile marker: {error}"))
 }
 
+/// Persist the account a Claude session launches under beside its id, so a launch that never ran
+/// leaves a record of its own session only and vouches for no other.
+pub(crate) fn write_claude_session_auth(
+    session_name: &str,
+    session_id: &str,
+    profile_id: &str,
+) -> Result<(), String> {
+    std::fs::write(
+        session_temp_path(session_name, CLAUDE_SESSION_AUTH_TEMP_EXT),
+        format!("{session_id}\n{}", profile_id.trim()),
+    )
+    .map_err(|error| format!("write claude session auth marker: {error}"))
+}
+
+/// Whether `session_id` ran under `profile_id`: by its own record, or by the profile marker while
+/// no launch recorded one. A record of another session vouches for nothing.
+pub(crate) fn claude_session_auth_matches(
+    session_name: &str,
+    session_id: &str,
+    profile_id: &str,
+) -> Result<bool, String> {
+    if resolve_session_temp_path(session_name, CLAUDE_SESSION_AUTH_TEMP_EXT).is_none() {
+        return Ok(tmux_session_auth_profile_matches(session_name, profile_id));
+    }
+    Ok(claude_session_auth(session_name, session_id)?.as_deref() == Some(profile_id.trim()))
+}
+
+/// Carries the account recorded for `from` over to `to` once the same execution verifiably moved on
+/// from `from` to `to`; a record of any other session stays as it is and vouches for neither.
+pub(crate) fn advance_claude_session_auth(
+    session_name: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
+    match claude_session_auth(session_name, from)? {
+        Some(profile) => write_claude_session_auth(session_name, to, &profile),
+        None => Ok(()),
+    }
+}
+
+/// The account `session_id` ran under, recorded by its launch or by the session it moved on from;
+/// `None` when the record names another session or none exists.
+pub(crate) fn claude_session_auth(
+    session_name: &str,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    let Some(path) = resolve_session_temp_path(session_name, CLAUDE_SESSION_AUTH_TEMP_EXT) else {
+        return Ok(None);
+    };
+    let body = std::fs::read_to_string(&path)
+        .map_err(|error| format!("read claude session auth marker: {error}"))?;
+    let own = body.split_once('\n').filter(|(id, _)| *id == session_id);
+    Ok(own.map(|(_, profile)| profile.to_owned()))
+}
+
 pub(crate) fn write_tmux_runtime_kind_marker(
     tmux_session_name: &str,
     runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind,
