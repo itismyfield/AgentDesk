@@ -25,11 +25,9 @@ use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, SourceMessageQueuedGeneration,
 };
-use inject::InjectMode;
 #[cfg(all(test, unix))]
-pub(in crate::services::discord) use inject::{
-    CodexLedger, Input as BusyInput, herdr::run as herdr_busy,
-};
+pub(in crate::services::discord) use inject::CodexLedger;
+use inject::InjectMode;
 pub(crate) use inject::{
     InjectAttempt, Origin as InjectOrigin, SOURCE_OWNED, attempt as inject_human_input,
 };
