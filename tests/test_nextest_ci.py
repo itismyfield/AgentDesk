@@ -832,6 +832,10 @@ class BaseDiff(Fixture):
 
     def test_platform_reason_is_stale_when_its_target_still_has_the_test(self):
         self.same_plans()
+        for platform, other in (("linux", "macos"), ("macos", "windows"), ("windows", "macos")):
+            with self.subTest(platform=platform):
+                source = source_losses(present={platform: ["m::native"], other: ["m::native"]})
+                self.assertEqual(self.diff(SHA, rows=self.scoped_row(platform), source=source)[0], 1)
         for source in (source_losses(present={"windows": ["m::native"], "macos": ["m::native"]}),
                        source_losses(), {**source_losses(present={}), "present_tests": {"macos": []}}):
             with self.subTest(source=source):
@@ -844,6 +848,30 @@ class BaseDiff(Fixture):
         rc, err = self.diff(SHA, rows=self.scoped_row(), source=source_losses(present={}))
         self.assertEqual(rc, 1)
         self.assertIn("matches no loss", err)
+
+    def test_platform_history_uses_current_coverage_not_the_removed_baseline(self):
+        self.plan_ok(["m::a", "m::native"], workers=1, out="base")
+        self.plan_ok(["m::a"], workers=1)
+        source = source_losses(present={})
+        source["present_tests"]["linux"] = ["m::native"]
+        source["removed"]["linux"] = ["m::native"]
+        rows = self.scoped_row("linux") + self.scoped_row("windows")
+        rc, err = self.diff(SHA, rows=rows, source=source)
+        self.assertEqual(rc, 1)
+        self.assertIn("matches no loss", err)
+        source["present_tests"]["macos"] = ["m::native"]
+        self.assertEqual(self.diff(SHA, rows=rows, source=source), (0, ""))
+
+    def test_platform_history_subtracts_native_losses_from_union_presence(self):
+        self.same_plans()
+        source = source_losses(removed={"macos": ["m::native"]}, present={"macos": ["m::native"]})
+        rows = self.scoped_row("macos") + self.scoped_row("windows")
+        rc, err = self.diff(SHA, rows=rows, source=source)
+        self.assertEqual(rc, 1)
+        self.assertIn("matches no loss", err)
+        self.plan_ok(["m::a", "m::native"], workers=1)
+        source["present_tests"]["linux"] = ["m::native"]
+        self.assertEqual(self.diff(SHA, rows=rows, source=source), (0, ""))
 
     def test_legacy_reason_rules_stay_unchanged(self):
         self.same_plans()

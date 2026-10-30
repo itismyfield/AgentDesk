@@ -658,8 +658,12 @@ def platform_losses(path, binary_id):
     if any(not isinstance(name, str) or not ID_RE.fullmatch(name) for name in names):
         return found, None
     by_platform = {p: {_check_id(binary_id, name) for name in presence[p]} for p in ("macos", "windows")}
-    if isinstance(presence.get("linux"), list) and all(isinstance(t, str) and ID_RE.fullmatch(t) for t in presence["linux"]):
-        by_platform["linux"] = {_check_id(binary_id, name) for name in presence["linux"]}
+    linux_removed = doc["removed"].get("linux")
+    if all(isinstance(names, list) and all(isinstance(t, str) and ID_RE.fullmatch(t) for t in names)
+           for names in (presence.get("linux"), linux_removed)):
+        # Legacy rows ignore Linux presence; scoped rows need current source IDs as well as plan IDs.
+        by_platform["linux"] = ({_check_id(binary_id, name) for name in presence["linux"]}
+                                - {_check_id(binary_id, name) for name in linux_removed})
     return found, by_platform
 
 
@@ -713,9 +717,17 @@ def cmd_base_diff(args):
         if platform is None or native_present is None or platform not in native_present:
             return False
         test_id = tuple(test.split(" "))
-        target = native_present[platform] | (present if platform == "linux" else set())
-        others = (present if platform != "linux" else set()) | set().union(
-            *(ids for p, ids in native_present.items() if p != platform))
+
+        def in_head(p):
+            if p == "linux":
+                return native_present.get("linux", set()) | run | ign
+            # Source presence is base | head; subtract native removals to recover head.
+            removed = {tuple(t.split(" ")) for (t, kind), platforms in platform_lost.items()
+                       if kind == "removed" and p in platforms}
+            return native_present[p] - removed
+
+        target = in_head(platform)
+        others = set().union(*(in_head(p) for p in ("linux", "macos", "windows") if p != platform))
         return test_id not in target and test_id in others
 
     carried = {row for row in stale if platform_exclusion_remains(row)}
